@@ -17,8 +17,17 @@ Given the original idea and any prior report, output ONLY a JSON object with:
 - "priorities": the same features ordered by priority (most important first)
 - "cycle_goal": ONE specific, small, buildable-in-one-pass goal for this cycle only
 
-Keep cycle_goal narrow. Do not invent unrelated features. Respond with ONLY valid JSON, no markdown, no explanation."""
+IMPORTANT — avoid getting stuck refining one feature indefinitely:
+- If the prior report shows a feature is reasonably working (tests passing, no
+  unresolved critical issues), move on to the NEXT unbuilt feature in priorities,
+  even if the current one could still be polished further.
+- Do not generate more than 2 consecutive cycle_goals that refine or harden the
+  same feature. Polish is welcome, but never at the cost of leaving a listed
+  feature completely unstarted.
+- Treat "unstarted, listed feature" as higher priority than "deeper validation
+  or robustness on an already-working feature."
 
+Keep cycle_goal narrow. Do not invent unrelated features. Respond with ONLY valid JSON, no markdown, no explanation."""
 def run():
     idea = read(KEYS["original_idea"])
     prior_report = read(KEYS["latest_report"], default=None)

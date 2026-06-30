@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from google import genai
 
 from memory.bus import read, write, KEYS
-
+import time
 load_dotenv()
 
 api_key = os.getenv("GEMINI_API_KEY_1")
@@ -33,10 +33,22 @@ def run_report_writer():
         + "\n\nSandbox test results:\n" + json.dumps(test_results, indent=2)
     )
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=SYSTEM_PROMPT + "\n\n" + user_prompt,
-    )
+    max_retries = 4
+    response = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=SYSTEM_PROMPT + "\n\n" + user_prompt,
+            )
+            break
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+            print(f"  [Report Writer] API error ({exc.__class__.__name__}), "
+                  f"retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
+            time.sleep(wait)
 
     report_text = response.text.strip()
 

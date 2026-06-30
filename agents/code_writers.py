@@ -30,7 +30,16 @@ def write_module(module_spec):
             {"role": "user", "content": user_content}
         ]
     )
-    code = response.choices[0].message.content.strip()
+    choice = response.choices[0]
+    content = choice.message.content
+    if not content:
+        finish_reason = getattr(choice, "finish_reason", "unknown")
+        code = (
+            f"# CODE WRITER FAILED: model returned empty content "
+            f"(finish_reason={finish_reason}). No code generated for this module."
+        )
+        return module_spec["name"], code
+    code = content.strip()
     # Strip markdown fences if present
     if code.startswith("```"):
         code = code.split("```")[1]
