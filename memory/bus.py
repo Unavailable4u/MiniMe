@@ -38,4 +38,6 @@ KEYS = {
     "cycle_count": "cycle_count",
     "loop_decision": "loop_decision",
     "feature_status": "feature_status",
+    "file_map": "file_map",
+    "app_slug": "app_slug",
 }
