@@ -1,14 +1,12 @@
 import os
+import sys
 import json
 from dotenv import load_dotenv
-from google import genai
-
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
-import time
+from utils.retry import call_with_retry
+from utils.gemini_client import generate_text
 load_dotenv()
-
-api_key = os.getenv("GEMINI_API_KEY_1")
-client = genai.Client(api_key=api_key)
 
 SYSTEM_PROMPT = """You are a report writer for an autonomous coding pipeline.
 Summarize this cycle in under 200 words for the next planner. Cover: what got
@@ -33,24 +31,10 @@ def run_report_writer():
         + "\n\nSandbox test results:\n" + json.dumps(test_results, indent=2)
     )
 
-    max_retries = 4
-    response = None
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=SYSTEM_PROMPT + "\n\n" + user_prompt,
-            )
-            break
-        except Exception as exc:
-            if attempt == max_retries - 1:
-                raise
-            wait = 2 ** attempt  # 1s, 2s, 4s, 8s
-            print(f"  [Report Writer] API error ({exc.__class__.__name__}), "
-                  f"retrying in {wait}s... (attempt {attempt + 1}/{max_retries})")
-            time.sleep(wait)
-
-    report_text = response.text.strip()
+    report_text = call_with_retry(
+        lambda: generate_text(SYSTEM_PROMPT, user_prompt, agent_name="Report Writer"),
+        agent_name="Report Writer",
+    )
 
     failed_modules = [
         name for name, result in test_results.items()
