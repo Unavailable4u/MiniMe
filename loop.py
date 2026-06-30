@@ -27,8 +27,11 @@ from agents import prompt_writer
 from agents import code_writers
 from agents import reviewer
 from agents import fixer_tester
+from agents import structure_architect
+from agents import file_manager
 from agents import report_writer
 from agents import gatekeeper
+
 
 
 def _print_header(cycle_num: int) -> None:
@@ -75,6 +78,16 @@ def run_one_cycle(cycle_num: int) -> str:
     total = len(test_results)
     _print_status("Fixer + Tester done", f"{passed}/{total} modules passed sandbox run")
 
+
+    _print_status("Structure Architect", "planning file/folder layout...")
+    plan = structure_architect.run_structure_architect()
+    _print_status("Structure Architect done", f"{len(plan.get('operations', []))} operation(s) planned")
+
+    _print_status("File Manager", "executing file plan...")
+    fm_summary = file_manager.run_file_manager()
+    _print_status("File Manager done",
+    f"{len(fm_summary['written'])} written, {len(fm_summary['moved'])} moved, {len(fm_summary['deleted'])} deleted")
+
     _print_status("Report Writer", "summarizing the cycle...")
     report = report_writer.run_report_writer()
     _print_status("Report Writer done", f"all_tests_passed: {report.get('all_tests_passed')}")
@@ -115,12 +128,15 @@ def main():
                   "from this cycle (no idea argument needed).")
             sys.exit(1)
 
+        cycle_num += 1
+        write(KEYS["cycle_count"], cycle_num)
+
         if decision == "STOP":
-            print(f"\nGatekeeper says STOP after cycle {cycle_num}. Loop ending.")
+            print(f"\nGatekeeper says STOP after cycle {cycle_num - 1}. Loop ending.")
             break
 
         if decision == "PAUSE_FOR_HUMAN":
-            print(f"\nGatekeeper says PAUSE_FOR_HUMAN after cycle {cycle_num}.")
+            print(f"\nGatekeeper says PAUSE_FOR_HUMAN after cycle {cycle_num - 1}.")
             print("Review the latest_report in memory, then rerun `python loop.py` "
                   "(no idea argument) to continue from here.")
             break
