@@ -20,7 +20,7 @@ def run_report_writer():
     fixed_code = read(KEYS["fixed_code"])
     test_results = read(KEYS["test_results"])
     review_notes = read(KEYS["review_notes"])
-
+    current_plan = read(KEYS["current_plan"], default={})
     if not fixed_code or not test_results:
         raise ValueError("Missing fixed_code or test_results in memory. Run the Fixer+Tester first.")
 
@@ -40,13 +40,20 @@ def run_report_writer():
         name for name, result in test_results.items()
         if not result.get("passed", False)
     ]
+    all_passed = len(failed_modules) == 0
+
+    target_feature = current_plan.get("target_feature")
+    if target_feature:
+        feature_status = read(KEYS["feature_status"], default={})
+        feature_status[target_feature] = "done" if all_passed else "in_progress"
+        write(KEYS["feature_status"], feature_status)
 
     report_record = {
         "text": report_text,
-        "all_tests_passed": len(failed_modules) == 0,
+        "all_tests_passed": all_passed,
         "failed_modules": failed_modules,
+        "target_feature": target_feature,
     }
-
     write(KEYS["latest_report"], report_record)
     return report_record
 

@@ -37,4 +37,5 @@ KEYS = {
     "latest_report": "latest_report",
     "cycle_count": "cycle_count",
     "loop_decision": "loop_decision",
+    "feature_status": "feature_status",
 }
