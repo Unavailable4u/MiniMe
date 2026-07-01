@@ -32,10 +32,18 @@ load_dotenv()
 
 # Rotation order per worker -- if the first model errors transiently, the
 # same worker (same key) tries the next one before giving up.
+#
+# NOTE (updated): Cerebras's public-endpoint catalog only guarantees
+# gpt-oss-120b as a production model as of mid-2026; the qwen-3-235b and
+# llama-4-scout models this list previously rotated to have been removed
+# from the public endpoint (they now 404). zai-glm-4.7 and gemma-4-31b are
+# the current preview-tier models -- preview means "may be pulled on short
+# notice," so re-check https://inference-docs.cerebras.ai/models/overview
+# if this rotation starts 404-ing again.
 MODELS = [
     "gpt-oss-120b",
-    "qwen-3-235b-a22b-instruct-2507",
-    "llama-4-scout-17b",
+    "zai-glm-4.7",
+    "gemma-4-31b",
 ]
 
 # One key per parallel worker slot, per Part 4's "keys #1-#5".

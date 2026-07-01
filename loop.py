@@ -1,11 +1,13 @@
 """
 loop.py — the orchestrator.
 
-Wires all 7 agents into one running cycle, per Section 3 / Section 8 of the
+Wires all agents into one running cycle, per Section 3 / Section 8 of the
 blueprint:
 
-    Idea Planner -> Prompt Writer -> Code Writers (x3) -> Reviewer
-        -> Fixer/Tester -> Report Writer -> Gatekeeper -> (loop or stop)
+    Idea Planner -> Prompt Writer -> Code Writers (x5) -> Test Writer
+        -> Reviewer -> Fixer Pool -> Sandbox Tester -> Structure Architect
+        -> File Manager -> Changelog Writer -> Report Writer -> Gatekeeper
+        -> (loop or stop)
 
 Every agent module exposes a no-argument run function and reads/writes
 everything through memory.bus (Upstash Redis), so this file's only job is
@@ -25,10 +27,13 @@ from memory.bus import read, write, KEYS
 from agents import idea_planner
 from agents import prompt_writer
 from agents import code_writers
+from agents import test_writer
 from agents import reviewer
-from agents import fixer_tester
+from agents import fixer_pool
+from agents import sandbox_tester
 from agents import structure_architect
 from agents import file_manager
+from agents import changelog_writer
 from agents import report_writer
 from agents import gatekeeper
 
@@ -67,17 +72,24 @@ def run_one_cycle(cycle_num: int) -> str:
     code_writers.run()
     _print_status("Code Writers done")
 
-    _print_status("Reviewer", "auditing submitted code...")
+    _print_status("Test Writer", "generating tests for the new modules...")
+    test_code = test_writer.run()
+    _print_status("Test Writer done", f"tests written for {len(test_code)} module(s)")
+
+    _print_status("Reviewer", "auditing submitted code (3 parallel reviewers)...")
     review_notes = reviewer.run_reviewer()
     issue_count = len(review_notes.get("issues", []))
     _print_status("Reviewer done", f"{issue_count} issue(s) found")
 
-    _print_status("Fixer + Tester", "patching issues, running sandbox tests...")
-    _, test_results = fixer_tester.run_fixer_and_tester()
+    _print_status("Fixer Pool", "patching issues in parallel...")
+    fixed_code = fixer_pool.run_fixer_pool()
+    _print_status("Fixer Pool done", f"{len(fixed_code)} module(s) processed")
+
+    _print_status("Sandbox Tester", "running fixed modules in parallel E2B sandboxes...")
+    test_results = sandbox_tester.run_sandbox_tester()
     passed = sum(1 for r in test_results.values() if r.get("passed"))
     total = len(test_results)
-    _print_status("Fixer + Tester done", f"{passed}/{total} modules passed sandbox run")
-
+    _print_status("Sandbox Tester done", f"{passed}/{total} modules passed sandbox run")
 
     _print_status("Structure Architect", "planning file/folder layout...")
     plan = structure_architect.run_structure_architect()
@@ -87,6 +99,10 @@ def run_one_cycle(cycle_num: int) -> str:
     fm_summary = file_manager.run_file_manager()
     _print_status("File Manager done",
     f"{len(fm_summary['written'])} written, {len(fm_summary['moved'])} moved, {len(fm_summary['deleted'])} deleted")
+
+    _print_status("Changelog Writer", "writing commit message + changelog entry...")
+    changelog = changelog_writer.run()
+    _print_status("Changelog Writer done", changelog.get("commit_message", ""))
 
     _print_status("Report Writer", "summarizing the cycle...")
     report = report_writer.run_report_writer()
@@ -140,9 +156,6 @@ def main():
             print("Review the latest_report in memory, then rerun `python loop.py` "
                   "(no idea argument) to continue from here.")
             break
-
-        cycle_num += 1
-        write(KEYS["cycle_count"], cycle_num)
 
 
 if __name__ == "__main__":

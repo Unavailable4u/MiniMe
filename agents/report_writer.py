@@ -9,10 +9,11 @@ from utils.llm_client import generate_text
 load_dotenv()
 
 # Fallback chain per Part 4, agent #17 of the v5 blueprint:
-# Groq llama-3.3-70b-versatile -> Cerebras (key #9)
+# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b (key #9)
+# (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s.)
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "llama-3.3-70b", "key_env": "CEREBRAS_API_KEY_9"},
+    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
 ]
 
 SYSTEM_PROMPT = """You are a report writer for an autonomous coding pipeline.

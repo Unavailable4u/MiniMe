@@ -1,3 +1,4 @@
+
 import os
 import json
 from dotenv import load_dotenv
@@ -31,9 +32,12 @@ KEYS = {
     "current_plan": "current_plan",
     "module_specs": "module_specs",
     "submitted_code": "submitted_code",
+    "test_code": "test_code",
     "review_notes": "review_notes",
     "fixed_code": "fixed_code",
     "test_results": "test_results",
+    "commit_message": "commit_message",
+    "changelog_entry": "changelog_entry",
     "latest_report": "latest_report",
     "cycle_count": "cycle_count",
     "loop_decision": "loop_decision",

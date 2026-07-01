@@ -1,6 +1,9 @@
+import sys
+import os
 import json
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import write, KEYS
-from agents.fixer_tester import run_fixer_and_tester
+from agents.fixer_pool import run_fixer_pool
 
 FAKE_SUBMITTED_CODE = {
     "todo_storage": {
@@ -55,21 +58,17 @@ def main():
     write(KEYS["submitted_code"], FAKE_SUBMITTED_CODE)
     write(KEYS["review_notes"], FAKE_REVIEW_NOTES)
 
-    print("Running Fixer + Tester agent (this calls Cerebras then E2B, may take a moment)...")
-    fixed_code, test_results = run_fixer_and_tester()
+    print("Running Fixer Pool (this calls Cerebras across up to 3 parallel workers)...")
+    fixed_code = run_fixer_pool()
 
     print("\n--- fixed_code ---")
     print(json.dumps(fixed_code, indent=2))
 
-    print("\n--- test_results ---")
-    print(json.dumps(test_results, indent=2))
-
-    todo_api_result = test_results.get("todo_api", {})
-    if todo_api_result.get("passed"):
-        print("\nOK: todo_api ran without error after fixing — the NameError bug appears resolved.")
+    todo_api_fix = fixed_code.get("todo_api", {}).get("code", "")
+    if "global storage" not in todo_api_fix and "storage.clear" not in todo_api_fix:
+        print("\nOK: todo_api no longer calls the undefined 'storage' global.")
     else:
-        print("\nWARNING: todo_api still failed in the sandbox after the fix attempt. "
-              "Check stderr above before trusting this agent on real cycles.")
+        print("\nWARNING: todo_api still references the buggy 'storage' global — the fix may not have applied.")
 
 
 if __name__ == "__main__":
