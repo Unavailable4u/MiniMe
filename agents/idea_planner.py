@@ -9,10 +9,12 @@ from utils.llm_client import generate_text
 load_dotenv()
 
 # Fallback chain per Part 4, agent #1 of the v5 blueprint:
-# Groq llama-3.3-70b-versatile -> Cerebras llama-3.3-70b -> GitHub Models
+# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b -> GitHub Models
+# (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s; gpt-oss-120b
+# is the one model guaranteed on Cerebras's public production tier.)
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "llama-3.3-70b", "key_env": "CEREBRAS_API_KEY_1"},
+    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
     {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
