@@ -1,94 +1,125 @@
+"""
+agents/code_writers.py — Code Writer Pool (Part 4, agent #3 of the v5
+Master Blueprint).
+
+Rewritten from the old OpenRouter/sequential version to match the blueprint
+exactly:
+- Provider: Cerebras only (no OpenRouter anywhere in this system).
+- Concurrency: up to 5 modules written genuinely in parallel via
+  ThreadPoolExecutor, one worker per Cerebras key (CEREBRAS_API_KEY_1..5).
+- Model rotation: each worker cycles through 3 models in order if one
+  fails -- gpt-oss-120b -> qwen-3-235b-a22b-instruct-2507 -> llama-4-scout-17b
+  -- staying on its own assigned key throughout (workers don't share keys).
+
+If there are more than 5 modules in a cycle, keys are reused round-robin
+(modules 6, 7... share a key with modules 1, 2...) rather than failing --
+an edge case the blueprint doesn't explicitly cover, but sharing beats
+crashing.
+"""
+
 import os
 import sys
 import json
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError, APIStatusError
+from cerebras.cloud.sdk import Cerebras, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 
 load_dotenv()
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-)
-
-# Real free model IDs tried in order. If one is rate-limited, next is tried.
-# Verify current free models at: openrouter.ai/models?max_price=0
-FREE_MODELS = [
-    "openai/gpt-oss-120b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
+# Rotation order per worker -- if the first model errors transiently, the
+# same worker (same key) tries the next one before giving up.
+MODELS = [
+    "gpt-oss-120b",
+    "qwen-3-235b-a22b-instruct-2507",
+    "llama-4-scout-17b",
 ]
 
-# Seconds to wait between writing each module (avoids per-minute rate limits)
-INTER_MODULE_DELAY = 10
+# One key per parallel worker slot, per Part 4's "keys #1-#5".
+KEY_ENVS = [
+    "CEREBRAS_API_KEY_1",
+    "CEREBRAS_API_KEY_2",
+    "CEREBRAS_API_KEY_3",
+    "CEREBRAS_API_KEY_4",
+    "CEREBRAS_API_KEY_5",
+]
+
+MAX_WORKERS = 5
+
+_TRANSIENT_ERRORS = (RateLimitError, APIStatusError, APIConnectionError, APITimeoutError)
 
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
 for the module described below. Follow the spec exactly. Include basic input validation.
 Do not invent features outside the spec. Output ONLY the code, no explanation, no markdown
 code fences."""
 
-
-def _call_with_model_fallback(user_content: str) -> str:
-    """
-    Tries each model in FREE_MODELS in order.
-    On 429 or provider error, waits briefly then moves to the next model.
-    Returns the generated code string.
-    Raises RuntimeError if all models are exhausted.
-    """
-    for model_index, model in enumerate(FREE_MODELS):
-        print(f"    [Code Writer] trying model: {model}")
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_content},
-                ],
-            )
-            content = response.choices[0].message.content or ""
-            return content.strip()
-
-        except (RateLimitError, APIStatusError) as exc:
-            is_last = model_index == len(FREE_MODELS) - 1
-            if is_last:
-                raise RuntimeError(
-                    f"All free models exhausted. Last error: {exc}"
-                ) from exc
-            wait = 12
-            print(f"    [Code Writer] {model} rate-limited ({exc.__class__.__name__}), "
-                  f"waiting {wait}s then trying next model...")
-            time.sleep(wait)
-
-        except Exception as exc:
-            # Non-rate-limit errors (bad JSON, network blip) — don't skip to
-            # next model, just re-raise so the loop can surface the real problem.
-            raise
+_client_cache = {}
 
 
-def write_module(module_spec: dict) -> tuple[str, str]:
-    """Generate code for a single module. Returns (module_name, code)."""
-    user_content = json.dumps(module_spec)
-    raw = _call_with_model_fallback(user_content)
+def _get_client(key_env: str) -> Cerebras:
+    key = os.getenv(key_env)
+    if not key:
+        return None
+    if key_env not in _client_cache:
+        _client_cache[key_env] = Cerebras(api_key=key)
+    return _client_cache[key_env]
 
-    # Strip markdown fences if the model adds them anyway
-    code = raw
+
+def _strip_fences(code: str) -> str:
+    code = code.strip()
     if code.startswith("```"):
         code = code.split("```")[1]
         if code.startswith("python"):
             code = code[6:]
         code = code.strip()
+    return code
 
-    if not code:
-        code = (
-            f"# CODE WRITER FAILED: model returned empty content. "
-            f"No code generated for module '{module_spec.get('name', '?')}'."
-        )
 
-    return module_spec["name"], code
+def _write_one_module(module_spec: dict, key_env: str) -> tuple[str, str]:
+    """
+    Runs on one worker thread with one fixed Cerebras key. Tries each model
+    in MODELS, in order, staying on this same key throughout. Returns
+    (module_name, code).
+    """
+    name = module_spec.get("name", "?")
+    client = _get_client(key_env)
+
+    if client is None:
+        return name, (f"# CODE WRITER FAILED: {key_env} not set. "
+                       f"No code generated for module '{name}'.")
+
+    user_content = json.dumps(module_spec)
+    last_exc = None
+
+    for model_index, model in enumerate(MODELS):
+        print(f"    [Code Writer:{key_env}] module '{name}' trying model: {model}")
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            raw = response.choices[0].message.content or ""
+            code = _strip_fences(raw)
+            if not code:
+                code = (f"# CODE WRITER FAILED: model returned empty content. "
+                         f"No code generated for module '{name}'.")
+            return name, code
+
+        except _TRANSIENT_ERRORS as exc:
+            last_exc = exc
+            is_last = model_index == len(MODELS) - 1
+            print(f"    [Code Writer:{key_env}] {model} failed "
+                  f"({exc.__class__.__name__}) for '{name}'"
+                  + ("" if is_last else ", trying next model..."))
+
+    return name, (f"# CODE WRITER FAILED: all models exhausted on {key_env}. "
+                   f"Last error: {last_exc}")
 
 
 def run():
@@ -96,17 +127,15 @@ def run():
     modules = specs["modules"]
     results = {}
 
-    # Sequential — NOT parallel. Three simultaneous calls on a free tier
-    # (20 req/min limit) instantly triggers rate limiting. The loop is
-    # network-bound anyway; sequential with a small gap is just as fast
-    # in wall-clock terms once rate limits are factored in.
-    for i, module in enumerate(modules):
-        if i > 0:
-            print(f"    [Code Writer] waiting {INTER_MODULE_DELAY}s before next module...")
-            time.sleep(INTER_MODULE_DELAY)
-        name, code = write_module(module)
-        results[name] = code
-        print(f"    [Code Writer] wrote module: {name} ({len(code)} chars)")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(_write_one_module, module, KEY_ENVS[i % len(KEY_ENVS)]): module
+            for i, module in enumerate(modules)
+        }
+        for future in as_completed(futures):
+            name, code = future.result()
+            results[name] = code
+            print(f"    [Code Writer] wrote module: {name} ({len(code)} chars)")
 
     write(KEYS["submitted_code"], results)
     return results
