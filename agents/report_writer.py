@@ -5,8 +5,15 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
-from utils.gemini_client import generate_text
+from utils.llm_client import generate_text
 load_dotenv()
+
+# Fallback chain per Part 4, agent #17 of the v5 blueprint:
+# Groq llama-3.3-70b-versatile -> Cerebras (key #9)
+CHAIN = [
+    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "cerebras", "model": "llama-3.3-70b", "key_env": "CEREBRAS_API_KEY_9"},
+]
 
 SYSTEM_PROMPT = """You are a report writer for an autonomous coding pipeline.
 Summarize this cycle in under 200 words for the next planner. Cover: what got
@@ -32,7 +39,7 @@ def run_report_writer():
     )
 
     report_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_prompt, agent_name="Report Writer"),
+        lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Report Writer"),
         agent_name="Report Writer",
     )
 

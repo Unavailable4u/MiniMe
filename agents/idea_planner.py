@@ -5,8 +5,17 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
-from utils.gemini_client import generate_text
+from utils.llm_client import generate_text
 load_dotenv()
+
+# Fallback chain per Part 4, agent #1 of the v5 blueprint:
+# Groq llama-3.3-70b-versatile -> Cerebras llama-3.3-70b -> GitHub Models
+CHAIN = [
+    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "cerebras", "model": "llama-3.3-70b", "key_env": "CEREBRAS_API_KEY_1"},
+    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
+]
+
 SYSTEM_PROMPT = """You are the product planner for an autonomous build loop.
 Given the original idea, any prior report, and the current feature_status,
 output ONLY a JSON object with:
@@ -36,7 +45,7 @@ def run():
     else:
         user_content += "\n\nThis is cycle 1. No prior report exists yet."
     raw_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_content, agent_name="Idea Planner"),
+        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Idea Planner"),
         agent_name="Idea Planner",
     )
     # Strip markdown code fences if the model adds them anyway
