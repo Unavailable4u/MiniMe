@@ -1,12 +1,11 @@
+
 import os
 import json
 import re
 from dotenv import load_dotenv
 from upstash_redis import Redis
 from upstash_vector import Index
-
 load_dotenv()
-
 redis = Redis(
     url=os.getenv("UPSTASH_REDIS_REST_URL"),
     token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
@@ -14,11 +13,7 @@ redis = Redis(
 def slugify(text: str, max_len: int = 40) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
     return slug[:max_len] or "untitled_app"
-
-
 _app_slug_cache = None
-
-
 def _current_app_slug():
     global _app_slug_cache
     if _app_slug_cache is None:
@@ -26,8 +21,6 @@ def _current_app_slug():
         if raw is not None:
             _app_slug_cache = json.loads(raw)
     return _app_slug_cache
-
-
 def _namespaced(key: str) -> str:
     """Prefixes every key with the active app_slug, except app_slug itself
     (bootstrap key, can't prefix itself) and usage:* keys (Part 7.1 --
@@ -41,8 +34,6 @@ def _namespaced(key: str) -> str:
 # index but use different id-prefix namespaces (see each agent's docstring)
 # so their embeddings never collide or get queried against each other.
 _vector_index = None
-
-
 def vector_index() -> Index:
     """Lazy singleton so importing bus.py doesn't require Vector env vars
     to be set for code paths that never touch it (most agents don't)."""
@@ -58,16 +49,12 @@ def vector_index() -> Index:
             )
         _vector_index = Index(url=url, token=token)
     return _vector_index
-
-
 def write(key: str, value):
     """Write any JSON-serializable value to memory."""
     redis.set(_namespaced(key), json.dumps(value))
     if key == "app_slug":
         global _app_slug_cache
         _app_slug_cache = value
-
-
 def read(key: str, default=None):
     """Read a value back from memory. Returns default if not found."""
     raw = redis.get(_namespaced(key))
@@ -78,13 +65,9 @@ def read(key: str, default=None):
         global _app_slug_cache
         _app_slug_cache = value
     return value
-
-
 def append_cycle_history(cycle_num: int, report: dict):
     """Store each cycle's report under its own key, for long-term memory."""
     write(f"cycle:{cycle_num}:report", report)
-
-
 # Standard memory keys used across the loop
 KEYS = {
     "original_idea": "original_idea",
@@ -110,4 +93,14 @@ KEYS = {
     "security_scan_results": "security_scan_results", # #12 Security/Dependency Scanner Pool
     "doc_output": "doc_output",                        # #14 Documentation Agent
     "final_qa_verdict": "final_qa_verdict",             # #16 Final QA/Acceptance Reviewer
+    # --- Tier-1 lean pipeline (Part 2.4) --- deliberately separate key
+    # names from the tier-3 keys above, even though the shapes are
+    # similar in places, so a tier-1 run and a tier-3 cycle can never
+    # collide if they're ever run back to back on the same app_slug.
+    "tier1_task_text": "tier1_task_text",
+    "tier1_module_spec": "tier1_module_spec",
+    "tier1_code": "tier1_code",
+    "tier1_review_notes": "tier1_review_notes",
+    "tier1_fixed_code": "tier1_fixed_code",
+    "tier1_test_results": "tier1_test_results",
 }

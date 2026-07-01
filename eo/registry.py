@@ -1,30 +1,22 @@
+
 """
 eo/registry.py — Stage 4, step 1 of the v5 Master Blueprint's build roadmap
 (Part 10).
-
 Single source of truth mapping an agent *name* (string, the vocabulary the
 Inspector/Router speak in) to the real, importable Python callable that
 does the work, plus a couple of bits of metadata router.py and the future
 executor need.
-
 This module intentionally does NOT execute anything. It only resolves
 names -> callables. That keeps it safe to import from tests, from
 router.py, and eventually from an executor, without any side effects
 (no LLM calls, no memory writes) just from `import eo.registry`.
-
-Only the production 19-agent roster (tier 3, Part 4 of the blueprint) is
-wired up here for now. Tier 0's Responder and Tier 1's lean pipeline
-(Part 2.3-2.4) are NOT yet in this registry — those are new agents that
-don't exist in the codebase yet (Stage 4, steps 2-4 of the roadmap).
-Referencing them before they exist would let this module silently lie
-about what it can run, so router.py raises NotImplementedError for tier
-0/1 rather than pretending.
+The production 19-agent roster (tier 3, Part 4 of the blueprint), plus
+Tier 0's Responder and Tier 1's lean pipeline (Part 2.3-2.4, added in
+Stage 4 steps 2-4 of the roadmap), are all wired up here.
 """
 import sys
 import os
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from agents import (
     memory_search,
     idea_planner,
@@ -44,8 +36,11 @@ from agents import (
     report_writer,
     final_qa,
     gatekeeper,
+    responder,
+    prompt_writer_lean,
+    code_writer_lean,
+    reviewer_fixer_lean,
 )
-
 # name -> {"callable": fn, "needs_cycle_num": bool}
 #
 # "needs_cycle_num" flags the one agent (Gatekeeper) whose run function
@@ -70,9 +65,14 @@ REGISTRY = {
     "report_writer":       {"callable": report_writer.run_report_writer,  "needs_cycle_num": False},
     "final_qa":            {"callable": final_qa.run,                    "needs_cycle_num": False},
     "gatekeeper":          {"callable": gatekeeper.run_gatekeeper,        "needs_cycle_num": True},
+    # --- Tier 0 (Part 2.3) ---
+    "responder":           {"callable": responder.run,                   "needs_cycle_num": False},
+    # --- Tier 1 lean pipeline (Part 2.4) ---
+    "prompt_writer_lean":     {"callable": prompt_writer_lean.run,          "needs_cycle_num": False},
+    "code_writer_lean":       {"callable": code_writer_lean.run,            "needs_cycle_num": False},
+    "reviewer_fixer_lean":    {"callable": reviewer_fixer_lean.run,         "needs_cycle_num": False},
+    "sandbox_tester_lean":    {"callable": sandbox_tester.run_sandbox_tester_lean, "needs_cycle_num": False},
 }
-
-
 def resolve(agent_name: str):
     """Return the callable for `agent_name`, or raise KeyError with a
     clear message — never return None and let a caller silently no-op."""
