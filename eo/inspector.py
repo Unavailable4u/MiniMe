@@ -1,4 +1,3 @@
-
 """
 eo/inspector.py — Part 2.1 of the v5 Master Blueprint: the Inspector EO.
 Runs on every incoming task. Classifies it into a tier + (optionally) a
@@ -37,6 +36,7 @@ import json
 import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
+from relay.emitter import emit_event
 VALID_DIRECTED_TASK_TYPES = {
     "debug", "review", "add_tests", "refactor",
     "security_scan", "write_docs", "explain_code", None,
@@ -113,7 +113,7 @@ def _validate(parsed: dict) -> dict:
         "suggested_agents": parsed["suggested_agents"],
         "reasoning": parsed.get("reasoning", ""),
     }
-def classify(task_text: str, context: str = None) -> dict:
+def classify(task_text: str, context: str = None, session_id: str = None) -> dict:
     """
     Classifies `task_text`. Returns the Part 3 output schema dict.
     Raises RuntimeError if every step in CHAIN is exhausted (matches
@@ -128,7 +128,19 @@ def classify(task_text: str, context: str = None) -> dict:
     similar tasks, never as an instruction about what to conclude this
     time, so the Inspector keeps classifying honestly per this module's
     own docstring.
+
+    `session_id`, if given, fires relay events (Part 6.3) so a connected
+    frontend can watch this classification happen live — Stage 6, step 1
+    of the roadmap ("wire the event-emitting wrapper into one agent
+    first ... as a proof of concept"). Omitting session_id (the default)
+    makes this call byte-for-byte the same as before Stage 6 existed:
+    every event call below becomes a no-op per relay/emitter.py's own
+    contract, so existing callers (loop_v4.py without a session, all the
+    EO tests) are unaffected.
     """
+    emit_event("agent_start", session_id, agent="inspector",
+                payload={"label": "Inspector — classifying task"})
+
     user_content = f"Task: {task_text}"
     if context:
         user_content += (
@@ -136,11 +148,23 @@ def classify(task_text: str, context: str = None) -> dict:
             f"routed and what happened (this is informational only — use "
             f"your own judgment on the current task):\n{context}"
         )
-    raw = generate_text(
-        system_prompt=SYSTEM_PROMPT,
-        user_content=user_content,
-        chain=CHAIN,
-        agent_name="Inspector",
-    )
-    parsed = json.loads(_strip_fences(raw))
-    return _validate(parsed)
+
+    try:
+        raw = generate_text(
+            system_prompt=SYSTEM_PROMPT,
+            user_content=user_content,
+            chain=CHAIN,
+            agent_name="Inspector",
+        )
+        parsed = _validate(json.loads(_strip_fences(raw)))
+    except Exception as exc:
+        emit_event("error", session_id, agent="inspector",
+                    payload={"message": str(exc), "agent": "inspector"})
+        raise
+
+    emit_event("routing_decision", session_id, agent="inspector",
+                tier=parsed["tier"], payload=parsed)
+    emit_event("agent_done", session_id, agent="inspector",
+                tier=parsed["tier"],
+                payload={"summary": parsed["reasoning"]})
+    return parsed

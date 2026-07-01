@@ -1,0 +1,138 @@
+# =============================================================================
+# AI Loop v5 -- Environment Variables / Secrets
+# Corrected version: NO Gemini, NO OpenRouter anywhere in the system.
+# EO layer models per the approved image (Groq/Qwen, Cloudflare/Llama, GitHub/GPT).
+# Copy this file to .env and fill in real values. Never commit .env itself.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. EO LAYER -- Inspector + Panel (new in v5, revised)
+# -----------------------------------------------------------------------------
+
+# Inspector EO + Responder (tier-0 execution) -- Groq, qwen/qwen3-32b
+# MUST be a fresh, dedicated Groq account (different email/signup than your
+# production GROQ_API_KEY below) so a busy tier-3 run never starves triage
+# for the next incoming task.
+# Get from: https://console.groq.com/keys
+EO_INSPECTOR_GROQ_KEY_1=*****************
+
+# Optional: a SECOND fresh Groq account, used only if KEY_1 is rate-limited.
+# Skip for now -- the GitHub Models fallback (below) covers you.
+EO_INSPECTOR_GROQ_KEY_2=***********************
+
+# EO Panel Member B -- Cloudflare Workers AI, @cf/meta/llama-3.1-8b-instruct
+# MUST be a dedicated Cloudflare account, separate from the 8 production
+# CLOUDFLARE_API_KEY_x accounts below -- same isolation reasoning as the
+# Inspector's Groq account.
+# Get both from: https://dash.cloudflare.com/ -> Workers AI -> (create API token)
+# Account ID is on the right sidebar of the Cloudflare dashboard home page.
+EO_PANEL_CLOUDFLARE_ACCOUNT_ID=**************
+EO_PANEL_CLOUDFLARE_API_TOKEN=*************************
+
+# EO Panel Member C + Inspector's fallback + Responder's fallback
+# GitHub Models, openai/gpt-4.1-mini (fallback gpt-4.1-nano)
+# A GitHub Personal Access Token (fine-grained, no special scopes beyond
+# "Models" access needed).
+# Get from: https://github.com/settings/personal-access-tokens
+# IMPORTANT: must be a SEPARATE PAT from GITHUB_MODELS_PAT below.
+EO_PANEL_GITHUB_PAT=**********************************************
+
+# -----------------------------------------------------------------------------
+# 2. PRODUCTION 19-AGENT ROSTER (unchanged from v3 design)
+# -----------------------------------------------------------------------------
+
+# Idea Planner, Prompt Writer, Test Writer, Report Writer (primary),
+# Gatekeeper -- these agents run sequentially, low volume, so they all
+# safely share one key/quota pool.
+# Get from: https://console.groq.com/keys
+GROQ_API_KEY=************************
+
+# Reviewer Pool (3 parallel workers) -- each worker needs its OWN key so
+# 3 simultaneous calls don't fight each other for the same rate limit.
+# 3 separate fresh Groq accounts, different emails.
+GROQ_API_KEY_6=************************
+GROQ_API_KEY_7=*************************
+GROQ_API_KEY_8=*********************
+
+# Structure Architect -- isolated key, separate quota from the shared
+# GROQ_API_KEY pool above (this agent runs right after the Reviewer Pool
+# and Fixer Pool in the cycle, so keeping it off the shared key avoids
+# queuing behind that burst of parallel usage).
+GROQ_API_KEY_9=********************
+
+# Code Writer Pool (5 parallel workers), Fixer Pool, Report Writer fallback
+# Get from: https://cloud.cerebras.ai/  (one key per slot; can reuse the same
+# key for all 9 slots to start -- split later only if you hit rate limits)
+CEREBRAS_API_KEY_1=********************
+CEREBRAS_API_KEY_2=**************
+CEREBRAS_API_KEY_3=****************
+CEREBRAS_API_KEY_4=****************
+CEREBRAS_API_KEY_5=*************
+CEREBRAS_API_KEY_6=**********
+CEREBRAS_API_KEY_7=***************
+CEREBRAS_API_KEY_8=***********
+CEREBRAS_API_KEY_9=*************
+
+# Dependency Mapper (key #1), Reviewer fallback (key #2), Fixer fallback
+# (key #3), Scanner Pool (keys #4-#8, 5 parallel workers)
+# Get from: https://dash.cloudflare.com/ -> Workers AI -> Create a Workers AI
+# API Token (Account / Workers AI / Edit -- same permission as the EO panel
+# one). Each numbered slot below is its own Cloudflare account, so grab
+# both the Account ID and the token from each one.
+CLOUDFLARE_ACCOUNT_ID_1=********************
+CLOUDFLARE_API_KEY_1=******************
+CLOUDFLARE_ACCOUNT_ID_2=******************
+CLOUDFLARE_API_KEY_2=***********************
+CLOUDFLARE_ACCOUNT_ID_3=*****************
+CLOUDFLARE_API_KEY_3=******************
+CLOUDFLARE_ACCOUNT_ID_4=*****************
+CLOUDFLARE_API_KEY_4=*************
+CLOUDFLARE_ACCOUNT_ID_5=***********
+CLOUDFLARE_API_KEY_5=*************
+CLOUDFLARE_ACCOUNT_ID_6=************
+CLOUDFLARE_API_KEY_6=**************
+CLOUDFLARE_ACCOUNT_ID_7=****************
+CLOUDFLARE_API_KEY_7=***************
+CLOUDFLARE_ACCOUNT_ID_8=******************
+CLOUDFLARE_API_KEY_8=***************
+
+# Documentation Agent, Final QA
+# Get from: https://console.mistral.ai/api-keys
+MISTRAL_API_KEY=****************
+
+# Various fallbacks across the 19 production agents.
+# IMPORTANT: must be SEPARATE from EO_PANEL_GITHUB_PAT above.
+# Get from: https://github.com/settings/personal-access-tokens
+GITHUB_MODELS_PAT=****************
+
+# Cross-Cycle Memory Search, Duplication Checker
+# Get from: https://huggingface.co/settings/tokens
+HUGGINGFACE_API_KEY=******************
+
+# -----------------------------------------------------------------------------
+# 3. INFRASTRUCTURE (unchanged from v3)
+# -----------------------------------------------------------------------------
+
+# memory/bus.py
+# Get from: https://console.upstash.com/ -> Redis database -> REST API section
+UPSTASH_REDIS_REST_URL=https://super-insect-155702.upstash.io
+UPSTASH_REDIS_REST_TOKEN=********************
+
+# Cross-Cycle Memory Search, Duplication Checker
+# Get from: https://console.upstash.com/ -> Vector database -> REST API section
+UPSTASH_VECTOR_REST_URL=*******************
+UPSTASH_VECTOR_REST_TOKEN=*******************
+
+# Sandbox Tester
+# Get from: https://e2b.dev/dashboard -> API Keys
+E2B_API_KEY=*****************
+
+# -----------------------------------------------------------------------------
+# 4. REAL-TIME RELAY (Stage 6 -- do NOT worry about this yet)
+# -----------------------------------------------------------------------------
+
+# Get all four from: https://dashboard.pusher.com/ (create a Channels app)
+PUSHER_APP_ID=*****
+PUSHER_KEY=**********
+PUSHER_SECRET=*************
+PUSHER_CLUSTER=***

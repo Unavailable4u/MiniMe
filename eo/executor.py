@@ -21,36 +21,81 @@ need the raw task text passed in directly the first time:
 Every other agent name in a tier-0/1/2 graph reads its input from
 memory.bus, exactly like the tier-3 roster does, since the agent before it
 in the same graph already wrote it there.
+
+Stage 6 step 4 addition: each step now fires agent_start/agent_done (and
+error, on failure) through relay/emitter.py, per Part 6.3's schema. This
+is intentionally NOT token streaming yet (Part 6.4's agent_token_chunk) —
+that requires instrumenting each agent's own LLM call to stream in
+chunks, which belongs to a later step once agent internals are in view.
+This step only lights up "agent started / agent finished" per lane.
+
+session_id defaults to None, which makes emit_event() a documented no-op
+(relay/emitter.py) — so every existing caller (CLI, tests) that doesn't
+pass a session_id keeps working with zero behavior change, just a few
+harmless no-op calls.
 """
 import os
 import sys
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import resolve
+from relay.emitter import emit_event
 
 TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
 
 
-def execute_graph(agent_names: list, task_text: str = None, cycle_num: int = None) -> dict:
+def _summarize(result, limit: int = 300) -> str:
+    """Best-effort human-readable summary for an agent_done payload.
+    Results vary in shape (str, dict, ...) across the agent roster, so
+    this is deliberately forgiving rather than assuming a schema."""
+    if isinstance(result, str):
+        text = result
+    elif isinstance(result, dict):
+        text = result.get("code") or result.get("answer") or str(result)
+    else:
+        text = str(result)
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def execute_graph(agent_names: list, task_text: str = None, cycle_num: int = None,
+                   session_id: str = None, tier: int = None) -> dict:
     """
     Runs each agent name in `agent_names`, in order. Returns
     {agent_name: result} for every step that ran. Raises immediately (does
     not continue to the next agent) if any step raises — for tiers 0-2 a
     failed step means the whole graph's output is unusable, and silently
     continuing past it would produce a misleading partial result.
+
+    session_id/tier, if given, are forwarded to relay/emitter.py so a
+    connected frontend can render live per-agent activity (Part 6.6's
+    "live agent activity panel"). Leaving session_id unset keeps this
+    function's behavior identical to before Stage 6 step 4.
     """
     results = {}
     for name in agent_names:
         fn = resolve(name)
         print(f"  [Executor] running: {name}")
-        if name in TASK_TEXT_ENTRYPOINTS and task_text:
-            result = fn(task_text)
-        elif name == "gatekeeper":
-            result = fn(cycle_num)
-        else:
-            result = fn()
+        emit_event("agent_start", session_id=session_id, agent=name, tier=tier,
+                    payload={"label": name})
+        started = time.monotonic()
+        try:
+            if name in TASK_TEXT_ENTRYPOINTS and task_text:
+                result = fn(task_text)
+            elif name == "gatekeeper":
+                result = fn(cycle_num)
+            else:
+                result = fn()
+        except Exception as exc:
+            emit_event("error", session_id=session_id, agent=name, tier=tier,
+                        payload={"message": f"{exc.__class__.__name__}: {exc}"})
+            raise
+        duration_ms = int((time.monotonic() - started) * 1000)
         results[name] = result
         print(f"  [Executor] done: {name}")
+        emit_event("agent_done", session_id=session_id, agent=name, tier=tier,
+                    payload={"summary": _summarize(result), "duration_ms": duration_ms})
     return results
 
 

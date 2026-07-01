@@ -94,6 +94,15 @@ def _synthesize(votes: list, draft: dict) -> dict:
         f"member {label}: {v.get('reasoning', '')}"
         for label, v in zip("ABC", votes)
     )
+    # Raw per-member votes, kept alongside the flattened `reasoning`
+    # string (unchanged, nothing downstream that reads `reasoning`
+    # breaks). This is what lets a frontend trace card show "all 3 panel
+    # opinions" (Part 6.6) as structured data instead of re-parsing the
+    # joined string.
+    panel_votes = [
+        {"member": label, **v}
+        for label, v in zip("ABC", votes)
+    ]
     return {
         "tier": max_tier,
         "directed_task_type": directed_task_type,
@@ -101,6 +110,7 @@ def _synthesize(votes: list, draft: dict) -> dict:
         "suggested_agents": sorted(all_agents),
         "reasoning": reasoning,
         "panel_reviewed": True,
+        "panel_votes": panel_votes,
     }
 
 
