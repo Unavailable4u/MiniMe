@@ -228,8 +228,11 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
                   f"Keeping original code for these modules.")
             return modules
 
-    cleaned = _strip_fences(raw)
-    fixed = _extract_json(cleaned)
+    if isinstance(raw, dict):
+        fixed = raw  # Cloudflare's json_schema mode returns parsed JSON directly
+    else:
+        cleaned = _strip_fences(raw)
+        fixed = _extract_json(cleaned)
     if fixed is None or not isinstance(fixed, dict):
         print(f"  [Fixer {worker_index}] output was not valid JSON, keeping original code.")
         return modules
