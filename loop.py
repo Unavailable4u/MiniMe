@@ -1,42 +1,45 @@
 """
 loop.py — the orchestrator.
-
-Wires all agents into one running cycle, per Section 3 / Section 8 of the
-blueprint:
-
-    Idea Planner -> Prompt Writer -> Code Writers (x5) -> Test Writer
-        -> Reviewer -> Fixer Pool -> Sandbox Tester -> Structure Architect
-        -> File Manager -> Changelog Writer -> Report Writer -> Gatekeeper
+Wires all 19 agents into one running cycle, per Part 4 of the v5 Master
+Blueprint:
+    Memory Search -> Idea Planner -> Prompt Writer -> Code Writers (x5)
+        -> Dependency Mapper -> Test Writer -> Reviewer -> Duplication
+        Checker -> Fixer Pool -> Sandbox Tester -> Structure Architect
+        -> Security Scanner Pool -> File Manager -> Documentation Agent
+        -> Changelog Writer -> Report Writer -> Final QA -> Gatekeeper
         -> (loop or stop)
 
 Every agent module exposes a no-argument run function and reads/writes
-everything through memory.bus (Upstash Redis), so this file's only job is
-sequencing, cycle bookkeeping, and turning the Gatekeeper's verdict into
-control flow. No business logic lives here.
+everything through memory.bus (Upstash Redis + Vector), so this file's only
+job is sequencing, cycle bookkeeping, and turning the Gatekeeper's verdict
+into control flow. No business logic lives here.
 
 Usage:
     python loop.py "a one-sentence idea for the app"
     python loop.py            (resumes/continues an existing run from memory)
 """
-
 import sys
 import traceback
 
 from memory.bus import read, write, KEYS
-
+from agents import memory_search
 from agents import idea_planner
 from agents import prompt_writer
 from agents import code_writers
+from agents import dependency_mapper
 from agents import test_writer
 from agents import reviewer
+from agents import duplication_checker
 from agents import fixer_pool
 from agents import sandbox_tester
 from agents import structure_architect
+from agents import security_scanner
 from agents import file_manager
+from agents import documentation_agent
 from agents import changelog_writer
 from agents import report_writer
+from agents import final_qa
 from agents import gatekeeper
-
 
 
 def _print_header(cycle_num: int) -> None:
@@ -59,6 +62,10 @@ def run_one_cycle(cycle_num: int) -> str:
     """
     _print_header(cycle_num)
 
+    _print_status("Memory Search", "retrieving relevant context from past cycles...")
+    context = memory_search.run()
+    _print_status("Memory Search done", f"{len(context.splitlines())} prior note(s) found" if context else "no prior context")
+
     _print_status("Planner", "expanding plan / setting cycle goal...")
     plan = idea_planner.run()
     _print_status("Planner done", f"cycle_goal: {plan.get('cycle_goal', '?')}")
@@ -72,6 +79,10 @@ def run_one_cycle(cycle_num: int) -> str:
     code_writers.run()
     _print_status("Code Writers done")
 
+    _print_status("Dependency Mapper", "mapping inter-module dependencies...")
+    dep_map = dependency_mapper.run()
+    _print_status("Dependency Mapper done", f"{len(dep_map)} module(s) mapped")
+
     _print_status("Test Writer", "generating tests for the new modules...")
     test_code = test_writer.run()
     _print_status("Test Writer done", f"tests written for {len(test_code)} module(s)")
@@ -80,6 +91,10 @@ def run_one_cycle(cycle_num: int) -> str:
     review_notes = reviewer.run_reviewer()
     issue_count = len(review_notes.get("issues", []))
     _print_status("Reviewer done", f"{issue_count} issue(s) found")
+
+    _print_status("Duplication Checker", "checking for near-duplicate modules...")
+    dup_report = duplication_checker.run()
+    _print_status("Duplication Checker done", dup_report.get("summary", ""))
 
     _print_status("Fixer Pool", "patching issues in parallel...")
     fixed_code = fixer_pool.run_fixer_pool()
@@ -95,10 +110,19 @@ def run_one_cycle(cycle_num: int) -> str:
     plan = structure_architect.run_structure_architect()
     _print_status("Structure Architect done", f"{len(plan.get('operations', []))} operation(s) planned")
 
+    _print_status("Security Scanner", "scanning final code (5 parallel workers)...")
+    security_results = security_scanner.run()
+    finding_count = sum(len(r.get("findings", [])) for r in security_results.values())
+    _print_status("Security Scanner done", f"{finding_count} finding(s) across {len(security_results)} module(s)")
+
     _print_status("File Manager", "executing file plan...")
     fm_summary = file_manager.run_file_manager()
     _print_status("File Manager done",
     f"{len(fm_summary['written'])} written, {len(fm_summary['moved'])} moved, {len(fm_summary['deleted'])} deleted")
+
+    _print_status("Documentation Agent", "updating README...")
+    documentation_agent.run()
+    _print_status("Documentation Agent done")
 
     _print_status("Changelog Writer", "writing commit message + changelog entry...")
     changelog = changelog_writer.run()
@@ -107,6 +131,10 @@ def run_one_cycle(cycle_num: int) -> str:
     _print_status("Report Writer", "summarizing the cycle...")
     report = report_writer.run_report_writer()
     _print_status("Report Writer done", f"all_tests_passed: {report.get('all_tests_passed')}")
+
+    _print_status("Final QA", "final acceptance review...")
+    verdict = final_qa.run()
+    _print_status("Final QA done", f"accept: {verdict.get('accept')} — {verdict.get('summary', '')}")
 
     _print_status("Gatekeeper", "deciding whether to continue...")
     decision = gatekeeper.run_gatekeeper(cycle_count=cycle_num)
@@ -117,7 +145,6 @@ def run_one_cycle(cycle_num: int) -> str:
 
 def main():
     existing_idea = read(KEYS["original_idea"], default=None)
-
     if len(sys.argv) > 1:
         idea = " ".join(sys.argv[1:])
         write(KEYS["original_idea"], idea)
@@ -150,7 +177,6 @@ def main():
         if decision == "STOP":
             print(f"\nGatekeeper says STOP after cycle {cycle_num - 1}. Loop ending.")
             break
-
         if decision == "PAUSE_FOR_HUMAN":
             print(f"\nGatekeeper says PAUSE_FOR_HUMAN after cycle {cycle_num - 1}.")
             print("Review the latest_report in memory, then rerun `python loop.py` "
