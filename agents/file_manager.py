@@ -87,6 +87,8 @@ def run_file_manager() -> dict:
 
     for op in plan.get("operations", []):
         action = op.get("action")
+        if action == "write":
+            print(f"  [File Manager] plan wants module='{op.get('module')}' -> {op.get('path')}")
 
         try:
             if action == "mkdir":
@@ -102,7 +104,7 @@ def run_file_manager() -> dict:
                 rel_path = op["path"]
                 full = _safe_relpath(app_dir, rel_path)
                 os.makedirs(os.path.dirname(full), exist_ok=True)
-                with open(full, "w") as f:
+                with open(full, "w", encoding="utf-8") as f:
                     f.write(code)
                 file_map[module_name] = rel_path
                 written.append(rel_path)
@@ -134,6 +136,10 @@ def run_file_manager() -> dict:
 
         except (KeyError, ValueError) as exc:
             skipped.append({"op": op, "reason": str(exc)})
+    for s in skipped:
+        op = s["op"]
+        label = op.get("module", op.get("path"))
+        print(f"  [File Manager] skipped: {label} — {s['reason']}")
 
     write(FILE_MAP_KEY, file_map)
 

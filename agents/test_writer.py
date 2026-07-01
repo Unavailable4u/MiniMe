@@ -22,6 +22,7 @@ out AND its own generated tests don't raise AssertionError.
 import os
 import sys
 import json
+import re
 
 from dotenv import load_dotenv
 
@@ -64,6 +65,9 @@ Return an entry for every module you were given.
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
+    # qwen3-32b (a reasoning model) prepends a <think>...</think> block
+    # before its actual answer -- strip it before fence-stripping.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = text.split("```")[1]
         if text.startswith("json"):
@@ -84,6 +88,7 @@ def run():
         lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Test Writer"),
         agent_name="Test Writer",
     )
+    
     cleaned = _strip_fences(raw_text)
 
     try:

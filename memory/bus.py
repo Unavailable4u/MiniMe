@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from dotenv import load_dotenv
 from upstash_redis import Redis
 from upstash_vector import Index
@@ -10,7 +11,31 @@ redis = Redis(
     url=os.getenv("UPSTASH_REDIS_REST_URL"),
     token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
 )
+def slugify(text: str, max_len: int = 40) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
+    return slug[:max_len] or "untitled_app"
 
+
+_app_slug_cache = None
+
+
+def _current_app_slug():
+    global _app_slug_cache
+    if _app_slug_cache is None:
+        raw = redis.get("app_slug")
+        if raw is not None:
+            _app_slug_cache = json.loads(raw)
+    return _app_slug_cache
+
+
+def _namespaced(key: str) -> str:
+    """Prefixes every key with the active app_slug, except app_slug itself
+    (bootstrap key, can't prefix itself) and usage:* keys (Part 7.1 --
+    quota is a property of your accounts, not any one project)."""
+    if key == "app_slug" or key.startswith("usage:"):
+        return key
+    slug = _current_app_slug()
+    return f"{slug}:{key}" if slug else key
 # DB4 — Vector (Part 5, memory schema). Used by Cross-Cycle Memory Search
 # (#0) and the Duplication/Similarity Checker (#7). Both share this one
 # index but use different id-prefix namespaces (see each agent's docstring)
@@ -37,15 +62,22 @@ def vector_index() -> Index:
 
 def write(key: str, value):
     """Write any JSON-serializable value to memory."""
-    redis.set(key, json.dumps(value))
+    redis.set(_namespaced(key), json.dumps(value))
+    if key == "app_slug":
+        global _app_slug_cache
+        _app_slug_cache = value
 
 
 def read(key: str, default=None):
     """Read a value back from memory. Returns default if not found."""
-    raw = redis.get(key)
+    raw = redis.get(_namespaced(key))
     if raw is None:
         return default
-    return json.loads(raw)
+    value = json.loads(raw)
+    if key == "app_slug":
+        global _app_slug_cache
+        _app_slug_cache = value
+    return value
 
 
 def append_cycle_history(cycle_num: int, report: dict):

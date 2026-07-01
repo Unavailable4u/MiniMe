@@ -37,6 +37,7 @@ anything.
 import os
 import sys
 import json
+import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
@@ -91,6 +92,7 @@ it must be one of the seven strings above — never invent a new one."""
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = text.split("```")[1]
         if text.startswith("json"):

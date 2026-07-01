@@ -30,8 +30,8 @@ load_dotenv()
 
 # Use your second Groq key here so this agent draws from a separate daily
 # quota than prompt_writer.py / gatekeeper.py, which use GROQ_API_KEY.
-api_key = os.getenv("GROQ_API_KEY_2") or os.getenv("GROQ_API_KEY")
-client = Groq(api_key=api_key)
+api_key = os.getenv("GROQ_API_KEY_9") or os.getenv("GROQ_API_KEY")
+client = Groq(api_key=api_key, timeout=30)
 
 FILE_MAP_KEY = KEYS.get("file_map", "file_map")
 APP_SLUG_KEY = KEYS.get("app_slug", "app_slug")

@@ -21,7 +21,7 @@ Usage:
 import sys
 import traceback
 
-from memory.bus import read, write, KEYS
+from memory.bus import read, write, KEYS, slugify   # add slugify to the import
 from agents import memory_search
 from agents import idea_planner
 from agents import prompt_writer
@@ -149,6 +149,9 @@ def main():
         idea = " ".join(sys.argv[1:])
         write(KEYS["original_idea"], idea)
         print(f"Starting new run with idea: {idea}")
+        app_slug = slugify(idea)
+        write(KEYS["app_slug"], app_slug)
+        print(f"App namespace: {app_slug}")
         cycle_num = 1
         write(KEYS["cycle_count"], cycle_num)
     elif existing_idea:

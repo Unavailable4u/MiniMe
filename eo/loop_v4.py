@@ -74,7 +74,15 @@ def run_inspector_and_log(task_text: str) -> dict:
         write("eo:routing_decision", {"error": str(exc), "forced_tier": FORCED_TIER})
         print(f"  [Inspector] classification failed ({exc.__class__.__name__}: {exc}) "
               f"— logged, proceeding with forced tier {FORCED_TIER} anyway.")
-
+    if decision and decision["tier"] < FORCED_TIER:
+        print(f"\n[EO] Inspector suggests tier {decision['tier']} "
+              f"(confidence {decision['confidence']:.2f}: {decision['reasoning']}), "
+              f"but this system is currently forced to tier {FORCED_TIER} "
+              f"(~19 LLM calls, sandboxed testing, full commit cycle).")
+        confirm = input("Proceed with the full tier-3 pipeline anyway? [y/N]: ").strip().lower()
+        if confirm != "y":
+            print("Aborted — nothing was run.")
+            sys.exit(0)
     # Log what tier-3's execution graph looks like too, so eo:execution_graph
     # is populated from day one even though it's hardcoded right now.
     graph = build_execution_graph(tier=FORCED_TIER)
