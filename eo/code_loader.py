@@ -63,6 +63,7 @@ def load_existing_app(app_slug: str) -> dict:
         )
     write(KEYS["app_slug"], app_slug)
     submitted_code = {}
+    file_map = {}
     if os.path.isdir(src_dir):
         for root, _dirs, files in os.walk(src_dir):
             for fname in files:
@@ -74,7 +75,17 @@ def load_existing_app(app_slug: str) -> dict:
                 with open(full_path, "r", encoding="utf-8") as f:
                     code = f.read()
                 submitted_code[module_key] = {"language": "python", "code": code}
+                # Record where this module actually lives on disk, in the
+                # same {module_name: path relative to app_dir} shape
+                # file_manager.py already uses (normally populated by
+                # structure_architect.py in the tier-3 flow). Tier 2 has
+                # no structure_architect step, so this is the only place
+                # that mapping gets recorded -- without it, a tier-2 fix
+                # has nowhere to be written back to (see
+                # file_manager.write_back_existing_app()).
+                file_map[module_key] = "src/" + rel_path.replace(os.sep, "/")
     write(KEYS["submitted_code"], submitted_code)
+    write(KEYS.get("file_map", "file_map"), file_map)
     return submitted_code
 
 

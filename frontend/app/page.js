@@ -17,6 +17,7 @@ export default function ChatPage() {
   });
   const [liveDecision, setLiveDecision] = useState(null);
   const [liveLanes, setLiveLanes] = useState({});
+  const [usageStats, setUsageStats] = useState({});
 
   useEffect(() => {
     const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
@@ -35,6 +36,14 @@ export default function ChatPage() {
 
       if (eventType === "routing_decision") {
         setLiveDecision(payload);
+        return;
+      }
+      if (eventType === "usage_update") {
+        // Keyed by provider:key_id so each account's bar tracks
+        // independently — Part 6.7's dashboard is per-key, not just
+        // per-provider, since separate keys have separate quotas.
+        const statKey = `${payload?.provider}:${payload?.key_id}`;
+        setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
         return;
       }
       if (eventType === "agent_start") {
@@ -119,6 +128,8 @@ export default function ChatPage() {
         <h1 className="text-sm font-medium text-neutral-400">AI Loop v5</h1>
       </header>
 
+      <TokenQuotaDashboard stats={usageStats} />
+
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.length === 0 && (
           <p className="text-neutral-500 text-sm">
@@ -151,6 +162,49 @@ export default function ChatPage() {
           Send
         </button>
       </form>
+    </div>
+  );
+}
+
+function TokenQuotaDashboard({ stats }) {
+  const entries = Object.entries(stats);
+  // Nothing to show until the first usage_update arrives -- no point
+  // rendering an empty dashboard before any agent has made a call.
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="border-b border-neutral-800 px-4 py-3 space-y-2">
+      {entries.map(([statKey, s]) => {
+        const used = s.tokens_used_today ?? 0;
+        const limit = s.daily_limit;
+        // daily_limit is a rough static estimate (Part 6.7's QUOTA_CONFIG),
+        // not every provider is in that table yet -- show the raw count
+        // instead of a bar when we don't have a limit to compare against.
+        const pct = limit ? Math.min(100, Math.round((used / limit) * 100)) : null;
+        const nearLimit = pct !== null && pct >= 80;
+
+        return (
+          <div key={statKey} className="text-xs">
+            <div className="flex items-center justify-between text-neutral-500 mb-1">
+              <span>
+                {s.provider} <span className="text-neutral-600">· {s.key_id}</span>
+              </span>
+              <span className={nearLimit ? "text-amber-500" : ""}>
+                {used.toLocaleString()}
+                {limit ? ` / ${limit.toLocaleString()} tokens` : " tokens today"}
+              </span>
+            </div>
+            {pct !== null && (
+              <div className="h-1.5 rounded-full bg-neutral-900 overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${nearLimit ? "bg-amber-500" : "bg-neutral-500"}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

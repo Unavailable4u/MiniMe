@@ -21,12 +21,14 @@ Output, written to KEYS["security_scan_results"]:
 import os
 import sys
 import json
-import requests
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from relay.emitter import emit_event
+from utils.llm_client import generate_text
 
 load_dotenv()
 
@@ -55,41 +57,59 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _call_cloudflare(slot: int, user_prompt: str) -> str:
-    account_id = os.getenv(f"CLOUDFLARE_ACCOUNT_ID_{slot}")
-    token = os.getenv(f"CLOUDFLARE_API_KEY_{slot}")
-    if not account_id or not token:
-        raise RuntimeError(f"CLOUDFLARE_ACCOUNT_ID_{slot}/CLOUDFLARE_API_KEY_{slot} not set")
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{CLOUDFLARE_MODEL}"
-    response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "response_format": {"type": "json_object"},
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not data.get("success", True) and data.get("errors"):
-        raise RuntimeError(f"Cloudflare error: {data['errors']}")
-    return data["result"]["response"]
+def _scan_one(module_name: str, code: str, slot: int, session_id: str = None, tier: int = None) -> tuple:
+    """
+    Stage 6 step 5: fires agent_start/agent_done labeled scanner_{slot}.
+    Uses the Cloudflare slot number (4-8) rather than a plain worker
+    index, since that's what actually identifies which account did the
+    work -- and slots get reused round-robin when there are more than 5
+    modules, same reasoning as code_writers.py's key-slot labeling.
 
+    NOTE: the old hand-rolled call used Cloudflare's json_object response
+    mode as a light steering hint (not a strict schema, unlike
+    fixer_pool.py's old json_schema mode -- there's nothing lost here that
+    wasn't already just "asking nicely" via the prompt). generate_text()
+    has no equivalent parameter, so this now relies purely on
+    SYSTEM_PROMPT's instructions plus the broad except below, same
+    tolerance as before.
+    """
+    agent_name = f"scanner_{slot}"
+    emit_event("agent_start", session_id=session_id, agent=agent_name, tier=tier,
+               payload={"label": f"Scanner {slot} — {module_name}"})
+    started = time.monotonic()
 
-def _scan_one(module_name: str, code: str, slot: int) -> tuple:
+    chain = [
+        {"provider": "cloudflare", "model": CLOUDFLARE_MODEL,
+         "account_id_env": f"CLOUDFLARE_ACCOUNT_ID_{slot}", "token_env": f"CLOUDFLARE_API_KEY_{slot}"},
+    ]
+
     try:
-        raw_text = _call_cloudflare(slot, json.dumps({"module": module_name, "code": code[:6000]}))
+        raw_text = generate_text(
+            SYSTEM_PROMPT,
+            json.dumps({"module": module_name, "code": code[:6000]}),
+            chain,
+            agent_name=agent_name,
+            session_id=session_id,
+            tier=tier,
+        )
         result = json.loads(_strip_fences(raw_text))
     except Exception as exc:
-        return module_name, {"findings": [], "error": str(exc)}
+        result = {"findings": [], "error": str(exc)}
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    findings = result.get("findings", [])
+    if result.get("error"):
+        summary = f"scan failed: {result['error']}"
+    elif findings:
+        summary = f"{len(findings)} finding(s)"
+    else:
+        summary = "no findings"
+    emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+               payload={"summary": summary, "duration_ms": duration_ms})
     return module_name, result
 
 
-def run() -> dict:
+def run(session_id: str = None, tier: int = None) -> dict:
     submitted_code = read(KEYS["fixed_code"], default=None) or read(KEYS["submitted_code"], default={})
     if not submitted_code:
         write(KEYS["security_scan_results"], {})
@@ -102,7 +122,7 @@ def run() -> dict:
         for i, (name, data) in enumerate(modules):
             code = data.get("code", "") if isinstance(data, dict) else str(data)
             slot = CLOUDFLARE_KEY_SLOTS[i % len(CLOUDFLARE_KEY_SLOTS)]
-            futures[executor.submit(_scan_one, name, code, slot)] = name
+            futures[executor.submit(_scan_one, name, code, slot, session_id=session_id, tier=tier)] = name
         for future in as_completed(futures):
             name, result = future.result()
             results[name] = result

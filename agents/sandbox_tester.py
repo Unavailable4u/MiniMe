@@ -1,4 +1,3 @@
-
 """
 agents/sandbox_tester.py — Sandbox Tester (Part 4, agent #10 of the v5
 Master Blueprint).
@@ -13,9 +12,13 @@ modules per cycle by default).
 import os
 import sys
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from relay.emitter import emit_event
 from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
+
+from relay.emitter import emit_event
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 load_dotenv()
@@ -63,9 +66,23 @@ def _run_one_module(module_name: str, module_data, test_code: str = "") -> tuple
             "error": f"Sandbox failed to run: {exc}",
         }
 def run_sandbox_tester():
-    fixed_code = read(KEYS["fixed_code"])
+    # Falls back to submitted_code when fixed_code is empty -- not every
+    # caller runs Fixer Pool first. Tier 3 always populates fixed_code.
+    # Tier 2's "debug" directed task does too (fixer_pool is in its
+    # agent list). But tier 2's "add_tests" deliberately does NOT run
+    # Fixer Pool (DIRECTED_TASK_MAP["add_tests"] = ["test_writer",
+    # "sandbox_tester"], nothing else) -- there's nothing to fix, just
+    # tests to add. Without this fallback, that path has no code to test
+    # at all and either crashes (fixed_code truly empty) or, worse,
+    # silently tests stale fixed_code left over from an unrelated
+    # earlier run under the same app_slug. Same fallback pattern already
+    # used by security_scanner.py's run().
+    fixed_code = read(KEYS["fixed_code"], default=None) or read(KEYS["submitted_code"], default={})
     if not fixed_code:
-        raise ValueError("No fixed_code found in memory. Run the Fixer Pool first.")
+        raise ValueError(
+            "No fixed_code or submitted_code found in memory. Run the Fixer "
+            "Pool or Code Writer Pool first."
+        )
     test_code_map = read(KEYS["test_code"], default={})
     modules = {name: data for name, data in fixed_code.items() if name != "_fixer_error"}
     test_results = {}
@@ -80,7 +97,7 @@ def run_sandbox_tester():
             test_results[name] = result
     write(KEYS["test_results"], test_results)
     return test_results
-def run_sandbox_tester_lean() -> dict:
+def run_sandbox_tester_lean(session_id: str = None, tier: int = None) -> dict:
     """
     Tier-1 variant (Part 2.4: "Sandbox Tester (optional) ... only invoked
     if the user asked to run/test the result"). Reuses the exact same
@@ -89,14 +106,27 @@ def run_sandbox_tester_lean() -> dict:
     many, and writes to tier1_test_results instead of the tier-3
     test_results key, per Part 5's "deliberately separate key names"
     rule for the lean pipeline.
+
+    Stage 6 step 4: fires agent_start/agent_done so this optional step is
+    visible in the frontend's live activity panel when it runs, matching
+    the other lean-pipeline agents. No usage logging here -- this agent
+    makes no LLM calls, so there's nothing for llm_client.py to log.
     """
     module = read(KEYS["tier1_fixed_code"])
     if not module:
         raise ValueError(
             "No tier1_fixed_code found in memory. Run reviewer_fixer_lean first."
         )
-    name, result = _run_one_module(module.get("name", "module"), module)
-    test_results = {name: result}
+    name = module.get("name", "module")
+    emit_event("agent_start", session_id=session_id, agent="sandbox_tester_lean", tier=tier,
+               payload={"label": f"Sandbox Tester — {name}"})
+    started = time.monotonic()
+    result_name, result = _run_one_module(name, module)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    summary = "passed" if result.get("passed") else f"failed: {result.get('error') or result.get('stderr') or 'unknown'}"
+    emit_event("agent_done", session_id=session_id, agent="sandbox_tester_lean", tier=tier,
+               payload={"summary": summary, "duration_ms": duration_ms})
+    test_results = {result_name: result}
     write(KEYS["tier1_test_results"], test_results)
     return test_results
 

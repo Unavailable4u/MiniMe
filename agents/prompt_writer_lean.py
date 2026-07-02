@@ -35,9 +35,11 @@ task. Given a task description, output ONLY a JSON object shaped like:
 {
   "name": "short_module_name",
   "description": "what it does",
+  "language": "the programming language requested in the task, e.g. python, c, javascript, bash — default to python if the task does not specify one",
   "inputs": "expected inputs",
   "outputs": "expected outputs",
-  "edge_cases": ["list", "of", "edge", "cases", "to", "handle"]
+  "edge_cases": ["list", "of", "edge", "cases", "to", "handle"],
+  "constraints": ["any other explicit preferences from the task text, e.g. 'keep it short', 'no external libraries', 'use recursion', 'add comments' — empty list if none given"]
 }
 This must describe ONE self-contained module — do not split the task into \
 multiple modules or files. Respond with ONLY valid JSON, no markdown, no \
@@ -53,7 +55,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(task_text: str = None) -> dict:
+def run(task_text: str = None, session_id: str = None, tier: int = None) -> dict:
     if task_text:
         write(KEYS["tier1_task_text"], task_text)
     else:
@@ -68,6 +70,8 @@ def run(task_text: str = None) -> dict:
         user_content=f"Task: {task_text}",
         chain=CHAIN,
         agent_name="Prompt Writer (lean)",
+        session_id=session_id,
+        tier=tier,
     )
     spec = json.loads(_strip_fences(raw))
     write(KEYS["tier1_module_spec"], spec)

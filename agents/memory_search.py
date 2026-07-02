@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, vector_index
+from utils.llm_client import log_usage
 
 load_dotenv()
 
@@ -64,7 +65,7 @@ def _app_slug() -> str:
     return read(KEYS["app_slug"], default=None) or read(KEYS["original_idea"], default="untitled")
 
 
-def store_cycle_memory(cycle_num: int) -> None:
+def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None) -> None:
     report = read(KEYS["latest_report"], default=None)
     plan = read(KEYS["current_plan"], default={})
     if not report:
@@ -81,6 +82,11 @@ def store_cycle_memory(cycle_num: int) -> None:
     except Exception as exc:
         print(f"  [Memory Search] embed failed, skipping store: {exc}")
         return
+    # HF feature-extraction has no chat-completion "usage" object to pull a
+    # token count from, so this logs a request-only entry (tokens=None) --
+    # same pattern duplication_checker.py should use for its HF calls.
+    log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
+              session_id=session_id, tier=tier, agent_name="Memory Search")
     try:
         vector_index().upsert(
             vectors=[(f"{ID_PREFIX}:{slug}:{cycle_num}", vector, {
@@ -93,10 +99,20 @@ def store_cycle_memory(cycle_num: int) -> None:
         print(f"  [Memory Search] vector upsert failed: {exc}")
 
 
-def retrieve_context(query_text: str, top_k: int = 3) -> str:
+def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, tier: int = None) -> str:
     slug = _app_slug()
     try:
         vector = _embed(query_text)
+    except Exception as exc:
+        print(f"  [Memory Search] retrieval failed, continuing with no context: {exc}")
+        write(KEYS["retrieved_context"], "")
+        return ""
+    # Log right after the embed call itself succeeds -- a downstream
+    # Vector query failure shouldn't hide the fact that the billable HF
+    # call already happened.
+    log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
+              session_id=session_id, tier=tier, agent_name="Memory Search")
+    try:
         result = vector_index().query(
             vector=vector, top_k=top_k, include_metadata=True,
             filter=f"app_slug = '{slug}'",
@@ -111,13 +127,13 @@ def retrieve_context(query_text: str, top_k: int = 3) -> str:
     return context
 
 
-def run() -> str:
+def run(session_id: str = None, tier: int = None) -> str:
     """Convenience entrypoint for loop.py: retrieve context for the
     upcoming cycle, based on the original idea + feature status."""
     idea = read(KEYS["original_idea"], default="")
     feature_status = read(KEYS["feature_status"], default={})
     query = f"{idea} | feature_status: {json.dumps(feature_status)}"
-    return retrieve_context(query)
+    return retrieve_context(query, session_id=session_id, tier=tier)
 
 
 if __name__ == "__main__":

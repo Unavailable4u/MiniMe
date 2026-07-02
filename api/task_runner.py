@@ -70,7 +70,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
                      "test_results": {...} | None }
         tier 2 -> { "directed_task_type": str, "app_slug": str, "output": ... }
     """
-    decision = loop_v4._get_decision(task_text, tier_override, directed_task_type_override)
+    decision = loop_v4._get_decision(task_text, tier_override, directed_task_type_override, session_id=session_id)
     tier = decision["tier"]
 
     # One session_id per incoming task, regardless of tier. Prefer the

@@ -54,6 +54,16 @@ If a module has nothing meaningfully testable (e.g. pure UI markup, a config
 file, boilerplate with no logic), output a single line: `# no testable logic`
 for that module -- do not invent fake assertions just to have something.
 
+Exception handling rule, critical: when testing that a function correctly
+raises an error, catch ONLY that specific exception type (e.g.
+`except ValueError:`), never a bare `except:` and never `except Exception:`.
+A bare except also silently swallows AssertionError from your own asserts
+above it in the same try block -- that turns a genuinely failing test into
+a falsely "passing" one, which defeats the entire point of writing the
+test. If you're not testing for a raised exception, don't use try/except
+at all -- a plain `assert` that's allowed to raise and fail loudly is
+correct and expected.
+
 Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly this
 shape:
 {
@@ -61,6 +71,21 @@ shape:
 }
 Return an entry for every module you were given.
 """
+
+
+# Catches bare `except:`, `except Exception:`/`except Exception as e:`, and
+# `except BaseException:`/`except BaseException as e:` -- anything broad
+# enough to swallow AssertionError from our own asserts. Specific catches
+# like `except ValueError:` are untouched. Prompt-only guidance (see
+# SYSTEM_PROMPT above) reduces how often the model does this but doesn't
+# guarantee it -- this is the hard backstop.
+_UNSAFE_EXCEPT_RE = re.compile(
+    r"except\s*(:|Exception\b\s*(as\s+\w+\s*)?:|BaseException\b\s*(as\s+\w+\s*)?:)"
+)
+
+
+def _has_unsafe_except(code: str) -> bool:
+    return bool(_UNSAFE_EXCEPT_RE.search(code))
 
 
 def _strip_fences(text: str) -> str:
@@ -105,6 +130,19 @@ def run():
         name: code for name, code in test_code.items()
         if isinstance(code, str) and name in submitted_code
     }
+
+    # Hard backstop: drop any module whose generated test code still has a
+    # bare/broad except clause, even though the prompt tells the model not
+    # to. A test that can silently swallow its own AssertionError is worse
+    # than no test at all -- same reasoning as the malformed-entry filter
+    # above, applied to a correctness issue instead of a shape issue.
+    unsafe = [name for name, code in test_code.items() if _has_unsafe_except(code)]
+    if unsafe:
+        print(
+            f"  [Test Writer] dropped {len(unsafe)} module(s) with a bare/broad "
+            f"except clause that would swallow AssertionError: {', '.join(unsafe)}"
+        )
+        test_code = {name: code for name, code in test_code.items() if name not in unsafe}
 
     write(KEYS["test_code"], test_code)
     return test_code

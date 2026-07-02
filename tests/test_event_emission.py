@@ -151,8 +151,8 @@ def test_inspector_emits_start_and_done_and_routing_decision(monkeypatch):
                     return _FakeMsgResponse(_FakeResponse.GOOD_JSON)
 
     import utils.llm_client as llm_client
-    monkeypatch.setitem(llm_client._PROVIDER_GETTERS, "groq",
-                         lambda key_env: _FakeWorkingClient())
+    monkeypatch.setattr(llm_client, "_get_groq",
+                         lambda key_env, timeout=None: _FakeWorkingClient())
 
     result = inspector.classify("what's 2+2", session_id="sess_xyz")
 
@@ -196,8 +196,8 @@ def test_inspector_without_session_id_emits_nothing(monkeypatch):
                 def create(**kwargs):
                     return _FakeMsgResponse(GOOD_JSON)
 
-    monkeypatch.setitem(llm_client._PROVIDER_GETTERS, "groq",
-                         lambda key_env: _FakeWorkingClient())
+    monkeypatch.setattr(llm_client, "_get_groq",
+                         lambda key_env, timeout=None: _FakeWorkingClient())
 
     inspector.classify("what's 2+2")  # no session_id
     assert fake_client.calls == []

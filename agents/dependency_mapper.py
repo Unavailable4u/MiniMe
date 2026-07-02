@@ -20,20 +20,26 @@ Output shape, written to KEYS["dependency_map"]:
 import os
 import sys
 import json
-import requests
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
+from utils.llm_client import generate_text
 
 load_dotenv()
 
 # Same model choice as fixer_pool.py's Cloudflare fallback -- confirmed on
 # Cloudflare's JSON Mode model list, unlike the smaller 8B instruct model.
-CLOUDFLARE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID_1"
-CLOUDFLARE_TOKEN_ENV = "CLOUDFLARE_API_KEY_1"
+# json_mode: True is critical here, not decorative -- see llm_client.py's
+# _call_cloudflare_step() docstring. Routed through generate_text() instead
+# of a hand-rolled request so this call actually gets usage-logged --
+# previously it logged nothing.
+CHAIN = [
+    {"provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+     "account_id_env": "CLOUDFLARE_ACCOUNT_ID_1", "token_env": "CLOUDFLARE_API_KEY_1",
+     "json_mode": True},
+]
 
 SYSTEM_PROMPT = """You are a static-dependency analyst. You will be given JSON
 containing several code modules. For each module, list which OTHER modules
@@ -57,32 +63,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _call_cloudflare(user_prompt: str) -> str:
-    account_id = os.getenv(CLOUDFLARE_ACCOUNT_ID_ENV)
-    token = os.getenv(CLOUDFLARE_TOKEN_ENV)
-    if not account_id or not token:
-        raise RuntimeError(f"{CLOUDFLARE_ACCOUNT_ID_ENV}/{CLOUDFLARE_TOKEN_ENV} not set")
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{CLOUDFLARE_MODEL}"
-    response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "response_format": {"type": "json_object"},
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not data.get("success", True) and data.get("errors"):
-        raise RuntimeError(f"Cloudflare error: {data['errors']}")
-    return data["result"]["response"]
-
-
-def run() -> dict:
+def run(session_id: str = None, tier: int = None) -> dict:
     submitted_code = read(KEYS["submitted_code"], default={})
     if not submitted_code:
         write(KEYS["dependency_map"], {})
@@ -95,7 +76,8 @@ def run() -> dict:
     user_prompt = json.dumps({"modules": preview}, indent=2)
 
     raw_text = call_with_retry(
-        lambda: _call_cloudflare(user_prompt),
+        lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Dependency Mapper",
+                               session_id=session_id, tier=tier),
         agent_name="Dependency Mapper",
     )
     dep_map = json.loads(_strip_fences(raw_text))

@@ -21,17 +21,31 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from groq import Groq
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from utils.llm_client import generate_text
 
 load_dotenv()
 
-# Use your second Groq key here so this agent draws from a separate daily
-# quota than prompt_writer.py / gatekeeper.py, which use GROQ_API_KEY.
-api_key = os.getenv("GROQ_API_KEY_9") or os.getenv("GROQ_API_KEY")
-client = Groq(api_key=api_key, timeout=30)
+# GROQ_API_KEY_9 first so this agent draws from a separate daily quota
+# than prompt_writer.py / gatekeeper.py, falling back to the shared
+# GROQ_API_KEY if key #9 isn't set -- same intent as the original
+# `os.getenv("GROQ_API_KEY_9") or os.getenv("GROQ_API_KEY")`, but now a
+# real two-step chain: generate_text() also falls through to the second
+# step on a transient provider error, not just a missing key, which the
+# original single-resolved-key version couldn't do.
+#
+# timeout=30 preserved from the original `Groq(..., timeout=30)` -- this
+# agent runs synchronously in the tier-3 pipeline right before file
+# operations, so a stalled call should fail fast and fall through to the
+# next chain step rather than hang the whole cycle. Routed through
+# generate_text() instead of a hand-rolled client so this call also gets
+# usage-logged -- previously it logged nothing.
+CHAIN = [
+    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY_9", "timeout": 30},
+    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+]
 
 FILE_MAP_KEY = KEYS.get("file_map", "file_map")
 APP_SLUG_KEY = KEYS.get("app_slug", "app_slug")
@@ -105,7 +119,7 @@ def _code_preview(code: str, max_chars: int = 400) -> str:
     return code if len(code) <= max_chars else code[:max_chars] + "...(truncated)"
 
 
-def run_structure_architect() -> dict:
+def run_structure_architect(session_id: str = None, tier: int = None) -> dict:
     fixed_code = read(KEYS["fixed_code"])
     if not fixed_code:
         raise ValueError("No fixed_code found in memory. Run Fixer+Tester first.")
@@ -136,15 +150,8 @@ def run_structure_architect() -> dict:
         + "\n\nNew/updated modules this cycle:\n" + json.dumps(modules_for_prompt, indent=2)
     )
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-
-    raw = response.choices[0].message.content
+    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Structure Architect",
+                         session_id=session_id, tier=tier)
     cleaned = _strip_fences(raw)
 
     try:
