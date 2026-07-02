@@ -22,16 +22,21 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from openai import OpenAI
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
+from utils.llm_client import generate_text
 
 load_dotenv()
 
-MISTRAL_MODEL = "mistral-large-latest"
-MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+# No fallback specified in the blueprint for this agent -- single-step
+# chain, same as documentation_agent.py. Routed through generate_text()
+# (llm_client.py's "mistral" provider) instead of a hand-rolled client,
+# so this call actually gets usage-logged -- previously it logged nothing.
+CHAIN = [
+    {"provider": "mistral", "model": "mistral-large-latest", "key_env": "MISTRAL_API_KEY"},
+]
 
 SYSTEM_PROMPT = """You are the final acceptance reviewer for an autonomous
 build cycle. You will be given the cycle report, sandbox test results,
@@ -49,19 +54,6 @@ security findings, or a cycle that clearly didn't do what it claimed) --
 minor style nitpicks should be a "concern," not a rejection.
 """
 
-_client = None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        api_key = os.getenv("MISTRAL_API_KEY")
-        if not api_key:
-            raise RuntimeError("MISTRAL_API_KEY not set")
-        _client = OpenAI(base_url=MISTRAL_BASE_URL, api_key=api_key)
-    return _client
-
-
 def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -71,19 +63,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _call_mistral(user_prompt: str) -> str:
-    client = _get_client()
-    response = client.chat.completions.create(
-        model=MISTRAL_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return (response.choices[0].message.content or "").strip()
-
-
-def run() -> dict:
+def run(session_id: str = None, tier: int = None) -> dict:
     report = read(KEYS["latest_report"], default={})
     test_results = read(KEYS["test_results"], default={})
     security_results = read(KEYS["security_scan_results"], default={})
@@ -98,7 +78,8 @@ def run() -> dict:
 
     try:
         raw_text = call_with_retry(
-            lambda: _call_mistral(user_prompt),
+            lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Final QA",
+                                   session_id=session_id, tier=tier),
             agent_name="Final QA",
         )
         verdict = json.loads(_strip_fences(raw_text))

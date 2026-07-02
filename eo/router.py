@@ -1,4 +1,3 @@
-
 """
 eo/router.py — Stage 4, step 1 of the v5 Master Blueprint's build roadmap
 (Part 10, Stage 4.1):
@@ -19,14 +18,18 @@ from eo.registry import REGISTRY
 # This list is deliberately hand-copied from loop.py's actual call order
 # (not "what Part 4's table implies"), because the point of this step is
 # fidelity to what the system does today, not to what the table says it
-# should do. Note the one real discrepancy this surfaced:
+# should do.
 #
-#   agents/review_aggregator.py exists (agent #8, "deterministic Python,
-#   no LLM") but loop.py never imports or calls it — reviewer.py's output
-#   goes straight to duplication_checker.py. That's a pre-existing gap
-#   between the blueprint and the code, not something this router
-#   introduces or silently papers over. Flagging it here rather than
-#   guessing at a fix.
+#   Note (corrected): agents/review_aggregator.py's aggregate_reviews()
+#   IS called -- from inside agents/reviewer.py's run_reviewer(), right
+#   after the 3-worker Reviewer Pool finishes, before review_notes is
+#   written. It never needs its own line in this roster because it isn't
+#   a standalone pipeline step -- it's an internal merge step inside the
+#   "reviewer" agent itself, same as security_aggregator.py is a
+#   standalone roster entry for Scanner Pool but review_aggregator.py is
+#   not for Reviewer Pool. (An earlier version of this comment claimed
+#   loop.py never called it -- that was true of an older reviewer.py,
+#   not the current one. Confirmed by reading reviewer.py directly.)
 # ---------------------------------------------------------------------------
 TIERS = {
     0: {
@@ -58,6 +61,7 @@ TIERS = {
             "sandbox_tester",
             "structure_architect",
             "security_scanner",
+            "security_aggregator",
             "file_manager",
             "documentation_agent",
             "changelog_writer",
@@ -82,10 +86,10 @@ TIERS = {
 # ---------------------------------------------------------------------------
 DIRECTED_TASK_MAP = {
     "review":        ["reviewer"],
-    "debug":         ["reviewer", "fixer_pool", "sandbox_tester"],
-    "add_tests":     ["test_writer", "sandbox_tester"],
-    "refactor":      ["code_writers"],
-    "security_scan": ["security_scanner"],
+    "debug":         ["reviewer", "fixer_pool", "sandbox_tester", "file_manager_writeback"],
+    "add_tests":     ["test_writer", "sandbox_tester", "file_manager_test_writeback"],
+    "refactor":      ["code_writers", "file_manager_writeback"],
+    "security_scan": ["security_scanner", "security_aggregator"],
     "write_docs":    ["documentation_agent"],
 }
 EXPLAIN_CODE_ROUTE = ["responder"]

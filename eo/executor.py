@@ -81,10 +81,37 @@ def execute_graph(agent_names: list, task_text: str = None, cycle_num: int = Non
                     payload={"label": name})
         started = time.monotonic()
         try:
-            if name in TASK_TEXT_ENTRYPOINTS and task_text:
+            if name == "prompt_writer_lean" and task_text:
+                # Stage 6 step 6 (Part 6.7): this is the first agent wired
+                # to pass session_id/tier into generate_text() so token
+                # usage gets logged and a usage_update event fires. Other
+                # agents will get the same treatment one at a time -- see
+                # llm_client.py's docstring note on why this stays a
+                # no-op for anyone not yet passing session_id through.
+                result = fn(task_text, session_id=session_id, tier=tier)
+            elif name in TASK_TEXT_ENTRYPOINTS and task_text:
                 result = fn(task_text)
+            elif name == "code_writer_lean":
+                result = fn(session_id=session_id, tier=tier)
+            elif name == "reviewer_fixer_lean":
+                result = fn(session_id=session_id, tier=tier)
+            elif name == "code_writers":
+                # Stage 6 step 5: the 5-worker pool, called by tier 2's
+                # "refactor" directed task. Passes session_id/tier through
+                # so each of the 5 parallel workers fires its own
+                # agent_start/agent_done (code_writers.py's _write_one_module),
+                # letting the frontend show real overlapping activity.
+                result = fn(session_id=session_id, tier=tier)
+            elif name == "security_scanner":
+                   result = fn(session_id=session_id, tier=tier)
+            elif name == "fixer_pool":
+                result = fn(session_id=session_id, tier=tier)
+            elif name == "reviewer":
+                result = fn(session_id=session_id, tier=tier)
+            elif name == "sandbox_tester_lean":
+                result = fn(session_id=session_id, tier=tier)
             elif name == "gatekeeper":
-                result = fn(cycle_num)
+                result = fn(cycle_num, session_id=session_id, tier=tier)
             else:
                 result = fn()
         except Exception as exc:

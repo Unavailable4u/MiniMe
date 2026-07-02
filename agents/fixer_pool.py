@@ -19,14 +19,16 @@ a separate agent: agents/sandbox_tester.py (#10).
 import os
 import sys
 import json
+import time
+import ast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
 from dotenv import load_dotenv
-from cerebras.cloud.sdk import Cerebras, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from relay.emitter import emit_event
+from utils.llm_client import generate_text
 
 load_dotenv()
 
@@ -35,15 +37,16 @@ CEREBRAS_KEY_ENVS = ["CEREBRAS_API_KEY_6", "CEREBRAS_API_KEY_7", "CEREBRAS_API_K
 
 # Cloudflare fallback -- key #3 in the production roster.
 # Using llama-3.3-70b-instruct-fp8-fast rather than the smaller
-# llama-3.1-8b-instruct: Cloudflare only lists a specific set of models as
-# supporting JSON Mode (https://developers.cloudflare.com/workers-ai/features/json-mode/),
-# and this is the strongest one on that list -- the 8B model isn't on it
-# and was unreliable at returning parseable JSON under this prompt.
+# llama-3.1-8b-instruct: it was the more reliable of the two at returning
+# parseable JSON under this prompt. NOTE: this fallback used to be pinned
+# to Cloudflare's JSON Mode with an explicit schema (see git history) --
+# since the swap to generate_text() (which has no response_format
+# support), that decode-time constraint is gone. _extract_json()'s
+# forgiving parse + _normalize_entry()'s shape coercion below are the
+# remaining safety net for malformed output on this path.
 CLOUDFLARE_ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID_3"
 CLOUDFLARE_TOKEN_ENV = "CLOUDFLARE_API_KEY_3"
 CLOUDFLARE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-
-_TRANSIENT_ERRORS = (RateLimitError, APIStatusError, APIConnectionError, APITimeoutError)
 
 SYSTEM_PROMPT = """You are a bug-fixing engineer. You will be given JSON containing
 one or more code modules and a list of review issues found in them. Resolve every
@@ -58,17 +61,6 @@ Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly this s
 Return every module you were given, fixed or not, with its full code each time.
 """
 
-_cerebras_client_cache = {}
-
-
-def _get_cerebras_client(key_env: str):
-    key = os.getenv(key_env)
-    if not key:
-        return None
-    if key_env not in _cerebras_client_cache:
-        _cerebras_client_cache[key_env] = Cerebras(api_key=key)
-    return _cerebras_client_cache[key_env]
-
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
@@ -77,69 +69,6 @@ def _strip_fences(text: str) -> str:
         if text.startswith("json"):
             text = text[4:]
     return text.strip()
-
-
-def _call_cerebras(key_env: str, user_prompt: str) -> str:
-    client = _get_cerebras_client(key_env)
-    if client is None:
-        raise RuntimeError(f"{key_env} not set")
-    response = client.chat.completions.create(
-        model=CEREBRAS_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return response.choices[0].message.content or ""
-
-
-def _build_json_schema(module_names) -> dict:
-    """Builds a JSON Schema requiring exactly the given module names as
-    top-level keys, each shaped like {"language": str, "code": str}.
-    Passed as response_format to Cloudflare's JSON Mode so the model is
-    constrained at decode time rather than just asked nicely."""
-    return {
-        "type": "object",
-        "properties": {
-            name: {
-                "type": "object",
-                "properties": {
-                    "language": {"type": "string"},
-                    "code": {"type": "string"},
-                },
-                "required": ["code"],
-            }
-            for name in module_names
-        },
-        "required": list(module_names),
-    }
-
-
-def _call_cloudflare_fallback(user_prompt: str, module_names) -> str:
-    account_id = os.getenv(CLOUDFLARE_ACCOUNT_ID_ENV)
-    token = os.getenv(CLOUDFLARE_TOKEN_ENV)
-    if not account_id or not token:
-        raise RuntimeError(f"{CLOUDFLARE_ACCOUNT_ID_ENV} / {CLOUDFLARE_TOKEN_ENV} not set")
-
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{CLOUDFLARE_MODEL}"
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": _build_json_schema(module_names),
-            },
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("result", {}).get("response", "")
 
 
 def _extract_json(text: str):
@@ -184,26 +113,71 @@ def _normalize_entry(entry, original: dict) -> dict:
     than let that malformed shape propagate downstream (where
     sandbox_tester.py would crash on .get("code")), fix it here at the
     source.
+
+    Also guards against a shape that WAS valid JSON but whose "code" string
+    is not valid Python -- e.g. a worker fixing one reported issue while
+    silently de-indenting an unrelated block (observed bug: `if weight_kg >
+    5:` followed by a same-level `return` instead of an indented one).
+    _extract_json()'s JSON validation has no visibility into the Python
+    embedded inside a string value, so it passes shape-checks cleanly and
+    would otherwise reach fixed_code -- and from there sandbox_tester.py --
+    as a SyntaxError several stages downstream, several steps removed from
+    the actual cause. Only python-language modules are checked; other
+    languages have no cheap syntax check available here and are passed
+    through as before.
     """
     if isinstance(entry, dict) and "code" in entry:
-        return entry
-    if isinstance(entry, str):
-        return {"language": original.get("language", "python"), "code": entry}
-    # Anything else unexpected (list, None, number...) -- not worth
-    # guessing, fall back to the pre-fix version of this module.
-    return original
+        candidate = entry
+    elif isinstance(entry, str):
+        candidate = {"language": original.get("language", "python"), "code": entry}
+    else:
+        # Anything else unexpected (list, None, number...) -- not worth
+        # guessing, fall back to the pre-fix version of this module.
+        return original
+
+    if candidate.get("language", "python") == "python":
+        try:
+            ast.parse(candidate["code"])
+        except SyntaxError as exc:
+            print(f"  [Fixer] rejected syntactically invalid fix, keeping original "
+                  f"code for this module: {exc}")
+            return original
+
+    return candidate
 
 
-def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes: dict) -> dict:
+def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes: dict,
+                     session_id: str = None, tier: int = None) -> dict:
     """
     Runs on one thread with one fixed Cerebras key. Fixes only the modules
     assigned to this worker. Falls back to the shared Cloudflare account #3
-    if Cerebras is unavailable or errors transiently. Returns the modules
-    unchanged (not a crash) if both fail, so one bad worker doesn't lose
-    the rest of the pool's output.
+    (via generate_text()'s chain) if Cerebras is unavailable or errors
+    transiently. Returns the modules unchanged (not a crash) if both fail,
+    so one bad worker doesn't lose the rest of the pool's output.
+
+    Stage 6 step 5: fires agent_start/agent_done. Unlike Code Writer
+    Pool's 1-module-per-worker lanes, a Fixer worker may hold multiple
+    modules in its bucket (round-robin partition) -- the label lists all
+    module names this worker owns, not just one.
     """
+    agent_name = f"fixer_{worker_index}"
     if not modules:
+        emit_event("agent_start", session_id=session_id, agent=agent_name, tier=tier,
+                   payload={"label": f"Fixer {worker_index} — (no modules assigned)"})
+        emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+                   payload={"summary": "no modules assigned", "duration_ms": 0})
         return {}
+
+    module_names = list(modules.keys())
+    emit_event("agent_start", session_id=session_id, agent=agent_name, tier=tier,
+               payload={"label": f"Fixer {worker_index} — {', '.join(module_names)}"})
+    started = time.monotonic()
+
+    def _done(result: dict) -> dict:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+                   payload={"summary": f"fixed: {', '.join(result.keys())}", "duration_ms": duration_ms})
+        return result
 
     relevant = _relevant_issues(review_notes, set(modules.keys()))
     user_prompt = (
@@ -211,31 +185,24 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
         + "\n\nReview issues relevant to these modules:\n" + json.dumps(relevant, indent=2)
     )
 
-    raw = None
+    chain = [
+        {"provider": "cerebras", "model": CEREBRAS_MODEL, "key_env": key_env},
+        {"provider": "cloudflare", "model": CLOUDFLARE_MODEL,
+         "account_id_env": CLOUDFLARE_ACCOUNT_ID_ENV, "token_env": CLOUDFLARE_TOKEN_ENV},
+    ]
+
     try:
-        raw = _call_cerebras(key_env, user_prompt)
-    except _TRANSIENT_ERRORS as exc:
-        print(f"  [Fixer {worker_index}] Cerebras ({key_env}) failed "
-              f"({exc.__class__.__name__}), falling back to Cloudflare...")
+        raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name=agent_name,
+                             session_id=session_id, tier=tier)
     except RuntimeError as exc:
-        print(f"  [Fixer {worker_index}] {exc}, falling back to Cloudflare...")
+        print(f"  [Fixer {worker_index}] {exc}. Keeping original code for these modules.")
+        return _done(modules)
 
-    if raw is None:
-        try:
-            raw = _call_cloudflare_fallback(user_prompt, modules.keys())
-        except Exception as exc:
-            print(f"  [Fixer {worker_index}] Cloudflare fallback also failed: {exc}. "
-                  f"Keeping original code for these modules.")
-            return modules
-
-    if isinstance(raw, dict):
-        fixed = raw  # Cloudflare's json_schema mode returns parsed JSON directly
-    else:
-        cleaned = _strip_fences(raw)
-        fixed = _extract_json(cleaned)
+    cleaned = _strip_fences(raw)
+    fixed = _extract_json(cleaned)
     if fixed is None or not isinstance(fixed, dict):
         print(f"  [Fixer {worker_index}] output was not valid JSON, keeping original code.")
-        return modules
+        return _done(modules)
 
     # Normalize each module's shape, and guard against a worker silently
     # dropping a module it was given.
@@ -243,10 +210,10 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
     for name, original in modules.items():
         entry = fixed.get(name)
         result[name] = _normalize_entry(entry, original) if entry is not None else original
-    return result
+    return _done(result)
 
 
-def run_fixer_pool():
+def run_fixer_pool(session_id: str = None, tier: int = None):
     submitted_code = read(KEYS["submitted_code"])
     review_notes = read(KEYS["review_notes"])
 
@@ -261,7 +228,8 @@ def run_fixer_pool():
     fixed_code = {}
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
-            executor.submit(_run_one_worker, i + 1, CEREBRAS_KEY_ENVS[i], buckets[i], review_notes): i
+            executor.submit(_run_one_worker, i + 1, CEREBRAS_KEY_ENVS[i], buckets[i], review_notes,
+                             session_id=session_id, tier=tier): i
             for i in range(num_workers)
         }
         for future in as_completed(futures):

@@ -60,7 +60,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(module: dict = None) -> dict:
+def run(module: dict = None, session_id: str = None, tier: int = None) -> dict:
     if module:
         write(KEYS["tier1_code"], module)
     else:
@@ -76,6 +76,8 @@ def run(module: dict = None) -> dict:
         user_content=user_content,
         chain=CHAIN,
         agent_name="Reviewer+Fixer (lean)",
+        session_id=session_id,
+        tier=tier,
     )
     try:
         parsed = json.loads(_strip_fences(raw))

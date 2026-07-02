@@ -48,6 +48,7 @@ from eo.executor import execute_graph
 from eo import panel as eo_panel
 from eo import code_loader
 from eo import routing_memory
+from relay.emitter import emit_event 
 from memory.bus import write
 
 # Part 8.3 — starting guess, not a measured value. Recalibrate manually
@@ -89,11 +90,10 @@ def _parse_args(argv: list) -> dict:
     return opts
 
 
-def _get_decision(task_text: str, tier_override: int, directed_override: str) -> dict:
+def _get_decision(task_text: str, tier_override: int, directed_override: str,
+                   session_id: str = None) -> dict:          # <-- add param
     """
-    Runs the Inspector, escalates to the Panel if warranted (Part 3's
-    decision flow), and applies a manual --tier override if given. Always
-    returns a usable decision dict -- never raises out to the caller.
+    ...docstring unchanged...
     """
     context = routing_memory.retrieve_similar_outcomes(task_text)
     try:
@@ -121,6 +121,10 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str) ->
     write("eo:task_classification", draft)
     write("eo:routing_decision", decision)
     write("eo:execution_graph", _safe_graph_preview(decision))
+
+    emit_event("routing_decision", session_id=session_id,               # <-- add this block
+                tier=decision.get("tier"), payload=decision)
+
     return decision
 
 

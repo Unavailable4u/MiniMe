@@ -7,8 +7,56 @@ mechanical operation, not a judgment call, so it stays out of model hands.
 
 Called internally by reviewer.py after the 3-parallel Reviewer Pool
 finishes; not wired into loop.py directly.
-"""
 
+Dedupe fix: exact-string (module, description) matching under-merges in
+practice, since 3 independent reviewers phrase the same bug differently
+("references an undefined global variable" vs. "ignores its 'todos'
+parameter" -- same bug, zero string overlap on a strict key). Switched to
+difflib.SequenceMatcher fuzzy matching within each module -- still fully
+deterministic stdlib Python, no LLM call, keeping this module's original
+design constraint intact.
+"""
+import re
+from difflib import SequenceMatcher
+
+SIMILARITY_THRESHOLD = 0.35
+
+_STOPWORDS = {
+    "a", "an", "the", "is", "are", "this", "that", "and", "or", "to", "of",
+    "in", "on", "for", "with", "without", "which", "can", "when", "not",
+    "its", "it's", "instead", "leading", "before", "calling", "uses", "use",
+}
+
+
+def _tokenize(text: str) -> set:
+    words = re.findall(r"[a-z0-9_']+", text.lower())
+    # Light stemming -- strip common suffixes so "raises"/"raise",
+    # "validating"/"validate" count as the same token. Crude but cheap,
+    # and good enough for this: we only need "close enough", not correct
+    # linguistics.
+    stemmed = set()
+    for w in words:
+        if w in _STOPWORDS or len(w) <= 2:
+            continue
+        for suffix in ("ing", "ed", "es", "s"):
+            if w.endswith(suffix) and len(w) > len(suffix) + 2:
+                w = w[: -len(suffix)]
+                break
+        stemmed.add(w)
+    return stemmed
+
+
+def _similarity(a: str, b: str) -> float:
+    ta, tb = _tokenize(a), _tokenize(b)
+    if not ta or not tb:
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    jaccard = len(ta & tb) / len(ta | tb)
+    # Take whichever signal is stronger -- catches both "reworded but same
+    # vocabulary" (Jaccard's strength) and "near-identical phrasing"
+    # (SequenceMatcher's strength) without either one alone missing cases
+    # the other would catch.
+    char_ratio = SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    return max(jaccard, char_ratio)
 
 def aggregate_reviews(member_reviews: list) -> dict:
     """
@@ -22,18 +70,28 @@ def aggregate_reviews(member_reviews: list) -> dict:
     fixer_tester.py already expects from KEYS["review_notes"].
 
     Aggregation rule:
-    - Union of all issues across members, deduped on (module, description).
-    - If the same (module, description) pair was flagged by multiple
-      members at different severities, keep the highest severity seen
-      (critical > moderate > minor) -- never silently downgrade a real bug
-      because one of the three reviewers missed it.
+    - Issues are grouped by module, then fuzzy-matched by description
+      (SIMILARITY_THRESHOLD) -- similar-enough descriptions within the
+      same module are treated as the same underlying issue, not just
+      exact string matches.
+    - If the same underlying issue was flagged by multiple members at
+      different severities, keep the highest severity seen (critical >
+      moderate > minor) -- never silently downgrade a real bug because
+      one of the three reviewers missed it or phrased it more mildly.
+    - Each merged issue also carries flagged_by_count -- how many of the
+      (up to 3) reviewers independently raised it. An issue all 3
+      reviewers agreed on is a stronger signal than one only 1 caught;
+      this makes that visible downstream instead of flattening it away.
     - Summary is the concatenation of each member's one-line verdict,
       labeled by member index, so a human can see where reviewers agreed
       or disagreed.
     """
     severity_rank = {"critical": 3, "moderate": 2, "minor": 1}
 
-    merged_issues = {}
+    # module -> list of merged-issue dicts (each also tracks its own
+    # description so later issues in the same module can be compared
+    # against it for fuzzy matching).
+    by_module = {}
     summaries = []
 
     for i, review in enumerate(member_reviews):
@@ -48,35 +106,58 @@ def aggregate_reviews(member_reviews: list) -> dict:
             module = issue.get("module", "unknown")
             description = issue.get("description", "").strip()
             severity = issue.get("severity", "minor")
+            if not description:
+                continue
 
-            dedupe_key = (module, description)
-            existing = merged_issues.get(dedupe_key)
+            bucket = by_module.setdefault(module, [])
 
-            if existing is None:
-                merged_issues[dedupe_key] = {
+            # Look for an existing merged issue in this module similar
+            # enough to be the same underlying bug.
+            match = None
+            for existing in bucket:
+                if _similarity(existing["description"], description) >= SIMILARITY_THRESHOLD:
+                    match = existing
+                    break
+
+            if match is None:
+                bucket.append({
                     "module": module,
                     "severity": severity,
                     "description": description,
-                }
+                    "flagged_by_count": 1,
+                })
             else:
-                existing_rank = severity_rank.get(existing["severity"], 0)
+                match["flagged_by_count"] += 1
+                existing_rank = severity_rank.get(match["severity"], 0)
                 new_rank = severity_rank.get(severity, 0)
                 if new_rank > existing_rank:
-                    existing["severity"] = severity
+                    match["severity"] = severity
+                # Keep the longer/more detailed description of the two --
+                # a more specific restatement is more useful downstream
+                # than whichever one happened to arrive first.
+                if len(description) > len(match["description"]):
+                    match["description"] = description
+
+    merged_issues = [issue for bucket in by_module.values() for issue in bucket]
 
     return {
-        "issues": list(merged_issues.values()),
+        "issues": merged_issues,
         "summary": " | ".join(summaries) if summaries else "No reviewers returned usable output.",
     }
 
 
 if __name__ == "__main__":
-    # Quick manual smoke test
+    # Quick manual smoke test -- includes both an exact-match case and a
+    # reworded-but-same-bug case, to confirm both dedupe correctly.
     example = [
-        {"issues": [{"module": "auth", "severity": "moderate", "description": "no input validation"}],
-         "summary": "Mostly fine, one moderate issue."},
-        {"issues": [{"module": "auth", "severity": "critical", "description": "no input validation"}],
-         "summary": "Found a critical bug."},
+        {"issues": [
+            {"module": "auth", "severity": "moderate", "description": "no input validation"},
+            {"module": "todo_api", "severity": "critical", "description": "references an undefined global variable 'storage', causing a NameError"},
+        ], "summary": "Mostly fine, a couple issues."},
+        {"issues": [
+            {"module": "auth", "severity": "critical", "description": "no input validation"},
+            {"module": "todo_api", "severity": "moderate", "description": "delete_all ignores its 'todos' parameter and uses undefined global 'storage' instead"},
+        ], "summary": "Found a critical bug."},
         {"issues": [], "summary": "Looks clean to me."},
     ]
     import json

@@ -1,4 +1,3 @@
-
 """
 eo/registry.py — Stage 4, step 1 of the v5 Master Blueprint's build roadmap
 (Part 10).
@@ -30,6 +29,7 @@ from agents import (
     sandbox_tester,
     structure_architect,
     security_scanner,
+    security_aggregator,
     file_manager,
     documentation_agent,
     changelog_writer,
@@ -59,7 +59,23 @@ REGISTRY = {
     "sandbox_tester":      {"callable": sandbox_tester.run_sandbox_tester,"needs_cycle_num": False},
     "structure_architect": {"callable": structure_architect.run_structure_architect, "needs_cycle_num": False},
     "security_scanner":    {"callable": security_scanner.run,             "needs_cycle_num": False},
+    "security_aggregator": {"callable": security_aggregator.run,          "needs_cycle_num": False},
     "file_manager":        {"callable": file_manager.run_file_manager,    "needs_cycle_num": False},
+    # Tier 2 only (Part 2.5's "debug"/"refactor" routes) -- plan-free
+    # write-back using eo/code_loader.py's own recorded paths, since tier
+    # 2 never runs structure_architect.py to produce a file_plan for
+    # run_file_manager() above to interpret. See file_manager.py's
+    # write_back_existing_app() docstring for the full reasoning.
+    "file_manager_writeback": {"callable": file_manager.write_back_existing_app, "needs_cycle_num": False},
+    # Tier 2 only (Part 2.5's "add_tests" route) -- writes test_writer.py's
+    # generated test_code out to tests/test_<module>.py, stitched with the
+    # module's own source the same way sandbox_tester.py already runs it.
+    # Separate from file_manager_writeback above: add_tests never changes
+    # a module's own source, it only adds new test files, so it needs its
+    # own callable rather than reusing write_back_existing_app(). See
+    # file_manager.py's write_back_test_code() docstring for the full
+    # reasoning.
+    "file_manager_test_writeback": {"callable": file_manager.write_back_test_code, "needs_cycle_num": False},
     "documentation_agent": {"callable": documentation_agent.run,          "needs_cycle_num": False},
     "changelog_writer":    {"callable": changelog_writer.run,             "needs_cycle_num": False},
     "report_writer":       {"callable": report_writer.run_report_writer,  "needs_cycle_num": False},

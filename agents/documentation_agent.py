@@ -23,16 +23,22 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError, APIStatusError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
+from utils.llm_client import generate_text
 
 load_dotenv()
 
-MISTRAL_MODEL = "mistral-medium-latest"
-MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+# No fallback specified in the blueprint for this agent -- single-step
+# chain. Using the -latest alias, see module docstring. Now routed through
+# generate_text() (llm_client.py's new "mistral" provider) instead of a
+# hand-rolled client, so this call actually gets usage-logged like every
+# other agent -- previously it logged nothing at all.
+CHAIN = [
+    {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY"},
+]
 APPS_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apps")
 
 SYSTEM_PROMPT = """You are a technical writer. You will be given a summary of
@@ -44,19 +50,6 @@ this shape:
 {"readme_markdown": "# Full README content in markdown..."}
 """
 
-_client = None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        api_key = os.getenv("MISTRAL_API_KEY")
-        if not api_key:
-            raise RuntimeError("MISTRAL_API_KEY not set")
-        _client = OpenAI(base_url=MISTRAL_BASE_URL, api_key=api_key)
-    return _client
-
-
 def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -66,19 +59,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _call_mistral(user_prompt: str) -> str:
-    client = _get_client()
-    response = client.chat.completions.create(
-        model=MISTRAL_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return (response.choices[0].message.content or "").strip()
-
-
-def run() -> dict:
+def run(session_id: str = None, tier: int = None) -> dict:
     idea = read(KEYS["original_idea"], default="")
     feature_status = read(KEYS["feature_status"], default={})
     report = read(KEYS["latest_report"], default={})
@@ -93,7 +74,8 @@ def run() -> dict:
     }, indent=2)
 
     raw_text = call_with_retry(
-        lambda: _call_mistral(user_prompt),
+        lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Documentation Agent",
+                               session_id=session_id, tier=tier),
         agent_name="Documentation Agent",
     )
     doc = json.loads(_strip_fences(raw_text))

@@ -14,6 +14,12 @@ that this is a tier-0/1-only guardrail and should NOT touch the tier-3
 Code Writer Pool's prompt, since large multi-module projects sometimes
 legitimately need adapter/service layers that a single small module never
 does.
+
+Stage 6 step 6: model rotation now goes through utils.llm_client's
+generate_text() instead of a hand-rolled Cerebras client + retry loop, so
+this agent's calls get usage-logged and fire usage_update events the same
+way prompt_writer_lean's do. session_id/tier are optional passthroughs —
+leaving them unset keeps behavior identical to before.
 """
 import os
 import sys
@@ -21,19 +27,27 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
-from cerebras.cloud.sdk import Cerebras, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
+from utils.llm_client import generate_text
 
 # Same rotation as agents/code_writers.py — see that file's docstring for
 # why this list isn't the blueprint's original one (model deprecations).
 MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
 KEY_ENV = "CEREBRAS_API_KEY_1"  # first key of the production 5-key pool
 
-_TRANSIENT_ERRORS = (RateLimitError, APIStatusError, APIConnectionError, APITimeoutError)
+# Expressed as a llm_client chain: same provider and key each step, only
+# the model changes — this is what "rotation" means for this agent.
+CHAIN = [{"provider": "cerebras", "model": m, "key_env": KEY_ENV} for m in MODELS]
 
 # Part 8.5's simplicity constraint, verbatim from the blueprint text.
-SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python \
-code for the module described below. Follow the spec exactly. Include basic \
-input validation. Do not invent features outside the spec.
+SYSTEM_PROMPT = """You are a code generator for a lean, single-file build task. \
+Given a JSON module spec (name, description, language, inputs, outputs, \
+edge_cases, constraints), write the complete, working code for that module \
+in the language specified by the spec's "language" field. If "language" is \
+missing or empty, default to Python.
+
+Honor every item in "constraints" as an explicit user requirement (e.g. \
+brevity, no external libraries, a specific technique) alongside the \
+functional spec.
 
 For small, self-contained modules, write the simplest correct \
 implementation. Do not introduce adapter, bridge, or service-indirection \
@@ -41,31 +55,26 @@ layers unless the spec explicitly calls for integrating with an external \
 system. A single file solving the stated problem is preferred over \
 multiple files that only forward calls to each other.
 
-Output ONLY the code, no explanation, no markdown code fences."""
-
-_client_cache = {}
-
-
-def _get_client():
-    key = os.getenv(KEY_ENV)
-    if not key:
-        return None
-    if KEY_ENV not in _client_cache:
-        _client_cache[KEY_ENV] = Cerebras(api_key=key)
-    return _client_cache[KEY_ENV]
+Respond with ONLY the raw code, no markdown code fences, no explanation, \
+no commentary before or after."""
 
 
 def _strip_fences(code: str) -> str:
     code = code.strip()
     if code.startswith("```"):
         code = code.split("```")[1]
-        if code.startswith("python"):
-            code = code[6:]
+        # first line after the opening fence is often a language tag
+        # (python, c, cpp, javascript, ...) regardless of what language
+        # was actually requested — drop it if it looks like a bare tag
+        # rather than actual code.
+        lines = code.split("\n", 1)
+        if len(lines) > 1 and lines[0].strip().isalpha():
+            code = lines[1]
         code = code.strip()
     return code
 
 
-def run(module_spec: dict = None) -> dict:
+def run(module_spec: dict = None, session_id: str = None, tier: int = None) -> dict:
     if module_spec:
         write(KEYS["tier1_module_spec"], module_spec)
     else:
@@ -76,35 +85,24 @@ def run(module_spec: dict = None) -> dict:
                 "Run prompt_writer_lean first."
             )
     name = module_spec.get("name", "module")
-    client = _get_client()
-    if client is None:
-        code = f"# CODE WRITER FAILED: {KEY_ENV} not set. No code generated for '{name}'."
-        result = {"name": name, "code": code}
-        write(KEYS["tier1_code"], result)
-        return result
     user_content = json.dumps(module_spec)
-    last_exc = None
-    code = None
-    for model_index, model in enumerate(MODELS):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-            )
-            code = _strip_fences(response.choices[0].message.content or "")
-            if code:
-                break
-        except _TRANSIENT_ERRORS as exc:
-            last_exc = exc
-            is_last = model_index == len(MODELS) - 1
-            print(f"  [Code Writer (lean)] {model} failed "
-                  f"({exc.__class__.__name__})" + ("" if is_last else ", trying next model..."))
-    if not code:
-        code = f"# CODE WRITER FAILED: all models exhausted. Last error: {last_exc}"
-    result = {"name": name, "language": "python", "code": code}
+
+    try:
+        raw = generate_text(
+            SYSTEM_PROMPT,
+            user_content,
+            CHAIN,
+            agent_name="Code Writer (lean)",
+            session_id=session_id,
+            tier=tier,
+        )
+        code = _strip_fences(raw)
+        if not code:
+            code = f"# CODE WRITER FAILED: model returned empty output for '{name}'."
+    except RuntimeError as exc:
+        code = f"# CODE WRITER FAILED: {exc}"
+
+    result = {"name": name, "language": module_spec.get("language") or "python", "code": code}
     write(KEYS["tier1_code"], result)
     return result
 

@@ -143,14 +143,14 @@ class _FakeWorkingClient:
 def test_fallback_chain_engages_when_primary_provider_fails(monkeypatch):
     import utils.llm_client as llm_client
 
-    def fake_get_groq(key_env):
+    def fake_get_groq(key_env, timeout=None):
         return _FakeFailingClient()
 
-    def fake_get_github(key_env):
+    def fake_get_github(key_env, timeout=None):
         return _FakeWorkingClient()
 
-    monkeypatch.setitem(llm_client._PROVIDER_GETTERS, "groq", fake_get_groq)
-    monkeypatch.setitem(llm_client._PROVIDER_GETTERS, "github", fake_get_github)
+    monkeypatch.setattr(llm_client, "_get_groq", fake_get_groq)
+    monkeypatch.setattr(llm_client, "_get_github", fake_get_github)
 
     result = inspector.classify("write a small script that reverses a string")
     assert result["tier"] == 1
@@ -160,14 +160,14 @@ def test_fallback_chain_engages_when_primary_provider_fails(monkeypatch):
 def test_raises_when_every_provider_in_chain_fails(monkeypatch):
     import utils.llm_client as llm_client
 
-    def fake_get_groq(key_env):
+    def fake_get_groq(key_env, timeout=None):
         return _FakeFailingClient()
 
-    def fake_get_github(key_env):
+    def fake_get_github(key_env, timeout=None):
         return None  # simulates key_env not set at all
 
-    monkeypatch.setitem(llm_client._PROVIDER_GETTERS, "groq", fake_get_groq)
-    monkeypatch.setitem(llm_client._PROVIDER_GETTERS, "github", fake_get_github)
+    monkeypatch.setattr(llm_client, "_get_groq", fake_get_groq)
+    monkeypatch.setattr(llm_client, "_get_github", fake_get_github)
 
     try:
         inspector.classify("anything")

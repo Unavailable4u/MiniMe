@@ -1,4 +1,3 @@
-
 """
 tests/test_eo_router.py — Part 11 of the v5 Master Blueprint's testing
 plan: "every entry in DIRECTED_TASK_MAP resolves to real, importable
@@ -30,6 +29,7 @@ EXPECTED_TIER3_ORDER = [
     "sandbox_tester",
     "structure_architect",
     "security_scanner",
+    "security_aggregator",
     "file_manager",
     "documentation_agent",
     "changelog_writer",
@@ -61,7 +61,13 @@ def test_unknown_agent_name_raises_keyerror_not_silent_none():
 def test_tier2_directed_task_routing():
     assert build_execution_graph(tier=2, directed_task_type="review") == ["reviewer"]
     assert build_execution_graph(tier=2, directed_task_type="debug") == [
-        "reviewer", "fixer_pool", "sandbox_tester",
+        "reviewer", "fixer_pool", "sandbox_tester", "file_manager_writeback",
+    ]
+    # add_tests: covers the tier-2 persistence-gap fix -- test_writer's
+    # generated test_code now gets written to disk via
+    # file_manager_test_writeback, not silently dropped.
+    assert build_execution_graph(tier=2, directed_task_type="add_tests") == [
+        "test_writer", "sandbox_tester", "file_manager_test_writeback",
     ]
 def test_tier2_missing_directed_task_type_raises():
     try:

@@ -19,15 +19,16 @@ Rewritten from a single Cerebras call to match the blueprint:
 import os
 import sys
 import json
-import requests
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
-from groq import Groq, RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from relay.emitter import emit_event
 from agents.review_aggregator import aggregate_reviews
+from utils.llm_client import generate_text
 
 load_dotenv()
 
@@ -42,8 +43,6 @@ CLOUDFLARE_TOKEN_ENV = "CLOUDFLARE_API_KEY_2"
 # same general-purpose instruct model chosen for the EO panel's Cloudflare
 # member for consistency. Swap if you want a different Workers AI model.
 CLOUDFLARE_MODEL = "@cf/meta/llama-3.1-8b-instruct"
-
-_TRANSIENT_ERRORS = (RateLimitError, APIStatusError, APIConnectionError, APITimeoutError)
 
 SYSTEM_PROMPT = """You are a strict code reviewer. You will be given JSON containing
 multiple code modules submitted by different writers. List every bug, security risk,
@@ -60,17 +59,6 @@ Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly this s
 If there are no issues, return an empty issues list.
 """
 
-_groq_client_cache = {}
-
-
-def _get_groq_client(key_env: str):
-    key = os.getenv(key_env)
-    if not key:
-        return None
-    if key_env not in _groq_client_cache:
-        _groq_client_cache[key_env] = Groq(api_key=key)
-    return _groq_client_cache[key_env]
-
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
@@ -81,73 +69,59 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _call_groq(key_env: str, user_prompt: str) -> str:
-    client = _get_groq_client(key_env)
-    if client is None:
-        raise RuntimeError(f"{key_env} not set")
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return response.choices[0].message.content or ""
-
-
-def _call_cloudflare_fallback(user_prompt: str) -> str:
-    account_id = os.getenv(CLOUDFLARE_ACCOUNT_ID_ENV)
-    token = os.getenv(CLOUDFLARE_TOKEN_ENV)
-    if not account_id or not token:
-        raise RuntimeError(f"{CLOUDFLARE_ACCOUNT_ID_ENV} / {CLOUDFLARE_TOKEN_ENV} not set")
-
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{CLOUDFLARE_MODEL}"
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={"messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("result", {}).get("response", "")
-
-
-def _run_one_worker(worker_index: int, key_env: str, user_prompt: str) -> dict:
+def _run_one_worker(worker_index: int, key_env: str, user_prompt: str,
+                     session_id: str = None, tier: int = None) -> dict:
     """
     Runs on one thread. Tries this worker's dedicated Groq key first,
     falls back to the shared Cloudflare account #2 if Groq is unavailable
     or errors transiently. Returns a parsed review dict, or an empty
     review (not a crash) if both fail -- one bad worker shouldn't sink
     the whole pool's aggregation.
-    """
-    raw = None
-    try:
-        raw = _call_groq(key_env, user_prompt)
-    except _TRANSIENT_ERRORS as exc:
-        print(f"  [Reviewer {worker_index}] Groq ({key_env}) failed "
-              f"({exc.__class__.__name__}), falling back to Cloudflare...")
-    except RuntimeError as exc:
-        print(f"  [Reviewer {worker_index}] {exc}, falling back to Cloudflare...")
 
-    if raw is None:
-        try:
-            raw = _call_cloudflare_fallback(user_prompt)
-        except Exception as exc:
-            print(f"  [Reviewer {worker_index}] Cloudflare fallback also failed: {exc}")
-            return {"issues": [], "summary": f"Reviewer {worker_index} produced no output (both providers failed)."}
+    Stage 6 step 5: fires agent_start/agent_done per worker so the
+    frontend's live activity panel shows all 3 reviewers running at
+    once. Unlike Code Writer Pool's workers, each reviewer_N here is
+    reviewing the SAME submitted_code, not a different module -- expect
+    to see similar/overlapping content across the 3 lanes, with
+    potentially different verdicts. That's the reviewer-pool pattern
+    (independent opinions -> aggregated), not a bug.
+    """
+    agent_name = f"reviewer_{worker_index}"
+    emit_event("agent_start", session_id=session_id, agent=agent_name, tier=tier,
+               payload={"label": f"Reviewer {worker_index}"})
+    started = time.monotonic()
+
+    chain = [
+        {"provider": "groq", "model": GROQ_MODEL, "key_env": key_env},
+        {"provider": "cloudflare", "model": CLOUDFLARE_MODEL,
+         "account_id_env": CLOUDFLARE_ACCOUNT_ID_ENV, "token_env": CLOUDFLARE_TOKEN_ENV},
+    ]
+
+    try:
+        raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name=agent_name,
+                             session_id=session_id, tier=tier)
+    except RuntimeError as exc:
+        print(f"  [Reviewer {worker_index}] {exc}")
+        result = {"issues": [], "summary": f"Reviewer {worker_index} produced no output (both providers failed)."}
+        duration_ms = int((time.monotonic() - started) * 1000)
+        emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+                   payload={"summary": result["summary"], "duration_ms": duration_ms})
+        return result
 
     cleaned = _strip_fences(raw)
     try:
-        return json.loads(cleaned)
+        result = json.loads(cleaned)
     except json.JSONDecodeError:
-        return {"issues": [], "summary": f"Reviewer {worker_index} output was not valid JSON, discarded."}
+        result = {"issues": [], "summary": f"Reviewer {worker_index} output was not valid JSON, discarded."}
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    summary = result.get("summary", "") or f"{len(result.get('issues', []))} issue(s) found"
+    emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+               payload={"summary": summary, "duration_ms": duration_ms})
+    return result
 
 
-def run_reviewer():
+def run_reviewer(session_id: str = None, tier: int = None):
     submitted_code = read(KEYS["submitted_code"])
     if not submitted_code:
         raise ValueError("No submitted_code found in memory. Run the Code Writers first.")
@@ -160,7 +134,8 @@ def run_reviewer():
     member_reviews = [None] * len(GROQ_KEY_ENVS)
     with ThreadPoolExecutor(max_workers=len(GROQ_KEY_ENVS)) as executor:
         futures = {
-            executor.submit(_run_one_worker, i + 1, key_env, user_prompt): i
+            executor.submit(_run_one_worker, i + 1, key_env, user_prompt,
+                             session_id=session_id, tier=tier): i
             for i, key_env in enumerate(GROQ_KEY_ENVS)
         }
         for future in as_completed(futures):

@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, vector_index
+from utils.llm_client import log_usage
 
 load_dotenv()
 
@@ -44,12 +45,13 @@ HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 HF_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}/pipeline/feature-extraction"
 ID_PREFIX = "codechunk"
 SIMILARITY_THRESHOLD = 0.90
+HF_KEY_ENV = "HUGGINGFACE_API_KEY"
 
 
-def _embed(text: str) -> list:
-    api_key = os.getenv("HUGGINGFACE_API_KEY")
+def _embed(text: str, session_id: str = None, tier=None, agent_name: str = "Duplication Checker") -> list:
+    api_key = os.getenv(HF_KEY_ENV)
     if not api_key:
-        raise RuntimeError("HUGGINGFACE_API_KEY not set")
+        raise RuntimeError(f"{HF_KEY_ENV} not set")
     response = requests.post(
         HF_URL,
         headers={"Authorization": f"Bearer {api_key}"},
@@ -57,6 +59,11 @@ def _embed(text: str) -> list:
         timeout=30,
     )
     response.raise_for_status()
+    # Feature-extraction responses carry no token/usage field the way chat
+    # completions do -- tokens=None, but the request itself still gets
+    # logged (see llm_client.log_usage()'s docstring for why this now
+    # differs from the old all-or-nothing _log_usage() behavior).
+    log_usage("huggingface", HF_KEY_ENV, None, session_id=session_id, tier=tier, agent_name=agent_name)
     vec = response.json()
     if isinstance(vec[0], list):
         dims = len(vec[0])
@@ -68,7 +75,7 @@ def _app_slug() -> str:
     return read(KEYS["app_slug"], default=None) or read(KEYS["original_idea"], default="untitled")
 
 
-def run() -> dict:
+def run(session_id: str = None, tier=None) -> dict:
     submitted_code = read(KEYS["submitted_code"], default={})
     cycle_num = read(KEYS["cycle_count"], default=1)
     slug = _app_slug()
@@ -81,7 +88,7 @@ def run() -> dict:
         if not code.strip():
             continue
         try:
-            vector = _embed(code)
+            vector = _embed(code, session_id=session_id, tier=tier)
         except Exception as exc:
             print(f"  [Duplication Checker] embed failed for {module_name}: {exc}")
             continue

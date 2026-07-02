@@ -34,6 +34,7 @@ from agents import fixer_pool
 from agents import sandbox_tester
 from agents import structure_architect
 from agents import security_scanner
+from agents import security_aggregator
 from agents import file_manager
 from agents import documentation_agent
 from agents import changelog_writer
@@ -114,6 +115,13 @@ def run_one_cycle(cycle_num: int) -> str:
     security_results = security_scanner.run()
     finding_count = sum(len(r.get("findings", [])) for r in security_results.values())
     _print_status("Security Scanner done", f"{finding_count} finding(s) across {len(security_results)} module(s)")
+
+    _print_status("Security Aggregator", "deduplicating findings within each module...")
+    security_results = security_aggregator.run()
+    deduped_count = sum(
+        len(r.get("findings", [])) for r in security_results.values() if isinstance(r, dict)
+    )
+    _print_status("Security Aggregator done", f"{deduped_count} finding(s) remain after dedup")
 
     _print_status("File Manager", "executing file plan...")
     fm_summary = file_manager.run_file_manager()
