@@ -8,17 +8,13 @@ This module only ANSWERS THE QUESTION "for this tier (and, at tier 2,
 this directed_task_type), which agent names run, in what order?" It does
 not call anything itself — see eo/registry.py for name->callable
 resolution, and a later-stage executor for actually running the graph.
-Nothing in loop.py is touched by this file. It is purely additive and
-inert until something imports and calls it.
 """
 from eo.registry import REGISTRY, resolve_role
 # ---------------------------------------------------------------------------
 # Tier 3 — full roster, Part 4 of the blueprint.
 #
-# This list is deliberately hand-copied from loop.py's actual call order
-# (not "what Part 4's table implies"), because the point of this step is
-# fidelity to what the system does today, not to what the table says it
-# should do.
+# This list reflects the system's actual production call order, not just
+# what Part 4's table implies.
 #
 #   Note (corrected): agents/review_aggregator.py's aggregate_reviews()
 #   IS called -- from inside agents/reviewer.py's run_reviewer(), right
@@ -27,9 +23,7 @@ from eo.registry import REGISTRY, resolve_role
 #   a standalone pipeline step -- it's an internal merge step inside the
 #   "reviewer" agent itself, same as security_aggregator.py is a
 #   standalone roster entry for Scanner Pool but review_aggregator.py is
-#   not for Reviewer Pool. (An earlier version of this comment claimed
-#   loop.py never called it -- that was true of an older reviewer.py,
-#   not the current one. Confirmed by reading reviewer.py directly.)
+#   not for Reviewer Pool.
 # ---------------------------------------------------------------------------
 TIERS = {
     0: {

@@ -48,6 +48,7 @@ from eo import loop_v4
 from eo.modes import apply_mode
 from eo.router import build_execution_graph, build_execution_graph_from_hires, EXPLAIN_CODE_ROUTE
 from eo.executor import execute_graph
+from eo.loop_controller import run_with_looping
 from eo.sga import attempt as sga_attempt
 from eo.semantic_cache import check_cache, write_cache
 from eo.panel import staff_task
@@ -103,35 +104,33 @@ def _run_tier1(task_text: str, decision: dict, run_tests: bool, session_id: str)
 def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: list,
                       project_unique_name: str = None, mode: str = "auto") -> dict:
     """
-    Migration Part 10 testability wiring. This applies the exact same
-    "if hires: build_execution_graph_from_hires() + execute_graph()"
-    pattern _run_tier2() below already uses (Part 5 §3), so a
-    hires-driven tier-3 task — often non-coding, per Part 10's whole
-    point — actually reaches generic_worker instead of always falling to
-    the not_wired_yet placeholder. This is deliberately the minimum
-    needed to make Part 10's tests runnable end to end:
-      - no cost-ceiling confirmation (loop_v4.py's CLI-only _confirm_tier3
-        gate isn't reproduced here, same as before this change)
-      - no attempt to unify this with loop.py's 19-agent path, or to
-        retire/replace anything — that unification is explicitly a later
-        part's job
-    When hires is empty, run_task() falls through to the existing
+    Migration Part 10 testability wiring, updated by Part 14 §2: now
+    routes through eo/loop_controller.py's run_with_looping() instead of
+    calling execute_graph() directly, so the adaptive-looping machinery
+    from Parts 11-12 (macro-loop gatekeeper, hard safety caps) actually
+    fires here too — same swap as loop_v4.py's CLI mirror, except this
+    path has a real session_id to pass through (the CLI path doesn't).
+
+    Still deliberately not a cost-ceiling-gated or loop.py-unified path;
+    when hires is empty, run_task() falls through to the existing
     not_wired_yet response exactly as before this change.
+
+    Note: since run_with_looping() doesn't expose a single "last agent"
+    (the execution order can change between macro-loop passes), "output"
+    below is now the full role-keyed results dict rather than just the
+    final role's output — a necessary shape change, not a stylistic one.
     """
-    graph, key_overrides, role_names = build_execution_graph_from_hires(
-        hires, execution_order=decision.get("execution_order"))
-    results = execute_graph(graph, task_text=task_text, session_id=session_id, tier=3,
-                             key_overrides=key_overrides, project_unique_name=project_unique_name,
-                             mode=mode, role_names=role_names)
-    last_agent = graph[-1]
-    output = results[last_agent]
+    results = run_with_looping(
+        hires, decision.get("execution_order"), task_text, session_id=session_id,
+        mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
+    )
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
     return {
         "decision": decision,
         "tier": 3,
         "session_id": session_id,
         "status": "ok",
-        "result": {"output": output},
+        "result": {"output": results},
         "message": None,
     }
 
