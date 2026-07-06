@@ -35,6 +35,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
+from eo.registry import AGENT_CAPABILITIES
+from eo.quota_sentinel import get_quota_snapshot
 
 load_dotenv()
 
@@ -54,16 +56,38 @@ MODELS = [
     "gemma-4-31b",
 ]
 
-# One key per parallel worker slot, per Part 4's "keys #1-#5".
-KEY_ENVS = [
-    "CEREBRAS_API_KEY_1",
-    "CEREBRAS_API_KEY_2",
-    "CEREBRAS_API_KEY_3",
-    "CEREBRAS_API_KEY_4",
-    "CEREBRAS_API_KEY_5",
-]
+# Migration Part 9 §2: replaces the old static KEY_ENVS + RESERVE_KEY_ENVS
+# lists (which kept reserve accounts idle outside Expert/Beast) with a
+# registry-driven pool, ranked by live quota every run. Mode now only
+# controls how many of the pool get used AT ONCE (see run()), not who's
+# eligible to be picked -- base and reserve accounts are always both in
+# the fairness rotation.
+ROLE_TAG = "implementer"
 
-MAX_WORKERS = 5
+
+def _eligible_pool() -> list:
+    """Every account tagged for this role — base AND reserve accounts
+    alike. Mode plays no part in who's ELIGIBLE; only in how many of
+    them get used at once (see run(), below)."""
+    return [key for key, info in AGENT_CAPABILITIES.items() if ROLE_TAG in info.get("natural_roles", [])]
+
+
+def _select_workers(worker_count: int, key_override=None) -> list:
+    """Panel-driven hires (Part 5's key_override) always win outright —
+    the Panel already made a specific, informed choice. Otherwise, rank
+    the FULL eligible pool (base + reserve together) by today's live
+    usage and take the `worker_count` least-used accounts. This is the
+    fairness rotation: a reserve account with less usage than a base
+    account gets picked ahead of it on a totally ordinary Simple-mode
+    run — it's not gated behind Expert/Beast, only the COUNT is."""
+    if key_override:
+        return key_override if isinstance(key_override, list) else [key_override]
+    pool = _eligible_pool()
+    if not pool:
+        raise RuntimeError("code_writers: no accounts tagged 'implementer' in AGENT_CAPABILITIES.")
+    snapshot = get_quota_snapshot()
+    ranked = sorted(pool, key=lambda k: (snapshot.get(k) or {}).get("pct") or 0.0)
+    return ranked[:worker_count]
 
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
 for the module described below. Follow the spec exactly. Include basic input validation.
@@ -150,16 +174,38 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     return _done(code)
 
 
-def run(session_id: str = None, tier: int = None):
+def run(session_id: str = None, tier: int = None, expanded: bool = False,
+        key_override=None):
+    """
+    Migration Part 5 §2.3 — key_override, if given, is the Panel's specific
+    account-selection decision for this hire (eo.router's
+    build_execution_graph_from_hires(), threaded through by
+    eo.executor.execute_graph()):
+
+    key_override: None (default) -> today's exact behavior, this module
+        picks its own worker keys from KEY_ENVS/RESERVE_KEY_ENVS via
+        _worker_keys(expanded), as it always has.
+    key_override: a single key_env string -> use ONLY that account for
+        every module in this call (the Panel decided one specific,
+        under-quota Cerebras account should do this hire's work).
+    key_override: a list of key_env strings -> use exactly those accounts
+        as the parallel worker pool for this call, instead of
+        _worker_keys(expanded) -- this is what a multi-hire "implementer"
+        staffing decision (build_execution_graph_from_hires()'s
+        list-handling) turns into.
+    """
     specs = read(KEYS["module_specs"])
     modules = specs["modules"]
     results = {}
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    worker_count = 8 if expanded else 5
+    key_envs = _select_workers(worker_count, key_override)
+
+    with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
         futures = {
             executor.submit(
-                _write_one_module, module, KEY_ENVS[i % len(KEY_ENVS)],
-                (i % len(KEY_ENVS)) + 1, session_id=session_id, tier=tier,
+                _write_one_module, module, key_envs[i % len(key_envs)],
+                (i % len(key_envs)) + 1, session_id=session_id, tier=tier,
             ): module
             for i, module in enumerate(modules)
         }

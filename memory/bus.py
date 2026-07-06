@@ -1,4 +1,3 @@
-
 import os
 import json
 import re
@@ -23,9 +22,15 @@ def _current_app_slug():
     return _app_slug_cache
 def _namespaced(key: str) -> str:
     """Prefixes every key with the active app_slug, except app_slug itself
-    (bootstrap key, can't prefix itself) and usage:* keys (Part 7.1 --
-    quota is a property of your accounts, not any one project)."""
-    if key == "app_slug" or key.startswith("usage:"):
+    (bootstrap key, can't prefix itself), project_registry (Part 3 step 6
+    -- Cross-Project File Control tracks projects across the whole
+    system, not any one app_slug), usage:* keys (Part 7.1 -- quota is a
+    property of your accounts, not any one project), and registry:* keys
+    (Part 7 -- the role-prompt and role-to-agent registries are also
+    properties of the SYSTEM, not any one project, same reasoning as
+    usage:* and project_registry above)."""
+    if (key == "app_slug" or key == "project_registry"
+            or key.startswith("usage:") or key.startswith("registry:")):
         return key
     slug = _current_app_slug()
     return f"{slug}:{key}" if slug else key

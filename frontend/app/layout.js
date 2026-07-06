@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "AI Loop v5",
+  title: "MiniMe",
   description: "EO-gated multi-agent system — chat interface",
 };
 

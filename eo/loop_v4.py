@@ -21,7 +21,9 @@ observes" version (Stage 4.2). Real routing now happens:
   tier 3 -> Part 8.1's cost-ceiling confirmation, then hands off to
             loop.py exactly as before -- unmodified, same process, same
             behavior. This is still the only tier that touches the full
-            19-agent roster and the full infra layer.
+            19-agent roster and the full infra layer. User-facing text
+            for this tier now calls it the "Ultimate Structure" (Part 3
+            step 5 rename) -- internally it's still exactly `tier == 3`.
 
 Manual override (--tier N) bypasses the Inspector's own tier entirely,
 per Part 3 ("you sometimes know better than the classifier ... generate
@@ -30,25 +32,44 @@ threshold"). It does NOT bypass tier 3's cost-ceiling confirmation --
 that guardrail exists specifically for the expensive case, and knowing
 you want tier 3 doesn't make it free.
 
+Part 2 (MiniMe v6 migration) addition: a new Layer 0 (eo/sga.py, the
+Starter General Agents) runs BEFORE classification on every task that
+isn't a manual --tier override. Most tasks resolve here and never reach
+the Inspector at all. If all three SGAs escalate, execution falls
+through to classify() exactly as it did before this layer existed.
+
+Migration Part 8 §8.1/§8.3: --register-project registers an external
+project folder for cross-project control (eo/project_registry.py), and
+--project addresses an already-registered project by its unique_name on
+any normal tier-2 task, redirecting file_manager.py's writes into that
+project's root instead of this system's own apps/ directory.
+
 Usage:
     python eo/loop_v4.py "a one-sentence idea for the app"      (routes automatically)
     python eo/loop_v4.py --tier 1 "reverse a string from stdin" (manual override)
     python eo/loop_v4.py --tier 1 --test "..."                  (tier 1 + sandbox test)
     python eo/loop_v4.py --tier 2 --directed-task-type debug --app my_app "fix the login bug"
     python eo/loop_v4.py                                         (resumes an existing tier-3 run)
+    python eo/loop_v4.py --register-project /path/to/folder "My Project"
+    python eo/loop_v4.py --project my_project_a1b2c3 --tier 2 --directed-task-type debug --app my_app "fix the bug"
 """
 import os
 import sys
 import json
 
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.modes import apply_mode
 from eo.inspector import classify
-from eo.router import build_execution_graph, DIRECTED_TASK_MAP, EXPLAIN_CODE_ROUTE
+from eo.router import build_execution_graph, build_execution_graph_from_hires, DIRECTED_TASK_MAP, EXPLAIN_CODE_ROUTE
 from eo.executor import execute_graph
 from eo import panel as eo_panel
+from eo.panel import staff_task
+from eo.sga import attempt as sga_attempt
+from eo.semantic_cache import check_cache, write_cache
 from eo import code_loader
 from eo import routing_memory
-from relay.emitter import emit_event 
+from relay.emitter import emit_event
 from memory.bus import write
 
 # Part 8.3 — starting guess, not a measured value. Recalibrate manually
@@ -65,31 +86,6 @@ _CLASSIFY_FAILURE_DRAFT = {
 }
 
 
-def _parse_args(argv: list) -> dict:
-    """Manual flag stripping, matching this file's existing style (no new
-    dependency on argparse). Returns a dict of parsed options plus the
-    remaining task text."""
-    args = list(argv)
-    opts = {"tier": None, "app": None, "test": False, "directed_task_type": None}
-    if "--tier" in args:
-        i = args.index("--tier")
-        opts["tier"] = int(args[i + 1])
-        del args[i:i + 2]
-    if "--app" in args:
-        i = args.index("--app")
-        opts["app"] = args[i + 1]
-        del args[i:i + 2]
-    if "--directed-task-type" in args:
-        i = args.index("--directed-task-type")
-        opts["directed_task_type"] = args[i + 1]
-        del args[i:i + 2]
-    if "--test" in args:
-        args.remove("--test")
-        opts["test"] = True
-    opts["task_text"] = " ".join(args) if args else None
-    return opts
-
-
 def _get_decision(task_text: str, tier_override: int, directed_override: str,
                    session_id: str = None) -> dict:          # <-- add param
     """
@@ -100,7 +96,7 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
         draft = classify(task_text, context=context or None)
     except Exception as exc:
         print(f"  [Inspector] classification failed ({exc.__class__.__name__}: {exc}), "
-              f"defaulting to a conservative tier-3 draft.")
+              f"defaulting to a conservative Ultimate Structure (tier 3) draft.")
         draft = dict(_CLASSIFY_FAILURE_DRAFT)
 
     should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] >= 2
@@ -163,7 +159,8 @@ def _run_tier1(task_text: str, decision: dict, run_tests: bool) -> None:
     routing_memory.log_outcome(task_text, decision, outcome=outcome)
 
 
-def _run_tier2(task_text: str, decision: dict, app_slug: str) -> None:
+def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None,
+               project_unique_name: str = None, mode: str = "auto") -> None:
     directed_task_type = decision.get("directed_task_type")
     if not directed_task_type:
         print("[EO] Tier 2 requires a directed_task_type, but none was set "
@@ -180,7 +177,11 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str) -> None:
     if directed_task_type == "explain_code":
         # explain_code is read-only and doesn't go through the 19-roster
         # agents at all (Part 4's note) -- Responder answers directly,
-        # given the loaded code as context.
+        # given the loaded code as context. Fixed single-agent route,
+        # unaffected by hires or project_unique_name -- there's no
+        # hiring decision to make for a read-only lookup, and nothing
+        # here touches disk (same reasoning as router.py's "review"
+        # directed task having only one possible reviewer).
         from memory.bus import read, KEYS
         submitted_code = read(KEYS["submitted_code"], default={})
         combined = (
@@ -191,41 +192,165 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str) -> None:
         results = execute_graph(graph, task_text=combined)
         print(f"\n[Responder — explain_code]\n{results['responder']}\n")
     else:
-        graph = build_execution_graph(tier=2, directed_task_type=directed_task_type)
-        results = execute_graph(graph)
+        # Migration Part 5 §3 — if the Panel actually staffed this task
+        # (hires non-empty), build the graph from that staffing decision
+        # instead of the fixed DIRECTED_TASK_MAP entry, and thread the
+        # Panel's specific key_overrides through. Falls back to the old
+        # fixed-list behavior when hires is empty (e.g. a simple directed
+        # task where DIRECTED_TASK_MAP's static list is genuinely correct
+        # and there's no hiring decision to make).
+        #
+        # Migration Part 8 §8.1/§8.3 — project_unique_name is forwarded
+        # to execute_graph() on both branches, which forwards it on to
+        # file_manager.py's disk-touching calls. When None (the default,
+        # no --project flag passed), this is the exact unchanged
+        # behavior: writes go to apps/<app_slug>.
+        if hires:
+            # Migration Part 10 §3.1/§4 — mirrors the same change made in
+            # api/task_runner.py's _run_tier2 (see that file's comment for
+            # the full reasoning): 3-tuple return, execution_order passed
+            # in, role_names threaded through, task_text now passed too.
+            graph, key_overrides, role_names = build_execution_graph_from_hires(
+                hires, execution_order=decision.get("execution_order"))
+            results = execute_graph(graph, task_text=task_text, key_overrides=key_overrides,
+                                     project_unique_name=project_unique_name, mode=mode,
+                                     role_names=role_names)
+        else:
+            graph = build_execution_graph(tier=2, directed_task_type=directed_task_type)
+            results = execute_graph(graph, project_unique_name=project_unique_name, mode=mode)
         last_agent = graph[-1]
         print(f"\n[Tier 2 — {directed_task_type}] final output from '{last_agent}':")
         print(json.dumps(results[last_agent], indent=2, default=str))
     routing_memory.log_outcome(task_text, decision, outcome=f"tier-2 {directed_task_type} completed on {app_slug}")
 
 
+def _run_tier3_hires(task_text: str, decision: dict, hires: list,
+                      project_unique_name: str = None, mode: str = "auto") -> None:
+    """CLI mirror of api/task_runner.py's _run_tier3_hires() — see that
+    file's docstring for the full reasoning (Migration Part 10
+    testability wiring, Part 5 §3's existing tier-2 pattern applied to
+    tier 3). Minimum wiring so a hires-driven tier-3 task reaches
+    generic_worker; not a cost-ceiling-gated or loop.py-unified path."""
+    graph, key_overrides, role_names = build_execution_graph_from_hires(
+        hires, execution_order=decision.get("execution_order"))
+    results = execute_graph(graph, task_text=task_text, key_overrides=key_overrides,
+                             project_unique_name=project_unique_name, mode=mode,
+                             role_names=role_names)
+    last_agent = graph[-1]
+    print(f"\n[Tier 3 — hires-driven] final output from '{last_agent}':")
+    print(json.dumps(results[last_agent], indent=2, default=str))
+    routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
+
+
 def _confirm_tier3(decision: dict) -> bool:
     """Part 8.1's cost-ceiling confirmation. Defaults to NOT proceeding
     when the classification is panel-reviewed and still borderline
     (confidence below threshold even after escalation) -- exactly the
-    "ambiguous tier-3 classification" case Part 8.1 calls out."""
+    "ambiguous tier-3 classification" case Part 8.1 calls out.
+
+    Part 3 step 5: this is a naming/framing change only -- the
+    `tier == 3` code path and the confirmation gate itself are unchanged.
+    User-facing wording now calls tier 3 the "Ultimate Structure" and
+    mentions Beast Mode as an alternative framing, per the migration
+    guide's rename."""
     borderline = decision.get("panel_reviewed") and decision.get("confidence", 1.0) < CONFIDENCE_THRESHOLD
-    print("\nThis will run the full 19-agent pipeline (~19 LLM calls, "
-          "sandboxed testing, scheduled execution).")
+    print("\nThis is Ultimate Structure-scale work: the full 19-agent pipeline "
+          "(~19 LLM calls, sandboxed testing, scheduled execution).")
     if borderline:
         print("Note: this classification was panel-reviewed and is still "
               "borderline -- defaulting to NOT proceeding.")
     default = "N"
-    confirm = input(f"Proceed with the full tier-3 pipeline? [y/{default}]: ").strip().lower()
+    confirm = input(f"Continue with the Ultimate Structure, or would Beast Mode better "
+                     f"fit what you need? Proceed with Ultimate Structure? [y/{default}]: ").strip().lower()
     return confirm == "y"
+
+
+def _parse_args(argv: list) -> dict:
+    """Manual flag stripping, matching this file's existing style (no new
+    dependency on argparse). Returns a dict of parsed options plus the
+    remaining task text.
+
+    Migration Part 8 §8.1/§8.3: added --register-project PATH NAME (takes
+    two args, registers an external project for cross-project control)
+    and --project NAME (addresses an already-registered project by its
+    unique_name on any normal task)."""
+    args = list(argv)
+    opts = {"tier": None, "app": None, "test": False, "directed_task_type": None, "mode": "auto",
+            "project": None, "register_project": None}
+    if "--tier" in args:
+        i = args.index("--tier")
+        opts["tier"] = int(args[i + 1])
+        del args[i:i + 2]
+    if "--mode" in args:
+        i = args.index("--mode")
+        opts["mode"] = args[i + 1]
+        del args[i:i + 2]
+    if "--app" in args:
+        i = args.index("--app")
+        opts["app"] = args[i + 1]
+        del args[i:i + 2]
+    if "--directed-task-type" in args:
+        i = args.index("--directed-task-type")
+        opts["directed_task_type"] = args[i + 1]
+        del args[i:i + 2]
+    if "--project" in args:
+        i = args.index("--project")
+        opts["project"] = args[i + 1]
+        del args[i:i + 2]
+    if "--register-project" in args:
+        i = args.index("--register-project")
+        opts["register_project"] = (args[i + 1], args[i + 2])
+        del args[i:i + 3]
+    if "--test" in args:
+        args.remove("--test")
+        opts["test"] = True
+    opts["task_text"] = " ".join(args) if args else None
+    return opts
 
 
 def main():
     opts = _parse_args(sys.argv[1:])
+
+    # NEW — Part 8 §8.1: registration is a standalone action, not a task,
+    # so it short-circuits before the "no task text -> resume tier-3 run"
+    # check below (a bare --register-project call has no task_text at
+    # all, and shouldn't be misread as "resume").
+    if opts["register_project"]:
+        from eo.project_registry import generate_control_unit, register_project
+        path, display_name = opts["register_project"]
+        unit = generate_control_unit(display_name)
+        register_project(unit["unique_name"], path)
+        print(f"Registered '{display_name}' as '{unit['unique_name']}' -> {path}")
+        print(f"You can now address it by name: minime --project {unit['unique_name']} \"...task...\"")
+        return
+
     task_text = opts["task_text"]
 
     if not task_text:
-        print("[EO] No new task text — resuming an existing run. Only tier-3 "
-              "runs have resumable state, so handing off to loop.py directly.")
+        print("[EO] No new task text — resuming an existing run. Only Ultimate "
+              "Structure (tier 3) runs have resumable state, so handing off to "
+              "loop.py directly.")
         sys.argv = ["loop.py"]
         import loop
         loop.main()
         return
+
+    # NEW — Part 2: Starter General Agents attempt first, unless a manual
+    # --tier override was given (an explicit override skips SGA/cache
+    # entirely, same reasoning as the classify() skip below).
+    # NEW — Part 4 step 4: Semantic Cache checked first, ahead of SGA
+    # itself, so a near-duplicate task skips the whole SGA relay too.
+    if opts["tier"] is None:
+        cached = check_cache(task_text, app_slug=opts["app"])
+        if cached:
+            print(f"\n[Cache]\n{cached}\n")
+            return
+
+        sga_result = sga_attempt(task_text)
+        if sga_result["resolved"]:
+            write_cache(task_text, sga_result["answer"], app_slug=opts["app"])
+            print(f"\n[SGA]\n{sga_result['answer']}\n")
+            return
 
     print("[EO] Classifying task...")
     decision = _get_decision(task_text, opts["tier"], opts["directed_task_type"])
@@ -234,21 +359,57 @@ def main():
           f"confidence={decision.get('confidence', 0):.2f}"
           f"{' (panel-reviewed)' if decision.get('panel_reviewed') else ''} — {decision.get('reasoning', '')}")
 
+    # CHANGE — Part 7 §2.1: staff_task() now needs the original task text
+    # to write a good brief if a suggested role is genuinely new.
+    # Note: session_id is NOT passed here — this CLI path has no
+    # session_id variable at all (same pre-existing gap as the
+    # _get_decision() call above, whose own emit_event() already always
+    # fires with session_id=None on this path). Brief-writer events will
+    # simply go out unassociated with any session here, exactly like
+    # routing_decision events already do.
+    hires = staff_task(decision, task_text=task_text)
+    assessed_max = decision.get("agent_count_max", len(decision.get("suggested_agents", [])) or 1)
+    mode_result = apply_mode(opts["mode"], hires, assessed_max)
+
+    if mode_result["action"] == "offer_beast_mode":
+        print("The Inspector assumed it's a Beast Mode level task.")
+        confirm = input("Switch to beast mode? [y/N]: ").strip().lower()
+        if confirm == "y":
+            mode_result = apply_mode("beast", hires, assessed_max)
+        else:
+            print("Continuing with the capped hire list.")
+    elif mode_result["action"] == "stop_ask_beast_mode":
+        print("Please choose Beast Mode explicitly for a task this large.")
+        return
+
+    hires = mode_result["hires"]
     if tier == 0:
         _run_tier0(task_text, decision)
     elif tier == 1:
         _run_tier1(task_text, decision, run_tests=opts["test"])
     elif tier == 2:
-        _run_tier2(task_text, decision, app_slug=opts["app"])
+        _run_tier2(task_text, decision, app_slug=opts["app"], hires=hires,
+                   project_unique_name=opts["project"], mode=opts["mode"])
     elif tier == 3:
-        if not _confirm_tier3(decision):
-            print("Aborted — nothing was run.")
-            return
-        routing_memory.log_outcome(task_text, decision, outcome="handed off to tier-3 loop.py")
-        print("[EO] Handing off to loop.py, tier 3, unmodified.\n")
-        sys.argv = ["loop.py", task_text]
-        import loop
-        loop.main()
+        # Migration Part 10 testability wiring: same Part 5 §3 pattern
+        # tier 2 already uses below — "if hires: build+execute, else:
+        # fall through to the existing dispatch." Here, "existing
+        # dispatch" is the cost-ceiling confirmation + loop.py handoff,
+        # UNCHANGED for the no-hires case. Deliberately not a unification
+        # with loop.py — just the minimum needed so a hires-driven,
+        # often non-coding tier-3 task reaches generic_worker.
+        if hires:
+            _run_tier3_hires(task_text, decision, hires=hires,
+                              project_unique_name=opts["project"], mode=opts["mode"])
+        else:
+            if not _confirm_tier3(decision):
+                print("Aborted — nothing was run.")
+                return
+            routing_memory.log_outcome(task_text, decision, outcome="handed off to Ultimate Structure (tier-3) loop.py")
+            print("[EO] Handing off to loop.py — Ultimate Structure (tier 3), unmodified.\n")
+            sys.argv = ["loop.py", task_text]
+            import loop
+            loop.main()
     else:
         print(f"[EO] Unknown tier {tier!r} — aborting.")
 

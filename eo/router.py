@@ -11,7 +11,7 @@ resolution, and a later-stage executor for actually running the graph.
 Nothing in loop.py is touched by this file. It is purely additive and
 inert until something imports and calls it.
 """
-from eo.registry import REGISTRY
+from eo.registry import REGISTRY, resolve_role
 # ---------------------------------------------------------------------------
 # Tier 3 — full roster, Part 4 of the blueprint.
 #
@@ -71,6 +71,17 @@ TIERS = {
         ],
     },
 }
+
+# Mode ceilings (blueprint §8, raised from the original Blueprint's 14/9/11
+# to reflect the reserve-account capacity added in this part). Not used by
+# build_execution_graph() itself — consumed by eo/modes.py (new, step 3).
+MODE_CEILINGS = {
+    "auto": 16,
+    "simple": 10,
+    "fast": 13,
+    "expert": None,      # no ceiling
+    "beast": None,        # sized as ~2.5x assessed max instead, see eo/modes.py
+}
 # ---------------------------------------------------------------------------
 # Tier 2 — directed-task subsets of the SAME 19-agent roster (Part 2.5:
 # "No new models — Tier 2 calls directly into the existing 19-agent
@@ -128,6 +139,68 @@ def build_execution_graph(tier: int, directed_task_type: str = None, run_tests: 
     if tier == 3:
         return list(TIERS[3]["agents"])
     raise ValueError(f"Unknown tier: {tier!r}")
+
+
+def build_execution_graph_from_hires(hires: list, execution_order: list = None) -> tuple:
+    """
+    Migration Part 5 §2.1, extended by Part 10 §3.1/§4, corrected by
+    Part 11 §0.
+
+    hires: [{"role": "implementer", "agent_key": "CEREBRAS_CODE_1", "brief": "..."}, ...]
+    execution_order: the Panel's synthesized ordering (Part 10 §3) — a
+        list of role name strings. Optional: omitting it (every call site
+        from Parts 1-9) preserves hire order exactly as before, since the
+        reorder step below only runs `if execution_order`.
+
+    Returns a 3-tuple:
+
+        agent_names: ["code_writers", "generic_worker", "generic_worker", ...]
+        role_names: ["implementer", "brainstormer", "writer", ...] — PARALLEL
+            to agent_names, same order, same length. role_names[i] is
+            always the real role for agent_names[i].
+        key_overrides: {"implementer": "CEREBRAS_CODE_1", "brainstormer": "...", ...}
+            — keyed by ROLE NAME, not resolved agent/module name.
+
+    Part 11 §0 fix: key_overrides used to be keyed by resolved module
+    name. That broke once Part 10 introduced generic_worker as the
+    shared module for many different roles — "brainstormer" and "writer"
+    both resolve to the literal string "generic_worker", so a dict keyed
+    that way let one hire's account choice silently clobber another's.
+    It also mismatched real-action roles whose role name and module name
+    were never actually identical (e.g. "verifier" resolves to module
+    "reviewer") — collapsing those together conflated two distinct
+    hiring decisions into one call. Keying by role name fixes both: every
+    hire keeps its own distinct account choice, and only hires that
+    genuinely share the same role name (a real worker-pool hire, the
+    same role staffed more than once) collapse their keys into a list.
+
+    Note: role_names is built in the exact order agent_names is, which
+    IS the effective execution order after the optional reorder step
+    below — so a caller (eo/executor.py) can use role_names[:idx] directly
+    as "every role that already ran before this point," with no separate
+    execution_order list needing to be threaded through.
+    """
+    if execution_order:
+        order_index = {role: i for i, role in enumerate(execution_order)}
+        # hires not mentioned in execution_order (Panel forgot one, or a
+        # role was added after ordering) go to the end, in their
+        # original hire order — never dropped
+        hires = sorted(hires, key=lambda h: order_index.get(h["role"], len(execution_order)))
+
+    agent_names, role_names = [], []
+    key_overrides = {}   # keyed by ROLE now, not by resolved module name
+    for hire in hires:
+        agent_names.append(resolve_role(hire["role"]))
+        role_names.append(hire["role"])
+        existing = key_overrides.get(hire["role"])
+        if existing is None:
+            key_overrides[hire["role"]] = hire["agent_key"]
+        elif isinstance(existing, list):
+            existing.append(hire["agent_key"])
+        else:
+            key_overrides[hire["role"]] = [existing, hire["agent_key"]]
+
+    return agent_names, role_names, key_overrides
 
 
 def validate_registry_coverage() -> None:

@@ -41,7 +41,7 @@ one or more files, say so plainly rather than guessing at a small answer, \
 since that means you were routed here in error."""
 
 
-def run(task_text: str = None) -> str:
+def run(task_text: str = None, key_override=None) -> str:
     """
     Answers `task_text` directly. Unlike the other agents in this
     codebase, this one takes its input as an argument rather than reading
@@ -51,16 +51,44 @@ def run(task_text: str = None) -> str:
     `task_text` defaults to None only so this still matches the registry's
     no-arg-callable shape (eo/registry.py) when called incidentally with
     no argument; a real tier-0 run must always pass the task text.
+
+    Migration Part 5 §2.3 addition — key_override, if given, is the
+    Panel's specific account choice for this hire (a "researcher" or
+    "writer" role, per ROLE_TO_AGENT, both of which resolve to this
+    module). Responder makes exactly ONE call, unlike the parallel-pool
+    agents — so a list here has no multi-worker meaning; the first entry
+    is used and the rest are ignored.
+
+    key_override: None (default) -> today's exact behavior,
+        EO_INSPECTOR_GROQ_KEY_1 as the primary key.
+    key_override: a single key_env string -> use that account as the
+        primary key instead.
+    key_override: a list of key_env strings -> use only the first entry
+        as the primary key (no parallel pool to spread the rest across).
+    The GitHub fallback step is unaffected either way.
     """
     if not task_text:
         raise ValueError(
             "responder.run() needs task_text — tier 0 has no memory.bus "
             "state to fall back on (Part 5.1)."
         )
+
+    if key_override is None:
+        primary_key_env = "EO_INSPECTOR_GROQ_KEY_1"
+    elif isinstance(key_override, list):
+        primary_key_env = key_override[0]
+    else:
+        primary_key_env = key_override
+
+    chain = [
+        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": primary_key_env},
+        {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "EO_PANEL_GITHUB_PAT"},
+    ]
+
     answer = generate_text(
         system_prompt=SYSTEM_PROMPT,
         user_content=task_text,
-        chain=CHAIN,
+        chain=chain,
         agent_name="Responder",
     )
     return answer.strip()

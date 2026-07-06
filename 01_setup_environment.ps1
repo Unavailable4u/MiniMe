@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  AI Loop v5 - Stage 4 prep: environment + secrets scaffolding ONLY.
+  MiniMe - Stage 4 prep: environment + secrets scaffolding ONLY.
   Safe to run on top of your existing (partial) v3 repo - every step
   checks before writing, so nothing existing gets overwritten.
 

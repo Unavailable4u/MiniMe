@@ -72,7 +72,7 @@ def log_outcome(task_text: str, decision: dict, outcome: str = "") -> dict:
     """
     record = {
         "task_text": task_text,
-        "tier": decision.get("tier") if decision else None,
+        "path": decision.get("path") if decision else None,
         "directed_task_type": decision.get("directed_task_type") if decision else None,
         "confidence": decision.get("confidence") if decision else None,
         "panel_reviewed": decision.get("panel_reviewed", False) if decision else False,
@@ -81,7 +81,7 @@ def log_outcome(task_text: str, decision: dict, outcome: str = "") -> dict:
     }
     write("eo:routing_outcome", record)
     try:
-        text = f"task: {task_text} | tier: {record['tier']} | outcome: {outcome}"
+        text = f"task: {task_text} | path: {record['path']} | outcome: {outcome}"
         vector = _embed(text)
         vector_index().upsert(
             vectors=[(f"{ID_PREFIX}:{int(record['logged_at'] * 1000)}", vector, record)]
@@ -111,7 +111,7 @@ def retrieve_similar_outcomes(task_text: str, top_k: int = 3) -> str:
         if not meta:
             continue
         lines.append(
-            f"- task: {meta.get('task_text', '')!r} -> routed tier {meta.get('tier')}, "
+            f"- task: {meta.get('task_text', '')!r} -> routed path {meta.get('path')}, "
             f"outcome: {meta.get('outcome', '')}"
         )
     return "\n".join(lines)
@@ -120,7 +120,7 @@ def retrieve_similar_outcomes(task_text: str, top_k: int = 3) -> str:
 if __name__ == "__main__":
     rec = log_outcome(
         "write a small script that reverses a string",
-        {"tier": 1, "directed_task_type": None, "confidence": 0.9},
-        outcome="correctly routed, tier-1 lean pipeline completed successfully",
+        {"path": "direct", "directed_task_type": None, "confidence": 0.9},
+        outcome="correctly routed, direct lean pipeline completed successfully",
     )
     print(json.dumps(rec, indent=2, default=str))

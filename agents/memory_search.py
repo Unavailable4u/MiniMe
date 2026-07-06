@@ -26,39 +26,15 @@ KEYS it needs and writes to KEYS["retrieved_context"] plus Vector itself.
 import os
 import sys
 import json
-import requests
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, vector_index
-from utils.llm_client import log_usage
+from utils.llm_client import log_usage, embed_text
 
 load_dotenv()
 
-HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-HF_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}/pipeline/feature-extraction"
 ID_PREFIX = "cyclemem"
-
-
-def _embed(text: str) -> list:
-    api_key = os.getenv("HUGGINGFACE_API_KEY")
-    if not api_key:
-        raise RuntimeError("HUGGINGFACE_API_KEY not set")
-    response = requests.post(
-        HF_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"inputs": text, "options": {"wait_for_model": True}},
-        timeout=30,
-    )
-    response.raise_for_status()
-    vec = response.json()
-    # feature-extraction can return a token-level matrix ([tokens][dims]) or
-    # already-pooled [dims] depending on the model; mean-pool defensively.
-    if isinstance(vec[0], list):
-        dims = len(vec[0])
-        pooled = [sum(row[i] for row in vec) / len(vec) for i in range(dims)]
-        return pooled
-    return vec
 
 
 def _app_slug() -> str:
@@ -78,7 +54,7 @@ def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None)
         f"summary: {report.get('summary', '')}"
     )
     try:
-        vector = _embed(summary_text)
+        vector = embed_text(summary_text)
     except Exception as exc:
         print(f"  [Memory Search] embed failed, skipping store: {exc}")
         return
@@ -102,7 +78,7 @@ def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None)
 def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, tier: int = None) -> str:
     slug = _app_slug()
     try:
-        vector = _embed(query_text)
+        vector = embed_text(query_text)
     except Exception as exc:
         print(f"  [Memory Search] retrieval failed, continuing with no context: {exc}")
         write(KEYS["retrieved_context"], "")
