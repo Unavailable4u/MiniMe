@@ -1,20 +1,23 @@
 ﻿# Python
 __pycache__/
 *.pyc
+.pytest_cache/
 venv/
-.venv/
-*.egg-info/
 
-# Node / Next.js
-node_modules/
-.next/
+# Secrets — never commit these
+.env
+frontend/.env.local
+
+# Frontend build/deps
 frontend/node_modules/
 frontend/.next/
 
-# Env files
-.env
-.env.local
-*.env
-
 # Editor
 .vscode/
+
+# Generated artifacts
+apps/shipping_test/
+filelist.txt
+
+# Excluded per your own call
+tests/
