@@ -56,6 +56,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RegisterProjectRequest(BaseModel):
+    path: str
+    display_name: str
+
+
+@app.post("/api/projects", dependencies=[Depends(require_auth)])
+def register_project_endpoint(req: RegisterProjectRequest):
+    unit = generate_control_unit(req.display_name)
+    register_project(unit["unique_name"], req.path)
+    return {"unique_name": unit["unique_name"], "root_path": req.path}
 
 class TaskRequest(BaseModel):
     task_text: str

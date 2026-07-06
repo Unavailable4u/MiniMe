@@ -63,6 +63,7 @@ from eo.modes import apply_mode
 from eo.inspector import classify
 from eo.router import build_execution_graph, build_execution_graph_from_hires, DIRECTED_TASK_MAP, EXPLAIN_CODE_ROUTE
 from eo.executor import execute_graph
+from eo.loop_controller import run_with_looping
 from eo import panel as eo_panel
 from eo.panel import staff_task
 from eo.sga import attempt as sga_attempt
@@ -84,6 +85,28 @@ _CLASSIFY_FAILURE_DRAFT = {
     "tier": 3, "directed_task_type": None, "confidence": 0.0,
     "suggested_agents": [], "reasoning": "classification failed, defaulting to tier 3 (safest)",
 }
+
+# Part 14 §1 -- a tier-3 classification can no longer produce zero
+# staffable roles. Keyed by domain; "writer" is the generalist fallback
+# for a None/unrecognized domain.
+MINIMUM_ADAPTIVE_ROLES = {
+    "coding": ["implementer", "verifier", "fixer"],
+    "creative_writing": ["writer", "editor"],
+    "research": ["researcher", "writer"],
+    "data_analysis": ["analyst", "writer"],
+}
+
+
+def _ensure_staffable(decision: dict) -> dict:
+    """A tier-3 classification can no longer produce zero staffable
+    roles -- if suggested_agents came back empty, fall back to a sane
+    minimum set for the classified domain (or a single generalist writer
+    if domain is None/unrecognized), so hires downstream is never empty
+    either."""
+    if decision.get("tier") == 3 and not decision.get("suggested_agents"):
+        domain = decision.get("domain")
+        decision["suggested_agents"] = MINIMUM_ADAPTIVE_ROLES.get(domain, ["writer"])
+    return decision
 
 
 def _get_decision(task_text: str, tier_override: int, directed_override: str,
@@ -112,6 +135,12 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
         decision = {**decision, "tier": tier_override}
         if tier_override == 2:
             decision["directed_task_type"] = directed_override or decision.get("directed_task_type")
+
+    decision = _ensure_staffable(decision)   # NEW — Part 14 §1, before
+                                              # any write/emit so both
+                                              # reflect the filled-in
+                                              # suggested_agents, not the
+                                              # empty draft.
 
     write("eo:original_task", task_text)
     write("eo:task_classification", draft)
@@ -229,16 +258,21 @@ def _run_tier3_hires(task_text: str, decision: dict, hires: list,
     """CLI mirror of api/task_runner.py's _run_tier3_hires() — see that
     file's docstring for the full reasoning (Migration Part 10
     testability wiring, Part 5 §3's existing tier-2 pattern applied to
-    tier 3). Minimum wiring so a hires-driven tier-3 task reaches
-    generic_worker; not a cost-ceiling-gated or loop.py-unified path."""
-    graph, key_overrides, role_names = build_execution_graph_from_hires(
-        hires, execution_order=decision.get("execution_order"))
-    results = execute_graph(graph, task_text=task_text, key_overrides=key_overrides,
-                             project_unique_name=project_unique_name, mode=mode,
-                             role_names=role_names)
-    last_agent = graph[-1]
-    print(f"\n[Tier 3 — hires-driven] final output from '{last_agent}':")
-    print(json.dumps(results[last_agent], indent=2, default=str))
+    tier 3).
+
+    Migration Part 14 §2: now routes through eo/loop_controller.py's
+    run_with_looping() instead of calling execute_graph() directly, so
+    the adaptive-looping machinery from Parts 11-12 (macro-loop
+    gatekeeper, hard safety caps) actually fires for a hires-driven
+    tier-3 task, rather than sitting fully built and unused. No
+    session_id available on this CLI path (same pre-existing gap as
+    _get_decision()'s own call above)."""
+    results = run_with_looping(
+        hires, decision.get("execution_order"), task_text, session_id=None,
+        mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
+    )
+    print(f"\n[Tier 3 — hires-driven] final results:")
+    print(json.dumps(results, indent=2, default=str))
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
 
 
@@ -327,12 +361,9 @@ def main():
     task_text = opts["task_text"]
 
     if not task_text:
-        print("[EO] No new task text — resuming an existing run. Only Ultimate "
-              "Structure (tier 3) runs have resumable state, so handing off to "
-              "loop.py directly.")
-        sys.argv = ["loop.py"]
-        import loop
-        loop.main()
+        print("[EO] No task text given. The old loop.py resume mechanism was retired along "
+              "with loop.py — there's no resumable-run feature in the current pipeline yet. "
+              "Start a new task, or ask for it to be rebuilt for the adaptive pipeline specifically.")
         return
 
     # NEW — Part 2: Starter General Agents attempt first, unless a manual
@@ -391,25 +422,11 @@ def main():
         _run_tier2(task_text, decision, app_slug=opts["app"], hires=hires,
                    project_unique_name=opts["project"], mode=opts["mode"])
     elif tier == 3:
-        # Migration Part 10 testability wiring: same Part 5 §3 pattern
-        # tier 2 already uses below — "if hires: build+execute, else:
-        # fall through to the existing dispatch." Here, "existing
-        # dispatch" is the cost-ceiling confirmation + loop.py handoff,
-        # UNCHANGED for the no-hires case. Deliberately not a unification
-        # with loop.py — just the minimum needed so a hires-driven,
-        # often non-coding tier-3 task reaches generic_worker.
-        if hires:
-            _run_tier3_hires(task_text, decision, hires=hires,
-                              project_unique_name=opts["project"], mode=opts["mode"])
-        else:
-            if not _confirm_tier3(decision):
-                print("Aborted — nothing was run.")
-                return
-            routing_memory.log_outcome(task_text, decision, outcome="handed off to Ultimate Structure (tier-3) loop.py")
-            print("[EO] Handing off to loop.py — Ultimate Structure (tier 3), unmodified.\n")
-            sys.argv = ["loop.py", task_text]
-            import loop
-            loop.main()
+        # Migration Part 14 §1/§3: _ensure_staffable() guarantees hires is
+        # never empty for a tier-3 task now, so the old "else: loop.py"
+        # fallback is gone — there's no case left for it to catch.
+        _run_tier3_hires(task_text, decision, hires=hires,
+                          project_unique_name=opts["project"], mode=opts["mode"])
     else:
         print(f"[EO] Unknown tier {tier!r} — aborting.")
 

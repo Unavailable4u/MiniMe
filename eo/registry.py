@@ -17,98 +17,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
-from agents import (
-    memory_search,
-    idea_planner,
-    prompt_writer,
-    code_writers,
-    dependency_mapper,
-    test_writer,
-    reviewer,
-    duplication_checker,
-    fixer_pool,
-    sandbox_tester,
-    structure_architect,
-    security_scanner,
-    security_aggregator,
-    file_manager,
-    documentation_agent,
-    changelog_writer,
-    report_writer,
-    final_qa,
-    gatekeeper,
-    responder,
-    prompt_writer_lean,
-    code_writer_lean,
-    reviewer_fixer_lean,
-    generic_worker,
-)
-# name -> {"callable": fn, "needs_cycle_num": bool}
-#
-# "needs_cycle_num" flags the one agent (Gatekeeper) whose run function
-# takes an argument instead of being a plain no-arg call — the executor
-# built in a later stage needs to know this; router.py itself doesn't care.
-REGISTRY = {
-    "memory_search":       {"callable": memory_search.run,                "needs_cycle_num": False},
-    "idea_planner":        {"callable": idea_planner.run,                 "needs_cycle_num": False},
-    "prompt_writer":       {"callable": prompt_writer.run,                "needs_cycle_num": False},
-    "code_writers":        {"callable": code_writers.run,                 "needs_cycle_num": False},
-    "dependency_mapper":   {"callable": dependency_mapper.run,            "needs_cycle_num": False},
-    "test_writer":         {"callable": test_writer.run,                  "needs_cycle_num": False},
-    "reviewer":            {"callable": reviewer.run_reviewer,            "needs_cycle_num": False},
-    "duplication_checker": {"callable": duplication_checker.run,          "needs_cycle_num": False},
-    "fixer_pool":          {"callable": fixer_pool.run_fixer_pool,        "needs_cycle_num": False},
-    "sandbox_tester":      {"callable": sandbox_tester.run_sandbox_tester,"needs_cycle_num": False},
-    "structure_architect": {"callable": structure_architect.run_structure_architect, "needs_cycle_num": False},
-    "security_scanner":    {"callable": security_scanner.run,             "needs_cycle_num": False},
-    "security_aggregator": {"callable": security_aggregator.run,          "needs_cycle_num": False},
-    "file_manager":        {"callable": file_manager.run_file_manager,    "needs_cycle_num": False},
-    # Tier 2 only (Part 2.5's "debug"/"refactor" routes) -- plan-free
-    # write-back using eo/code_loader.py's own recorded paths, since tier
-    # 2 never runs structure_architect.py to produce a file_plan for
-    # run_file_manager() above to interpret. See file_manager.py's
-    # write_back_existing_app() docstring for the full reasoning.
-    "file_manager_writeback": {"callable": file_manager.write_back_existing_app, "needs_cycle_num": False},
-    # Tier 2 only (Part 2.5's "add_tests" route) -- writes test_writer.py's
-    # generated test_code out to tests/test_<module>.py, stitched with the
-    # module's own source the same way sandbox_tester.py already runs it.
-    # Separate from file_manager_writeback above: add_tests never changes
-    # a module's own source, it only adds new test files, so it needs its
-    # own callable rather than reusing write_back_existing_app(). See
-    # file_manager.py's write_back_test_code() docstring for the full
-    # reasoning.
-    "file_manager_test_writeback": {"callable": file_manager.write_back_test_code, "needs_cycle_num": False},
-    "documentation_agent": {"callable": documentation_agent.run,          "needs_cycle_num": False},
-    "changelog_writer":    {"callable": changelog_writer.run,             "needs_cycle_num": False},
-    "report_writer":       {"callable": report_writer.run_report_writer,  "needs_cycle_num": False},
-    "final_qa":            {"callable": final_qa.run,                    "needs_cycle_num": False},
-    "gatekeeper":          {"callable": gatekeeper.run_gatekeeper,        "needs_cycle_num": True},
-    # --- Tier 0 (Part 2.3) ---
-    "responder":           {"callable": responder.run,                   "needs_cycle_num": False},
-    # --- Tier 1 lean pipeline (Part 2.4) ---
-    "prompt_writer_lean":     {"callable": prompt_writer_lean.run,          "needs_cycle_num": False},
-    "code_writer_lean":       {"callable": code_writer_lean.run,            "needs_cycle_num": False},
-    "reviewer_fixer_lean":    {"callable": reviewer_fixer_lean.run,         "needs_cycle_num": False},
-    "sandbox_tester_lean":    {"callable": sandbox_tester.run_sandbox_tester_lean, "needs_cycle_num": False},
-    # --- Migration Part 10 §2 — every reasoning-only role dispatches
-    # through this one module, called with role=<the actual role name>.
-    # resolve() below just needs the literal string "generic_worker" to
-    # find the callable; eo/executor.py's dispatch is what supplies the
-    # real role/input_keys/session_id/key_override arguments.
-    "generic_worker":         {"callable": generic_worker.run,                "needs_cycle_num": False},
-}
-def resolve(agent_name: str):
-    """Return the callable for `agent_name`, or raise KeyError with a
-    clear message — never return None and let a caller silently no-op."""
-    entry = REGISTRY.get(agent_name)
-    if entry is None:
-        raise KeyError(
-            f"'{agent_name}' is not in eo.registry.REGISTRY. Either it's "
-            f"misspelled, or it's a tier-0/1-only agent that hasn't been "
-            f"built yet (see the module docstring)."
-        )
-    return entry["callable"]
-# NEW — add below resolve(), don't touch REGISTRY or resolve() above
+
 
 AGENT_CAPABILITIES = {
     # --- Groq: sequential low-volume roles ---
@@ -239,6 +148,8 @@ AGENT_CAPABILITIES = {
     },
 }
 
+
+
 ROLE_PROMPTS_KEY = "registry:role_prompts"
 
 # What used to be the live ROLE_PROMPTS dict is now only a SEED — the
@@ -309,3 +220,97 @@ def resolve_role(role_name: str) -> str:
     actually routes that to agents.generic_worker.run(role=role_name,
     ...)."""
     return REAL_ACTION_ROLES.get(role_name, "generic_worker")
+
+from agents import (
+    memory_search,
+    idea_planner,
+    prompt_writer,
+    code_writers,
+    dependency_mapper,
+    test_writer,
+    reviewer,
+    duplication_checker,
+    fixer_pool,
+    sandbox_tester,
+    structure_architect,
+    security_scanner,
+    security_aggregator,
+    file_manager,
+    documentation_agent,
+    changelog_writer,
+    report_writer,
+    final_qa,
+    gatekeeper,
+    responder,
+    prompt_writer_lean,
+    code_writer_lean,
+    reviewer_fixer_lean,
+    generic_worker,
+)
+
+# name -> {"callable": fn, "needs_cycle_num": bool}
+#
+# "needs_cycle_num" flags the one agent (Gatekeeper) whose run function
+# takes an argument instead of being a plain no-arg call — the executor
+# built in a later stage needs to know this; router.py itself doesn't care.
+REGISTRY = {
+    "memory_search":       {"callable": memory_search.run,                "needs_cycle_num": False},
+    "idea_planner":        {"callable": idea_planner.run,                 "needs_cycle_num": False},
+    "prompt_writer":       {"callable": prompt_writer.run,                "needs_cycle_num": False},
+    "code_writers":        {"callable": code_writers.run,                 "needs_cycle_num": False},
+    "dependency_mapper":   {"callable": dependency_mapper.run,            "needs_cycle_num": False},
+    "test_writer":         {"callable": test_writer.run,                  "needs_cycle_num": False},
+    "reviewer":            {"callable": reviewer.run_reviewer,            "needs_cycle_num": False},
+    "duplication_checker": {"callable": duplication_checker.run,          "needs_cycle_num": False},
+    "fixer_pool":          {"callable": fixer_pool.run_fixer_pool,        "needs_cycle_num": False},
+    "sandbox_tester":      {"callable": sandbox_tester.run_sandbox_tester,"needs_cycle_num": False},
+    "structure_architect": {"callable": structure_architect.run_structure_architect, "needs_cycle_num": False},
+    "security_scanner":    {"callable": security_scanner.run,             "needs_cycle_num": False},
+    "security_aggregator": {"callable": security_aggregator.run,          "needs_cycle_num": False},
+    "file_manager":        {"callable": file_manager.run_file_manager,    "needs_cycle_num": False},
+    # Tier 2 only (Part 2.5's "debug"/"refactor" routes) -- plan-free
+    # write-back using eo/code_loader.py's own recorded paths, since tier
+    # 2 never runs structure_architect.py to produce a file_plan for
+    # run_file_manager() above to interpret. See file_manager.py's
+    # write_back_existing_app() docstring for the full reasoning.
+    "file_manager_writeback": {"callable": file_manager.write_back_existing_app, "needs_cycle_num": False},
+    # Tier 2 only (Part 2.5's "add_tests" route) -- writes test_writer.py's
+    # generated test_code out to tests/test_<module>.py, stitched with the
+    # module's own source the same way sandbox_tester.py already runs it.
+    # Separate from file_manager_writeback above: add_tests never changes
+    # a module's own source, it only adds new test files, so it needs its
+    # own callable rather than reusing write_back_existing_app(). See
+    # file_manager.py's write_back_test_code() docstring for the full
+    # reasoning.
+    "file_manager_test_writeback": {"callable": file_manager.write_back_test_code, "needs_cycle_num": False},
+    "documentation_agent": {"callable": documentation_agent.run,          "needs_cycle_num": False},
+    "changelog_writer":    {"callable": changelog_writer.run,             "needs_cycle_num": False},
+    "report_writer":       {"callable": report_writer.run_report_writer,  "needs_cycle_num": False},
+    "final_qa":            {"callable": final_qa.run,                    "needs_cycle_num": False},
+    "gatekeeper":          {"callable": gatekeeper.run_gatekeeper,        "needs_cycle_num": True},
+    # --- Tier 0 (Part 2.3) ---
+    "responder":           {"callable": responder.run,                   "needs_cycle_num": False},
+    # --- Tier 1 lean pipeline (Part 2.4) ---
+    "prompt_writer_lean":     {"callable": prompt_writer_lean.run,          "needs_cycle_num": False},
+    "code_writer_lean":       {"callable": code_writer_lean.run,            "needs_cycle_num": False},
+    "reviewer_fixer_lean":    {"callable": reviewer_fixer_lean.run,         "needs_cycle_num": False},
+    "sandbox_tester_lean":    {"callable": sandbox_tester.run_sandbox_tester_lean, "needs_cycle_num": False},
+    # --- Migration Part 10 §2 — every reasoning-only role dispatches
+    # through this one module, called with role=<the actual role name>.
+    # resolve() below just needs the literal string "generic_worker" to
+    # find the callable; eo/executor.py's dispatch is what supplies the
+    # real role/input_keys/session_id/key_override arguments.
+    "generic_worker":         {"callable": generic_worker.run,                "needs_cycle_num": False},
+}
+def resolve(agent_name: str):
+    """Return the callable for `agent_name`, or raise KeyError with a
+    clear message — never return None and let a caller silently no-op."""
+    entry = REGISTRY.get(agent_name)
+    if entry is None:
+        raise KeyError(
+            f"'{agent_name}' is not in eo.registry.REGISTRY. Either it's "
+            f"misspelled, or it's a tier-0/1-only agent that hasn't been "
+            f"built yet (see the module docstring)."
+        )
+    return entry["callable"]
+
