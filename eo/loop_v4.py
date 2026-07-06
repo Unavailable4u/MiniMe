@@ -77,6 +77,21 @@ from memory.bus import write
 # once eo:routing_outcome has enough entries.
 CONFIDENCE_THRESHOLD = 0.75
 
+# NEW — Part 15: translate eo/inspector.py's Part 12 "path" output back
+# into the "tier" int this file (and eo/panel.py, eo/router.py, both not
+# yet renamed) still use throughout. This is a boundary shim, not a
+# decision-schema rename -- decision/draft keep the "tier" key because
+# every downstream collaborator in this file still requires it.
+PATH_TO_TIER = {"instant": 0, "direct": 1, "fixed": 2, "adaptive": 3}
+
+# NEW — Part 15 micro-fix follow-up: reverse of the map above. decision["tier"]
+# is always present (override, draft, or panel-synthesized all set it), while
+# decision["path"] is not (it disappears once eo.panel.run_panel() -- not yet
+# renamed -- synthesizes a new decision). Used only to label the
+# routing_decision event now that relay/emitter.py's own tier->path rename
+# (§4b) means it no longer accepts tier= at all.
+TIER_TO_PATH = {v: k for k, v in PATH_TO_TIER.items()}
+
 # The conservative fallback used when the Inspector's own chain is fully
 # exhausted (network down, all keys unset, etc.) -- tier 3 is the safe
 # default to fall back to, same reasoning as the old forced-tier-3 stage,
@@ -117,6 +132,7 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
     context = routing_memory.retrieve_similar_outcomes(task_text)
     try:
         draft = classify(task_text, context=context or None)
+        draft["tier"] = PATH_TO_TIER[draft["path"]]   # NEW — Part 15
     except Exception as exc:
         print(f"  [Inspector] classification failed ({exc.__class__.__name__}: {exc}), "
               f"defaulting to a conservative Ultimate Structure (tier 3) draft.")
@@ -126,7 +142,12 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
     if should_escalate:
         print(f"  [EO] escalating to panel (confidence={draft['confidence']:.2f}, "
               f"tier={draft['tier']}) ...")
-        decision = eo_panel.run_panel(task_text, draft)
+        try:
+            decision = eo_panel.run_panel(task_text, draft)
+        except Exception as exc:                                    # NEW — Part 15 stopgap
+            print(f"  [EO] panel escalation failed ({exc.__class__.__name__}: {exc}), "
+                  f"falling back to the Inspector's own draft.")
+            decision = draft
     else:
         decision = draft
 
@@ -147,8 +168,8 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
     write("eo:routing_decision", decision)
     write("eo:execution_graph", _safe_graph_preview(decision))
 
-    emit_event("routing_decision", session_id=session_id,               # <-- add this block
-                tier=decision.get("tier"), payload=decision)
+    emit_event("routing_decision", session_id=session_id,
+                path=TIER_TO_PATH.get(decision.get("tier")), payload=decision)
 
     return decision
 
@@ -270,6 +291,7 @@ def _run_tier3_hires(task_text: str, decision: dict, hires: list,
     results = run_with_looping(
         hires, decision.get("execution_order"), task_text, session_id=None,
         mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
+        path="adaptive",   # NEW — Part 15 §2c, optional path label
     )
     print(f"\n[Tier 3 — hires-driven] final results:")
     print(json.dumps(results, indent=2, default=str))
@@ -371,7 +393,9 @@ def main():
     # entirely, same reasoning as the classify() skip below).
     # NEW — Part 4 step 4: Semantic Cache checked first, ahead of SGA
     # itself, so a near-duplicate task skips the whole SGA relay too.
-    if opts["tier"] is None:
+    # CHANGE: --mode beast also skips cache/SGA, same as --tier does —
+    # kept symmetric with api/task_runner.py's run_task().
+    if opts["tier"] is None and opts["mode"] != "beast":
         cached = check_cache(task_text, app_slug=opts["app"])
         if cached:
             print(f"\n[Cache]\n{cached}\n")

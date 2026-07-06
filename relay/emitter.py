@@ -92,12 +92,12 @@ def emit_event(
     event_type: str,
     session_id: str = None,
     agent: str = None,
-    tier: int = None,
+    path: str = None,
     payload: dict = None,
 ) -> bool:
     """
     Fires one event on session_id's channel. Part 6.3 schema:
-        {type, session_id, agent, tier, timestamp, payload}
+        {type, session_id, agent, path, timestamp, payload}
 
     Returns True if the event was sent, False if it was skipped (no
     session_id, Pusher not configured) or failed. Callers should NOT
@@ -123,7 +123,7 @@ def emit_event(
         "type": event_type,
         "session_id": session_id,
         "agent": agent,
-        "tier": tier,
+        "path": path,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": payload or {},
     }

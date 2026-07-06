@@ -58,7 +58,7 @@ from eo import routing_memory
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
     graph = build_execution_graph(tier=0)
-    results = execute_graph(graph, task_text=task_text, session_id=session_id, tier=0)
+    results = execute_graph(graph, task_text=task_text, session_id=session_id, path="instant")
     answer = results["responder"]
     routing_memory.log_outcome(task_text, decision, outcome="tier-0 responder answered directly")
     return {
@@ -73,7 +73,7 @@ def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
 
 def _run_tier1(task_text: str, decision: dict, run_tests: bool, session_id: str) -> dict:
     graph = build_execution_graph(tier=1, run_tests=run_tests)
-    results = execute_graph(graph, task_text=task_text, session_id=session_id, tier=1)
+    results = execute_graph(graph, task_text=task_text, session_id=session_id, path="direct")
     fixed = results["reviewer_fixer_lean"]
 
     test_results = None
@@ -123,6 +123,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     results = run_with_looping(
         hires, decision.get("execution_order"), task_text, session_id=session_id,
         mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
+        path="adaptive",   # NEW — Part 15 §2c, optional path label
     )
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
     return {
@@ -153,7 +154,12 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     # NEW — Part 4 step 4: Semantic Cache checked first, ahead of SGA
     # itself, so a near-duplicate task skips the whole SGA relay too —
     # same as loop_v4.py's CLI path, kept symmetric per the guide.
-    if tier_override is None:
+    # CHANGE: an explicit "beast" mode selection also skips cache/SGA,
+    # same as a manual tier_override does — Beast Mode is meant to force
+    # the full staffed pipeline, not have a fast-path answer slip in
+    # ahead of it. Auto/simple/fast/expert are unaffected; only "beast"
+    # bypasses this block.
+    if tier_override is None and mode != "beast":
         cached = check_cache(task_text, app_slug=app_slug)
         if cached:
             return {
@@ -277,7 +283,7 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, session_id: str, h
             + json.dumps(submitted_code, indent=2)
         )
         graph = list(EXPLAIN_CODE_ROUTE)
-        results = execute_graph(graph, task_text=combined, session_id=session_id, tier=2)
+        results = execute_graph(graph, task_text=combined, session_id=session_id, path="fixed")
         output = results["responder"]
     else:
         # Migration Part 5 §3 — build from the Panel's staffing decision
@@ -301,12 +307,12 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, session_id: str, h
             # omitting it was invisible.
             graph, key_overrides, role_names = build_execution_graph_from_hires(
                 hires, execution_order=decision.get("execution_order"))
-            results = execute_graph(graph, task_text=task_text, session_id=session_id, tier=2,
+            results = execute_graph(graph, task_text=task_text, session_id=session_id, path="fixed",
                                      key_overrides=key_overrides, project_unique_name=project_unique_name,
                                      mode=mode, role_names=role_names)
         else:
             graph = build_execution_graph(tier=2, directed_task_type=directed_task_type)
-            results = execute_graph(graph, session_id=session_id, tier=2,
+            results = execute_graph(graph, session_id=session_id, path="fixed",
                                      project_unique_name=project_unique_name, mode=mode)
         last_agent = graph[-1]
         output = results[last_agent]
