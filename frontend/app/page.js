@@ -2,7 +2,16 @@
 
 import { useState, useRef, useEffect } from "react";
 import Pusher from "pusher-js";
+import RoutingTraceGraph from "./components/RoutingTraceGraph";
+import DependencyGraph from "./components/DependencyGraph";
+import StructurePlanDiagram from "./components/StructurePlanDiagram";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Part 4 step 5.1 -- Grafana public dashboard embed URL. Set in
+// frontend/.env.local, e.g.:
+//   NEXT_PUBLIC_GRAFANA_QUOTA_URL=http://localhost:3001/public-dashboards/abc123def456
+// Left unset-safe (renders nothing) so local dev without Grafana running
+// doesn't show a broken iframe.
+const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
 
 export default function ChatPage() {
   const [messages, setMessages] = useState([]);
@@ -18,6 +27,10 @@ export default function ChatPage() {
   const [liveDecision, setLiveDecision] = useState(null);
   const [liveLanes, setLiveLanes] = useState({});
   const [usageStats, setUsageStats] = useState({});
+  const [routeTrace, setRouteTrace] = useState([]);
+  const [dependencyMap, setDependencyMap] = useState({});
+  const [structurePlan, setStructurePlan] = useState(null);
+  const [mode, setMode] = useState("auto");
 
   useEffect(() => {
     const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
@@ -44,6 +57,25 @@ export default function ChatPage() {
         // per-provider, since separate keys have separate quotas.
         const statKey = `${payload?.provider}:${payload?.key_id}`;
         setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
+        return;
+      }
+      if (eventType === "dispatch_event") {
+        setRouteTrace((prev) => [...prev, { destination: payload?.destination, reason: payload?.reason }]);
+        return;
+      }
+      if (eventType === "dependency_map") {
+        setDependencyMap(payload?.map || {});
+        return;
+      }
+      if (eventType === "structure_plan") {
+        setStructurePlan(payload?.mermaid || null);
+        return;
+      }
+      if (eventType === "quota_alert") {
+        // No dedicated state needed -- Grafana (Part 4 §5) is the real
+        // display surface for this; log it for now so it's at least
+        // visible during dev.
+        console.warn("quota_alert:", payload);
         return;
       }
       if (eventType === "agent_start") {
@@ -96,11 +128,17 @@ export default function ChatPage() {
     setLoading(true);
     setLiveDecision(null);
     setLiveLanes({});
+    setRouteTrace([]);
+    setDependencyMap({});
+    setStructurePlan(null);
     try {
       const res = await fetch(`${API_URL}/api/task`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_text: taskText, session_id: sessionId }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+        },
+        body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
       });
       const data = await res.json();
       setMessages((prev) => [...prev, { role: "assistant", data }]);
@@ -114,6 +152,37 @@ export default function ChatPage() {
     }
   }
 
+  async function registerProject() {
+    // Migration Part 8 §8.4 — intentionally minimal: a prompt() dialog,
+    // not a polished picker modal, so the mechanism (§8.1/§8.2) is
+    // actually usable today. A full project-picker UI (blueprint §15)
+    // is a larger frontend task than this part's scope.
+    const path = prompt("Full path to the project folder:");
+    const name = prompt("Display name for this project:");
+    if (!path || !name) return;
+    try {
+      const res = await fetch(`${API_URL}/api/projects`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+        },
+        body: JSON.stringify({ path, display_name: name }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`Registration failed: ${data.detail || res.status}`);
+        return;
+      }
+      // No project-picker UI yet (see comment above), so surfacing the
+      // unique_name directly is the only way to hand it back right now --
+      // reference it via project_unique_name on a task (CLI: --project).
+      alert(`Registered as '${data.unique_name}' -> ${data.root_path}`);
+    } catch (err) {
+      alert(`Registration failed: ${String(err)}`);
+    }
+  }
+
   function handleSubmit(e) {
     e.preventDefault();
     const text = input.trim();
@@ -124,11 +193,19 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-screen max-w-3xl mx-auto">
-      <header className="border-b border-neutral-800 px-4 py-3">
-        <h1 className="text-sm font-medium text-neutral-400">AI Loop v5</h1>
+      <header className="border-b border-neutral-800 px-4 py-3 flex items-center justify-between">
+        <h1 className="text-sm font-medium text-neutral-400">MiniMe</h1>
+        <button
+          onClick={registerProject}
+          className="text-xs text-neutral-500 hover:text-neutral-300 border border-neutral-800 rounded-lg px-2 py-1"
+          title="Register an external project folder for cross-project control"
+        >
+          + Register project
+        </button>
       </header>
 
       <TokenQuotaDashboard stats={usageStats} />
+      <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
 
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.length === 0 && (
@@ -141,12 +218,30 @@ export default function ChatPage() {
           <MessageBubble key={i} message={m} />
         ))}
         {loading && (
-          <LiveActivity decision={liveDecision} lanes={liveLanes} />
+          <LiveActivity
+            decision={liveDecision}
+            lanes={liveLanes}
+            routeTrace={routeTrace}
+            dependencyMap={dependencyMap}
+            structurePlan={structurePlan}
+          />
         )}
         <div ref={bottomRef} />
       </div>
 
       <form onSubmit={handleSubmit} className="border-t border-neutral-800 p-4 flex gap-2">
+        <select
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+          disabled={loading}
+          className="bg-neutral-900 border border-neutral-800 rounded-lg px-2 py-2 text-sm outline-none"
+        >
+          <option value="auto">Auto</option>
+          <option value="simple">Simple</option>
+          <option value="fast">Fast</option>
+          <option value="expert">Expert</option>
+          <option value="beast">Beast</option>
+        </select>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -162,6 +257,28 @@ export default function ChatPage() {
           Send
         </button>
       </form>
+    </div>
+  );
+}
+
+function GrafanaQuotaPanel({ url }) {
+  // Part 4 step 5.1. Complements TokenQuotaDashboard above rather than
+  // replacing it: TokenQuotaDashboard shows live, per-task usage_update
+  // events over Pusher for the run in progress; this panel shows
+  // Grafana's own cross-run view of the real usage data tracked in
+  // memory.bus (eo/quota_sentinel.py, since Part 8 §2 -- no longer a
+  // separate cache-Redis counter), which persists across sessions and
+  // page reloads.
+  if (!url) return null;
+  return (
+    <div className="border-b border-neutral-800 px-4 py-3">
+      <iframe
+        src={url}
+        width="100%"
+        height="300"
+        frameBorder="0"
+        title="Grafana quota dashboard"
+      />
     </div>
   );
 }
@@ -292,7 +409,7 @@ function RoutingTraceCard({ decision }) {
   );
 }
 
-function LiveActivity({ decision, lanes }) {
+function LiveActivity({ decision, lanes, routeTrace, dependencyMap, structurePlan }) {
   const laneList = Object.entries(lanes);
 
   if (!decision) {
@@ -306,6 +423,9 @@ function LiveActivity({ decision, lanes }) {
   return (
     <div className="space-y-2">
       <RoutingTraceCard decision={decision} />
+      {routeTrace.length > 1 && <RoutingTraceGraph trace={routeTrace} />}
+      {Object.keys(dependencyMap).length > 0 && <DependencyGraph map={dependencyMap} />}
+      {structurePlan && <StructurePlanDiagram mermaidText={structurePlan} />}
       {laneList.map(([agent, lane]) => (
         <div
           key={agent}
@@ -344,6 +464,9 @@ function LiveActivity({ decision, lanes }) {
 function ResultBody({ data }) {
   if (data.status === "error" || data.message) {
     return <div className="text-red-400">{data.message}</div>;
+  }
+  if (data.tier === "sga" || data.tier === "cache") {
+    return <div>{data.result?.answer}</div>;
   }
   if (data.tier === 0) {
     return <div>{data.result?.answer}</div>;

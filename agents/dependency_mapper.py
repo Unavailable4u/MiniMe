@@ -26,6 +26,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
 from utils.llm_client import generate_text
+from relay.emitter import emit_event
 
 load_dotenv()
 
@@ -82,6 +83,7 @@ def run(session_id: str = None, tier: int = None) -> dict:
     )
     dep_map = json.loads(_strip_fences(raw_text))
     write(KEYS["dependency_map"], dep_map)
+    emit_event("dependency_map", session_id, agent="dependency_mapper", payload={"map": dep_map})
     return dep_map
 
 

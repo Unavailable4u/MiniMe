@@ -20,21 +20,39 @@ import os
 import sys
 import traceback
 
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException, Depends
+from eo.project_registry import list_projects, generate_control_unit, register_project
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Union
 
 from api.task_runner import run_task
+from eo.quota_sentinel import get_quota_snapshot
+from eo.project_registry import list_projects
 
-app = FastAPI(title="AI Loop v5 — EO layer API")
+app = FastAPI(title="MiniMe v6 — EO layer API")
 
+API_AUTH_MODE = os.getenv("API_AUTH_MODE", "api_key")
+API_AUTH_SECRET = os.getenv("API_AUTH_SECRET")
+
+
+def require_auth(request: Request):
+    if not API_AUTH_SECRET:
+        return  # auth disabled if no secret configured — same
+                # fail-open-to-local-dev behavior the CORS default has
+    provided = request.headers.get("x-api-key")
+    if provided != API_AUTH_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["POST"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 
@@ -46,18 +64,27 @@ class TaskRequest(BaseModel):
     app_slug: Optional[str] = None
     run_tests: bool = False
     session_id: Optional[str] = None
+    mode: Optional[str] = "auto"
+    project_unique_name: Optional[str] = None   # NEW
 
 
 class TaskResponse(BaseModel):
+    # tier is int for tiers 0-3, or the literal string "sga" when the
+    # Starter General Agents resolved the task before classification
+    # (Part 2) — loosened from `int` to fix a latent validation bug that
+    # would have 500'd on every real SGA-resolved HTTP request.
     decision: dict
-    tier: int
+    tier: Union[int, str]
     session_id: Optional[str] = None
+    # status values: "ok" | "error" | "needs_app" | "needs_directed_task_type"
+    # | "not_wired_yet" | "needs_beast_mode_confirmation" (Part 3)
+    # | "needs_beast_mode_choice" (Part 3)
     status: str
     result: Optional[dict] = None
     message: Optional[str] = None
 
 
-@app.post("/api/task", response_model=TaskResponse)
+@app.post("/api/task", response_model=TaskResponse, dependencies=[Depends(require_auth)])
 def post_task(req: TaskRequest):
     try:
         return run_task(
@@ -67,6 +94,8 @@ def post_task(req: TaskRequest):
             app_slug=req.app_slug,
             run_tests=req.run_tests,
             session_id=req.session_id,
+            mode=req.mode,
+            project_unique_name=req.project_unique_name,   # NEW
         )
     except Exception as exc:
         # Step 2 has no relay yet, so a stack trace on the server console
@@ -85,3 +114,13 @@ def post_task(req: TaskRequest):
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/quota", dependencies=[Depends(require_auth)])
+def quota():
+    return get_quota_snapshot()
+
+
+@app.get("/api/projects", dependencies=[Depends(require_auth)])
+def projects():
+    return list_projects()

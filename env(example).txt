@@ -136,3 +136,40 @@ PUSHER_APP_ID=*****
 PUSHER_KEY=**********
 PUSHER_SECRET=*************
 PUSHER_CLUSTER=***
+
+
+# =============================================================================
+# MiniMe v6 migration — Part 1 additions (additive only, nothing above this
+# line should be renamed or removed yet — that happens in Part 2/3 alongside
+# the code changes that read these new names)
+# =============================================================================
+
+# --- Starter General Agents (new Layer 0 — built in Part 2) ---
+SGA_GROQ_1=***************
+SGA_GROQ_2=**********
+SGA_GROQ_3=***************
+
+# --- Dedicated cache/quota Redis (new — built in Part 2) ---
+UPSTASH_REDIS_CACHE_URL=*****************
+UPSTASH_REDIS_CACHE_TOKEN=*****************
+
+
+# --- Reserved for Part 3 (do not fill in yet — placeholders only, so the
+#     file's final shape is visible now without you needing to re-edit it
+#     three separate times) ---
+CEREBRAS_RESERVE_1=*****************
+CEREBRAS_RESERVE_2=********************
+CEREBRAS_RESERVE_3=*******************
+CF_SCANNER_RESERVE_1_ACCOUNT_ID=******************
+CF_SCANNER_RESERVE_1_API_TOKEN=************
+CF_SCANNER_RESERVE_2_ACCOUNT_ID=******************
+CF_SCANNER_RESERVE_2_API_TOKEN=******************
+CF_SCANNER_RESERVE_3_ACCOUNT_ID=******************
+CF_SCANNER_RESERVE_3_API_TOKEN=******************
+GROQ_RESERVE_1=******************
+GROQ_RESERVE_2=******************
+
+# --- Reserved for Part 4 (API auth + frontend) ---
+# API_AUTH_MODE=api_key
+# API_AUTH_SECRET=
+# ALLOWED_ORIGINS=http://localhost:3000

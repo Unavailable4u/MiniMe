@@ -42,20 +42,20 @@ def _get_critical_issue_keys(review_notes: dict) -> set:
     }
 
 
-def _ask_llm_for_decision(report: dict, cycle_count: int, session_id: str = None, tier: int = None) -> str:
+def _ask_llm_for_decision(report: dict, cycle_count: int, session_id: str = None, path: str = None) -> str:
     user_prompt = (
         f"Cycle count: {cycle_count}\n\n"
         f"Report:\n{json.dumps(report, indent=2)}"
     )
     raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Gatekeeper",
-                         session_id=session_id, tier=tier)
+                         session_id=session_id, path=path)
     decision = raw.strip().upper()
     if decision not in ("CONTINUE", "PAUSE_FOR_HUMAN", "STOP"):
         decision = "PAUSE_FOR_HUMAN"
     return decision
 
 
-def run_gatekeeper(cycle_count: int = None, session_id: str = None, tier: int = None) -> str:
+def run_gatekeeper(cycle_count: int = None, session_id: str = None, path: str = None) -> str:
     if cycle_count is None:
         cycle_count = read(KEYS["cycle_count"], default=1)
 
@@ -93,7 +93,7 @@ def run_gatekeeper(cycle_count: int = None, session_id: str = None, tier: int = 
         return decision
 
     # --- No hard rule triggered: ask the LLM for judgment ---
-    decision = _ask_llm_for_decision(report, cycle_count, session_id=session_id, tier=tier)
+    decision = _ask_llm_for_decision(report, cycle_count, session_id=session_id, path=path)
     write(KEYS["loop_decision"], decision)
     return decision
 

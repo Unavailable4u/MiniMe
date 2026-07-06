@@ -18,6 +18,7 @@ Place this file at: agents/structure_architect.py
 """
 
 import os
+import re
 import sys
 import json
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
+from relay.emitter import emit_event
 
 load_dotenv()
 
@@ -119,6 +121,45 @@ def _code_preview(code: str, max_chars: int = 400) -> str:
     return code if len(code) <= max_chars else code[:max_chars] + "...(truncated)"
 
 
+def _mermaid_id(text: str) -> str:
+    # Mermaid node IDs can't contain slashes/dots/etc -- sanitize while
+    # keeping the readable label (set separately) intact.
+    return "n" + re.sub(r"[^A-Za-z0-9_]", "_", text)
+
+
+def _build_mermaid(plan: dict) -> str:
+    """Turns the operations plan into a flowchart -- there's no
+    module-depends-on-module relationship here (that's dependency_mapper.py's
+    job), so this instead shows what structure_architect.py actually decided:
+    module-->path for writes, old_path-->new_path for moves, and distinct
+    shapes for delete/mkdir so they're visually distinguishable from writes."""
+    lines = ["graph TD"]
+    for op in plan.get("operations", []):
+        action = op.get("action")
+        if action == "write":
+            module = op.get("module", "?")
+            path = op.get("path", "?")
+            mid = _mermaid_id(f"mod_{module}")
+            pid = _mermaid_id(f"path_{path}")
+            lines.append(f'{mid}["{module}"] -->|write| {pid}["{path}"]')
+        elif action == "move":
+            old_path = op.get("old_path", "?")
+            new_path = op.get("new_path", "?")
+            oid = _mermaid_id(f"path_{old_path}")
+            nid = _mermaid_id(f"path_{new_path}")
+            lines.append(f'{oid}["{old_path}"] -->|move| {nid}["{new_path}"]')
+        elif action == "delete":
+            path = op.get("path", "?")
+            pid = _mermaid_id(f"path_{path}")
+            lines.append(f'{pid}["{path}"]:::deleted')
+        elif action == "mkdir":
+            path = op.get("path", "?")
+            pid = _mermaid_id(f"path_{path}")
+            lines.append(f'{pid}[["{path}/"]]')
+    lines.append("classDef deleted fill:#7f1d1d,stroke:#ef4444,color:#fca5a5")
+    return "\n".join(lines)
+
+
 def run_structure_architect(session_id: str = None, tier: int = None) -> dict:
     fixed_code = read(KEYS["fixed_code"])
     if not fixed_code:
@@ -171,7 +212,10 @@ def run_structure_architect(session_id: str = None, tier: int = None) -> dict:
             ]
         }
 
+    plan["mermaid"] = _build_mermaid(plan)
     write(FILE_PLAN_KEY, plan)
+    emit_event("structure_plan", session_id, agent="structure_architect",
+               payload={"mermaid": plan["mermaid"]})
     return plan
 
 

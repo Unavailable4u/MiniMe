@@ -35,6 +35,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.inspector import SYSTEM_PROMPT, _strip_fences, _validate, VALID_DIRECTED_TASK_TYPES
+from eo.structure import build_reference_structure_addition
 from utils.llm_client import generate_text
 
 MEMBER_B_CHAIN = [
@@ -56,14 +57,20 @@ _UNREACHABLE_VOTE = {
     "confidence": 0.0,
     "suggested_agents": [],
     "reasoning": "member unreachable — all providers in its chain failed",
+    "domain": None,
+    "execution_order": [],
 }
 
 
 def _get_member_vote(label: str, task_text: str, chain: list) -> dict:
     try:
+        # Migration Part 10 §3 — same helper eo/inspector.py's classify()
+        # uses for member A, so all three panel votes see identical
+        # domain/execution_order framing and the same reference structure.
+        user_content = f"Task: {task_text}" + build_reference_structure_addition(task_text)
         raw = generate_text(
             system_prompt=SYSTEM_PROMPT,
-            user_content=f"Task: {task_text}",
+            user_content=user_content,
             chain=chain,
             agent_name=f"EO Panel ({label})",
         )
@@ -73,6 +80,35 @@ def _get_member_vote(label: str, task_text: str, chain: list) -> dict:
         print(f"  [EO Panel] member {label} unreachable ({exc.__class__.__name__}: {exc}), "
               f"voting conservative (tier 3, confidence 0.0).")
         return dict(_UNREACHABLE_VOTE)
+
+
+def _merge_execution_order(votes: list, all_agents_sorted: list) -> list:
+    """Migration Part 10 §3 — the guide folds execution_order into the
+    Panel's schema but doesn't specify how to synthesize THREE members'
+    orders into one. Each member's own execution_order only covers ITS
+    OWN suggested_agents, not the union all three voted for, so we can't
+    just pick one member's list wholesale.
+
+    Chosen rule: stable-merge in priority order A, B, C (A is the
+    Inspector's own already-more-trusted draft, matching how member A is
+    already treated as "carried over" rather than an equal blind vote
+    elsewhere in this module) — first-seen role wins its position, and
+    any unioned role none of the three explicitly ordered (e.g. only
+    mentioned via suggested_agents union, not in anyone's own
+    execution_order) is appended at the end rather than dropped, per the
+    same "never drop a hired role" principle Part 10 §3.1 uses in
+    build_execution_graph_from_hires()."""
+    merged, seen = [], set()
+    for v in votes:
+        for role in v.get("execution_order", []):
+            if role in all_agents_sorted and role not in seen:
+                merged.append(role)
+                seen.add(role)
+    for role in all_agents_sorted:
+        if role not in seen:
+            merged.append(role)
+            seen.add(role)
+    return merged
 
 
 def _synthesize(votes: list, draft: dict) -> dict:
@@ -90,6 +126,18 @@ def _synthesize(votes: list, draft: dict) -> dict:
         # rather than guessing which member was right (Part 2.2).
         directed_task_type = None
         max_tier = max(max_tier, 3)
+
+    # Migration Part 10 §3 — domain and execution_order. Domain
+    # disagreement does NOT bump tier the way directed_task_type
+    # disagreement does — domain only biases execution_order (a
+    # convenience), it isn't load-bearing for routing correctness the
+    # way directed_task_type is, so there's no need to force tier 3 over
+    # three members picking different reference structures.
+    domains = {v.get("domain") for v in votes}
+    domain = domains.pop() if len(domains) == 1 else None
+    all_agents_sorted = sorted(all_agents)
+    execution_order = _merge_execution_order(votes, all_agents_sorted)
+
     reasoning = " | ".join(
         f"member {label}: {v.get('reasoning', '')}"
         for label, v in zip("ABC", votes)
@@ -107,10 +155,12 @@ def _synthesize(votes: list, draft: dict) -> dict:
         "tier": max_tier,
         "directed_task_type": directed_task_type,
         "confidence": round(avg_confidence, 4),
-        "suggested_agents": sorted(all_agents),
+        "suggested_agents": all_agents_sorted,
         "reasoning": reasoning,
         "panel_reviewed": True,
         "panel_votes": panel_votes,
+        "domain": domain,
+        "execution_order": execution_order,
     }
 
 
@@ -125,6 +175,148 @@ def run_panel(task_text: str, draft: dict) -> dict:
     result = _synthesize([draft, member_b, member_c], draft)
     return result
 
+# NEW — add to eo/panel.py, below run_panel()
+
+from eo.registry import AGENT_CAPABILITIES, get_role_prompt, add_role_prompt
+from eo.quota_sentinel import get_quota_snapshot
+from utils.llm_client import QUOTA_CONFIG
+from relay.emitter import emit_event
+
+QUOTA_CUTOFF = 0.8   # matches the blueprint's 80% figure — the same threshold
+                     # quota_sentinel.py already uses to fire quota_alert
+
+# Reuses the EXISTING EO_PANEL_CEREBRAS_KEY account (Part 2's Panel
+# Member B) — no new account provisioning needed for this. Writing a new
+# brief is an occasional single call, not parallel worker traffic.
+BRIEF_WRITER_CHAIN = [
+    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
+]
+
+BRIEF_WRITER_SYSTEM_PROMPT = """You write reusable role briefs for a multi-agent task-execution system. \
+Given a role name and the task that currently needs it, write a concise brief (2-4 sentences) describing \
+what an agent filling this role should do. Write it to generalize beyond this one task — it will be reused \
+verbatim for every future task that needs this same role, so avoid referencing specifics of the current \
+task itself. Respond with ONLY the brief text — no preamble, no markdown, no quotation marks."""
+
+
+def _get_or_write_role_prompt(role_name: str, task_text: str, session_id: str = None,
+                                tier: int = None) -> str:
+    """Fast path: the role's already in the registry (Part 1's global,
+    non-namespaced store) — return it, zero extra LLM calls. Slow path
+    (only happens once per genuinely new role, ever): write a new brief
+    and save it so this slow path never runs again for this role."""
+    existing = get_role_prompt(role_name)
+    if existing:
+        return existing
+
+    emit_event("agent_start", session_id, agent="panel_brief_writer",
+               payload={"label": f"Writing a new role brief: {role_name}"})
+    brief = generate_text(
+        system_prompt=BRIEF_WRITER_SYSTEM_PROMPT,
+        user_content=f"Role: {role_name}\nTask that currently needs it: {task_text}",
+        chain=BRIEF_WRITER_CHAIN,
+        agent_name="Panel (brief writer)",
+        session_id=session_id,   # Part 8 §9 — without this, this call's usage
+        tier=tier,                # never got logged or shown live, silently.
+    ).strip()
+    add_role_prompt(role_name, brief)
+    emit_event("agent_done", session_id, agent="panel_brief_writer",
+               payload={"summary": f"New role '{role_name}' added to the registry"})
+    return brief
+
+
+def _usage_fraction(key_env: str, quota_status: dict) -> float:
+    """0.0-1.0+ fraction of this account's estimated daily quota already
+    used, read directly from get_quota_snapshot()'s own {"pct": ...}
+    field. Missing usage data, an unknown key, or a provider with no
+    verified QUOTA_CONFIG entry (cloudflare, mistral) all read as 0.0 —
+    fail toward "treat it as available" rather than toward excluding an
+    account we simply have no data on yet."""
+    if not quota_status:
+        return 0.0
+    return quota_status.get(key_env, {}).get("pct") or 0.0
+
+
+def _sorted_by_quota(candidates: list, quota_status: dict) -> list:
+    return sorted(candidates, key=lambda k: _usage_fraction(k, quota_status))
+
+
+def staff_task(classification: dict, quota_status: dict = None,
+                task_text: str = None, session_id: str = None) -> list:
+    """
+    Takes the synthesized classification from run_panel() (or the
+    Inspector's own draft, if no escalation was needed) and returns a
+    list of hiring decisions:
+        [{"role": "implementer", "agent_key": "CEREBRAS_CODE_1",
+          "brief": "..."}, ...]
+
+    Migration Part 6 §2: quota_status now auto-fetches the live snapshot
+    from eo/quota_sentinel.py when the caller doesn't supply one — every
+    existing call site (loop_v4.py, task_runner.py) calls staff_task(draft)
+    with quota data omitted, so this makes that omission mean "use live
+    quota data" instead of "run with no quota awareness at all."
+
+    Migration Part 7 §2.1: task_text and session_id (2 NEW params) —
+    task_text lets _get_or_write_role_prompt() write a real, on-topic
+    brief the first time a genuinely new role shows up; session_id lets
+    that brief-writing call emit agent_start/agent_done events on the
+    caller's own live channel instead of nowhere.
+    """
+    if quota_status is None:
+        quota_status = get_quota_snapshot()
+    suggested_agents = classification.get("suggested_agents", [])
+    hires = []
+    for role_name in suggested_agents:
+        candidate = _best_match(role_name, quota_status)
+        if candidate is None:
+            continue
+        brief = _get_or_write_role_prompt(
+            role_name, task_text or classification.get("reasoning", ""),
+            session_id=session_id, tier=classification.get("tier"),
+        )
+        hires.append({"role": role_name, "agent_key": candidate, "brief": brief})
+    return hires
+
+
+def _best_match(role_name: str, quota_status: dict = None) -> str:
+    """
+    Migration Part 6 §1: prefer the best expertise (natural_roles) match
+    and KEEP using it as long as it's under 80% of its daily quota. Only
+    switch away once it crosses that line. If NO account's natural_roles
+    lists this role at all, that's not a failure — fall through to the
+    full account pool and pick purely by quota, since any capable
+    account can attempt a role it just isn't specially tagged for.
+    """
+    natural_candidates = [
+        key for key, info in AGENT_CAPABILITIES.items()
+        if role_name in info.get("natural_roles", [])
+    ]
+
+    if natural_candidates:
+        under_cutoff = [c for c in natural_candidates if _usage_fraction(c, quota_status) < QUOTA_CUTOFF]
+        if under_cutoff:
+            # One or more natural matches still have headroom — use the
+            # least-used one among THEM as a simple tiebreaker (not a
+            # bouncing mechanism, since all of them are still "good
+            # enough" on expertise grounds; this only matters when a
+            # role has more than one natural-match account).
+            return _sorted_by_quota(under_cutoff, quota_status)[0]
+        # every natural match is at/over 80% — deliberately fall through
+        # to the full pool below rather than returning None or forcing
+        # an over-quota account.
+
+    # No natural match at all, OR every natural match is maxed out:
+    # choose from every provisioned account, ranked purely by quota.
+    all_candidates = list(AGENT_CAPABILITIES.keys())
+    if not all_candidates:
+        return None   # only possible if AGENT_CAPABILITIES itself is empty —
+                       # a real configuration problem, not a normal outcome
+    ranked = _sorted_by_quota(all_candidates, quota_status)
+    under_cutoff = [c for c in ranked if _usage_fraction(c, quota_status) < QUOTA_CUTOFF]
+    return under_cutoff[0] if under_cutoff else ranked[0]
+    # ^ if literally every account is over 80%, still return the least-bad
+    #   option rather than failing the hire entirely — a degraded account
+    #   is better than no agent at all for a task that needs one.
 
 if __name__ == "__main__":
     fake_draft = {

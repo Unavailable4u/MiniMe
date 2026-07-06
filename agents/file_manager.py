@@ -16,6 +16,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from eo.project_registry import resolve_project_root
 
 FILE_MAP_KEY = KEYS.get("file_map", "file_map")
 APP_SLUG_KEY = KEYS.get("app_slug", "app_slug")
@@ -61,6 +62,62 @@ def _safe_relpath(app_dir: str, rel_path: str) -> str:
     return full
 
 
+def _confine_to_root(target_path: str, project_unique_name: str = None) -> str:
+    """
+    Migration Part 3 §6.2 — the single most important safety change in
+    this migration (v6 blueprint §24: file-system safety is the
+    top-rated real-world risk).
+
+    Raises PermissionError if target_path would resolve outside the
+    allowed root. When project_unique_name is None, the allowed root is
+    this system's own apps/ directory (today's existing, unchanged
+    default). When set, the allowed root is that external project's
+    registered root path (eo/project_registry.py).
+
+    This is a sanity check on the *root itself* (app_dir / the external
+    project root), called once at the top of every function below that
+    touches disk, before any operations run. It's deliberately separate
+    from -- not a replacement for -- _safe_relpath() above, which already
+    confines every individual operation to whatever root it's given
+    (tighter: one specific app's own subfolder, not the whole apps/
+    tree). Once project_unique_name threads that root through to
+    _safe_relpath() below, every existing per-op check automatically
+    applies to the external project too, with no second, divergent
+    confinement mechanism to keep in sync.
+    """
+    allowed_root = resolve_project_root(project_unique_name) if project_unique_name else APPS_ROOT
+    allowed_root = os.path.abspath(allowed_root)
+    resolved = os.path.abspath(target_path)
+    if resolved != allowed_root and not resolved.startswith(allowed_root + os.sep):
+        raise PermissionError(
+            f"Refusing to write outside confined root: {resolved} not under {allowed_root}"
+        )
+    return resolved
+
+
+def _confirm_destructive(action_desc: str, project_unique_name: str = None) -> bool:
+    """
+    Migration Part 3 §6.3 — confirmation gate for delete/overwrite/move
+    operations specifically when project_unique_name is set (i.e.
+    touching a user's own external project, not MiniMe's own generated
+    apps/ folder). Reuses the same interactive y/N confirm pattern
+    already used elsewhere in the codebase (e.g. loop_v4.py's tier-3 /
+    Ultimate Structure cost-ceiling confirmation) rather than building a
+    second mechanism.
+
+    Always returns True when project_unique_name is None -- writes to
+    MiniMe's own generated apps/ are never gated by this; that's the
+    unmodified, existing behavior.
+    """
+    if not project_unique_name:
+        return True
+    confirm = input(
+        f"[File Manager] About to {action_desc} in external project "
+        f"'{project_unique_name}'. Proceed? [y/N]: "
+    ).strip().lower()
+    return confirm == "y"
+
+
 def _get_module_code(fixed_code: dict, module_name: str):
     data = fixed_code.get(module_name)
     if data is None:
@@ -70,7 +127,7 @@ def _get_module_code(fixed_code: dict, module_name: str):
     return "python", data or ""
 
 
-def run_file_manager() -> dict:
+def run_file_manager(project_unique_name: str = None) -> dict:
     fixed_code = read(KEYS["fixed_code"])
     plan = read(FILE_PLAN_KEY)
     if not fixed_code:
@@ -78,9 +135,16 @@ def run_file_manager() -> dict:
     if not plan:
         raise ValueError("No file_plan found in memory. Run structure_architect.py first.")
 
-    app_slug = _get_or_create_app_slug()
-    app_dir = os.path.join(APPS_ROOT, app_slug)
-    _ensure_app_skeleton(app_dir)
+    if project_unique_name:
+        app_slug = project_unique_name
+        app_dir = _confine_to_root(resolve_project_root(project_unique_name), project_unique_name)
+        # Deliberately no _ensure_app_skeleton() here -- src/, tests/, and
+        # a MiniMe-authored README are this system's own app convention;
+        # they have no business appearing in a user's external project.
+    else:
+        app_slug = _get_or_create_app_slug()
+        app_dir = _confine_to_root(os.path.join(APPS_ROOT, app_slug), project_unique_name)
+        _ensure_app_skeleton(app_dir)
 
     file_map = read(FILE_MAP_KEY, default={})
     written, deleted, moved, skipped = [], [], [], []
@@ -96,6 +160,9 @@ def run_file_manager() -> dict:
                 os.makedirs(full, exist_ok=True)
 
             elif action == "write":
+                if not _confirm_destructive(f"write '{op.get('path')}'", project_unique_name):
+                    skipped.append({"op": op, "reason": "declined by user (external project write)"})
+                    continue
                 module_name = op.get("module")
                 _, code = _get_module_code(fixed_code, module_name)
                 if not code:
@@ -110,6 +177,11 @@ def run_file_manager() -> dict:
                 written.append(rel_path)
 
             elif action == "move":
+                if not _confirm_destructive(
+                    f"move '{op.get('old_path')}' -> '{op.get('new_path')}'", project_unique_name
+                ):
+                    skipped.append({"op": op, "reason": "declined by user (external project move)"})
+                    continue
                 old_full = _safe_relpath(app_dir, op["old_path"])
                 new_full = _safe_relpath(app_dir, op["new_path"])
                 if os.path.exists(old_full):
@@ -125,6 +197,9 @@ def run_file_manager() -> dict:
                 # Hard safety rule: never let the plan delete README or tests/
                 if rel_path == "README.md" or rel_path.startswith("tests/"):
                     skipped.append({"op": op, "reason": "protected path, refused"})
+                    continue
+                if not _confirm_destructive(f"delete '{rel_path}'", project_unique_name):
+                    skipped.append({"op": op, "reason": "declined by user (external project delete)"})
                     continue
                 full = _safe_relpath(app_dir, rel_path)
                 if os.path.exists(full):
@@ -155,7 +230,7 @@ def run_file_manager() -> dict:
     return summary
 
 
-def write_back_existing_app() -> dict:
+def write_back_existing_app(project_unique_name: str = None) -> dict:
     """
     Tier-2's write-back path (Part 2.5 / DIRECTED_TASK_MAP's "debug" and
     "refactor" routes) -- deliberately NOT run_file_manager() above.
@@ -181,17 +256,36 @@ def write_back_existing_app() -> dict:
     Deliberately does not gate on sandbox_tester's pass/fail -- matches
     the existing tier-3 precedent, where file_manager.py already runs
     before gatekeeper.py's verdict, not after/conditional on it.
+
+    Migration Part 3 §6: project_unique_name, when set, redirects the
+    write-back target from MiniMe's own apps/<slug> to the external
+    project registered under that control-unit name (§6.2's
+    _confine_to_root() sanity-checks the root; §6.3's confirmation gate
+    runs once for the whole batch below, since this function always
+    overwrites files by design rather than exposing per-op choices).
     """
     app_slug = read(APP_SLUG_KEY, default=None)
     if not app_slug:
         raise ValueError("No app_slug in memory -- write_back_existing_app() must run "
                           "after eo/code_loader.py has loaded an app.")
-    app_dir = os.path.join(APPS_ROOT, app_slug)
+
+    if project_unique_name:
+        app_dir = _confine_to_root(resolve_project_root(project_unique_name), project_unique_name)
+    else:
+        app_dir = _confine_to_root(os.path.join(APPS_ROOT, app_slug), project_unique_name)
 
     file_map = read(FILE_MAP_KEY, default={})
     fixed_code = read(KEYS["fixed_code"], default=None)
     submitted_code = read(KEYS["submitted_code"], default=None)
     code_source = fixed_code if fixed_code else (submitted_code or {})
+
+    if project_unique_name and code_source and not _confirm_destructive(
+        f"overwrite up to {len(code_source)} file(s)", project_unique_name
+    ):
+        summary = {"app_dir": app_dir, "app_slug": app_slug, "written": [],
+                   "skipped": [{"reason": "declined by user (external project write-back)"}]}
+        write("last_file_manager_summary", summary)
+        return summary
 
     written, skipped = [], []
     for module_name, data in code_source.items():
@@ -223,7 +317,7 @@ def write_back_existing_app() -> dict:
     return summary
 
 
-def write_back_test_code() -> dict:
+def write_back_test_code(project_unique_name: str = None) -> dict:
     """
     Tier-2's "add_tests" write-back path (DIRECTED_TASK_MAP["add_tests"] =
     ["test_writer", "sandbox_tester", ...]). Deliberately separate from
@@ -253,18 +347,38 @@ def write_back_test_code() -> dict:
         (Part 4's rule for modules with nothing meaningfully testable) --
         writing that alone as a test file adds no value, or
       - no module source can be found to stitch the test against.
+
+    Migration Part 3 §6: project_unique_name, when set, redirects the
+    write target from MiniMe's own apps/<slug>/tests to
+    <external project root>/tests, same root-confinement and batch
+    confirmation pattern as write_back_existing_app() above. New test
+    files are additive rather than overwrites of existing source, but
+    they still land inside a user's own project, so the same confirmation
+    gate applies per §6.3's "touching an external project" framing.
     """
     app_slug = read(APP_SLUG_KEY, default=None)
     if not app_slug:
         raise ValueError("No app_slug in memory -- write_back_test_code() must run "
                           "after eo/code_loader.py has loaded an app.")
-    app_dir = os.path.join(APPS_ROOT, app_slug)
+
+    if project_unique_name:
+        app_dir = _confine_to_root(resolve_project_root(project_unique_name), project_unique_name)
+    else:
+        app_dir = _confine_to_root(os.path.join(APPS_ROOT, app_slug), project_unique_name)
     os.makedirs(os.path.join(app_dir, "tests"), exist_ok=True)
 
     fixed_code = read(KEYS["fixed_code"], default=None)
     submitted_code = read(KEYS["submitted_code"], default=None)
     code_source = fixed_code if fixed_code else (submitted_code or {})
     test_code_map = read(KEYS["test_code"], default={})
+
+    if project_unique_name and test_code_map and not _confirm_destructive(
+        f"add up to {len(test_code_map)} test file(s)", project_unique_name
+    ):
+        summary = {"app_dir": app_dir, "app_slug": app_slug, "written": [],
+                   "skipped": [{"reason": "declined by user (external project test write-back)"}]}
+        write("last_file_manager_summary", summary)
+        return summary
 
     written, skipped = [], []
     for module_name, test_code in test_code_map.items():
@@ -298,5 +412,8 @@ def write_back_test_code() -> dict:
     summary = {"app_dir": app_dir, "app_slug": app_slug, "written": written, "skipped": skipped}
     write("last_file_manager_summary", summary)
     return summary
+
+
+if __name__ == "__main__":
     result = run_file_manager()
     print(json.dumps(result, indent=2))
