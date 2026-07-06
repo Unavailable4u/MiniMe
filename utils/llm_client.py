@@ -271,12 +271,12 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
             "usage_update",
             session_id=session_id,
             agent=agent_name,
-            tier=tier,
             payload={
                 "provider": provider,
                 "key_id": key_id,
                 "tokens_used_today": current["tokens"],
                 "daily_limit": QUOTA_CONFIG.get(provider),
+                "tier": tier,
             },
         )
     except Exception as exc:
