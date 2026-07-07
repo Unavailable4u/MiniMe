@@ -55,7 +55,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(task_text: str = None, session_id: str = None, tier: int = None) -> dict:
+def run(task_text: str = None, session_id: str = None, path: str = None) -> dict:
     if task_text:
         write(KEYS["tier1_task_text"], task_text)
     else:
@@ -71,7 +71,7 @@ def run(task_text: str = None, session_id: str = None, tier: int = None) -> dict
         chain=CHAIN,
         agent_name="Prompt Writer (lean)",
         session_id=session_id,
-        tier=tier,
+        tier=path,   # <-- generate_text() still expects `tier`, not `path`
     )
     spec = json.loads(_strip_fences(raw))
     write(KEYS["tier1_module_spec"], spec)
