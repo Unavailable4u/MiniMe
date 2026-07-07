@@ -11,6 +11,22 @@ the entire payoff of this part: domain expertise now lives in data, not
 in a new agents/*.py file per role.
 """
 
+
+# Migration Part 26 §4c: shared home for the "path" (str, eo/inspector.py's
+# Part 12 output) <-> "tier" (int, what every other collaborator in this
+# system still keys on) translation. Previously defined independently in
+# eo/panel.py and eo/loop_v4.py (with loop_v4.py deriving TIER_TO_PATH as
+# this dict's own inverse) -- both files' own comments said the duplication
+# was deliberate, to avoid a circular import (eo.registry -> agents.
+# generic_worker -> eo.panel -> eo.registry). eo/structure.py is safe for
+# both of them to import from instead: it has no imports of its own, and
+# eo/panel.py already imports build_reference_structure_addition from here,
+# so this isn't a new dependency edge -- just one source of truth instead
+# of two copies that could silently drift if "instant"/"direct"/"fixed"/
+# "adaptive" ever change.
+PATH_TO_TIER = {"instant": 0, "direct": 1, "fixed": 2, "adaptive": 3}
+TIER_TO_PATH = {v: k for k, v in PATH_TO_TIER.items()}
+
 STRUCTURE_TEMPLATES = {
     "coding": [
         "idea_planner", "prompt_writer", "implementer", "test_writer",

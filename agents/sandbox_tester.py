@@ -18,7 +18,6 @@ from relay.emitter import emit_event
 from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
 
-from relay.emitter import emit_event
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 load_dotenv()
@@ -97,7 +96,7 @@ def run_sandbox_tester():
             test_results[name] = result
     write(KEYS["test_results"], test_results)
     return test_results
-def run_sandbox_tester_lean(session_id: str = None, tier: int = None) -> dict:
+def run_sandbox_tester_lean(session_id: str = None, path: str = None) -> dict:
     """
     Tier-1 variant (Part 2.4: "Sandbox Tester (optional) ... only invoked
     if the user asked to run/test the result"). Reuses the exact same
@@ -118,13 +117,13 @@ def run_sandbox_tester_lean(session_id: str = None, tier: int = None) -> dict:
             "No tier1_fixed_code found in memory. Run reviewer_fixer_lean first."
         )
     name = module.get("name", "module")
-    emit_event("agent_start", session_id=session_id, agent="sandbox_tester_lean", tier=tier,
+    emit_event("agent_start", session_id=session_id, agent="sandbox_tester_lean", path=path,
                payload={"label": f"Sandbox Tester — {name}"})
     started = time.monotonic()
     result_name, result = _run_one_module(name, module)
     duration_ms = int((time.monotonic() - started) * 1000)
     summary = "passed" if result.get("passed") else f"failed: {result.get('error') or result.get('stderr') or 'unknown'}"
-    emit_event("agent_done", session_id=session_id, agent="sandbox_tester_lean", tier=tier,
+    emit_event("agent_done", session_id=session_id, agent="sandbox_tester_lean", path=path,
                payload={"summary": summary, "duration_ms": duration_ms})
     test_results = {result_name: result}
     write(KEYS["tier1_test_results"], test_results)

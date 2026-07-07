@@ -70,6 +70,8 @@ from eo.sga import attempt as sga_attempt
 from eo.semantic_cache import check_cache, write_cache
 from eo import code_loader
 from eo import routing_memory
+from eo import conversation_memory   # NEW — Part 23
+from eo.structure import PATH_TO_TIER, TIER_TO_PATH   # CHANGED — Part 26 §4c, was defined locally
 from relay.emitter import emit_event
 from memory.bus import write
 
@@ -77,20 +79,17 @@ from memory.bus import write
 # once eo:routing_outcome has enough entries.
 CONFIDENCE_THRESHOLD = 0.75
 
-# NEW — Part 15: translate eo/inspector.py's Part 12 "path" output back
-# into the "tier" int this file (and eo/panel.py, eo/router.py, both not
-# yet renamed) still use throughout. This is a boundary shim, not a
-# decision-schema rename -- decision/draft keep the "tier" key because
-# every downstream collaborator in this file still requires it.
-PATH_TO_TIER = {"instant": 0, "direct": 1, "fixed": 2, "adaptive": 3}
-
-# NEW — Part 15 micro-fix follow-up: reverse of the map above. decision["tier"]
-# is always present (override, draft, or panel-synthesized all set it), while
-# decision["path"] is not (it disappears once eo.panel.run_panel() -- not yet
-# renamed -- synthesizes a new decision). Used only to label the
-# routing_decision event now that relay/emitter.py's own tier->path rename
-# (§4b) means it no longer accepts tier= at all.
-TIER_TO_PATH = {v: k for k, v in PATH_TO_TIER.items()}
+# Migration Part 26 §4c: PATH_TO_TIER / TIER_TO_PATH now come from
+# eo/structure.py (one shared definition, imported above) instead of being
+# defined here and duplicated again in eo/panel.py. Still the same Part 15
+# boundary shim it always was -- translates eo/inspector.py's Part 12
+# "path" output back into the "tier" int this file (and eo/panel.py,
+# eo/router.py, both not yet renamed) use throughout. This is a boundary
+# shim, not a decision-schema rename -- decision/draft keep the "tier" key
+# because every downstream collaborator in this file still requires it.
+# TIER_TO_PATH (its inverse) is used to label the routing_decision event,
+# since relay/emitter.py's own tier->path rename (§4b) means it no longer
+# accepts tier= at all.
 
 # The conservative fallback used when the Inspector's own chain is fully
 # exhausted (network down, all keys unset, etc.) -- tier 3 is the safe
@@ -125,13 +124,22 @@ def _ensure_staffable(decision: dict) -> dict:
 
 
 def _get_decision(task_text: str, tier_override: int, directed_override: str,
-                   session_id: str = None) -> dict:          # <-- add param
+                   session_id: str = None) -> dict:
     """
     ...docstring unchanged...
+
+    Part 23: also folds in this session's light conversation-memory
+    summary (a follow-up like "now add auth too" reading as more complex
+    than the previous turn should be able to bump the classification),
+    merged alongside routing_memory's similar-past-tasks context into the
+    same `context` slot classify() already treats as pure evidence, never
+    an instruction -- see eo/inspector.py's classify() docstring.
     """
     context = routing_memory.retrieve_similar_outcomes(task_text)
+    conv_context = conversation_memory.get_light_context(session_id)   # NEW — Part 23
+    combined_context = "\n\n".join(c for c in [context, conv_context] if c) or None   # NEW — Part 23
     try:
-        draft = classify(task_text, context=context or None)
+        draft = classify(task_text, context=combined_context)   # CHANGED — Part 23, was `context or None`
         draft["tier"] = PATH_TO_TIER[draft["path"]]   # NEW — Part 15
     except Exception as exc:
         print(f"  [Inspector] classification failed ({exc.__class__.__name__}: {exc}), "
@@ -260,15 +268,16 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None
             # api/task_runner.py's _run_tier2 (see that file's comment for
             # the full reasoning): 3-tuple return, execution_order passed
             # in, role_names threaded through, task_text now passed too.
-            graph, key_overrides, role_names = build_execution_graph_from_hires(
+            agent_names, role_names, key_overrides = build_execution_graph_from_hires(
                 hires, execution_order=decision.get("execution_order"))
-            results = execute_graph(graph, task_text=task_text, key_overrides=key_overrides,
+            results = execute_graph(agent_names, task_text=task_text, key_overrides=key_overrides,
                                      project_unique_name=project_unique_name, mode=mode,
                                      role_names=role_names)
+            last_agent = role_names[-1] if role_names else agent_names[-1]
         else:
             graph = build_execution_graph(tier=2, directed_task_type=directed_task_type)
             results = execute_graph(graph, project_unique_name=project_unique_name, mode=mode)
-        last_agent = graph[-1]
+            last_agent = graph[-1]
         print(f"\n[Tier 2 — {directed_task_type}] final output from '{last_agent}':")
         print(json.dumps(results[last_agent], indent=2, default=str))
     routing_memory.log_outcome(task_text, decision, outcome=f"tier-2 {directed_task_type} completed on {app_slug}")
@@ -388,6 +397,16 @@ def main():
               "Start a new task, or ask for it to be rebuilt for the adaptive pipeline specifically.")
         return
 
+    # Part 23: the CLI path has never threaded a real session_id through
+    # at all -- append_turn()'s "no-op if session_id is falsy" guard
+    # means this simply does nothing on the CLI path today. Not a
+    # regression (the CLI never had conversation memory before either),
+    # just a known limitation -- see conversation_memory.py's own
+    # module docstring, and a candidate for a later part if CLI
+    # conversation continuity ever matters.
+    session_id = None
+    conversation_memory.append_turn(session_id, "user", task_text)   # NEW — Part 23 (no-op today)
+
     # NEW — Part 2: Starter General Agents attempt first, unless a manual
     # --tier override was given (an explicit override skips SGA/cache
     # entirely, same reasoning as the classify() skip below).
@@ -408,7 +427,7 @@ def main():
             return
 
     print("[EO] Classifying task...")
-    decision = _get_decision(task_text, opts["tier"], opts["directed_task_type"])
+    decision = _get_decision(task_text, opts["tier"], opts["directed_task_type"], session_id=session_id)
     tier = decision["tier"]
     print(f"[EO] Routing decision: tier={tier} directed_task_type={decision.get('directed_task_type')} "
           f"confidence={decision.get('confidence', 0):.2f}"
@@ -416,10 +435,9 @@ def main():
 
     # CHANGE — Part 7 §2.1: staff_task() now needs the original task text
     # to write a good brief if a suggested role is genuinely new.
-    # Note: session_id is NOT passed here — this CLI path has no
-    # session_id variable at all (same pre-existing gap as the
-    # _get_decision() call above, whose own emit_event() already always
-    # fires with session_id=None on this path). Brief-writer events will
+    # Note: session_id is passed through as None here — this CLI path has
+    # no real session_id variable (same pre-existing gap _get_decision()'s
+    # own call above now shares explicitly). Brief-writer events will
     # simply go out unassociated with any session here, exactly like
     # routing_decision events already do.
     hires = staff_task(decision, task_text=task_text)

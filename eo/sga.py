@@ -48,11 +48,17 @@ def _rotate_start():
     return order[idx:] + order[:idx]
 
 def _call_one(agent_key: str, task_text: str, session_id: str = None) -> str:
+    # Migration Part 26 §5 fix: this took session_id as a parameter but
+    # never passed it into generate_text() below -- every SGA call's
+    # usage/events went out unscoped (session_id=None) even mid-session,
+    # same class of gap §5 found in six other agents at the eo/executor.py
+    # boundary, just isolated here to the three Starter General Agents.
     return generate_text(
         system_prompt=SYSTEM_PROMPT,
         user_content=task_text,
         chain=SGA_CHAINS[agent_key],
         agent_name=f"SGA ({agent_key})",
+        session_id=session_id,
     ).strip()
 
 def attempt(task_text: str, session_id: str = None) -> dict:

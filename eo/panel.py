@@ -35,7 +35,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.inspector import SYSTEM_PROMPT, _strip_fences, _validate, VALID_DIRECTED_TASK_TYPES
-from eo.structure import build_reference_structure_addition
+from eo.structure import build_reference_structure_addition, PATH_TO_TIER, TIER_TO_PATH
 from utils.llm_client import generate_text
 
 MEMBER_B_CHAIN = [
@@ -45,15 +45,17 @@ MEMBER_C_CHAIN = [
     {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "EO_PANEL_GITHUB_PAT"},
     {"provider": "github", "model": "openai/gpt-4.1-nano", "key_env": "EO_PANEL_GITHUB_PAT"},
 ]
-# Same Part 15 boundary shim as eo/loop_v4.py's PATH_TO_TIER — duplicated
-# here (rather than imported) to avoid a circular import, since
-# loop_v4.py already imports this module. eo.inspector.classify()/_validate()
-# emit "path" (Part 12), but every vote in this module (_UNREACHABLE_VOTE,
-# and the draft passed in from loop_v4.py) is keyed by "tier" — a real
-# member B/C vote needs the same translation applied, or _synthesize()'s
-# `v["tier"]` lookup raises KeyError the moment a panel member actually
-# succeeds instead of falling back to _UNREACHABLE_VOTE.
-PATH_TO_TIER = {"instant": 0, "direct": 1, "fixed": 2, "adaptive": 3}
+# Migration Part 26 §4c: PATH_TO_TIER / TIER_TO_PATH now come from
+# eo/structure.py (one shared definition) instead of being redefined here.
+# eo.inspector.classify()/_validate() emit "path" (Part 12), but every vote
+# in this module (_UNREACHABLE_VOTE, and the draft passed in from
+# loop_v4.py) is keyed by "tier" — a real member B/C vote needs the same
+# translation applied, or _synthesize()'s `v["tier"]` lookup raises
+# KeyError the moment a panel member actually succeeds instead of falling
+# back to _UNREACHABLE_VOTE. TIER_TO_PATH is what lets _synthesize()'s
+# return dict carry a real "path" again (Part 26 §6) so
+# eo/routing_memory.py's log_outcome() stops recording "path": None for
+# every escalated task.
 
 # A conservative stand-in vote used when a panel member's own chain is
 # fully exhausted. Per the "never under-route on disagreement" rule, a
@@ -161,6 +163,7 @@ def _synthesize(votes: list, draft: dict) -> dict:
     ]
     return {
         "tier": max_tier,
+        "path": TIER_TO_PATH.get(max_tier),
         "directed_task_type": directed_task_type,
         "confidence": round(avg_confidence, 4),
         "suggested_agents": all_agents_sorted,

@@ -36,6 +36,17 @@ _run_tier2() -> execute_graph() -> file_manager.py, so a tier-2 task can
 target a registered external project (eo/project_registry.py) instead of
 this system's own apps/ directory. Only tier 2 touches disk today, so
 tiers 0/1 don't need this parameter at all.
+
+Part 23: run_task() is now a thin wrapper around _run_task_inner() (the
+old run_task() body, renamed). The wrapper records the incoming task_text
+as a "user" turn and the resolved response as an "assistant" turn in this
+session's shared conversation transcript (eo/conversation_memory.py),
+before returning that response unchanged. This is done as a wrapper
+rather than at each of _run_task_inner()'s several early-return points
+(cache hit, SGA resolved, needs_directed_task_type, needs_app,
+needs_beast_mode_*, tier 0/1/2/3, not_wired_yet, unknown-tier error) so
+every one of those paths gets turn-recording for free without touching
+any of them individually.
 """
 import os
 import sys
@@ -54,6 +65,7 @@ from eo.semantic_cache import check_cache, write_cache
 from eo.panel import staff_task
 from eo import code_loader
 from eo import routing_memory
+from eo import conversation_memory   # NEW — Part 23
 
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
@@ -136,6 +148,25 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     }
 
 
+def _extract_answer_text(response: dict) -> str:
+    """Best-effort flat text for the conversation transcript — mirrors
+    eo/executor.py's own _summarize() reasoning (results vary in shape
+    across tiers), but doesn't truncate as aggressively since this is
+    for context recall, not a UI label. Covers every run_task() return
+    shape: cache/SGA/tier-0 use "answer", tier-1 uses "code", tier-2/3
+    use "output"; anything else (needs_*, not_wired_yet, error) has no
+    "result" payload worth recording, so falls back to "message" (or ""
+    if that's also absent, e.g. an empty result dict)."""
+    result = response.get("result") or {}
+    if "answer" in result:
+        return str(result["answer"])
+    if "code" in result:
+        return str(result["code"])
+    if "output" in result:
+        return str(result["output"])
+    return str(response.get("message") or "")
+
+
 def run_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None) -> dict:
@@ -148,8 +179,35 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         this control-unit name (eo/project_registry.py) instead of this
         system's own apps/<app_slug> directory. Has no effect on tiers
         0/1, which never touch disk.
+
+    Part 23: thin wrapper around _run_task_inner() — records the
+    incoming task_text as a "user" turn and the resolved response as an
+    "assistant" turn in this session's conversation transcript, on
+    either side of the actual routing/execution logic, so a follow-up
+    task submitted with the same session_id has real prior context to
+    build on (see eo/conversation_memory.py).
     """
     session_id = session_id or str(uuid.uuid4())
+    conversation_memory.append_turn(session_id, "user", task_text)   # NEW — Part 23
+    response = _run_task_inner(
+        task_text, tier_override=tier_override, directed_task_type_override=directed_task_type_override,
+        app_slug=app_slug, run_tests=run_tests, session_id=session_id,
+        mode=mode, project_unique_name=project_unique_name,
+    )
+    conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))   # NEW — Part 23
+    return response
+
+
+def _run_task_inner(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
+                     app_slug: str = None, run_tests: bool = False, session_id: str = None,
+                     mode: str = "auto", project_unique_name: str = None) -> dict:
+    """The actual routing/execution body — was run_task() itself before
+    Part 23 wrapped it for conversation-turn recording (see run_task()'s
+    own docstring above). session_id is always already resolved to a
+    real value by the time this is called (run_task() does that before
+    calling in), so the `session_id or str(uuid.uuid4())` line that used
+    to live here is gone — there is exactly one place that generates a
+    session_id now, not two."""
 
     # NEW — Part 4 step 4: Semantic Cache checked first, ahead of SGA
     # itself, so a near-duplicate task skips the whole SGA relay too —
@@ -305,16 +363,17 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, session_id: str, h
             # task text to build its context; before Part 10, nothing in
             # this hires-branch's graph ever read task_text directly, so
             # omitting it was invisible.
-            graph, key_overrides, role_names = build_execution_graph_from_hires(
+            agent_names, role_names, key_overrides = build_execution_graph_from_hires(
                 hires, execution_order=decision.get("execution_order"))
-            results = execute_graph(graph, task_text=task_text, session_id=session_id, path="fixed",
+            results = execute_graph(agent_names, task_text=task_text, session_id=session_id, path="fixed",
                                      key_overrides=key_overrides, project_unique_name=project_unique_name,
                                      mode=mode, role_names=role_names)
+            last_agent = role_names[-1] if role_names else agent_names[-1]
         else:
             graph = build_execution_graph(tier=2, directed_task_type=directed_task_type)
             results = execute_graph(graph, session_id=session_id, path="fixed",
                                      project_unique_name=project_unique_name, mode=mode)
-        last_agent = graph[-1]
+            last_agent = graph[-1]
         output = results[last_agent]
 
     routing_memory.log_outcome(

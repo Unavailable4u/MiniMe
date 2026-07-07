@@ -25,12 +25,17 @@ def _namespaced(key: str) -> str:
     (bootstrap key, can't prefix itself), project_registry (Part 3 step 6
     -- Cross-Project File Control tracks projects across the whole
     system, not any one app_slug), usage:* keys (Part 7.1 -- quota is a
-    property of your accounts, not any one project), and registry:* keys
+    property of your accounts, not any one project), registry:* keys
     (Part 7 -- the role-prompt and role-to-agent registries are also
     properties of the SYSTEM, not any one project, same reasoning as
-    usage:* and project_registry above)."""
+    usage:* and project_registry above), and conversation:* keys (Part 23
+    -- a conversation is a property of the SESSION, not whatever
+    app_slug happens to be active when a given message lands, since a
+    single session isn't reliably tied to one app_slug across its
+    lifetime)."""
     if (key == "app_slug" or key == "project_registry"
-            or key.startswith("usage:") or key.startswith("registry:")):
+            or key.startswith("usage:") or key.startswith("registry:")
+            or key.startswith("conversation:")):   # NEW — Part 23
         return key
     slug = _current_app_slug()
     return f"{slug}:{key}" if slug else key

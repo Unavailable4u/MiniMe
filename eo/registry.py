@@ -210,6 +210,25 @@ REAL_ACTION_ROLES = {
     "fixer": "fixer_pool",
     "security_reviewer": "security_scanner",
     "file_manager": "file_manager",
+    # Migration Part 27 §2: these four were only ever reachable through
+    # the classic tier-3 pipeline (TIERS[3], now deleted from
+    # eo/router.py -- confirmed dead, nothing called it). They do real,
+    # non-LLM-replicable work (HuggingFace embeddings, Cloudflare-scoped
+    # folder planning), not reasoning generic_worker can substitute for,
+    # so -- rather than deleting working integrations along with the
+    # dead pipeline that used to be their only caller -- they're wired
+    # into the adaptive/hires-driven path here instead. Each already
+    # has an AGENT_CAPABILITIES natural_roles tag (structure_architect ->
+    # GROQ_API_KEY_9, dependency_mapper -> CLOUDFLARE_ACCOUNT_ID_4,
+    # memory_search/duplication_checker -> HUGGINGFACE_API_KEY) and
+    # already calls generate_text()/log_usage() with the
+    # session_id/tier convention eo/executor.py's UNSCOPED_TIER_AGENTS
+    # dispatch already handles -- so no executor.py change is needed,
+    # only this mapping.
+    "dependency_mapper": "dependency_mapper",
+    "duplication_checker": "duplication_checker",
+    "structure_architect": "structure_architect",
+    "memory_search": "memory_search",
 }
 
 
@@ -237,10 +256,7 @@ from agents import (
     security_aggregator,
     file_manager,
     documentation_agent,
-    changelog_writer,
     report_writer,
-    final_qa,
-    gatekeeper,
     responder,
     prompt_writer_lean,
     code_writer_lean,
@@ -284,10 +300,18 @@ REGISTRY = {
     # reasoning.
     "file_manager_test_writeback": {"callable": file_manager.write_back_test_code, "needs_cycle_num": False},
     "documentation_agent": {"callable": documentation_agent.run,          "needs_cycle_num": False},
-    "changelog_writer":    {"callable": changelog_writer.run,             "needs_cycle_num": False},
+    # Migration Part 27: changelog_writer, final_qa, and gatekeeper's
+    # dedicated agent modules were retired -- all three were either pure
+    # reasoning-only text generation (changelog_writer, final_qa) with
+    # zero live callers (both confirmed unreachable except through the
+    # dead classic tier-3 pipeline, see router.py's TIERS[3] comment) or,
+    # for gatekeeper, actively superseded by eo/loop_controller.py's own
+    # generic_run(role="gatekeeper", ...) call. Their role names remain
+    # valid in eo/structure.py's STRUCTURE_TEMPLATES for the Panel to
+    # hire, and (not being in REAL_ACTION_ROLES) now resolve straight to
+    # "generic_worker" -- no dedicated module, no lost capability, one
+    # fewer file to maintain.
     "report_writer":       {"callable": report_writer.run_report_writer,  "needs_cycle_num": False},
-    "final_qa":            {"callable": final_qa.run,                    "needs_cycle_num": False},
-    "gatekeeper":          {"callable": gatekeeper.run_gatekeeper,        "needs_cycle_num": True},
     # --- Tier 0 (Part 2.3) ---
     "responder":           {"callable": responder.run,                   "needs_cycle_num": False},
     # --- Tier 1 lean pipeline (Part 2.4) ---
@@ -313,4 +337,3 @@ def resolve(agent_name: str):
             f"built yet (see the module docstring)."
         )
     return entry["callable"]
-

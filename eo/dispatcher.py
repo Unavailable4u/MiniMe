@@ -52,7 +52,8 @@ def _record_visit(session_id: str, name: str) -> None:
     write(f"visit_counts:{session_id}", counts)
 
 
-def next_step(agent_result: dict, role_plan: list, idx: int, session_id: str = None) -> tuple:
+def next_step(agent_result: dict, role_plan: list, idx: int, session_id: str = None,
+              known_roles: set = None) -> tuple:
     """
     role_plan: the ordered list of ROLE names for this run (role_names)
         — NOT resolved module names. This is what lets a
@@ -63,6 +64,14 @@ def next_step(agent_result: dict, role_plan: list, idx: int, session_id: str = N
         (see eo/executor.py) or the next iteration will index past its
         end.
     idx: position in role_plan that just finished.
+    known_roles: set of role names that have an actual staffed brief
+        (already-briefed roles, e.g. from eo/registry.py's
+        list_known_roles() plus the current role_plan). Used to reject
+        hallucinated "next_destination" values that were never staffed
+        and have no brief -- a role escalating to a name outside this
+        set gets rejected rather than run brief-less. If None, no
+        rejection is applied (back-compat for callers that don't pass
+        it yet).
 
     Returns (next_idx_or_None, reason). Caller resolves
         agent_names[next_idx] separately to know which function to call.
@@ -78,6 +87,18 @@ def next_step(agent_result: dict, role_plan: list, idx: int, session_id: str = N
     if named not in role_plan:
         # A genuinely new role, not in the original plan at all --
         # escalate by appending it on the fly rather than dropping it.
+        # BUT only if it's in the system's known-roles vocabulary
+        # (already-briefed roles) -- otherwise the model just made this
+        # name up on the spot, it was never passed through
+        # staff_task() -> _get_or_write_role_prompt() -> add_role_prompt(),
+        # and running it would produce a brief-less, dead-end step.
+        if known_roles is not None and named not in known_roles:
+            emit_event("hallucinated_role_rejected", session_id=session_id, agent="dispatcher",
+                       payload={"attempted_role": named})
+            nxt = idx + 1
+            target_idx = nxt if nxt < len(role_plan) else None
+            _log_route(session_id, role_plan[nxt] if target_idx is not None else None, "plan")
+            return target_idx, "plan"
         role_plan.append(named)
         target_idx = len(role_plan) - 1
         reason = "escalate"

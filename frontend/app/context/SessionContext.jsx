@@ -40,6 +40,13 @@ export function SessionProvider({ children }) {
   const [liveSteps, setLiveSteps] = useState([]);
   const stepsRef = useRef([]);           // NEW — Part 18: mirrors liveSteps synchronously
   const stepSeq = useRef(0);             // NEW — Part 18: unique id per step, for React keys
+  // NEW — Part 21: mirror routeTrace/dependencyMap/structurePlan the
+  // same way stepsRef mirrors liveSteps, so they survive into the
+  // per-message snapshot instead of being wiped by the next run's
+  // setRouteTrace([]) / setDependencyMap({}) / setStructurePlan(null).
+  const routeTraceRef = useRef([]);
+  const dependencyMapRef = useRef({});
+  const structurePlanRef = useRef(null);
   const [usageStats, setUsageStats] = useState({});
   const [usageHistory, setUsageHistory] = useState({});       // { [statKey]: [{t, tokens}, ...] } — Part 17
   const [combinedUsageHistory, setCombinedUsageHistory] = useState([]); // [{t, [provider]: tokens}, ...] — Part 17
@@ -50,6 +57,7 @@ export function SessionProvider({ children }) {
   const [structurePlan, setStructurePlan] = useState(null);
   const [mode, setMode] = useState("auto");
   const [pusherConnected, setPusherConnected] = useState(false); // NEW — Settings tab diagnostic, §6
+  const [activeMessageIndex, setActiveMessageIndex] = useState(null); // NEW — Part 21: shared scroll-sync index between Chat and Working panels
 
   // --- Pusher subscription: identical to today's page.js effect, just
   // living up here instead of inside the page that used to render
@@ -114,7 +122,9 @@ export function SessionProvider({ children }) {
         return;
       }
       if (eventType === "dispatch_event") {
-        setRouteTrace((prev) => [...prev, { destination: payload?.destination, reason: payload?.reason }]);
+        const nextRouteTrace = [...routeTraceRef.current, { destination: payload?.destination, reason: payload?.reason }];
+        routeTraceRef.current = nextRouteTrace;
+        setRouteTrace(nextRouteTrace);
         return;
       }
       if (eventType === "macro_loop_decision") {
@@ -125,11 +135,13 @@ export function SessionProvider({ children }) {
         return;
       }
       if (eventType === "dependency_map") {
-        setDependencyMap(payload?.map || {});
+        dependencyMapRef.current = payload?.map || {};
+        setDependencyMap(dependencyMapRef.current);
         return;
       }
       if (eventType === "structure_plan") {
-        setStructurePlan(payload?.mermaid || null);
+        structurePlanRef.current = payload?.mermaid || null;
+        setStructurePlan(structurePlanRef.current);
         return;
       }
       if (eventType === "quota_alert") {
@@ -200,8 +212,11 @@ export function SessionProvider({ children }) {
     setLiveDecision(null);
     stepsRef.current = [];
     setLiveSteps([]);
+    routeTraceRef.current = [];
     setRouteTrace([]);
+    dependencyMapRef.current = {};
     setDependencyMap({});
+    structurePlanRef.current = null;
     setStructurePlan(null);
     setMacroLoopDecisions([]);   // NEW — same clean-slate treatment as the others
     try {
@@ -219,11 +234,37 @@ export function SessionProvider({ children }) {
       // which would be stale here — this closure captured whatever
       // liveSteps was at the moment sendTask() was called, not the
       // latest value after every event that streamed in since).
-      setMessages((prev) => [...prev, { role: "assistant", data, steps: stepsRef.current }]);
-    } catch (err) {
+      // NEW — Part 21: same reasoning now applies to routeTrace/
+      // dependencyMap/structurePlan — snapshot from the refs (not the
+      // stale-closure state vars), plus the task prompt itself, so the
+      // Working Panel has a self-contained section per message.
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", data: { status: "error", message: String(err) }, steps: stepsRef.current },
+        {
+          role: "assistant",
+          data,
+          task: taskText,
+          steps: stepsRef.current,
+          routeTrace: routeTraceRef.current,
+          dependencyMap: dependencyMapRef.current,
+          structurePlan: structurePlanRef.current,
+        },
+      ]);
+    } catch (err) {
+      // NEW — Part 21: same four-field snapshot on the error path, so a
+      // failed run still shows whatever routing/structure data was
+      // captured before it broke instead of a blank Working Panel section.
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          data: { status: "error", message: String(err) },
+          task: taskText,
+          steps: stepsRef.current,
+          routeTrace: routeTraceRef.current,
+          dependencyMap: dependencyMapRef.current,
+          structurePlan: structurePlanRef.current,
+        },
       ]);
     } finally {
       setLoading(false);
@@ -261,6 +302,7 @@ export function SessionProvider({ children }) {
   macroLoopDecisions,   // NEW
   mode, setMode,
   pusherConnected,
+  activeMessageIndex, setActiveMessageIndex,
   sendTask, registerProject,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

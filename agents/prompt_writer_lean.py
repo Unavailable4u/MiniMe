@@ -16,6 +16,13 @@ table: Groq llama-3.3-70b-versatile -> GitHub Models gpt-4.1-mini.
 Deliberately produces ONE module, not 2-3 like the production Prompt
 Writer — Part 2.1 defines tier 1 as "a small, self-contained script or
 single-file program," so there's nothing to split.
+
+Part 23: prepends this session's full conversation-memory context
+(eo/conversation_memory.py's get_full_context()) ahead of the task text
+sent to the LLM, so a follow-up task has real prior content to build on.
+Only the text actually sent to the model gets this prefix -- the stored
+tier1_task_text stays the raw task text, unmodified, so anything else
+that reads it later still gets a clean value.
 """
 import os
 import sys
@@ -23,6 +30,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from eo import conversation_memory   # NEW — Part 23
 from utils.llm_client import generate_text
 
 CHAIN = [
@@ -65,13 +73,19 @@ def run(task_text: str = None, session_id: str = None, path: str = None) -> dict
                 "No tier1_task_text found in memory and none passed in. "
                 "This must be the first step of the tier-1 pipeline."
             )
+
+    conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23
+    user_content = f"Task: {task_text}"
+    if conv_context:
+        user_content = f"Recent conversation:\n{conv_context}\n\n{user_content}"   # NEW — Part 23
+
     raw = generate_text(
         system_prompt=SYSTEM_PROMPT,
-        user_content=f"Task: {task_text}",
+        user_content=user_content,   # CHANGED — Part 23, was f"Task: {task_text}"
         chain=CHAIN,
         agent_name="Prompt Writer (lean)",
         session_id=session_id,
-        tier=path,   # <-- generate_text() still expects `tier`, not `path`
+        path=path,   # Migration Part 27 §1: generate_text() now accepts `path` for real
     )
     spec = json.loads(_strip_fences(raw))
     write(KEYS["tier1_module_spec"], spec)

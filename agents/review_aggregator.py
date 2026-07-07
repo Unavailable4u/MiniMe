@@ -12,12 +12,23 @@ Dedupe fix: exact-string (module, description) matching under-merges in
 practice, since 3 independent reviewers phrase the same bug differently
 ("references an undefined global variable" vs. "ignores its 'todos'
 parameter" -- same bug, zero string overlap on a strict key). Switched to
-difflib.SequenceMatcher fuzzy matching within each module -- still fully
-deterministic stdlib Python, no LLM call, keeping this module's original
-design constraint intact.
+fuzzy matching within each module -- still fully deterministic stdlib
+Python, no LLM call, keeping this module's original design constraint
+intact.
+
+Migration Part 26 §4b: the actual similarity scoring (tokenize + Jaccard/
+SequenceMatcher) used to be reimplemented here nearly identically to
+agents/security_aggregator.py's copy -- now shared via utils/similarity.py.
+This file keeps its own SIMILARITY_THRESHOLD and _STOPWORDS (hand-tuned
+against real examples, per the original comment) and passes them in
+explicitly; see utils/similarity.py's docstring for why they weren't
+collapsed into one shared list/threshold too.
 """
-import re
-from difflib import SequenceMatcher
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.similarity import similarity as _fuzzy_similarity
 
 SIMILARITY_THRESHOLD = 0.35
 
@@ -28,35 +39,11 @@ _STOPWORDS = {
 }
 
 
-def _tokenize(text: str) -> set:
-    words = re.findall(r"[a-z0-9_']+", text.lower())
-    # Light stemming -- strip common suffixes so "raises"/"raise",
-    # "validating"/"validate" count as the same token. Crude but cheap,
-    # and good enough for this: we only need "close enough", not correct
-    # linguistics.
-    stemmed = set()
-    for w in words:
-        if w in _STOPWORDS or len(w) <= 2:
-            continue
-        for suffix in ("ing", "ed", "es", "s"):
-            if w.endswith(suffix) and len(w) > len(suffix) + 2:
-                w = w[: -len(suffix)]
-                break
-        stemmed.add(w)
-    return stemmed
-
-
 def _similarity(a: str, b: str) -> float:
-    ta, tb = _tokenize(a), _tokenize(b)
-    if not ta or not tb:
-        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-    jaccard = len(ta & tb) / len(ta | tb)
-    # Take whichever signal is stronger -- catches both "reworded but same
-    # vocabulary" (Jaccard's strength) and "near-identical phrasing"
-    # (SequenceMatcher's strength) without either one alone missing cases
-    # the other would catch.
-    char_ratio = SequenceMatcher(None, a.lower(), b.lower()).ratio()
-    return max(jaccard, char_ratio)
+    # stem=True matches this module's original _tokenize() behavior
+    # (light suffix-stemming so "raises"/"raise" count as the same token).
+    return _fuzzy_similarity(a, b, _STOPWORDS, stem=True)
+
 
 def aggregate_reviews(member_reviews: list) -> dict:
     """
