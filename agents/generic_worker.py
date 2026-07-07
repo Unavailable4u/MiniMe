@@ -52,12 +52,22 @@ PROVIDER_DEFAULT_MODEL = {
     "github": "openai/gpt-4.1-mini",
 }
 
+MARKDOWN_INSTRUCTION = (
+    "\n\nFormat your answer in Markdown: use fenced code blocks with a "
+    "language tag for any code, use tables for tabular data, use headers/"
+    "bullet lists to structure longer answers, and use bold/italic "
+    "sparingly for emphasis."
+)
+
 NEXT_TAG_INSTRUCTION = (
     "\n\nAfter your answer, on its own final line, write exactly one of:\n"
     "NEXT: DONE                 (your part is genuinely complete)\n"
     "NEXT: <role_name>          (this needs another pass from a specific "
     "earlier or later role, name it exactly)\n"
-    "Default to NEXT: DONE unless something is genuinely unresolved."
+    "Default to NEXT: DONE unless something is genuinely unresolved.\n"
+    "IMPORTANT: this NEXT: line must be plain text, NOT inside a markdown "
+    "code block or any other formatting, so it can still be parsed "
+    "correctly."
 )
 
 # Migration Part 12 §3.4 — see module docstring. A role not in this map
@@ -130,7 +140,7 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
 
     chain = [_chain_step_for(agent_key)] if agent_key else []
     raw = generate_text(
-        system_prompt=(brief or "") + NEXT_TAG_INSTRUCTION,
+        system_prompt=(brief or "") + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION,
         user_content=context,
         chain=chain,
         agent_name=f"generic:{role}",

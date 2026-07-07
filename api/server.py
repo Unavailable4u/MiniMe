@@ -23,14 +23,14 @@ import traceback
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, Query
 from eo.project_registry import list_projects, generate_control_unit, register_project
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Union
 
 from api.task_runner import run_task
-from eo.quota_sentinel import get_quota_snapshot
+from eo.quota_sentinel import get_quota_snapshot, get_usage_history
 from eo.project_registry import list_projects
 
 app = FastAPI(title="MiniMe v6 — EO layer API")
@@ -129,6 +129,16 @@ def health():
 @app.get("/api/quota", dependencies=[Depends(require_auth)])
 def quota():
     return get_quota_snapshot()
+
+
+@app.get("/api/usage/history", dependencies=[Depends(require_auth)])
+def usage_history(days: int = Query(7, ge=1, le=90)):
+    # Cross-session, persisted day-by-day usage (Part 19 candidate flagged
+    # in the Part 17 guide) -- reads the same usage:{provider}:{key_id}:
+    # {date} records /api/quota already reads for today, just repeated
+    # across the last `days` calendar dates. See eo/quota_sentinel.py's
+    # get_usage_history() docstring for the exact response shape.
+    return get_usage_history(days=days)
 
 
 @app.get("/api/projects", dependencies=[Depends(require_auth)])

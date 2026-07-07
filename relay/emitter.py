@@ -38,6 +38,7 @@ VALID_EVENT_TYPES = {
     "agent_start", "agent_token_chunk", "agent_done",
     "routing_decision", "usage_update", "cycle_update", "error",
     "dispatch_event", "quota_alert", "dependency_map", "structure_plan",
+    "macro_loop_decision",
 }
 
 _pusher_client = None

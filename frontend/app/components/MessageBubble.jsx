@@ -1,12 +1,16 @@
 "use client";
 import RoutingTraceCard from "./RoutingTraceCard";
 import AgentStepList from "./AgentStepList";
+import Markdown from "./Markdown";
 
 export default function MessageBubble({ message }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="bg-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%]">
+        {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
+            pasted code) actually keeps its line breaks and indentation
+            instead of collapsing to one line. */}
+        <div className="bg-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%] whitespace-pre-wrap">
           {message.text}
         </div>
       </div>
@@ -30,19 +34,25 @@ export default function MessageBubble({ message }) {
 
 function ResultBody({ data }) {
   if (data.status === "error" || data.message) {
-    return <div className="text-red-400">{data.message}</div>;
+    return <div className="text-red-400 whitespace-pre-wrap">{data.message}</div>;
   }
   if (data.tier === "sga" || data.tier === "cache") {
-    return <div>{data.result?.answer}</div>;
+    return <Markdown>{data.result?.answer}</Markdown>;
   }
   if (data.tier === 0) {
-    return <div>{data.result?.answer}</div>;
+    return <Markdown>{data.result?.answer}</Markdown>;
   }
   if (data.tier === 1) {
+    // NOT run through Markdown here on purpose: result.code is raw code
+    // text, not markdown prose — parsing it as markdown risks mangling
+    // things like underscores (_snake_case_) as italics. Styled the same
+    // as Markdown's own fenced-code blocks for visual consistency.
     return (
-      <pre className="whitespace-pre-wrap text-xs bg-black/40 rounded p-2 overflow-x-auto">
-        {data.result?.code}
-      </pre>
+      <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden">
+        <pre className="overflow-x-auto p-3 text-xs text-neutral-300">
+          <code>{data.result?.code}</code>
+        </pre>
+      </div>
     );
   }
   if (data.tier === 2) {

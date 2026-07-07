@@ -1,10 +1,13 @@
 "use client";
-import { useMemo } from "react";
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { useMemo, useState, useEffect } from "react";
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 import { useSession } from "../../context/SessionContext";
 
 const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
 
+// Kept as distinct, saturated per-provider colors on purpose — these
+// identify DATA series in charts, not chrome, so they stay separate from
+// the cyan/magenta UI accent palette rather than being folded into it.
 const PROVIDER_COLOR = {
   groq: "#f97316",
   cerebras: "#3b82f6",
@@ -13,21 +16,154 @@ const PROVIDER_COLOR = {
   github: "#a1a1aa",
   huggingface: "#eab308",
 };
-const colorFor = (provider) => PROVIDER_COLOR[provider] || "#8b5cf6";
+const colorFor = (provider) => PROVIDER_COLOR[provider] || "#a78bfa";
+
+const TOOLTIP_STYLE = {
+  background: "#0a0f1a",
+  border: "1px solid #1a2740",
+  borderRadius: 6,
+  fontSize: 11,
+  fontFamily: "'Share Tech Mono', monospace",
+  color: "#d6e4f0",
+};
+
+const DAY_RANGES = [7, 14, 30];
+
+// Reads NEXT_PUBLIC_API_KEY if you've set one for the frontend to send as
+// x-api-key -- matches server.py's require_auth() header check. If your
+// SessionContext.jsx already attaches this header some other way (e.g. a
+// value read from context instead of env), swap this constant for that
+// instead; this is just the simplest thing that matches server.py as
+// written.
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
+
+function UsageHistoryPanel({ apiUrl }) {
+  const [days, setDays] = useState(7);
+  const [historyData, setHistoryData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`${apiUrl}/api/usage/history?days=${days}`, {
+      headers: API_KEY ? { "x-api-key": API_KEY } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setHistoryData(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [apiUrl, days]);
+
+  const chartRows = useMemo(() => {
+    if (!historyData) return [];
+    const { dates, providers } = historyData;
+    return dates.map((d, i) => {
+      const row = { date: d };
+      for (const provider of Object.keys(providers)) {
+        row[provider] = providers[provider].tokens[i];
+      }
+      return row;
+    });
+  }, [historyData]);
+
+  const providerNames = historyData ? Object.keys(historyData.providers).sort() : [];
+
+  return (
+    <Card
+      title="Usage history (cross-session)"
+      action={
+        <div className="flex gap-1">
+          {DAY_RANGES.map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`font-display text-[10px] uppercase tracking-wide rounded px-2 py-1 border transition-colors ${
+                days === d
+                  ? "bg-cyber-cyan/10 border-cyber-cyan text-cyber-cyan"
+                  : "border-cyber-border text-cyber-dim hover:text-cyber-text"
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      }
+    >
+      {loading && <p className="text-xs text-cyber-dim">Loading history...</p>}
+      {error && (
+        <p className="text-xs text-rose-400">
+          Couldn't load usage history: {error}. Check that <code className="font-mono">GET /api/usage/history</code> is
+          reachable and, if <code className="font-mono">API_AUTH_SECRET</code> is set on the backend, that{" "}
+          <code className="font-mono">NEXT_PUBLIC_API_KEY</code> is set to match on the frontend.
+        </p>
+      )}
+      {!loading && !error && providerNames.length === 0 && (
+        <p className="text-xs text-cyber-dim">No usage recorded in this window yet.</p>
+      )}
+      {!loading && !error && providerNames.length > 0 && (
+        <>
+          <div style={{ height: 220 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartRows}>
+                <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: "#64748b" }}
+                  tickFormatter={(d) => d.slice(5)}
+                />
+                <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }} />
+                {providerNames.map((p) => (
+                  <Bar key={p} dataKey={p} fill={colorFor(p)} radius={[2, 2, 0, 0]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3 pt-2 border-t border-cyber-border">
+            {providerNames.map((p) => (
+              <div key={p} className="text-[11px] font-mono">
+                <span style={{ color: colorFor(p) }} className="font-display uppercase tracking-wide text-[10px]">
+                  {p}
+                </span>
+                <div className="text-cyber-dim">
+                  avg {historyData.providers[p].avg_tokens_per_day.toLocaleString()} tok/day
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
 
 export default function TokenUsageTab() {
-  const { usageStats, usageHistory, combinedUsageHistory } = useSession();
+  const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
 
   const byProvider = useMemo(() => groupByProvider(usageStats), [usageStats]);
   const providers = Object.keys(byProvider).sort();
 
   if (providers.length === 0) {
     return (
-      <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto">
-        <p className="text-neutral-500 text-sm">
+      <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-4">
+        <p className="text-cyber-dim text-sm">
           No usage events yet this session. Send a task from Chat — accounts
           light up here as soon as they make their first call today.
         </p>
+        <UsageHistoryPanel apiUrl={API_URL} />
         <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
       </div>
     );
@@ -51,6 +187,7 @@ export default function TokenUsageTab() {
           />
         ))}
       </div>
+      <UsageHistoryPanel apiUrl={API_URL} />
       <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
     </div>
   );
@@ -83,24 +220,26 @@ function OverallRollup({ byProvider }) {
   return (
     <Card title="Overall, this session">
       <div className="flex items-baseline justify-between">
-        <span className="text-2xl font-medium text-neutral-100">{totalUsed.toLocaleString()}</span>
-        <span className="text-xs text-neutral-500">
+        <span className="font-display text-2xl text-cyber-cyan cyber-glow-text">{totalUsed.toLocaleString()}</span>
+        <span className="text-xs text-cyber-dim">
           tokens{totalLimit ? ` / ~${totalLimit.toLocaleString()} est. capacity` : ""}
         </span>
       </div>
       {pct !== null && (
-        <div className="h-1.5 rounded-full bg-neutral-900 overflow-hidden mt-2">
+        <div className="h-1.5 rounded-full bg-black/50 border border-cyber-border overflow-hidden mt-2">
           <div
-            className={`h-full rounded-full ${pct >= 80 ? "bg-amber-500" : "bg-neutral-500"}`}
+            className={`h-full rounded-full transition-all ${
+              pct >= 80 ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.6)]" : "bg-cyber-cyan shadow-glow-cyan"
+            }`}
             style={{ width: `${pct}%` }}
           />
         </div>
       )}
       {unmeasuredProviders.length > 0 && (
-        <p className="text-[11px] text-neutral-600 mt-2">
+        <p className="text-[11px] text-cyber-dim mt-2">
           Capacity estimate excludes {unmeasuredProviders.join(", ")} — no verified
           daily limit configured for {unmeasuredProviders.length === 1 ? "it" : "them"} yet
-          (see <code>utils/llm_client.py</code>'s <code>QUOTA_CONFIG</code>).
+          (see <code className="font-mono">utils/llm_client.py</code>'s <code className="font-mono">QUOTA_CONFIG</code>).
         </p>
       )}
     </Card>
@@ -114,10 +253,10 @@ function ProviderCard({ provider, keys, history }) {
   const pct = limit ? Math.min(100, Math.round((used / (limit * keys.length)) * 100)) : null;
   const providerHistory = useMemo(() => mergeProviderHistory(keys, history), [keys, history]);
   return (
-    <div className="rounded-lg border border-neutral-800 p-3 space-y-2">
+    <div className="cyber-panel p-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium" style={{ color }}>{provider}</span>
-        <span className="text-xs text-neutral-500">
+        <span className="font-display text-xs uppercase tracking-wide" style={{ color }}>{provider}</span>
+        <span className="text-xs text-cyber-dim">
           {used.toLocaleString()}{limit ? ` / ~${(limit * keys.length).toLocaleString()}` : ""} tokens today
         </span>
       </div>
@@ -129,19 +268,19 @@ function ProviderCard({ provider, keys, history }) {
               <XAxis dataKey="t" hide />
               <YAxis hide domain={[0, "auto"]} />
               <Tooltip
-                contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", fontSize: 11 }}
+                contentStyle={TOOLTIP_STYLE}
                 labelFormatter={(t) => new Date(t).toLocaleTimeString()}
               />
             </AreaChart>
           </ResponsiveContainer>
         </div>
       )}
-      <div className="space-y-1 pt-1 border-t border-neutral-800/70">
+      <div className="space-y-1 pt-1 border-t border-cyber-border">
         {keys.map((k) => {
           const keyPct = limit ? Math.min(100, Math.round((k.tokens_used_today / limit) * 100)) : null;
           const near = keyPct !== null && keyPct >= 80;
           return (
-            <div key={k.statKey} className="text-[11px] text-neutral-500 flex items-center justify-between">
+            <div key={k.statKey} className="text-[11px] text-cyber-dim flex items-center justify-between font-mono">
               <span>{k.key_id}</span>
               <span className={near ? "text-amber-500" : ""}>
                 {(k.tokens_used_today || 0).toLocaleString()}
@@ -171,11 +310,11 @@ function CombinedChart({ data, providers }) {
     <div style={{ height: 200 }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data}>
-          <CartesianGrid stroke="#262626" strokeDasharray="3 3" />
-          <XAxis dataKey="t" tickFormatter={(t) => new Date(t).toLocaleTimeString()} tick={{ fontSize: 10, fill: "#737373" }} />
-          <YAxis tick={{ fontSize: 10, fill: "#737373" }} />
+          <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
+          <XAxis dataKey="t" tickFormatter={(t) => new Date(t).toLocaleTimeString()} tick={{ fontSize: 10, fill: "#64748b" }} />
+          <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
           <Tooltip
-            contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", fontSize: 11 }}
+            contentStyle={TOOLTIP_STYLE}
             labelFormatter={(t) => new Date(t).toLocaleTimeString()}
           />
           {providers.map((p) => (
@@ -196,10 +335,13 @@ function CombinedChart({ data, providers }) {
   );
 }
 
-function Card({ title, children }) {
+function Card({ title, action, children }) {
   return (
-    <div className="rounded-lg border border-neutral-800 p-4">
-      <h3 className="text-xs text-neutral-500 mb-2">{title}</h3>
+    <div className="cyber-panel p-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-display text-[11px] uppercase tracking-wide text-cyber-dim">{title}</h3>
+        {action}
+      </div>
       {children}
     </div>
   );
