@@ -58,6 +58,16 @@ def run_report_writer():
 
     report_record = {
         "text": report_text,
+        # Migration Part 26 fix (§2): documentation_agent.py and
+        # memory_search.py both read report.get("summary", "") -- there
+        # was never a "summary" key, only "text", so every generated
+        # README's "recent changes" section and every cross-cycle memory
+        # embedding silently got an empty string instead of the actual
+        # cycle summary. Adding "summary" as an alias here (rather than
+        # renaming "text" outright) fixes both readers immediately
+        # without risking any other consumer that might already depend
+        # on the "text" key.
+        "summary": report_text,
         "all_tests_passed": all_passed,
         "failed_modules": failed_modules,
         "target_feature": target_feature,

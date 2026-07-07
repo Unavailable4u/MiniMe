@@ -32,43 +32,33 @@ Output, written to KEYS["duplication_report"]:
 import os
 import sys
 import json
-import requests
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, vector_index
-from utils.llm_client import log_usage
+from utils.llm_client import log_usage, embed_text
 
 load_dotenv()
 
-HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-HF_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}/pipeline/feature-extraction"
 ID_PREFIX = "codechunk"
 SIMILARITY_THRESHOLD = 0.90
 HF_KEY_ENV = "HUGGINGFACE_API_KEY"
 
-
-def _embed(text: str, session_id: str = None, tier=None, agent_name: str = "Duplication Checker") -> list:
-    api_key = os.getenv(HF_KEY_ENV)
-    if not api_key:
-        raise RuntimeError(f"{HF_KEY_ENV} not set")
-    response = requests.post(
-        HF_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"inputs": text[:4000], "options": {"wait_for_model": True}},
-        timeout=30,
-    )
-    response.raise_for_status()
-    # Feature-extraction responses carry no token/usage field the way chat
-    # completions do -- tokens=None, but the request itself still gets
-    # logged (see llm_client.log_usage()'s docstring for why this now
-    # differs from the old all-or-nothing _log_usage() behavior).
-    log_usage("huggingface", HF_KEY_ENV, None, session_id=session_id, tier=tier, agent_name=agent_name)
-    vec = response.json()
-    if isinstance(vec[0], list):
-        dims = len(vec[0])
-        return [sum(row[i] for row in vec) / len(vec) for i in range(dims)]
-    return vec
+# Migration Part 26 §4a: this module used to hand-roll its own _embed(),
+# POSTing to the HF inference URL directly -- the same pattern
+# agents/memory_search.py's own comment flagged as something this file
+# "should use for its HF calls" and never got fixed. Now routes through
+# the shared utils.llm_client.embed_text(), matching memory_search.py.
+# embed_text() already mean-pools an unpooled [seq_len][dim] response the
+# same way this file's old _embed() did, so nothing is lost there. Two
+# things embed_text() does NOT do that the old _embed() did, preserved at
+# the call site below instead: truncating to 4000 chars, and logging
+# usage (embed_text() itself stays a pure embed call with no logging
+# side effect, same as it already is for memory_search.py's two callers).
+#
+# (eo/routing_memory.py has a THIRD hand-rolled _embed() copy, left alone
+# on purpose -- see its own comment for why -- so it's not part of this
+# merge.)
 
 
 def _app_slug() -> str:
@@ -88,10 +78,22 @@ def run(session_id: str = None, tier=None) -> dict:
         if not code.strip():
             continue
         try:
-            vector = _embed(code, session_id=session_id, tier=tier)
+            # Truncated to 4000 chars -- embed_text() itself doesn't
+            # truncate (its two other callers, memory_search.py and
+            # eo/semantic_cache.py, only ever embed short text), but code
+            # snippets can be much longer, so this file still truncates
+            # at its own call site to preserve the old _embed()'s behavior.
+            vector = embed_text(code[:4000])
         except Exception as exc:
             print(f"  [Duplication Checker] embed failed for {module_name}: {exc}")
             continue
+        # embed_text() has no logging side effect of its own (same as
+        # memory_search.py's two embed_text() call sites) -- log right
+        # after the embed call succeeds, same reasoning as
+        # memory_search.py's own comment: a downstream Vector query
+        # failure shouldn't hide that the billable HF call already happened.
+        log_usage("huggingface", HF_KEY_ENV, None, session_id=session_id,
+                   tier=tier, agent_name="Duplication Checker")
 
         try:
             matches = vector_index().query(

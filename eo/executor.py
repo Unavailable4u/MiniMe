@@ -70,16 +70,54 @@ import sys
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.registry import resolve, resolve_role
+from eo.registry import resolve, resolve_role, list_known_roles
+from eo.structure import PATH_TO_TIER
 from relay.emitter import emit_event
 
 TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
 
+# Migration Part 26 §5: these six agents are NOT special-cased below, so
+# every prior call into them fell into the generic `else: fn()` branch --
+# called with ZERO arguments. Their own run()/run_X() signatures default
+# session_id/tier to None, so this never crashed, but it did mean every
+# one of their generate_text()/usage-log calls was silently unscoped
+# (session_id=None) even mid-session, and none of their calls were
+# labeled with a real tier either. Per §1's own table, all six already do
+# the right thing INTERNALLY with a `tier` int ("tier=tier where
+# applicable -> correct") -- the gap was purely here, at the boundary,
+# never wiring session_id/tier through to them at all.
+#
+# These six take `tier` (int), not `path` (str) -- unlike the boundary-A
+# group above, none of them were part of the tier->path migration, so
+# this dispatch case translates `path` back to `tier` via the same
+# PATH_TO_TIER table eo/panel.py and eo/loop_v4.py use (now shared via
+# eo/structure.py, Part 26 §4c) rather than asking these six to also
+# migrate to `path` for no reason -- they never emit_event()'d with a
+# path label to begin with (see §1's table: "not called with tier/path,
+# or not called at all").
+UNSCOPED_TIER_AGENTS = {
+    "dependency_mapper", "documentation_agent", "duplication_checker",
+    "memory_search", "structure_architect",
+}
+# Migration Part 27: "final_qa" removed from this set -- its dedicated
+# agents/final_qa.py module was deleted (reasoning-only, no live caller;
+# see eo/registry.py's REGISTRY comment). The role name still resolves
+# via generic_worker if the Panel hires it.
 
-def _summarize(result, limit: int = 300) -> str:
+
+def _summarize(result, limit: int = 9000) -> str:
     """Best-effort human-readable summary for an agent_done payload.
     Results vary in shape (str, dict, ...) across the agent roster, so
-    this is deliberately forgiving rather than assuming a schema."""
+    this is deliberately forgiving rather than assuming a schema.
+
+    limit defaults to 9000, not the old 300 -- Pusher enforces a hard
+    ~10KB payload limit per event (true on every plan, not just free
+    tier), and the event envelope around this string (type, session_id,
+    agent, path, timestamp) costs a few hundred bytes, so 9000 is the
+    most we can send while leaving headroom. This is "full output" for
+    the large majority of real agent results; only genuinely oversized
+    ones (e.g. a full multi-module code submission) still get cut, and
+    now say so explicitly instead of a bare '...'."""
     if isinstance(result, str):
         text = result
     elif isinstance(result, dict):
@@ -87,7 +125,9 @@ def _summarize(result, limit: int = 300) -> str:
     else:
         text = str(result)
     text = text.strip()
-    return text if len(text) <= limit else text[:limit] + "..."
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated, {len(text)} chars total]"
 
 
 def execute_graph(agent_names: list, role_names: list = None, task_text: str = None,
@@ -146,8 +186,6 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                 result = fn(session_id=session_id, path=path, key_override=override)
             elif current_name == "sandbox_tester_lean":
                 result = fn(session_id=session_id, path=path)
-            elif current_name == "gatekeeper":
-                result = fn(cycle_num, session_id=session_id, path=path)
             elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
                 # Migration Part 8 §8.3 fix, preserved: kept the
                 # three-name case rather than Part 12 §3.3's illustrative
@@ -166,6 +204,15 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                 result = fn(role=role, task_text=task_text,
                             input_keys=role_names[:idx], session_id=session_id,
                             key_override=override)
+            elif current_name in UNSCOPED_TIER_AGENTS:
+                # Migration Part 26 §5 fix: was falling into the generic
+                # `else: fn()` branch below (zero args). tier=None if path
+                # itself is None/unrecognized -- these agents already
+                # treat a None tier as "unscoped" today (that's the exact
+                # gap being fixed, not a new failure mode), so this is
+                # strictly additive: a real tier whenever one is known,
+                # same silent-None fallback as before whenever it isn't.
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path))
             else:
                 result = fn()
         except Exception as exc:
@@ -186,6 +233,7 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
         next_idx, reason = next_step(
             result if isinstance(result, dict) else {},
             role_names, idx, session_id=session_id,
+            known_roles=set(list_known_roles()) | set(role_names),
         )
 
         # Migration Part 12 §3.3 executor bug fix: next_step() may have

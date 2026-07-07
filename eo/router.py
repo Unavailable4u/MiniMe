@@ -41,29 +41,20 @@ TIERS = {
         # other three steps.
         "agents": ["prompt_writer_lean", "code_writer_lean", "reviewer_fixer_lean"],
     },
-    3: {
-        "agents": [
-            "memory_search",
-            "idea_planner",
-            "prompt_writer",
-            "code_writers",
-            "dependency_mapper",
-            "test_writer",
-            "reviewer",
-            "duplication_checker",
-            "fixer_pool",
-            "sandbox_tester",
-            "structure_architect",
-            "security_scanner",
-            "security_aggregator",
-            "file_manager",
-            "documentation_agent",
-            "changelog_writer",
-            "report_writer",
-            "final_qa",
-            "gatekeeper",
-        ],
-    },
+    # Migration Part 27 §2: TIERS[3] (the classic, fixed 19-agent
+    # roster) is retired -- confirmed dead: both live entrypoints
+    # (eo/loop_v4.py, api/task_runner.py) always route tier 3 through
+    # the adaptive/hires-driven path (_run_tier3_hires() ->
+    # build_execution_graph_from_hires()), never through
+    # build_execution_graph(tier=3). Nothing called this. The four
+    # modules that were only reachable through it (dependency_mapper,
+    # duplication_checker, structure_architect, memory_search) do real
+    # work generic_worker can't replicate, so rather than deleting them
+    # along with this dead list, they're wired into the live path
+    # instead via eo/registry.py's REAL_ACTION_ROLES -- see that dict's
+    # comment. gatekeeper/changelog_writer/final_qa's dedicated modules
+    # really were dead weight (reasoning-only, duplicated or
+    # unreachable) and were deleted outright, not migrated.
 }
 
 # Mode ceilings (blueprint §8, raised from the original Blueprint's 14/9/11
@@ -111,6 +102,13 @@ def build_execution_graph(tier: int, directed_task_type: str = None, run_tests: 
     for every other tier, so callers can pass it unconditionally without
     branching on tier first.
 
+    Tier 3 has no entry here anymore (Migration Part 27 §2) -- it never
+    ran through this static-graph function in practice (both live
+    entrypoints always go through build_execution_graph_from_hires()
+    instead), so this now raises ValueError for tier 3 same as any other
+    unknown tier, rather than silently returning a graph nothing ever
+    executed.
+
     Raises ValueError for an unknown tier or a tier-2 call missing
     directed_task_type, and KeyError if directed_task_type isn't in
     DIRECTED_TASK_MAP.
@@ -130,8 +128,6 @@ def build_execution_graph(tier: int, directed_task_type: str = None, run_tests: 
         if directed_task_type not in DIRECTED_TASK_MAP:
             raise KeyError(f"Unknown directed_task_type '{directed_task_type}'.")
         return list(DIRECTED_TASK_MAP[directed_task_type])
-    if tier == 3:
-        return list(TIERS[3]["agents"])
     raise ValueError(f"Unknown tier: {tier!r}")
 
 
@@ -203,8 +199,16 @@ def validate_registry_coverage() -> None:
     EXPLAIN_CODE_ROUTE and confirms it resolves in eo.registry.REGISTRY.
     Raises on the first gap. Call this in tests (see
     tests/test_eo_router.py) and optionally at process startup.
+
+    Migration Part 27 §2: no longer includes TIERS[3] -- that key was
+    removed (the classic 19-agent roster is retired; nothing ever called
+    build_execution_graph(tier=3)). Tier 3's real agent-name coverage now
+    comes entirely from the hires-driven path (eo.registry.REAL_ACTION_ROLES
+    / resolve_role()), which this function doesn't need to separately
+    validate -- resolve_role() always returns either a real REGISTRY key
+    or the literal "generic_worker", both of which are guaranteed present.
     """
-    all_names = set(TIERS[0]["agents"]) | set(TIERS[1]["agents"]) | set(TIERS[3]["agents"])
+    all_names = set(TIERS[0]["agents"]) | set(TIERS[1]["agents"])
     all_names.update(EXPLAIN_CODE_ROUTE)
     all_names.add("sandbox_tester_lean")
     for names in DIRECTED_TASK_MAP.values():

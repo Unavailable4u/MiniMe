@@ -113,7 +113,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, tier: int = None) -> tuple:
+def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, path: str = None) -> tuple:
     """
     Stage 6 step 5: fires agent_start/agent_done labeled scanner_{slot}.
     `slot` is a descriptor dict (see _slot_descriptors) rather than a bare
@@ -133,7 +133,7 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, t
     """
     label = slot["label"]
     agent_name = f"scanner_{label}"
-    emit_event("agent_start", session_id=session_id, agent=agent_name, tier=tier,
+    emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
                payload={"label": f"Scanner {label} — {module_name}"})
     started = time.monotonic()
 
@@ -149,7 +149,7 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, t
             chain,
             agent_name=agent_name,
             session_id=session_id,
-            tier=tier,
+            path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real
         )
         result = json.loads(_strip_fences(raw_text))
     except Exception as exc:
@@ -163,7 +163,7 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, t
         summary = f"{len(findings)} finding(s)"
     else:
         summary = "no findings"
-    emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+    emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
                payload={"summary": summary, "duration_ms": duration_ms})
     return module_name, result
 
@@ -209,7 +209,7 @@ def _resolve_override_slots(key_override) -> list:
     return resolved
 
 
-def run(session_id: str = None, tier: int = None, expanded: bool = False,
+def run(session_id: str = None, path: str = None, expanded: bool = False,
         key_override=None) -> dict:
     """
     key_override: None (default) -> today's exact behavior, picks slots
@@ -233,7 +233,7 @@ def run(session_id: str = None, tier: int = None, expanded: bool = False,
         for i, (name, data) in enumerate(modules):
             code = data.get("code", "") if isinstance(data, dict) else str(data)
             slot = slots[i % len(slots)]
-            futures[executor.submit(_scan_one, name, code, slot, session_id=session_id, tier=tier)] = name
+            futures[executor.submit(_scan_one, name, code, slot, session_id=session_id, path=path)] = name
         for future in as_completed(futures):
             name, result = future.result()
             results[name] = result

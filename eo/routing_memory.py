@@ -33,32 +33,15 @@ import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import write, vector_index
+# Part 26 §4 — was a hand-copied _embed() duplicating utils/llm_client's
+# embed_text() (same URL, same model, same mean-pooling), kept separate
+# so routing-outcome logging wouldn't pull in llm_client.py's groq/
+# cerebras/openai SDK imports just to embed a string. That's now solved
+# properly: embed_text() lives in utils/embedding.py, which only needs
+# os/requests, so it's safe to import here directly.
+from utils.embedding import embed_text as _embed
 
 ID_PREFIX = "eo_outcome"
-
-
-def _embed(text: str) -> list:
-    """Reuses the exact same HF embedding call agents/memory_search.py
-    uses, duplicated rather than imported to keep this module usable even
-    if memory_search.py's own dependencies (HUGGINGFACE_API_KEY) aren't
-    configured yet -- routing-outcome logging shouldn't be gated on a key
-    an EO-only deployment might not have set up."""
-    import requests
-    api_key = os.getenv("HUGGINGFACE_API_KEY")
-    if not api_key:
-        raise RuntimeError("HUGGINGFACE_API_KEY not set")
-    hf_model = "sentence-transformers/all-MiniLM-L6-v2"
-    url = f"https://router.huggingface.co/hf-inference/models/{hf_model}/pipeline/feature-extraction"
-    response = requests.post(
-        url, headers={"Authorization": f"Bearer {api_key}"},
-        json={"inputs": text, "options": {"wait_for_model": True}}, timeout=30,
-    )
-    response.raise_for_status()
-    vec = response.json()
-    if isinstance(vec[0], list):
-        dims = len(vec[0])
-        return [sum(row[i] for row in vec) / len(vec) for i in range(dims)]
-    return vec
 
 
 def log_outcome(task_text: str, decision: dict, outcome: str = "") -> dict:
@@ -100,7 +83,7 @@ def retrieve_similar_outcomes(task_text: str, top_k: int = 3) -> str:
         vector = _embed(task_text)
         result = vector_index().query(
             vector=vector, top_k=top_k, include_metadata=True,
-            filter=f"outcome != ''",
+            filter="outcome != ''",
         )
     except Exception as exc:
         print(f"  [Routing Memory] retrieval skipped ({exc.__class__.__name__}: {exc}).")

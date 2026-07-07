@@ -17,16 +17,24 @@ agent is that step.
 
 HONEST LIMITATION, stated up front rather than glossed over: this is a
 deterministic, no-LLM merge, so it can only catch duplicates that share
-enough vocabulary to be detected by word-overlap -- see _similarity()
-below. Two findings describing the same bug in completely disjoint
-wording (no shared significant words at all) will NOT be caught. This
-trades recall for the same "cheap and auditable" property review_aggregator.py
+enough vocabulary to be detected by word-overlap -- see utils/similarity.py.
+Two findings describing the same bug in completely disjoint wording (no
+shared significant words at all) will NOT be caught. This trades recall
+for the same "cheap and auditable" property review_aggregator.py
 presumably already trades for on the Reviewer Pool side -- an LLM-based
 semantic merge would catch more, at the cost of a 6th API call per module
 and a new source of hallucination on top of the scan itself. Revisit this
 tradeoff if false-negative duplicates (missed merges) turn out to be more
 common than false positives (wrongly merged, genuinely distinct findings)
 once this runs against real output.
+
+Migration Part 26 §4b: the actual similarity scoring (tokenize + Jaccard/
+SequenceMatcher) used to be reimplemented here nearly identically to
+agents/review_aggregator.py's copy -- now shared via utils/similarity.py.
+This file keeps its own SIMILARITY_THRESHOLD and _STOPWORDS (tuned against
+measured examples, per the original comment) and passes them in
+explicitly; see utils/similarity.py's docstring for why they weren't
+collapsed into one shared list/threshold too.
 
 Input:  KEYS["security_scan_results"] -- security_scanner.py's raw output,
         {module_name: {"findings": [...], ["error": "..."]}}
@@ -38,11 +46,10 @@ Output: KEYS["security_scan_results"] -- same key, overwritten in place
 """
 import os
 import sys
-import re
-from difflib import SequenceMatcher
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from utils.similarity import similarity as _fuzzy_similarity
 
 # Ordered worst-to-... no, best-to-worst is more useful here: higher number
 # wins when merging two findings' severities.
@@ -65,24 +72,10 @@ _STOPWORDS = {
 }
 
 
-def _tokens(text: str) -> set:
-    words = re.findall(r"[a-z0-9]+", text.lower())
-    return {w for w in words if w not in _STOPWORDS and len(w) > 2}
-
-
 def _similarity(a: str, b: str) -> float:
-    """Max of word-level Jaccard overlap and character-level SequenceMatcher
-    ratio -- catches both "same words, different order/grammar" (Jaccard's
-    strength) and "same phrase, minor edit" (SequenceMatcher's strength).
-    Neither alone was reliable enough on real duplicate examples tested
-    during development; take whichever signal is stronger for a given pair."""
-    tokens_a, tokens_b = _tokens(a), _tokens(b)
-    if tokens_a and tokens_b:
-        jaccard = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
-    else:
-        jaccard = 0.0
-    ratio = SequenceMatcher(None, a.lower(), b.lower()).ratio()
-    return max(jaccard, ratio)
+    # stem=False matches this module's original _tokens() behavior (no
+    # suffix-stemming, plain [a-z0-9]+ tokenization).
+    return _fuzzy_similarity(a, b, _STOPWORDS, stem=False)
 
 
 def _merge_pair(kept: dict, incoming: dict) -> dict:

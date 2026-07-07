@@ -27,6 +27,12 @@ two different namespacing dimensions -- a true unification is a bigger
 change than this bridge attempts. This map covers coding's specific
 early-stage hand-off, which is what's actually needed for coding tasks to
 work through the unified pipeline.
+
+Part 23: also prepends this session's full conversation-memory context
+(eo/conversation_memory.py's get_full_context()) ahead of the rest of the
+context this role sees, so a follow-up like "make it shorter" or "add
+three more features" has real prior content to build on instead of being
+treated as the first message in the session.
 """
 import sys
 import os
@@ -34,6 +40,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import get_role_prompt, AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
+from eo import conversation_memory   # NEW — Part 23
 from utils.llm_client import generate_text
 from memory.bus import read as bus_read, write as bus_write
 # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
@@ -56,7 +63,12 @@ MARKDOWN_INSTRUCTION = (
     "\n\nFormat your answer in Markdown: use fenced code blocks with a "
     "language tag for any code, use tables for tabular data, use headers/"
     "bullet lists to structure longer answers, and use bold/italic "
-    "sparingly for emphasis."
+    "sparingly for emphasis. If the task calls for a mind map, flowchart, "
+    "process diagram, or any other visual/structural diagram, output it as "
+    "a fenced code block tagged ```mermaid using real Mermaid syntax "
+    "(e.g. flowchart TD, mindmap, or graph LR) — do NOT describe a diagram "
+    "as an indented text outline; write actual Mermaid syntax that can be "
+    "rendered."
 )
 
 NEXT_TAG_INSTRUCTION = (
@@ -117,7 +129,12 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     """
     brief = get_role_prompt(role)
     input_keys = input_keys or []
+
     context_parts = [f"TASK: {task_text}"]
+    conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23
+    if conv_context:
+        context_parts.insert(0, f"--- Recent conversation ---\n{conv_context}")   # NEW — Part 23
+
     for k in input_keys:
         prior = bus_read(f"stage_output:{session_id}:{k}", default=None)
         if prior is None and k in LEGACY_BUS_KEY_MAP:

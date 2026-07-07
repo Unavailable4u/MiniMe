@@ -121,7 +121,7 @@ def _strip_fences(code: str) -> str:
 
 
 def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
-                       session_id: str = None, tier: int = None) -> tuple[str, str]:
+                       session_id: str = None, path: str = None) -> tuple[str, str]:
     """
     Runs on one worker thread with one fixed Cerebras key. Tries each model
     in MODELS, in order, staying on this same key throughout, via
@@ -134,14 +134,14 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     """
     name = module_spec.get("name", "?")
     agent_name = f"code_writer_{worker_id}"
-    emit_event("agent_start", session_id=session_id, agent=agent_name, tier=tier,
+    emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
                payload={"label": f"Code Writer {worker_id} — {name}"})
     started = time.monotonic()
 
     def _done(code: str) -> tuple[str, str]:
         duration_ms = int((time.monotonic() - started) * 1000)
         summary = code if len(code) <= 300 else code[:300] + "..."
-        emit_event("agent_done", session_id=session_id, agent=agent_name, tier=tier,
+        emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
                    payload={"summary": summary, "duration_ms": duration_ms})
         return name, code
 
@@ -152,8 +152,14 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     # DIRECTED_TASK_MAP), same spirit as tier-1/tier-0 -- gets the simplicity
     # constraint. Tier 3 == the full 19-agent loop building bigger, more
     # versatile projects -- keeps the bare prompt, unchanged from before.
+    # Migration Part 26 fix: this used to check `tier == 2`, but callers
+    # (eo/executor.py) now pass the string `path`, not the old int `tier`.
+    # Per PATH_TO_TIER = {"instant": 0, "direct": 1, "fixed": 2, "adaptive": 3}
+    # (eo/panel.py, eo/loop_v4.py), tier 2's path label is "fixed" -- so this
+    # check is now on path, not a bare int comparison that would silently
+    # never match again.
     system_prompt = SYSTEM_PROMPT
-    if tier == 2:
+    if path == "fixed":
         system_prompt += SIMPLICITY_CONSTRAINT
 
     try:
@@ -163,7 +169,7 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
             chain,
             agent_name=agent_name,
             session_id=session_id,
-            tier=tier,
+            path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real
         )
         code = _strip_fences(raw)
         if not code:
@@ -174,7 +180,7 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     return _done(code)
 
 
-def run(session_id: str = None, tier: int = None, expanded: bool = False,
+def run(session_id: str = None, path: str = None, expanded: bool = False,
         key_override=None):
     """
     Migration Part 5 §2.3 — key_override, if given, is the Panel's specific
@@ -205,7 +211,7 @@ def run(session_id: str = None, tier: int = None, expanded: bool = False,
         futures = {
             executor.submit(
                 _write_one_module, module, key_envs[i % len(key_envs)],
-                (i % len(key_envs)) + 1, session_id=session_id, tier=tier,
+                (i % len(key_envs)) + 1, session_id=session_id, path=path,
             ): module
             for i, module in enumerate(modules)
         }

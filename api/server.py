@@ -31,7 +31,6 @@ from typing import Optional, Union
 
 from api.task_runner import run_task
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history
-from eo.project_registry import list_projects
 
 app = FastAPI(title="MiniMe v6 — EO layer API")
 

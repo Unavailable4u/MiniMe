@@ -242,7 +242,7 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
 
 
 def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
-              agent_name: str = "Agent") -> None:
+              path: str = None, agent_name: str = "Agent") -> None:
     """Public usage logger -- increments today's usage:{provider}:{key_id}:{date}
     entry in Upstash and fires a usage_update event. Never raises.
 
@@ -257,7 +257,21 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
     Call this directly for any provider call that doesn't go through
     generate_text() -- e.g. duplication_checker.py's / memory_search.py's
     HuggingFace embedding calls, which have no chat-completion "usage"
-    object to extract a token count from at all."""
+    object to extract a token count from at all.
+
+    Migration Part 27 §1: `path` (str) added alongside the original
+    `tier` (int) param, rather than replacing it. These are genuinely two
+    different callers, not one migrated name: eo/executor.py's
+    boundary-A agents (code_writers, reviewer, fixer_pool,
+    security_scanner, the *_lean trio) were migrated to the string
+    `path` label ("instant"/"direct"/"fixed"/"adaptive") and are the ones
+    that were crashing here with `path=` unexpected-keyword errors.
+    dependency_mapper/documentation_agent/duplication_checker/
+    memory_search's own `tier` (int) parameter was deliberately NOT part
+    of that migration (see eo/executor.py's UNSCOPED_TIER_AGENTS comment)
+    -- they still call this with `tier=`, and that keeps working
+    unchanged. Both are accepted; the usage_update payload below includes
+    whichever one the caller actually passed."""
     try:
         today = date.today().isoformat()
         db_key = f"usage:{provider}:{key_id}:{today}"
@@ -277,13 +291,14 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
                 "tokens_used_today": current["tokens"],
                 "daily_limit": QUOTA_CONFIG.get(provider),
                 "tier": tier,
+                "path": path,
             },
         )
     except Exception as exc:
         print(f"  [{agent_name}] usage logging failed (non-fatal): {exc}")
 
 
-def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, agent_name: str) -> None:
+def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, agent_name: str) -> None:
     """Internal adapter used by generate_text()'s chat-completion call
     sites: extracts a token count out of whatever usage shape the
     provider returned (SDK object with .total_tokens, or a plain dict
@@ -299,11 +314,11 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, agent_n
         tokens = getattr(usage, "total_tokens", None)
         if tokens is None and isinstance(usage, dict):
             tokens = usage.get("total_tokens")
-    log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, agent_name=agent_name)
+    log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path, agent_name=agent_name)
 
 
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
-                   session_id: str = None, tier: int = None) -> str:
+                   session_id: str = None, tier: int = None, path: str = None) -> str:
     """
     Walks `chain` in order. Each step is a dict. For groq/cerebras/github:
         {"provider": "groq"|"cerebras"|"github", "model": "...", "key_env": "..."}
@@ -315,12 +330,21 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     error unrelated to rate limiting, etc.) so real bugs don't get masked
     as "well, try the next provider."
 
-    session_id/tier (Stage 6, Part 6.7): if given, logs this call's token
-    usage to Upstash and fires a usage_update event so a connected
-    frontend can render the quota dashboard live. Leaving session_id
-    unset keeps this function's return value and behavior identical to
-    before Stage 6 step 6 -- emit_event's own no-op-on-None handles the
-    rest, same pattern as executor.py's session_id plumbing.
+    session_id/tier/path (Stage 6, Part 6.7; Part 27 §1): if given, logs
+    this call's token usage to Upstash and fires a usage_update event so
+    a connected frontend can render the quota dashboard live. Leaving
+    session_id unset keeps this function's return value and behavior
+    identical to before Stage 6 step 6 -- emit_event's own no-op-on-None
+    handles the rest, same pattern as executor.py's session_id plumbing.
+
+    `tier` (int, 0-3) and `path` (str, "instant"/"direct"/"fixed"/
+    "adaptive") are two distinct labels, not two names for the same
+    thing -- see this function's own module docstring update / Part 27
+    §1's audit. Pass whichever one your call site actually has; both are
+    forwarded to log_usage() and included in the usage_update payload.
+    Passing `path=` here used to raise TypeError (reviewer.py/
+    fixer_pool.py were already calling it this way) -- that's the bug
+    this parameter addition fixes.
 
     Raises RuntimeError if every step in the chain is exhausted or unusable
     (e.g. missing API key/credentials).
@@ -345,7 +369,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             try:
                 text, usage = _call_cloudflare_step(creds, model, system_prompt, user_content,
                                                       json_mode=json_mode)
-                _log_usage(provider, key_id, usage, session_id, tier, agent_name)
+                _log_usage(provider, key_id, usage, session_id, tier, path, agent_name)
                 return text
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
@@ -373,7 +397,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         label = f"{provider}:{model}"
         try:
             text, usage = _call_step(client, model, system_prompt, user_content)
-            _log_usage(provider, key_env, usage, session_id, tier, agent_name)
+            _log_usage(provider, key_env, usage, session_id, tier, path, agent_name)
             return text
         except _TRANSIENT_ERRORS as exc:
             last_exc = exc
@@ -389,50 +413,16 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     )
 
 # HuggingFace Inference — sentence embeddings for Upstash Vector (DB4).
-# Used by agents/memory_search.py (cyclemem embeddings) and
-# eo/semantic_cache.py (Part 4 step 4, task-similarity cache). Both share
-# this one function so there's exactly one embedding code path, per the
-# migration guide's own instruction not to duplicate it.
+# Used by agents/memory_search.py (cyclemem embeddings), eo/semantic_cache.py
+# (Part 4 step 4, task-similarity cache), and eo/routing_memory.py
+# (routing-outcome retrieval). All three share this one function so
+# there's exactly one embedding code path, per the migration guide's own
+# instruction not to duplicate it.
 #
-# Model choice is NOT arbitrary: your actual Upstash Vector index
-# (checked via idx.info()) reports dimension=384, similarity_function=
-# COSINE. sentence-transformers/all-MiniLM-L6-v2 is the standard model
-# for that exact pairing -- if you ever recreate the Vector index with a
-# different dimension, this model string must change to match, or every
-# upsert/query call will fail with a dimension-mismatch error.
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-HF_FEATURE_EXTRACTION_URL = "https://router.huggingface.co/hf-inference/models"
-
-def embed_text(text: str) -> list:
-    """Embeds `text` via HuggingFace Inference API, returns a 384-dim
-    vector (list[float]) ready for Upstash Vector's upsert()/query().
-
-    Raises RuntimeError if HUGGINGFACE_API_KEY is missing, or the HF
-    request fails outright (caller decides how to degrade -- e.g.
-    memory_search.py already wraps its embed_text() calls in try/except
-    and treats a failure as "no prior context," not a hard error)."""
-    api_key = os.getenv("HUGGINGFACE_API_KEY")
-    if not api_key:
-        raise RuntimeError("HUGGINGFACE_API_KEY not set — required for embed_text().")
-
-    url = f"{HF_FEATURE_EXTRACTION_URL}/{EMBEDDING_MODEL}/pipeline/feature-extraction"
-    response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"inputs": text, "options": {"wait_for_model": True}},
-        timeout=30,
-    )
-    response.raise_for_status()
-    embedding = response.json()
-
-    # Feature-extraction can return either an already-pooled [dim] vector
-    # or an unpooled [seq_len][dim] matrix depending on the model/endpoint
-    # version -- mean-pool across tokens if it's the unpooled shape, so
-    # callers always get back a flat list[float] regardless of which
-    # shape HF happens to serve.
-    if embedding and isinstance(embedding[0], list):
-        seq_len = len(embedding)
-        dim = len(embedding[0])
-        embedding = [sum(tok[i] for tok in embedding) / seq_len for i in range(dim)]
-
-    return embedding
+# Part 26 §4 — this used to be defined here directly, but embed_text()
+# only needs os/requests, while this module also imports groq/cerebras/
+# openai at load time. eo/routing_memory.py wanted embed_text() without
+# that SDK weight, so the function now lives in utils/embedding.py (zero
+# heavy imports) and this is just a re-export for existing callers that
+# already do `from utils.llm_client import embed_text`.
+from utils.embedding import embed_text, EMBEDDING_MODEL, HF_FEATURE_EXTRACTION_URL

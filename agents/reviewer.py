@@ -205,7 +205,27 @@ def run_reviewer(session_id: str = None, path: str = None, expanded: bool = Fals
     """
     submitted_code = read(KEYS["submitted_code"])
     if not submitted_code:
-        raise ValueError("No submitted_code found in memory. Run the Code Writers first.")
+        # Migration Part 26 fix: a hires-driven plan can staff a
+        # "verifier" role (which resolves to this module, per
+        # eo/registry.py's REAL_ACTION_ROLES) without ever having staffed
+        # an "implementer" first -- e.g. a hardware/embedded task hiring
+        # only custom roles like "hardware_expert"/"embedded_software_developer"
+        # through generic_worker. In that case nothing ever wrote
+        # submitted_code, through no fault of this call. Raising here used
+        # to crash the whole run; failing soft instead lets the plan
+        # continue past a review step that genuinely has nothing to
+        # review. Shape matches aggregate_reviews()'s normal return
+        # ("issues"/"summary") plus next_destination, so callers that read
+        # either key (e.g. eo/loop_controller.py's _extract_critical_issue)
+        # keep working unchanged.
+        review_notes = {
+            "issues": [],
+            "summary": "Reviewer skipped: no submitted_code found in memory "
+                       "(no Code Writer step ran before this one).",
+            "next_destination": None,
+        }
+        write(KEYS["review_notes"], review_notes)
+        return review_notes
 
     user_prompt = (
         "Here is the submitted code from all modules this cycle:\n\n"

@@ -149,9 +149,12 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
 
     while True:
         agent_names, role_names, key_overrides = build_execution_graph_from_hires(hires, current_order)
-        results = execute_graph(agent_names, role_names=role_names, task_text=task_text,
-                                  session_id=session_id, path=path, key_overrides=key_overrides,
-                                  project_unique_name=project_unique_name, mode=mode)
+        pass_results = execute_graph(agent_names, role_names=role_names, task_text=task_text,
+                                       session_id=session_id, path=path, key_overrides=key_overrides,
+                                       project_unique_name=project_unique_name, mode=mode)
+        results.update(pass_results)   # merge, don't replace — a redo pass should only
+                                        # overwrite the specific roles it re-ran, not erase
+                                        # everything from earlier passes.
 
         if mode.lower() not in ("expert", "beast") or loop_num >= MAX_MACRO_LOOPS:
             break

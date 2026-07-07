@@ -3,13 +3,11 @@ import { useState } from "react";
 import { SessionProvider } from "../context/SessionContext";
 import ChatTab from "./tabs/ChatTab";
 import TokenUsageTab from "./tabs/TokenUsageTab";
-import RoutingStructureTab from "./tabs/RoutingStructureTab";
 import SettingsTab from "./tabs/SettingsTab";
 
 const TABS = [
   { id: "chat", label: "Chat", render: ChatTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
-  { id: "routing", label: "Routing & Structure", render: RoutingStructureTab },
   { id: "settings", label: "Settings", render: SettingsTab },
 ];
 

@@ -60,7 +60,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(module: dict = None, session_id: str = None, tier: int = None) -> dict:
+def run(module: dict = None, session_id: str = None, path: str = None) -> dict:
     if module:
         write(KEYS["tier1_code"], module)
     else:
@@ -77,7 +77,7 @@ def run(module: dict = None, session_id: str = None, tier: int = None) -> dict:
         chain=CHAIN,
         agent_name="Reviewer+Fixer (lean)",
         session_id=session_id,
-        tier=tier,
+        path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real
     )
     try:
         parsed = json.loads(_strip_fences(raw))

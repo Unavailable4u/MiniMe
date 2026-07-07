@@ -1,6 +1,7 @@
 "use client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import MermaidDiagram from "./MermaidDiagram";
 
 // Shared markdown renderer for agent output (MessageBubble's ResultBody,
 // AgentStepList's step bodies). Custom-styled per element instead of
@@ -47,6 +48,19 @@ export default function Markdown({ children }) {
             // Language tag from the fenced block (```python -> "language-python"),
             // shown as a small label above the block.
             const lang = /language-(\w+)/.exec(className || "")?.[1];
+
+            // ```mermaid fences render as an actual diagram instead of
+            // raw Mermaid syntax as text — reuses the same renderer
+            // structure_architect's structure-plan views already use.
+            if (lang === "mermaid") {
+              const mermaidText = String(children).replace(/\n$/, "");
+              return (
+                <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden my-2 p-3">
+                  <MermaidDiagram mermaidText={mermaidText} />
+                </div>
+              );
+            }
+
             return (
               <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden my-2">
                 {lang && (

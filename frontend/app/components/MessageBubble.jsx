@@ -1,6 +1,4 @@
 "use client";
-import RoutingTraceCard from "./RoutingTraceCard";
-import AgentStepList from "./AgentStepList";
 import Markdown from "./Markdown";
 
 export default function MessageBubble({ message }) {
@@ -17,15 +15,13 @@ export default function MessageBubble({ message }) {
     );
   }
 
-  const { data, steps } = message;
+  const { data } = message;
   return (
     <div className="flex justify-start">
       <div className="bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%] space-y-1">
         <div className="text-xs text-neutral-500">
           tier {data.tier} · {data.status}
         </div>
-        <RoutingTraceCard decision={data.decision} />
-        <AgentStepList steps={steps} />
         <ResultBody data={data} />
       </div>
     </div>

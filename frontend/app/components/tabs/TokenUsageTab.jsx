@@ -355,7 +355,14 @@ function GrafanaQuotaPanel({ url }) {
   if (!url) return null;
   return (
     <Card title="Grafana (cross-session)">
-      <iframe src={url} width="100%" height="300" frameBorder="0" title="Grafana quota dashboard" />
+      <iframe
+        src={url}
+        width="100%"
+        height="1280"
+        style={{ minHeight: 600, border: "none" }}
+        frameBorder="0"
+        title="Grafana quota dashboard"
+      />
     </Card>
   );
 }

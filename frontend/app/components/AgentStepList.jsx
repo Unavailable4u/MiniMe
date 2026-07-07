@@ -18,9 +18,17 @@ export default function AgentStepList({ steps }) {
   );
 }
 
+// Matches the exact suffix eo/executor.py's _summarize() appends when it
+// still has to cut a result short (Migration Part 26 fix — the limit was
+// raised 300 -> 9000 chars, so most results now arrive here whole; this
+// only fires for the genuinely oversized minority, e.g. a full
+// multi-module code submission).
+const TRUNCATED_SUFFIX = /\.\.\. \[truncated, \d+ chars total\]$/;
+
 function StepRow({ step }) {
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(step.text || step.summary);
+  const wasTruncated = !step.text && step.summary && TRUNCATED_SUFFIX.test(step.summary);
 
   return (
     <div
@@ -57,11 +65,10 @@ function StepRow({ step }) {
               <div className="max-h-64 overflow-y-auto">
                 <Markdown>{step.text || step.summary}</Markdown>
               </div>
-              {!step.text && step.summary && (
+              {wasTruncated && (
                 <p className="mt-1 text-neutral-600 text-xs">
-                  Only a short summary is available for this step — the
-                  full output isn't streamed to the frontend for every
-                  agent yet (see Part 18 guide §1).
+                  This output was too long to stream in full and was
+                  truncated.
                 </p>
               )}
             </>
