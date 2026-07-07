@@ -45,6 +45,15 @@ MEMBER_C_CHAIN = [
     {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "EO_PANEL_GITHUB_PAT"},
     {"provider": "github", "model": "openai/gpt-4.1-nano", "key_env": "EO_PANEL_GITHUB_PAT"},
 ]
+# Same Part 15 boundary shim as eo/loop_v4.py's PATH_TO_TIER — duplicated
+# here (rather than imported) to avoid a circular import, since
+# loop_v4.py already imports this module. eo.inspector.classify()/_validate()
+# emit "path" (Part 12), but every vote in this module (_UNREACHABLE_VOTE,
+# and the draft passed in from loop_v4.py) is keyed by "tier" — a real
+# member B/C vote needs the same translation applied, or _synthesize()'s
+# `v["tier"]` lookup raises KeyError the moment a panel member actually
+# succeeds instead of falling back to _UNREACHABLE_VOTE.
+PATH_TO_TIER = {"instant": 0, "direct": 1, "fixed": 2, "adaptive": 3}
 
 # A conservative stand-in vote used when a panel member's own chain is
 # fully exhausted. Per the "never under-route on disagreement" rule, a
@@ -64,9 +73,6 @@ _UNREACHABLE_VOTE = {
 
 def _get_member_vote(label: str, task_text: str, chain: list) -> dict:
     try:
-        # Migration Part 10 §3 — same helper eo/inspector.py's classify()
-        # uses for member A, so all three panel votes see identical
-        # domain/execution_order framing and the same reference structure.
         user_content = f"Task: {task_text}" + build_reference_structure_addition(task_text)
         raw = generate_text(
             system_prompt=SYSTEM_PROMPT,
@@ -75,7 +81,9 @@ def _get_member_vote(label: str, task_text: str, chain: list) -> dict:
             agent_name=f"EO Panel ({label})",
         )
         parsed = json.loads(_strip_fences(raw))
-        return _validate(parsed)
+        validated = _validate(parsed)
+        validated["tier"] = PATH_TO_TIER[validated["path"]]   # NEW — same fix as loop_v4.py's draft
+        return validated
     except Exception as exc:
         print(f"  [EO Panel] member {label} unreachable ({exc.__class__.__name__}: {exc}), "
               f"voting conservative (tier 3, confidence 0.0).")
