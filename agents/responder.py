@@ -38,7 +38,11 @@ system itself — you are only invoked when a task is simple enough that no \
 code needs to be written, planned, or reviewed. Answer directly and \
 concisely. If the task actually requires writing or editing code across \
 one or more files, say so plainly rather than guessing at a small answer, \
-since that means you were routed here in error."""
+since that means you were routed here in error.
+
+Format your answer in Markdown: use fenced code blocks with a language tag \
+for any code, use tables for tabular data, use headers/bullet lists to \
+structure longer answers, and use bold/italic sparingly for emphasis."""
 
 
 def run(task_text: str = None, key_override=None) -> str:

@@ -45,6 +45,7 @@ export function SessionProvider({ children }) {
   const [combinedUsageHistory, setCombinedUsageHistory] = useState([]); // [{t, [provider]: tokens}, ...] — Part 17
   const latestByProviderRef = useRef({});                       // provider -> summed tokens across its keys, for the combined chart — Part 17
   const [routeTrace, setRouteTrace] = useState([]);
+  const [macroLoopDecisions, setMacroLoopDecisions] = useState([]);
   const [dependencyMap, setDependencyMap] = useState({});
   const [structurePlan, setStructurePlan] = useState(null);
   const [mode, setMode] = useState("auto");
@@ -114,6 +115,13 @@ export function SessionProvider({ children }) {
       }
       if (eventType === "dispatch_event") {
         setRouteTrace((prev) => [...prev, { destination: payload?.destination, reason: payload?.reason }]);
+        return;
+      }
+      if (eventType === "macro_loop_decision") {
+        setMacroLoopDecisions((prev) => [
+          ...prev,
+          { action: payload?.decision, loop: payload?.loop, cause: payload?.cause },
+        ]);
         return;
       }
       if (eventType === "dependency_map") {
@@ -190,11 +198,12 @@ export function SessionProvider({ children }) {
     setMessages((prev) => [...prev, { role: "user", text: taskText }]);
     setLoading(true);
     setLiveDecision(null);
-    stepsRef.current = [];              // CHANGE — Part 18: reset the ref too, not just state
+    stepsRef.current = [];
     setLiveSteps([]);
     setRouteTrace([]);
     setDependencyMap({});
     setStructurePlan(null);
+    setMacroLoopDecisions([]);   // NEW — same clean-slate treatment as the others
     try {
       const res = await fetch(`${API_URL}/api/task`, {
         method: "POST",
@@ -246,12 +255,13 @@ export function SessionProvider({ children }) {
   }
 
   const value = {
-    sessionId, API_URL,
-    messages, loading,
-    liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
-    mode, setMode,
-    pusherConnected,
-    sendTask, registerProject,
+  sessionId, API_URL,
+  messages, loading,
+  liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
+  macroLoopDecisions,   // NEW
+  mode, setMode,
+  pusherConnected,
+  sendTask, registerProject,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

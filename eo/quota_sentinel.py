@@ -17,7 +17,7 @@ same fix; see llm_client.py's own comment at that call site.
 """
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -71,3 +71,71 @@ def check_and_alert(session_id: str = None) -> None:
             emit_event("quota_alert", session_id, agent="quota_sentinel",
                        payload={"agent_key": agent_key, "used": info["used"],
                                 "quota": info["quota"], "pct": round(info["pct"], 3)})
+
+
+def get_usage_history(days: int = 7) -> dict:
+    """
+    Cross-session, persisted day-by-day usage — the GET /api/usage/history
+    candidate flagged in the Part 17 guide. Reads the exact same
+    usage:{provider}:{key_id}:{date} keys get_quota_snapshot() reads for
+    "today", just repeated across the last `days` calendar dates. No new
+    storage, no new write path -- this is a pure read rollup over data
+    utils/llm_client.py's log_usage() already writes on every real call.
+
+    Returns:
+    {
+      "dates": ["2026-07-01", ..., "2026-07-07"],   # oldest -> newest
+      "providers": {
+        "groq": {"tokens": [d0, d1, ...], "requests": [d0, d1, ...],
+                  "total_tokens": int, "avg_tokens_per_day": float},
+        ...
+      },
+      "accounts": {
+        "EO_INSPECTOR_GROQ_KEY_1": {"provider": "groq",
+                                     "tokens": [d0, d1, ...]},
+        ...
+      }
+    }
+
+    Provider-level series SUM every account under that provider for each
+    day -- mirrors how get_quota_snapshot()'s pct is already a
+    per-account number, but a dashboard comparing "Groq vs Cerebras vs
+    Mistral" wants one line per provider, not one per account. The
+    per-account breakdown is kept too (under "accounts"), for a drill-
+    down view or per-key debugging, without a second round of reads.
+    """
+    from eo.registry import AGENT_CAPABILITIES
+
+    dates = [(date.today() - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+
+    providers = {}
+    accounts = {}
+
+    for agent_key, info in AGENT_CAPABILITIES.items():
+        provider = info.get("provider")
+        key_id = _key_id_for(agent_key, provider)
+
+        tokens_series = []
+        requests_series = []
+        for d in dates:
+            record = bus_read(f"usage:{provider}:{key_id}:{d}", default={"requests": 0, "tokens": 0})
+            tokens_series.append(record.get("tokens", 0))
+            requests_series.append(record.get("requests", 0))
+
+        accounts[agent_key] = {"provider": provider, "tokens": tokens_series, "requests": requests_series}
+
+        if provider not in providers:
+            providers[provider] = {"tokens": [0] * days, "requests": [0] * days}
+        providers[provider]["tokens"] = [
+            a + b for a, b in zip(providers[provider]["tokens"], tokens_series)
+        ]
+        providers[provider]["requests"] = [
+            a + b for a, b in zip(providers[provider]["requests"], requests_series)
+        ]
+
+    for provider, series in providers.items():
+        total = sum(series["tokens"])
+        series["total_tokens"] = total
+        series["avg_tokens_per_day"] = round(total / days, 1) if days else 0.0
+
+    return {"dates": dates, "providers": providers, "accounts": accounts}

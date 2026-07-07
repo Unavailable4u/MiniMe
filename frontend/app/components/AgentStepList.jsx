@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import Markdown from "./Markdown";
 
 // Each `step` is one agent_start/agent_done pair pushed by
 // SessionContext.jsx's Pusher handler, in arrival order. Safe to render
@@ -50,14 +51,14 @@ function StepRow({ step }) {
       {open && hasBody && (
         <div className="border-t border-neutral-800 px-3 py-2">
           {step.status === "error" ? (
-            <div className="text-red-400">{step.summary}</div>
+            <div className="text-red-400 whitespace-pre-wrap">{step.summary}</div>
           ) : (
             <>
-              <pre className="whitespace-pre-wrap text-neutral-400 max-h-64 overflow-y-auto">
-                {step.text || step.summary}
-              </pre>
+              <div className="max-h-64 overflow-y-auto">
+                <Markdown>{step.text || step.summary}</Markdown>
+              </div>
               {!step.text && step.summary && (
-                <p className="mt-1 text-neutral-600">
+                <p className="mt-1 text-neutral-600 text-xs">
                   Only a short summary is available for this step — the
                   full output isn't streamed to the frontend for every
                   agent yet (see Part 18 guide §1).
