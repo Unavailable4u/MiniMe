@@ -20,6 +20,7 @@ from e2b_code_interpreter import Sandbox
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
+from eo.errors import MissingDependencyError   # NEW — bug fix
 load_dotenv()
 e2b_api_key = os.getenv("E2B_API_KEY")
 if e2b_api_key:
@@ -78,9 +79,14 @@ def run_sandbox_tester():
     # used by security_scanner.py's run().
     fixed_code = read(KEYS["fixed_code"], default=None) or read(KEYS["submitted_code"], default={})
     if not fixed_code:
-        raise ValueError(
+        # Bug fix: was `raise ValueError(...)`. Neither key is populated
+        # only if "implementer" (code_writers.py) never ran at all -- the
+        # fixer_pool-vs-submitted_code fallback above already covers "ran
+        # but wasn't fixed yet", so "implementer" is the right ask here.
+        raise MissingDependencyError(
+            "implementer",
             "No fixed_code or submitted_code found in memory. Run the Fixer "
-            "Pool or Code Writer Pool first."
+            "Pool or Code Writer Pool first.",
         )
     test_code_map = read(KEYS["test_code"], default={})
     modules = {name: data for name, data in fixed_code.items() if name != "_fixer_error"}
@@ -113,8 +119,16 @@ def run_sandbox_tester_lean(session_id: str = None, path: str = None) -> dict:
     """
     module = read(KEYS["tier1_fixed_code"])
     if not module:
-        raise ValueError(
-            "No tier1_fixed_code found in memory. Run reviewer_fixer_lean first."
+        # Bug fix: consistent error type with the rest of the roster (see
+        # eo/errors.py). Note this is the tier-1 "lean" pipeline, which
+        # runs on a statically-ordered graph (path="direct") -- executor.py
+        # only auto-inserts a missing role on the adaptive path, so this
+        # still surfaces as a real failure here, same as before. Kept for
+        # consistency and so any future adaptive use of this function
+        # benefits automatically.
+        raise MissingDependencyError(
+            "reviewer_fixer_lean",
+            "No tier1_fixed_code found in memory. Run reviewer_fixer_lean first.",
         )
     name = module.get("name", "module")
     emit_event("agent_start", session_id=session_id, agent="sandbox_tester_lean", path=path,

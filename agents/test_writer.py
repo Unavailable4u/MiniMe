@@ -30,6 +30,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
 from utils.llm_client import generate_text
+from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
@@ -103,7 +104,14 @@ def _strip_fences(text: str) -> str:
 def run():
     submitted_code = read(KEYS["submitted_code"])
     if not submitted_code:
-        raise ValueError("No submitted_code found in memory. Run the Code Writers first.")
+        # Bug fix: was `raise ValueError(...)` -- "implementer" is the role
+        # name code_writers.py resolves from (eo/registry.py's
+        # REAL_ACTION_ROLES), so on the adaptive path eo/executor.py can
+        # insert it and retry this step automatically instead of the whole
+        # task dying here.
+        raise MissingDependencyError(
+            "implementer", "No submitted_code found in memory. Run the Code Writers first."
+        )
 
     user_content = (
         "Modules to write tests for:\n" + json.dumps(submitted_code, indent=2)

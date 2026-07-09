@@ -26,6 +26,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
+from eo.errors import MissingDependencyError   # NEW — bug fix
 
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
@@ -66,9 +67,12 @@ def run(module: dict = None, session_id: str = None, path: str = None) -> dict:
     else:
         module = read(KEYS["tier1_code"])
         if not module:
-            raise ValueError(
+            # Bug fix: consistent error type (see eo/errors.py). Same
+            # "fixed pipeline, won't auto-heal" note as code_writer_lean.py.
+            raise MissingDependencyError(
+                "code_writer_lean",
                 "No tier1_code found in memory and none passed in. "
-                "Run code_writer_lean first."
+                "Run code_writer_lean first.",
             )
     user_content = json.dumps(module)
     raw = generate_text(

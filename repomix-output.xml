@@ -1,0 +1,3663 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: frontend/app
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+frontend/app/components/AddChatToWorkspaceModal.jsx
+frontend/app/components/agentRoleIcons.js
+frontend/app/components/AgentStepList.jsx
+frontend/app/components/AppShell.jsx
+frontend/app/components/ChatSidebar.jsx
+frontend/app/components/ConfirmDialog.jsx
+frontend/app/components/CreateWorkspaceModal.jsx
+frontend/app/components/DependencyGraph.jsx
+frontend/app/components/ManageBatchModal.jsx
+frontend/app/components/ManageWorkspaceModal.jsx
+frontend/app/components/Markdown.jsx
+frontend/app/components/MermaidDiagram.jsx
+frontend/app/components/MessageBubble.jsx
+frontend/app/components/RoutingTraceCard.jsx
+frontend/app/components/RoutingTraceGraph.jsx
+frontend/app/components/tabs/ChatTab.jsx
+frontend/app/components/tabs/SettingsTab.jsx
+frontend/app/components/tabs/TokenUsageTab.jsx
+frontend/app/components/WorkingPanel.jsx
+frontend/app/context/SessionContext.jsx
+frontend/app/globals.css
+frontend/app/layout.js
+frontend/app/page.js
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="frontend/app/components/AddChatToWorkspaceModal.jsx">
+"use client";
+import { useSession } from "../context/SessionContext";
+
+// candidates = chats not already in THIS workspace and not in ANY other
+// workspace — a chat living in two "projects" at once would mean its
+// linked_chat_ids gets overwritten by whichever workspace's _sync ran
+// last, which is silent, confusing behavior. Keep membership exclusive.
+export default function AddChatToWorkspaceModal({ workspace, allChats, workspacedChatIds, onClose }) {
+  const { addWorkspaceChat } = useSession();
+
+  const candidates = allChats.filter(
+    (c) => !workspace.chat_ids.includes(c.id) && !workspacedChatIds.has(c.id)
+  );
+
+  async function pick(chatId) {
+    await addWorkspaceChat(workspace.id, chatId);
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-medium text-neutral-200 mb-3">Add a chat to "{workspace.name}"</h3>
+        <div className="space-y-1">
+          {candidates.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => pick(c.id)}
+              className="w-full text-left text-xs text-neutral-300 hover:bg-neutral-800 rounded px-2 py-1.5 truncate"
+            >
+              {c.title}
+            </button>
+          ))}
+          {candidates.length === 0 && (
+            <p className="text-xs text-neutral-600">No available chats — everything's already in a project or in this one.</p>
+          )}
+        </div>
+        <div className="flex justify-end mt-4">
+          <button onClick={onClose} className="text-xs text-neutral-400 px-3 py-1.5">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/agentRoleIcons.js">
+// frontend/app/components/agentRoleIcons.js
+//
+// Role -> {icon, color} lookup used by RoutingTraceGraph.jsx (and any
+// other place that wants a consistent glyph per agent role). Pulled out
+// of RoutingTraceGraph.jsx into its own file because this list is meant
+// to grow: agents in this system are not just coding roles, they can be
+// spun up for almost any kind of task, so the icon set needs to cover
+// far more ground than "implementer/reviewer/tester".
+//
+// MATCHING RULES:
+// - `categorize(label)` returns the FIRST entry whose `test` regex
+//   matches the role/label string. Order matters -- more specific
+//   patterns must come before broader ones that could also match them.
+// - Keep one glyph per concept where possible so users build a mental
+//   map (e.g. 🔍 always means "review/inspect text", 🛡️ always means
+//   "security/guard-type role").
+// - Prefer emoji that render consistently cross-platform (avoid rare
+//   ZWJ sequences) since these are drawn directly on a <canvas>.
+
+export const ROLE_CATEGORIES = [
+  // ---- Meta / orchestration-specific (system's own role names) ----
+  { key: "briefing", test: /^writing a new role brief/i, icon: "\u{1F4DC}", color: "#fbbf24" }, // 📜
+  { key: "inspector", test: /\binspector\b/i, icon: "\u{1F46E}", color: "#60a5fa" }, // 👮 police-officer -- dedicated, no longer shares "dispatch"
+  { key: "sga", test: /\bsga\b/i, icon: "\u{1F6E1}\uFE0F", color: "#facc15" }, // 🛡️ dedicated shield for the SGA pre-filter
+  { key: "dispatch", test: /dispatcher|panel|responder/i, icon: "\u2699\uFE0F", color: "#9ca3af" }, // ⚙️
+
+  // ---- Planning / ideation ----
+  { key: "planning", test: /idea_planner|prompt_writer|planner|brainstorm/i, icon: "\u{1F9ED}", color: "#f59e0b" }, // 🧭
+  { key: "strategy", test: /strategist|roadmap/i, icon: "\u265F\uFE0F", color: "#c4b5fd" }, // ♟️
+  { key: "project-mgmt", test: /project_manager|scrum_master|coordinator/i, icon: "\u{1F4CB}", color: "#93c5fd" }, // 📋
+
+  // ---- Software / engineering ----
+  { key: "coding", test: /implementer|code.?writer|frontend|backend|full.?stack/i, icon: "\u{1F4BB}", color: "#38bdf8" }, // 💻
+  { key: "fixing", test: /\bfixer\b|debugg/i, icon: "\u{1F527}", color: "#fb7185" }, // 🔧
+  { key: "devops", test: /devops|infrastructure|deploy|ci_cd|sre\b/i, icon: "\u2601\uFE0F", color: "#7dd3fc" }, // ☁️
+  { key: "database", test: /database|\bsql\b|db_admin/i, icon: "\u{1F5C4}\uFE0F", color: "#5eead4" }, // 🗄️
+  { key: "networking", test: /network|protocol|dns\b|routing_engineer/i, icon: "\u{1F4E1}", color: "#67e8f9" }, // 📡
+  { key: "cybersecurity", test: /security|pentest|vulnerab|threat_model/i, icon: "\u{1F510}", color: "#f87171" }, // 🔐
+  { key: "ai-ml", test: /machine_learning|neural|model_train|\bml_\b/i, icon: "\u{1F916}", color: "#a78bfa" }, // 🤖
+  { key: "robotics", test: /robot|automation_engineer/i, icon: "\u{1F9BE}", color: "#94a3b8" }, // 🦾
+  { key: "blockchain", test: /blockchain|crypto|smart_contract/i, icon: "\u26D3\uFE0F", color: "#fbbf24" }, // ⛓️
+
+  // ---- QA / review ----
+  { key: "reviewing", test: /verifier|reviewer/i, icon: "\u{1F50D}", color: "#a78bfa" }, // 🔍
+  { key: "testing", test: /test_writer|sandbox_tester|\btester\b|qa\b/i, icon: "\u{1F9EA}", color: "#34d399" }, // 🧪
+  { key: "fact-check", test: /fact.?check/i, icon: "\u2705", color: "#4ade80" }, // ✅
+
+  // ---- Files / docs ----
+  { key: "files", test: /file_manager|structure_architect/i, icon: "\u{1F5C2}\uFE0F", color: "#22d3ee" }, // 🗂️
+  { key: "docs", test: /documentation|report_writer/i, icon: "\u{1F4C4}", color: "#a3e635" }, // 📄
+  { key: "admin", test: /\badmin\b|data_entry|clerical/i, icon: "\u{1F5C3}\uFE0F", color: "#d4d4d8" }, // 🗃️
+  { key: "personal-assistant", test: /assistant|scheduler|calendar/i, icon: "\u{1F5D3}\uFE0F", color: "#fda4af" }, // 🗓️
+
+  // ---- Research / data / science ----
+  { key: "research", test: /research|analyst|investigat/i, icon: "\u{1F52C}", color: "#818cf8" }, // 🔬
+  { key: "data-science", test: /data_scientist|statistic/i, icon: "\u{1F4CA}", color: "#60a5fa" }, // 📊
+  { key: "science", test: /scientist|physic|chemist|biolog/i, icon: "\u{1F52D}", color: "#38bdf8" }, // 🔭
+  { key: "math", test: /mathematic|calculus/i, icon: "\u{1F4D0}", color: "#fcd34d" }, // 📐
+  { key: "astronomy", test: /astronom/i, icon: "\u{1F30C}", color: "#818cf8" }, // 🌌
+  { key: "environment", test: /environment|sustainab|climate/i, icon: "\u{1F331}", color: "#4ade80" }, // 🌱
+  { key: "weather", test: /weather|meteorolog/i, icon: "\u26C5", color: "#93c5fd" }, // ⛅
+
+  // ---- Writing / creative ----
+  { key: "lyrics", test: /lyricist|songwriter/i, icon: "\u{1F3A4}", color: "#f472b6" }, // 🎤
+  { key: "music", test: /composer|arranger/i, icon: "\u{1F3B5}", color: "#c084fc" }, // 🎵
+  { key: "storytelling", test: /storyteller|novelist|narrative/i, icon: "\u{1F4D6}", color: "#fb923c" }, // 📖
+  { key: "copywriting", test: /copywriter|blog|essay|ghostwrit/i, icon: "\u270D\uFE0F", color: "#f0abfc" }, // ✍️
+  { key: "journalism", test: /journalist|reporter\b/i, icon: "\u{1F4F0}", color: "#fca5a5" }, // 📰
+  { key: "translation", test: /translat|localiz/i, icon: "\u{1F310}", color: "#5eead4" }, // 🌐
+  { key: "design", test: /designer|\bux\b|\bui\b|graphic_design/i, icon: "\u{1F3A8}", color: "#f9a8d4" }, // 🎨
+  { key: "art", test: /illustrat|painter|\bartist\b/i, icon: "\u{1F58C}\uFE0F", color: "#e879f9" }, // 🖌️
+  { key: "video", test: /video_edit|filmmak|videograph/i, icon: "\u{1F3AC}", color: "#fca5a5" }, // 🎬
+  { key: "photo", test: /photo|image_edit/i, icon: "\u{1F4F7}", color: "#fdba74" }, // 📷
+  { key: "gaming", test: /game_design|gaming|esport/i, icon: "\u{1F3AE}", color: "#a78bfa" }, // 🎮
+  { key: "social-media", test: /social_media|community_manager/i, icon: "\u{1F4F1}", color: "#7dd3fc" }, // 📱
+
+  // ---- Business / finance / legal ----
+  { key: "finance", test: /finance|accountant|bookkeep|budget/i, icon: "\u{1F4B0}", color: "#facc15" }, // 💰
+  { key: "legal", test: /legal|lawyer|attorney|compliance|contract/i, icon: "\u2696\uFE0F", color: "#cbd5e1" }, // ⚖️
+  { key: "sales", test: /\bsales\b|negotiat/i, icon: "\u{1F91D}", color: "#fb923c" }, // 🤝
+  { key: "marketing", test: /marketing|advertis|campaign/i, icon: "\u{1F4E3}", color: "#f472b6" }, // 📣
+  { key: "customer-support", test: /support|helpdesk|customer_service/i, icon: "\u{1F3A7}", color: "#67e8f9" }, // 🎧
+  { key: "hr", test: /\bhr\b|recruit|hiring|talent/i, icon: "\u{1F9D1}\u200D\u{1F4BC}", color: "#a3e635" }, // 🧑‍💼
+  { key: "logistics", test: /logistics|supply_chain|inventory|shipping/i, icon: "\u{1F4E6}", color: "#fdba74" }, // 📦
+  { key: "retail", test: /retail|merchandis/i, icon: "\u{1F6D2}", color: "#f9a8d4" }, // 🛒
+  { key: "real-estate", test: /real_estate|property_manag|realtor/i, icon: "\u{1F3E0}", color: "#86efac" }, // 🏠
+
+  // ---- Health / lifestyle ----
+  { key: "medical", test: /medical|doctor|clinician|diagnos|health/i, icon: "\u{1FA7A}", color: "#f87171" }, // 🩺
+  { key: "therapy", test: /therapist|counselor|psycholog/i, icon: "\u{1F9E0}", color: "#c4b5fd" }, // 🧠
+  { key: "nutrition", test: /nutrition|\bdiet\b|meal_plan/i, icon: "\u{1F957}", color: "#84cc16" }, // 🥗
+  { key: "fitness", test: /fitness|trainer|workout|coach/i, icon: "\u{1F3CB}\uFE0F", color: "#fb7185" }, // 🏋️
+  { key: "cooking", test: /\bchef\b|recipe|cook/i, icon: "\u{1F468}\u200D\u{1F373}", color: "#fdba74" }, // 👨‍🍳
+
+  // ---- Education / other domains ----
+  { key: "education", test: /teacher|tutor|instructor|professor/i, icon: "\u{1F393}", color: "#93c5fd" }, // 🎓
+  { key: "event-planning", test: /event_plan|wedding_plan|party_plan/i, icon: "\u{1F389}", color: "#f472b6" }, // 🎉
+  { key: "travel", test: /travel|itinerary|trip_plan/i, icon: "\u2708\uFE0F", color: "#38bdf8" }, // ✈️
+  { key: "transportation", test: /transport|route_plan|vehicle/i, icon: "\u{1F697}", color: "#94a3b8" }, // 🚗
+  { key: "agriculture", test: /\bfarm|agricult/i, icon: "\u{1F33E}", color: "#a3e635" }, // 🌾
+  { key: "energy", test: /energy|power_grid|renewable/i, icon: "\u26A1", color: "#facc15" }, // ⚡
+  { key: "architecture", test: /building_architect|architectural_design/i, icon: "\u{1F3DB}\uFE0F", color: "#d4d4d8" }, // 🏛️
+  { key: "engineering", test: /mechanical_eng|electrical_eng|civil_eng/i, icon: "\u{1F6E0}\uFE0F", color: "#fb923c" }, // 🛠️
+  { key: "military", test: /military|tactical/i, icon: "\u{1F396}\uFE0F", color: "#a8a29e" }, // 🎖️
+  { key: "law-enforcement", test: /\bpolice\b|detective/i, icon: "\u{1F694}", color: "#60a5fa" }, // 🚔
+  { key: "sports", test: /\bsports\b|athlete/i, icon: "\u{1F3C6}", color: "#fbbf24" }, // 🏆
+];
+
+// Fallback + fixed endpoint categories -- unchanged behavior from before.
+export const DEFAULT_CATEGORY = { key: "generic", icon: "\u{1F9E9}", color: "#e879f9" }; // 🧩
+export const INPUT_CATEGORY = { key: "input", icon: "\u{1F4E5}", color: "#38bdf8" }; // 📥
+export const OUTPUT_CATEGORY = { key: "output", icon: "\u{1F4E4}", color: "#34d399" }; // 📤
+
+export function categorize(label) {
+  if (!label) return DEFAULT_CATEGORY;
+  return ROLE_CATEGORIES.find((c) => c.test.test(label)) || DEFAULT_CATEGORY;
+}
+</file>
+
+<file path="frontend/app/components/ChatSidebar.jsx">
+"use client";
+import { useState, useEffect } from "react";   // CHANGED — add useEffect
+import { useSession } from "../context/SessionContext";
+import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
+import ManageBatchModal from "./ManageBatchModal";
+import CreateWorkspaceModal from "./CreateWorkspaceModal";
+import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";
+import ManageWorkspaceModal from "./ManageWorkspaceModal";
+import ConfirmDialog from "./ConfirmDialog";
+
+// NEW — §9.1: color-code batches so grouping is visible at a glance
+// without reading labels. Deterministic hash of the batch id → one of a
+// small fixed palette, so a given batch always gets the same color across
+// reloads (no need to persist a color field on the batch object itself).
+const BATCH_ACCENTS = [
+  "var(--cyber-cyan)",
+  "var(--cyber-magenta)",
+  "var(--cyber-amber)",
+  "var(--cyber-violet)",
+  "var(--cyber-lime)",
+];
+
+function hashBatchColor(batchId) {
+  let hash = 0;
+  for (let i = 0; i < batchId.length; i++) {
+    hash = (hash * 31 + batchId.charCodeAt(i)) | 0;
+  }
+  return BATCH_ACCENTS[Math.abs(hash) % BATCH_ACCENTS.length];
+}
+
+export default function ChatSidebar({ collapsed, onToggle }) {
+  const { chats, batches, workspaces, sessionId, switchChat, createNewChat, renameChat, deleteChat, linkChats } = useSession();
+  const [editingId, setEditingId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [linkingId, setLinkingId] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null); // chat object or null
+  // NEW — §4: which batch's manage modal is open. The modal itself is
+  // built in §5 (ManageBatchModal) — for now this just tracks selection
+  // so wiring the modal in next is a one-line render addition.
+  const [managingBatch, setManagingBatch] = useState(null);
+  const [managingWorkspace, setManagingWorkspace] = useState(null);
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+  const [addingToWorkspace, setAddingToWorkspace] = useState(null);
+  // NEW — §8: search bar. Client-side only — chats/batches/workspaces are
+  // already loaded in state, no backend endpoint needed.
+  const [query, setQuery] = useState("");
+
+  function openManageBatch(batch) {
+    setManagingBatch(batch);
+  }
+
+  const workspacedChatIds = new Set(workspaces.flatMap((w) => w.chat_ids));
+// A chat that's somehow in both a workspace and a batch is shown under
+// the workspace only — it's the more structural, persistent grouping.
+  const batchedChatIds = new Set(
+    batches.flatMap((b) => b.member_chat_ids).filter((id) => !workspacedChatIds.has(id))
+  );
+  const unbatchedChats = chats.filter((c) => !batchedChatIds.has(c.id) && !workspacedChatIds.has(c.id));
+
+  // NEW — §8: search filtering. A group (workspace/batch) stays visible if
+  // its own name matches OR any of its member chats match — and in that
+  // second case we only show the matching members, not the whole group,
+  // so a search for one chat title doesn't dump every batch-mate on screen.
+  const q = query.trim().toLowerCase();
+  const chatMatches = (chat) => !q || chat.title.toLowerCase().includes(q);
+
+  const filteredWorkspaces = q
+    ? workspaces.filter(
+        (ws) => ws.name.toLowerCase().includes(q) || chats.some((c) => ws.chat_ids.includes(c.id) && chatMatches(c))
+      )
+    : workspaces;
+
+  const filteredBatches = q
+    ? batches.filter(
+        (b) => b.name.toLowerCase().includes(q) || chats.some((c) => b.member_chat_ids.includes(c.id) && chatMatches(c))
+      )
+    : batches;
+
+  const filteredUnbatchedChats = unbatchedChats.filter(chatMatches);
+
+  if (collapsed) {
+    return (
+      <div className="w-10 shrink-0 border-r border-neutral-800 flex flex-col items-center py-3">
+        <button onClick={onToggle} className="text-neutral-500 hover:text-neutral-300" title="Show chats">
+          <ChevronRight size={16} />
+        </button>
+      </div>
+    );
+  }
+
+  function startRename(chat) {
+    setEditingId(chat.id);
+    setEditTitle(chat.title);
+  }
+
+  async function commitRename(chatId) {
+    if (editTitle.trim()) await renameChat(chatId, editTitle.trim());
+    setEditingId(null);
+  }
+
+  function askDelete(chat) {
+    setPendingDelete(chat);
+  }
+
+  async function confirmDelete() {
+    await deleteChat(pendingDelete.id);
+    setPendingDelete(null);
+  }
+
+  // Extracted from the original flat-list row so batched (indented) and
+  // unbatched chats render identically — same click/rename/link/delete
+  // behavior either way, just an indent + no per-row Link2 badge once a
+  // chat is grouped (the batch header above it already communicates that).
+  function renderChatRow(chat, { indent = false, accentColor = null } = {}) {
+    return (
+      <div
+        key={chat.id}
+        className={`group px-3 py-2 border-b border-neutral-900 cursor-pointer ${indent ? "pl-6" : ""} ${
+          chat.id === sessionId ? "bg-neutral-800/70" : "hover:bg-neutral-900"
+        }`}
+        style={accentColor ? { borderLeft: `2px solid ${accentColor}` } : undefined}
+        onClick={() => editingId !== chat.id && switchChat(chat.id)}
+      >
+        {editingId === chat.id ? (
+          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            <input
+              autoFocus
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && commitRename(chat.id)}
+              className="flex-1 bg-neutral-950 border border-neutral-700 rounded px-1.5 py-0.5 text-xs outline-none"
+            />
+            <button onClick={() => commitRename(chat.id)}><Check size={13} className="text-green-400" /></button>
+            <button onClick={() => setEditingId(null)}><X size={13} className="text-neutral-500" /></button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-xs text-neutral-200 truncate">{chat.title}</span>
+            <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
+              {/* Batched chats already show a badge in their batch header
+                  above, so only render the per-row Link2 badge for chats
+                  linked the old, non-batch way. */}
+              {!indent && chat.linked_chat_ids?.length > 0 && (
+                <Link2 size={12} className="text-neutral-500" title={`Linked to ${chat.linked_chat_ids.length} chat(s)`} />
+              )}
+              {/* Manual per-chat link button hidden once a chat is
+                  batched — batch membership (managed via §5's "Manage
+                  batch" modal) is now the single source of truth for its
+                  linked_chat_ids, so editing it here directly would fight
+                  memory_batch.py's _sync_members on the next batch edit. */}
+              {!indent && (
+                <button onClick={(e) => { e.stopPropagation(); setLinkingId(chat.id); }} title="Share memory with other chats">
+                  <Link2 size={12} className="text-neutral-500 hover:text-neutral-200" />
+                </button>
+              )}
+              <button onClick={(e) => { e.stopPropagation(); startRename(chat); }} title="Rename">
+                <Pencil size={12} className="text-neutral-500 hover:text-neutral-200" />
+              </button>
+              <button onClick={(e) => { e.stopPropagation(); askDelete(chat); }} title="Delete">
+                <Trash2 size={12} className="text-neutral-500 hover:text-red-400" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-64 shrink-0 border-r border-neutral-800 flex flex-col h-full">
+      <div className="flex items-center justify-between px-3 py-3 border-b border-neutral-800">
+        <span className="text-xs font-medium text-neutral-400">Chats</span>
+        <div className="flex items-center gap-2">
+          <button onClick={createNewChat} title="New chat" className="text-neutral-400 hover:text-neutral-100">
+            <Plus size={15} />
+          </button>
+          <button onClick={() => setCreatingWorkspace(true)} title="New project" className="text-neutral-400 hover:text-neutral-100">
+            <FolderPlus size={15} />
+          </button>
+          <button onClick={onToggle} title="Hide chats" className="text-neutral-500 hover:text-neutral-300">
+            <ChevronLeft size={15} />
+          </button>
+        </div>
+      </div>
+
+      <div className="px-3 py-2 border-b border-neutral-900">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search chats, batches, projects…"
+          className="w-full bg-black/30 border border-neutral-800 rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+        />
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {filteredWorkspaces.map((ws) => {
+          const memberChats = chats.filter((c) => ws.chat_ids.includes(c.id));
+          // Whole group matched by name → show every member. Only a member
+          // matched → show just the matching ones (still lets you jump
+          // straight to the chat you searched for).
+          const visibleMembers = ws.name.toLowerCase().includes(q) ? memberChats : memberChats.filter(chatMatches);
+          return (
+            <div key={ws.id} className="border-b border-neutral-900">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-black/20">
+                <span className="text-[10px] uppercase tracking-wide" style={{ color: "var(--cyber-magenta)" }}>
+                  {ws.name} · {ws.chat_ids.length}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setAddingToWorkspace(ws)} title="Add chat to project">
+                    <FolderInput size={11} className="text-neutral-500 hover:text-neutral-200" />
+                  </button>
+                  <button onClick={() => setManagingWorkspace(ws)} title="Manage project">
+                    <Settings2 size={11} className="text-neutral-500 hover:text-neutral-200" />
+                  </button>
+                </div>
+              </div>
+              {visibleMembers.map((chat) => renderChatRow(chat, { indent: true }))}
+            </div>
+          );
+        })}
+
+        {filteredBatches.map((batch) => {
+          const memberChats = chats.filter(
+            (c) => batch.member_chat_ids.includes(c.id) && !workspacedChatIds.has(c.id)
+          );
+          if (memberChats.length === 0) return null; // all members moved into a workspace
+          const visibleMembers = batch.name.toLowerCase().includes(q) ? memberChats : memberChats.filter(chatMatches);
+          if (visibleMembers.length === 0) return null;
+          const accentColor = hashBatchColor(batch.id);
+          return (
+            <div key={batch.id} className="border-b border-neutral-900">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-black/20">
+                <span className="text-[10px] uppercase tracking-wide flex items-center" style={{ color: accentColor }}>
+                  <Link2 size={10} className="inline mr-1" />
+                  {batch.name} · {memberChats.length}
+                </span>
+                <button onClick={() => openManageBatch(batch)} title="Manage batch">
+                  <Settings2 size={11} className="text-neutral-500 hover:text-neutral-200" />
+                </button>
+              </div>
+              {visibleMembers.map((chat) => renderChatRow(chat, { indent: true, accentColor }))}
+            </div>
+          );
+        })}
+
+        {filteredUnbatchedChats.map((chat) => renderChatRow(chat))}
+      </div>
+
+      {linkingId && (
+        <LinkChatsModal
+          chatId={linkingId}
+          allChats={chats}
+          onClose={() => setLinkingId(null)}
+        />
+      )}
+
+      {managingBatch && (
+        <ManageBatchModal
+          batch={batches.find((b) => b.id === managingBatch.id) || managingBatch}
+          allChats={chats}
+          onClose={() => setManagingBatch(null)}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title="Delete chat"
+        message={`Delete "${pendingDelete?.title}"? Its messages and memory can't be recovered.`}
+        confirmLabel="Delete"
+        tone="danger"
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
+
+      {creatingWorkspace && <CreateWorkspaceModal onClose={() => setCreatingWorkspace(false)} />}
+
+      {addingToWorkspace && (
+        <AddChatToWorkspaceModal
+          workspace={workspaces.find((w) => w.id === addingToWorkspace.id) || addingToWorkspace}
+          allChats={chats}
+          workspacedChatIds={workspacedChatIds}
+          onClose={() => setAddingToWorkspace(null)}
+        />
+      )}
+
+      {managingWorkspace && (
+        <ManageWorkspaceModal
+          workspace={workspaces.find((w) => w.id === managingWorkspace.id) || managingWorkspace}
+          allChats={chats}
+          onClose={() => setManagingWorkspace(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// NEW — §6: this modal is now "Create batch" in practice. It keeps the
+// name LinkChatsModal (and the old linkChats() path stays available for
+// power users linking a chat that ISN'T going into a batch), but saving
+// with 1+ chats selected now calls createBatch() so the result is a real
+// mutual-membership group, not a one-directional linked_chat_ids edit.
+// This only ever opens for unbatched chats — the Link2 button that opens
+// it is already hidden on batched rows (see renderChatRow above), so
+// there's no "chat already in a batch" case to special-case here.
+function LinkChatsModal({ chatId, allChats, onClose }) {
+  const { linkChats, createBatch, estimateBatch } = useSession();   // CHANGED
+  const current = allChats.find((c) => c.id === chatId);
+  const [selected, setSelected] = useState(new Set(current?.linked_chat_ids || []));
+  const [estimate, setEstimate] = useState(null);   // NEW — §9.2
+
+  function toggle(id) {
+    const next = new Set(selected);
+    next.has(id) ? next.delete(id) : next.add(id);
+    setSelected(next);
+  }
+
+  // NEW — §9.2: recompute as the selection changes. Nothing to estimate
+  // until there's at least one other chat picked — an empty selection
+  // isn't forming a batch at all.
+  useEffect(() => {
+    if (selected.size === 0) { setEstimate(null); return; }
+    let cancelled = false;
+    estimateBatch([chatId, ...Array.from(selected)]).then((result) => {
+      if (!cancelled) setEstimate(result);
+    });
+    return () => { cancelled = true; };
+  }, [selected, chatId, estimateBatch]);
+
+  async function save() {
+    if (selected.size > 0) {
+      // Selecting at least one other chat forms a real batch now, instead
+      // of the old one-directional link. Default name is editable right
+      // after via ManageBatchModal's rename affordance (§5).
+      const defaultName = `${current?.title || "Chat"} + ${selected.size} more`;
+      await createBatch(defaultName, [chatId, ...Array.from(selected)]);
+    } else {
+      // Nothing selected: fall back to clearing any old-style links.
+      await linkChats(chatId, []);
+    }
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-medium text-neutral-200 mb-1">Share memory with "{current?.title}"</h3>
+        <p className="text-xs text-neutral-500 mb-3">
+          Pick chats to group with this one — they'll all share memory with each other as a batch.
+        </p>
+        <div className="space-y-1">
+          {allChats.filter((c) => c.id !== chatId).map((c) => (
+            <label key={c.id} className="flex items-center gap-2 text-xs text-neutral-300 py-1 cursor-pointer">
+              <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+              {c.title}
+            </label>
+          ))}
+          {allChats.length <= 1 && (
+            <p className="text-xs text-neutral-600">No other chats yet.</p>
+          )}
+        </div>
+
+        {/* NEW — §9.2: goes right here, between the checkbox list and the
+            Cancel/Save row — so it's the last thing you see before deciding */}
+        {estimate && selected.size > 0 && (
+          <p className={`text-[11px] mt-3 ${estimate.max_tokens_per_message > 800 ? "text-red-400" : "text-neutral-500"}`}>
+            ~{estimate.max_tokens_per_message} tokens of shared context injected per message across {estimate.member_count} chats
+          </p>
+        )}
+
+        <div className="flex justify-end gap-2 mt-4">
+          <button onClick={onClose} className="text-xs text-neutral-400 px-3 py-1.5">Cancel</button>
+          <button onClick={save} className="text-xs bg-neutral-100 text-neutral-900 rounded px-3 py-1.5 font-medium">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/ConfirmDialog.jsx">
+"use client";
+import { AlertTriangle } from "lucide-react";
+
+export default function ConfirmDialog({
+  open, title, message, confirmLabel = "Delete", tone = "danger", onConfirm, onCancel,
+}) {
+  if (!open) return null;
+  const accent = tone === "danger" ? "var(--cyber-magenta)" : "var(--cyber-cyan)";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        className="w-80 rounded-lg p-4"
+        style={{
+          background: "var(--cyber-panel)",
+          border: "1px solid var(--cyber-border)",
+          boxShadow: `0 0 24px ${accent}22`,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <AlertTriangle size={16} style={{ color: accent }} />
+          <h3 className="text-sm font-display" style={{ color: "var(--cyber-text)" }}>
+            {title}
+          </h3>
+        </div>
+        <p className="text-xs mb-4" style={{ color: "var(--cyber-dim)" }}>
+          {message}
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="text-xs px-3 py-1.5 rounded"
+            style={{ color: "var(--cyber-dim)" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="text-xs px-3 py-1.5 rounded font-medium"
+            style={{
+              background: accent,
+              color: "var(--cyber-bg)",
+              boxShadow: `var(--cyber-glow)`,
+            }}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/CreateWorkspaceModal.jsx">
+"use client";
+import { useState } from "react";
+import { useSession } from "../context/SessionContext";
+
+export default function CreateWorkspaceModal({ onClose }) {
+  const { createWorkspace } = useSession();
+  const [name, setName] = useState("");
+
+  async function save() {
+    if (!name.trim()) return;
+    await createWorkspace(name.trim());
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 w-80" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-medium text-neutral-200 mb-3">New project</h3>
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && save()}
+          placeholder="Project name"
+          className="w-full bg-neutral-950 border border-neutral-700 rounded px-2 py-1.5 text-xs outline-none mb-4"
+        />
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="text-xs text-neutral-400 px-3 py-1.5">Cancel</button>
+          <button onClick={save} className="text-xs bg-neutral-100 text-neutral-900 rounded px-3 py-1.5 font-medium">Create</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/ManageBatchModal.jsx">
+"use client";
+import { useState } from "react";
+import { useSession } from "../context/SessionContext";
+import ConfirmDialog from "./ConfirmDialog";
+
+export default function ManageBatchModal({ batch, allChats, onClose }) {
+  const { unlinkBatchMembers, renameBatch, deleteBatch } = useSession();
+  const [checked, setChecked] = useState(new Set());
+  const [editingName, setEditingName] = useState(false);
+  const [name, setName] = useState(batch.name);
+  const [confirmDissolve, setConfirmDissolve] = useState(false);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+
+  const members = allChats.filter((c) => batch.member_chat_ids.includes(c.id));
+  const wouldDissolve = members.length - checked.size <= 1;
+
+  function toggle(id) {
+    const next = new Set(checked);
+    next.has(id) ? next.delete(id) : next.add(id);
+    setChecked(next);
+  }
+
+  function handleUnlinkClick() {
+    if (checked.size === 0) return;
+    if (wouldDissolve) setConfirmDissolve(true);
+    else doUnlink();
+  }
+
+  async function doUnlink() {
+    await unlinkBatchMembers(batch.id, Array.from(checked));
+    setConfirmDissolve(false);
+    onClose();
+  }
+
+  async function commitRename() {
+    if (name.trim() && name !== batch.name) await renameBatch(batch.id, name.trim());
+    setEditingName(false);
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+        <div
+          className="w-96 rounded-lg p-4"
+          style={{ background: "var(--cyber-panel)", border: "1px solid var(--cyber-border)" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {editingName ? (
+            <div className="flex items-center gap-1 mb-3">
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && commitRename()}
+                className="flex-1 bg-black/30 border border-neutral-700 rounded px-2 py-1 text-sm"
+              />
+              <button onClick={commitRename} className="text-xs" style={{ color: "var(--cyber-cyan)" }}>
+                Save
+              </button>
+            </div>
+          ) : (
+            <h3
+              className="text-sm font-display mb-3 cursor-pointer"
+              style={{ color: "var(--cyber-text)" }}
+              onClick={() => setEditingName(true)}
+              title="Click to rename"
+            >
+              {batch.name}
+            </h3>
+          )}
+
+          <p className="text-xs mb-2" style={{ color: "var(--cyber-dim)" }}>
+            Check the chats you want to unlink from this batch.
+          </p>
+          <div className="space-y-1 mb-3 max-h-52 overflow-y-auto">
+            {members.map((c) => (
+              <label key={c.id} className="flex items-center gap-2 text-xs py-1">
+                <input type="checkbox" checked={checked.has(c.id)} onChange={() => toggle(c.id)} />
+                {c.title}
+              </label>
+            ))}
+          </div>
+          {wouldDissolve && checked.size > 0 && (
+            <p className="text-[11px] mb-3" style={{ color: "var(--cyber-magenta)" }}>
+              Only 1 chat would remain — the whole batch will be dissolved.
+            </p>
+          )}
+
+          <div className="flex justify-between items-center pt-2 border-t" style={{ borderColor: "var(--cyber-border)" }}>
+            <button
+              onClick={() => setConfirmDeleteAll(true)}
+              className="text-xs"
+              style={{ color: "var(--cyber-magenta)" }}
+            >
+              Delete entire batch
+            </button>
+            <div className="flex gap-2">
+              <button onClick={onClose} className="text-xs px-3 py-1.5" style={{ color: "var(--cyber-dim)" }}>
+                Close
+              </button>
+              <button
+                onClick={handleUnlinkClick}
+                disabled={checked.size === 0}
+                className="text-xs px-3 py-1.5 rounded font-medium disabled:opacity-40"
+                style={{ background: "var(--cyber-cyan)", color: "var(--cyber-bg)" }}
+              >
+                Unlink selected
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <ConfirmDialog
+        open={confirmDissolve}
+        title="This will dissolve the batch"
+        message="Unlinking these chats leaves only 1 chat behind, which isn't a group anymore — the batch will be removed entirely and that chat will go back to being unlinked."
+        confirmLabel="Unlink & dissolve"
+        tone="danger"
+        onConfirm={doUnlink}
+        onCancel={() => setConfirmDissolve(false)}
+      />
+      <ConfirmDialog
+        open={confirmDeleteAll}
+        title="Delete this batch"
+        message={`Delete "${batch.name}"? All ${members.length} chats stay, but they'll stop sharing memory with each other.`}
+        confirmLabel="Delete batch"
+        tone="danger"
+        onConfirm={async () => {
+          await deleteBatch(batch.id);
+          setConfirmDeleteAll(false);
+          onClose();
+        }}
+        onCancel={() => setConfirmDeleteAll(false)}
+      />
+    </>
+  );
+}
+</file>
+
+<file path="frontend/app/components/ManageWorkspaceModal.jsx">
+"use client";
+import { useState } from "react";
+import { useSession } from "../context/SessionContext";
+import { Pencil, Check, X, FolderMinus, Trash2 } from "lucide-react";
+import ConfirmDialog from "./ConfirmDialog";
+
+export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
+  const { renameWorkspace, removeWorkspaceChat, deleteWorkspace } = useSession();
+  const [name, setName] = useState(workspace.name);
+  const [editingName, setEditingName] = useState(false);
+  const [pendingRemove, setPendingRemove] = useState(null); // { chat, deleteChat }
+  const [pendingDeleteWs, setPendingDeleteWs] = useState(false);
+
+  const members = allChats.filter((c) => workspace.chat_ids.includes(c.id));
+
+  async function saveName() {
+    if (name.trim() && name.trim() !== workspace.name) await renameWorkspace(workspace.id, name.trim());
+    setEditingName(false);
+  }
+
+  async function confirmRemove() {
+    const { chat, deleteChat } = pendingRemove;
+    await removeWorkspaceChat(workspace.id, chat.id, deleteChat);
+    setPendingRemove(null);
+  }
+
+  async function confirmDeleteWorkspace() {
+    await deleteWorkspace(workspace.id);
+    setPendingDeleteWs(false);
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1 mb-3">
+          {editingName ? (
+            <>
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && saveName()}
+                className="flex-1 bg-neutral-950 border border-neutral-700 rounded px-1.5 py-0.5 text-sm outline-none"
+              />
+              <button onClick={saveName}><Check size={14} className="text-green-400" /></button>
+              <button onClick={() => { setName(workspace.name); setEditingName(false); }}><X size={14} className="text-neutral-500" /></button>
+            </>
+          ) : (
+            <>
+              <h3 className="text-sm font-medium text-neutral-200 flex-1 truncate">{workspace.name}</h3>
+              <button onClick={() => setEditingName(true)} title="Rename project">
+                <Pencil size={13} className="text-neutral-500 hover:text-neutral-200" />
+              </button>
+            </>
+          )}
+        </div>
+
+        <div className="space-y-1 mb-3">
+          {members.map((chat) => (
+            <div key={chat.id} className="flex items-center justify-between gap-2 text-xs text-neutral-300 py-1">
+              <span className="truncate">{chat.title}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button onClick={() => setPendingRemove({ chat, deleteChat: false })} title="Remove from project" className="text-neutral-500 hover:text-neutral-200">
+                  <FolderMinus size={13} />
+                </button>
+                <button onClick={() => setPendingRemove({ chat, deleteChat: true })} title="Delete chat entirely" className="text-neutral-500 hover:text-red-400">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {members.length === 0 && <p className="text-xs text-neutral-600">No chats in this project yet.</p>}
+        </div>
+
+        <div className="flex justify-between items-center pt-2 border-t border-neutral-800">
+          <button onClick={() => setPendingDeleteWs(true)} className="text-xs text-red-400/80 hover:text-red-400">Delete project</button>
+          <button onClick={onClose} className="text-xs text-neutral-400 px-3 py-1.5">Close</button>
+        </div>
+      </div>
+
+      <ConfirmDialog
+        open={!!pendingRemove}
+        title={pendingRemove?.deleteChat ? "Delete chat" : "Remove from project"}
+        message={
+          pendingRemove?.deleteChat
+            ? `Delete "${pendingRemove?.chat?.title}"? Its messages and memory can't be recovered.`
+            : `Remove "${pendingRemove?.chat?.title}" from "${workspace.name}"? The chat stays, it just stops auto-sharing memory with the rest of the project.`
+        }
+        confirmLabel={pendingRemove?.deleteChat ? "Delete" : "Remove"}
+        tone="danger"
+        onConfirm={confirmRemove}
+        onCancel={() => setPendingRemove(null)}
+      />
+      <ConfirmDialog
+        open={pendingDeleteWs}
+        title="Delete project"
+        message={`Delete "${workspace.name}"? Member chats survive and just stop auto-sharing memory with each other.`}
+        confirmLabel="Delete"
+        tone="danger"
+        onConfirm={confirmDeleteWorkspace}
+        onCancel={() => setPendingDeleteWs(false)}
+      />
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/DependencyGraph.jsx">
+"use client";
+import ReactFlow, { Background, Controls } from "reactflow";
+import "reactflow/dist/style.css";
+
+// `map` shape (from agents/dependency_mapper.py's actual output):
+// { module_name: { depends_on: ["other_module", ...], notes: "..." } }
+export default function DependencyGraph({ map }) {
+  const moduleNames = Object.keys(map);
+
+  const nodes = moduleNames.map((name, i) => ({
+    id: name,
+    position: { x: (i % 4) * 180, y: Math.floor(i / 4) * 120 },
+    data: { label: name },
+  }));
+
+  const edges = moduleNames.flatMap((name) =>
+    (map[name]?.depends_on || []).map((dep, i) => ({
+      id: `${name}-${dep}-${i}`,
+      source: name,
+      target: dep,
+    }))
+  );
+
+  return (
+    <div style={{ height: 260 }}>
+      <ReactFlow nodes={nodes} edges={edges} fitView>
+        <Background /><Controls />
+      </ReactFlow>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/MermaidDiagram.jsx">
+"use client";
+import { useEffect, useRef, useState } from "react";
+import mermaid from "mermaid";
+
+// Bug fix: the diagrams behind this component come straight from an LLM
+// (generic_worker.py's MARKDOWN_INSTRUCTION asks it to write real Mermaid
+// syntax for flowcharts/mindmaps/etc.), so invalid syntax is a real,
+// expected case, not a corner case. By default, when mermaid.render() hits
+// a parse error, it doesn't just reject the promise -- it also inserts its
+// own "Syntax error in text / mermaid version x.y.z" bomb-icon SVG
+// directly into the document (not into this component's own ref), which is
+// exactly the stray error blocks stacking up outside the chat UI.
+// `suppressErrorRendering: true` (supported since mermaid ~10.3, and this
+// project is on 11.x) turns that off and makes render() simply reject like
+// any other failed async call, so the .catch() below is actually in
+// control of what the user sees.
+mermaid.initialize({ startOnLoad: false, theme: "dark", suppressErrorRendering: true });
+
+export default function MermaidDiagram({ mermaidText }) {
+  const ref = useRef(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFailed(false);
+    if (ref.current && mermaidText) {
+      const renderId = `mermaid-diagram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      mermaid.render(renderId, mermaidText)
+        .then(({ svg }) => {
+          if (!cancelled && ref.current) {
+            ref.current.innerHTML = svg;
+          }
+        })
+        .catch((err) => {
+          console.error("Mermaid render failed:", err);
+          if (!cancelled) setFailed(true);
+          // Belt-and-braces: some mermaid versions still append a stray
+          // `#renderId` error node to the document body on failure even
+          // with suppressErrorRendering set. Clean it up if present so it
+          // can never leak into the page layout.
+          document.getElementById(renderId)?.remove();
+        });
+    }
+    return () => { cancelled = true; };
+  }, [mermaidText]);
+
+  if (failed) {
+    // Fall back to the raw diagram source instead of a blank/broken box,
+    // so the content isn't lost -- just not rendered as a graphic. Styled
+    // to match the plain fenced-code-block look Markdown.jsx already uses
+    // for non-mermaid code, since this is effectively the same case.
+    return (
+      <div className="text-[11px] text-neutral-500 space-y-1.5">
+        <div>Couldn't render this diagram — showing the raw source instead:</div>
+        <pre className="overflow-x-auto p-3 text-xs bg-black/30 rounded-md border border-neutral-800">
+          <code>{mermaidText}</code>
+        </pre>
+      </div>
+    );
+  }
+
+  return <div ref={ref} />;
+}
+</file>
+
+<file path="frontend/app/components/RoutingTraceCard.jsx">
+"use client";
+
+export default function RoutingTraceCard({ decision }) {
+  // server.py returns decision={} on a caught server-side error — nothing
+  // to show in that case, and empty-object access below would just print
+  // "confidence 0.00" noise for no reason.
+  if (!decision || !decision.reasoning) return null;
+
+  const isPanel = decision.panel_reviewed && Array.isArray(decision.panel_votes);
+  const pct = (c) => (typeof c === "number" ? c.toFixed(2) : "0.00");
+
+  return (
+    <details className="rounded-lg border border-neutral-800 bg-neutral-950/50 text-xs">
+      <summary className="cursor-pointer select-none px-2 py-1.5 text-neutral-400 hover:text-neutral-300">
+        routing trace
+        {isPanel && <span className="ml-1 text-amber-500/80">· panel reviewed</span>}
+      </summary>
+
+      <div className="space-y-2 border-t border-neutral-800 px-2 pb-2 pt-1.5">
+        {isPanel ? (
+          <>
+            <div className="space-y-1.5">
+              {decision.panel_votes.map((v) => (
+                <div key={v.member} className="border-l-2 border-neutral-800 pl-2">
+                  <div className="text-neutral-500">
+                    member {v.member} · tier {v.tier} · confidence {pct(v.confidence)}
+                    {v.directed_task_type ? ` · ${v.directed_task_type}` : ""}
+                  </div>
+                  <div className="text-neutral-400">{v.reasoning}</div>
+                </div>
+              ))}
+            </div>
+            <div className="border-t border-neutral-800/70 pt-1.5">
+              <div className="text-neutral-500">
+                synthesis · tier {decision.tier} (max) · confidence {pct(decision.confidence)} (avg) ·{" "}
+                {decision.directed_task_type
+                  ? decision.directed_task_type
+                  : "directed_task_type: none (members disagreed)"}
+              </div>
+              {decision.suggested_agents?.length > 0 && (
+                <div className="mt-0.5 text-neutral-500">
+                  agents: {decision.suggested_agents.join(", ")}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="text-neutral-500">
+              inspector · tier {decision.tier} · confidence {pct(decision.confidence)}
+              {decision.directed_task_type ? ` · ${decision.directed_task_type}` : ""}
+            </div>
+            <div className="text-neutral-400">{decision.reasoning}</div>
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+</file>
+
+<file path="frontend/app/components/tabs/SettingsTab.jsx">
+"use client";
+import { useSession } from "../../context/SessionContext";
+
+export default function SettingsTab() {
+  const { sessionId, API_URL, registerProject, pusherConnected } = useSession();
+  return (
+    <div className="h-full overflow-y-auto px-4 py-6 max-w-xl mx-auto space-y-6 text-sm">
+      <section>
+        <h2 className="text-neutral-400 font-medium mb-2">Project</h2>
+        <button
+          onClick={registerProject}
+          className="text-xs text-neutral-500 hover:text-neutral-300 border border-neutral-800 rounded-lg px-3 py-1.5"
+        >
+          + Register external project
+        </button>
+        <p className="text-neutral-600 text-xs mt-2">
+          Registers a folder for cross-project control (tier 2 tasks can then
+          target it via <code>project_unique_name</code>).
+        </p>
+      </section>
+      <section>
+        <h2 className="text-neutral-400 font-medium mb-2">Connection</h2>
+        <dl className="text-xs text-neutral-500 space-y-1">
+          <div className="flex justify-between"><dt>API URL</dt><dd>{API_URL}</dd></div>
+          <div className="flex justify-between">
+            <dt>Live events (Pusher)</dt>
+            <dd className={pusherConnected ? "text-emerald-500" : "text-amber-500"}>
+              {pusherConnected ? "connected" : "not configured"}
+            </dd>
+          </div>
+          <div className="flex justify-between"><dt>Session ID</dt><dd className="truncate max-w-[60%]">{sessionId}</dd></div>
+        </dl>
+      </section>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/WorkingPanel.jsx">
+"use client";
+import { useRef, useEffect } from "react";
+import { useSession } from "../context/SessionContext";
+import RoutingTraceCard from "./RoutingTraceCard";
+import AgentStepList from "./AgentStepList";
+import RoutingTraceGraph from "./RoutingTraceGraph";
+import DependencyGraph from "./DependencyGraph";
+import MermaidDiagram from "./MermaidDiagram";
+
+// One section per assistant message that carries a snapshot (steps /
+// routeTrace / dependencyMap / structurePlan — all attached by
+// SessionContext.jsx's sendTask(), success and error paths alike),
+// plus a trailing "live" section for whatever run is currently in
+// flight (no message snapshot exists for that one yet).
+//
+// `isSyncingRef` is the same lock ChatTab.jsx uses on its own scroll
+// handler — set true right before a programmatic sync-scroll here so
+// this panel's own onScroll doesn't immediately fire, recompute a
+// (possibly different) closest index, and bounce activeMessageIndex
+// back, which would fight ChatTab's handler forever.
+export default function WorkingPanel({ isSyncingRef }) {
+  const {
+    messages,
+    activeMessageIndex,
+    setActiveMessageIndex,
+    loading,
+    liveDecision,
+    liveSteps,
+    routeTrace,
+    roleRequests,
+    dependencyMap,
+    structurePlan,
+    sessionId,   // NEW — §4
+    batches,     // NEW — §4
+  } = useSession();
+
+  // NEW — §4: answers "which chats is *this* chat currently pulling
+  // context from" right where the user is already looking, without
+  // opening the (§5) manage-batch modal. A chat is in at most one batch
+  // (see eo/memory_batch.py's "one batch at a time" note), so `.find`
+  // is safe here.
+  const activeBatch = batches.find((b) => b.member_chat_ids.includes(sessionId)) || null;
+
+  const sectionRefs = useRef([]);
+  const containerRef = useRef(null);
+
+  // Scroll to the active index when it changed from the OTHER panel
+  // (i.e. from ChatTab's handler, via setActiveMessageIndex).
+  useEffect(() => {
+    if (activeMessageIndex == null) return;
+    const el = sectionRefs.current[activeMessageIndex];
+    if (!el || !containerRef.current) return;
+    isSyncingRef.current = true;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Release the lock after the smooth scroll has had time to settle,
+    // rather than on scroll-end (no reliable cross-browser event for
+    // that on a plain div), so this panel's own onScroll below stays
+    // suppressed for the duration of the programmatic scroll.
+    const t = setTimeout(() => {
+      isSyncingRef.current = false;
+    }, 500);
+    return () => clearTimeout(t);
+  }, [activeMessageIndex, isSyncingRef]);
+
+  // This panel's own scroll -> figure out which section is closest to
+  // the top and publish it as activeMessageIndex, same "closest
+  // distance from container top" approach as ChatTab.handleChatScroll.
+  function handleScroll() {
+    if (isSyncingRef.current) return;
+    const containerTop = containerRef.current?.getBoundingClientRect().top ?? 0;
+    let closestIndex = null;
+    let closestDist = Infinity;
+    sectionRefs.current.forEach((el, i) => {
+      if (!el) return;
+      const dist = Math.abs(el.getBoundingClientRect().top - containerTop);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestIndex = i;
+      }
+    });
+    if (closestIndex != null) setActiveMessageIndex(closestIndex);
+  }
+
+  const snapshotMessages = messages
+    .map((m, i) => ({ ...m, index: i }))
+    .filter(
+      (m) =>
+        m.role === "assistant" &&
+        (m.steps?.length > 0 ||
+          m.routeTrace?.length > 0 ||
+          (m.dependencyMap && Object.keys(m.dependencyMap).length > 0) ||
+          m.structurePlan)
+    );
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* NEW — §4B: small strip above the panel, only when the active
+          chat is currently a batch member. */}
+      {activeBatch && (
+        <div
+          className="text-[10px] px-3 py-1.5 border-b shrink-0"
+          style={{ borderColor: "var(--cyber-border)", color: "var(--cyber-dim)" }}
+        >
+          Sharing memory with {activeBatch.member_chat_ids.length - 1} other chat(s) in &quot;{activeBatch.name}&quot;
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-3 space-y-6"
+      >
+      {snapshotMessages.length === 0 && !loading && (
+        <p className="text-neutral-600 text-xs p-4">
+          Routing and structure info will appear here once a task runs.
+        </p>
+      )}
+
+      {snapshotMessages.map((m) => (
+        <div
+          key={m.index}
+          ref={(el) => (sectionRefs.current[m.index] = el)}
+          className="space-y-2 border-b border-neutral-800 pb-4"
+        >
+          <p className="text-xs text-neutral-500 truncate">{m.task}</p>
+          {m.data?.decision && <RoutingTraceCard decision={m.data.decision} />}
+          {m.steps?.length > 0 && <AgentStepList steps={m.steps} />}
+          {/*
+            FIX: this used to require `m.routeTrace?.length > 1` before
+            the graph would even mount -- a dispatch_event only fires
+            AFTER the first role finishes and the dispatcher computes the
+            next hop, so for most of a run's early life (SGA, Inspector,
+            role-brief writing, the first role itself) routeTrace has 0
+            or 1 entries and the graph never appeared until the run was
+            nearly over. RoutingTraceGraph now builds its own backbone
+            from `steps` (every real agent_start/agent_done, in order),
+            so it no longer needs routeTrace to have anything in it at
+            all -- render it whenever there's ANY real activity to show.
+          */}
+          {(m.steps?.length > 0 || m.routeTrace?.length > 0) && (
+            <RoutingTraceGraph
+              trace={m.routeTrace}
+              suggestedAgents={m.data?.decision?.suggested_agents}
+              steps={m.steps}
+              roleRequests={m.roleRequests}
+              runStatus={m.data?.status === "error" ? "error" : "done"}
+            />
+          )}
+          {m.dependencyMap && Object.keys(m.dependencyMap).length > 0 && (
+            <DependencyGraph map={m.dependencyMap} />
+          )}
+          {m.structurePlan && <MermaidDiagram mermaidText={m.structurePlan} />}
+        </div>
+      ))}
+
+      {/* Live section for the in-progress run — same shape LiveActivity.jsx
+          used to render standalone; absorbed here per Part 21 Step 5. */}
+      {loading && (
+        <div className="space-y-2">
+          <p className="text-xs text-neutral-500">Running…</p>
+          {!liveDecision ? (
+            <div className="text-neutral-500 text-sm animate-pulse">
+              Classifying and routing...
+            </div>
+          ) : (
+            <>
+              <RoutingTraceCard decision={liveDecision} />
+              {/*
+                FIX: same gate removed as above, PLUS this now renders as
+                soon as liveDecision exists (classification just landed) —
+                RoutingTraceGraph draws the planned pipeline as a
+                placeholder chain immediately from suggestedAgents, then
+                fills it in live as liveSteps arrives, instead of waiting
+                for two dispatch_events to accumulate first.
+              */}
+              <RoutingTraceGraph
+                trace={routeTrace}
+                suggestedAgents={liveDecision?.suggested_agents}
+                steps={liveSteps}
+                roleRequests={roleRequests}
+                runStatus="running"
+              />
+              {Object.keys(dependencyMap).length > 0 && (
+                <DependencyGraph map={dependencyMap} />
+              )}
+              {structurePlan && <MermaidDiagram mermaidText={structurePlan} />}
+              <AgentStepList steps={liveSteps} />
+            </>
+          )}
+        </div>
+      )}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/AppShell.jsx">
+"use client";
+import { useState, useEffect } from "react";
+import { SessionProvider } from "../context/SessionContext";
+import ChatSidebar from "./ChatSidebar";
+import ChatTab from "./tabs/ChatTab";
+import TokenUsageTab from "./tabs/TokenUsageTab";
+import SettingsTab from "./tabs/SettingsTab";
+
+const TABS = [
+  { id: "chat", label: "Chat", render: ChatTab },
+  { id: "usage", label: "Token Usage", render: TokenUsageTab },
+  { id: "settings", label: "Settings", render: SettingsTab },
+];
+
+const SIDEBAR_KEY = "minime_sidebar_collapsed";
+
+export default function AppShell() {
+  const [activeTab, setActiveTab] = useState("chat");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
+  }, []);
+
+  function toggleSidebar() {
+    setSidebarCollapsed((prev) => {
+      localStorage.setItem(SIDEBAR_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+
+  const Active = TABS.find((t) => t.id === activeTab)?.render ?? ChatTab;
+  return (
+    <SessionProvider>
+      <div className="flex flex-col h-screen">
+        <header className="border-b border-neutral-800 px-4 py-3 flex items-center gap-6">
+          <h1 className="text-sm font-medium text-neutral-400">MiniMe</h1>
+          <nav className="flex gap-1">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setActiveTab(t.id)}
+                className={`text-xs rounded-lg px-3 py-1.5 transition-colors ${
+                  activeTab === t.id ? "bg-neutral-100 text-neutral-900 font-medium" : "text-neutral-500 hover:text-neutral-300"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+        </header>
+        <div className="flex flex-1 min-h-0">
+          <ChatSidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+          <div className="flex-1 min-h-0">
+            <Active />
+          </div>
+        </div>
+      </div>
+    </SessionProvider>
+  );
+}
+</file>
+
+<file path="frontend/app/components/Markdown.jsx">
+"use client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import MermaidDiagram from "./MermaidDiagram";
+
+// Shared markdown renderer for agent output (MessageBubble's ResultBody,
+// AgentStepList's step bodies). Custom-styled per element instead of
+// relying on @tailwindcss/typography, since this repo doesn't have that
+// plugin installed — keeps the dependency footprint to just
+// react-markdown + remark-gfm (tables, strikethrough, task lists).
+export default function Markdown({ children }) {
+  if (!children) return null;
+  return (
+    <div className="markdown-body text-sm leading-relaxed text-neutral-200 space-y-3">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: (p) => <h1 className="text-lg font-semibold text-neutral-100 mt-4 mb-2" {...p} />,
+          h2: (p) => <h2 className="text-base font-semibold text-neutral-100 mt-4 mb-2" {...p} />,
+          h3: (p) => <h3 className="text-sm font-semibold text-neutral-200 mt-3 mb-1.5" {...p} />,
+          p: (p) => <p className="text-neutral-300" {...p} />,
+          ul: (p) => <ul className="list-disc pl-5 space-y-1 text-neutral-300" {...p} />,
+          ol: (p) => <ol className="list-decimal pl-5 space-y-1 text-neutral-300" {...p} />,
+          li: (p) => <li className="marker:text-neutral-600" {...p} />,
+          a: (p) => (
+            <a className="text-cyan-400 underline underline-offset-2 hover:text-cyan-300" target="_blank" rel="noreferrer" {...p} />
+          ),
+          blockquote: (p) => (
+            <blockquote className="border-l-2 border-neutral-700 pl-3 text-neutral-400 italic" {...p} />
+          ),
+          hr: () => <hr className="border-neutral-800 my-3" />,
+          table: (p) => (
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse text-xs" {...p} />
+            </div>
+          ),
+          thead: (p) => <thead className="border-b border-neutral-700" {...p} />,
+          th: (p) => <th className="text-left px-2 py-1.5 font-medium text-neutral-300" {...p} />,
+          td: (p) => <td className="px-2 py-1.5 border-t border-neutral-800/70 text-neutral-400" {...p} />,
+          code: ({ inline, className, children, ...rest }) => {
+            if (inline) {
+              return (
+                <code className="bg-neutral-800 rounded px-1 py-0.5 text-[0.85em] text-amber-300" {...rest}>
+                  {children}
+                </code>
+              );
+            }
+            // Language tag from the fenced block (```python -> "language-python"),
+            // shown as a small label above the block.
+            const lang = /language-(\w+)/.exec(className || "")?.[1];
+
+            // ```mermaid fences render as an actual diagram instead of
+            // raw Mermaid syntax as text — reuses the same renderer
+            // structure_architect's structure-plan views already use.
+            if (lang === "mermaid") {
+              const mermaidText = String(children).replace(/\n$/, "");
+              return (
+                <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden my-2 p-3">
+                  <MermaidDiagram mermaidText={mermaidText} />
+                </div>
+              );
+            }
+
+            return (
+              <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden my-2">
+                {lang && (
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-neutral-500 border-b border-neutral-800">
+                    {lang}
+                  </div>
+                )}
+                <pre className="overflow-x-auto p-3 text-xs">
+                  <code className={className} {...rest}>
+                    {children}
+                  </code>
+                </pre>
+              </div>
+            );
+          },
+        }}
+      >
+        {children}
+      </ReactMarkdown>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/RoutingTraceGraph.jsx">
+"use client";
+import { useMemo, useRef, useEffect, useState } from "react";
+import dynamic from "next/dynamic";
+
+// react-force-graph-2d touches the canvas/window at import time, so it
+// has to load client-side only -- same reasoning as any other
+// canvas/WebGL library under Next.js's app router.
+const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
+
+// The full icon table (role name -> {icon, color}, spanning coding,
+// writing, music, legal, medical, business, science, trades, etc --
+// this app isn't just for coding tasks) lives in agentRoleIcons.js so
+// it can grow without bloating this file. "Writing a new role brief: X"
+// (eo/panel.py's panel_brief_writer step) is matched there too, first,
+// so it doesn't fall through to the generic default.
+import { categorize, INPUT_CATEGORY, OUTPUT_CATEGORY } from "./agentRoleIcons";
+
+const REASON_COLORS = {
+  plan: "#6b7280",
+  "error-priority": "#ef4444",
+  recheck: "#f59e0b",
+  skip: "#8b5cf6",
+  escalate: "#ec4899",
+  requested: "#22d3ee",   // agent_requested_role edges
+};
+
+// Matches eo/agents/code_writers.py's "Code Writer {worker_id} — {name}"
+// and agents/reviewer.py's "Reviewer {worker_index}" -- both fire their
+// own agent_start/agent_done WHILE the outer dispatcher-level step
+// (e.g. "implementer") is still open, i.e. genuinely parallel workers
+// under one stage, not a sequential chain. See groupWorkers() below.
+function workerGroupOf(label) {
+  const m = /^(Code Writer|Reviewer)\s+(\d+)/i.exec(label || "");
+  if (!m) return null;
+  return m[1].toLowerCase().startsWith("code") ? "Code Writer Pool" : "Reviewer Pool";
+}
+
+function briefedRole(label) {
+  const m = /^Writing a new role brief:\s*(.+)$/i.exec(label || "");
+  return m ? m[1].trim() : null;
+}
+
+// Short form for the label drawn UNDER the node on canvas, where space
+// is genuinely tight. This is cosmetic-only -- the hover tooltip always
+// uses fullNameOf() instead (see nodeLabel below), so the complete name
+// is never actually lost, just abbreviated in the one place that can't
+// fit it.
+function shortLabel(id) {
+  const brief = briefedRole(id);
+  if (brief) return `Brief: ${brief}`;
+  return id.length > 26 ? id.slice(0, 24) + "…" : id;
+}
+
+// Untruncated version, used ONLY for the hover tooltip. Every upsert()
+// call below sets both `display` (shortLabel) and `fullName`
+// (fullNameOf) on the node -- this is the piece that was previously
+// missing: a node could carry a fullName field in theory, but if
+// nothing ever assigned it, nodeLabel silently fell back to the
+// truncated `display` anyway. Every call site here is wired to set it.
+function fullNameOf(id) {
+  const brief = briefedRole(id);
+  return brief ? `Brief: ${brief}` : id;
+}
+
+function truncate(text, n = 220) {
+  if (!text) return "";
+  return text.length > n ? text.slice(0, n) + "…" : text;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+// `trace`: array of {destination, reason} from eo/dispatcher.py's
+// _log_route(), via the "dispatch_event" relay event. Used here only to
+// annotate WHY the backbone moved from one dispatcher-level role to the
+// next (plan/recheck/escalate coloring) -- it is no longer the source of
+// which nodes exist. See `steps` below for that.
+//
+// `steps` (the same liveSteps/message.steps array AgentStepList.jsx
+// renders): this is the actual source of truth for nodes. It captures
+// EVERY agent_start/agent_done pair that ran, in the order it started --
+// dispatcher-level roles, Inspector, SGA, panel_brief_writer's
+// "Writing a new role brief: X" steps, and nested per-worker steps
+// (Code Writer N, Reviewer N) alike. Building the graph from this instead
+// of `trace` is what makes every worked role show up, including ones
+// that never went through the dispatcher.
+//
+// `roleRequests`: agent_requested_role events -- eo/executor.py
+// auto-inserting a missing prerequisite role. Rendered as its own
+// distinct edge color/label ("requested").
+//
+// `suggestedAgents`: decision.suggested_agents -- used to draw a
+// "planned pipeline" placeholder chain the moment classification
+// completes, before any agent_start has actually arrived yet, so the
+// graph has something to show immediately instead of appearing empty
+// until the first real step lands.
+//
+// `runStatus`: "running" | "done" | "error" -- drives the Output node's
+// status ring so it visibly flips from pending -> done/error.
+export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus }) {
+  const fgRef = useRef();
+  const containerRef = useRef(null);
+  const [dims, setDims] = useState({ width: 600, height: 360 });
+  const [hoveredNode, setHoveredNode] = useState(null);
+
+  // FIX (graph reflows/jumps on every single event instead of growing
+  // smoothly): react-force-graph keys physics state off object identity,
+  // not id. Rebuilding a brand-new plain object for every node on every
+  // render meant the WHOLE simulation restarted from scratch each time,
+  // which is why nothing looked "live" -- it only visually settled once
+  // events stopped arriving. Keeping one persistent object per node id
+  // (mutated in place, not replaced) lets already-placed nodes keep their
+  // x/y and only genuinely new nodes enter unplaced.
+  const nodeObjectsRef = useRef(new Map());
+  const lastZoomRef = useRef(0);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const observer = new ResizeObserver(([entry]) => {
+      setDims({ width: entry.contentRect.width, height: 360 });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Most recent step per role/id -- a role can be revisited (recheck/
+  // escalate), and the latest run of it is what the node should reflect.
+  const stepByRole = useMemo(() => {
+    const map = {};
+    for (const s of steps || []) map[s.role || s.agent] = s;
+    return map;
+  }, [steps]);
+
+  const graphData = useMemo(() => {
+    const upsert = (id, patch) => {
+      let obj = nodeObjectsRef.current.get(id);
+      if (!obj) {
+        obj = { id };
+        nodeObjectsRef.current.set(id, obj);
+      }
+      Object.assign(obj, patch);
+      return obj;
+    };
+
+    const links = [];
+    const seenPairs = {};
+    const addLink = (source, target, reason) => {
+      if (!source || !target || source === target) return;
+      const key = `${source}=>${target}`;
+      seenPairs[key] = (seenPairs[key] || 0) + 1;
+      links.push({ source, target, reason, curvature: seenPairs[key] === 1 ? 0 : 0.3 * seenPairs[key] });
+    };
+
+    const orderedSteps = steps || [];
+    const usedIds = new Set(["__input__", "__output__"]);
+
+    upsert("__input__", {
+      category: INPUT_CATEGORY, status: "done", display: "Input", fullName: "Input", isEndpoint: true,
+      summary: "Task received", durationMs: null,
+    });
+    upsert("__output__", {
+      category: OUTPUT_CATEGORY,
+      status: runStatus === "error" ? "error" : runStatus === "done" ? "done" : "pending",
+      display: "Output", fullName: "Output", isEndpoint: true,
+      summary: runStatus === "done" ? "Result delivered" : runStatus === "error" ? "Run failed" : null,
+      durationMs: null,
+    });
+
+    // No real steps yet -- draw the PLANNED pipeline as a placeholder
+    // chain the moment routing/classification finishes, so the graph is
+    // never just sitting empty waiting for the first agent_start.
+    if (orderedSteps.length === 0 && suggestedAgents?.length) {
+      let prev = "__input__";
+      for (const role of suggestedAgents) {
+        usedIds.add(role);
+        upsert(role, {
+          category: categorize(role), status: "pending",
+          display: shortLabel(role), fullName: fullNameOf(role),
+        });
+        addLink(prev, role, "plan");
+        prev = role;
+      }
+      addLink(prev, "__output__", "plan");
+    }
+
+    // dispatcher reasons, keyed by destination role, for backbone edge
+    // coloring (plan/recheck/escalate) where they line up.
+    const reasonByDestination = {};
+    for (const t of trace || []) if (t.destination) reasonByDestination[t.destination] = t.reason;
+
+    let anchor = "__input__";
+    let openGroup = null; // { key, members: [] } -- a currently fanned-out worker pool
+
+    for (const step of orderedSteps) {
+      const id = step.role || step.agent;
+      if (!id) continue;
+      usedIds.add(id);
+      const group = workerGroupOf(id);
+
+      upsert(id, {
+        category: categorize(id),
+        status: step.status,
+        summary: step.summary,
+        durationMs: step.durationMs,
+        display: shortLabel(id),
+        fullName: fullNameOf(id),
+      });
+
+      if (group) {
+        // A worker belonging to a pool -- fan out from whatever anchor
+        // was current BEFORE this pool started (its outer dispatcher-
+        // level step), not chained to the previous worker.
+        if (!openGroup || openGroup.key !== group) {
+          openGroup = { key: group, anchor, members: [] };
+        }
+        openGroup.members.push(id);
+        addLink(openGroup.anchor, id, "plan");
+        continue;
+      }
+
+      if (openGroup) {
+        // First non-worker step after a pool closes -- fan every pool
+        // member back into it, then resume the normal single-file chain.
+        for (const m of openGroup.members) addLink(m, id, "plan");
+        openGroup = null;
+      } else {
+        addLink(anchor, id, reasonByDestination[id] || "plan");
+      }
+      anchor = id;
+    }
+
+    // Still-open pool at the end of the recorded steps (mid-run) -- leave
+    // it fanned out; it'll converge once the next step lands. If the run
+    // is actually finished, converge it into Output instead of leaving
+    // it dangling.
+    if (openGroup) {
+      const target = runStatus && runStatus !== "running" ? "__output__" : null;
+      if (target) for (const m of openGroup.members) addLink(m, target, "plan");
+    } else if (orderedSteps.length > 0) {
+      addLink(anchor, "__output__", reasonByDestination["__output__"] || "plan");
+    }
+
+    // agent_requested_role overlay -- a runtime self-heal insertion,
+    // kept as its own distinctly colored edge so it's obviously not part
+    // of the original plan.
+    for (const req of roleRequests || []) {
+      if (!req.requestedRole) continue;
+      const sourceId =
+        orderedSteps.find((s) => s.agent === req.requestingAgent)?.role || req.requestingAgent;
+      usedIds.add(sourceId);
+      usedIds.add(req.requestedRole);
+      upsert(sourceId, (nodeObjectsRef.current.get(sourceId)) || { category: categorize(sourceId), status: "done" });
+      upsert(req.requestedRole, nodeObjectsRef.current.get(req.requestedRole) || {
+        category: categorize(req.requestedRole), status: stepByRole[req.requestedRole]?.status || "pending",
+        display: shortLabel(req.requestedRole), fullName: fullNameOf(req.requestedRole),
+      });
+      addLink(sourceId, req.requestedRole, "requested");
+    }
+
+    // Only surface nodes actually referenced this render (a fresh
+    // component instance's nodeObjectsRef starts empty anyway, but this
+    // keeps things correct if this ever gets reused across messages).
+    const nodes = Array.from(usedIds).map((id) => nodeObjectsRef.current.get(id)).filter(Boolean);
+
+    return { nodes, links };
+  }, [trace, suggestedAgents, roleRequests, steps, stepByRole, runStatus]);
+
+  return (
+    <div ref={containerRef} className="relative rounded-lg border border-neutral-800 overflow-hidden">
+      <ForceGraph2D
+        ref={fgRef}
+        graphData={graphData}
+        width={dims.width}
+        height={dims.height}
+        backgroundColor="#0a0a0a"
+        linkColor={(link) => REASON_COLORS[link.reason] || "#6b7280"}
+        linkCurvature="curvature"
+        linkDirectionalArrowLength={5}
+        linkDirectionalArrowRelPos={1}
+        linkWidth={(link) => (link.reason === "requested" ? 2 : 1)}
+        linkLabel={(link) => link.reason}
+        cooldownTicks={60}
+        onEngineStop={() => {
+          // Debounced re-frame: with positions now persisted across
+          // renders (see nodeObjectsRef), this only needs to nudge the
+          // view outward as new nodes arrive, not fully re-center every
+          // single event -- avoids the camera jumping around mid-run.
+          const now = Date.now();
+          if (now - lastZoomRef.current > 250) {
+            lastZoomRef.current = now;
+            fgRef.current?.zoomToFit(400, 60);
+          }
+        }}
+        onNodeHover={(node) => setHoveredNode(node)}
+        nodeLabel={(node) => {
+          // FIX (long agent names get cut off on hover too): this used to
+          // reuse the same already-truncated `display` string as the
+          // under-node label, so anything past ~26 chars was unreadable
+          // everywhere, including hover -- the one place with room to
+          // show it in full. node.fullName is untruncated and is always
+          // set alongside node.display wherever a node is upserted above.
+          const parts = [
+            `<div style="font-weight:600">${escapeHtml(node.category.icon)} ${escapeHtml(node.fullName || node.display || node.id)}</div>`,
+            `<div style="opacity:.7">${escapeHtml(node.status)}${node.durationMs != null ? ` · ${node.durationMs}ms` : ""}</div>`,
+          ];
+          if (node.summary) {
+            parts.push(`<div style="max-width:320px;white-space:normal;word-break:break-word;margin-top:2px">${escapeHtml(truncate(node.summary))}</div>`);
+          }
+          return `<div style="background:#171717;border:1px solid #404040;border-radius:6px;padding:6px 8px;font-size:11px;color:#e5e5e5;max-width:340px;white-space:normal;word-break:break-word">${parts.join("")}</div>`;
+        }}
+        nodeCanvasObject={(node, ctx, globalScale) => {
+          const { icon, color } = node.category;
+          // FIX (icons too small / shapes too busy): flat circular badge
+          // for every node -- category shown via color+icon, no more
+          // diamond/hexagon/triangle geometry competing with the glyph.
+          // Endpoint nodes (Input/Output) get a slightly larger badge so
+          // they read as the start/end of the flow, not just another step.
+          const r = node.isEndpoint ? 13 : 11;
+          const ringColor =
+            node.status === "error" ? "#ef4444" :
+            node.status === "running" ? "#f59e0b" :
+            node.status === "done" ? "#22c55e" :
+            node.status === "pending" ? "#525252" : "#525252";
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+          ctx.fillStyle = color;
+          ctx.globalAlpha = node.status === "pending" ? 0.22 : node.status === "running" ? 0.6 : 0.92;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.lineWidth = node === hoveredNode ? 3 : 2;
+          if (node.status === "pending") ctx.setLineDash([2, 2]);
+          ctx.strokeStyle = ringColor;
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.restore();
+
+          // Big icon glyph, front and center -- sized off the badge
+          // radius (not a flat px value) so it always fills the badge.
+          const iconSize = (r * 1.65) / globalScale;
+          ctx.font = `${iconSize}px sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(icon, node.x, node.y);
+
+          // Label below.
+          const fontSize = 11 / globalScale;
+          ctx.font = `${node.isEndpoint ? "700 " : ""}${fontSize}px sans-serif`;
+          ctx.textBaseline = "alphabetic";
+          ctx.fillStyle = node.isEndpoint ? "#e5e5e5" : "#a3a3a3";
+          ctx.fillText(node.display || node.id, node.x, node.y + r + 12 / globalScale);
+        }}
+        nodePointerAreaPaint={(node, color, ctx) => {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, node.isEndpoint ? 15 : 13, 0, 2 * Math.PI);
+          ctx.fill();
+        }}
+      />
+      {/* Legend: status ring meaning + edge-reason meaning. */}
+      <div className="absolute bottom-1 right-1 flex flex-wrap items-center gap-2 rounded bg-black/60 px-2 py-1 text-[10px] text-neutral-400 max-w-[90%]">
+        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-emerald-500" /> done</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-amber-500" /> running</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-red-500" /> error</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-neutral-500" style={{ borderStyle: "dashed" }} /> pending</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-cyan-400" /> requested</span>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/globals.css">
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------
+   Design tokens — kept as plain CSS variables too (not just Tailwind
+   theme values) so any hand-written CSS or inline style in this file
+   stays in sync with tailwind.config.js without duplicating hex codes.
+----------------------------------------------------------------*/
+:root {
+  --cyber-bg: #05070d;
+  --cyber-panel: #0a0f1a;
+  --cyber-border: #1a2740;
+  --cyber-cyan: #22d3ee;
+  --cyber-magenta: #f472b6;
+  --cyber-text: #d6e4f0;
+  --cyber-dim: #64748b;
+  --cyber-glow: 0 0 12px rgba(34, 211, 238, 0.35);
+
+  /* Swap this filename once you've uploaded your background image into
+     frontend/public/. Nothing else in this file needs to change. */
+  --cyber-bg-image: url('/minimebg.jpg');
+}
+
+/* ---------------------------------------------------------------
+   Base page styling
+----------------------------------------------------------------*/
+html, body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--cyber-bg);
+  color: var(--cyber-text);
+  font-family: 'Rajdhani', sans-serif;
+  position: relative;
+  min-height: 100vh;
+}
+
+/* Fixed, dimmed background image behind the whole app. Sits on ::before
+   (not directly on body's background) so the dark overlay gradient can
+   be layered on top of the image in one paint, and so page content
+   never needs its own z-index gymnastics to stay above it. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(180deg, rgba(5,7,13,0.88) 0%, rgba(5,7,13,0.94) 100%),
+    var(--cyber-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+h1, h2, h3, h4, h5, h6,
+button, .font-display {
+  font-family: 'Orbitron', sans-serif;
+  letter-spacing: 0.02em;
+}
+
+code, pre, .font-mono {
+  font-family: 'Share Tech Mono', monospace;
+}
+
+/* ---------------------------------------------------------------
+   Scrollbars — default browser scrollbars break the theme instantly
+----------------------------------------------------------------*/
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyber-cyan) var(--cyber-panel);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: var(--cyber-panel);
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--cyber-border);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--cyber-cyan);
+}
+
+/* ---------------------------------------------------------------
+   Reusable component classes — drop these on existing elements
+   instead of hand-writing the same Tailwind utility strings everywhere.
+----------------------------------------------------------------*/
+
+/* Card / panel surface — chat window, sidebars, provider cards, etc. */
+.cyber-panel {
+  background-color: var(--cyber-panel);
+  border: 1px solid var(--cyber-border);
+  border-radius: 0.5rem;
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.05) inset;
+}
+
+/* Primary action button */
+.cyber-btn {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--cyber-cyan);
+  background-color: rgba(34, 211, 238, 0.08);
+  border: 1px solid var(--cyber-cyan);
+  border-radius: 0.375rem;
+  padding: 0.5rem 1rem;
+  transition: box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.cyber-btn:hover {
+  background-color: rgba(34, 211, 238, 0.15);
+  box-shadow: var(--cyber-glow);
+}
+.cyber-btn:active {
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.6);
+}
+.cyber-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* Secondary / warning variant */
+.cyber-btn-magenta {
+  color: var(--cyber-magenta);
+  border-color: var(--cyber-magenta);
+  background-color: rgba(244, 114, 182, 0.08);
+}
+.cyber-btn-magenta:hover {
+  background-color: rgba(244, 114, 182, 0.15);
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.35);
+}
+
+/* Chat input / text areas */
+.cyber-input {
+  background-color: var(--cyber-bg);
+  border: 1px solid var(--cyber-border);
+  border-radius: 0.5rem;
+  color: var(--cyber-text);
+  font-family: 'Rajdhani', sans-serif;
+  padding: 0.75rem 1rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.cyber-input:focus {
+  outline: none;
+  border-color: var(--cyber-cyan);
+  box-shadow: var(--cyber-glow);
+}
+.cyber-input::placeholder {
+  color: var(--cyber-dim);
+}
+
+/* Faint grid texture — use sparingly, e.g. on the chat background layer
+   only, not stacked on every panel or it turns into visual noise. */
+.cyber-grid-bg {
+  background-image:
+    linear-gradient(rgba(34,211,238,0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34,211,238,0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Glowing text, for the app title / hero label only — this is the one
+   "loud" element; don't apply it to body copy or it stops meaning anything. */
+.cyber-glow-text {
+  color: var(--cyber-cyan);
+  text-shadow: 0 0 8px rgba(34, 211, 238, 0.6), 0 0 20px rgba(34, 211, 238, 0.3);
+}
+</file>
+
+<file path="frontend/app/layout.js">
+import "./globals.css";
+
+export const metadata = {
+  title: "MiniMe",
+  description: "EO-gated multi-agent system — chat interface",
+};
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <body className="bg-neutral-950 text-neutral-100 min-h-screen">
+        {children}
+      </body>
+    </html>
+  );
+}
+</file>
+
+<file path="frontend/app/components/AgentStepList.jsx">
+"use client";
+import { useState } from "react";
+import Markdown from "./Markdown";
+
+// Each `step` is one agent_start/agent_done pair pushed by
+// SessionContext.jsx's Pusher handler, in arrival order. Safe to render
+// in array order and treat the last entry as "currently running" —
+// see SessionContext.jsx's comment on why eo/executor.py's strictly
+// sequential execution loop makes that safe.
+export default function AgentStepList({ steps }) {
+  if (!steps || steps.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      {steps.map((step) => (
+        <StepRow key={step.id} step={step} />
+      ))}
+    </div>
+  );
+}
+
+// Matches the exact suffix eo/executor.py's _summarize() appends when it
+// still has to cut a result short (Migration Part 26 fix — the limit was
+// raised 300 -> 9000 chars, so most results now arrive here whole; this
+// only fires for the genuinely oversized minority, e.g. a full
+// multi-module code submission).
+const TRUNCATED_SUFFIX = /\.\.\. \[truncated, \d+ chars total\]$/;
+
+// Small fixed palette, assigned deterministically per role name (hash ->
+// index) so the same role always gets the same color across a session,
+// without needing to hand-maintain a mapping for every possible role the
+// Panel might hire (roles are dynamic — see eo/panel.py's staff_task()).
+const ROLE_COLORS = [
+  "text-sky-400", "text-violet-400", "text-emerald-400", "text-amber-400",
+  "text-rose-400", "text-cyan-400", "text-fuchsia-400", "text-lime-400",
+];
+function roleColor(role) {
+  if (!role) return "text-neutral-400";
+  let hash = 0;
+  for (let i = 0; i < role.length; i++) hash = (hash * 31 + role.charCodeAt(i)) >>> 0;
+  return ROLE_COLORS[hash % ROLE_COLORS.length];
+}
+
+function StepRow({ step }) {
+  const [open, setOpen] = useState(false);
+  const hasBody = Boolean(step.text || step.summary);
+  const wasTruncated = !step.text && step.summary && TRUNCATED_SUFFIX.test(step.summary);
+  const color = step.status === "error" ? "text-red-400" : roleColor(step.role);
+
+  return (
+    <div
+      className={`rounded-lg border text-xs ${
+        step.status === "error"
+          ? "border-red-900 bg-red-950/30"
+          : step.status === "done"
+          ? "border-neutral-800 bg-neutral-950/50"
+          : "border-neutral-700 bg-neutral-900/50"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => hasBody && setOpen((o) => !o)}
+        className={`w-full flex items-center justify-between px-3 py-2 text-left ${
+          hasBody ? "cursor-pointer" : "cursor-default"
+        }`}
+      >
+        <span className={`flex items-center gap-1.5 font-medium ${color}`}>
+          {hasBody && <span className="text-neutral-600">{open ? "▾" : "▸"}</span>}
+          {step.role}
+        </span>
+        <span className={step.status === "running" ? "animate-pulse text-neutral-500" : "text-neutral-500"}>
+          {step.status}
+          {step.durationMs != null ? ` · ${step.durationMs}ms` : ""}
+        </span>
+      </button>
+      {open && hasBody && (
+        <div className="border-t border-neutral-800 px-3 py-2">
+          {step.status === "error" ? (
+            <div className="text-red-400 whitespace-pre-wrap">{step.summary}</div>
+          ) : (
+            <>
+              <div className="max-h-64 overflow-y-auto">
+                <Markdown>{step.text || step.summary}</Markdown>
+              </div>
+              {wasTruncated && (
+                <p className="mt-1 text-neutral-600 text-xs">
+                  This output was too long to stream in full and was
+                  truncated.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/MessageBubble.jsx">
+"use client";
+import { useState } from "react";
+import Markdown from "./Markdown";
+
+// Per-tier accent color — gives each response a quick at-a-glance
+// identity in the chat instead of every bubble looking identical. Kept
+// to Tailwind's built-in palette (no arbitrary hex) so it stays
+// consistent with the rest of the dark theme.
+const TIER_STYLES = {
+  sga: { label: "Instant", text: "text-emerald-400", dot: "bg-emerald-400" },
+  cache: { label: "Cached", text: "text-emerald-400", dot: "bg-emerald-400" },
+  0: { label: "Tier 0 · Instant", text: "text-emerald-400", dot: "bg-emerald-400" },
+  1: { label: "Tier 1 · Direct", text: "text-sky-400", dot: "bg-sky-400" },
+  2: { label: "Tier 2 · Fixed", text: "text-violet-400", dot: "bg-violet-400" },
+  3: { label: "Tier 3 · Ultimate Structure", text: "text-amber-400", dot: "bg-amber-400" },
+};
+const ERROR_STYLE = { label: "Error", text: "text-red-400", dot: "bg-red-500" };
+
+function tierStyle(data) {
+  if (data.status === "error") return ERROR_STYLE;
+  return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-neutral-400", dot: "bg-neutral-500" };
+}
+
+export default function MessageBubble({ message }) {
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end">
+        {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
+            pasted code) actually keeps its line breaks and indentation
+            instead of collapsing to one line. */}
+        <div className="bg-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%] whitespace-pre-wrap">
+          {message.text}
+        </div>
+      </div>
+    );
+  }
+
+  const { data } = message;
+  const style = tierStyle(data);
+  return (
+    <div className="flex justify-start">
+      <div className="bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%] space-y-1.5">
+        <div className={`flex items-center gap-1.5 text-xs font-medium ${style.text}`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+          {style.label}
+          <span className="text-neutral-600 font-normal">· {data.status}</span>
+        </div>
+        <ResultBody data={data} />
+      </div>
+    </div>
+  );
+}
+
+// Mirrors eo/result_render.py's render_agent_result() — keep these two
+// in sync if a new agent result shape is added on the backend. Turns
+// ANY agent result shape in this codebase into markdown text instead of
+// falling back to a raw JSON/object dump.
+function renderCodeModules(modules) {
+  const names = Object.keys(modules || {});
+  if (names.length === 0) return "_(no modules)_";
+  return names
+    .map((name) => {
+      const entry = modules[name];
+      const isObj = entry && typeof entry === "object";
+      const lang = isObj ? entry.language || "" : "";
+      const code = isObj ? entry.code || "" : String(entry);
+      return `**${name}**\n\`\`\`${lang}\n${code}\n\`\`\``;
+    })
+    .join("\n\n");
+}
+
+function looksLikeModuleMap(result) {
+  const values = Object.values(result);
+  return values.every(
+    (v) => typeof v === "string" || (v && typeof v === "object" && "code" in v)
+  );
+}
+
+function answerTextOf(result) {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+  if (typeof result !== "object") return String(result);
+
+  if (result.text) return result.text;
+
+  if (Array.isArray(result.issues)) {
+    // agents/reviewer.py's "verifier" shape.
+    const lines = [];
+    const summary = (result.summary || "").trim();
+    if (summary) lines.push(summary);
+    if (result.issues.length > 0) {
+      if (summary) lines.push("");
+      for (const issue of result.issues) {
+        const count = issue.flagged_by_count;
+        const tag = count ? ` _(flagged by ${count} reviewer${count !== 1 ? "s" : ""})_` : "";
+        lines.push(`- **[${issue.severity || ""}]** \`${issue.module || ""}\`: ${issue.description || ""}${tag}`);
+      }
+    } else if (!summary) {
+      lines.push("No issues found.");
+    }
+    return lines.join("\n");
+  }
+
+  if (result.fixed_code && typeof result.fixed_code === "object") {
+    // agents/fixer_pool.py's "fixer" shape.
+    return renderCodeModules(result.fixed_code);
+  }
+
+  if (result.code) return result.code;
+  if (result.answer) return String(result.answer);
+
+  if (looksLikeModuleMap(result)) {
+    // agents/code_writers.py ("implementer") / agents/test_writer.py
+    // ("test_writer") flat {module: code} shape, including the
+    // legitimate empty-object "no tests generated" case.
+    return renderCodeModules(result);
+  }
+
+  // Genuinely unrecognized shape — pretty-printed JSON (still readable)
+  // rather than React's default object-to-string coercion.
+  try {
+    return "```json\n" + JSON.stringify(result, null, 2) + "\n```";
+  } catch {
+    return String(result);
+  }
+}
+
+function ResultBody({ data }) {
+  if (data.status === "error" || data.message) {
+    return <div className="text-red-400 whitespace-pre-wrap">{data.message}</div>;
+  }
+  if (data.tier === "sga" || data.tier === "cache") {
+    return <Markdown>{data.result?.answer}</Markdown>;
+  }
+  if (data.tier === 0) {
+    return <Markdown>{data.result?.answer}</Markdown>;
+  }
+  if (data.tier === 1) {
+    // NOT run through Markdown here on purpose: result.code is raw code
+    // text, not markdown prose — parsing it as markdown risks mangling
+    // things like underscores (_snake_case_) as italics. Styled the same
+    // as Markdown's own fenced-code blocks for visual consistency.
+    return (
+      <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden">
+        <pre className="overflow-x-auto p-3 text-xs text-neutral-300">
+          <code>{data.result?.code}</code>
+        </pre>
+      </div>
+    );
+  }
+  if (data.tier === 2) {
+    const text = answerTextOf(data.result?.output);
+    return text ? (
+      <Markdown>{text}</Markdown>
+    ) : (
+      <pre className="whitespace-pre-wrap text-xs bg-black/40 rounded p-2 overflow-x-auto">
+        {JSON.stringify(data.result?.output, null, 2)}
+      </pre>
+    );
+  }
+  if (data.tier === 3) {
+    // NEW — bug fix: api/task_runner.py now returns a clean
+    // result.answer (the final role's own text) alongside the full
+    // role-keyed result.output tree. Render just the answer as markdown,
+    // with the full multi-agent trace tucked behind an optional toggle
+    // instead of dumped inline as raw JSON.
+    const answer = data.result?.answer;
+    if (answer) {
+      return (
+        <>
+          <Markdown>{answer}</Markdown>
+          {data.result?.output && Object.keys(data.result.output).length > 1 && (
+            <AgentTraceDisclosure output={data.result.output} finalRole={data.result?.final_role} />
+          )}
+        </>
+      );
+    }
+    // Fallback for older cached responses that predate the "answer"
+    // field — still avoid a raw JSON dump.
+    const fallbackText = answerTextOf(
+      data.result?.output && data.result?.final_role
+        ? data.result.output[data.result.final_role]
+        : null
+    );
+    return fallbackText ? (
+      <Markdown>{fallbackText}</Markdown>
+    ) : (
+      <pre className="whitespace-pre-wrap text-xs bg-black/40 rounded p-2 overflow-x-auto">
+        {JSON.stringify(data.result?.output, null, 2)}
+      </pre>
+    );
+  }
+  return (
+    <pre className="whitespace-pre-wrap text-xs bg-black/40 rounded p-2 overflow-x-auto">
+      {JSON.stringify(data, null, 2)}
+    </pre>
+  );
+}
+
+// Collapsed by default — the full per-role breakdown (writer, reviewer,
+// editor, ...) is useful for inspecting the pipeline but shouldn't
+// compete with the actual answer for attention. The live per-agent
+// steps already stream into WorkingPanel's AgentStepList as the task
+// runs; this is just a static after-the-fact version scoped to this one
+// message, for whoever wants to double check what each role produced.
+function AgentTraceDisclosure({ output, finalRole }) {
+  const [open, setOpen] = useState(false);
+  const roles = Object.keys(output);
+  return (
+    <div className="pt-1 border-t border-neutral-800/70">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="text-[11px] text-neutral-500 hover:text-neutral-300 transition-colors flex items-center gap-1"
+      >
+        <span>{open ? "▾" : "▸"}</span>
+        {open ? "Hide" : "Show"} all {roles.length} agent outputs
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {roles.map((role) => (
+            <div key={role} className="rounded-lg border border-neutral-800 bg-black/30 p-2">
+              <div
+                className={`text-[11px] font-medium mb-1 ${
+                  role === finalRole ? "text-amber-400" : "text-neutral-500"
+                }`}
+              >
+                {role}
+                {role === finalRole ? " · final" : ""}
+              </div>
+              <Markdown>{answerTextOf(output[role])}</Markdown>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/tabs/ChatTab.jsx">
+"use client";
+import { useRef, useEffect, useState } from "react";
+import { useSession } from "../../context/SessionContext";
+import MessageBubble from "../MessageBubble";
+import WorkingPanel from "../WorkingPanel";
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown } from "lucide-react";
+
+// Icon + label per mode, shared between the trigger button and the
+// dropdown list. Swap these for any other lucide-react icon you like —
+// full icon list: https://lucide.dev/icons
+const MODES = [
+  { id: "auto", label: "Auto", icon: Sparkles, hint: "Let the Inspector decide" },
+  { id: "simple", label: "Simple", icon: Feather, hint: "Cheapest capable tier only" },
+  { id: "fast", label: "Fast", icon: Zap, hint: "Favor speed over headcount" },
+  { id: "expert", label: "Expert", icon: Brain, hint: "Allow the full staffed ceiling" },
+  { id: "beast", label: "Beast", icon: Flame, hint: "Force the full pipeline, skip SGA/cache" },
+];
+
+const WORKING_PANEL_KEY = "minime_working_panel_collapsed";
+
+export default function ChatTab() {
+  const {
+    messages, loading, sendTask, mode, setMode,
+    activeMessageIndex, setActiveMessageIndex,
+  } = useSession();
+  const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
+  const chatContainerRef = useRef(null);
+  const messageRefs = useRef([]);
+  const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
+  const [modeOpen, setModeOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+
+  useEffect(() => {
+    setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
+  }, []);
+  function toggleWorkingPanel() {
+    setWorkingPanelCollapsed((prev) => {
+      localStorage.setItem(WORKING_PANEL_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  // Auto-grow the textarea as the person types multiple lines, capped so
+  // it doesn't swallow the whole viewport on a very long paste.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+  }, [draft]);
+
+  function handleSubmit(e) {
+    e?.preventDefault();
+    const text = draft.trim();
+    if (!text || loading) return;
+    setDraft("");
+    sendTask(text);
+  }
+
+  // Enter sends; Shift+Enter (or Alt/Ctrl+Enter) inserts a real newline —
+  // same convention as Slack/Discord/ChatGPT, so multiline/indented input
+  // (e.g. pasted code, a numbered list) is actually usable here.
+  function handleKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  }
+
+  // Scroll-sync: figure out which message is closest to the top of the
+  // viewport and publish it as activeMessageIndex, so WorkingPanel can
+  // scroll its own matching section into view. Guarded by isSyncingRef
+  // so a programmatic sync-scroll (triggered by WorkingPanel's own
+  // scroll) doesn't bounce right back and fight the other panel.
+  function handleChatScroll() {
+    if (isSyncingRef.current) return;
+    let closestIndex = null;
+    let closestDist = Infinity;
+    messageRefs.current.forEach((el, i) => {
+      if (!el) return;
+      const dist = Math.abs(
+        el.getBoundingClientRect().top - (chatContainerRef.current?.getBoundingClientRect().top ?? 0)
+      );
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestIndex = i;
+      }
+    });
+    if (closestIndex != null) setActiveMessageIndex(closestIndex);
+  }
+
+  const activeMode = MODES.find((m) => m.id === mode) || MODES[0];
+  const ActiveIcon = activeMode.icon;
+
+  return (
+    <div className="flex h-full max-w-6xl mx-auto">
+      {/* LEFT — Chat Box */}
+      <div className="flex flex-col flex-1 min-w-0 border-r border-neutral-800">
+        <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
+          <span className="text-xs font-medium text-neutral-400">Chat Box</span>
+          {workingPanelCollapsed && (
+            <button
+              onClick={toggleWorkingPanel}
+              className="text-xs text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
+            >
+              Show Working Panel
+            </button>
+          )}
+        </div>
+
+        <div
+          ref={chatContainerRef}
+          onScroll={handleChatScroll}
+          className="flex-1 overflow-y-auto px-4 py-6 space-y-4"
+        >
+          {messages.length === 0 && (
+            <p className="text-neutral-500 text-sm">
+              Send a task — the EO layer will classify it and route it through
+              the appropriate tier.
+            </p>
+          )}
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              ref={(el) => (messageRefs.current[i] = el)}
+              onClick={() => setActiveMessageIndex(i)}
+            >
+              <MessageBubble message={m} />
+            </div>
+          ))}
+          {loading && (
+            <div className="text-neutral-500 text-sm animate-pulse">Working…</div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        <form onSubmit={handleSubmit} className="border-t border-neutral-800 p-4 flex gap-2 items-end">
+          {/* Mode picker — custom dropdown (not a native <select>) so each
+              option can carry its own icon. */}
+          <div className="relative">
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => setModeOpen((o) => !o)}
+              className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm outline-none disabled:opacity-50 hover:border-neutral-600 transition-colors"
+            >
+              <ActiveIcon size={14} />
+              {activeMode.label}
+              <ChevronDown size={13} className={`transition-transform ${modeOpen ? "rotate-180" : ""}`} />
+            </button>
+            {modeOpen && (
+              <div className="absolute bottom-full mb-2 left-0 w-56 rounded-lg border border-neutral-800 bg-neutral-900 shadow-xl overflow-hidden z-10">
+                {MODES.map((m) => {
+                  const Icon = m.icon;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => {
+                        setMode(m.id);
+                        setModeOpen(false);
+                      }}
+                      className={`w-full flex items-start gap-2 px-3 py-2 text-left text-sm hover:bg-neutral-800 transition-colors ${
+                        m.id === mode ? "bg-neutral-800/70" : ""
+                      }`}
+                    >
+                      <Icon size={15} className="mt-0.5 shrink-0" />
+                      <span>
+                        <span className="block text-neutral-200">{m.label}</span>
+                        <span className="block text-[11px] text-neutral-500">{m.hint}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <textarea
+            ref={textareaRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Describe a task... (Shift+Enter for a new line)"
+            disabled={loading}
+            rows={1}
+            className="flex-1 resize-none bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-neutral-600 disabled:opacity-50 leading-relaxed"
+          />
+          <button
+            type="submit"
+            disabled={loading || !draft.trim()}
+            className="bg-neutral-100 text-neutral-900 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+
+      {/* RIGHT — Working Panel, foldable */}
+      {!workingPanelCollapsed && (
+        <div className="w-[420px] shrink-0 hidden lg:flex flex-col">
+          <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-neutral-400">Working Panel</span>
+            <button onClick={toggleWorkingPanel} className="text-xs text-neutral-500 hover:text-neutral-300">
+              Hide
+            </button>
+          </div>
+          <div className="flex-1 min-h-0">
+            <WorkingPanel isSyncingRef={isSyncingRef} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="frontend/app/components/tabs/TokenUsageTab.jsx">
+"use client";
+import { useMemo, useState, useEffect } from "react";
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
+import { useSession } from "../../context/SessionContext";
+
+const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
+
+// Kept as distinct, saturated per-provider colors on purpose — these
+// identify DATA series in charts, not chrome, so they stay separate from
+// the cyan/magenta UI accent palette rather than being folded into it.
+const PROVIDER_COLOR = {
+  groq: "#f97316",
+  cerebras: "#3b82f6",
+  cloudflare: "#fb923c",
+  mistral: "#ef4444",
+  github: "#a1a1aa",
+  huggingface: "#eab308",
+};
+const colorFor = (provider) => PROVIDER_COLOR[provider] || "#a78bfa";
+
+const TOOLTIP_STYLE = {
+  background: "#0a0f1a",
+  border: "1px solid #1a2740",
+  borderRadius: 6,
+  fontSize: 11,
+  fontFamily: "'Share Tech Mono', monospace",
+  color: "#d6e4f0",
+};
+
+const DAY_RANGES = [7, 14, 30];
+
+// Reads NEXT_PUBLIC_API_KEY if you've set one for the frontend to send as
+// x-api-key -- matches server.py's require_auth() header check. If your
+// SessionContext.jsx already attaches this header some other way (e.g. a
+// value read from context instead of env), swap this constant for that
+// instead; this is just the simplest thing that matches server.py as
+// written.
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
+
+function UsageHistoryPanel({ apiUrl }) {
+  const [days, setDays] = useState(7);
+  const [historyData, setHistoryData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`${apiUrl}/api/usage/history?days=${days}`, {
+      headers: API_KEY ? { "x-api-key": API_KEY } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setHistoryData(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [apiUrl, days]);
+
+  const chartRows = useMemo(() => {
+    if (!historyData) return [];
+    const { dates, providers } = historyData;
+    return dates.map((d, i) => {
+      const row = { date: d };
+      for (const provider of Object.keys(providers)) {
+        row[provider] = providers[provider].tokens[i];
+      }
+      return row;
+    });
+  }, [historyData]);
+
+  const providerNames = historyData ? Object.keys(historyData.providers).sort() : [];
+
+  return (
+    <Card
+      title="Usage history (cross-session)"
+      action={
+        <div className="flex gap-1">
+          {DAY_RANGES.map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`font-display text-[10px] uppercase tracking-wide rounded px-2 py-1 border transition-colors ${
+                days === d
+                  ? "bg-cyber-cyan/10 border-cyber-cyan text-cyber-cyan"
+                  : "border-cyber-border text-cyber-dim hover:text-cyber-text"
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      }
+    >
+      {loading && <p className="text-xs text-cyber-dim">Loading history...</p>}
+      {error && (
+        <p className="text-xs text-rose-400">
+          Couldn't load usage history: {error}. Check that <code className="font-mono">GET /api/usage/history</code> is
+          reachable and, if <code className="font-mono">API_AUTH_SECRET</code> is set on the backend, that{" "}
+          <code className="font-mono">NEXT_PUBLIC_API_KEY</code> is set to match on the frontend.
+        </p>
+      )}
+      {!loading && !error && providerNames.length === 0 && (
+        <p className="text-xs text-cyber-dim">No usage recorded in this window yet.</p>
+      )}
+      {!loading && !error && providerNames.length > 0 && (
+        <>
+          <div style={{ height: 220 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartRows}>
+                <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: "#64748b" }}
+                  tickFormatter={(d) => d.slice(5)}
+                />
+                <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }} />
+                {providerNames.map((p) => (
+                  <Bar key={p} dataKey={p} fill={colorFor(p)} radius={[2, 2, 0, 0]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3 pt-2 border-t border-cyber-border">
+            {providerNames.map((p) => (
+              <div key={p} className="text-[11px] font-mono">
+                <span style={{ color: colorFor(p) }} className="font-display uppercase tracking-wide text-[10px]">
+                  {p}
+                </span>
+                <div className="text-cyber-dim">
+                  avg {historyData.providers[p].avg_tokens_per_day.toLocaleString()} tok/day
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+export default function TokenUsageTab() {
+  const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
+
+  const byProvider = useMemo(() => groupByProvider(usageStats), [usageStats]);
+  const providers = Object.keys(byProvider).sort();
+
+  if (providers.length === 0) {
+    return (
+      <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-4">
+        <p className="text-cyber-dim text-sm">
+          No usage events yet this session. Send a task from Chat — accounts
+          light up here as soon as they make their first call today.
+        </p>
+        <UsageHistoryPanel apiUrl={API_URL} />
+        <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-6">
+      <OverallRollup byProvider={byProvider} />
+      {combinedUsageHistory.length > 1 && (
+        <Card title="All providers, this session">
+          <CombinedChart data={combinedUsageHistory} providers={providers} />
+        </Card>
+      )}
+      <div className="grid gap-4 sm:grid-cols-2">
+        {providers.map((provider) => (
+          <ProviderCard
+            key={provider}
+            provider={provider}
+            keys={byProvider[provider]}
+            history={usageHistory}
+          />
+        ))}
+      </div>
+      <UsageHistoryPanel apiUrl={API_URL} />
+      <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
+    </div>
+  );
+}
+
+function groupByProvider(usageStats) {
+  const byProvider = {};
+  for (const [statKey, s] of Object.entries(usageStats)) {
+    const provider = s.provider || statKey.split(":")[0];
+    (byProvider[provider] ||= []).push({ statKey, ...s });
+  }
+  return byProvider;
+}
+
+function OverallRollup({ byProvider }) {
+  let totalUsed = 0;
+  let totalLimit = 0;   // only sums keys that HAVE a numeric daily_limit — see footnote below
+  let unmeasuredProviders = [];
+  for (const [provider, keys] of Object.entries(byProvider)) {
+    const providerUsed = keys.reduce((s, k) => s + (k.tokens_used_today || 0), 0);
+    totalUsed += providerUsed;
+    const limited = keys.filter((k) => k.daily_limit);
+    if (limited.length > 0) {
+      totalLimit += limited.reduce((s, k) => s + k.daily_limit, 0);
+    } else {
+      unmeasuredProviders.push(provider);
+    }
+  }
+  const pct = totalLimit ? Math.min(100, Math.round((totalUsed / totalLimit) * 100)) : null;
+  return (
+    <Card title="Overall, this session">
+      <div className="flex items-baseline justify-between">
+        <span className="font-display text-2xl text-cyber-cyan cyber-glow-text">{totalUsed.toLocaleString()}</span>
+        <span className="text-xs text-cyber-dim">
+          tokens{totalLimit ? ` / ~${totalLimit.toLocaleString()} est. capacity` : ""}
+        </span>
+      </div>
+      {pct !== null && (
+        <div className="h-1.5 rounded-full bg-black/50 border border-cyber-border overflow-hidden mt-2">
+          <div
+            className={`h-full rounded-full transition-all ${
+              pct >= 80 ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.6)]" : "bg-cyber-cyan shadow-glow-cyan"
+            }`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      {unmeasuredProviders.length > 0 && (
+        <p className="text-[11px] text-cyber-dim mt-2">
+          Capacity estimate excludes {unmeasuredProviders.join(", ")} — no verified
+          daily limit configured for {unmeasuredProviders.length === 1 ? "it" : "them"} yet
+          (see <code className="font-mono">utils/llm_client.py</code>'s <code className="font-mono">QUOTA_CONFIG</code>).
+        </p>
+      )}
+    </Card>
+  );
+}
+
+function ProviderCard({ provider, keys, history }) {
+  const color = colorFor(provider);
+  const used = keys.reduce((s, k) => s + (k.tokens_used_today || 0), 0);
+  const limit = keys[0]?.daily_limit; // same static estimate for every key of a given provider
+  const pct = limit ? Math.min(100, Math.round((used / (limit * keys.length)) * 100)) : null;
+  const providerHistory = useMemo(() => mergeProviderHistory(keys, history), [keys, history]);
+  return (
+    <div className="cyber-panel p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="font-display text-xs uppercase tracking-wide" style={{ color }}>{provider}</span>
+        <span className="text-xs text-cyber-dim">
+          {used.toLocaleString()}{limit ? ` / ~${(limit * keys.length).toLocaleString()}` : ""} tokens today
+        </span>
+      </div>
+      {providerHistory.length > 1 && (
+        <div style={{ height: 90 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={providerHistory}>
+              <Area type="monotone" dataKey="tokens" stroke={color} fill={color} fillOpacity={0.15} strokeWidth={1.5} isAnimationActive={false} />
+              <XAxis dataKey="t" hide />
+              <YAxis hide domain={[0, "auto"]} />
+              <Tooltip
+                contentStyle={TOOLTIP_STYLE}
+                labelFormatter={(t) => new Date(t).toLocaleTimeString()}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      <div className="space-y-1 pt-1 border-t border-cyber-border">
+        {keys.map((k) => {
+          const keyPct = limit ? Math.min(100, Math.round((k.tokens_used_today / limit) * 100)) : null;
+          const near = keyPct !== null && keyPct >= 80;
+          return (
+            <div key={k.statKey} className="text-[11px] text-cyber-dim flex items-center justify-between font-mono">
+              <span>{k.key_id}</span>
+              <span className={near ? "text-amber-500" : ""}>
+                {(k.tokens_used_today || 0).toLocaleString()}
+                {limit ? ` / ${limit.toLocaleString()}` : ""}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function mergeProviderHistory(keys, history) {
+  // Combine every key of this provider's own per-key history into one
+  // provider-level series, summing whichever keys have a sample at each
+  // timestamp seen. Simpler than a true resample/forward-fill (fine for
+  // a live sparkline over one session; revisit if a provider with many
+  // concurrently-active keys makes this look choppy).
+  const rows = keys.flatMap((k) => (history[k.statKey] || []).map((p) => ({ ...p, statKey: k.statKey })));
+  rows.sort((a, b) => a.t - b.t);
+  return rows;
+}
+
+function CombinedChart({ data, providers }) {
+  return (
+    <div style={{ height: 200 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data}>
+          <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
+          <XAxis dataKey="t" tickFormatter={(t) => new Date(t).toLocaleTimeString()} tick={{ fontSize: 10, fill: "#64748b" }} />
+          <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
+          <Tooltip
+            contentStyle={TOOLTIP_STYLE}
+            labelFormatter={(t) => new Date(t).toLocaleTimeString()}
+          />
+          {providers.map((p) => (
+            <Area
+              key={p}
+              type="monotone"
+              dataKey={p}
+              stackId="1"
+              stroke={colorFor(p)}
+              fill={colorFor(p)}
+              fillOpacity={0.25}
+              isAnimationActive={false}
+            />
+          ))}
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function Card({ title, action, children }) {
+  return (
+    <div className="cyber-panel p-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-display text-[11px] uppercase tracking-wide text-cyber-dim">{title}</h3>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function GrafanaQuotaPanel({ url }) {
+  // Unchanged from Part 16 — this is the one thing here that DOES show
+  // real cross-session, persisted usage (Part 4 §5.1's Grafana embed
+  // reading eo/quota_sentinel.py's actual stored data), complementing
+  // rather than duplicating the live-only charts above.
+  if (!url) return null;
+  return (
+    <Card title="Grafana (cross-session)">
+      <iframe
+        src={url}
+        width="100%"
+        height="1280"
+        style={{ minHeight: 600, border: "none" }}
+        frameBorder="0"
+        title="Grafana quota dashboard"
+      />
+    </Card>
+  );
+}
+</file>
+
+<file path="frontend/app/context/SessionContext.jsx">
+"use client";
+import { createContext, useContext, useState, useRef, useEffect } from "react";
+import Pusher from "pusher-js";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — persists which chat to reopen on refresh
+
+const SessionContext = createContext(null);
+
+export function useSession() {
+  const ctx = useContext(SessionContext);
+  if (!ctx) throw new Error("useSession() must be used inside <SessionProvider>");
+  return ctx;
+}
+
+export function SessionProvider({ children }) {
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [chats, setChats] = useState([]);                 // NEW — sidebar list
+  const [batches, setBatches] = useState([]);              // NEW — §4/§5: memory_batch groups, parallel to `chats`
+  const [workspaces, setWorkspaces] = useState([]); // NEW — §7: named containers, function like an always-on batch           
+  const [sessionId, setSessionId] = useState(null);        // CHANGED — no longer random-on-mount; this IS chat_id
+  const [chatsLoading, setChatsLoading] = useState(true);  // NEW
+  const [liveDecision, setLiveDecision] = useState(null);
+  // CHANGE — Part 18: liveLanes (object keyed by module name) replaced
+  // with liveSteps (an ordered array). Two reasons, both found reading
+  // eo/executor.py directly:
+  //   1. agent_start/agent_done are keyed by the RESOLVED MODULE name
+  //      (e.g. "generic_worker"), not the role. Multiple hired roles
+  //      routinely share the same module, so an object keyed by module
+  //      name silently overwrote one role's lane with another's.
+  //   2. Object state also meant a finished message could never show
+  //      its own trace afterward — liveLanes just got reset to {} on
+  //      the next sendTask() and was never attached to the message.
+  // Array order is safe to rely on here because eo/executor.py's
+  // execute_graph() is a strictly sequential `while` loop (confirmed
+  // reading it directly) — no two agent_start events are ever "in
+  // flight" at once, so "operate on the most recently pushed entry" is
+  // always correct and never ambiguous.
+  const [liveSteps, setLiveSteps] = useState([]);
+  const stepsRef = useRef([]);           // NEW — Part 18: mirrors liveSteps synchronously
+  const stepSeq = useRef(0);             // NEW — Part 18: unique id per step, for React keys
+  // Bug fix: agent_done/agent_token_chunk/error used to always target
+  // "whichever step is structurally last in stepsRef.current" — correct
+  // ONLY when steps never nest. That broke the moment a role that spawns
+  // its OWN sub-agent events (agents/code_writers.py's per-worker "Code
+  // Writer N — module" events, agents/reviewer.py's per-worker "Reviewer
+  // N" events) ran: eo/executor.py's outer agent_start for "implementer"
+  // pushes a step, then code_writers.py pushes+closes 3 more nested steps
+  // WHILE "implementer" is still open, then executor.py's own agent_done
+  // for "implementer" arrives last — but by then "array's last element"
+  // is the 3rd nested worker's (already-closed) step, so agent_done
+  // overwrites THAT instead of the "implementer" step it actually
+  // belongs to, leaving "implementer" stuck on status "running" forever
+  // (same for "verifier" wrapping reviewer.py's nested Reviewer N steps).
+  // Fix: nesting is a call stack, not a flat sequence — track which step
+  // ids are still open (LIFO), and match every agent_done/token_chunk/
+  // error to the MOST RECENTLY OPENED step that hasn't closed yet (the
+  // top of the stack), by id, not by array position.
+  const openStepStack = useRef([]);      // NEW — bug fix
+  // NEW — captures the new "agent_requested_role" event (an agent asked
+  // eo/executor.py to insert a missing prerequisite role and retry — see
+  // eo/errors.py). Kept separate from routeTrace since it's a distinct
+  // kind of edge (a runtime request, not a dispatcher routing decision),
+  // but RoutingTraceGraph.jsx merges both into one picture.
+  const [roleRequests, setRoleRequests] = useState([]);
+  const roleRequestsRef = useRef([]);
+  // NEW — Part 21: mirror routeTrace/dependencyMap/structurePlan the
+  // same way stepsRef mirrors liveSteps, so they survive into the
+  // per-message snapshot instead of being wiped by the next run's
+  // setRouteTrace([]) / setDependencyMap({}) / setStructurePlan(null).
+  const routeTraceRef = useRef([]);
+  const dependencyMapRef = useRef({});
+  const structurePlanRef = useRef(null);
+  const [usageStats, setUsageStats] = useState({});
+  const [usageHistory, setUsageHistory] = useState({});       // { [statKey]: [{t, tokens}, ...] } — Part 17
+  const [combinedUsageHistory, setCombinedUsageHistory] = useState([]); // [{t, [provider]: tokens}, ...] — Part 17
+  const latestByProviderRef = useRef({});                       // provider -> summed tokens across its keys, for the combined chart — Part 17
+  const [routeTrace, setRouteTrace] = useState([]);
+  const [macroLoopDecisions, setMacroLoopDecisions] = useState([]);
+  const [dependencyMap, setDependencyMap] = useState({});
+  const [structurePlan, setStructurePlan] = useState(null);
+  const [mode, setMode] = useState("auto");
+  const [pusherConnected, setPusherConnected] = useState(false); // NEW — Settings tab diagnostic, §6
+  const [activeMessageIndex, setActiveMessageIndex] = useState(null); // NEW — Part 21: shared scroll-sync index between Chat and Working panels
+
+  // --- NEW: on mount, load the chat list, then restore the last active
+  // chat (or create the very first one). This replaces the old
+  // `useState(() => "sess_" + ...)` initializer — sessionId is no longer
+  // minted randomly on every page load, it's loaded from localStorage /
+  // the persisted chat store, which is the actual fix for "everything
+  // disappears on refresh" (see guide §0).
+  useEffect(() => {
+    (async () => {
+      const res = await fetch(`${API_URL}/api/chats`, {
+        headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      });
+      const list = await res.json();
+      setChats(list);
+      fetchBatches();   // NEW — §4: don't block chat restore on this, batches are additive UI
+      fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
+      const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
+      const stillExists = savedId && list.some((c) => c.id === savedId);
+
+      if (stillExists) {
+        await switchChat(savedId, { skipListReload: true });
+      } else if (list.length > 0) {
+        // Don't silently jump to a "new chat" tab on reload — reopen
+        // whatever chat is most recently updated instead.
+        await switchChat(list[0].id, { skipListReload: true });
+      } else {
+        await createNewChat();
+      }
+      setChatsLoading(false);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Pusher subscription: identical to today's page.js effect, just
+  // living up here instead of inside the page that used to render
+  // everything. This is the fix described in §1 — this effect now only
+  // ever mounts/unmounts with the whole app, never with a tab switch.
+  // Note: sessionId now changes value on switchChat()/createNewChat()
+  // (it used to only be set once), so this effect — keyed on
+  // [sessionId] — correctly unsubscribes from the old chat's channel
+  // and subscribes to the new one automatically whenever you switch.
+  useEffect(() => {
+    if (!sessionId) return;   // NEW — nothing to subscribe to until the first chat is loaded/created
+    const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+    const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
+    if (!key || !cluster) {
+      console.warn("Pusher env vars not set — live agent events disabled.");
+      return;
+    }
+    const pusher = new Pusher(key, { cluster });
+    setPusherConnected(true);
+    const channelName = `session-${sessionId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
+    const channel = pusher.subscribe(channelName);
+    channel.bind_global((eventType, data) => {
+      const { agent, payload } = data;
+      if (eventType === "routing_decision") {
+        setLiveDecision(payload);
+        return;
+      }
+      if (eventType === "usage_update") {
+        const statKey = `${payload?.provider}:${payload?.key_id}`;
+        setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
+
+        // NEW — Part 17: append to this key's own history (capped so a
+        // very long session doesn't grow this unbounded).
+        setUsageHistory((prev) => {
+          const series = prev[statKey] || [];
+          const next = [...series, { t: Date.now(), tokens: payload?.tokens_used_today ?? 0 }];
+          return { ...prev, [statKey]: next.length > 300 ? next.slice(-300) : next };
+        });
+
+        // NEW — Part 17: maintain a per-provider running total (summed
+        // across every key seen so far for that provider) and append one
+        // row to a combined, time-aligned series every update, forward-
+        // filling every OTHER provider's last known value so the combined
+        // chart has a real value for every provider at every timestamp,
+        // not just the one that happened to fire this particular event.
+        const provider = payload?.provider;
+        if (provider) {
+          // Recompute this provider's total from every key of theirs
+          // we've seen so far, rather than a running += — a += would
+          // double count if this same key's usage_update fires again
+          // with a lower number for any reason (shouldn't happen, but
+          // recomputing from source is one fewer thing to trust blindly).
+          setUsageStats((prevStats) => {
+            const total = Object.entries(prevStats)
+              .filter(([k]) => k.startsWith(`${provider}:`))
+              .reduce((sum, [, v]) => sum + (v.tokens_used_today || 0), 0)
+              + (payload?.tokens_used_today || 0); // this event's own key may not be in prevStats yet
+            latestByProviderRef.current = { ...latestByProviderRef.current, [provider]: total };
+            return prevStats; // this call is read-only against usageStats — the actual write already happened above
+          });
+          setCombinedUsageHistory((prev) => {
+            const row = { t: Date.now(), ...latestByProviderRef.current };
+            const next = [...prev, row];
+            return next.length > 300 ? next.slice(-300) : next;
+          });
+        }
+        return;
+      }
+      if (eventType === "dispatch_event") {
+        const nextRouteTrace = [...routeTraceRef.current, { destination: payload?.destination, reason: payload?.reason }];
+        routeTraceRef.current = nextRouteTrace;
+        setRouteTrace(nextRouteTrace);
+        return;
+      }
+      if (eventType === "macro_loop_decision") {
+        setMacroLoopDecisions((prev) => [
+          ...prev,
+          { action: payload?.decision, loop: payload?.loop, cause: payload?.cause },
+        ]);
+        return;
+      }
+      if (eventType === "dependency_map") {
+        dependencyMapRef.current = payload?.map || {};
+        setDependencyMap(dependencyMapRef.current);
+        return;
+      }
+      if (eventType === "structure_plan") {
+        structurePlanRef.current = payload?.mermaid || null;
+        setStructurePlan(structurePlanRef.current);
+        return;
+      }
+      if (eventType === "quota_alert") {
+        console.warn("quota_alert:", payload);
+        return;
+      }
+      if (eventType === "agent_requested_role") {
+        // NEW — see eo/executor.py's MissingDependencyError handling.
+        const next = [...roleRequestsRef.current, {
+          requestingAgent: agent, requestedRole: payload?.requested_role, label: payload?.label,
+        }];
+        roleRequestsRef.current = next;
+        setRoleRequests(next);
+        return;
+      }
+      // CHANGE — Part 18: agent_start/agent_token_chunk/agent_done/error
+      // now push/update against liveSteps (array), not a lanes object.
+      if (eventType === "agent_start") {
+        const step = {
+          id: stepSeq.current++,
+          agent,                                   // resolved module name (executor.py's current_name)
+          role: payload?.label || agent,            // actual role — payload.label per executor.py's emit_event() call
+          text: "",
+          summary: null,
+          durationMs: null,
+          status: "running",
+        };
+        stepsRef.current = [...stepsRef.current, step];
+        openStepStack.current = [...openStepStack.current, step.id];   // NEW — bug fix
+        setLiveSteps(stepsRef.current);
+        return;
+      }
+      if (eventType === "agent_token_chunk") {
+        // §1: not every agent is confirmed to emit this. Steps that
+        // never receive a chunk simply fall back to agent_done's
+        // summary below.
+        if (openStepStack.current.length === 0) return;
+        const targetId = openStepStack.current[openStepStack.current.length - 1];   // NEW — bug fix
+        const updated = stepsRef.current.map((s) =>
+          s.id === targetId ? { ...s, text: s.text + (payload?.text || "") } : s
+        );
+        stepsRef.current = updated;
+        setLiveSteps(updated);
+        return;
+      }
+      if (eventType === "agent_done") {
+        if (openStepStack.current.length === 0) return;
+        const targetId = openStepStack.current[openStepStack.current.length - 1];   // NEW — bug fix
+        openStepStack.current = openStepStack.current.slice(0, -1);                 // NEW — bug fix: pop
+        const updated = stepsRef.current.map((s) =>
+          s.id === targetId
+            ? { ...s, status: "done", summary: payload?.summary, durationMs: payload?.duration_ms }
+            : s
+        );
+        stepsRef.current = updated;
+        setLiveSteps(updated);
+        return;
+      }
+      if (eventType === "error") {
+        if (openStepStack.current.length === 0) return;
+        const targetId = openStepStack.current[openStepStack.current.length - 1];   // NEW — bug fix
+        openStepStack.current = openStepStack.current.slice(0, -1);                 // NEW — bug fix: pop
+        const updated = stepsRef.current.map((s) =>
+          s.id === targetId ? { ...s, status: "error", summary: payload?.message } : s
+        );
+        stepsRef.current = updated;
+        setLiveSteps(updated);
+      }
+    });
+    return () => {
+      pusher.unsubscribe(channelName);
+      pusher.disconnect();
+      setPusherConnected(false);
+    };
+  }, [sessionId]);
+
+  // --- NEW: chat list + switching / creating / renaming / deleting /
+  // linking chats. sessionId and chat_id are the same string everywhere
+  // (see eo/chat_store.py's docstring), so these just move sessionId
+  // around and keep the persisted chat store + local state in sync.
+
+  async function refreshChatList() {
+    const res = await fetch(`${API_URL}/api/chats`, {
+      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    });
+    setChats(await res.json());
+  }
+
+  // NEW — §4: loads memory_batch groups so the sidebar can render batch
+  // sections and the Working Panel can show "sharing memory with..."
+  // for the active chat. §5 adds create/rename/unlink/delete on top of
+  // this same `batches` state.
+  // NEW — §6: repurposes the old LinkChatsModal save flow. Creates a
+  // real batch (mutual membership) instead of the old one-directional
+  // linkChats() call — see ChatSidebar.jsx's LinkChatsModal.
+  async function createBatch(name, memberChatIds) {
+    await fetch(`${API_URL}/api/batches`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ name, member_chat_ids: memberChatIds }),
+    });
+    await fetchBatches();
+    await refreshChatList();
+  }
+  // NEW — §9.2: live estimate for the create-batch modal. Not stored in
+// context state — it's ephemeral per-modal-open, computed fresh each
+// time the checkbox selection changes.
+  async function estimateBatch(chatIds) {
+    const res = await fetch(`${API_URL}/api/batches/estimate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ chat_ids: chatIds }),
+    });
+    return res.json();
+  }
+  async function fetchBatches() {
+    const res = await fetch(`${API_URL}/api/batches`, {
+      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    });
+    setBatches(await res.json());
+  }
+  // NEW — §7: workspaces ("Projects" in the UI). Mirrors the batch functions
+// above 1:1, with one thing to keep straight: workspaces store members as
+// `chat_ids` (see eo/chat_workspace.py), batches use `member_chat_ids` —
+// don't cross the two up when reading a response.
+
+async function fetchWorkspaces() {
+  const res = await fetch(`${API_URL}/api/workspaces`, {
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  setWorkspaces(await res.json());
+}
+
+async function createWorkspace(name) {
+  await fetch(`${API_URL}/api/workspaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ name }),
+  });
+  await fetchWorkspaces();
+}
+
+async function renameWorkspace(wsId, name) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ name }),
+  });
+  await fetchWorkspaces();
+}
+
+async function addWorkspaceChat(wsId, chatId) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/chats`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ chat_id: chatId }),
+  });
+  await fetchWorkspaces();
+  await refreshChatList(); // membership changes linked_chat_ids server-side (chat_workspace.py's _sync)
+}
+
+async function removeWorkspaceChat(wsId, chatId, deleteChat = false) {
+  await fetch(
+    `${API_URL}/api/workspaces/${wsId}/chats/${chatId}?delete_chat=${deleteChat}`,
+    { method: "DELETE", headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY } }
+  );
+  await fetchWorkspaces();
+  if (deleteChat && chatId === sessionId) {
+    // Same "don't strand the user on a chat that no longer exists" logic
+    // as deleteChat() below — switchChat()/createNewChat() already
+    // refresh the chat list internally.
+    const remaining = chats.filter((c) => c.id !== chatId);
+    if (remaining.length > 0) await switchChat(remaining[0].id);
+    else await createNewChat();
+  } else {
+    await refreshChatList();
+  }
+}
+
+async function deleteWorkspace(wsId) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}`, {
+    method: "DELETE",
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  await fetchWorkspaces();
+  await refreshChatList();
+}
+
+  // NEW — §5: manage-batch modal actions (rename / unlink members /
+  // delete the whole batch). All three touch batch membership, which
+  // also changes linked_chat_ids server-side (see eo/memory_batch.py),
+  // so each refreshes both `batches` and `chats` the same way §3/§4's
+  // create flow already does.
+
+  async function renameBatch(batchId, name) {
+    await fetch(`${API_URL}/api/batches/${batchId}/rename`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ name }),
+    });
+    await fetchBatches();
+  }
+
+  async function unlinkBatchMembers(batchId, chatIds) {
+    await fetch(`${API_URL}/api/batches/${batchId}/unlink`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ chat_ids: chatIds }),
+    });
+    await fetchBatches();
+    await refreshChatList();
+  }
+
+  async function deleteBatch(batchId) {
+    await fetch(`${API_URL}/api/batches/${batchId}`, {
+      method: "DELETE",
+      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    });
+    await fetchBatches();
+    await refreshChatList();
+  }
+
+  async function switchChat(chatId, { skipListReload = false } = {}) {
+    const res = await fetch(`${API_URL}/api/chats/${chatId}`, {
+      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    });
+    if (!res.ok) return;
+    const chat = await res.json();
+    setSessionId(chatId);
+    localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
+    setMessages(chat.messages || []);
+    // Clear transient Working Panel state — it belongs to whatever run is
+    // in flight, not to a chat you just reloaded from disk.
+    stepsRef.current = []; setLiveSteps([]);
+    routeTraceRef.current = []; setRouteTrace([]);
+    dependencyMapRef.current = {}; setDependencyMap({});
+    structurePlanRef.current = null; setStructurePlan(null);
+    roleRequestsRef.current = []; setRoleRequests([]);
+    setMacroLoopDecisions([]);
+    setLiveDecision(null);
+    if (!skipListReload) await refreshChatList();
+  }
+
+  async function createNewChat() {
+    const res = await fetch(`${API_URL}/api/chats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ title: "New Chat" }),
+    });
+    const chat = await res.json();
+    setSessionId(chat.id);
+    localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
+    setMessages([]);
+    await refreshChatList();
+    return chat.id;
+  }
+
+  async function renameChat(chatId, title) {
+    await fetch(`${API_URL}/api/chats/${chatId}/rename`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ title }),
+    });
+    await refreshChatList();
+  }
+
+  async function deleteChat(chatId) {
+    await fetch(`${API_URL}/api/chats/${chatId}`, {
+      method: "DELETE",
+      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    });
+    if (chatId === sessionId) {
+      const remaining = chats.filter((c) => c.id !== chatId);
+      if (remaining.length > 0) await switchChat(remaining[0].id);
+      else await createNewChat();
+    } else {
+      await refreshChatList();
+    }
+  }
+
+  async function linkChats(chatId, linkedChatIds) {
+    await fetch(`${API_URL}/api/chats/${chatId}/links`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ linked_chat_ids: linkedChatIds }),
+    });
+    await refreshChatList();
+  }
+
+  async function persistMessage(message) {
+    // Fire-and-forget-ish: don't block the UI on this, but don't swallow
+    // errors silently either — a failed save here is exactly the "lost
+    // my chat" bug again, just moved one layer down.
+    try {
+      await fetch(`${API_URL}/api/chats/${sessionId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        body: JSON.stringify({ message }),
+      });
+    } catch (err) {
+      console.error("Failed to persist message:", err);
+    }
+  }
+
+  async function sendTask(taskText) {
+    const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
+    setMessages((prev) => [...prev, userMessage]);
+    persistMessage(userMessage);   // NEW
+    setLoading(true);
+    setLiveDecision(null);
+    stepsRef.current = [];
+    setLiveSteps([]);
+    openStepStack.current = [];   // NEW — bug fix
+    roleRequestsRef.current = []; // NEW
+    setRoleRequests([]);          // NEW
+    routeTraceRef.current = [];
+    setRouteTrace([]);
+    dependencyMapRef.current = {};
+    setDependencyMap({});
+    structurePlanRef.current = null;
+    setStructurePlan(null);
+    setMacroLoopDecisions([]);   // NEW — same clean-slate treatment as the others
+    try {
+      const res = await fetch(`${API_URL}/api/task`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+        },
+        body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
+      });
+      const data = await res.json();
+      // NEW — Part 18: snapshot the just-finished run's steps onto the
+      // message itself, via the ref (not the `liveSteps` state variable,
+      // which would be stale here — this closure captured whatever
+      // liveSteps was at the moment sendTask() was called, not the
+      // latest value after every event that streamed in since).
+      // NEW — Part 21: same reasoning now applies to routeTrace/
+      // dependencyMap/structurePlan — snapshot from the refs (not the
+      // stale-closure state vars), plus the task prompt itself, so the
+      // Working Panel has a self-contained section per message.
+      const assistantMessage = {
+        role: "assistant",
+        data,
+        task: taskText,
+        steps: stepsRef.current,
+        routeTrace: routeTraceRef.current,
+        roleRequests: roleRequestsRef.current,   // NEW
+        dependencyMap: dependencyMapRef.current,
+        structurePlan: structurePlanRef.current,
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+      persistMessage(assistantMessage);   // NEW
+    } catch (err) {
+      // NEW — Part 21: same four-field snapshot on the error path, so a
+      // failed run still shows whatever routing/structure data was
+      // captured before it broke instead of a blank Working Panel section.
+      const assistantMessage = {
+        role: "assistant",
+        data: { status: "error", message: String(err) },
+        task: taskText,
+        steps: stepsRef.current,
+        routeTrace: routeTraceRef.current,
+        roleRequests: roleRequestsRef.current,   // NEW
+        dependencyMap: dependencyMapRef.current,
+        structurePlan: structurePlanRef.current,
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+      persistMessage(assistantMessage);   // NEW
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function registerProject() {
+    const path = prompt("Full path to the project folder:");
+    const name = prompt("Display name for this project:");
+    if (!path || !name) return;
+    try {
+      const res = await fetch(`${API_URL}/api/projects`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+        },
+        body: JSON.stringify({ path, display_name: name }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`Registration failed: ${data.detail || res.status}`);
+        return;
+      }
+      alert(`Registered as '${data.unique_name}' -> ${data.root_path}`);
+    } catch (err) {
+      alert(`Registration failed: ${String(err)}`);
+    }
+  }
+
+  const value = {
+  sessionId, API_URL,
+  messages, loading,
+  chats, chatsLoading, switchChat, createNewChat, renameChat, deleteChat, linkChats,
+  batches, fetchBatches,
+  createBatch, estimateBatch,
+  renameBatch, unlinkBatchMembers, deleteBatch,
+  workspaces, fetchWorkspaces, createWorkspace, renameWorkspace,
+  addWorkspaceChat, removeWorkspaceChat, deleteWorkspace,   // NEW — §7
+  liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
+  macroLoopDecisions,
+  roleRequests,
+  mode, setMode,
+  pusherConnected,
+  activeMessageIndex, setActiveMessageIndex,
+  sendTask, registerProject,
+  };
+  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+}
+</file>
+
+<file path="frontend/app/page.js">
+"use client";
+import AppShell from "./components/AppShell";
+
+export default function Page() {
+  return <AppShell />;
+}
+</file>
+
+</files>

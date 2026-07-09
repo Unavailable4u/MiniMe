@@ -139,7 +139,7 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
     conv_context = conversation_memory.get_light_context(session_id)   # NEW — Part 23
     combined_context = "\n\n".join(c for c in [context, conv_context] if c) or None   # NEW — Part 23
     try:
-        draft = classify(task_text, context=combined_context)   # CHANGED — Part 23, was `context or None`
+        draft = classify(task_text, context=combined_context, session_id=session_id)   # CHANGED — Part 26, was missing session_id entirely, so classify()'s own agent_start/routing_decision/agent_done events were silent no-ops
         draft["tier"] = PATH_TO_TIER[draft["path"]]   # NEW — Part 15
     except Exception as exc:
         print(f"  [Inspector] classification failed ({exc.__class__.__name__}: {exc}), "
@@ -296,13 +296,29 @@ def _run_tier3_hires(task_text: str, decision: dict, hires: list,
     gatekeeper, hard safety caps) actually fires for a hires-driven
     tier-3 task, rather than sitting fully built and unused. No
     session_id available on this CLI path (same pre-existing gap as
-    _get_decision()'s own call above)."""
-    results = run_with_looping(
+    _get_decision()'s own call above).
+
+    Migration Part B (session isolation fix): generates a throwaway
+    per-invocation slug and scopes this run's bus keys to it (see
+    api/task_runner.py's _run_tier3_hires() for the full reasoning) —
+    without this, two separate CLI runs back to back would share the
+    same module_specs/current_plan/submitted_code/etc. exactly like the
+    HTTP path did before this fix."""
+    from memory.bus import set_app_slug, slugify
+    import uuid
+    set_app_slug(f"{slugify(task_text)}_{uuid.uuid4().hex[:8]}")
+
+    looped = run_with_looping(
         hires, decision.get("execution_order"), task_text, session_id=None,
         mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
         path="adaptive",   # NEW — Part 15 §2c, optional path label
     )
-    print(f"\n[Tier 3 — hires-driven] final results:")
+    results, final_role = looped["results"], looped["final_role"]
+    final_output = results.get(final_role) if final_role else None
+    if isinstance(final_output, dict) and final_output.get("text"):
+        print(f"\n[Tier 3 — hires-driven] final answer (from '{final_role}'):")
+        print(final_output["text"])
+    print(f"\n[Tier 3 — hires-driven] full results (every role):")
     print(json.dumps(results, indent=2, default=str))
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
 

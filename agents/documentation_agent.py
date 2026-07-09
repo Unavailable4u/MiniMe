@@ -64,7 +64,15 @@ def run(session_id: str = None, tier: int = None) -> dict:
     feature_status = read(KEYS["feature_status"], default={})
     report = read(KEYS["latest_report"], default={})
     file_map = read(KEYS["file_map"], default={})
-    slug = read(KEYS["app_slug"], default=None)
+    # Migration Part B (session isolation fix): was read(KEYS["app_slug"], ...),
+    # which -- "app_slug" being exempt from memory.bus's namespacing --
+    # always reads the raw, UNSCOPED global Redis record, not this run's
+    # own session-scoped slug (see api/task_runner.py's _run_tier3_hires()
+    # and memory/bus.py's set_app_slug()). That let one session's docs
+    # agent read (or silently fall back to None instead of) an entirely
+    # unrelated session's app name.
+    from memory.bus import get_current_app_slug
+    slug = get_current_app_slug()
 
     user_prompt = json.dumps({
         "idea": idea,

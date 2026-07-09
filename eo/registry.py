@@ -210,21 +210,9 @@ REAL_ACTION_ROLES = {
     "fixer": "fixer_pool",
     "security_reviewer": "security_scanner",
     "file_manager": "file_manager",
-    # Migration Part 27 §2: these four were only ever reachable through
-    # the classic tier-3 pipeline (TIERS[3], now deleted from
-    # eo/router.py -- confirmed dead, nothing called it). They do real,
-    # non-LLM-replicable work (HuggingFace embeddings, Cloudflare-scoped
-    # folder planning), not reasoning generic_worker can substitute for,
-    # so -- rather than deleting working integrations along with the
-    # dead pipeline that used to be their only caller -- they're wired
-    # into the adaptive/hires-driven path here instead. Each already
-    # has an AGENT_CAPABILITIES natural_roles tag (structure_architect ->
-    # GROQ_API_KEY_9, dependency_mapper -> CLOUDFLARE_ACCOUNT_ID_4,
-    # memory_search/duplication_checker -> HUGGINGFACE_API_KEY) and
-    # already calls generate_text()/log_usage() with the
-    # session_id/tier convention eo/executor.py's UNSCOPED_TIER_AGENTS
-    # dispatch already handles -- so no executor.py change is needed,
-    # only this mapping.
+    "idea_planner": "idea_planner",      # ADD
+    "prompt_writer": "prompt_writer",    # ADD
+    "test_writer": "test_writer",        # ADD
     "dependency_mapper": "dependency_mapper",
     "duplication_checker": "duplication_checker",
     "structure_architect": "structure_architect",

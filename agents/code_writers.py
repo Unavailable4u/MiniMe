@@ -180,8 +180,69 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     return _done(code)
 
 
+def _derive_specs_from_task_text(task_text: str, session_id: str = None) -> dict:
+    """Fallback spec synthesis for when this module gets hired directly by
+    the tier-3 adaptive Panel WITHOUT the legacy "prompt_writer" role
+    ahead of it in the plan. This module's original v5 contract assumed
+    prompt_writer.run() had always already written KEYS["module_specs"]
+    before this ran — a fine assumption for the old fixed 19-agent
+    pipeline, not a safe one for the Panel's hires-driven pipeline (Part
+    10), which is free to pick any subset of roles. Rather than crashing
+    with a bare TypeError on `specs["modules"]` (the exact bug this fixes
+    — a hired "implementer" with no "prompt_writer" upstream left
+    module_specs unwritten -> None -> not subscriptable), ask the same
+    kind of single-shot spec question prompt_writer.py asks, seeded
+    directly from the raw task text, and write the result to the same key
+    so any later reader still finds it there.
+    """
+    from utils.llm_client import generate_text
+    spec_prompt = """You are a technical spec writer. Given a task description, break it
+into 1-3 independent modules that can be built in parallel without depending on each
+other's internal code (only on their defined interface). If the task is small enough
+to be one module, return just one.
+
+Output ONLY a JSON object with a "modules" key containing a list. Each module must have:
+- "name": short module name
+- "description": what it does
+- "inputs": expected inputs
+- "outputs": expected outputs
+- "edge_cases": list of edge cases to handle
+
+Respond with ONLY valid JSON, no markdown, no explanation."""
+    chain = [
+        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+        {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
+    ]
+    try:
+        raw_text = generate_text(
+            spec_prompt, f"Task: {task_text}", chain,
+            agent_name="Code Writers (spec fallback)", session_id=session_id,
+        ).strip()
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+            raw_text = raw_text.strip()
+        specs = json.loads(raw_text)
+        if not specs.get("modules"):
+            raise ValueError("empty modules list")
+    except Exception:
+        # Last-resort single module so this never hard-crashes even if
+        # the fallback LLM call itself fails -- one module named after
+        # the task is always a valid, if unrefined, plan.
+        specs = {"modules": [{
+            "name": "main",
+            "description": task_text or "Implement the requested task.",
+            "inputs": "see description",
+            "outputs": "see description",
+            "edge_cases": [],
+        }]}
+    write(KEYS["module_specs"], specs)
+    return specs
+
+
 def run(session_id: str = None, path: str = None, expanded: bool = False,
-        key_override=None):
+        key_override=None, task_text: str = None):
     """
     Migration Part 5 §2.3 — key_override, if given, is the Panel's specific
     account-selection decision for this hire (eo.router's
@@ -199,8 +260,16 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
         _worker_keys(expanded) -- this is what a multi-hire "implementer"
         staffing decision (build_execution_graph_from_hires()'s
         list-handling) turns into.
+
+    task_text: NEW — bug fix. Only used as a fallback seed for
+    _derive_specs_from_task_text() when KEYS["module_specs"] hasn't been
+    written yet (see that function's docstring). Optional so every
+    existing caller that doesn't pass it keeps working exactly as before
+    whenever prompt_writer DID already run.
     """
     specs = read(KEYS["module_specs"])
+    if not specs or not specs.get("modules"):
+        specs = _derive_specs_from_task_text(task_text, session_id=session_id)
     modules = specs["modules"]
     results = {}
 

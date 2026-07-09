@@ -132,18 +132,53 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     below is now the full role-keyed results dict rather than just the
     final role's output — a necessary shape change, not a stylistic one.
     """
-    results = run_with_looping(
+    from memory.bus import set_app_slug, slugify
+    # Migration Part B (session isolation fix): scope every bus key this
+    # run touches (module_specs, current_plan, submitted_code, test_code,
+    # fixed_code, file_plan, file_map, ...) to this session, instead of
+    # the old shared process-wide app_slug global. Without this, an
+    # unrelated earlier task's leftover state (or a concurrent one) gets
+    # silently read by this run — that's what actually caused the
+    # TypeError on the module_specs key: implementer read a stale string
+    # left behind by a different task entirely, because nothing scoped
+    # these keys per-session before. session_id is always a real value
+    # here (run_task() generates one if the caller didn't pass one), so
+    # this is safe unconditionally. Folding in a slug of the task text
+    # keeps the eventual apps/<slug>/ disk folder (see file_manager.py)
+    # human-readable instead of a bare opaque UUID.
+    set_app_slug(f"{slugify(task_text)}_{session_id[:8]}")
+
+    looped = run_with_looping(
         hires, decision.get("execution_order"), task_text, session_id=session_id,
         mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
         path="adaptive",   # NEW — Part 15 §2c, optional path label
     )
+    results = looped["results"]
+    final_role = looped["final_role"]
+
+    # NEW — bug fix: previously "result" only carried the entire
+    # role-keyed `results` tree under "output", with nothing marking
+    # which role's output was actually the answer. The frontend had no
+    # choice but to dump the whole tree (every intermediate agent's raw
+    # output) straight into the chat bubble. `answer` below is just the
+    # final role's human-readable text — `output` is kept as-is alongside
+    # it so the agent-trace/working panel still has full detail to show.
+    # render_agent_result() (eo/result_render.py) is the same renderer
+    # eo/executor.py's _summarize() uses for the live step panel, so a
+    # "fixer"/"verifier"/"implementer"-shaped final role (not just plain
+    # {"text": ...}) still comes out as readable markdown here too,
+    # instead of falling back to str(dict).
+    from eo.result_render import render_agent_result
+    final_output = results.get(final_role) if final_role else None
+    answer = render_agent_result(final_output) if final_output is not None else ""
+
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
     return {
         "decision": decision,
         "tier": 3,
         "session_id": session_id,
         "status": "ok",
-        "result": {"output": results},
+        "result": {"output": results, "answer": answer, "final_role": final_role},
         "message": None,
     }
 

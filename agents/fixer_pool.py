@@ -48,6 +48,7 @@ from memory.bus import read, write, KEYS
 from relay.emitter import emit_event
 from agents.generic_worker import NEXT_TAG_INSTRUCTION, parse_next_tag
 from utils.llm_client import generate_text
+from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
@@ -280,7 +281,11 @@ def run_fixer_pool(session_id: str = None, path: str = None, key_override=None):
     review_notes = read(KEYS["review_notes"])
 
     if not submitted_code:
-        raise ValueError("No submitted_code found in memory. Run the Code Writers first.")
+        # Bug fix: was `raise ValueError(...)` -- see agents/test_writer.py's
+        # identical fix for why this specific role name.
+        raise MissingDependencyError(
+            "implementer", "No submitted_code found in memory. Run the Code Writers first."
+        )
     if not review_notes:
         review_notes = {"issues": [], "summary": ""}
 

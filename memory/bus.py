@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import contextvars
 from dotenv import load_dotenv
 from upstash_redis import Redis
 from upstash_vector import Index
@@ -12,14 +13,61 @@ redis = Redis(
 def slugify(text: str, max_len: int = 40) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
     return slug[:max_len] or "untitled_app"
-_app_slug_cache = None
+
+# Migration Part B (session isolation fix): replaces the old plain
+# module-level global `_app_slug_cache`. A bare global is shared across
+# EVERY concurrent request in this process -- with the tier-3 adaptive
+# path never explicitly scoping it, every session's module_specs/
+# current_plan/submitted_code/test_code/etc. silently collided in the
+# same namespace. A ContextVar is per-request/per-task instead:
+# FastAPI's threadpool for sync endpoints (Starlette's
+# run_in_threadpool) correctly propagates context into the worker
+# thread, so this isolates concurrent HTTP requests properly, unlike
+# the old global.
+_app_slug_ctx: "contextvars.ContextVar" = contextvars.ContextVar("app_slug", default=None)
+
+
 def _current_app_slug():
-    global _app_slug_cache
-    if _app_slug_cache is None:
-        raw = redis.get("app_slug")
-        if raw is not None:
-            _app_slug_cache = json.loads(raw)
-    return _app_slug_cache
+    """Namespacing lookup used internally by _namespaced() for every
+    ordinary bus key. Context-scoped value wins if set_app_slug() was
+    called this request/task; otherwise falls back to the persisted
+    Redis global, which preserves the original CLI/tier-2 behavior
+    ("keep working on whatever app was last loaded") for callers that
+    never explicitly scope a context."""
+    ctx_value = _app_slug_ctx.get()
+    if ctx_value is not None:
+        return ctx_value
+    raw = redis.get("app_slug")
+    if raw is not None:
+        return json.loads(raw)
+    return None
+
+
+def set_app_slug(slug: str) -> None:
+    """Scopes every bus read/write in THIS request/task context to
+    `slug`, WITHOUT touching the persisted global Redis "app_slug"
+    record. Call this once, at the very top of every tier-3
+    adaptive-path run, keyed by session_id -- this is what actually
+    stops unrelated sessions from sharing module_specs/current_plan/
+    submitted_code/test_code/etc.
+
+    Deliberately does not persist to Redis: write(KEYS["app_slug"], ...)
+    still does that, and is reserved for tier-2/CLI's "load this app and
+    keep working on it across separate invocations" behavior, which
+    this function must not interfere with."""
+    _app_slug_ctx.set(slug)
+
+
+def get_current_app_slug():
+    """Public accessor for "the app slug this run is scoped to" as a
+    piece of DATA (e.g. for building a disk path), not just as a key
+    prefix. Agents that need this (see agents/file_manager.py) should
+    call this directly rather than read(KEYS["app_slug"])/
+    write(KEYS["app_slug"], ...) -- that pair talks to the raw,
+    unnamespaced global Redis record (see _namespaced()'s exemption
+    list below) and would silently clobber a session-scoped context
+    value set via set_app_slug() above."""
+    return _current_app_slug()
 def _namespaced(key: str) -> str:
     """Prefixes every key with the active app_slug, except app_slug itself
     (bootstrap key, can't prefix itself), project_registry (Part 3 step 6
@@ -63,8 +111,12 @@ def write(key: str, value):
     """Write any JSON-serializable value to memory."""
     redis.set(_namespaced(key), json.dumps(value))
     if key == "app_slug":
-        global _app_slug_cache
-        _app_slug_cache = value
+        # Keeps the context-local value in sync with an explicit
+        # write(KEYS["app_slug"], ...) call within the SAME
+        # request/task (e.g. tier-2's load_existing_app()), so a
+        # later read in this same context sees it immediately without
+        # a round-trip to Redis.
+        _app_slug_ctx.set(value)
 def read(key: str, default=None):
     """Read a value back from memory. Returns default if not found."""
     raw = redis.get(_namespaced(key))
@@ -72,9 +124,46 @@ def read(key: str, default=None):
         return default
     value = json.loads(raw)
     if key == "app_slug":
-        global _app_slug_cache
-        _app_slug_cache = value
+        _app_slug_ctx.set(value)
     return value
+def read_many(keys: list, default=None) -> dict:
+    """Batch-read multiple keys in a SINGLE Redis round trip via MGET,
+    instead of one request per key. Since bus.py talks to Upstash Redis
+    over REST, every individual read() is a full HTTPS request -- calling
+    read() in a loop over N keys means N sequential (or, at best,
+    N concurrent) network round trips. MGET fetches all of them in one
+    request instead.
+
+    Returns {key: value_or_default}, keyed by the ORIGINAL (un-namespaced)
+    keys passed in, mirroring read()'s per-key namespacing behavior so
+    callers don't need to think about _namespaced() themselves. Does not
+    special-case "app_slug" the way read() does -- this is meant for
+    bulk, read-only rollups (e.g. eo/quota_sentinel.py's usage history),
+    not for the single bootstrap key that participates in the app_slug
+    context-var sync.
+    """
+    if not keys:
+        return {}
+    namespaced_keys = [_namespaced(k) for k in keys]
+    # Fix: Redis.mget() is variadic (mget(*keys)), not a single list arg.
+    # Passing the list directly made the client treat it as ONE bogus key,
+    # so raw_values came back as a single-element result. zip(keys, raw_values)
+    # then silently truncated to just the first key, dropping every other
+    # key from the returned dict -- causing KeyError downstream (e.g.
+    # eo/quota_sentinel.py's get_usage_history()) for anything but the
+    # first key requested. Unpacking with * sends each key as its own
+    # argument, matching the client's real signature.
+    raw_values = redis.mget(*namespaced_keys)
+    return {
+        original_key: (json.loads(raw) if raw is not None else default)
+        for original_key, raw in zip(keys, raw_values)
+    }
+def delete(key: str) -> None:
+    """Delete a key from memory entirely (as opposed to write(key, [])
+    or write(key, None), which leave a namespaced key sitting in Redis
+    with an empty/null value forever). Used by eo/chat_store.py's
+    delete_chat() to actually clear a session's conversation history."""
+    redis.delete(_namespaced(key))
 def append_cycle_history(cycle_num: int, report: dict):
     """Store each cycle's report under its own key, for long-term memory."""
     write(f"cycle:{cycle_num}:report", report)

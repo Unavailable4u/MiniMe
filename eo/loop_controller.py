@@ -142,10 +142,25 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
     `domain` is accepted for call-site compatibility with Part 11 §3.2's
     wiring but is no longer branched on anywhere in this module (Part 12
     §0) -- every domain takes the same path through _run_gatekeeper().
+
+    Return shape — NEW: {"results": {role: output, ...}, "final_role": str
+    | None}. Previously this returned the bare `results` dict with no way
+    for a caller to know which role's output is "the" answer (the whole
+    plan can end with a different role each run, and a macro-loop redo
+    pass doesn't necessarily re-run every role, so "last key in the dict"
+    isn't reliable either — dict.update() keeps an existing key's
+    original insertion position). final_role is explicitly tracked as
+    "the last role that finished in the most recent pass" instead, which
+    is what callers actually want: e.g. api/task_runner.py surfacing one
+    clean answer to the chat UI instead of the entire role-keyed results
+    tree. final_role is None only if hires was empty and no pass ever
+    ran (shouldn't happen given eo/loop_v4.py's _ensure_staffable(), but
+    kept honest rather than assuming).
     """
     current_order = execution_order
     loop_num = 1
     results = {}
+    final_role = None
 
     while True:
         agent_names, role_names, key_overrides = build_execution_graph_from_hires(hires, current_order)
@@ -155,6 +170,8 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
         results.update(pass_results)   # merge, don't replace — a redo pass should only
                                         # overwrite the specific roles it re-ran, not erase
                                         # everything from earlier passes.
+        if pass_results:
+            final_role = list(pass_results.keys())[-1]
 
         if mode.lower() not in ("expert", "beast") or loop_num >= MAX_MACRO_LOOPS:
             break
@@ -169,4 +186,4 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
         loop_num += 1
         current_order = decision.get("redo_roles") or execution_order
 
-    return results
+    return {"results": results, "final_role": final_role}

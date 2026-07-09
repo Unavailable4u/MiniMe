@@ -27,9 +27,19 @@ export default function WorkingPanel({ isSyncingRef }) {
     liveDecision,
     liveSteps,
     routeTrace,
+    roleRequests,
     dependencyMap,
     structurePlan,
+    sessionId,   // NEW — §4
+    batches,     // NEW — §4
   } = useSession();
+
+  // NEW — §4: answers "which chats is *this* chat currently pulling
+  // context from" right where the user is already looking, without
+  // opening the (§5) manage-batch modal. A chat is in at most one batch
+  // (see eo/memory_batch.py's "one batch at a time" note), so `.find`
+  // is safe here.
+  const activeBatch = batches.find((b) => b.member_chat_ids.includes(sessionId)) || null;
 
   const sectionRefs = useRef([]);
   const containerRef = useRef(null);
@@ -83,11 +93,22 @@ export default function WorkingPanel({ isSyncingRef }) {
     );
 
   return (
-    <div
-      ref={containerRef}
-      onScroll={handleScroll}
-      className="h-full overflow-y-auto p-3 space-y-6"
-    >
+    <div className="h-full flex flex-col">
+      {/* NEW — §4B: small strip above the panel, only when the active
+          chat is currently a batch member. */}
+      {activeBatch && (
+        <div
+          className="text-[10px] px-3 py-1.5 border-b shrink-0"
+          style={{ borderColor: "var(--cyber-border)", color: "var(--cyber-dim)" }}
+        >
+          Sharing memory with {activeBatch.member_chat_ids.length - 1} other chat(s) in &quot;{activeBatch.name}&quot;
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-3 space-y-6"
+      >
       {snapshotMessages.length === 0 && !loading && (
         <p className="text-neutral-600 text-xs p-4">
           Routing and structure info will appear here once a task runs.
@@ -103,10 +124,25 @@ export default function WorkingPanel({ isSyncingRef }) {
           <p className="text-xs text-neutral-500 truncate">{m.task}</p>
           {m.data?.decision && <RoutingTraceCard decision={m.data.decision} />}
           {m.steps?.length > 0 && <AgentStepList steps={m.steps} />}
-          {m.routeTrace?.length > 1 && (
+          {/*
+            FIX: this used to require `m.routeTrace?.length > 1` before
+            the graph would even mount -- a dispatch_event only fires
+            AFTER the first role finishes and the dispatcher computes the
+            next hop, so for most of a run's early life (SGA, Inspector,
+            role-brief writing, the first role itself) routeTrace has 0
+            or 1 entries and the graph never appeared until the run was
+            nearly over. RoutingTraceGraph now builds its own backbone
+            from `steps` (every real agent_start/agent_done, in order),
+            so it no longer needs routeTrace to have anything in it at
+            all -- render it whenever there's ANY real activity to show.
+          */}
+          {(m.steps?.length > 0 || m.routeTrace?.length > 0) && (
             <RoutingTraceGraph
               trace={m.routeTrace}
               suggestedAgents={m.data?.decision?.suggested_agents}
+              steps={m.steps}
+              roleRequests={m.roleRequests}
+              runStatus={m.data?.status === "error" ? "error" : "done"}
             />
           )}
           {m.dependencyMap && Object.keys(m.dependencyMap).length > 0 && (
@@ -128,12 +164,21 @@ export default function WorkingPanel({ isSyncingRef }) {
           ) : (
             <>
               <RoutingTraceCard decision={liveDecision} />
-              {routeTrace.length > 1 && (
-                <RoutingTraceGraph
-                  trace={routeTrace}
-                  suggestedAgents={liveDecision?.suggested_agents}
-                />
-              )}
+              {/*
+                FIX: same gate removed as above, PLUS this now renders as
+                soon as liveDecision exists (classification just landed) —
+                RoutingTraceGraph draws the planned pipeline as a
+                placeholder chain immediately from suggestedAgents, then
+                fills it in live as liveSteps arrives, instead of waiting
+                for two dispatch_events to accumulate first.
+              */}
+              <RoutingTraceGraph
+                trace={routeTrace}
+                suggestedAgents={liveDecision?.suggested_agents}
+                steps={liveSteps}
+                roleRequests={roleRequests}
+                runStatus="running"
+              />
               {Object.keys(dependencyMap).length > 0 && (
                 <DependencyGraph map={dependencyMap} />
               )}
@@ -143,6 +188,7 @@ export default function WorkingPanel({ isSyncingRef }) {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }

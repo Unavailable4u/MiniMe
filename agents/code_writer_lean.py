@@ -28,6 +28,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
+from eo.errors import MissingDependencyError   # NEW — bug fix
 
 # Same rotation as agents/code_writers.py — see that file's docstring for
 # why this list isn't the blueprint's original one (model deprecations).
@@ -80,9 +81,14 @@ def run(module_spec: dict = None, session_id: str = None, path: str = None) -> d
     else:
         module_spec = read(KEYS["tier1_module_spec"])
         if not module_spec:
-            raise ValueError(
+            # Bug fix: consistent error type (see eo/errors.py). This is
+            # the tier-1 "lean" fixed pipeline (path="direct") -- won't
+            # auto-heal via executor.py's adaptive-only insertion, same
+            # note as sandbox_tester_lean's identical fix.
+            raise MissingDependencyError(
+                "prompt_writer_lean",
                 "No tier1_module_spec found in memory and none passed in. "
-                "Run prompt_writer_lean first."
+                "Run prompt_writer_lean first.",
             )
     name = module_spec.get("name", "module")
     user_content = json.dumps(module_spec)
