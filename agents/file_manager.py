@@ -17,6 +17,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from eo.project_registry import resolve_project_root
+from eo.errors import MissingDependencyError   # NEW — bug fix
 
 FILE_MAP_KEY = KEYS.get("file_map", "file_map")
 APP_SLUG_KEY = KEYS.get("app_slug", "app_slug")
@@ -32,12 +33,33 @@ def _slugify(text: str, max_len: int = 40) -> str:
 
 
 def _get_or_create_app_slug() -> str:
-    slug = read(APP_SLUG_KEY, default=None)
+    """Migration Part B (session isolation fix): now reads/writes via
+    memory.bus's get_current_app_slug()/set_app_slug() instead of
+    read(APP_SLUG_KEY)/write(APP_SLUG_KEY, ...).
+
+    Why the change: APP_SLUG_KEY == "app_slug" is on _namespaced()'s
+    exemption list — read/write(KEYS["app_slug"], ...) always talk to
+    the raw, GLOBAL Redis record, completely bypassing the session-scoped
+    context api/task_runner.py's _run_tier3_hires() sets up before this
+    module ever runs. The old version would silently clobber that
+    per-session scoping the moment file_manager ran: it would either (a)
+    read some OTHER session's stale global slug and start writing into
+    that session's app folder/bus keys, or (b) derive a fresh idea-based
+    slug and persist it globally, which would then leak into whichever
+    unrelated task's context read app_slug next. get_current_app_slug()
+    returns the already-set session-scoped value if one exists (the
+    normal case for every tier-3 adaptive run), and set_app_slug() below
+    only updates THIS context, never the persisted global — so tier-2's
+    separate load_existing_app()/write(KEYS["app_slug"], ...) behavior
+    (intentionally global, for CLI "keep working on the same app across
+    invocations" continuity) is completely unaffected."""
+    from memory.bus import get_current_app_slug, set_app_slug
+    slug = get_current_app_slug()
     if slug:
         return slug
     idea = read(KEYS["original_idea"], default="untitled_app")
     slug = _slugify(idea)
-    write(APP_SLUG_KEY, slug)
+    set_app_slug(slug)
     return slug
 
 
@@ -128,12 +150,25 @@ def _get_module_code(fixed_code: dict, module_name: str):
 
 
 def run_file_manager(project_unique_name: str = None) -> dict:
-    fixed_code = read(KEYS["fixed_code"])
+    # Bug fix: no longer hard-requires fixed_code. A plan can be entirely
+    # mkdir + content-only "write" ops (structure_architect.py's no-code
+    # mode) with no code modules involved at all -- see that module's
+    # docstring. Still prefer fixed_code (Fixer Pool's cleaned-up output)
+    # over submitted_code (Code Writers' raw output) when both exist, same
+    # preference order structure_architect.py now uses.
+    fixed_code = read(KEYS["fixed_code"], default=None)
+    submitted_code = read(KEYS["submitted_code"], default=None)
+    code_source = fixed_code or submitted_code or {}
     plan = read(FILE_PLAN_KEY)
-    if not fixed_code:
-        raise ValueError("No fixed_code found in memory. Run Fixer+Tester first.")
     if not plan:
-        raise ValueError("No file_plan found in memory. Run structure_architect.py first.")
+        # Bug fix: was `raise ValueError(...)` -- this is exactly the
+        # "another agent needs to run first" case eo/errors.py exists for.
+        # eo/executor.py will insert structure_architect and retry this
+        # step automatically on the adaptive path.
+        raise MissingDependencyError(
+            "structure_architect",
+            "No file_plan found in memory. Run structure_architect.py first.",
+        )
 
     if project_unique_name:
         app_slug = project_unique_name
@@ -164,16 +199,28 @@ def run_file_manager(project_unique_name: str = None) -> dict:
                     skipped.append({"op": op, "reason": "declined by user (external project write)"})
                     continue
                 module_name = op.get("module")
-                _, code = _get_module_code(fixed_code, module_name)
-                if not code:
-                    skipped.append({"op": op, "reason": "no code found for module"})
+                if module_name:
+                    _, code = _get_module_code(code_source, module_name)
+                    if not code:
+                        skipped.append({"op": op, "reason": "no code found for module"})
+                        continue
+                elif "content" in op:
+                    # Bug fix: structure_architect.py's no-code mode emits
+                    # write ops with literal "content" instead of a
+                    # "module" reference (there's no code to look up) --
+                    # "" is a valid, intentional empty placeholder file,
+                    # so this only skips when the key is missing entirely.
+                    code = op.get("content") or ""
+                else:
+                    skipped.append({"op": op, "reason": "write op has neither 'module' nor 'content'"})
                     continue
                 rel_path = op["path"]
                 full = _safe_relpath(app_dir, rel_path)
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 with open(full, "w", encoding="utf-8") as f:
                     f.write(code)
-                file_map[module_name] = rel_path
+                if module_name:
+                    file_map[module_name] = rel_path
                 written.append(rel_path)
 
             elif action == "move":

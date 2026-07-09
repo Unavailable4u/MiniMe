@@ -72,9 +72,20 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import resolve, resolve_role, list_known_roles
 from eo.structure import PATH_TO_TIER
+from eo.errors import MissingDependencyError
 from relay.emitter import emit_event
 
 TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
+
+# Bug fix / new capability: an agent can now raise MissingDependencyError
+# instead of hard-failing the whole task when a prerequisite role's output
+# isn't in memory yet (see eo/errors.py's module docstring for the full
+# reasoning and the "adaptive path only" scoping). MAX_AUTO_INSERTS_PER_STEP
+# guards against a genuinely unsatisfiable or circular dependency looping
+# forever -- e.g. a role that requests itself, or two roles that each
+# request the other. Keyed per (role, requested_role) pair rather than
+# globally, so one step's retries don't eat another step's budget.
+MAX_AUTO_INSERTS_PER_STEP = 2
 
 # Migration Part 26 §5: these six agents are NOT special-cased below, so
 # every prior call into them fell into the generic `else: fn()` branch --
@@ -97,18 +108,29 @@ TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
 # or not called at all").
 UNSCOPED_TIER_AGENTS = {
     "dependency_mapper", "documentation_agent", "duplication_checker",
-    "memory_search", "structure_architect",
+    "memory_search",
 }
 # Migration Part 27: "final_qa" removed from this set -- its dedicated
 # agents/final_qa.py module was deleted (reasoning-only, no live caller;
 # see eo/registry.py's REGISTRY comment). The role name still resolves
 # via generic_worker if the Panel hires it.
+#
+# Bug fix: "structure_architect" moved OUT of the set above into its own
+# dispatch case below. Its new no-code planning path (structure_architect.py)
+# needs task_text -- the original task description -- to plan a folder/file
+# scaffold when there's no fixed_code/submitted_code to organize. The other
+# four agents in UNSCOPED_TIER_AGENTS have no such need, so they're
+# unaffected.
 
 
 def _summarize(result, limit: int = 9000) -> str:
     """Best-effort human-readable summary for an agent_done payload.
-    Results vary in shape (str, dict, ...) across the agent roster, so
-    this is deliberately forgiving rather than assuming a schema.
+    Results vary in shape (str, dict, ...) across the agent roster —
+    eo/result_render.py's render_agent_result() is the one place that
+    knows every shape (generic_worker's {"text"}, reviewer's {"issues"},
+    fixer_pool's {"fixed_code"}, code_writers'/test_writer's flat
+    {module: code} map, ...) and turns each into markdown instead of a
+    raw Python dict repr.
 
     limit defaults to 9000, not the old 300 -- Pusher enforces a hard
     ~10KB payload limit per event (true on every plan, not just free
@@ -118,16 +140,8 @@ def _summarize(result, limit: int = 9000) -> str:
     the large majority of real agent results; only genuinely oversized
     ones (e.g. a full multi-module code submission) still get cut, and
     now say so explicitly instead of a bare '...'."""
-    if isinstance(result, str):
-        text = result
-    elif isinstance(result, dict):
-        text = result.get("code") or result.get("answer") or str(result)
-    else:
-        text = str(result)
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"... [truncated, {len(text)} chars total]"
+    from eo.result_render import render_agent_result
+    return render_agent_result(result, limit=limit)
 
 
 def execute_graph(agent_names: list, role_names: list = None, task_text: str = None,
@@ -157,6 +171,11 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
 
     results = {}
     idx = 0
+    # Bug fix / new capability: how many times we've auto-inserted a given
+    # (role, requested_role) pair to satisfy a MissingDependencyError.
+    # Keyed per-pair, not globally -- see MAX_AUTO_INSERTS_PER_STEP's
+    # comment above for why.
+    auto_inserted = {}
 
     while idx is not None and idx < len(agent_names):
         current_name = agent_names[idx]
@@ -174,18 +193,41 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
             if current_name == "prompt_writer_lean" and task_text:
                 result = fn(task_text, session_id=session_id, path=path)
             elif current_name in TASK_TEXT_ENTRYPOINTS and task_text:
-                result = fn(task_text, key_override=override)
+                # Part 23 fix: was `fn(task_text, key_override=override)` —
+                # session_id/path never reached responder.py at all, so its
+                # own Part 23 conversation-memory wiring (get_full_context())
+                # had no session_id to work with even after that agent was
+                # fixed to accept one. (prompt_writer_lean is also in
+                # TASK_TEXT_ENTRYPOINTS but never reaches this branch — it's
+                # caught by the dedicated `if` above, which already passed
+                # both through.)
+                result = fn(task_text, key_override=override, session_id=session_id, path=path)
             elif current_name == "code_writer_lean":
                 result = fn(session_id=session_id, path=path)
             elif current_name == "reviewer_fixer_lean":
                 result = fn(session_id=session_id, path=path)
-            elif current_name in ("code_writers", "reviewer", "security_scanner"):
+            elif current_name == "code_writers":
+                # NEW — bug fix: code_writers needs task_text as a
+                # fallback seed for its own module_specs synthesis when
+                # it's hired without "prompt_writer" ahead of it in the
+                # plan (see agents/code_writers.py's
+                # _derive_specs_from_task_text() docstring). Split out of
+                # the shared branch below since "reviewer"/
+                # "security_scanner" don't take task_text.
+                result = fn(session_id=session_id, path=path, expanded=expanded,
+                            key_override=override, task_text=task_text)
+            elif current_name in ("reviewer", "security_scanner"):
                 result = fn(session_id=session_id, path=path, expanded=expanded,
                             key_override=override)
             elif current_name == "fixer_pool":
                 result = fn(session_id=session_id, path=path, key_override=override)
             elif current_name == "sandbox_tester_lean":
                 result = fn(session_id=session_id, path=path)
+            elif current_name == "structure_architect":
+                # Bug fix: needs task_text now too (see UNSCOPED_TIER_AGENTS
+                # comment above) -- its no-code planning path uses it to plan
+                # a folder/file scaffold when there's no code to organize.
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text)
             elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
                 # Migration Part 8 §8.3 fix, preserved: kept the
                 # three-name case rather than Part 12 §3.3's illustrative
@@ -215,6 +257,33 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                 result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path))
             else:
                 result = fn()
+        except MissingDependencyError as dep_exc:
+            # New capability: an agent asked for a specific prerequisite
+            # role instead of just hard-failing the task. Only attempt to
+            # self-heal on the "adaptive" path -- that's the only mode
+            # where role_names is a Panel-decided vocabulary a new role
+            # can be spliced into; on instant/direct/fixed's statically-
+            # built graphs (see eo/errors.py's docstring) this is a real
+            # ordering bug, not a staffing gap, so it's re-raised as-is.
+            needed_role = dep_exc.required_role
+            pair = (role, needed_role)
+            already_ran = needed_role in role_names[:idx]
+            over_budget = auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP
+            if path != "adaptive" or already_ran or over_budget:
+                emit_event("error", session_id=session_id, agent=current_name, path=path,
+                            payload={"message": f"{dep_exc.__class__.__name__}: {dep_exc}"})
+                raise
+            auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
+            print(f"  [Executor] {current_name} (role={role}) requested prerequisite "
+                  f"role '{needed_role}' — inserting it and retrying.")
+            emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
+                        payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
+                                 "requested_role": needed_role})
+            role_names.insert(idx, needed_role)
+            agent_names.insert(idx, resolve_role(needed_role))
+            continue   # re-enter the loop at the same idx, now pointing at
+                       # the newly inserted prerequisite step instead of
+                       # the one that raised (which got shifted to idx+1).
         except Exception as exc:
             emit_event("error", session_id=session_id, agent=current_name, path=path,
                         payload={"message": f"{exc.__class__.__name__}: {exc}"})

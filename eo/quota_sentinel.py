@@ -21,7 +21,7 @@ from datetime import date, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory.bus import read as bus_read
+from memory.bus import read as bus_read, read_many as bus_read_many
 from utils.llm_client import QUOTA_CONFIG
 from relay.emitter import emit_event
 
@@ -108,19 +108,38 @@ def get_usage_history(days: int = 7) -> dict:
 
     dates = [(date.today() - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
 
-    providers = {}
-    accounts = {}
-
+    agent_infos = []
     for agent_key, info in AGENT_CAPABILITIES.items():
         provider = info.get("provider")
         key_id = _key_id_for(agent_key, provider)
+        agent_infos.append((agent_key, provider, key_id))
 
-        tokens_series = []
-        requests_series = []
+    # Fix — this used to be a nested loop calling bus_read() once per
+    # (account, date) pair, sequentially: accounts * days blocking round
+    # trips in a row, each one a full HTTPS request (bus.py talks to
+    # Upstash Redis over REST). That's what was turning a handful of
+    # accounts x 7 days into dozens of sequential network calls and the
+    # 30s+ wait on this endpoint. Every (account, date) key is
+    # independent, so fetch them all in ONE round trip via MGET instead.
+    all_keys = [
+        f"usage:{provider}:{key_id}:{d}"
+        for agent_key, provider, key_id in agent_infos
+        for d in dates
+    ]
+    records = bus_read_many(all_keys, default={"requests": 0, "tokens": 0})
+
+    results_by_agent = {agent_key: {} for agent_key, _, _ in agent_infos}
+    for agent_key, provider, key_id in agent_infos:
         for d in dates:
-            record = bus_read(f"usage:{provider}:{key_id}:{d}", default={"requests": 0, "tokens": 0})
-            tokens_series.append(record.get("tokens", 0))
-            requests_series.append(record.get("requests", 0))
+            record = records[f"usage:{provider}:{key_id}:{d}"]
+            results_by_agent[agent_key][d] = (record.get("tokens", 0), record.get("requests", 0))
+
+    providers = {}
+    accounts = {}
+
+    for agent_key, provider, key_id in agent_infos:
+        tokens_series = [results_by_agent[agent_key][d][0] for d in dates]
+        requests_series = [results_by_agent[agent_key][d][1] for d in dates]
 
         accounts[agent_key] = {"provider": provider, "tokens": tokens_series, "requests": requests_series}
 

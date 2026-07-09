@@ -62,7 +62,15 @@ HF_KEY_ENV = "HUGGINGFACE_API_KEY"
 
 
 def _app_slug() -> str:
-    return read(KEYS["app_slug"], default=None) or read(KEYS["original_idea"], default="untitled")
+    # Migration Part B (session isolation fix): was
+    # read(KEYS["app_slug"], ...), which -- "app_slug" being exempt from
+    # memory.bus's namespacing -- always reads the raw, UNSCOPED global
+    # Redis record instead of this run's own session-scoped slug (see
+    # api/task_runner.py's _run_tier3_hires() and memory/bus.py's
+    # set_app_slug()/get_current_app_slug()). That let this vector-index
+    # filter mix duplication results across unrelated sessions.
+    from memory.bus import get_current_app_slug
+    return get_current_app_slug() or read(KEYS["original_idea"], default="untitled")
 
 
 def run(session_id: str = None, tier=None) -> dict:

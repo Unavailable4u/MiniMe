@@ -6,6 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.retry import call_with_retry
 from utils.llm_client import generate_text
+from eo.errors import MissingDependencyError   # NEW — bug fix
 load_dotenv()
 
 # Fallback chain per Part 4, agent #17 of the v5 blueprint:
@@ -26,16 +27,39 @@ and by the next planning agent as plain text.
 
 def run_report_writer():
     fixed_code = read(KEYS["fixed_code"])
+    submitted_code = read(KEYS["submitted_code"])
+    # Bug fix: fall back to submitted_code, same reasoning as
+    # sandbox_tester.py's own fallback -- report_writer can still write a
+    # meaningful cycle summary from the Code Writers' raw output even if
+    # the Fixer Pool never ran (e.g. review found nothing to fix).
+    code_source = fixed_code or submitted_code
     test_results = read(KEYS["test_results"])
     review_notes = read(KEYS["review_notes"])
     current_plan = read(KEYS["current_plan"], default={})
-    if not fixed_code or not test_results:
-        raise ValueError("Missing fixed_code or test_results in memory. Run the Fixer+Tester first.")
+    if not code_source:
+        # Bug fix: was `raise ValueError(...)`. "implementer" specifically
+        # (not "fixer") -- if code_source is empty, code_writers.py never
+        # ran at all, so that's the actual missing step; fixer_pool.py has
+        # its own fallback (see agents/sandbox_tester.py) for "ran but
+        # nothing needed fixing."
+        raise MissingDependencyError(
+            "implementer", "Missing fixed_code/submitted_code in memory. Run the Code Writers first."
+        )
+    if not test_results:
+        # NOT converted to MissingDependencyError: the sandbox-testing step
+        # isn't a role the Panel can hire on its own (it isn't in
+        # eo/registry.py's REAL_ACTION_ROLES -- it's wired into the fixed
+        # tier-1/tier-2 pipelines directly), so there's no role name to
+        # meaningfully hand executor.py here. Still write a best-effort
+        # report rather than hard-failing the whole task over a summary
+        # step -- untested code is worth reporting on too.
+        test_results = {}
+        print("  [Report Writer] no test_results in memory — writing the report without them.")
 
     user_prompt = (
         "Review notes from this cycle:\n" + json.dumps(review_notes, indent=2)
         + "\n\nFixed code modules (names only, not full code, to keep this short):\n"
-        + json.dumps(list(fixed_code.keys()))
+        + json.dumps(list(code_source.keys()))
         + "\n\nSandbox test results:\n" + json.dumps(test_results, indent=2)
     )
 

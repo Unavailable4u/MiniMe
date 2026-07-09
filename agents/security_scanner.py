@@ -188,22 +188,36 @@ def _resolve_override_slots(key_override) -> list:
     the mode-based ceiling wouldn't otherwise unlock it) and returns the
     matching full descriptors.
 
-    Raises KeyError, loudly, if a given token_env doesn't match any known
-    slot -- silently dropping to the default pool would mean the Panel's
-    specific account choice was ignored without anyone noticing.
+    Raises KeyError, loudly, if a given account_id_env doesn't match any
+    known slot -- silently dropping to the default pool would mean the
+    Panel's specific account choice was ignored without anyone noticing.
+
+    Bug fix (Part 9 §2.1 follow-up): this used to match key_override
+    against each slot's token_env. That was correct under the OLD static
+    CLOUDFLARE_KEY_SLOTS design, but Part 9 §2.1 switched AGENT_CAPABILITIES
+    (and therefore every hiring decision's agent_key, i.e. what actually
+    arrives here as key_override) to be keyed by account_id_env for
+    cloudflare entries -- see this module's top-of-file docstring and
+    _eligible_pool(). This function was never updated to match, so a
+    perfectly valid override like 'CLOUDFLARE_ACCOUNT_ID_4' was checked
+    against token_env values it could never match, raising KeyError on
+    every single Panel-directed hire for this role. Matching on
+    account_id_env instead makes this consistent with how code_writers.py/
+    reviewer.py/fixer_pool.py already resolve their own key_overrides
+    (directly against AGENT_CAPABILITIES keys).
     """
-    token_envs = key_override if isinstance(key_override, list) else [key_override]
+    account_id_envs = key_override if isinstance(key_override, list) else [key_override]
     all_slots = [_slot_for(k) for k in _eligible_pool()]  # base + reserve, always
-    by_token = {slot["token_env"]: slot for slot in all_slots}
+    by_account = {slot["account_id_env"]: slot for slot in all_slots}
     resolved = []
-    for token_env in token_envs:
-        slot = by_token.get(token_env)
+    for account_id_env in account_id_envs:
+        slot = by_account.get(account_id_env)
         if slot is None:
             raise KeyError(
-                f"key_override references '{token_env}', which doesn't match "
-                f"any known Cloudflare slot's token_env in "
-                f"security_scanner._slot_descriptors(). Known token_envs: "
-                f"{sorted(by_token.keys())}"
+                f"key_override references '{account_id_env}', which doesn't match "
+                f"any known Cloudflare slot's account_id_env in "
+                f"security_scanner._eligible_pool(). Known account_id_envs: "
+                f"{sorted(by_account.keys())}"
             )
         resolved.append(slot)
     return resolved

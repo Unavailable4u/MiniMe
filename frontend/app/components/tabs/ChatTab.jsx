@@ -16,6 +16,8 @@ const MODES = [
   { id: "beast", label: "Beast", icon: Flame, hint: "Force the full pipeline, skip SGA/cache" },
 ];
 
+const WORKING_PANEL_KEY = "minime_working_panel_collapsed";
+
 export default function ChatTab() {
   const {
     messages, loading, sendTask, mode, setMode,
@@ -28,6 +30,17 @@ export default function ChatTab() {
   const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
+  const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+
+  useEffect(() => {
+    setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
+  }, []);
+  function toggleWorkingPanel() {
+    setWorkingPanelCollapsed((prev) => {
+      localStorage.setItem(WORKING_PANEL_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -87,8 +100,20 @@ export default function ChatTab() {
 
   return (
     <div className="flex h-full max-w-6xl mx-auto">
-      {/* LEFT — Chat Panel, conversation only */}
+      {/* LEFT — Chat Box */}
       <div className="flex flex-col flex-1 min-w-0 border-r border-neutral-800">
+        <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
+          <span className="text-xs font-medium text-neutral-400">Chat Box</span>
+          {workingPanelCollapsed && (
+            <button
+              onClick={toggleWorkingPanel}
+              className="text-xs text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
+            >
+              Show Working Panel
+            </button>
+          )}
+        </div>
+
         <div
           ref={chatContainerRef}
           onScroll={handleChatScroll}
@@ -177,10 +202,20 @@ export default function ChatTab() {
         </form>
       </div>
 
-      {/* RIGHT — Working Panel, synced to chat by activeMessageIndex */}
-      <div className="w-[420px] shrink-0 hidden lg:block">
-        <WorkingPanel isSyncingRef={isSyncingRef} />
-      </div>
+      {/* RIGHT — Working Panel, foldable */}
+      {!workingPanelCollapsed && (
+        <div className="w-[420px] shrink-0 hidden lg:flex flex-col">
+          <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-neutral-400">Working Panel</span>
+            <button onClick={toggleWorkingPanel} className="text-xs text-neutral-500 hover:text-neutral-300">
+              Hide
+            </button>
+          </div>
+          <div className="flex-1 min-h-0">
+            <WorkingPanel isSyncingRef={isSyncingRef} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

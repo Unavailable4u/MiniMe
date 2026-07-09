@@ -19,5 +19,9 @@ frontend/.next/
 apps/shipping_test/
 filelist.txt
 
-# Excluded per your own call
+# Test files to ignore
 tests/
+
+# Persistent chat data (user content, not source)
+data/
+ 

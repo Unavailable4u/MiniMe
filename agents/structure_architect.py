@@ -14,6 +14,28 @@ Why this is its own agent and not just smarter code:
   or moves files. If the model hallucinates a bad path, you can validate/
   reject the plan before anything touches disk.
 
+Bug fix — two-mode planning: this used to hard-require `fixed_code` and
+raise if it was empty, which made this agent (and file_manager.py
+downstream) structurally unable to run for any task that doesn't produce
+source code at all -- e.g. "build me a yearbook app with a folder per
+year to keep memories in," which is a genuine, valid file/folder-
+organizing request, not a coding one. The Inspector/Panel can (correctly)
+decide a task needs "file_manager" without needing any code-writing role
+at all; this agent shouldn't then be the thing that makes that
+impossible.
+
+Now genuinely two modes:
+  - Code mode (unchanged behavior): fixed_code (preferred) or
+    submitted_code is present -- plan write/move/delete/mkdir ops for
+    those code modules, exactly as before.
+  - No-code mode (NEW): neither is present -- plan a plain folder/file
+    scaffold straight from the task description (and whatever idea/plan
+    context exists), using "mkdir" and content-only "write" ops (no
+    "module" field, since there's no code module to look up). This is a
+    real, separate LLM call with its own prompt -- not a guess or a
+    silent no-op -- so the plan it produces is genuinely shaped by what
+    the person actually asked for.
+
 Place this file at: agents/structure_architect.py
 """
 
@@ -27,6 +49,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
 from relay.emitter import emit_event
+from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
@@ -95,6 +118,44 @@ operation. Keep paths relative to the app root, always starting with "src/"
 or "tests/". Use lowercase_with_underscores for filenames.
 """
 
+# NEW — bug fix: no-code mode's own prompt. Deliberately NOT a variant of
+# the code-mode prompt above -- the two modes plan fundamentally different
+# things (organizing existing code modules vs designing a folder/file
+# layout from a plain description), so sharing one prompt with a couple of
+# conditional sentences would leave the model guessing which rules apply
+# when. This one never mentions "module" or "code" at all.
+NO_CODE_SYSTEM_PROMPT = """You are a file/folder architect for a general-purpose \
+task-execution system. This particular task does not involve writing code -- it \
+needs a plain folder/file structure created to organize or hold something (notes, \
+records, media, a per-year archive, etc.). You decide WHAT files and folders to \
+create and where -- you do not generate the substantive content of any file \
+yourself beyond a short, genuinely useful placeholder (e.g. a one-line README, an \
+empty folder for the person to fill in later).
+
+You will be given the task description and any planning context already produced \
+for it (e.g. a feature list). Design a clear, sensibly-named folder/file layout \
+that actually satisfies what was asked -- if the task describes a specific set of \
+items (e.g. "a folder for every year from my birth year to now"), enumerate them \
+for real rather than a token example.
+
+For each folder, use "mkdir". For each file, use "write" with a short "content" \
+string (may be empty "" for a genuinely empty placeholder file, e.g. a blank note \
+file the person will fill in) -- never a "module" field, there is no code module \
+here.
+
+Respond with ONLY valid JSON, no markdown fences, no explanation, in exactly this \
+shape:
+{
+  "operations": [
+    {"action": "mkdir", "path": "memories/1998", "reason": "..."},
+    {"action": "write", "path": "memories/1998/notes.md", "content": "# 1998\\n", "reason": "..."}
+  ]
+}
+Keep paths relative to the app root -- do NOT prefix them with "src/" or "tests/", \
+those are source-code conventions that don't apply here. Use lowercase_with_underscores \
+or plain numbers for names, whichever is clearer for what's being organized.
+"""
+
 
 def _get_project_tree(app_dir: str) -> list:
     if not os.path.isdir(app_dir):
@@ -132,16 +193,24 @@ def _build_mermaid(plan: dict) -> str:
     module-depends-on-module relationship here (that's dependency_mapper.py's
     job), so this instead shows what structure_architect.py actually decided:
     module-->path for writes, old_path-->new_path for moves, and distinct
-    shapes for delete/mkdir so they're visually distinguishable from writes."""
+    shapes for delete/mkdir so they're visually distinguishable from writes.
+
+    Bug fix: a no-code "write" op has no "module" (see NO_CODE_SYSTEM_PROMPT
+    above) -- shown as its own leaf node instead of a module-->path edge,
+    same visual family as "mkdir" since both are just "this gets created."
+    """
     lines = ["graph TD"]
     for op in plan.get("operations", []):
         action = op.get("action")
         if action == "write":
-            module = op.get("module", "?")
+            module = op.get("module")
             path = op.get("path", "?")
-            mid = _mermaid_id(f"mod_{module}")
             pid = _mermaid_id(f"path_{path}")
-            lines.append(f'{mid}["{module}"] -->|write| {pid}["{path}"]')
+            if module:
+                mid = _mermaid_id(f"mod_{module}")
+                lines.append(f'{mid}["{module}"] -->|write| {pid}["{path}"]')
+            else:
+                lines.append(f'{pid}("{path}")')
         elif action == "move":
             old_path = op.get("old_path", "?")
             new_path = op.get("new_path", "?")
@@ -160,12 +229,17 @@ def _build_mermaid(plan: dict) -> str:
     return "\n".join(lines)
 
 
-def run_structure_architect(session_id: str = None, tier: int = None) -> dict:
-    fixed_code = read(KEYS["fixed_code"])
-    if not fixed_code:
-        raise ValueError("No fixed_code found in memory. Run Fixer+Tester first.")
-
-    app_slug = read(APP_SLUG_KEY, default=None)
+def _code_plan(fixed_code: dict, session_id: str, tier: int) -> dict:
+    """Existing (pre-fix) behavior, unchanged: plan write/move/delete/mkdir
+    operations for a set of already-generated code modules."""
+    # Migration Part B (session isolation fix): get_current_app_slug(),
+    # not read(APP_SLUG_KEY, ...) -- "app_slug" is exempt from
+    # memory.bus's namespacing, so a raw read would see (or plan a file
+    # layout against) an unrelated session's existing app directory. See
+    # api/task_runner.py's _run_tier3_hires() / memory/bus.py's
+    # set_app_slug().
+    from memory.bus import get_current_app_slug
+    app_slug = get_current_app_slug()
     app_dir = os.path.join(APPS_ROOT, app_slug) if app_slug else None
     project_tree = _get_project_tree(app_dir) if app_dir else []
     file_map = read(FILE_MAP_KEY, default={})
@@ -211,6 +285,67 @@ def run_structure_architect(session_id: str = None, tier: int = None) -> dict:
                 for name in modules_for_prompt
             ]
         }
+    return plan
+
+
+def _no_code_plan(task_text: str, session_id: str, tier: int) -> dict:
+    """NEW — bug fix: plan a plain folder/file scaffold when there's no
+    code to organize. Pulls in whatever idea/plan context this session
+    has produced so far (idea_planner's output, if it ran) alongside the
+    task text itself, same "give the model everything genuinely relevant,
+    let it decide" spirit as _code_plan() above -- this is a real planning
+    call, not a token/fallback one."""
+    current_plan = read(KEYS["current_plan"], default=None)
+    idea = read(KEYS["original_idea"], default=None)
+
+    user_prompt = f"Task: {task_text or '(no task text available)'}"
+    if idea:
+        user_prompt += f"\n\nOriginal idea: {idea}"
+    if current_plan:
+        user_prompt += f"\n\nPlan produced for this task so far:\n{json.dumps(current_plan, indent=2)}"
+
+    raw = generate_text(NO_CODE_SYSTEM_PROMPT, user_prompt, CHAIN,
+                         agent_name="Structure Architect (no-code)",
+                         session_id=session_id, tier=tier)
+    cleaned = _strip_fences(raw)
+
+    try:
+        plan = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Fail safe: a single top-level folder named from the task, rather
+        # than nothing at all -- file_manager.py still has something valid
+        # to execute, same principle as _code_plan()'s own fallback.
+        plan = {
+            "operations": [
+                {"action": "mkdir", "path": "files",
+                 "reason": "fallback: architect output was not valid JSON"},
+            ]
+        }
+    return plan
+
+
+def run_structure_architect(session_id: str = None, tier: int = None,
+                             task_text: str = None) -> dict:
+    """
+    Bug fix: no longer hard-requires fixed_code. Prefers fixed_code
+    (Fixer Pool's output) over submitted_code (Code Writers' raw output,
+    same preference order file_manager.py already uses) when planning a
+    code layout; when NEITHER is present, plans a plain folder/file
+    scaffold from task_text instead of raising -- see this module's
+    docstring for why a "no code at all" task is a legitimate, separate
+    case rather than an error.
+
+    `task_text` (NEW param) is only used by the no-code path -- the code
+    path doesn't need it, it already has the actual modules to work from.
+    """
+    fixed_code = read(KEYS["fixed_code"], default=None)
+    submitted_code = read(KEYS["submitted_code"], default=None)
+    code_source = fixed_code or submitted_code
+
+    if code_source:
+        plan = _code_plan(code_source, session_id, tier)
+    else:
+        plan = _no_code_plan(task_text, session_id, tier)
 
     plan["mermaid"] = _build_mermaid(plan)
     write(FILE_PLAN_KEY, plan)

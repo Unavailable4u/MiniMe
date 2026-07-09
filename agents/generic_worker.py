@@ -84,11 +84,18 @@ NEXT_TAG_INSTRUCTION = (
 
 # Migration Part 12 §3.4 — see module docstring. A role not in this map
 # (most non-coding roles) only gets the normal stage_output:* treatment.
-LEGACY_BUS_KEY_MAP = {
-    "idea_planner": "current_plan",
-    "prompt_writer": "module_specs",
-    "test_writer": "test_code",
-}
+#
+# Migration Part A fix (registry.py's REAL_ACTION_ROLES): idea_planner,
+# prompt_writer, and test_writer were moved back to their dedicated
+# real-action modules (they produce structured JSON that code_writers.py/
+# sandbox_tester.py need in dict shape, not free-text reasoning output —
+# routing them through generic_worker was writing plain strings into
+# module_specs/current_plan/test_code, which crashed the first real-action
+# consumer downstream). None of the three resolve to "generic_worker"
+# anymore, so this map is intentionally empty now — left in place as a
+# dict (rather than removed outright) in case a genuinely new role is
+# ever added that needs the same style of legacy-key bridge.
+LEGACY_BUS_KEY_MAP = {}
 
 
 def _chain_step_for(agent_key: str) -> dict:

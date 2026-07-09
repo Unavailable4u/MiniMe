@@ -22,6 +22,7 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
+from eo import chat_store   # NEW — cross-chat memory sharing (see §4)
 
 MAX_STORED_TURNS = 20      # hard cap on raw storage growth per session
 FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see
@@ -63,7 +64,14 @@ def get_full_context(session_id: str, max_turns: int = FULL_CONTEXT_TURNS) -> st
         if len(text) > FULL_TURN_CHAR_LIMIT:
             text = text[:FULL_TURN_CHAR_LIMIT] + "..."
         lines.append(f"[{t['role']}]: {text}")
-    return "\n\n".join(lines)
+    own = "\n\n".join(lines)
+
+    # NEW — pull in recent turns from any chats this one is linked to
+    # (eo/chat_store.py's set_linked_chats()/get_linked_context_text()).
+    linked = chat_store.get_linked_context_text(session_id, max_turns_per_chat=6, char_limit=400)
+    if linked and own:
+        return linked + "\n\n--- current conversation ---\n\n" + own
+    return linked or own
 
 
 def get_light_context(session_id: str, max_turns: int = LIGHT_CONTEXT_TURNS) -> str:
@@ -81,4 +89,10 @@ def get_light_context(session_id: str, max_turns: int = LIGHT_CONTEXT_TURNS) -> 
         if len(text) > LIGHT_TURN_CHAR_LIMIT:
             text = text[:LIGHT_TURN_CHAR_LIMIT] + "..."
         lines.append(f"- {t['role']}: {text}")
-    return "\n".join(lines)
+    own = "\n".join(lines)
+
+    # NEW — same idea as get_full_context(), shorter, for the classifier/Inspector.
+    linked = chat_store.get_linked_context_text(session_id, max_turns_per_chat=3, char_limit=150)
+    if linked and own:
+        return linked + "\n--- current conversation ---\n" + own
+    return linked or own

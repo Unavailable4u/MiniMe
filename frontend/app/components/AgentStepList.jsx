@@ -25,10 +25,26 @@ export default function AgentStepList({ steps }) {
 // multi-module code submission).
 const TRUNCATED_SUFFIX = /\.\.\. \[truncated, \d+ chars total\]$/;
 
+// Small fixed palette, assigned deterministically per role name (hash ->
+// index) so the same role always gets the same color across a session,
+// without needing to hand-maintain a mapping for every possible role the
+// Panel might hire (roles are dynamic — see eo/panel.py's staff_task()).
+const ROLE_COLORS = [
+  "text-sky-400", "text-violet-400", "text-emerald-400", "text-amber-400",
+  "text-rose-400", "text-cyan-400", "text-fuchsia-400", "text-lime-400",
+];
+function roleColor(role) {
+  if (!role) return "text-neutral-400";
+  let hash = 0;
+  for (let i = 0; i < role.length; i++) hash = (hash * 31 + role.charCodeAt(i)) >>> 0;
+  return ROLE_COLORS[hash % ROLE_COLORS.length];
+}
+
 function StepRow({ step }) {
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(step.text || step.summary);
   const wasTruncated = !step.text && step.summary && TRUNCATED_SUFFIX.test(step.summary);
+  const color = step.status === "error" ? "text-red-400" : roleColor(step.role);
 
   return (
     <div
@@ -47,7 +63,7 @@ function StepRow({ step }) {
           hasBody ? "cursor-pointer" : "cursor-default"
         }`}
       >
-        <span className="text-neutral-400 flex items-center gap-1.5">
+        <span className={`flex items-center gap-1.5 font-medium ${color}`}>
           {hasBody && <span className="text-neutral-600">{open ? "▾" : "▸"}</span>}
           {step.role}
         </span>

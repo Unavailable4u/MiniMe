@@ -31,6 +31,9 @@ from typing import Optional, Union
 
 from api.task_runner import run_task
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history
+from eo import chat_store   # NEW — persistent, file-per-chat storage (see chat_store.py)
+from eo import memory_batch  # NEW — mutual-membership chat groups (§3)
+from eo import chat_workspace  # NEW — named containers with auto-linking membership (§7)
 
 app = FastAPI(title="MiniMe v6 — EO layer API")
 
@@ -51,7 +54,7 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["POST", "GET"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -60,11 +63,218 @@ class RegisterProjectRequest(BaseModel):
     display_name: str
 
 
+class CreateChatRequest(BaseModel):
+    title: Optional[str] = "New Chat"
+
+
+class RenameChatRequest(BaseModel):
+    title: str
+
+
+class LinkChatsRequest(BaseModel):
+    linked_chat_ids: list[str]
+
+
+class CreateBatchRequest(BaseModel):
+    name: str
+    member_chat_ids: list[str]
+
+
+class EstimateBatchRequest(BaseModel):
+    chat_ids: list[str]
+
+
+class RenameBatchRequest(BaseModel):
+    name: str
+
+
+class BatchMembersRequest(BaseModel):
+    chat_ids: list[str]
+
+
+class CreateWorkspaceRequest(BaseModel):
+    name: str
+
+
+class RenameWorkspaceRequest(BaseModel):
+    name: str
+
+
+class WorkspaceChatRequest(BaseModel):
+    chat_id: str
+    delete_chat: Optional[bool] = False
+
+
+class AppendMessageRequest(BaseModel):
+    message: dict
+
+
 @app.post("/api/projects", dependencies=[Depends(require_auth)])
 def register_project_endpoint(req: RegisterProjectRequest):
     unit = generate_control_unit(req.display_name)
     register_project(unit["unique_name"], req.path)
     return {"unique_name": unit["unique_name"], "root_path": req.path}
+
+
+# --- persistent chats (see eo/chat_store.py) ------------------------------
+# chat_id and session_id are the same string everywhere in this system —
+# the sidebar creates a chat_id via POST /api/chats, and that value is
+# passed straight through as session_id on /api/task.
+
+@app.get("/api/chats", dependencies=[Depends(require_auth)])
+def get_chats():
+    return chat_store.list_chats()
+
+
+@app.post("/api/chats", dependencies=[Depends(require_auth)])
+def create_chat(req: CreateChatRequest):
+    return chat_store.create_chat(title=req.title or "New Chat")
+
+
+@app.get("/api/chats/{chat_id}", dependencies=[Depends(require_auth)])
+def get_chat(chat_id: str):
+    try:
+        return chat_store.get_chat(chat_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+
+@app.patch("/api/chats/{chat_id}/rename", dependencies=[Depends(require_auth)])
+def rename_chat(chat_id: str, req: RenameChatRequest):
+    try:
+        return chat_store.rename_chat(chat_id, req.title)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+
+@app.patch("/api/chats/{chat_id}/links", dependencies=[Depends(require_auth)])
+def link_chats(chat_id: str, req: LinkChatsRequest):
+    try:
+        return chat_store.set_linked_chats(chat_id, req.linked_chat_ids)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+
+@app.post("/api/chats/{chat_id}/messages", dependencies=[Depends(require_auth)])
+def append_message(chat_id: str, req: AppendMessageRequest):
+    return chat_store.append_message(chat_id, req.message)
+
+
+@app.delete("/api/chats/{chat_id}", dependencies=[Depends(require_auth)])
+def delete_chat(chat_id: str):
+    chat_store.delete_chat(chat_id)
+    return {"status": "deleted", "id": chat_id}
+
+
+# --- memory batches: mutual-membership groups (see eo/memory_batch.py) ---
+
+@app.get("/api/batches", dependencies=[Depends(require_auth)])
+def get_batches():
+    return memory_batch.list_batches()
+
+
+@app.post("/api/batches/estimate", dependencies=[Depends(require_auth)])
+def estimate_batch(req: EstimateBatchRequest):
+    """Called live from the create-batch modal as the user checks/unchecks
+    chats — NOT tied to an existing batch_id, since the whole point is to
+    show the cost BEFORE creating one. See chat_store.estimate_batch_context_tokens."""
+    return chat_store.estimate_batch_context_tokens(req.chat_ids)
+
+
+@app.post("/api/batches", dependencies=[Depends(require_auth)])
+def create_batch(req: CreateBatchRequest):
+    try:
+        return memory_batch.create_batch(req.name, req.member_chat_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/api/batches/{batch_id}/rename", dependencies=[Depends(require_auth)])
+def rename_batch(batch_id: str, req: RenameBatchRequest):
+    try:
+        return memory_batch.rename_batch(batch_id, req.name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+
+
+@app.post("/api/batches/{batch_id}/unlink", dependencies=[Depends(require_auth)])
+def unlink_batch_members(batch_id: str, req: BatchMembersRequest):
+    """Returns {"dissolved": true} if removing these members collapsed the
+    batch to <=1, otherwise returns the updated batch."""
+    try:
+        result = memory_batch.unlink_members(batch_id, req.chat_ids)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+    return result if result else {"dissolved": True, "id": batch_id}
+
+
+@app.post("/api/batches/{batch_id}/members", dependencies=[Depends(require_auth)])
+def add_batch_member(batch_id: str, req: BatchMembersRequest):
+    try:
+        for cid in req.chat_ids:
+            memory_batch.add_member(batch_id, cid)
+        return memory_batch.get_batch(batch_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+
+
+@app.delete("/api/batches/{batch_id}", dependencies=[Depends(require_auth)])
+def delete_batch(batch_id: str):
+    try:
+        memory_batch.delete_batch(batch_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+    return {"status": "deleted", "id": batch_id}
+
+
+# --- workspaces: named containers with auto-linking membership (§7) ------
+# UI label is "Projects" — named chat_workspace.py / /api/workspaces in
+# code to avoid colliding with eo/project_registry.py, which tracks
+# external codebase roots for Cross-Project File Control (unrelated
+# concept, same word).
+
+@app.get("/api/workspaces", dependencies=[Depends(require_auth)])
+def get_workspaces():
+    return chat_workspace.list_workspaces()
+
+
+@app.post("/api/workspaces", dependencies=[Depends(require_auth)])
+def create_workspace(req: CreateWorkspaceRequest):
+    return chat_workspace.create_workspace(req.name)
+
+
+@app.patch("/api/workspaces/{ws_id}/rename", dependencies=[Depends(require_auth)])
+def rename_workspace(ws_id: str, req: RenameWorkspaceRequest):
+    try:
+        return chat_workspace.rename_workspace(ws_id, req.name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+
+@app.post("/api/workspaces/{ws_id}/chats", dependencies=[Depends(require_auth)])
+def add_workspace_chat(ws_id: str, req: WorkspaceChatRequest):
+    try:
+        return chat_workspace.add_chat(ws_id, req.chat_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+
+@app.delete("/api/workspaces/{ws_id}/chats/{chat_id}", dependencies=[Depends(require_auth)])
+def remove_workspace_chat(ws_id: str, chat_id: str, delete_chat: bool = Query(False)):
+    try:
+        return chat_workspace.remove_chat(ws_id, chat_id, delete_chat=delete_chat)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+
+@app.delete("/api/workspaces/{ws_id}", dependencies=[Depends(require_auth)])
+def delete_workspace(ws_id: str):
+    try:
+        chat_workspace.delete_workspace(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    return {"status": "deleted", "id": ws_id}
+
 
 class TaskRequest(BaseModel):
     task_text: str

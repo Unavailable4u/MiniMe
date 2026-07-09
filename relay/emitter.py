@@ -39,6 +39,12 @@ VALID_EVENT_TYPES = {
     "routing_decision", "usage_update", "cycle_update", "error",
     "dispatch_event", "quota_alert", "dependency_map", "structure_plan",
     "macro_loop_decision",
+    # eo/dispatcher.py's next_step() emits these two on the rejection/cap
+    # paths (hallucinated "next_destination" values, and the
+    # MAX_STAGE_REVISITS ceiling) -- both were missing here, which meant
+    # either path crashed the whole run with a ValueError instead of
+    # degrading gracefully like every other dispatcher event does.
+    "hallucinated_role_rejected", "revisit_cap_reached",
 }
 
 _pusher_client = None

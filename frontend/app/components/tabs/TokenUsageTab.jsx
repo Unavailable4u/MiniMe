@@ -172,7 +172,7 @@ export default function TokenUsageTab() {
   return (
     <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-6">
       <OverallRollup byProvider={byProvider} />
-      {combinedUsageHistory.length > 1 && (
+      {combinedUsageHistory.length > 0 && (
         <Card title="All providers, this session">
           <CombinedChart data={combinedUsageHistory} providers={providers} />
         </Card>
