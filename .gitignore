@@ -24,4 +24,6 @@ tests/
 
 # Persistent chat data (user content, not source)
 data/
- 
+
+repomix-output - agent.xml
+repomix-output.xml
