@@ -31,7 +31,7 @@ Output ONLY a JSON object with a "modules" key containing a list. Each module mu
 
 Respond with ONLY valid JSON, no markdown, no explanation."""
 
-def run(session_id: str = None, tier: int = None):
+def run(session_id: str = None, tier: int = None, domain: str = None):
     plan = read(KEYS["current_plan"])
     cycle_goal = plan["cycle_goal"]
 
@@ -42,6 +42,7 @@ def run(session_id: str = None, tier: int = None):
         agent_name="Prompt Writer",
         session_id=session_id,
         tier=tier,
+        domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
     ).strip()
     if raw_text.startswith("```"):
         raw_text = raw_text.split("```")[1]

@@ -134,22 +134,44 @@ def build_execution_graph(tier: int, directed_task_type: str = None, run_tests: 
 def build_execution_graph_from_hires(hires: list, execution_order: list = None) -> tuple:
     """
     Migration Part 5 §2.1, extended by Part 10 §3.1/§4, corrected by
-    Part 11 §0.
+    Part 11 §0. Migration Part 2 §2.6: execution_order may now contain
+    nested groups (see below).
 
     hires: [{"role": "implementer", "agent_key": "CEREBRAS_CODE_1", "brief": "..."}, ...]
-    execution_order: the Panel's synthesized ordering (Part 10 §3) — a
-        list of role name strings. Optional: omitting it (every call site
-        from Parts 1-9) preserves hire order exactly as before, since the
-        reorder step below only runs `if execution_order`.
+        — always a FLAT list, one entry per role actually staffed by
+        staff_task(). Grouping (below) is purely an execution-order
+        concept; every role, grouped or not, still needs its own
+        individual hire (its own account and brief) exactly as before.
+    execution_order: the Panel's synthesized ordering (Part 10 §3), OR a
+        saved workflow template's `roles` (Part 2 §2.3) — a list of role
+        name strings, where a top-level entry may ALSO be a nested list
+        of role name strings marking a group its author said is safe to
+        run concurrently (Part 2 §2.6). Optional: omitting it (every
+        call site from Parts 1-9) preserves hire order exactly as
+        before, since the reorder step below only runs `if
+        execution_order`.
 
     Returns a 3-tuple:
 
         agent_names: ["code_writers", "generic_worker", "generic_worker", ...]
-        role_names: ["implementer", "brainstormer", "writer", ...] — PARALLEL
-            to agent_names, same order, same length. role_names[i] is
-            always the real role for agent_names[i].
+            — a position that's a concurrent group is "generic_worker"
+            here too (every group member is, by construction, a
+            reasoning-only role that resolves to generic_worker anyway
+            — see eo/structure.py's save_workflow_template() docstring),
+            since eo/executor.py only needs agent_names[idx] to say
+            "there's something to resolve/dispatch here"; it branches on
+            role_names[idx]'s actual shape (str vs list) to tell a group
+            apart from a single hire.
+        role_names: ["implementer", "brainstormer", ["writer_a", "writer_b"], ...]
+            — PARALLEL to agent_names, same length. role_names[i] is
+            either the single role for agent_names[i], or, for a
+            collapsed group, a list of every role in that group that was
+            ACTUALLY staffed (see below — a group with only one member
+            actually hired collapses back down to a plain single-role
+            slot, not a "group of one").
         key_overrides: {"implementer": "CEREBRAS_CODE_1", "brainstormer": "...", ...}
-            — keyed by ROLE NAME, not resolved agent/module name.
+            — keyed by ROLE NAME, not resolved agent/module name, one
+            entry per individual hire regardless of grouping.
 
     Part 11 §0 fix: key_overrides used to be keyed by resolved module
     name. That broke once Part 10 introduced generic_worker as the
@@ -168,10 +190,38 @@ def build_execution_graph_from_hires(hires: list, execution_order: list = None) 
     IS the effective execution order after the optional reorder step
     below — so a caller (eo/executor.py) can use role_names[:idx] directly
     as "every role that already ran before this point," with no separate
-    execution_order list needing to be threaded through.
+    execution_order list needing to be threaded through. (For a group at
+    an earlier position, that's a nested list inside the slice —
+    eo/executor.py's own _flatten_role_names() handles that.)
+
+    Migration Part 2 §2.6 — grouping mechanics:
+    order_index maps each role name to the position of its own top-level
+    slot in execution_order — every member of a group shares its group's
+    single position, so sorting hires by this key (Python's sort is
+    stable) always leaves group members contiguous with each other,
+    without disturbing their order relative to everything else. A second
+    pass then walks the now-sorted hires once, collapsing each
+    contiguous run of same-group hires into one role_names/agent_names
+    slot. Only roles BOTH marked as a group in execution_order AND
+    actually present in hires end up in the collapsed slot — a group
+    with 2+ members hired becomes a real concurrent slot; a group with
+    only 1 member actually staffed (the other candidate(s) never got an
+    available account, e.g. staff_task()'s own `_best_match() is None`
+    skip) quietly degrades to an ordinary single-role slot rather than
+    running "a group of one" or referencing a role that was never
+    staffed at all.
     """
+    role_to_group = {}
     if execution_order:
-        order_index = {role: i for i, role in enumerate(execution_order)}
+        order_index = {}
+        for i, entry in enumerate(execution_order):
+            if isinstance(entry, list):
+                group_key = tuple(entry)
+                for role in entry:
+                    order_index[role] = i
+                    role_to_group[role] = group_key
+            else:
+                order_index[entry] = i
         # hires not mentioned in execution_order (Panel forgot one, or a
         # role was added after ordering) go to the end, in their
         # original hire order — never dropped
@@ -179,16 +229,47 @@ def build_execution_graph_from_hires(hires: list, execution_order: list = None) 
 
     agent_names, role_names = [], []
     key_overrides = {}   # keyed by ROLE now, not by resolved module name
-    for hire in hires:
-        agent_names.append(resolve_role(hire["role"]))
-        role_names.append(hire["role"])
-        existing = key_overrides.get(hire["role"])
+
+    def _record_key_override(role: str, agent_key: str) -> None:
+        existing = key_overrides.get(role)
         if existing is None:
-            key_overrides[hire["role"]] = hire["agent_key"]
+            key_overrides[role] = agent_key
         elif isinstance(existing, list):
-            existing.append(hire["agent_key"])
+            existing.append(agent_key)
         else:
-            key_overrides[hire["role"]] = [existing, hire["agent_key"]]
+            key_overrides[role] = [existing, agent_key]
+
+    i = 0
+    while i < len(hires):
+        role = hires[i]["role"]
+        group_key = role_to_group.get(role)
+
+        if group_key is None:
+            agent_names.append(resolve_role(role))
+            role_names.append(role)
+            _record_key_override(role, hires[i]["agent_key"])
+            i += 1
+            continue
+
+        # Collect every hire that belongs to this same group and is
+        # contiguous here — the stable sort above guarantees group
+        # members always end up adjacent to each other.
+        group_roles_present = []
+        while i < len(hires) and role_to_group.get(hires[i]["role"]) == group_key:
+            member_role = hires[i]["role"]
+            group_roles_present.append(member_role)
+            _record_key_override(member_role, hires[i]["agent_key"])
+            i += 1
+
+        if len(group_roles_present) == 1:
+            # Only one member of this group actually got staffed —
+            # nothing to run concurrently WITH, so this is just a
+            # normal single-role slot, not a group of one.
+            agent_names.append(resolve_role(group_roles_present[0]))
+            role_names.append(group_roles_present[0])
+        else:
+            agent_names.append("generic_worker")
+            role_names.append(group_roles_present)
 
     return agent_names, role_names, key_overrides
 

@@ -64,7 +64,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(session_id: str = None, tier: int = None) -> dict:
+def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
     submitted_code = read(KEYS["submitted_code"], default={})
     if not submitted_code:
         write(KEYS["dependency_map"], {})
@@ -78,7 +78,7 @@ def run(session_id: str = None, tier: int = None) -> dict:
 
     raw_text = call_with_retry(
         lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Dependency Mapper",
-                               session_id=session_id, tier=tier),
+                               session_id=session_id, tier=tier, domain=domain),
         agent_name="Dependency Mapper",
     )
     dep_map = json.loads(_strip_fences(raw_text))

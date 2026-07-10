@@ -64,11 +64,26 @@ def _write_index(index: dict) -> None:
         json.dump(index, f, indent=2)
 
 
+def _clean_tags(tags: list | None) -> list:
+    """Strip/dedupe/cap — same defensive shape as chat_workspace.py's name
+    truncation. Tags stay free-form strings (no registry, per §0.4's own
+    "don't pre-build a tag registry" guidance) but shouldn't be allowed to
+    grow unbounded or carry accidental whitespace-only duplicates."""
+    if not tags:
+        return []
+    seen = []
+    for t in tags:
+        t = (t or "").strip()
+        if t and t not in seen:
+            seen.append(t)
+    return seen[:25]
+
+
 def new_chat_id() -> str:
     return f"chat_{uuid.uuid4().hex[:12]}"
 
 
-def create_chat(title: str = "New Chat") -> dict:
+def create_chat(title: str = "New Chat", tags: list | None = None) -> dict:
     """Creates an empty chat file + index entry. Returns the chat dict."""
     with _lock:
         _ensure_dirs()  # NEW — guards a fresh install with no data/chats/ yet
@@ -79,6 +94,7 @@ def create_chat(title: str = "New Chat") -> dict:
             "created_at": _now(),
             "updated_at": _now(),
             "linked_chat_ids": [],
+            "tags": _clean_tags(tags),   # NEW — §0.4 unified tagging
             "messages": [],
         }
         with open(_chat_path(chat_id), "w") as f:
@@ -92,6 +108,9 @@ def create_chat(title: str = "New Chat") -> dict:
             "updated_at": chat["updated_at"],
             "message_count": 0,
             "linked_chat_ids": [],
+            "tags": chat["tags"],   # NEW — kept in the index too, so tag
+                                     # filtering (list_chats_by_tag below)
+                                     # doesn't need to open every chat file.
         })
         _write_index(index)
         return chat
@@ -103,16 +122,47 @@ def list_chats() -> list:
     return sorted(index["chats"], key=lambda c: c["updated_at"], reverse=True)
 
 
+def list_chats_by_tag(tag: str) -> list:
+    """NEW — §0.4. Every chat (any workspace) carrying this exact tag —
+    the chat-side half of "tag Q3-launch shows up everywhere at once."
+    The node-side half is eo/knowledge_graph.py's search_nodes(tags=[...])
+    filter. Reads straight off the index (tags synced there on every
+    write below), so this never needs to open individual chat files."""
+    return [c for c in list_chats() if tag in (c.get("tags") or [])]
+
+
 def get_chat(chat_id: str) -> dict:
     path = _chat_path(chat_id)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
     with open(path, "r") as f:
-        return json.load(f)
+        chat = json.load(f)
+    chat.setdefault("tags", [])   # NEW — tolerate chats saved before §0.4
+    return chat
 
 
 def chat_exists(chat_id: str) -> bool:
     return os.path.exists(_chat_path(chat_id))
+
+
+def set_chat_tags(chat_id: str, tags: list) -> dict:
+    """NEW — §0.4. Full replace, same convention as
+    eo/workspace_facts.py's set_facts(): the tag editor UI sends the
+    whole list back on save. Updates both the chat file and its index
+    entry so list_chats_by_tag() stays correct without a rescan."""
+    with _lock:
+        chat = get_chat(chat_id)
+        chat["tags"] = _clean_tags(tags)
+        chat["updated_at"] = _now()
+        with open(_chat_path(chat_id), "w") as f:
+            json.dump(chat, f, indent=2)
+        index = _read_index()
+        for entry in index["chats"]:
+            if entry["id"] == chat_id:
+                entry["tags"] = chat["tags"]
+                entry["updated_at"] = chat["updated_at"]
+        _write_index(index)
+        return chat
 
 
 def append_message(chat_id: str, message: dict) -> dict:
@@ -126,7 +176,8 @@ def append_message(chat_id: str, message: dict) -> dict:
         if not chat_exists(chat_id):
             chat = {
                 "id": chat_id, "title": "New Chat", "created_at": _now(),
-                "updated_at": _now(), "linked_chat_ids": [], "messages": [],
+                "updated_at": _now(), "linked_chat_ids": [], "tags": [],
+                "messages": [],
             }
         else:
             chat = get_chat(chat_id)
@@ -152,6 +203,7 @@ def append_message(chat_id: str, message: dict) -> dict:
                 entry["title"] = chat["title"]
                 entry["updated_at"] = chat["updated_at"]
                 entry["message_count"] = len(chat["messages"])
+                entry.setdefault("tags", chat.get("tags", []))   # NEW
                 found = True
                 break
         if not found:
@@ -159,6 +211,7 @@ def append_message(chat_id: str, message: dict) -> dict:
                 "id": chat_id, "title": chat["title"],
                 "created_at": chat["created_at"], "updated_at": chat["updated_at"],
                 "message_count": len(chat["messages"]), "linked_chat_ids": [],
+                "tags": chat.get("tags", []),   # NEW
             })
         _write_index(index)
         return chat

@@ -36,7 +36,7 @@ RULES for choosing target_feature:
 - Only pick a "done" feature again if EVERY other feature is also "done".
 - Do not invent features outside the original idea's scope.
 Respond with ONLY valid JSON, no markdown, no explanation."""
-def run():
+def run(session_id: str = None, domain: str = None):
     idea = read(KEYS["original_idea"])
     prior_report = read(KEYS["latest_report"], default=None)
     feature_status = read(KEYS["feature_status"], default={})
@@ -47,7 +47,8 @@ def run():
     else:
         user_content += "\n\nThis is cycle 1. No prior report exists yet."
     raw_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Idea Planner"),
+        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Idea Planner",
+                               session_id=session_id, domain=domain),
         agent_name="Idea Planner",
     )
     # Strip markdown code fences if the model adds them anyway

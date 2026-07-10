@@ -1,13 +1,7 @@
 """
-api/server.py — Stage 6, step 2 (Part 10).
+api/server.py
 
-The thin HTTP layer in front of api/task_runner.py. This is intentionally
-the smallest possible FastAPI app: one endpoint, one job — take a task,
-run it through the EO layer synchronously, return the result as JSON.
-
-No streaming, no Pusher, no live panels here — that's Stage 6 step 1
-(relay) and steps 3-6 (live UI), layered on top of this later. Step 2's
-job is just proving task-in/result-out works end to end.
+The thin HTTP layer in front of api/task_runner.py.
 
 Run locally:
     pip install fastapi uvicorn
@@ -27,13 +21,16 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Query
 from eo.project_registry import list_projects, generate_control_unit, register_project
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
-from api.task_runner import run_task
-from eo.quota_sentinel import get_quota_snapshot, get_usage_history
-from eo import chat_store   # NEW — persistent, file-per-chat storage (see chat_store.py)
-from eo import memory_batch  # NEW — mutual-membership chat groups (§3)
-from eo import chat_workspace  # NEW — named containers with auto-linking membership (§7)
+from api.task_runner import run_task, preview_task, confirm_task   # preview/confirm NEW — Part 2 §2.5
+from eo.executor import resume_graph   # NEW — Part 2 §2.4
+from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
+from eo import chat_store
+from eo import memory_batch
+from eo import chat_workspace
+from eo import workspace_facts
+from eo import graph_edges
 
 app = FastAPI(title="MiniMe v6 — EO layer API")
 
@@ -107,6 +104,23 @@ class WorkspaceChatRequest(BaseModel):
 
 class AppendMessageRequest(BaseModel):
     message: dict
+
+
+class WorkspaceFactsRequest(BaseModel):
+    # Matches eo/workspace_facts.py's EMPTY_FACTS shape. All optional —
+    # a settings-panel save can send just the fields it's touching;
+    # set_facts() merges rather than requiring the full object every
+    # time.
+    brand_voice: Optional[str] = None
+    target_user: Optional[str] = None
+    tech_stack: Optional[list[str]] = None
+    custom: Optional[dict[str, Any]] = None
+
+
+class CreateEdgeRequest(BaseModel):
+    from_node_id: str
+    to_node_id: str
+    relation: str = "related"
 
 
 @app.post("/api/projects", dependencies=[Depends(require_auth)])
@@ -276,6 +290,82 @@ def delete_workspace(ws_id: str):
     return {"status": "deleted", "id": ws_id}
 
 
+# --- workspace facts: tier-3 memory (see eo/workspace_facts.py, §0.3) ----
+# The settings-panel-facing surface for "facts true across the whole
+# project" — brand voice, target user, tech stack, plus a free-form
+# `custom` bucket. Reading these into agent prompts happens automatically
+# inside eo/conversation_memory.py; nothing here needs to be called at
+# generation time, only when the user views/edits the panel.
+
+@app.get("/api/workspaces/{ws_id}/facts", dependencies=[Depends(require_auth)])
+def get_workspace_facts(ws_id: str):
+    chat_workspace.get_workspace(ws_id)  # 404s if the workspace doesn't exist
+    return workspace_facts.get_facts(ws_id)
+
+
+@app.put("/api/workspaces/{ws_id}/facts", dependencies=[Depends(require_auth)])
+def put_workspace_facts(ws_id: str, req: WorkspaceFactsRequest):
+    try:
+        chat_workspace.get_workspace(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    # exclude_unset -> a save that only touched brand_voice doesn't wipe
+    # target_user/tech_stack/custom back to empty.
+    return workspace_facts.set_facts(ws_id, req.dict(exclude_unset=True))
+
+
+@app.get("/api/workspaces/{ws_id}/facts/candidates", dependencies=[Depends(require_auth)])
+def get_workspace_fact_candidates(ws_id: str):
+    """Agent-proposed facts awaiting user accept/reject — see
+    workspace_facts.propose_fact()."""
+    return workspace_facts.list_candidates(ws_id)
+
+
+@app.post("/api/workspaces/{ws_id}/facts/candidates/{index}/accept", dependencies=[Depends(require_auth)])
+def accept_workspace_fact_candidate(ws_id: str, index: int):
+    try:
+        return workspace_facts.accept_candidate(ws_id, index)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Unknown candidate index")
+
+
+@app.delete("/api/workspaces/{ws_id}/facts/candidates/{index}", dependencies=[Depends(require_auth)])
+def reject_workspace_fact_candidate(ws_id: str, index: int):
+    try:
+        workspace_facts.reject_candidate(ws_id, index)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Unknown candidate index")
+    return {"status": "rejected", "index": index}
+
+
+# --- knowledge-graph edges (see eo/graph_edges.py, §0.2) -----------------
+# Auto-created edges are written directly by whichever agent produced
+# them (no HTTP round-trip). This is the manual path: the "link to..."
+# UI picker / drag-node-onto-node affordance calls this directly, no
+# agent involvement.
+
+@app.get("/api/graph/edges", dependencies=[Depends(require_auth)])
+def get_graph_edges(workspace_id: Optional[str] = Query(None)):
+    return graph_edges.list_edges(workspace_id=workspace_id)
+
+
+@app.post("/api/graph/edges", dependencies=[Depends(require_auth)])
+def create_graph_edge(req: CreateEdgeRequest):
+    try:
+        return graph_edges.create_edge(req.from_node_id, req.to_node_id, req.relation, created_by="user")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/graph/edges/{edge_id}", dependencies=[Depends(require_auth)])
+def delete_graph_edge(edge_id: str):
+    try:
+        graph_edges.delete_edge(edge_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown edge_id")
+    return {"status": "deleted", "id": edge_id}
+
+
 class TaskRequest(BaseModel):
     task_text: str
     tier_override: Optional[int] = None
@@ -284,20 +374,29 @@ class TaskRequest(BaseModel):
     run_tests: bool = False
     session_id: Optional[str] = None
     mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None   # NEW
+    project_unique_name: Optional[str] = None
+    approval_roles: Optional[list[str]] = None   # NEW — Part 2 §2.4: role
+    # names that require a human approval pause after they finish
+    # (tier-3 hires-driven path only). None/empty = full-auto, unchanged
+    # default behavior.
 
 
 class TaskResponse(BaseModel):
     # tier is int for tiers 0-3, or the literal string "sga" when the
-    # Starter General Agents resolved the task before classification
-    # (Part 2) — loosened from `int` to fix a latent validation bug that
-    # would have 500'd on every real SGA-resolved HTTP request.
+    # Starter General Agents resolved the task before classification —
+    # loosened from `int` to fix a latent validation bug that would have
+    # 500'd on every real SGA-resolved HTTP request.
     decision: dict
     tier: Union[int, str]
     session_id: Optional[str] = None
     # status values: "ok" | "error" | "needs_app" | "needs_directed_task_type"
-    # | "not_wired_yet" | "needs_beast_mode_confirmation" (Part 3)
-    # | "needs_beast_mode_choice" (Part 3)
+    # | "not_wired_yet" | "needs_beast_mode_confirmation" | "needs_beast_mode_choice"
+    # | "paused" (Part 2 §2.4 — a role in approval_roles just finished;
+    #   POST /api/resume with the same session_id to continue)
+    # | "preview_ready" (Part 2 §2.5 — only ever returned by
+    #   POST /api/task/preview, never by this endpoint; a real, editable
+    #   hires list is sitting in result.hires. POST /api/task/confirm
+    #   with this same session_id, decision, and hires to dispatch.)
     status: str
     result: Optional[dict] = None
     message: Optional[str] = None
@@ -314,12 +413,14 @@ def post_task(req: TaskRequest):
             run_tests=req.run_tests,
             session_id=req.session_id,
             mode=req.mode,
-            project_unique_name=req.project_unique_name,   # NEW
+            project_unique_name=req.project_unique_name,
+            approval_roles=set(req.approval_roles) if req.approval_roles else None,   # NEW
         )
     except Exception as exc:
-        # Step 2 has no relay yet, so a stack trace on the server console
-        # is the only debugging signal you get — keep it, but also return
-        # a clean JSON error instead of a raw 500 with no body.
+        # No relay-based error surface here, so a stack trace on the
+        # server console is the only debugging signal you get — keep it,
+        # but also return a clean JSON error instead of a raw 500 with no
+        # body.
         traceback.print_exc()
         return TaskResponse(
             decision={},
@@ -328,6 +429,170 @@ def post_task(req: TaskRequest):
             result=None,
             message=f"{exc.__class__.__name__}: {exc}",
         )
+
+
+class PreviewTaskRequest(BaseModel):
+    # Same shape as TaskRequest, minus approval_roles — approval_roles is
+    # only meaningful once a run actually dispatches (confirm_task()/
+    # run_task()), not at the preview stage.
+    task_text: str
+    tier_override: Optional[int] = None
+    directed_task_type: Optional[str] = None
+    app_slug: Optional[str] = None
+    run_tests: bool = False
+    session_id: Optional[str] = None
+    mode: Optional[str] = "auto"
+    project_unique_name: Optional[str] = None
+
+
+class HireEdit(BaseModel):
+    # Part 2 §2.5 — one entry from a preview_task() response's
+    # result.hires, echoed back (possibly edited) to /api/task/confirm.
+    role: str
+    agent_key: str
+    brief: str
+    update_library: Optional[bool] = False   # "just this once" (default)
+    # vs "update the library" (True — calls eo/registry.py's
+    # update_role_prompt(), making this edit the new stored default for
+    # every future hire of this role).
+
+
+class ConfirmTaskRequest(BaseModel):
+    task_text: str
+    decision: dict          # the unmodified `decision` object from the
+                             # matching preview_task() response
+    hires: list[HireEdit]   # possibly user-edited hires from that same response
+    session_id: str
+    app_slug: Optional[str] = None
+    mode: Optional[str] = "auto"
+    project_unique_name: Optional[str] = None
+    approval_roles: Optional[list[str]] = None   # same meaning as on /api/task
+
+
+@app.post("/api/task/preview", response_model=TaskResponse, dependencies=[Depends(require_auth)])
+def post_task_preview(req: PreviewTaskRequest):
+    """Part 2 §2.5 — runs classification + staff_task() and stops before
+    dispatch whenever there's a real, editable hires list (tier 2/3).
+    Everything else (cache hit, SGA, needs_beast_mode_*, tier 0/1,
+    hires-empty tier 2/3) runs straight through to a normal finished
+    response, exactly like POST /api/task — there's nothing to review
+    on those paths, so this endpoint doesn't invent an empty review step
+    for them. See preview_task()'s own docstring for the full breakdown."""
+    try:
+        return preview_task(
+            task_text=req.task_text,
+            tier_override=req.tier_override,
+            directed_task_type_override=req.directed_task_type,
+            app_slug=req.app_slug,
+            run_tests=req.run_tests,
+            session_id=req.session_id,
+            mode=req.mode,
+            project_unique_name=req.project_unique_name,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return TaskResponse(
+            decision={}, tier=-1, status="error", result=None,
+            message=f"{exc.__class__.__name__}: {exc}",
+        )
+
+
+@app.post("/api/task/confirm", response_model=TaskResponse, dependencies=[Depends(require_auth)])
+def post_task_confirm(req: ConfirmTaskRequest):
+    """Part 2 §2.5 — dispatches a (possibly user-edited) hires list from
+    a prior POST /api/task/preview response, without calling staff_task()
+    again. Each hire's `update_library` flag controls whether an edited
+    brief is a one-off override or becomes the new stored default via
+    eo/registry.py's update_role_prompt() (2.2)."""
+    try:
+        return confirm_task(
+            task_text=req.task_text,
+            decision=req.decision,
+            hires=[h.dict() for h in req.hires],
+            session_id=req.session_id,
+            app_slug=req.app_slug,
+            mode=req.mode,
+            project_unique_name=req.project_unique_name,
+            approval_roles=set(req.approval_roles) if req.approval_roles else None,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return TaskResponse(
+            decision=req.decision or {}, tier=-1, status="error", result=None,
+            message=f"{exc.__class__.__name__}: {exc}",
+        )
+
+
+class ResumeRequest(BaseModel):
+    # Part 2 §2.4
+    session_id: str
+    action: str          # "approve" | "edit" | "reject_redo"
+    text: Optional[str] = None   # required when action == "edit"
+
+
+class ResumeResponse(BaseModel):
+    session_id: str
+    # status values: "ok" | "paused" | "error"
+    status: str
+    result: Optional[dict] = None
+    message: Optional[str] = None
+
+
+@app.post("/api/resume", response_model=ResumeResponse, dependencies=[Depends(require_auth)])
+def post_resume(req: ResumeRequest):
+    """Part 2 §2.4: resumes a run paused at an approval_roles checkpoint.
+    Mirrors post_task()'s error-handling shape (clean JSON on unexpected
+    failure, real HTTP status codes for the specific, anticipated
+    failure modes resume_graph() raises)."""
+    decision = {"action": req.action}
+    if req.action == "edit":
+        decision["text"] = req.text or ""
+
+    try:
+        result = resume_graph(req.session_id, decision)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No paused run for session_id={req.session_id!r}")
+    except RuntimeError as exc:
+        # reject_redo hit MAX_STAGE_REVISITS — a real conflict (the run
+        # cannot resume as requested), not a client input error.
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        # unknown action string
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        return ResumeResponse(
+            session_id=req.session_id,
+            status="error",
+            result=None,
+            message=f"{exc.__class__.__name__}: {exc}",
+        )
+
+    if isinstance(result, dict) and result.get("status") == "paused":
+        return ResumeResponse(
+            session_id=req.session_id,
+            status="paused",
+            result={"paused_at_role": result["paused_at_role"]},
+            message=(f"Run paused again for approval at role "
+                     f"'{result['paused_at_role']}'. POST to /api/resume again to continue."),
+        )
+
+    # Finished — result here is the same role-keyed results dict
+    # execute_graph()/_run_loop() always returns. Mirrors
+    # api/task_runner.py's _run_tier3_hires() rendering of the final
+    # role's output, so a resumed run's answer looks the same as one
+    # that never paused.
+    from eo.result_render import render_agent_result
+    final_role = list(result.keys())[-1] if result else None
+    final_output = result.get(final_role) if final_role else None
+    answer = render_agent_result(final_output) if final_output is not None else ""
+
+    return ResumeResponse(
+        session_id=req.session_id,
+        status="ok",
+        result={"output": result, "answer": answer, "final_role": final_role},
+        message=None,
+    )
 
 
 @app.get("/api/health")
@@ -341,12 +606,25 @@ def quota():
 
 
 @app.get("/api/usage/history", dependencies=[Depends(require_auth)])
-def usage_history(days: int = Query(7, ge=1, le=90)):
-    # Cross-session, persisted day-by-day usage (Part 19 candidate flagged
-    # in the Part 17 guide) -- reads the same usage:{provider}:{key_id}:
-    # {date} records /api/quota already reads for today, just repeated
-    # across the last `days` calendar dates. See eo/quota_sentinel.py's
-    # get_usage_history() docstring for the exact response shape.
+def usage_history(
+    days: int = Query(7, ge=1, le=90),
+    domain: Optional[str] = Query(None),
+    workspace_id: Optional[str] = Query(None),
+):
+    # Cross-session, persisted day-by-day usage -- reads the same
+    # usage:{provider}:{key_id}:{date} records /api/quota already reads
+    # for today, just repeated across the last `days` calendar dates.
+    # See eo/quota_sentinel.py's get_usage_history() docstring for the
+    # exact response shape.
+    #
+    # Part 2 §2.6 -- when domain and/or workspace_id is given, this
+    # branches to get_usage_history_scoped() instead, returning
+    # {dates, domain, workspace} (see that function's docstring) rather
+    # than {dates, providers, accounts}. Same route, response shape
+    # depends on query params -- exactly the way `days` already changes
+    # this endpoint's window without becoming a separate route.
+    if domain or workspace_id:
+        return get_usage_history_scoped(days=days, domain=domain, workspace_id=workspace_id)
     return get_usage_history(days=days)
 
 

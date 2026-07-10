@@ -106,7 +106,8 @@ def _strip_fences(text: str) -> str:
 
 
 def _run_one_worker(worker_index: int, key_env: str, user_prompt: str,
-                     session_id: str = None, path: str = None) -> tuple:
+                     session_id: str = None, path: str = None,
+                     domain: str = None) -> tuple:
     """
     Runs on one thread. Tries this worker's dedicated Groq key first,
     falls back to the shared Cloudflare account #2 if Groq is unavailable
@@ -138,7 +139,8 @@ def _run_one_worker(worker_index: int, key_env: str, user_prompt: str,
 
     try:
         raw = generate_text(SYSTEM_PROMPT + NEXT_TAG_INSTRUCTION, user_prompt, chain,
-                             agent_name=agent_name, session_id=session_id, path=path)
+                             agent_name=agent_name, session_id=session_id, path=path,
+                             domain=domain)  # Migration Part 2 §2.6: cost-tracking gap
     except RuntimeError as exc:
         print(f"  [Reviewer {worker_index}] {exc}")
         result = {"issues": [], "summary": f"Reviewer {worker_index} produced no output (both providers failed)."}
@@ -190,7 +192,7 @@ def _merge_next_destinations(votes: list) -> str:
 
 
 def run_reviewer(session_id: str = None, path: str = None, expanded: bool = False,
-                  key_override=None):
+                  key_override=None, domain: str = None):
     """
     Migration Part 5 §2.3 — key_override, if given, is the Panel's specific
     account-selection decision for this hire (mirrors code_writers.py's
@@ -240,7 +242,7 @@ def run_reviewer(session_id: str = None, path: str = None, expanded: bool = Fals
     with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
         futures = {
             executor.submit(_run_one_worker, i + 1, key_env, user_prompt,
-                             session_id=session_id, path=path): i
+                             session_id=session_id, path=path, domain=domain): i
             for i, key_env in enumerate(key_envs)
         }
         for future in as_completed(futures):

@@ -163,35 +163,243 @@ ROLE_PROMPTS_SEED = {
     "researcher": "You gather and synthesize information on a topic from provided sources or general knowledge. Flag anything you're unsure of rather than stating it as fact.",
     "writer": "You draft prose to a specified tone, length, and format from a brief or outline.",
     "fact_checker": "You review a draft against source material or general knowledge and flag unsupported claims. You do not rewrite — only annotate.",
+
+    # Part 1 §1.3 — hand-written up front rather than left to the
+    # cold-start brief writer, since a bad first-draft persona brief
+    # becomes the permanent version once add_role_prompt() saves it (see
+    # this module's docstring for get_role_prompt()'s bootstrap
+    # behavior). Each brief describes how the persona thinks and reacts
+    # in general, never anything about a specific product — the same
+    # generalization rule every seed brief above already follows, since
+    # these get reused verbatim across every future task that hires the
+    # role.
+    "persona_customer": (
+        "You react to a product, feature, or pricing decision the way an "
+        "enthusiastic-but-realistic everyday customer would — voicing "
+        "genuine excitement, hesitation, or confusion in your own words. "
+        "Stay in character as a customer, not an analyst; do not reference "
+        "internal reasoning or business strategy the customer wouldn't know."
+    ),
+    "persona_skeptic": (
+        "You react to a product, feature, or pricing decision the way a "
+        "skeptical, hard-to-convince customer would — assuming the pitch "
+        "is exaggerated until proven otherwise and voicing the doubts most "
+        "reviews leave unsaid. Stay in character as a skeptical customer, "
+        "not a hostile critic; your skepticism should feel earned, not "
+        "performative."
+    ),
+    "critic_reviewer": (
+        "You evaluate the given work the way an experienced, opinionated "
+        "professional critic in its field would — praising real strengths "
+        "specifically and calling out weaknesses just as specifically, in "
+        "a confident published-review voice. Give an overall verdict, not "
+        "just scattered observations."
+    ),
+    "usability_walkthrough": (
+        "You simulate a first-time user attempting to complete a specific "
+        "task with the given product or flow, narrating each step, where "
+        "you hesitate, misclick, or get confused, and where the "
+        "experience feels smooth. Report friction points as they'd "
+        "actually happen in the moment, not as a retrospective list of "
+        "design principles."
+    ),
+    "red_team": (
+        "You actively try to find ways the given product, plan, or system "
+        "could fail, be misused, or be exploited — thinking like an "
+        "adversary or worst-case user, not a well-intentioned one. Be "
+        "specific about the failure mode and how it would actually "
+        "happen, not just that a risk 'exists.'"
+    ),
+    "pricing_sensitivity": (
+        "You react to a specific price or pricing change the way a real "
+        "prospective buyer weighing it against alternatives and their own "
+        "budget would — including whether it feels fair, cheap, or "
+        "expensive relative to perceived value. Give a specific reaction "
+        "(e.g. would/wouldn't pay, or at what price you'd reconsider), "
+        "not a generic pricing lecture."
+    ),
+    "support_ticket_predictor": (
+        "You predict the concrete support tickets, complaints, and "
+        "confused questions real users would submit after encountering "
+        "the given product or feature, written the way an actual user "
+        "would phrase them — not as a QA test-case list. Predict the "
+        "volume and tone (frustrated, confused, urgent) as well as the "
+        "content."
+    ),
+    "competitor_response": (
+        "You predict how a rational competitor would actually respond to "
+        "the given product, feature, or pricing move — matching, "
+        "ignoring, undercutting, or repositioning — reasoning the way a "
+        "competitor's own strategy team would. Ground your prediction in "
+        "plausible competitive incentives, not speculation about what "
+        "would be dramatic."
+    ),
+    # Part 1 §1.4, track 2 — a batch-generation role, not a persona. Used
+    # ALONE for "spread of reviews"-style requests (e.g. "15 App Store
+    # reviews"), never combined with the individual personas above --
+    # hiring N separate roles is the wrong shape for "a realistic
+    # distribution of the SAME kind of reaction." One call, one role
+    # slot, no mode-ceiling pressure (see eo/router.py's MODE_CEILINGS).
+    # The fenced-```json instruction is deliberate: agents/
+    # generic_worker.py appends MARKDOWN_INSTRUCTION to every role's
+    # system prompt unconditionally, and that instruction already tells
+    # the model to use fenced code blocks for any code -- leaning into
+    # that (rather than trying to suppress markdown for this one role)
+    # keeps this a zero-code-change addition like every other role here.
+    "marketplace_review_batch": (
+        "You generate a realistic distribution of N marketplace-style "
+        "reviews (e.g. App Store, Amazon) for the given product, "
+        "feature, or update — a genuine mix of positive, neutral, and "
+        "negative reactions, each in a different, plausible reviewer's "
+        "own voice, not N variations of the same opinion. Default to 10 "
+        "reviews if the task doesn't specify a count. Output your answer "
+        "as a single fenced ```json code block containing one JSON array "
+        "of objects, each with \"rating\" (1-5), \"sentiment\" "
+        "(\"positive\"/\"neutral\"/\"negative\"), and \"text\" (the "
+        "review itself) — nothing else outside that code block."
+    ),
+    # Deliberately NOT a dedup/aggregation pass like
+    # agents/review_aggregator.py — personas are SUPPOSED to disagree
+    # (see §1.5), so this brief explicitly instructs against flattening
+    # that disagreement away.
+    "simulation_synthesizer": (
+        "You read every persona's reaction to the same product or "
+        "decision and synthesize them into one summary: what most "
+        "personas agreed on, where they genuinely disagreed and why, and "
+        "an overall read. Preserve real disagreement between personas "
+        "explicitly — do not average conflicting reactions into a single "
+        "flattened conclusion."
+    ),
 }
 
 
-def get_role_prompt(role_name: str) -> str | None:
-    """Returns the stored brief for this role, or None if it's never
-    been written. Bootstraps from ROLE_PROMPTS_SEED on the very first
-    call if the memory bus has nothing yet — after that, the bus is
-    authoritative and the seed is never consulted again."""
+import datetime as _datetime
+
+
+def _utcnow_iso() -> str:
+    return _datetime.datetime.now(_datetime.timezone.utc).isoformat()
+
+
+def _wrap_legacy_entry(role_name: str, brief: str) -> dict:
+    """Part 2 §2.2 schema widening. A pre-migration store held bare
+    {role_name: brief_string}. Wrap a legacy bare string into the new
+    {brief, source, updated_at, times_hired} shape. There's no way to
+    recover real history for these, so tag honestly rather than guess
+    favorably: if the string is byte-for-byte still the current seed
+    value, "seed" is actually correct (that's how it got there);
+    anything else is tagged "panel_brief_writer" — the only other way a
+    bare string could have ended up in the pre-migration store — so the
+    UI correctly flags it as an unreviewed cold-start brief instead of
+    silently implying a human wrote it."""
+    source = "seed" if ROLE_PROMPTS_SEED.get(role_name) == brief else "panel_brief_writer"
+    return {"brief": brief, "source": source, "updated_at": None, "times_hired": 0}
+
+
+def _load_prompts() -> dict:
+    """Single read path for every function below. Bootstraps from
+    ROLE_PROMPTS_SEED on the very first call if the memory bus has
+    nothing yet (unchanged behavior), and migrates any bare-string
+    legacy entries into the new object shape in the same pass — no
+    separate migration script needed, per Part 2 §2.2's design. Writes
+    back to the bus only when bootstrap or migration actually changed
+    something, so a store that's already fully migrated costs one read
+    and zero writes."""
     prompts = read(ROLE_PROMPTS_KEY, default=None)
     if prompts is None:
-        prompts = dict(ROLE_PROMPTS_SEED)
+        prompts = {
+            name: _wrap_legacy_entry(name, brief)
+            for name, brief in ROLE_PROMPTS_SEED.items()
+        }
         write(ROLE_PROMPTS_KEY, prompts)
-    return prompts.get(role_name)
+        return prompts
+
+    changed = False
+    for role_name, value in list(prompts.items()):
+        if not isinstance(value, dict):
+            prompts[role_name] = _wrap_legacy_entry(role_name, value)
+            changed = True
+    if changed:
+        write(ROLE_PROMPTS_KEY, prompts)
+    return prompts
 
 
-def add_role_prompt(role_name: str, brief: str) -> None:
+def get_role_prompt(role_name: str) -> str | None:
+    """Returns the stored brief for this role as a plain string, or
+    None if it's never been written — exactly today's return contract.
+    Every existing caller (agents/generic_worker.py's run(),
+    eo/panel.py's _get_or_write_role_prompt()) keeps working
+    unmodified even though the underlying storage shape widened."""
+    entry = _load_prompts().get(role_name)
+    return entry["brief"] if entry else None
+
+
+def get_role_metadata(role_name: str) -> dict | None:
+    """New in Part 2 §2.2 — returns the full {brief, source,
+    updated_at, times_hired} object for the Role Library UI, or None
+    if this role has never been briefed. get_role_prompt() above stays
+    the string-only contract every non-UI caller already depends on;
+    this is the richer read path for the new frontend panel only."""
+    return _load_prompts().get(role_name)
+
+
+def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_writer") -> None:
     """Writes a newly-generated brief back into the persistent store.
     This is what makes the registry actually grow instead of writing
-    the same role's brief on every single task that needs it."""
-    prompts = read(ROLE_PROMPTS_KEY, default=dict(ROLE_PROMPTS_SEED))
-    prompts[role_name] = brief
+    the same role's brief on every single task that needs it.
+
+    Defaults to source="panel_brief_writer" — unchanged call shape for
+    eo/panel.py's _get_or_write_role_prompt(), which calls this every
+    time it writes a role's cold-start brief for the first time; only
+    the stored value's shape widened, not this function's default
+    behavior. Pass source="user_edited" (or just call
+    update_role_prompt() below) when a human wrote or edited the
+    brief instead. Preserves any existing times_hired count rather
+    than resetting it, since re-briefing a role isn't the same event
+    as it being hired."""
+    prompts = _load_prompts()
+    prompts[role_name] = {
+        "brief": brief,
+        "source": source,
+        "updated_at": _utcnow_iso(),
+        "times_hired": prompts.get(role_name, {}).get("times_hired", 0),
+    }
+    write(ROLE_PROMPTS_KEY, prompts)
+
+
+def update_role_prompt(role_name: str, new_brief: str, source: str = "user_edited") -> None:
+    """New in Part 2 §2.2 — thin wrapper over add_role_prompt(), just
+    setting source explicitly so the Role Library UI can visually
+    distinguish "you wrote this" from "the system generated this and
+    nobody's reviewed it yet." This is what the UI's inline-edit save
+    action calls; it directly surfaces the exact risk Part 1 §1.3
+    flagged (an unreviewed cold-start brief silently becoming
+    permanent)."""
+    add_role_prompt(role_name, new_brief, source=source)
+
+
+def record_role_hire(role_name: str) -> None:
+    """New in Part 2 §2.2 — increments times_hired for a role that was
+    just staffed. Not yet called from eo/panel.py in this pass (that's
+    a one-line addition inside staff_task() once panel.py is in scope
+    for §2.3/§2.5); exposed here now so that follow-up has something to
+    call. Creates a bare counter entry rather than raising if the role
+    somehow isn't in the store yet (a hire can in principle race a
+    first-ever brief write)."""
+    prompts = _load_prompts()
+    entry = prompts.get(role_name) or {
+        "brief": None, "source": "panel_brief_writer",
+        "updated_at": None, "times_hired": 0,
+    }
+    entry["times_hired"] = entry.get("times_hired", 0) + 1
+    prompts[role_name] = entry
     write(ROLE_PROMPTS_KEY, prompts)
 
 
 def list_known_roles() -> list:
-    """Every role the system has ever written a brief for — useful for
-    the frontend (a future 'known roles' panel) and for debugging."""
-    prompts = read(ROLE_PROMPTS_KEY, default=dict(ROLE_PROMPTS_SEED))
-    return sorted(prompts.keys())
+    """Every role the system has ever written a brief for — unchanged
+    return contract (sorted list of role-name strings) even though the
+    underlying store now holds richer objects per role."""
+    return sorted(_load_prompts().keys())
 
 # Migration Part 10 §2.1 — replaces Part 5's ROLE_TO_AGENT-based
 # resolve_role(). Only roles that perform a real action (write files to

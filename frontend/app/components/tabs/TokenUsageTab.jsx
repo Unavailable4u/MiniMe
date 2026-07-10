@@ -150,6 +150,142 @@ function UsageHistoryPanel({ apiUrl }) {
   );
 }
 
+// Part 2 §2.6 -- known domain buckets, mirroring eo/structure.py's
+// STRUCTURE_TEMPLATES keys. Hardcoded rather than fetched, since there's
+// no existing "list domains" endpoint; update this list if
+// STRUCTURE_TEMPLATES gains a new domain. A task can also carry no
+// domain at all (Panel classified it as null) -- that traffic simply
+// won't show up under any of these, which is correct, not a bug.
+const KNOWN_DOMAINS = ["coding", "creative_writing", "research", "data_analysis", "simulate"];
+
+function ProjectSectionUsagePanel({ apiUrl }) {
+  const [days, setDays] = useState(7);
+  const [domain, setDomain] = useState("");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!domain && !workspaceId) {
+      setData(null);
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const params = new URLSearchParams({ days: String(days) });
+    if (domain) params.set("domain", domain);
+    if (workspaceId) params.set("workspace_id", workspaceId);
+    fetch(`${apiUrl}/api/usage/history?${params.toString()}`, {
+      headers: API_KEY ? { "x-api-key": API_KEY } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [apiUrl, days, domain, workspaceId]);
+
+  // Expects GET /api/usage/history to also accept ?domain=&workspace_id=
+  // and, when either is present, call
+  // eo.quota_sentinel.get_usage_history_scoped() instead of
+  // get_usage_history() -- returning {dates, domain, workspace} rather
+  // than {dates, providers, accounts}. Same route, shape depends on
+  // query params, same way this endpoint's existing ?days= param already
+  // changes its window without becoming a new route.
+  const rows = useMemo(() => {
+    if (!data) return [];
+    return data.dates.map((d, i) => ({
+      date: d,
+      domain: data.domain ? data.domain.tokens[i] : undefined,
+      workspace: data.workspace ? data.workspace.tokens[i] : undefined,
+    }));
+  }, [data]);
+
+  return (
+    <Card
+      title="Usage by project / section"
+      action={
+        <div className="flex gap-1">
+          {DAY_RANGES.map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`font-display text-[10px] uppercase tracking-wide rounded px-2 py-1 border transition-colors ${
+                days === d
+                  ? "bg-cyber-cyan/10 border-cyber-cyan text-cyber-cyan"
+                  : "border-cyber-border text-cyber-dim hover:text-cyber-text"
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      }
+    >
+      <div className="flex flex-wrap gap-2 mb-3">
+        <select
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+          className="bg-black/40 border border-cyber-border rounded px-2 py-1 text-xs text-cyber-text"
+        >
+          <option value="">All domains</option>
+          {KNOWN_DOMAINS.map((d) => (
+            <option key={d} value={d}>{d}</option>
+          ))}
+        </select>
+        <input
+          value={workspaceId}
+          onChange={(e) => setWorkspaceId(e.target.value)}
+          placeholder="workspace_id (optional)"
+          className="bg-black/40 border border-cyber-border rounded px-2 py-1 text-xs text-cyber-text flex-1 min-w-[140px]"
+        />
+      </div>
+      {!domain && !workspaceId && (
+        <p className="text-xs text-cyber-dim">
+          Pick a domain and/or paste a project's workspace_id to see its usage breakdown.
+        </p>
+      )}
+      {loading && <p className="text-xs text-cyber-dim">Loading...</p>}
+      {error && (
+        <p className="text-xs text-rose-400">
+          Couldn't load: {error}. Make sure <code className="font-mono">GET /api/usage/history</code> accepts{" "}
+          <code className="font-mono">domain</code> / <code className="font-mono">workspace_id</code> query params.
+        </p>
+      )}
+      {!loading && !error && data && !data.domain && !data.workspace && (
+        <p className="text-xs text-cyber-dim">No usage recorded for that scope in this window yet.</p>
+      )}
+      {!loading && !error && data && (data.domain || data.workspace) && (
+        <div style={{ height: 180 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={rows}>
+              <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} tickFormatter={(d) => d.slice(5)} />
+              <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} />
+              <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }} />
+              {data.domain && <Bar dataKey="domain" name={domain || "domain"} fill="#22d3ee" radius={[2, 2, 0, 0]} />}
+              {data.workspace && <Bar dataKey="workspace" name="workspace" fill="#a78bfa" radius={[2, 2, 0, 0]} />}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function TokenUsageTab() {
   const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
 
@@ -164,6 +300,7 @@ export default function TokenUsageTab() {
           light up here as soon as they make their first call today.
         </p>
         <UsageHistoryPanel apiUrl={API_URL} />
+        <ProjectSectionUsagePanel apiUrl={API_URL} />
         <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
       </div>
     );
@@ -188,6 +325,7 @@ export default function TokenUsageTab() {
         ))}
       </div>
       <UsageHistoryPanel apiUrl={API_URL} />
+      <ProjectSectionUsagePanel apiUrl={API_URL} />
       <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
     </div>
   );

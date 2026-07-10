@@ -1,69 +1,47 @@
 """
-eo/executor.py — Stage 4 steps 4-5 of the roadmap: the piece that
-actually RUNS an execution graph from eo/router.py.
+eo/executor.py — runs an execution graph built by eo/router.py.
 
-Migration Part 12 §3.3: this is the TRUE FINAL execute_graph() —
-supersedes every prior version (Parts 2, 5, 8, 9, 10, 11) for real, not
-just in the manifest's bookkeeping sense.
+Execution navigates by ROLE, not by resolved module name: generic_worker
+runs for many different roles in the same plan, so a "next_destination:
+<role>" value from the Dispatcher needs to disambiguate which
+generic_worker SLOT in agent_names it means (multiple slots can all
+literally be the string "generic_worker"). eo/dispatcher.py's next_step()
+returns an INDEX into role_names; this module resolves agent_names[idx]
+separately at the moment of calling.
 
-Migration Part 12 §3.1/§3.2: execution now navigates by ROLE, not by
-resolved module name. This became necessary the moment generic_worker
-started running for many different roles in the same plan (Part 10
-§2.1's REAL_ACTION_ROLES split) — a "next_destination: <role>" value has
-no way to disambiguate which generic_worker SLOT in agent_names it means,
-since multiple slots are all literally the string "generic_worker".
-eo/dispatcher.py's next_step() now returns an INDEX into role_names, not
-a destination string; this module resolves agent_names[idx] separately
-at the moment of actually calling a function.
+The "instant"/"direct"/"fixed" paths' static graphs (build_execution_graph())
+have no separate role concept — role IS the module name there, so
+role_names defaults to a copy of agent_names. Hires-driven ("adaptive"
+path / Panel) calls always pass role_names explicitly, via
+eo.router.build_execution_graph_from_hires().
 
-Migration Part 12 §3.3 executor bug fix (found implementing this against
-the real graph, not just the guide's illustrative snippet): when the
-Dispatcher escalates to a genuinely new role (appends it to role_names),
-agent_names has to grow in lockstep, or the next loop iteration indexes
-past its end. Both agent_names and role_names are now local mutable
-copies, and an escalation resolves the new role's module name via
-eo.registry.resolve_role() before appending.
-
-Backward compatibility: the "instant"/"direct"/"fixed" paths' static
-graphs (build_execution_graph(), untouched since Part 2) have no separate
-role concept -- role IS the module name there. role_names defaults to a
-copy of agent_names in that case, so those callers are unaffected.
-Hires-driven ("adaptive" path / Panel) calls always pass role_names
-explicitly (eo.router.build_execution_graph_from_hires()).
-
-Two agent names need special handling because they're entry points that
-need the raw task text passed in directly the first time:
+Two agent names are entry points that need the raw task text passed in
+directly the first time:
   - "responder"          (path "instant" — the only agent in its graph)
   - "prompt_writer_lean" (path "direct" — the first agent in its graph)
 Every other agent name reads its input from memory.bus, since the agent
 before it in the same graph already wrote it there.
 
-Stage 6 step 4: each step fires agent_start/agent_done (and error, on
-failure) through relay/emitter.py, per Part 6.3's schema. session_id
-defaults to None, which makes emit_event() a documented no-op, so every
-existing caller that doesn't pass a session_id keeps working with zero
-behavior change.
+Each step fires agent_start/agent_done (and error, on failure) through
+relay/emitter.py. session_id defaults to None, which makes emit_event() a
+no-op, so callers that don't pass a session_id are unaffected.
 
-Migration Part 5 §2.2: key_overrides maps a ROLE name (Part 11 §0 fixed
-this to be role-keyed uniformly, not module-name-keyed) to the specific
-key_env(s) the Panel hired for it, via
-eo.router.build_execution_graph_from_hires(). Defaults to {}, so every
-existing caller keeps today's exact behavior — each agent module falls
-back to its own internal default key selection.
+key_overrides maps a ROLE name to the specific key_env(s) the Panel hired
+for it (eo.router.build_execution_graph_from_hires()). Defaults to {}, so
+each agent module falls back to its own internal default key selection.
 
-Migration Part 8 §8.3 / Part 9 fix: execute_graph() forwards
-project_unique_name to file_manager.py's three callables (file_manager,
-file_manager_writeback, file_manager_test_writeback) via a dedicated
-dispatch case, instead of letting it silently fall through the generic
-`else: fn()` branch and get dropped.
+Human-in-the-loop checkpoints (approval_roles): execute_graph() is split
+into a thin entry point plus a shared _run_loop() helper, so resume_graph()
+can re-enter the same dispatch/escalation/pause logic from a persisted
+snapshot instead of duplicating it. See _run_loop() and resume_graph()
+below.
 
-Migration Part 12 §8.4: `tier` (int) is renamed to `path` (str) throughout
-this module's signature, emit_event() calls, and every fn(...) dispatch
-call -- same positions, same meaning, new name only. One spot deliberately
-NOT touched: the `__main__` block's `build_execution_graph(tier=0)` call
-still passes the old numeric kwarg, since eo/router.py (not available at
-the time of this rewrite) hasn't been confirmed to accept `path=` yet --
-flagging rather than guessing at that module's signature.
+Scoped memory per agent (no_conversation_context_roles): Part 2 §2.6. A
+role name in this set is dispatched through generic_worker.run() with
+include_conversation_context=False, so it doesn't get the full
+conversation-memory transcript prepended ahead of context it wasn't
+scoped to see. Defaults to an empty set (today's exact behavior — every
+role sees the full transcript) everywhere it's threaded through below.
 """
 import os
 import sys
@@ -77,69 +55,218 @@ from relay.emitter import emit_event
 
 TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
 
-# Bug fix / new capability: an agent can now raise MissingDependencyError
-# instead of hard-failing the whole task when a prerequisite role's output
-# isn't in memory yet (see eo/errors.py's module docstring for the full
-# reasoning and the "adaptive path only" scoping). MAX_AUTO_INSERTS_PER_STEP
-# guards against a genuinely unsatisfiable or circular dependency looping
-# forever -- e.g. a role that requests itself, or two roles that each
-# request the other. Keyed per (role, requested_role) pair rather than
-# globally, so one step's retries don't eat another step's budget.
+# An agent can raise MissingDependencyError instead of hard-failing the
+# whole task when a prerequisite role's output isn't in memory yet (see
+# eo/errors.py). MAX_AUTO_INSERTS_PER_STEP guards against an unsatisfiable
+# or circular dependency looping forever (a role requesting itself, or two
+# roles each requesting the other). Keyed per (role, requested_role) pair,
+# so one step's retries don't eat another step's budget.
 MAX_AUTO_INSERTS_PER_STEP = 2
 
-# Migration Part 26 §5: these six agents are NOT special-cased below, so
-# every prior call into them fell into the generic `else: fn()` branch --
-# called with ZERO arguments. Their own run()/run_X() signatures default
-# session_id/tier to None, so this never crashed, but it did mean every
-# one of their generate_text()/usage-log calls was silently unscoped
-# (session_id=None) even mid-session, and none of their calls were
-# labeled with a real tier either. Per §1's own table, all six already do
-# the right thing INTERNALLY with a `tier` int ("tier=tier where
-# applicable -> correct") -- the gap was purely here, at the boundary,
-# never wiring session_id/tier through to them at all.
-#
-# These six take `tier` (int), not `path` (str) -- unlike the boundary-A
-# group above, none of them were part of the tier->path migration, so
-# this dispatch case translates `path` back to `tier` via the same
-# PATH_TO_TIER table eo/panel.py and eo/loop_v4.py use (now shared via
-# eo/structure.py, Part 26 §4c) rather than asking these six to also
-# migrate to `path` for no reason -- they never emit_event()'d with a
-# path label to begin with (see §1's table: "not called with tier/path,
-# or not called at all").
+# Guards resume_graph()'s "reject_redo" path — a human can send a role
+# back for a redo, but not forever. Keyed per-role since a reject_redo
+# always targets the exact role that just paused.
+MAX_STAGE_REVISITS = 2
+
+# These agents take `tier` (int) rather than `path` (str), and don't fit
+# any of the other dispatch cases below (they'd otherwise fall into the
+# generic `else: fn()` branch and run with zero context). PATH_TO_TIER
+# translates the current `path` back to the `tier` int they expect.
 UNSCOPED_TIER_AGENTS = {
     "dependency_mapper", "documentation_agent", "duplication_checker",
     "memory_search",
 }
-# Migration Part 27: "final_qa" removed from this set -- its dedicated
-# agents/final_qa.py module was deleted (reasoning-only, no live caller;
-# see eo/registry.py's REGISTRY comment). The role name still resolves
-# via generic_worker if the Panel hires it.
-#
-# Bug fix: "structure_architect" moved OUT of the set above into its own
-# dispatch case below. Its new no-code planning path (structure_architect.py)
-# needs task_text -- the original task description -- to plan a folder/file
-# scaffold when there's no fixed_code/submitted_code to organize. The other
-# four agents in UNSCOPED_TIER_AGENTS have no such need, so they're
-# unaffected.
+# "structure_architect" is deliberately NOT in the set above — its
+# no-code planning path needs task_text (to plan a folder/file scaffold
+# when there's no fixed_code/submitted_code to organize yet), which the
+# four agents above don't need. It gets its own dispatch case instead.
+
+
+def _apply_recheck_retry(key_overrides: dict, role_names: list, next_idx, reason: str) -> None:
+    """Migration Part 2 §2.6 — escalation logic's one genuine gap.
+
+    Every other escalation path already existed (SGA's three-stage
+    relay, Panel escalation, dispatcher-level "escalate"/prerequisite
+    auto-insertion). What was missing: automatically retrying a role on
+    a DIFFERENT, stronger/different account purely because its own
+    output looked weak (dispatcher reason == "recheck"), without the
+    agent having to self-report via a NEXT: tag naming some other role.
+
+    A "recheck" from eo/dispatcher.py's next_step() means role_names[next_idx]
+    is a role already run earlier in this plan, being revisited. Left
+    alone, key_overrides still points that role at the exact same
+    account that just produced the output weak enough to trigger the
+    recheck in the first place — this forces a different one via
+    eo.panel._best_match()'s new `exclude` param, mutating key_overrides
+    in place so the next iteration of the loop picks it up naturally
+    through the existing `override = key_overrides.get(role)` line.
+
+    No-op for every other reason ("plan"/"escalate") and for a role's
+    very first run (no prior override to exclude yet, so there's
+    nothing to switch away from)."""
+    if reason != "recheck" or next_idx is None:
+        return
+    from eo.panel import _best_match
+    from eo.quota_sentinel import get_quota_snapshot
+
+    retry_role = role_names[next_idx]
+    last_key = key_overrides.get(retry_role)
+    new_key = _best_match(retry_role, get_quota_snapshot(),
+                           exclude={last_key} if last_key else None)
+    if new_key:
+        key_overrides[retry_role] = new_key
+
+
+def _flatten_role_names(role_names: list) -> set:
+    """Migration Part 2 §2.6: role_names[idx] may now be a list (a
+    concurrent group — see _run_concurrent_group() below) instead of a
+    plain role-name string. Every place that used to do a bare
+    `set(role_names)` breaks the moment ANY position in the plan is a
+    group — not just while that position is being processed — since a
+    list isn't hashable. This flattens either shape into a plain set of
+    role-name strings, for next_step()'s known_roles argument."""
+    flat = set()
+    for entry in role_names:
+        if isinstance(entry, list):
+            flat.update(entry)
+        else:
+            flat.add(entry)
+    return flat
+
+
+def _merge_group_next_destinations(votes: list):
+    """Identical merge rule to agents/reviewer.py's own
+    _merge_next_destinations(): majority vote wins; on a tie or no
+    majority, the first non-None vote by member order wins; if every
+    member said DONE (None) or gave no parseable tag, the merged result
+    is None. Kept as its own small copy here rather than imported from
+    agents/reviewer.py — that module's version is tupled together with
+    its own review-specific logic, and importing agents/reviewer.py into
+    eo/executor.py for one shared function isn't worth the new
+    dependency edge."""
+    from collections import Counter
+    cast = [v for v in votes if v]
+    if not cast:
+        return None
+    counts = Counter(cast)
+    top_count = max(counts.values())
+    winners = {v for v in cast if counts[v] == top_count}
+    for v in cast:
+        if v in winners:
+            return v
+    return None
+
+
+def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results: dict,
+                            task_text: str, session_id: str, path: str, key_overrides: dict,
+                            next_step, no_conversation_context_roles: set = None,
+                            domain: str = None) -> tuple:
+    """Migration Part 2 §2.6 — parallel execution control's real gap.
+
+    The Panel-decided execution_order that generic_worker steps through
+    is strictly sequential today, unlike the Code Writer/Reviewer/Fixer
+    pools (which already run genuinely in parallel, but only inside
+    their own dedicated real-action modules). role_names[idx] being a
+    list rather than a str is what marks a concurrent group — produced
+    ONLY when a workflow template author explicitly nested roles that
+    way (eo/structure.py's save_workflow_template()); the Inspector/
+    Panel's own automatic classification never produces one, so an
+    ordinary run is completely unaffected.
+
+    Runs every role in group_roles through generic_worker at once, via
+    the identical ThreadPoolExecutor primitive agents/reviewer.py's
+    worker pool already uses. Each member reads the SAME input_keys
+    (every role that ran at any EARLIER position in the plan,
+    role_names[:idx] flattened so an earlier group's members are each
+    individually visible) but NOT each other's output — they're peers
+    running at once, not a sequential hand-off, the same relationship
+    reviewer.py's 3 workers already have to each other.
+
+    Each member's own call to generic_worker.run() already writes its
+    own stage_output:{session_id}:{role} key internally (keyed by its
+    own role name) — nothing extra to persist here for that. What DOES
+    need merging: each member's own next_destination vote, since
+    eo/dispatcher.py's next_step() expects ONE result dict to reason
+    about, not N — merged via the identical majority-vote rule
+    agents/reviewer.py already uses for its own worker pool.
+
+    no_conversation_context_roles (Part 2 §2.6, same set _run_loop()
+    receives): each member is dispatched with
+    include_conversation_context=(member_role not in this set), so the
+    scoped-memory opt-out applies the same way inside a concurrent group
+    as it does to a single sequential role.
+
+    domain (Part 2 §2.6, cost-tracking gap): forwarded to each member's
+    generic_worker.run() call the same way session_id already is, so
+    every role in the group gets the same per-project/per-section usage
+    attribution a sequential role gets. Defaults to None -- unaffected
+    unless a caller (execute_graph()/_run_loop()) actually has one.
+
+    Known v1 limitation, flagged rather than silently unsupported: a
+    group does not currently support approval_roles pausing or a
+    MissingDependencyError self-heal for any of its members. Both would
+    need the pause/resume snapshot shape and the auto-insert bookkeeping
+    to understand "idx currently covers N roles running together, not
+    one" — real additional work, left for later if a group member ever
+    actually needs either.
+    """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    no_conversation_context_roles = no_conversation_context_roles or set()
+    fn = resolve("generic_worker")
+    flat_input_keys = list(_flatten_role_names(role_names[:idx]))
+
+    started_at = {}
+    for member_role in group_roles:
+        started_at[member_role] = _time.monotonic()
+        emit_event("agent_start", session_id=session_id, agent=f"generic:{member_role}", path=path,
+                    payload={"label": member_role})
+
+    member_results = {}
+    with ThreadPoolExecutor(max_workers=len(group_roles)) as pool:
+        futures = {
+            pool.submit(fn, role=member_role, task_text=task_text,
+                        input_keys=flat_input_keys, session_id=session_id,
+                        key_override=key_overrides.get(member_role),
+                        include_conversation_context=member_role not in no_conversation_context_roles,
+                        domain=domain,
+                        ): member_role
+            for member_role in group_roles
+        }
+        for future in as_completed(futures):
+            member_results[futures[future]] = future.result()
+
+    votes = []
+    for member_role in group_roles:
+        result = member_results[member_role]
+        results[member_role] = result
+        duration_ms = int((_time.monotonic() - started_at[member_role]) * 1000)
+        emit_event("agent_done", session_id=session_id, agent=f"generic:{member_role}", path=path,
+                    payload={"summary": _summarize(result), "duration_ms": duration_ms})
+        votes.append(result.get("next_destination") if isinstance(result, dict) else None)
+
+    merged_next = _merge_group_next_destinations(votes)
+    next_idx, reason = next_step(
+        {"next_destination": merged_next}, role_names, idx, session_id=session_id,
+        known_roles=set(list_known_roles()) | _flatten_role_names(role_names),
+    )
+    return next_idx, reason
 
 
 def _summarize(result, limit: int = 9000) -> str:
     """Best-effort human-readable summary for an agent_done payload.
     Results vary in shape (str, dict, ...) across the agent roster —
-    eo/result_render.py's render_agent_result() is the one place that
-    knows every shape (generic_worker's {"text"}, reviewer's {"issues"},
-    fixer_pool's {"fixed_code"}, code_writers'/test_writer's flat
-    {module: code} map, ...) and turns each into markdown instead of a
-    raw Python dict repr.
+    eo/result_render.py's render_agent_result() knows every shape
+    (generic_worker's {"text"}, reviewer's {"issues"}, fixer_pool's
+    {"fixed_code"}, code_writers'/test_writer's flat {module: code} map,
+    ...) and turns each into markdown instead of a raw dict repr.
 
-    limit defaults to 9000, not the old 300 -- Pusher enforces a hard
-    ~10KB payload limit per event (true on every plan, not just free
-    tier), and the event envelope around this string (type, session_id,
-    agent, path, timestamp) costs a few hundred bytes, so 9000 is the
-    most we can send while leaving headroom. This is "full output" for
-    the large majority of real agent results; only genuinely oversized
-    ones (e.g. a full multi-module code submission) still get cut, and
-    now say so explicitly instead of a bare '...'."""
+    limit defaults to 9000: Pusher enforces a hard ~10KB payload limit
+    per event, and the event envelope around this string costs a few
+    hundred bytes, so 9000 is the most that fits with headroom. Only
+    genuinely oversized results (e.g. a full multi-module code
+    submission) still get cut, and now say so explicitly."""
     from eo.result_render import render_agent_result
     return render_agent_result(result, limit=limit)
 
@@ -147,42 +274,128 @@ def _summarize(result, limit: int = 9000) -> str:
 def execute_graph(agent_names: list, role_names: list = None, task_text: str = None,
                    cycle_num: int = None, session_id: str = None, path: str = None,
                    mode: str = None, key_overrides: dict = None,
-                   project_unique_name: str = None) -> dict:
+                   project_unique_name: str = None, approval_roles: set = None,
+                   no_conversation_context_roles: set = None, domain: str = None) -> dict:
+    """Fresh-start entry point. `approval_roles` defaults to None (today's
+    full-auto behavior) — every existing call site that doesn't pass it is
+    unaffected.
+
+    `no_conversation_context_roles` (Part 2 §2.6) defaults to None (today's
+    exact behavior — every role sees the full conversation-memory prepend).
+    A caller dispatching a saved workflow template passes
+    template["no_conversation_context_roles"] here, exactly the same
+    wiring pattern approval_roles already uses (see
+    eo/structure.py's classification_from_template()).
+
+    `domain` (Part 2 §2.6, cost-tracking gap): the classification domain
+    this run belongs to (e.g. "coding"/"simulate" — api/task_runner.py's
+    _run_tier3_hires() already has this as decision.get("domain") and
+    passes it down through eo/loop_controller.py's run_with_looping()).
+    Forwarded to every generic_worker dispatch (single-role and
+    concurrent-group) so utils/llm_client.py's log_usage() can tag each
+    call for the per-project/per-section usage breakdown. Defaults to
+    None — unaffected for every call site that doesn't pass one.
+
+    Returns either the finished {role: output} results dict, or, if
+    execution pauses at a role in approval_roles,
+    {"status": "paused", "paused_at_role": role} — see _run_loop()'s
+    docstring for who's responsible for not treating that as a completed
+    answer."""
     from eo.dispatcher import next_step
 
-    # Migration Part 3 step 4 / Part 12 §3.3: reserve-account worker
-    # pools only activate under Expert/Beast mode. Kept `mode=None` as
-    # the default (not the guide snippet's literal "auto") so existing
-    # callers that never pass mode keep working -- `(mode or "auto")`
-    # gives the same "auto" semantics the guide specifies without
-    # crashing on a bare .lower() call against None.
+    # Reserve-account worker pools only activate under Expert/Beast mode.
+    # `mode=None` stays the default so existing callers that never pass
+    # mode keep working — `(mode or "auto")` avoids crashing on a bare
+    # .lower() call against None.
     expanded = (mode or "auto").lower() in ("expert", "beast")
 
     key_overrides = key_overrides or {}
 
-    # Migration Part 12 §3.1/§3.2: role_names is now the Dispatcher's
-    # real unit of navigation, not just a display label. Local mutable
-    # copies -- role_names may get appended to on escalation (a
-    # genuinely new role named via next_destination), and agent_names
-    # must grow in lockstep right after, so neither can be the caller's
-    # original list object.
+    # role_names may get appended to on escalation (a genuinely new role
+    # named via next_destination), and agent_names must grow in lockstep
+    # right after — so both need to be local mutable copies, never the
+    # caller's original list object.
     role_names = list(role_names) if role_names is not None else list(agent_names)
     agent_names = list(agent_names)
+    approval_roles = set(approval_roles) if approval_roles else set()
+    no_conversation_context_roles = set(no_conversation_context_roles) if no_conversation_context_roles else set()
 
-    results = {}
-    idx = 0
-    # Bug fix / new capability: how many times we've auto-inserted a given
-    # (role, requested_role) pair to satisfy a MissingDependencyError.
-    # Keyed per-pair, not globally -- see MAX_AUTO_INSERTS_PER_STEP's
-    # comment above for why.
-    auto_inserted = {}
+    return _run_loop(
+        agent_names=agent_names, role_names=role_names, idx=0, results={},
+        auto_inserted={}, stage_revisits={}, task_text=task_text,
+        session_id=session_id, path=path, mode=mode, key_overrides=key_overrides,
+        project_unique_name=project_unique_name, expanded=expanded,
+        approval_roles=approval_roles, next_step=next_step,
+        no_conversation_context_roles=no_conversation_context_roles,
+        domain=domain,
+    )
+
+
+def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisits,
+              task_text, session_id, path, mode, key_overrides, project_unique_name,
+              expanded, approval_roles, next_step, no_conversation_context_roles=None,
+              domain=None) -> dict:
+    """The actual step-dispatch loop, factored out of execute_graph() so
+    resume_graph() below can re-enter it from a persisted mid-run
+    snapshot instead of duplicating every dispatch case, the
+    MissingDependencyError self-heal branch, and the escalation-growth
+    bookkeeping. execute_graph() calls this once, at idx=0 with empty
+    results/auto_inserted/stage_revisits; resume_graph() calls it
+    starting from wherever the snapshot left off.
+
+    Every list/dict argument is mutated in place, exactly as the original
+    inline loop always did — callers are expected to pass their own local
+    copies (execute_graph() already does; resume_graph() rebuilds fresh
+    copies from the snapshot before calling in), so nothing leaks across
+    sessions.
+
+    no_conversation_context_roles (Part 2 §2.6): defaults to None here
+    (normalized to an empty set immediately below) rather than requiring
+    every caller to pass one — resume_graph() reconstructs this from its
+    snapshot the same way it reconstructs approval_roles.
+
+    domain (Part 2 §2.6, cost-tracking gap): defaults to None, forwarded
+    unchanged to every generic_worker dispatch (single-role and
+    concurrent-group) and carried into the pause snapshot so a resumed
+    run keeps tagging usage under the same domain it started with — same
+    carry-through pattern no_conversation_context_roles already uses.
+
+    Pause behavior: checked immediately after a step's normal agent_done
+    emission and results[role] write, and BEFORE next_step() is called.
+    This means the Dispatcher never sees this step's result at all until
+    a human resumes it — no route_trace entry for "what happens after
+    this role" gets written, no escalation logic runs, nothing advances.
+    On a pause, this function returns
+    {"status": "paused", "paused_at_role": role} instead of the results
+    dict. Callers up the stack (eo/loop_controller.py's run_with_looping(),
+    and anything calling execute_graph() directly) must check for this
+    sentinel before treating the return value as finished output."""
+    no_conversation_context_roles = no_conversation_context_roles or set()
 
     while idx is not None and idx < len(agent_names):
+        # Migration Part 2 §2.6: a group (role_names[idx] is a list, not
+        # a str) is handled entirely separately from the single-role
+        # dispatch below — see _run_concurrent_group()'s own docstring
+        # for what it does and does not support yet (no approval_roles
+        # pausing, no MissingDependencyError self-heal, for any member).
+        if isinstance(role_names[idx], list):
+            next_idx, reason = _run_concurrent_group(
+                role_names[idx], role_names, idx, results, task_text,
+                session_id, path, key_overrides, next_step,
+                no_conversation_context_roles=no_conversation_context_roles,
+                domain=domain,
+            )
+            _apply_recheck_retry(key_overrides, role_names, next_idx, reason)
+            if next_idx is not None and next_idx >= len(agent_names):
+                agent_names.append(resolve_role(role_names[next_idx]))
+            idx = next_idx
+            continue
+
         current_name = agent_names[idx]
         role = role_names[idx]
         fn = resolve(current_name)
-        # Migration Part 11 §0: key_overrides is always keyed by ROLE
-        # name, not resolved agent/module name.
+        # key_overrides is always keyed by ROLE name, not resolved
+        # agent/module name.
         override = key_overrides.get(role)
 
         print(f"  [Executor] running: {current_name} (role={role})")
@@ -191,80 +404,92 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
         started = time.monotonic()
         try:
             if current_name == "prompt_writer_lean" and task_text:
-                result = fn(task_text, session_id=session_id, path=path)
+                result = fn(task_text, session_id=session_id, path=path, domain=domain)
             elif current_name in TASK_TEXT_ENTRYPOINTS and task_text:
-                # Part 23 fix: was `fn(task_text, key_override=override)` —
-                # session_id/path never reached responder.py at all, so its
-                # own Part 23 conversation-memory wiring (get_full_context())
-                # had no session_id to work with even after that agent was
-                # fixed to accept one. (prompt_writer_lean is also in
-                # TASK_TEXT_ENTRYPOINTS but never reaches this branch — it's
-                # caught by the dedicated `if` above, which already passed
-                # both through.)
-                result = fn(task_text, key_override=override, session_id=session_id, path=path)
+                # (prompt_writer_lean is also in TASK_TEXT_ENTRYPOINTS but
+                # never reaches this branch — it's caught by the dedicated
+                # `if` above, which already passes both session_id/path.)
+                result = fn(task_text, key_override=override, session_id=session_id, path=path,
+                            domain=domain)
             elif current_name == "code_writer_lean":
-                result = fn(session_id=session_id, path=path)
+                result = fn(session_id=session_id, path=path, domain=domain)
             elif current_name == "reviewer_fixer_lean":
-                result = fn(session_id=session_id, path=path)
+                result = fn(session_id=session_id, path=path, domain=domain)
             elif current_name == "code_writers":
-                # NEW — bug fix: code_writers needs task_text as a
-                # fallback seed for its own module_specs synthesis when
-                # it's hired without "prompt_writer" ahead of it in the
-                # plan (see agents/code_writers.py's
-                # _derive_specs_from_task_text() docstring). Split out of
-                # the shared branch below since "reviewer"/
-                # "security_scanner" don't take task_text.
+                # Needs task_text as a fallback seed for its own
+                # module_specs synthesis when hired without
+                # "prompt_writer" ahead of it in the plan (see
+                # agents/code_writers.py's _derive_specs_from_task_text()).
                 result = fn(session_id=session_id, path=path, expanded=expanded,
-                            key_override=override, task_text=task_text)
+                            key_override=override, task_text=task_text, domain=domain)
             elif current_name in ("reviewer", "security_scanner"):
                 result = fn(session_id=session_id, path=path, expanded=expanded,
-                            key_override=override)
+                            key_override=override, domain=domain)
             elif current_name == "fixer_pool":
-                result = fn(session_id=session_id, path=path, key_override=override)
+                result = fn(session_id=session_id, path=path, key_override=override, domain=domain)
             elif current_name == "sandbox_tester_lean":
                 result = fn(session_id=session_id, path=path)
             elif current_name == "structure_architect":
-                # Bug fix: needs task_text now too (see UNSCOPED_TIER_AGENTS
-                # comment above) -- its no-code planning path uses it to plan
-                # a folder/file scaffold when there's no code to organize.
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text)
+                # Needs task_text (see UNSCOPED_TIER_AGENTS comment above)
+                # — its no-code planning path uses it to plan a
+                # folder/file scaffold when there's no code to organize.
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
+                            domain=domain)
             elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
-                # Migration Part 8 §8.3 fix, preserved: kept the
-                # three-name case rather than Part 12 §3.3's illustrative
-                # single-name ("file_manager" only) snippet -- dropping
-                # back to one name would silently reintroduce the exact
-                # project_unique_name bug Part 8 fixed for the two
-                # writeback callables.
+                # Kept as a three-name case rather than a single
+                # "file_manager" case — dropping back to one name would
+                # silently drop project_unique_name for the two writeback
+                # callables.
                 result = fn(project_unique_name=project_unique_name)
             elif current_name == "generic_worker":
-                # Migration Part 10 §4 / Part 12 §3.2: `role` identifies
-                # WHICH reasoning-only role this step is. input_keys is
-                # "every role earlier than this one in the (possibly
-                # runtime-escalated) plan" -- role_names[:idx] is a plain
-                # slice since role_names is already in resolved execution
-                # order.
+                # `role` identifies WHICH reasoning-only role this step
+                # is. input_keys is "every role earlier than this one in
+                # the (possibly runtime-escalated) plan" — role_names[:idx]
+                # is a plain slice since role_names is already in resolved
+                # execution order.
+                #
+                # Part 2 §2.6: include_conversation_context is False only
+                # for a role explicitly listed in
+                # no_conversation_context_roles — every other role keeps
+                # today's exact behavior (full conversation-memory
+                # prepend). input_keys is unaffected either way, since
+                # that's the separate, already-enforced per-stage scoping
+                # mechanism this gap sat alongside.
+                #
+                # domain (Part 2 §2.6, cost-tracking gap): forwarded so
+                # utils/llm_client.py's log_usage() can tag this call's
+                # usage for the per-project/per-section breakdown.
                 result = fn(role=role, task_text=task_text,
                             input_keys=role_names[:idx], session_id=session_id,
-                            key_override=override)
+                            key_override=override,
+                            include_conversation_context=role not in no_conversation_context_roles,
+                            domain=domain)
             elif current_name in UNSCOPED_TIER_AGENTS:
-                # Migration Part 26 §5 fix: was falling into the generic
-                # `else: fn()` branch below (zero args). tier=None if path
-                # itself is None/unrecognized -- these agents already
-                # treat a None tier as "unscoped" today (that's the exact
-                # gap being fixed, not a new failure mode), so this is
-                # strictly additive: a real tier whenever one is known,
-                # same silent-None fallback as before whenever it isn't.
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path))
+                # tier=None if path itself is None/unrecognized — these
+                # agents already treat a None tier as "unscoped".
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), domain=domain)
+            elif current_name in ("idea_planner", "prompt_writer", "test_writer", "report_writer"):
+                # Migration Part 2 §2.6, cost-tracking gap's last piece:
+                # these four used to fall through to the bare `else: fn()`
+                # branch below and got NOTHING passed to them at all — not
+                # even session_id, let alone domain. Each of these four
+                # modules' own run()/run_report_writer() already accepted
+                # (or, this same Part, now accepts) session_id/domain
+                # kwargs that simply had no caller ever supplying them.
+                # tier isn't threaded here even though prompt_writer.run()
+                # accepts it — none of these four are tier-gated the way
+                # UNSCOPED_TIER_AGENTS' four are, so there's no
+                # PATH_TO_TIER lookup relevant to pass.
+                result = fn(session_id=session_id, domain=domain)
             else:
                 result = fn()
         except MissingDependencyError as dep_exc:
-            # New capability: an agent asked for a specific prerequisite
-            # role instead of just hard-failing the task. Only attempt to
-            # self-heal on the "adaptive" path -- that's the only mode
-            # where role_names is a Panel-decided vocabulary a new role
-            # can be spliced into; on instant/direct/fixed's statically-
-            # built graphs (see eo/errors.py's docstring) this is a real
-            # ordering bug, not a staffing gap, so it's re-raised as-is.
+            # An agent asked for a specific prerequisite role instead of
+            # hard-failing the task. Only attempt to self-heal on the
+            # "adaptive" path — that's the only mode where role_names is
+            # a Panel-decided vocabulary a new role can be spliced into;
+            # on instant/direct/fixed's statically-built graphs this is a
+            # real ordering bug, not a staffing gap, so it's re-raised.
             needed_role = dep_exc.required_role
             pair = (role, needed_role)
             already_ran = needed_role in role_names[:idx]
@@ -289,34 +514,201 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                         payload={"message": f"{exc.__class__.__name__}: {exc}"})
             raise
         duration_ms = int((time.monotonic() - started) * 1000)
-        # Migration Part 12 §3.3: results is now keyed by ROLE, not
-        # module name -- results["generic_worker"] would otherwise
-        # silently overwrite itself across multiple generic_worker hires
-        # in the same plan (the same root cause as the dispatch
-        # disambiguation fix above).
+        # results is keyed by ROLE, not module name — results["generic_worker"]
+        # would otherwise silently overwrite itself across multiple
+        # generic_worker hires in the same plan.
         results[role] = result
         print(f"  [Executor] done: {current_name}")
         emit_event("agent_done", session_id=session_id, agent=current_name, path=path,
                     payload={"summary": _summarize(result), "duration_ms": duration_ms})
 
+        # Human-in-the-loop pause point. See this function's own
+        # docstring above for exactly what state has and hasn't advanced
+        # by this point.
+        if role in approval_roles:
+            from memory.bus import write, get_current_app_slug
+            snapshot = {
+                "agent_names": agent_names,
+                "role_names": role_names,
+                "idx": idx,
+                "results": results,
+                "key_overrides": key_overrides,
+                "auto_inserted": auto_inserted,
+                "stage_revisits": stage_revisits,
+                "path": path,
+                "task_text": task_text,
+                "project_unique_name": project_unique_name,
+                "mode": mode,
+                "approval_roles": list(approval_roles),
+                # Part 2 §2.6: carried through so a resumed run keeps
+                # applying the same scoped-memory opt-outs to every role
+                # still ahead of it in the plan — without this, resuming
+                # from a snapshot would silently revert every later role
+                # back to include_conversation_context=True.
+                "no_conversation_context_roles": list(no_conversation_context_roles),
+                # Part 2 §2.6: same carry-through reasoning as
+                # no_conversation_context_roles above, so usage logged
+                # after a resume still attributes to the same domain the
+                # run started with, instead of silently losing that tag.
+                "domain": domain,
+                # Captured so resume_graph() can restore the exact bus
+                # namespace this run was writing under before touching
+                # anything else.
+                "app_slug": get_current_app_slug(),
+            }
+            write(f"paused_execution:{session_id}", snapshot)
+            return {"status": "paused", "paused_at_role": role}
+
         next_idx, reason = next_step(
-            result if isinstance(result, dict) else {},
-            role_names, idx, session_id=session_id,
-            known_roles=set(list_known_roles()) | set(role_names),
+            result if isinstance(result, dict) else {}, role_names, idx, session_id=session_id,
+            # Part 2 §2.6: role_names may contain a group (a list) at
+            # ANY position now, not just idx — a bare set(role_names)
+            # would raise on the unhashable list the moment one exists
+            # anywhere in the plan, even while processing an unrelated
+            # single-role step.
+            known_roles=set(list_known_roles()) | _flatten_role_names(role_names),
         )
 
-        # Migration Part 12 §3.3 executor bug fix: next_step() may have
-        # appended a genuinely new role to role_names (escalation to a
-        # role that wasn't in the original plan at all). agent_names
-        # must grow in lockstep right here, or the `idx < len(agent_names)`
-        # check above would pass on borrowed role_names length while
-        # agent_names[idx] indexes past its own end next iteration.
+        # Part 2 §2.6: a "recheck" (role sent back to itself) retries on
+        # a different account than the one that just produced weak
+        # output, instead of silently repeating the identical hire.
+        _apply_recheck_retry(key_overrides, role_names, next_idx, reason)
+
+        # next_step() may have appended a genuinely new role to role_names
+        # (escalation to a role that wasn't in the original plan at all).
+        # agent_names must grow in lockstep right here, or agent_names[idx]
+        # indexes past its own end next iteration.
         if next_idx is not None and next_idx >= len(agent_names):
             agent_names.append(resolve_role(role_names[next_idx]))
 
         idx = next_idx
 
     return results
+
+
+def resume_graph(session_id: str, decision: dict) -> dict:
+    """Reads the paused_execution:{session_id} snapshot that _run_loop()
+    left behind and applies one of three human decisions, then re-enters
+    _run_loop() so every later role behaves exactly as it would have in
+    an un-paused run.
+
+    decision shapes:
+      {"action": "approve"}
+      {"action": "edit", "text": "..."}     — overwrites the paused
+          role's stored result text (both in the in-memory results dict
+          this function rebuilds AND in stage_output:{session_id}:{role}
+          on the memory bus, so any later generic_worker step reading
+          this role's output via input_keys sees the edited version).
+      {"action": "reject_redo"}             — re-runs the same role from
+          scratch, guarded by MAX_STAGE_REVISITS so a reject loop can't
+          run forever.
+
+    Raises KeyError if there's no paused run for this session_id.
+    Raises RuntimeError if reject_redo exceeds MAX_STAGE_REVISITS for
+    this role. Both are meant to be caught at the API layer and turned
+    into 404 / 409 responses respectively.
+
+    Scope limit: this calls _run_loop() directly, NOT
+    eo/loop_controller.py's run_with_looping(). If the paused run is part
+    of an expert/beast-mode macro-loop, resuming it here finishes that
+    one execute_graph() pass but does NOT re-enter run_with_looping()'s
+    gatekeeper check afterward. Fine for a single adaptive pass (the
+    common case this targets), but worth knowing before this gets
+    exercised under expert/beast mode with an approval_roles role in the
+    plan.
+    """
+    from memory.bus import read, write, delete, set_app_slug
+    from eo.dispatcher import next_step
+
+    snapshot = read(f"paused_execution:{session_id}", default=None)
+    if snapshot is None:
+        raise KeyError(f"No paused execution found for session_id={session_id!r}")
+
+    # Restore this run's original bus namespace BEFORE touching anything
+    # else below (the edit action's stage_output write, and every bus
+    # operation _run_loop() does for the rest of the resumed pass).
+    set_app_slug(snapshot.get("app_slug"))
+
+    agent_names = list(snapshot["agent_names"])
+    role_names = list(snapshot["role_names"])
+    idx = snapshot["idx"]
+    results = dict(snapshot["results"])
+    key_overrides = snapshot["key_overrides"]
+    auto_inserted = snapshot["auto_inserted"]
+    stage_revisits = snapshot.get("stage_revisits", {})
+    path = snapshot["path"]
+    task_text = snapshot["task_text"]
+    project_unique_name = snapshot["project_unique_name"]
+    mode = snapshot["mode"]
+    approval_roles = set(snapshot.get("approval_roles") or [])
+    # Part 2 §2.6 — see _run_loop()'s snapshot-write comment above.
+    no_conversation_context_roles = set(snapshot.get("no_conversation_context_roles") or [])
+    domain = snapshot.get("domain")
+    expanded = (mode or "auto").lower() in ("expert", "beast")
+
+    role = role_names[idx]
+    action = decision.get("action")
+
+    if action == "edit":
+        new_text = decision.get("text", "")
+        prior = results.get(role)
+        if isinstance(prior, dict) and "text" in prior:
+            edited = dict(prior)
+            edited["text"] = new_text
+        else:
+            edited = {"text": new_text}
+        results[role] = edited
+        write(f"stage_output:{session_id}:{role}", edited)
+        action = "approve"   # same continuation path once the edit lands
+
+    if action == "approve":
+        next_idx, reason = next_step(
+            results[role] if isinstance(results[role], dict) else {},
+            role_names, idx, session_id=session_id,
+            known_roles=set(list_known_roles()) | _flatten_role_names(role_names),
+        )
+        # Part 2 §2.6: same recheck-retry fix as _run_loop() above — a
+        # human approving a paused step can still route into a
+        # "recheck" (the dispatcher doesn't distinguish who approved the
+        # step it's now reasoning about), so this path needs the same
+        # different-account guarantee.
+        _apply_recheck_retry(key_overrides, role_names, next_idx, reason)
+        if next_idx is not None and next_idx >= len(agent_names):
+            agent_names.append(resolve_role(role_names[next_idx]))
+        idx = next_idx
+
+    elif action == "reject_redo":
+        visits = stage_revisits.get(role, 0)
+        if visits >= MAX_STAGE_REVISITS:
+            delete(f"paused_execution:{session_id}")
+            raise RuntimeError(
+                f"role '{role}' hit its reject/redo cap ({MAX_STAGE_REVISITS}) "
+                f"for session_id={session_id!r} -- refusing to loop forever."
+            )
+        stage_revisits[role] = visits + 1
+        # idx stays exactly where it was — re-entering _run_loop() below
+        # re-executes agent_names[idx]/role_names[idx] from scratch, the
+        # same "mutate the plan and continue" idiom MissingDependencyError
+        # already uses above for prerequisite auto-insertion.
+
+    else:
+        raise ValueError(f"Unknown resume action: {action!r}")
+
+    # Snapshot consumed. A fresh one gets written by _run_loop() below if
+    # this run pauses again on a later approval_roles role.
+    delete(f"paused_execution:{session_id}")
+    emit_event("execution_resumed", session_id=session_id, path=path,
+                payload={"label": role, "action": decision.get("action")})
+
+    return _run_loop(
+        agent_names=agent_names, role_names=role_names, idx=idx, results=results,
+        auto_inserted=auto_inserted, stage_revisits=stage_revisits, task_text=task_text,
+        session_id=session_id, path=path, mode=mode, key_overrides=key_overrides,
+        project_unique_name=project_unique_name, expanded=expanded,
+        approval_roles=approval_roles, next_step=next_step,
+        no_conversation_context_roles=no_conversation_context_roles,
+        domain=domain,
+    )
 
 
 if __name__ == "__main__":

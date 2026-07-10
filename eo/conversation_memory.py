@@ -23,6 +23,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 from eo import chat_store   # NEW — cross-chat memory sharing (see §4)
+from eo import chat_workspace   # NEW — Part 0 §0.3, session_id -> workspace_id
+from eo import workspace_facts  # NEW — Part 0 §0.3, tier-3 memory
 
 MAX_STORED_TURNS = 20      # hard cap on raw storage growth per session
 FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see
@@ -33,6 +35,22 @@ LIGHT_TURN_CHAR_LIMIT = 120     # per-turn truncation for the light view
 
 def _key(session_id: str) -> str:
     return f"conversation:{session_id}"
+
+
+def _workspace_facts_text(session_id: str) -> str:
+    """NEW — Part 0 §0.3. session_id and chat_id are the same string
+    everywhere in this system (api/server.py's own comment), so a
+    session's workspace is just "whichever workspace this chat_id is a
+    member of" — eo/chat_workspace.py's workspace_for_chat(). A session
+    with no workspace (most ad-hoc chats) simply gets "", same
+    no-history-yet convention every other lookup in this module already
+    uses, so this is always safe to prepend unconditionally."""
+    if not session_id:
+        return ""
+    ws = chat_workspace.workspace_for_chat(session_id)
+    if not ws:
+        return ""
+    return workspace_facts.format_facts_for_prompt(ws["id"])
 
 
 def append_turn(session_id: str, role: str, text: str) -> None:
@@ -69,9 +87,16 @@ def get_full_context(session_id: str, max_turns: int = FULL_CONTEXT_TURNS) -> st
     # NEW — pull in recent turns from any chats this one is linked to
     # (eo/chat_store.py's set_linked_chats()/get_linked_context_text()).
     linked = chat_store.get_linked_context_text(session_id, max_turns_per_chat=6, char_limit=400)
-    if linked and own:
-        return linked + "\n\n--- current conversation ---\n\n" + own
-    return linked or own
+    body = linked + "\n\n--- current conversation ---\n\n" + own if (linked and own) else (linked or own)
+
+    # NEW — Part 0 §0.3: workspace-level facts (tier 3), prepended ahead
+    # of both linked-chat context (tier 2) and this conversation's own
+    # turns (tier 1) — facts are the most stable/important context, so
+    # they lead rather than get buried under recent chatter.
+    facts = _workspace_facts_text(session_id)
+    if facts and body:
+        return facts + "\n\n" + body
+    return facts or body
 
 
 def get_light_context(session_id: str, max_turns: int = LIGHT_CONTEXT_TURNS) -> str:
@@ -93,6 +118,14 @@ def get_light_context(session_id: str, max_turns: int = LIGHT_CONTEXT_TURNS) -> 
 
     # NEW — same idea as get_full_context(), shorter, for the classifier/Inspector.
     linked = chat_store.get_linked_context_text(session_id, max_turns_per_chat=3, char_limit=150)
-    if linked and own:
-        return linked + "\n--- current conversation ---\n" + own
-    return linked or own
+    body = linked + "\n--- current conversation ---\n" + own if (linked and own) else (linked or own)
+
+    # NEW — Part 0 §0.3: workspace facts, light form. Deliberately the
+    # SAME format_facts_for_prompt() output as the full context, not a
+    # further-truncated variant — the facts block is already short by
+    # construction (a handful of lines at most), so it doesn't need its
+    # own light-mode truncation the way turn text does.
+    facts = _workspace_facts_text(session_id)
+    if facts and body:
+        return facts + "\n" + body
+    return facts or body

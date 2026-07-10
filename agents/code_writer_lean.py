@@ -75,7 +75,8 @@ def _strip_fences(code: str) -> str:
     return code
 
 
-def run(module_spec: dict = None, session_id: str = None, path: str = None) -> dict:
+def run(module_spec: dict = None, session_id: str = None, path: str = None,
+        domain: str = None) -> dict:
     if module_spec:
         write(KEYS["tier1_module_spec"], module_spec)
     else:
@@ -101,6 +102,7 @@ def run(module_spec: dict = None, session_id: str = None, path: str = None) -> d
             agent_name="Code Writer (lean)",
             session_id=session_id,
             path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real
+            domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
         )
         code = _strip_fences(raw)
         if not code:

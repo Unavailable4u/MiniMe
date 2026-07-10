@@ -3,7 +3,8 @@ import { useRef, useEffect, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import MessageBubble from "../MessageBubble";
 import WorkingPanel from "../WorkingPanel";
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown } from "lucide-react";
+import HireReviewScreen from "../HireReviewScreen";
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck } from "lucide-react";
 
 // Icon + label per mode, shared between the trigger button and the
 // dropdown list. Swap these for any other lucide-react icon you like —
@@ -22,6 +23,8 @@ export default function ChatTab() {
   const {
     messages, loading, sendTask, mode, setMode,
     activeMessageIndex, setActiveMessageIndex,
+    reviewBeforeDispatch, setReviewBeforeDispatch,   // NEW — Part 2 §2.5
+    pendingHireReview, confirmHireReview, cancelHireReview,   // NEW — Part 2 §2.5
   } = useSession();
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
@@ -104,14 +107,33 @@ export default function ChatTab() {
       <div className="flex flex-col flex-1 min-w-0 border-r border-neutral-800">
         <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
           <span className="text-xs font-medium text-neutral-400">Chat Box</span>
-          {workingPanelCollapsed && (
+          <div className="flex items-center gap-3">
+            {/* NEW — Part 2 §2.5: per-session toggle, off by default —
+                most tasks should stay one-click. When on, sendTask()
+                calls /api/task/preview instead of /api/task and pauses
+                on a real hires list (tier 2/3 only) before dispatching. */}
             <button
-              onClick={toggleWorkingPanel}
-              className="text-xs text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
+              type="button"
+              onClick={() => setReviewBeforeDispatch((v) => !v)}
+              title="Review staffed roles before a run starts"
+              className={`flex items-center gap-1 text-xs px-2 py-1 rounded-md border transition-colors ${
+                reviewBeforeDispatch
+                  ? "border-neutral-500 text-neutral-200 bg-neutral-800/70"
+                  : "border-neutral-800 text-neutral-500 hover:text-neutral-300"
+              }`}
             >
-              Show Working Panel
+              <ClipboardCheck size={12} />
+              Review hires
             </button>
-          )}
+            {workingPanelCollapsed && (
+              <button
+                onClick={toggleWorkingPanel}
+                className="text-xs text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
+              >
+                Show Working Panel
+              </button>
+            )}
+          </div>
         </div>
 
         <div
@@ -140,6 +162,19 @@ export default function ChatTab() {
           <div ref={bottomRef} />
         </div>
 
+        {/* NEW — Part 2 §2.5: the review screen renders in place of the
+            compose bar while a preview is awaiting a decision — nothing
+            has dispatched yet, so there's nothing for the compose bar to
+            usefully do until Confirm/Cancel resolves it. */}
+        {pendingHireReview ? (
+          <div className="border-t border-neutral-800 p-4">
+            <HireReviewScreen
+              hires={pendingHireReview.hires}
+              onConfirm={confirmHireReview}
+              onCancel={cancelHireReview}
+            />
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="border-t border-neutral-800 p-4 flex gap-2 items-end">
           {/* Mode picker — custom dropdown (not a native <select>) so each
               option can carry its own icon. */}
@@ -200,6 +235,7 @@ export default function ChatTab() {
             Send
           </button>
         </form>
+        )}
       </div>
 
       {/* RIGHT — Working Panel, foldable */}

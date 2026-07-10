@@ -101,7 +101,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run():
+def run(session_id: str = None, domain: str = None):
     submitted_code = read(KEYS["submitted_code"])
     if not submitted_code:
         # Bug fix: was `raise ValueError(...)` -- "implementer" is the role
@@ -118,7 +118,8 @@ def run():
     )
 
     raw_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Test Writer"),
+        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Test Writer",
+                               session_id=session_id, domain=domain),
         agent_name="Test Writer",
     )
     

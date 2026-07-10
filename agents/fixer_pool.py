@@ -167,7 +167,8 @@ def _normalize_entry(entry, original: dict) -> dict:
 
 
 def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes: dict,
-                     session_id: str = None, path: str = None) -> tuple:
+                     session_id: str = None, path: str = None,
+                     domain: str = None) -> tuple:
     """
     Runs on one thread with one fixed Cerebras key. Fixes only the modules
     assigned to this worker. Falls back to the shared Cloudflare account #3
@@ -217,7 +218,8 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
 
     try:
         raw = generate_text(SYSTEM_PROMPT + NEXT_TAG_INSTRUCTION, user_prompt, chain,
-                             agent_name=agent_name, session_id=session_id, path=path)
+                             agent_name=agent_name, session_id=session_id, path=path,
+                             domain=domain)  # Migration Part 2 §2.6: cost-tracking gap
     except RuntimeError as exc:
         print(f"  [Fixer {worker_index}] {exc}. Keeping original code for these modules.")
         return _done(modules, None)
@@ -254,7 +256,8 @@ def _merge_next_destinations(votes: list) -> str:
     return None
 
 
-def run_fixer_pool(session_id: str = None, path: str = None, key_override=None):
+def run_fixer_pool(session_id: str = None, path: str = None, key_override=None,
+                    domain: str = None):
     """
     Migration Part 5 §2.3 — key_override, if given, is the Panel's specific
     account-selection decision for this hire (mirrors code_writers.py's
@@ -304,7 +307,7 @@ def run_fixer_pool(session_id: str = None, path: str = None, key_override=None):
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
             executor.submit(_run_one_worker, i + 1, key_envs[i], buckets[i], review_notes,
-                             session_id=session_id, path=path): i
+                             session_id=session_id, path=path, domain=domain): i
             for i in range(num_workers)
         }
         for future in as_completed(futures):

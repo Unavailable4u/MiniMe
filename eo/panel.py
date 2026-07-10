@@ -188,7 +188,7 @@ def run_panel(task_text: str, draft: dict) -> dict:
 
 # NEW — add to eo/panel.py, below run_panel()
 
-from eo.registry import AGENT_CAPABILITIES, get_role_prompt, add_role_prompt
+from eo.registry import AGENT_CAPABILITIES, get_role_prompt, add_role_prompt, record_role_hire
 from eo.quota_sentinel import get_quota_snapshot
 from utils.llm_client import QUOTA_CONFIG
 from relay.emitter import emit_event
@@ -272,6 +272,13 @@ def staff_task(classification: dict, quota_status: dict = None,
     brief the first time a genuinely new role shows up; session_id lets
     that brief-writing call emit agent_start/agent_done events on the
     caller's own live channel instead of nowhere.
+
+    Part 2 §2.3 note: this function needs ZERO changes to support
+    workflow-template-driven hiring — a template's saved roles list is
+    handed in as classification["suggested_agents"] (via
+    eo.structure.classification_from_template()) exactly like a normal
+    Inspector/Panel classification would be. Which roles to hire and how
+    to pick an account for each are orthogonal concerns.
     """
     if quota_status is None:
         quota_status = get_quota_snapshot()
@@ -285,11 +292,16 @@ def staff_task(classification: dict, quota_status: dict = None,
             role_name, task_text or classification.get("reasoning", ""),
             session_id=session_id, tier=classification.get("tier"),
         )
+        # Part 2 §2.2 follow-through: this was flagged as a one-line
+        # addition to make once staff_task() was back in scope --
+        # counts every real hire so the Role Library UI's times_hired
+        # reflects actual usage, not just brief-writing events.
+        record_role_hire(role_name)
         hires.append({"role": role_name, "agent_key": candidate, "brief": brief})
     return hires
 
 
-def _best_match(role_name: str, quota_status: dict = None) -> str:
+def _best_match(role_name: str, quota_status: dict = None, exclude: set = None) -> str:
     """
     Migration Part 6 §1: prefer the best expertise (natural_roles) match
     and KEEP using it as long as it's under 80% of its daily quota. Only
@@ -297,10 +309,20 @@ def _best_match(role_name: str, quota_status: dict = None) -> str:
     lists this role at all, that's not a failure — fall through to the
     full account pool and pick purely by quota, since any capable
     account can attempt a role it just isn't specially tagged for.
+
+    Migration Part 2 §2.6: exclude (optional) — a set of account keys to
+    skip entirely, regardless of quota headroom. Added for
+    eo/executor.py's escalation-retry path: when a role gets sent back
+    for a "recheck" (its own output looked weak), the retry should land
+    on a different account than the one that just produced that weak
+    output, not bounce back to the identical account for an identical
+    answer. None (default) excludes nothing, so every existing caller
+    (staff_task(), which never passes this) is completely unaffected.
     """
+    exclude = exclude or set()
     natural_candidates = [
         key for key, info in AGENT_CAPABILITIES.items()
-        if role_name in info.get("natural_roles", [])
+        if role_name in info.get("natural_roles", []) and key not in exclude
     ]
 
     if natural_candidates:
@@ -317,11 +339,19 @@ def _best_match(role_name: str, quota_status: dict = None) -> str:
         # an over-quota account.
 
     # No natural match at all, OR every natural match is maxed out:
-    # choose from every provisioned account, ranked purely by quota.
-    all_candidates = list(AGENT_CAPABILITIES.keys())
+    # choose from every provisioned account (minus exclude), ranked
+    # purely by quota.
+    all_candidates = [k for k in AGENT_CAPABILITIES.keys() if k not in exclude]
     if not all_candidates:
-        return None   # only possible if AGENT_CAPABILITIES itself is empty —
-                       # a real configuration problem, not a normal outcome
+        # Every account is either excluded or AGENT_CAPABILITIES is
+        # itself empty. If it's the former (exclude ate the whole pool
+        # — e.g. only one account is provisioned at all), fall back to
+        # considering it anyway: a repeated account is still better than
+        # failing the retry outright. If AGENT_CAPABILITIES is genuinely
+        # empty, that's a real configuration problem.
+        all_candidates = list(AGENT_CAPABILITIES.keys())
+        if not all_candidates:
+            return None
     ranked = _sorted_by_quota(all_candidates, quota_status)
     under_cutoff = [c for c in ranked if _usage_fraction(c, quota_status) < QUOTA_CUTOFF]
     return under_cutoff[0] if under_cutoff else ranked[0]

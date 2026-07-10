@@ -63,7 +63,8 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(task_text: str = None, session_id: str = None, path: str = None) -> dict:
+def run(task_text: str = None, session_id: str = None, path: str = None,
+        domain: str = None) -> dict:
     if task_text:
         write(KEYS["tier1_task_text"], task_text)
     else:
@@ -86,6 +87,7 @@ def run(task_text: str = None, session_id: str = None, path: str = None) -> dict
         agent_name="Prompt Writer (lean)",
         session_id=session_id,
         path=path,   # Migration Part 27 §1: generate_text() now accepts `path` for real
+        domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
     )
     spec = json.loads(_strip_fences(raw))
     write(KEYS["tier1_module_spec"], spec)

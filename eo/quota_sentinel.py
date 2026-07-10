@@ -158,3 +158,63 @@ def get_usage_history(days: int = 7) -> dict:
         series["avg_tokens_per_day"] = round(total / days, 1) if days else 0.0
 
     return {"dates": dates, "providers": providers, "accounts": accounts}
+
+
+def get_usage_history_scoped(days: int = 7, domain: str = None, workspace_id: str = None) -> dict:
+    """New in Part 2 §2.6 -- the "per project or per section" breakdown
+    the blueprint asked for and the original TokenUsageTab.jsx view (per
+    provider / per account, above) didn't cover. Reads the
+    usage_by_domain:{domain}:{date} / usage_by_workspace:{workspace_id}:{date}
+    keys utils/llm_client.py's log_usage() now writes (Part 2 §2.6)
+    alongside its existing per-account key -- same MGET-in-one-round-trip
+    approach as get_usage_history() above, same reasoning: don't turn a
+    handful of dates into that many sequential network calls.
+
+    Deliberately a SEPARATE function rather than new params bolted onto
+    get_usage_history() above: that function's {dates, providers,
+    accounts} return shape is a real, depended-on contract (the
+    UsageHistoryPanel component already reads it), and a domain/workspace
+    query has no "providers"/"accounts" breakdown to offer -- the
+    secondary keys are pure aggregates, not tagged by provider/account.
+    Changing that function's shape conditionally would make it harder to
+    reason about for every existing caller; a new function with its own
+    shape is the honest choice.
+
+    domain and workspace_id, if both given, are read as two INDEPENDENT
+    series, not intersected -- log_usage() doesn't write a joint
+    domain+workspace key (e.g. "coding tasks in workspace X" specifically),
+    since there's no caller asking for that specific cut yet; add a joint
+    key later if one shows up. Passing neither returns both series as
+    None rather than raising, so a caller can be lazy about the condition.
+
+    Returns:
+    {
+      "dates": ["2026-07-01", ..., "2026-07-07"],
+      "domain": {"tokens": [...], "requests": [...],
+                 "total_tokens": int, "avg_tokens_per_day": float} | None,
+      "workspace": {"tokens": [...], "requests": [...],
+                    "total_tokens": int, "avg_tokens_per_day": float} | None,
+    }
+    """
+    dates = [(date.today() - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+
+    def _series_for(prefix: str, scope_id: str):
+        if not scope_id:
+            return None
+        keys = [f"{prefix}:{scope_id}:{d}" for d in dates]
+        records = bus_read_many(keys, default={"requests": 0, "tokens": 0})
+        tokens_series = [records[f"{prefix}:{scope_id}:{d}"].get("tokens", 0) for d in dates]
+        requests_series = [records[f"{prefix}:{scope_id}:{d}"].get("requests", 0) for d in dates]
+        total = sum(tokens_series)
+        return {
+            "tokens": tokens_series,
+            "requests": requests_series,
+            "total_tokens": total,
+            "avg_tokens_per_day": round(total / days, 1) if days else 0.0,
+        }
+
+    return {
+        "dates": dates,
+        "domain": _series_for("usage_by_domain", domain),
+        "workspace": _series_for("usage_by_workspace", workspace_id),
+    }
