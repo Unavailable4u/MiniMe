@@ -43,6 +43,29 @@ STRUCTURE_TEMPLATES = {
     "data_analysis": [
         "analyst", "formatter", "writer", "editor",
     ],
+    # Part 1 §1.2 — a menu, not a fixed pipeline (see this dict's own
+    # docstring above): a real task only hires 2-4 of these. Persona
+    # roles are pure reasoning (no file/API writes), so every one of them
+    # already resolves to generic_worker in eo/registry.py's
+    # resolve_role() with zero REAL_ACTION_ROLES changes -- see Part 1
+    # §1.1. simulation_synthesizer is deliberately last: it's the one
+    # non-persona role in this list (the aggregation step, §1.5), and its
+    # position here is what biases the Panel to reliably order it after
+    # every persona it might read from via input_keys.
+    "simulate": [
+        "persona_customer", "persona_skeptic", "critic_reviewer",
+        "usability_walkthrough", "red_team", "pricing_sensitivity",
+        "support_ticket_predictor", "competitor_response",
+        # Part 1 §1.4, track 2 — a single role for LARGE, REPETITIVE-
+        # persona requests ("15 marketplace reviews"), not meant to be
+        # hired alongside the distinct-viewpoint personas above. Included
+        # in this reference list (rather than left for the Panel to
+        # invent cold) so a batch-shaped request reliably gets pointed at
+        # one role instead of the Panel hiring N separate persona slots
+        # for what's actually one structured-output generation task.
+        "marketplace_review_batch",
+        "simulation_synthesizer",
+    ],
 }
 
 
@@ -53,6 +76,19 @@ def _rough_domain_guess(task_text: str) -> str | None:
     guess entirely; this is only used to decide which (if any) reference
     structure gets shown alongside the prompt."""
     text = task_text.lower()
+    # Checked before "coding" deliberately: coding's "app"/"code" keywords
+    # are broad enough to false-positive on phrases like "app store
+    # review" or "reactions to this app", which are unambiguously
+    # simulate requests. These phrases are specific (mostly multi-word),
+    # so checking them first costs nothing when a task is genuinely about
+    # coding -- none of these phrases show up in ordinary coding requests.
+    if any(kw in text for kw in (
+        "simulate", "persona", "reaction", "focus group", "red team",
+        "playtest", "pricing test", "customer would", "usability",
+        "marketplace review", "app store review", "amazon review",
+        "spread of reviews", "app review",
+    )):
+        return "simulate"
     if any(kw in text for kw in (
         "code", "bug", "function", "script", "app", "refactor", "api",
         "test", "debug", "repo", "codebase",
@@ -106,3 +142,209 @@ def build_reference_structure_addition(task_text: str) -> str:
     guessed_domain = _rough_domain_guess(task_text)
     reference = STRUCTURE_TEMPLATES.get(guessed_domain, [])
     return PANEL_PROMPT_ADDITION.format(domains=domains, reference_structure=reference or "none")
+
+
+# ---------------------------------------------------------------------------
+# Part 2 §2.3 — Workflow templates: a runtime-savable STRUCTURE_TEMPLATES
+# entry. STRUCTURE_TEMPLATES above is already exactly the schema the
+# blueprint wants (a name mapped to an ordered list of role-name
+# strings); the only real gap is that it's hardcoded Python, editable
+# only by redeploying. This section is the user-savable counterpart:
+# same `roles` shape, stored on the memory bus instead of in source, so
+# a template saved here can be copy-pasted straight into
+# STRUCTURE_TEMPLATES later with zero reshaping if it turns out to be
+# broadly useful.
+# ---------------------------------------------------------------------------
+import uuid as _uuid
+from datetime import datetime as _datetime, timezone as _timezone
+from memory.bus import read as _bus_read, write as _bus_write
+
+WORKFLOW_TEMPLATES_KEY = "workflow_templates"
+
+
+def _utcnow_iso() -> str:
+    return _datetime.now(_timezone.utc).isoformat()
+
+
+def _load_templates() -> dict:
+    """Single read path — a plain {template_id: template_dict} object
+    under one bus key, mirroring eo/registry.py's registry:role_prompts
+    single-key-single-dict pattern (Part 2 §2.2) rather than one file
+    per template. No bootstrap needed here (unlike role_prompts) --
+    there's no seed data for user-saved templates, an empty store is a
+    perfectly normal starting state."""
+    return _bus_read(WORKFLOW_TEMPLATES_KEY, default={})
+
+
+def _flatten_roles(roles: list) -> list:
+    """Migration Part 2 §2.6 — roles may now contain plain role-name
+    strings OR a nested list of role-name strings (a group a template
+    author explicitly marked as safe to run concurrently — see
+    eo/executor.py's group-execution branch). This flattens either shape
+    into a pure list of role names, for any caller that needs a hire
+    list rather than the grouping/ordering structure itself
+    (classification_from_template()'s suggested_agents, below). A plain
+    flat list of strings — every template shape from before §2.6 existed
+    — flattens to exactly itself, so this is purely additive."""
+    flat = []
+    for entry in roles:
+        if isinstance(entry, list):
+            flat.extend(entry)
+        else:
+            flat.append(entry)
+    return flat
+
+
+def _validate_roles_shape(roles: list) -> None:
+    """Cheap sanity check, not strict schema validation: every top-level
+    entry must be a role-name string, or a list of role-name strings
+    (one level of nesting only — a group of groups isn't a concept
+    eo/executor.py's group-execution branch understands, so reject it
+    early with a clear message instead of silently mis-flattening it or
+    failing confusingly deep inside a run)."""
+    for entry in roles:
+        if isinstance(entry, list):
+            if not all(isinstance(r, str) for r in entry):
+                raise ValueError(f"workflow template group {entry!r} must contain only role-name strings")
+        elif not isinstance(entry, str):
+            raise ValueError(f"workflow template role entry {entry!r} must be a string or a list of strings")
+
+
+def save_workflow_template(name: str, roles: list, description: str = "",
+                            domain_hint: str | None = None,
+                            approval_roles: list | None = None,
+                            no_conversation_context_roles: list | None = None,
+                            created_by: str | None = None) -> dict:
+    """New in Part 2 §2.3. `roles` is the identical flat
+    list-of-role-name-strings shape STRUCTURE_TEMPLATES entries already
+    use, on purpose. Covers both write paths the design calls for:
+    "save from a finished run" (caller passes that run's own
+    execution_order as `roles`) and "build from scratch" (caller passes
+    a list assembled in the Role Library UI) — both are just a plain
+    list of role-name strings to this function, no distinct code path
+    needed for the two.
+
+    Migration Part 2 §2.6: a top-level entry in `roles` may now ALSO be
+    a list of role-name strings — a group the template author explicitly
+    marked as safe to run concurrently (e.g.
+    `["idea_planner", ["draft_writer_a", "draft_writer_b"], "editor"]`).
+    A template with no such grouping is stored exactly as before — this
+    only activates when an author deliberately nests a sub-list, so
+    every template saved before this existed keeps working unmodified.
+    See eo/executor.py's group-execution branch for how a group is
+    actually run once execution reaches it.
+
+    approval_roles defaults to [] (full-auto, today's exact dispatch
+    behavior) — this is the field Part 2 §2.4's human-in-the-loop
+    checkpoints read at dispatch time; defined here since this is where
+    the template schema itself lives, wired up for real in §2.4.
+
+    no_conversation_context_roles defaults to [] (every role sees the
+    full conversation-memory prepend, today's exact behavior) — Part 2
+    §2.6's scoped-memory fix. A role name in this list is dispatched with
+    generic_worker.run()'s `include_conversation_context=False`, for a
+    narrow persona or single-purpose role that has no business reading
+    unrelated conversation history it wasn't scoped to. Only meaningful
+    for roles that actually run through generic_worker — listing a
+    real-action role here (e.g. "code_writers") is harmless but has no
+    effect, since only generic_worker's dispatch case in eo/executor.py
+    reads this set. Whoever dispatches this template (eo/loop_v4.py or
+    api/task_runner.py) is expected to pass this straight through as
+    execute_graph()'s `no_conversation_context_roles` argument, the exact
+    same wiring pattern approval_roles already uses."""
+    _validate_roles_shape(roles)
+    templates = _load_templates()
+    template_id = str(_uuid.uuid4())
+    template = {
+        "template_id": template_id,
+        "name": name,
+        "description": description,
+        "roles": list(roles),
+        "domain_hint": domain_hint,
+        "approval_roles": list(approval_roles) if approval_roles else [],
+        "no_conversation_context_roles": list(no_conversation_context_roles) if no_conversation_context_roles else [],
+        "created_by": created_by,
+        "created_at": _utcnow_iso(),
+    }
+    templates[template_id] = template
+    _bus_write(WORKFLOW_TEMPLATES_KEY, templates)
+    return template
+
+
+def get_workflow_template(template_id: str) -> dict | None:
+    """Returns one saved template by id, or None if it doesn't exist."""
+    return _load_templates().get(template_id)
+
+
+def list_workflow_templates() -> list:
+    """Every saved template, newest first — for a template-picker UI."""
+    templates = list(_load_templates().values())
+    return sorted(templates, key=lambda t: t.get("created_at") or "", reverse=True)
+
+
+def delete_workflow_template(template_id: str) -> bool:
+    """Not explicitly spelled out by the design, but a save-only
+    template library with no way to remove a bad save isn't realistic
+    for v1 — a thin, obvious complement to save_workflow_template().
+    Returns True if a template was actually removed, False if the id
+    was already gone, so a caller can tell the two apart without a
+    try/except."""
+    templates = _load_templates()
+    if template_id not in templates:
+        return False
+    del templates[template_id]
+    _bus_write(WORKFLOW_TEMPLATES_KEY, templates)
+    return True
+
+
+def classification_from_template(template: dict) -> dict:
+    """New in Part 2 §2.3. Builds a classification-shaped dict from a
+    saved template so it can be handed straight to
+    eo.panel.staff_task() exactly like a normal Inspector/Panel
+    classification would be — staff_task() itself needs ZERO changes
+    for template-driven hiring, since it only ever reads
+    classification.get("suggested_agents", ...) and
+    classification.get("tier"). The template's own `roles` order
+    doubles as both the hire list AND the desired execution_order —
+    that's the same list, on purpose, since a saved template's whole
+    point is "run these roles, in this order."
+
+    Migration Part 2 §2.6: `roles` may contain nested groups now (see
+    save_workflow_template()'s docstring). staff_task() only ever needs
+    a flat hire list — a role still needs its own account and brief
+    whether or not it's grouped with others for execution — so
+    suggested_agents is `roles` FLATTENED via _flatten_roles(). But
+    execution_order keeps the original, possibly-nested shape: THAT'S
+    what eo.router.build_execution_graph_from_hires() must carry
+    through into role_names/agent_names unchanged, since a group is only
+    meaningful to eo/executor.py's dispatch loop if it survives as an
+    actual nested list at the position it belongs, not a flattened one.
+
+    tier is fixed at 3 ("adaptive"): a saved template is, by
+    definition, a hires-driven run — the same execution path every
+    other adaptive/tier-3 task (including everything Part 1 built)
+    already goes through. This is what a caller (eo/loop_v4.py or
+    api/task_runner.py, whichever entrypoint checks "did the user pick
+    a template?") uses in place of running the Inspector/Panel at all
+    for that request.
+
+    approval_roles and no_conversation_context_roles are carried through
+    verbatim (not part of the Inspector/Panel classification shape
+    itself, but the caller needs them alongside this dict to actually
+    wire up execute_graph()'s matching arguments — see this function's
+    docstring note under no_conversation_context_roles in
+    save_workflow_template())."""
+    roles = template["roles"]
+    return {
+        "tier": 3,
+        "path": "adaptive",
+        "directed_task_type": None,
+        "confidence": 1.0,
+        "suggested_agents": _flatten_roles(roles),
+        "execution_order": list(roles),
+        "domain": template.get("domain_hint"),
+        "reasoning": f"started from saved workflow template '{template['name']}'",
+        "panel_reviewed": False,
+        "approval_roles": list(template.get("approval_roles") or []),
+        "no_conversation_context_roles": list(template.get("no_conversation_context_roles") or []),
+    }

@@ -73,7 +73,7 @@ def _app_slug() -> str:
     return get_current_app_slug() or read(KEYS["original_idea"], default="untitled")
 
 
-def run(session_id: str = None, tier=None) -> dict:
+def run(session_id: str = None, tier=None, domain: str = None) -> dict:
     submitted_code = read(KEYS["submitted_code"], default={})
     cycle_num = read(KEYS["cycle_count"], default=1)
     slug = _app_slug()
@@ -101,7 +101,7 @@ def run(session_id: str = None, tier=None) -> dict:
         # memory_search.py's own comment: a downstream Vector query
         # failure shouldn't hide that the billable HF call already happened.
         log_usage("huggingface", HF_KEY_ENV, None, session_id=session_id,
-                   tier=tier, agent_name="Duplication Checker")
+                   tier=tier, agent_name="Duplication Checker", domain=domain)
 
         try:
             matches = vector_index().query(

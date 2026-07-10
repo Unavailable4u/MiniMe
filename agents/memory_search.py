@@ -50,7 +50,8 @@ def _app_slug() -> str:
     return get_current_app_slug() or read(KEYS["original_idea"], default="untitled")
 
 
-def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None) -> None:
+def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None,
+                        domain: str = None) -> None:
     report = read(KEYS["latest_report"], default=None)
     plan = read(KEYS["current_plan"], default={})
     if not report:
@@ -71,7 +72,7 @@ def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None)
     # token count from, so this logs a request-only entry (tokens=None) --
     # same pattern duplication_checker.py should use for its HF calls.
     log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
-              session_id=session_id, tier=tier, agent_name="Memory Search")
+              session_id=session_id, tier=tier, agent_name="Memory Search", domain=domain)
     try:
         vector_index().upsert(
             vectors=[(f"{ID_PREFIX}:{slug}:{cycle_num}", vector, {
@@ -84,7 +85,8 @@ def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None)
         print(f"  [Memory Search] vector upsert failed: {exc}")
 
 
-def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, tier: int = None) -> str:
+def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, tier: int = None,
+                      domain: str = None) -> str:
     slug = _app_slug()
     try:
         vector = embed_text(query_text)
@@ -96,7 +98,7 @@ def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, ti
     # Vector query failure shouldn't hide the fact that the billable HF
     # call already happened.
     log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
-              session_id=session_id, tier=tier, agent_name="Memory Search")
+              session_id=session_id, tier=tier, agent_name="Memory Search", domain=domain)
     try:
         result = vector_index().query(
             vector=vector, top_k=top_k, include_metadata=True,
@@ -112,13 +114,13 @@ def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, ti
     return context
 
 
-def run(session_id: str = None, tier: int = None) -> str:
+def run(session_id: str = None, tier: int = None, domain: str = None) -> str:
     """Convenience entrypoint for loop.py: retrieve context for the
     upcoming cycle, based on the original idea + feature status."""
     idea = read(KEYS["original_idea"], default="")
     feature_status = read(KEYS["feature_status"], default={})
     query = f"{idea} | feature_status: {json.dumps(feature_status)}"
-    return retrieve_context(query, session_id=session_id, tier=tier)
+    return retrieve_context(query, session_id=session_id, tier=tier, domain=domain)
 
 
 if __name__ == "__main__":

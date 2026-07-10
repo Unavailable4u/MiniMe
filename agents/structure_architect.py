@@ -229,7 +229,7 @@ def _build_mermaid(plan: dict) -> str:
     return "\n".join(lines)
 
 
-def _code_plan(fixed_code: dict, session_id: str, tier: int) -> dict:
+def _code_plan(fixed_code: dict, session_id: str, tier: int, domain: str = None) -> dict:
     """Existing (pre-fix) behavior, unchanged: plan write/move/delete/mkdir
     operations for a set of already-generated code modules."""
     # Migration Part B (session isolation fix): get_current_app_slug(),
@@ -266,7 +266,7 @@ def _code_plan(fixed_code: dict, session_id: str, tier: int) -> dict:
     )
 
     raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Structure Architect",
-                         session_id=session_id, tier=tier)
+                         session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 
     try:
@@ -288,7 +288,7 @@ def _code_plan(fixed_code: dict, session_id: str, tier: int) -> dict:
     return plan
 
 
-def _no_code_plan(task_text: str, session_id: str, tier: int) -> dict:
+def _no_code_plan(task_text: str, session_id: str, tier: int, domain: str = None) -> dict:
     """NEW — bug fix: plan a plain folder/file scaffold when there's no
     code to organize. Pulls in whatever idea/plan context this session
     has produced so far (idea_planner's output, if it ran) alongside the
@@ -306,7 +306,7 @@ def _no_code_plan(task_text: str, session_id: str, tier: int) -> dict:
 
     raw = generate_text(NO_CODE_SYSTEM_PROMPT, user_prompt, CHAIN,
                          agent_name="Structure Architect (no-code)",
-                         session_id=session_id, tier=tier)
+                         session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 
     try:
@@ -325,7 +325,7 @@ def _no_code_plan(task_text: str, session_id: str, tier: int) -> dict:
 
 
 def run_structure_architect(session_id: str = None, tier: int = None,
-                             task_text: str = None) -> dict:
+                             task_text: str = None, domain: str = None) -> dict:
     """
     Bug fix: no longer hard-requires fixed_code. Prefers fixed_code
     (Fixer Pool's output) over submitted_code (Code Writers' raw output,
@@ -343,9 +343,9 @@ def run_structure_architect(session_id: str = None, tier: int = None,
     code_source = fixed_code or submitted_code
 
     if code_source:
-        plan = _code_plan(code_source, session_id, tier)
+        plan = _code_plan(code_source, session_id, tier, domain=domain)
     else:
-        plan = _no_code_plan(task_text, session_id, tier)
+        plan = _no_code_plan(task_text, session_id, tier, domain=domain)
 
     plan["mermaid"] = _build_mermaid(plan)
     write(FILE_PLAN_KEY, plan)

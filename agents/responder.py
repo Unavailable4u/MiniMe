@@ -58,7 +58,8 @@ for any code, use tables for tabular data, use headers/bullet lists to \
 structure longer answers, and use bold/italic sparingly for emphasis."""
 
 
-def run(task_text: str = None, key_override=None, session_id: str = None, path: str = None) -> str:
+def run(task_text: str = None, key_override=None, session_id: str = None, path: str = None,
+        domain: str = None) -> str:
     """
     Answers `task_text` directly. Unlike the other agents in this
     codebase, this one takes its input as an argument rather than reading
@@ -94,6 +95,13 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     transcript, are untouched either way. path is forwarded to
     generate_text() purely for usage-log labeling (same as every other
     agent); it has no effect on the answer.
+
+    domain (Part 2 §2.6, cost-tracking gap): tier 0 has no Panel
+    classification step, so nothing upstream actually produces a domain
+    for this path today -- this param exists purely so session_id
+    tagging isn't the only thing forwarded, and so a future caller that
+    does have a domain doesn't need this signature touched again. Safe
+    to leave None, same as every other optional param here.
     """
     if not task_text:
         raise ValueError(
@@ -125,6 +133,7 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
         agent_name="Responder",
         session_id=session_id,   # NEW — Part 23 fix
         path=path,   # NEW — Part 23 fix
+        domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
     )
     return answer.strip()
 

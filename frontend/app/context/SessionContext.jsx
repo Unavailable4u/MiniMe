@@ -83,6 +83,19 @@ export function SessionProvider({ children }) {
   const [mode, setMode] = useState("auto");
   const [pusherConnected, setPusherConnected] = useState(false); // NEW — Settings tab diagnostic, §6
   const [activeMessageIndex, setActiveMessageIndex] = useState(null); // NEW — Part 21: shared scroll-sync index between Chat and Working panels
+  // NEW — Part 2 §2.5: gates whether sendTask() calls /api/task directly
+  // (today's exact one-click behavior, default) or /api/task/preview
+  // first so a human can review/edit the staffed hires before anything
+  // dispatches. Per-session, not persisted — a deliberate minority-case
+  // toggle per the design doc, not a global setting.
+  const [reviewBeforeDispatch, setReviewBeforeDispatch] = useState(false);
+  // NEW — Part 2 §2.5: non-null exactly when a preview_task() call
+  // returned "preview_ready" and is awaiting HireReviewScreen's
+  // confirm/cancel. Holds everything confirmHireReview()/
+  // cancelHireReview() need without re-deriving them: the original
+  // task text, the decision object (handed back to /api/task/confirm
+  // unmodified), and the hires list to render.
+  const [pendingHireReview, setPendingHireReview] = useState(null);
 
   // --- NEW: on mount, load the chat list, then restore the last active
   // chat (or create the very first one). This replaces the old
@@ -508,24 +521,97 @@ async function deleteWorkspace(wsId) {
     }
   }
 
-  async function sendTask(taskText) {
-    const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
-    setMessages((prev) => [...prev, userMessage]);
-    persistMessage(userMessage);   // NEW
-    setLoading(true);
+  // Part 2 §2.5 — pulled out of sendTask() so confirmHireReview() (below)
+  // can reset the exact same live-run state a normal dispatch does; a
+  // confirmed hire review is starting a real run just as much as a
+  // one-click sendTask() call is.
+  function _resetLiveRunState() {
     setLiveDecision(null);
     stepsRef.current = [];
     setLiveSteps([]);
-    openStepStack.current = [];   // NEW — bug fix
-    roleRequestsRef.current = []; // NEW
-    setRoleRequests([]);          // NEW
+    openStepStack.current = [];
+    roleRequestsRef.current = [];
+    setRoleRequests([]);
     routeTraceRef.current = [];
     setRouteTrace([]);
     dependencyMapRef.current = {};
     setDependencyMap({});
     structurePlanRef.current = null;
     setStructurePlan(null);
-    setMacroLoopDecisions([]);   // NEW — same clean-slate treatment as the others
+    setMacroLoopDecisions([]);
+  }
+
+  // Part 2 §2.5 — same reasoning as the Part 18/21 comments this
+  // replaces: snapshot from the refs (not the stale-closure state vars)
+  // so the message carries its own self-contained Working Panel section,
+  // whether it came from sendTask()'s direct path or confirmHireReview()'s
+  // post-review dispatch.
+  function _buildAssistantMessage(taskText, data) {
+    return {
+      role: "assistant",
+      data,
+      task: taskText,
+      steps: stepsRef.current,
+      routeTrace: routeTraceRef.current,
+      roleRequests: roleRequestsRef.current,
+      dependencyMap: dependencyMapRef.current,
+      structurePlan: structurePlanRef.current,
+    };
+  }
+
+  async function sendTask(taskText) {
+    const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
+    setMessages((prev) => [...prev, userMessage]);
+    persistMessage(userMessage);   // NEW
+    setLoading(true);
+    _resetLiveRunState();
+
+    // Part 2 §2.5: reviewBeforeDispatch is off by default (today's exact
+    // one-click behavior, unchanged) — most tasks should stay one-click,
+    // this is only for the minority of cases a user has explicitly opted
+    // into reviewing hires first.
+    if (reviewBeforeDispatch) {
+      try {
+        const res = await fetch(`${API_URL}/api/task/preview`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+          },
+          body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
+        });
+        const data = await res.json();
+        if (data.status === "preview_ready") {
+          // Nothing has run yet — stash it and hand off to
+          // HireReviewScreen via confirmHireReview()/cancelHireReview().
+          // loading stays true: the run genuinely hasn't finished, it's
+          // just paused on a human decision instead of agent work.
+          setPendingHireReview({
+            taskText,
+            sessionId: data.session_id,
+            decision: data.decision,
+            hires: data.result?.hires || [],
+          });
+          setLoading(false);
+          return;
+        }
+        // Every other status (cache/sga/tier-0/1/needs_*/hires-empty
+        // tier-2/3) is a genuinely finished response, identical in shape
+        // to what /api/task would have returned — handle it exactly like
+        // the non-preview path below.
+        const assistantMessage = _buildAssistantMessage(taskText, data);
+        setMessages((prev) => [...prev, assistantMessage]);
+        persistMessage(assistantMessage);
+        setLoading(false);
+      } catch (err) {
+        const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+        setMessages((prev) => [...prev, assistantMessage]);
+        persistMessage(assistantMessage);
+        setLoading(false);
+      }
+      return;
+    }
+
     try {
       const res = await fetch(`${API_URL}/api/task`, {
         method: "POST",
@@ -536,46 +622,65 @@ async function deleteWorkspace(wsId) {
         body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
       });
       const data = await res.json();
-      // NEW — Part 18: snapshot the just-finished run's steps onto the
-      // message itself, via the ref (not the `liveSteps` state variable,
-      // which would be stale here — this closure captured whatever
-      // liveSteps was at the moment sendTask() was called, not the
-      // latest value after every event that streamed in since).
-      // NEW — Part 21: same reasoning now applies to routeTrace/
-      // dependencyMap/structurePlan — snapshot from the refs (not the
-      // stale-closure state vars), plus the task prompt itself, so the
-      // Working Panel has a self-contained section per message.
-      const assistantMessage = {
-        role: "assistant",
-        data,
-        task: taskText,
-        steps: stepsRef.current,
-        routeTrace: routeTraceRef.current,
-        roleRequests: roleRequestsRef.current,   // NEW
-        dependencyMap: dependencyMapRef.current,
-        structurePlan: structurePlanRef.current,
-      };
+      const assistantMessage = _buildAssistantMessage(taskText, data);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);   // NEW
     } catch (err) {
-      // NEW — Part 21: same four-field snapshot on the error path, so a
-      // failed run still shows whatever routing/structure data was
-      // captured before it broke instead of a blank Working Panel section.
-      const assistantMessage = {
-        role: "assistant",
-        data: { status: "error", message: String(err) },
-        task: taskText,
-        steps: stepsRef.current,
-        routeTrace: routeTraceRef.current,
-        roleRequests: roleRequestsRef.current,   // NEW
-        dependencyMap: dependencyMapRef.current,
-        structurePlan: structurePlanRef.current,
-      };
+      const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);   // NEW
     } finally {
       setLoading(false);
     }
+  }
+
+  // Part 2 §2.5 — HireReviewScreen's "Confirm & Run" calls this with its
+  // edited hires array ({role, agent_key, brief, update_library}[]).
+  // Dispatches straight through /api/task/confirm — no second
+  // staff_task() call — then finishes the run exactly like sendTask()'s
+  // direct path (same message shape, same live-state reset).
+  async function confirmHireReview(editedHires) {
+    if (!pendingHireReview) return;
+    const { taskText, sessionId: reviewSessionId, decision } = pendingHireReview;
+    setLoading(true);
+    _resetLiveRunState();
+    try {
+      const res = await fetch(`${API_URL}/api/task/confirm`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+        },
+        body: JSON.stringify({
+          task_text: taskText,
+          decision,
+          hires: editedHires,
+          session_id: reviewSessionId,
+          mode,
+        }),
+      });
+      const data = await res.json();
+      const assistantMessage = _buildAssistantMessage(taskText, data);
+      setMessages((prev) => [...prev, assistantMessage]);
+      persistMessage(assistantMessage);
+    } catch (err) {
+      const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+      setMessages((prev) => [...prev, assistantMessage]);
+      persistMessage(assistantMessage);
+    } finally {
+      setLoading(false);
+      setPendingHireReview(null);
+    }
+  }
+
+  // Part 2 §2.5 — HireReviewScreen's "Cancel". Nothing was ever
+  // dispatched (preview_task() stopped before execute_graph()/
+  // run_with_looping()), so there's no run to tear down — just drop the
+  // pending review. The user's message stays in the transcript with no
+  // assistant reply, the same way a "needs_app"/"needs_directed_task_type"
+  // response leaves an unanswered turn today.
+  function cancelHireReview() {
+    setPendingHireReview(null);
   }
 
   async function registerProject() {
@@ -618,6 +723,9 @@ async function deleteWorkspace(wsId) {
   pusherConnected,
   activeMessageIndex, setActiveMessageIndex,
   sendTask, registerProject,
+  // NEW — Part 2 §2.5: manual role editing before dispatch
+  reviewBeforeDispatch, setReviewBeforeDispatch,
+  pendingHireReview, confirmHireReview, cancelHireReview,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

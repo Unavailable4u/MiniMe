@@ -1,11 +1,6 @@
 "use client";
-import { useMemo, useRef, useEffect, useState } from "react";
-import dynamic from "next/dynamic";
-
-// react-force-graph-2d touches the canvas/window at import time, so it
-// has to load client-side only -- same reasoning as any other
-// canvas/WebGL library under Next.js's app router.
-const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
+import { useMemo, useRef, useState } from "react";
+import ForceGraphBase from "./ForceGraphBase";
 
 // The full icon table (role name -> {icon, color}, spanning coding,
 // writing, music, legal, medical, business, science, trades, etc --
@@ -100,10 +95,13 @@ function escapeHtml(s) {
 //
 // `runStatus`: "running" | "done" | "error" -- drives the Output node's
 // status ring so it visibly flips from pending -> done/error.
+//
+// NOTE: this component now only computes `{nodes, links}` from routing-
+// specific inputs and how to DRAW a routing node/link -- the actual
+// ForceGraph2D wiring (sizing, dynamic import, zoom-to-fit) lives in the
+// generic ForceGraphBase, shared with KnowledgeGraphView.jsx (Part 0
+// Section 0.2). Nothing about the graph SHAPE below changed.
 export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus }) {
-  const fgRef = useRef();
-  const containerRef = useRef(null);
-  const [dims, setDims] = useState({ width: 600, height: 360 });
   const [hoveredNode, setHoveredNode] = useState(null);
 
   // FIX (graph reflows/jumps on every single event instead of growing
@@ -115,17 +113,6 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
   // (mutated in place, not replaced) lets already-placed nodes keep their
   // x/y and only genuinely new nodes enter unplaced.
   const nodeObjectsRef = useRef(new Map());
-  const lastZoomRef = useRef(0);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const el = containerRef.current;
-    const observer = new ResizeObserver(([entry]) => {
-      setDims({ width: entry.contentRect.width, height: 360 });
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
 
   // Most recent step per role/id -- a role can be revisited (recheck/
   // escalate), and the latest run of it is what the node should reflect.
@@ -269,107 +256,90 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
     return { nodes, links };
   }, [trace, suggestedAgents, roleRequests, steps, stepByRole, runStatus]);
 
+  const legend = (
+    <>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-emerald-500" /> done</span>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-amber-500" /> running</span>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-red-500" /> error</span>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-neutral-500" style={{ borderStyle: "dashed" }} /> pending</span>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-cyan-400" /> requested</span>
+    </>
+  );
+
   return (
-    <div ref={containerRef} className="relative rounded-lg border border-neutral-800 overflow-hidden">
-      <ForceGraph2D
-        ref={fgRef}
-        graphData={graphData}
-        width={dims.width}
-        height={dims.height}
-        backgroundColor="#0a0a0a"
-        linkColor={(link) => REASON_COLORS[link.reason] || "#6b7280"}
-        linkCurvature="curvature"
-        linkDirectionalArrowLength={5}
-        linkDirectionalArrowRelPos={1}
-        linkWidth={(link) => (link.reason === "requested" ? 2 : 1)}
-        linkLabel={(link) => link.reason}
-        cooldownTicks={60}
-        onEngineStop={() => {
-          // Debounced re-frame: with positions now persisted across
-          // renders (see nodeObjectsRef), this only needs to nudge the
-          // view outward as new nodes arrive, not fully re-center every
-          // single event -- avoids the camera jumping around mid-run.
-          const now = Date.now();
-          if (now - lastZoomRef.current > 250) {
-            lastZoomRef.current = now;
-            fgRef.current?.zoomToFit(400, 60);
-          }
-        }}
-        onNodeHover={(node) => setHoveredNode(node)}
-        nodeLabel={(node) => {
-          // FIX (long agent names get cut off on hover too): this used to
-          // reuse the same already-truncated `display` string as the
-          // under-node label, so anything past ~26 chars was unreadable
-          // everywhere, including hover -- the one place with room to
-          // show it in full. node.fullName is untruncated and is always
-          // set alongside node.display wherever a node is upserted above.
-          const parts = [
-            `<div style="font-weight:600">${escapeHtml(node.category.icon)} ${escapeHtml(node.fullName || node.display || node.id)}</div>`,
-            `<div style="opacity:.7">${escapeHtml(node.status)}${node.durationMs != null ? ` · ${node.durationMs}ms` : ""}</div>`,
-          ];
-          if (node.summary) {
-            parts.push(`<div style="max-width:320px;white-space:normal;word-break:break-word;margin-top:2px">${escapeHtml(truncate(node.summary))}</div>`);
-          }
-          return `<div style="background:#171717;border:1px solid #404040;border-radius:6px;padding:6px 8px;font-size:11px;color:#e5e5e5;max-width:340px;white-space:normal;word-break:break-word">${parts.join("")}</div>`;
-        }}
-        nodeCanvasObject={(node, ctx, globalScale) => {
-          const { icon, color } = node.category;
-          // FIX (icons too small / shapes too busy): flat circular badge
-          // for every node -- category shown via color+icon, no more
-          // diamond/hexagon/triangle geometry competing with the glyph.
-          // Endpoint nodes (Input/Output) get a slightly larger badge so
-          // they read as the start/end of the flow, not just another step.
-          const r = node.isEndpoint ? 13 : 11;
-          const ringColor =
-            node.status === "error" ? "#ef4444" :
-            node.status === "running" ? "#f59e0b" :
-            node.status === "done" ? "#22c55e" :
-            node.status === "pending" ? "#525252" : "#525252";
+    <ForceGraphBase
+      nodes={graphData.nodes}
+      links={graphData.links}
+      linkColor={(link) => REASON_COLORS[link.reason] || "#6b7280"}
+      linkWidth={(link) => (link.reason === "requested" ? 2 : 1)}
+      linkLabel={(link) => link.reason}
+      onNodeHover={setHoveredNode}
+      nodeLabel={(node) => {
+        // FIX (long agent names get cut off on hover too): this used to
+        // reuse the same already-truncated `display` string as the
+        // under-node label, so anything past ~26 chars was unreadable
+        // everywhere, including hover -- the one place with room to
+        // show it in full. node.fullName is untruncated and is always
+        // set alongside node.display wherever a node is upserted above.
+        const parts = [
+          `<div style="font-weight:600">${escapeHtml(node.category.icon)} ${escapeHtml(node.fullName || node.display || node.id)}</div>`,
+          `<div style="opacity:.7">${escapeHtml(node.status)}${node.durationMs != null ? ` · ${node.durationMs}ms` : ""}</div>`,
+        ];
+        if (node.summary) {
+          parts.push(`<div style="max-width:320px;white-space:normal;word-break:break-word;margin-top:2px">${escapeHtml(truncate(node.summary))}</div>`);
+        }
+        return `<div style="background:#171717;border:1px solid #404040;border-radius:6px;padding:6px 8px;font-size:11px;color:#e5e5e5;max-width:340px;white-space:normal;word-break:break-word">${parts.join("")}</div>`;
+      }}
+      nodeCanvasObject={(node, ctx, globalScale) => {
+        const { icon, color } = node.category;
+        // FIX (icons too small / shapes too busy): flat circular badge
+        // for every node -- category shown via color+icon, no more
+        // diamond/hexagon/triangle geometry competing with the glyph.
+        // Endpoint nodes (Input/Output) get a slightly larger badge so
+        // they read as the start/end of the flow, not just another step.
+        const r = node.isEndpoint ? 13 : 11;
+        const ringColor =
+          node.status === "error" ? "#ef4444" :
+          node.status === "running" ? "#f59e0b" :
+          node.status === "done" ? "#22c55e" :
+          node.status === "pending" ? "#525252" : "#525252";
 
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-          ctx.fillStyle = color;
-          ctx.globalAlpha = node.status === "pending" ? 0.22 : node.status === "running" ? 0.6 : 0.92;
-          ctx.fill();
-          ctx.globalAlpha = 1;
-          ctx.lineWidth = node === hoveredNode ? 3 : 2;
-          if (node.status === "pending") ctx.setLineDash([2, 2]);
-          ctx.strokeStyle = ringColor;
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.restore();
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = node.status === "pending" ? 0.22 : node.status === "running" ? 0.6 : 0.92;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = node === hoveredNode ? 3 : 2;
+        if (node.status === "pending") ctx.setLineDash([2, 2]);
+        ctx.strokeStyle = ringColor;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
 
-          // Big icon glyph, front and center -- sized off the badge
-          // radius (not a flat px value) so it always fills the badge.
-          const iconSize = (r * 1.65) / globalScale;
-          ctx.font = `${iconSize}px sans-serif`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(icon, node.x, node.y);
+        // Big icon glyph, front and center -- sized off the badge
+        // radius (not a flat px value) so it always fills the badge.
+        const iconSize = (r * 1.65) / globalScale;
+        ctx.font = `${iconSize}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(icon, node.x, node.y);
 
-          // Label below.
-          const fontSize = 11 / globalScale;
-          ctx.font = `${node.isEndpoint ? "700 " : ""}${fontSize}px sans-serif`;
-          ctx.textBaseline = "alphabetic";
-          ctx.fillStyle = node.isEndpoint ? "#e5e5e5" : "#a3a3a3";
-          ctx.fillText(node.display || node.id, node.x, node.y + r + 12 / globalScale);
-        }}
-        nodePointerAreaPaint={(node, color, ctx) => {
-          ctx.fillStyle = color;
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, node.isEndpoint ? 15 : 13, 0, 2 * Math.PI);
-          ctx.fill();
-        }}
-      />
-      {/* Legend: status ring meaning + edge-reason meaning. */}
-      <div className="absolute bottom-1 right-1 flex flex-wrap items-center gap-2 rounded bg-black/60 px-2 py-1 text-[10px] text-neutral-400 max-w-[90%]">
-        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-emerald-500" /> done</span>
-        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-amber-500" /> running</span>
-        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-red-500" /> error</span>
-        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-neutral-500" style={{ borderStyle: "dashed" }} /> pending</span>
-        <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-cyan-400" /> requested</span>
-      </div>
-    </div>
+        // Label below.
+        const fontSize = 11 / globalScale;
+        ctx.font = `${node.isEndpoint ? "700 " : ""}${fontSize}px sans-serif`;
+        ctx.textBaseline = "alphabetic";
+        ctx.fillStyle = node.isEndpoint ? "#e5e5e5" : "#a3a3a3";
+        ctx.fillText(node.display || node.id, node.x, node.y + r + 12 / globalScale);
+      }}
+      nodePointerAreaPaint={(node, color, ctx) => {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.isEndpoint ? 15 : 13, 0, 2 * Math.PI);
+        ctx.fill();
+      }}
+      legend={legend}
+    />
   );
 }

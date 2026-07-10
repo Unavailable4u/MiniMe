@@ -242,7 +242,7 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
 
 
 def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
-              path: str = None, agent_name: str = "Agent") -> None:
+              path: str = None, agent_name: str = "Agent", domain: str = None) -> None:
     """Public usage logger -- increments today's usage:{provider}:{key_id}:{date}
     entry in Upstash and fires a usage_update event. Never raises.
 
@@ -271,7 +271,29 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
     of that migration (see eo/executor.py's UNSCOPED_TIER_AGENTS comment)
     -- they still call this with `tier=`, and that keeps working
     unchanged. Both are accepted; the usage_update payload below includes
-    whichever one the caller actually passed."""
+    whichever one the caller actually passed.
+
+    Migration Part 2 §2.6 -- the one real cost-tracking gap the upgrade
+    plan flagged: "per project or per section" breakdown. Two additions,
+    both purely additive, neither changes the existing
+    usage:{provider}:{key_id}:{date} key or its write path above:
+
+    - `domain` (optional, e.g. "coding"/"simulate" -- eo/executor.py's
+      dispatch already has this as decision.get("domain")) is written to
+      a second key, usage_by_domain:{domain}:{date}, when given.
+    - workspace_id is NOT a parameter here -- it's derived automatically
+      from session_id via eo.chat_workspace.workspace_for_chat(), so no
+      existing call site (there are ~20 of them across agents/*.py) needs
+      to be touched to pass it explicitly. Written to
+      usage_by_workspace:{workspace_id}:{date} when session_id resolves
+      to a workspace.
+
+    Both secondary writes are best-effort and silently skipped (not
+    logged as an error) when domain/workspace_id isn't available for
+    this call -- a call with neither still logs its request/token count
+    to the account-level key exactly as before, it's simply not
+    attributable to a project/section breakdown. See
+    eo.quota_sentinel.get_usage_history_scoped() for the read side."""
     try:
         today = date.today().isoformat()
         db_key = f"usage:{provider}:{key_id}:{today}"
@@ -280,6 +302,31 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
         if tokens is not None:
             current["tokens"] = current.get("tokens", 0) + tokens
         bus_write(db_key, current)
+
+        workspace_id = None
+        if session_id:
+            try:
+                from eo.chat_workspace import workspace_for_chat
+                ws = workspace_for_chat(session_id)
+                workspace_id = ws["id"] if ws else None
+            except Exception:
+                workspace_id = None  # non-fatal: chat_workspace unavailable or session unresolved
+
+        if domain:
+            dom_key = f"usage_by_domain:{domain}:{today}"
+            dom_current = bus_read(dom_key, default={"requests": 0, "tokens": 0})
+            dom_current["requests"] = dom_current.get("requests", 0) + 1
+            if tokens is not None:
+                dom_current["tokens"] = dom_current.get("tokens", 0) + tokens
+            bus_write(dom_key, dom_current)
+
+        if workspace_id:
+            ws_key = f"usage_by_workspace:{workspace_id}:{today}"
+            ws_current = bus_read(ws_key, default={"requests": 0, "tokens": 0})
+            ws_current["requests"] = ws_current.get("requests", 0) + 1
+            if tokens is not None:
+                ws_current["tokens"] = ws_current.get("tokens", 0) + tokens
+            bus_write(ws_key, ws_current)
 
         emit_event(
             "usage_update",
@@ -292,13 +339,16 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
                 "daily_limit": QUOTA_CONFIG.get(provider),
                 "tier": tier,
                 "path": path,
+                "domain": domain,
+                "workspace_id": workspace_id,
             },
         )
     except Exception as exc:
         print(f"  [{agent_name}] usage logging failed (non-fatal): {exc}")
 
 
-def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, agent_name: str) -> None:
+def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, agent_name: str,
+               domain: str = None) -> None:
     """Internal adapter used by generate_text()'s chat-completion call
     sites: extracts a token count out of whatever usage shape the
     provider returned (SDK object with .total_tokens, or a plain dict
@@ -314,11 +364,13 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
         tokens = getattr(usage, "total_tokens", None)
         if tokens is None and isinstance(usage, dict):
             tokens = usage.get("total_tokens")
-    log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path, agent_name=agent_name)
+    log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path,
+              agent_name=agent_name, domain=domain)
 
 
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
-                   session_id: str = None, tier: int = None, path: str = None) -> str:
+                   session_id: str = None, tier: int = None, path: str = None,
+                   domain: str = None) -> str:
     """
     Walks `chain` in order. Each step is a dict. For groq/cerebras/github:
         {"provider": "groq"|"cerebras"|"github", "model": "...", "key_env": "..."}
@@ -346,6 +398,16 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     fixer_pool.py were already calling it this way) -- that's the bug
     this parameter addition fixes.
 
+    `domain` (Part 2 §2.6, optional): the classification domain this call
+    belongs to (e.g. "coding", "simulate" -- eo/executor.py's dispatch
+    already has this as decision.get("domain")). Purely forwarded to
+    log_usage() for the per-project/per-section usage breakdown; omitting
+    it costs nothing and changes no other behavior. workspace_id is never
+    a parameter here -- log_usage() derives it from session_id on its
+    own, so existing call sites that already pass session_id don't need
+    any change to get workspace-level attribution; only call sites that
+    want domain-level attribution too need to add `domain=...`.
+
     Raises RuntimeError if every step in the chain is exhausted or unusable
     (e.g. missing API key/credentials).
     """
@@ -369,7 +431,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             try:
                 text, usage = _call_cloudflare_step(creds, model, system_prompt, user_content,
                                                       json_mode=json_mode)
-                _log_usage(provider, key_id, usage, session_id, tier, path, agent_name)
+                _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain)
                 return text
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
@@ -397,7 +459,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         label = f"{provider}:{model}"
         try:
             text, usage = _call_step(client, model, system_prompt, user_content)
-            _log_usage(provider, key_env, usage, session_id, tier, path, agent_name)
+            _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain)
             return text
         except _TRANSIENT_ERRORS as exc:
             last_exc = exc

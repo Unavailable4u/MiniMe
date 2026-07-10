@@ -121,7 +121,8 @@ def _strip_fences(code: str) -> str:
 
 
 def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
-                       session_id: str = None, path: str = None) -> tuple[str, str]:
+                       session_id: str = None, path: str = None,
+                       domain: str = None) -> tuple[str, str]:
     """
     Runs on one worker thread with one fixed Cerebras key. Tries each model
     in MODELS, in order, staying on this same key throughout, via
@@ -170,6 +171,7 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
             agent_name=agent_name,
             session_id=session_id,
             path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real
+            domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
         )
         code = _strip_fences(raw)
         if not code:
@@ -180,7 +182,8 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     return _done(code)
 
 
-def _derive_specs_from_task_text(task_text: str, session_id: str = None) -> dict:
+def _derive_specs_from_task_text(task_text: str, session_id: str = None,
+                                  domain: str = None) -> dict:
     """Fallback spec synthesis for when this module gets hired directly by
     the tier-3 adaptive Panel WITHOUT the legacy "prompt_writer" role
     ahead of it in the plan. This module's original v5 contract assumed
@@ -217,6 +220,7 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
         raw_text = generate_text(
             spec_prompt, f"Task: {task_text}", chain,
             agent_name="Code Writers (spec fallback)", session_id=session_id,
+            domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
         ).strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
@@ -242,7 +246,7 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
 
 
 def run(session_id: str = None, path: str = None, expanded: bool = False,
-        key_override=None, task_text: str = None):
+        key_override=None, task_text: str = None, domain: str = None):
     """
     Migration Part 5 §2.3 — key_override, if given, is the Panel's specific
     account-selection decision for this hire (eo.router's
@@ -269,7 +273,7 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
     """
     specs = read(KEYS["module_specs"])
     if not specs or not specs.get("modules"):
-        specs = _derive_specs_from_task_text(task_text, session_id=session_id)
+        specs = _derive_specs_from_task_text(task_text, session_id=session_id, domain=domain)
     modules = specs["modules"]
     results = {}
 
@@ -281,6 +285,7 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
             executor.submit(
                 _write_one_module, module, key_envs[i % len(key_envs)],
                 (i % len(key_envs)) + 1, session_id=session_id, path=path,
+                domain=domain,
             ): module
             for i, module in enumerate(modules)
         }

@@ -83,7 +83,17 @@ def _namespaced(key: str) -> str:
     lifetime)."""
     if (key == "app_slug" or key == "project_registry"
             or key.startswith("usage:") or key.startswith("registry:")
-            or key.startswith("conversation:")):   # NEW — Part 23
+            or key.startswith("conversation:")   # NEW — Part 23
+            or key.startswith("paused_execution:")):   # NEW — Part 2 §2.4:
+        # a paused run's snapshot is a property of the SESSION, exactly the
+        # same reasoning as conversation: above -- and it HAS to be exempt,
+        # for a structural reason conversation: doesn't share: the snapshot
+        # itself is what tells resume_graph() which app_slug the original
+        # run used. If this key were namespaced, reading it back on a fresh
+        # POST /api/resume request (which hasn't called set_app_slug() yet
+        # -- that's literally the value this key is about to supply) would
+        # look in the wrong namespace, or the default/global one, and
+        # silently miss.
         return key
     slug = _current_app_slug()
     return f"{slug}:{key}" if slug else key

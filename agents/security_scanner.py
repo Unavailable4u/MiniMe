@@ -113,7 +113,8 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, path: str = None) -> tuple:
+def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, path: str = None,
+               domain: str = None) -> tuple:
     """
     Stage 6 step 5: fires agent_start/agent_done labeled scanner_{slot}.
     `slot` is a descriptor dict (see _slot_descriptors) rather than a bare
@@ -150,6 +151,7 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, p
             agent_name=agent_name,
             session_id=session_id,
             path=path,  # Migration Part 27 §1: generate_text() now accepts `path` for real
+            domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
         )
         result = json.loads(_strip_fences(raw_text))
     except Exception as exc:
@@ -224,7 +226,7 @@ def _resolve_override_slots(key_override) -> list:
 
 
 def run(session_id: str = None, path: str = None, expanded: bool = False,
-        key_override=None) -> dict:
+        key_override=None, domain: str = None) -> dict:
     """
     key_override: None (default) -> today's exact behavior, picks slots
         via _slot_descriptors(expanded).
@@ -247,7 +249,8 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
         for i, (name, data) in enumerate(modules):
             code = data.get("code", "") if isinstance(data, dict) else str(data)
             slot = slots[i % len(slots)]
-            futures[executor.submit(_scan_one, name, code, slot, session_id=session_id, path=path)] = name
+            futures[executor.submit(_scan_one, name, code, slot, session_id=session_id, path=path,
+                                     domain=domain)] = name
         for future in as_completed(futures):
             name, result = future.result()
             results[name] = result

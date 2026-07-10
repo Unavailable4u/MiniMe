@@ -24,6 +24,25 @@ export const ROLE_CATEGORIES = [
   { key: "sga", test: /\bsga\b/i, icon: "\u{1F6E1}\uFE0F", color: "#facc15" }, // 🛡️ dedicated shield for the SGA pre-filter
   { key: "dispatch", test: /dispatcher|panel|responder/i, icon: "\u2699\uFE0F", color: "#9ca3af" }, // ⚙️
 
+  // ---- Simulate & Test (persona role-play) ----
+  // Part 1 §1.6 — these must sit ABOVE any broader pattern that could
+  // also match a persona's literal role name (per this file's own
+  // matching rule): critic_reviewer would otherwise fall into
+  // "reviewing" below (it contains "reviewer"), and
+  // support_ticket_predictor would otherwise fall into
+  // "customer-support" (it contains "support"). Matched on the exact
+  // role-name strings from eo/structure.py's STRUCTURE_TEMPLATES["simulate"].
+  { key: "persona-customer", test: /persona_customer/i, icon: "\u{1F6CD}\uFE0F", color: "#fb923c" }, // 🛍️
+  { key: "persona-skeptic", test: /persona_skeptic/i, icon: "\u{1F928}", color: "#a1a1aa" }, // 🤨
+  { key: "critic-reviewer", test: /critic_reviewer/i, icon: "\u2B50", color: "#facc15" }, // ⭐
+  { key: "usability-walkthrough", test: /usability_walkthrough/i, icon: "\u{1F6B6}", color: "#60a5fa" }, // 🚶
+  { key: "red-team", test: /red_team/i, icon: "\u{1F977}", color: "#f87171" }, // 🥷
+  { key: "pricing-sensitivity", test: /pricing_sensitivity/i, icon: "\u{1F3F7}\uFE0F", color: "#4ade80" }, // 🏷️
+  { key: "support-ticket-predictor", test: /support_ticket_predictor/i, icon: "\u{1F3AB}", color: "#67e8f9" }, // 🎫
+  { key: "competitor-response", test: /competitor_response/i, icon: "\u{1F94A}", color: "#fb7185" }, // 🥊
+  { key: "simulation-synthesizer", test: /simulation_synthesizer/i, icon: "\u{1F9F5}", color: "#c4b5fd" }, // 🧵
+  { key: "marketplace-review-batch", test: /marketplace_review_batch/i, icon: "\u{1F5E3}\uFE0F", color: "#f0abfc" }, // 🗣️
+
   // ---- Planning / ideation ----
   { key: "planning", test: /idea_planner|prompt_writer|planner|brainstorm/i, icon: "\u{1F9ED}", color: "#f59e0b" }, // 🧭
   { key: "strategy", test: /strategist|roadmap/i, icon: "\u265F\uFE0F", color: "#c4b5fd" }, // ♟️

@@ -1,21 +1,14 @@
 """
-eo/loop_controller.py — v6 migration Part 11 §3.1, superseded in place by
-Part 12 §1.
+eo/loop_controller.py
 
 Wraps one pass of execute_graph() with an optional macro-loop: after a
-full structure completes, ask a gatekeeper-equivalent whether to stop,
-redo everything, or redo specific stages (e.g. "add the features I
-described, using your own judgment for anything I didn't specify" — a
-genuinely iterative ask, not a one-shot).
+full structure completes, ask a gatekeeper role whether to stop, redo
+everything, or redo specific stages (e.g. "add the features I described,
+using your own judgment for anything I didn't specify" — a genuinely
+iterative ask, not a one-shot).
 
-Migration Part 12 §0/§1: coding no longer keeps a separate code path.
-Part 11 §3.1's original `_run_gatekeeper()` special-cased
-`if domain == "coding": call agents/gatekeeper.py directly`. That branch
-is retired here — agents/gatekeeper.py's three deterministic safety rules
-(hard cycle cap, repeat-failure breaker, forced checkpoint) are
-generalized into `_hard_safety_check()` below so EVERY domain gets them,
-not just coding. agents/gatekeeper.py itself is left untouched and unused
-in the repo; nothing here imports it.
+Every domain takes the same path through _run_gatekeeper() — no
+domain-specific branching.
 """
 import os
 import sys
@@ -25,24 +18,20 @@ from eo.executor import execute_graph
 from memory.bus import read, write
 from relay.emitter import emit_event
 
-MAX_MACRO_LOOPS = 3          # matches Part 11's original cap
-FORCED_CHECKPOINT_EVERY = 5  # same cadence agents/gatekeeper.py already used for coding
+MAX_MACRO_LOOPS = 3
+FORCED_CHECKPOINT_EVERY = 5
 
 
 def _extract_critical_issue(results: dict):
-    """
-    Generalized past coding's own review_notes["issues"] shape (the
-    original agents/gatekeeper.py._get_critical_issue_keys()). `results`
-    here is execute_graph()'s full role-keyed output, so this scans every
-    role's result for anything shaped like {"issues": [...]} — reviewer/
-    verifier-style output — rather than assuming one specific key exists,
-    since a non-coding domain may not have a role called "reviewer" at
-    all. Returns a frozenset of (role, module_or_field, description)
-    tuples for every critical-severity issue found across all roles, or
-    an empty frozenset if none. Empty (not None) so "no critical issues
-    this loop" reliably intersects to nothing against any previous loop,
-    rather than short-circuiting the comparison in _hard_safety_check.
-    """
+    """Scans every role's result for anything shaped like
+    {"issues": [...]} — reviewer/verifier-style output — rather than
+    assuming one specific key exists, since a non-coding domain may not
+    have a role called "reviewer" at all. Returns a frozenset of
+    (role, module_or_field, description) tuples for every critical-
+    severity issue found across all roles, or an empty frozenset if none.
+    Empty (not None) so "no critical issues this loop" reliably
+    intersects to nothing against any previous loop, rather than
+    short-circuiting the comparison in _hard_safety_check."""
     found = set()
     for role, result in (results or {}).items():
         if not isinstance(result, dict):
@@ -59,31 +48,22 @@ def _extract_critical_issue(results: dict):
 
 
 def _hard_safety_check(session_id: str, loop_num: int, results: dict) -> dict | None:
-    """The three deterministic rules agents/gatekeeper.py always ran
-    BEFORE any LLM judgment — generalized past coding, domain-agnostic.
-    Returns a decision dict to force STOP/PAUSE, or None if none of the
-    hard rules fire (meaning: proceed to the LLM judgment call).
+    """Deterministic rules checked BEFORE any LLM judgment. Returns a
+    decision dict to force STOP/PAUSE, or None if none of the hard rules
+    fire (meaning: proceed to the LLM judgment call).
 
-    Note on the "action" values below: Part 12 §1's guide snippet maps
-    both forced_checkpoint and repeat_failure to a plain "STOP", same as
-    hard_cap. That collapses a real distinction the original
-    agents/gatekeeper.py made -- those two were resumable PAUSE_FOR_HUMAN
-    cases, not hard stops. Kept that distinction here; only hard_cap
-    returns "STOP". Flag if you want the literal guide behavior (all
-    three -> "STOP") instead.
-    """
+    forced_checkpoint and repeat_failure are resumable PAUSE_FOR_HUMAN
+    cases, not hard stops — only hard_cap returns "STOP"."""
     if loop_num >= MAX_MACRO_LOOPS:
         return {"action": "STOP", "cause": "hard_cap"}
     if loop_num > 0 and loop_num % FORCED_CHECKPOINT_EVERY == 0:
         return {"action": "PAUSE_FOR_HUMAN", "cause": "forced_checkpoint"}
 
     # Repeat-failure breaker: same critical issue flagged 2 loops running.
-    # Migration note: kept as a SET INTERSECTION against the previous
-    # loop's critical issues (any overlap counts as a repeat, even if new
-    # issues also appeared this loop), matching the original
-    # agents/gatekeeper.py behavior -- Part 12 §1's snippet uses exact
-    # equality instead, which is strictly less sensitive to a genuine
-    # repeat-failure (any single new/resolved issue would mask it).
+    # Uses a SET INTERSECTION against the previous loop's critical issues
+    # (any overlap counts as a repeat, even if new issues also appeared
+    # this loop) — more sensitive to a genuine repeat-failure than exact
+    # equality would be (a single new/resolved issue shouldn't mask it).
     prev = frozenset(tuple(item) for item in read(f"prev_critical_issues:{session_id}", default=[]))
     current = _extract_critical_issue(results)
     repeated = current & prev
@@ -95,15 +75,10 @@ def _hard_safety_check(session_id: str, loop_num: int, results: dict) -> dict | 
 
 
 def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: int) -> dict:
-    """
-    Migration Part 12 §1: replaces Part 11 §3.1's domain-branching
-    version entirely. No domain branch anymore -- EVERY domain, coding
-    included, asks the same LLM judgment question through
-    generic_worker's "gatekeeper" role. Part 7's registry writes this
-    brief ONCE, on whichever domain asks for it first, and reuses it
-    forever after -- coding no longer needs its own separate prompt for
-    this.
-    """
+    """Every domain, coding included, asks the same LLM judgment question
+    through generic_worker's "gatekeeper" role. The registry writes this
+    brief once, on whichever domain asks for it first, and reuses it
+    forever after."""
     hard = _hard_safety_check(session_id, loop_num, results)
     if hard:
         emit_event("macro_loop_decision", session_id=session_id,
@@ -125,37 +100,54 @@ def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: in
         redo = [r.strip() for r in text.split(":", 1)[1].split(",")] if ":" in text else []
         decision = {"action": "CONTINUE", "redo_roles": redo}
 
-    # Migration Part 12 item 2 (double event emission): _hard_safety_check
-    # already emits macro_loop_decision on its own STOP/PAUSE path above
-    # (and returns before reaching here). This is the single emission
-    # point for the LLM-judgment path, so run_with_looping() below must
-    # NOT also emit macro_loop_decision after calling this function --
-    # doing both was a duplicate fire for the same decision.
+    # This is the single emission point for the LLM-judgment path —
+    # _hard_safety_check already emits macro_loop_decision on its own
+    # STOP/PAUSE path above (and returns before reaching here), so
+    # run_with_looping() below must NOT also emit macro_loop_decision
+    # after calling this function.
     emit_event("macro_loop_decision", session_id=session_id,
                payload={"decision": decision["action"], "loop": loop_num})
     return decision
 
 
 def run_with_looping(hires, execution_order, task_text, session_id, mode,
-                      domain=None, project_unique_name=None, path=None) -> dict:
+                      domain=None, project_unique_name=None, path=None,
+                      approval_roles: set = None,
+                      no_conversation_context_roles: set = None) -> dict:
     """
-    `domain` is accepted for call-site compatibility with Part 11 §3.2's
-    wiring but is no longer branched on anywhere in this module (Part 12
-    §0) -- every domain takes the same path through _run_gatekeeper().
+    `domain` is not branched on anywhere in this module — every domain
+    takes the same path through _run_gatekeeper(). Part 2 §2.6: it IS now
+    forwarded to execute_graph() on every pass below (a redo pass still
+    belongs to the same domain the run started with), purely so
+    utils/llm_client.py's log_usage() can tag each call for the
+    per-project/per-section usage breakdown — that's the only thing this
+    parameter does; the gatekeeper/looping logic itself stays entirely
+    domain-agnostic.
 
-    Return shape — NEW: {"results": {role: output, ...}, "final_role": str
-    | None}. Previously this returned the bare `results` dict with no way
-    for a caller to know which role's output is "the" answer (the whole
-    plan can end with a different role each run, and a macro-loop redo
-    pass doesn't necessarily re-run every role, so "last key in the dict"
-    isn't reliable either — dict.update() keeps an existing key's
-    original insertion position). final_role is explicitly tracked as
-    "the last role that finished in the most recent pass" instead, which
-    is what callers actually want: e.g. api/task_runner.py surfacing one
-    clean answer to the chat UI instead of the entire role-keyed results
-    tree. final_role is None only if hires was empty and no pass ever
-    ran (shouldn't happen given eo/loop_v4.py's _ensure_staffable(), but
-    kept honest rather than assuming).
+    `approval_roles` is passed straight through to execute_graph()
+    unchanged. Defaults to None, matching execute_graph()'s own default —
+    today's exact full-auto behavior for any caller that doesn't pass it.
+
+    `no_conversation_context_roles` (Part 2 §2.6) is passed straight
+    through to execute_graph() on every pass, the identical treatment as
+    approval_roles above — a redo pass (mode expert/beast, gatekeeper
+    says CONTINUE) still shouldn't hand unscoped roles the full
+    conversation transcript just because it's a later macro-loop pass.
+    Defaults to None, matching execute_graph()'s own default.
+
+    Return shape: {"results": {role: output, ...}, "final_role": str | None}
+    on a normal completion — a caller can't rely on "last key in the dict"
+    to know which role's output is "the" answer (the execution order can
+    differ between macro-loop passes, and dict.update() keeps an existing
+    key's original insertion position), so final_role is explicitly
+    tracked as "the last role that finished in the most recent pass".
+    final_role is None only if hires was empty and no pass ever ran.
+
+    OR, if execute_graph() paused mid-pass at an approval_roles role:
+    {"status": "paused", "paused_at_role": str, "session_id": str}.
+    Callers must check for "status" == "paused" before assuming the
+    finished shape above — see api/task_runner.py's _run_tier3_hires()
+    for the one place that already does.
     """
     current_order = execution_order
     loop_num = 1
@@ -166,7 +158,24 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
         agent_names, role_names, key_overrides = build_execution_graph_from_hires(hires, current_order)
         pass_results = execute_graph(agent_names, role_names=role_names, task_text=task_text,
                                        session_id=session_id, path=path, key_overrides=key_overrides,
-                                       project_unique_name=project_unique_name, mode=mode)
+                                       project_unique_name=project_unique_name, mode=mode,
+                                       approval_roles=approval_roles,
+                                       no_conversation_context_roles=no_conversation_context_roles,
+                                       domain=domain)
+
+        # execute_graph() returns {"status": "paused", "paused_at_role": role}
+        # instead of a finished {role: output} dict when execution hits a
+        # role in approval_roles. Must be checked and returned BEFORE the
+        # results.update() below — merging that shape in would silently
+        # write "status"/"paused_at_role" into `results` as if they were
+        # role names.
+        if isinstance(pass_results, dict) and pass_results.get("status") == "paused":
+            return {
+                "status": "paused",
+                "paused_at_role": pass_results["paused_at_role"],
+                "session_id": session_id,
+            }
+
         results.update(pass_results)   # merge, don't replace — a redo pass should only
                                         # overwrite the specific roles it re-ran, not erase
                                         # everything from earlier passes.
@@ -176,9 +185,6 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
         if mode.lower() not in ("expert", "beast") or loop_num >= MAX_MACRO_LOOPS:
             break
 
-        # Migration Part 12 §1 call-site change: loop_num is now passed
-        # through so _hard_safety_check can actually count loops (Part
-        # 11's original call site never passed it at all).
         decision = _run_gatekeeper(results, task_text, session_id, loop_num)
 
         if decision["action"] in ("STOP", "PAUSE_FOR_HUMAN"):

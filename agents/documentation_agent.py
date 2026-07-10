@@ -59,7 +59,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def run(session_id: str = None, tier: int = None) -> dict:
+def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
     idea = read(KEYS["original_idea"], default="")
     feature_status = read(KEYS["feature_status"], default={})
     report = read(KEYS["latest_report"], default={})
@@ -83,7 +83,7 @@ def run(session_id: str = None, tier: int = None) -> dict:
 
     raw_text = call_with_retry(
         lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Documentation Agent",
-                               session_id=session_id, tier=tier),
+                               session_id=session_id, tier=tier, domain=domain),
         agent_name="Documentation Agent",
     )
     doc = json.loads(_strip_fences(raw_text))
@@ -94,6 +94,24 @@ def run(session_id: str = None, tier: int = None) -> dict:
         if os.path.isdir(os.path.dirname(readme_path)):
             with open(readme_path, "w", encoding="utf-8") as f:
                 f.write(doc.get("readme_markdown", ""))
+
+    # Part 0 §0.1: this README is a node like anything else a domain
+    # produces. workspace_id reuses the app slug for now (the coding
+    # domain doesn't yet have a separate workspace concept the way
+    # Notes/Research/Plan will) -- section="coding" distinguishes it from
+    # nodes future domains write under their own section name.
+    if slug:
+        from eo.knowledge_graph import write_node
+        write_node(
+            workspace_id=slug,
+            section="coding",
+            node_type="note",
+            title="README",
+            content=doc.get("readme_markdown", ""),
+            created_by="documentation_agent",
+            session_id=session_id,
+            tier=tier,
+        )
 
     return doc
 

@@ -25,7 +25,7 @@ and by the next planning agent as plain text.
 """
 
 
-def run_report_writer():
+def run_report_writer(session_id: str = None, domain: str = None):
     fixed_code = read(KEYS["fixed_code"])
     submitted_code = read(KEYS["submitted_code"])
     # Bug fix: fall back to submitted_code, same reasoning as
@@ -64,7 +64,8 @@ def run_report_writer():
     )
 
     report_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Report Writer"),
+        lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Report Writer",
+                               session_id=session_id, domain=domain),
         agent_name="Report Writer",
     )
 
