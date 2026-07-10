@@ -5,9 +5,13 @@ import ChatSidebar from "./ChatSidebar";
 import ChatTab from "./tabs/ChatTab";
 import TokenUsageTab from "./tabs/TokenUsageTab";
 import SettingsTab from "./tabs/SettingsTab";
+import RoleLibraryTab from "./tabs/RoleLibraryTab";
+import WorkflowTemplatesTab from "./tabs/WorkflowTemplatesTab";
 
 const TABS = [
   { id: "chat", label: "Chat", render: ChatTab },
+  { id: "roles", label: "Role Library", render: RoleLibraryTab },
+  { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
   { id: "settings", label: "Settings", render: SettingsTab },
 ];

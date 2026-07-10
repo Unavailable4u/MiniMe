@@ -96,6 +96,19 @@ export function SessionProvider({ children }) {
   // task text, the decision object (handed back to /api/task/confirm
   // unmodified), and the hires list to render.
   const [pendingHireReview, setPendingHireReview] = useState(null);
+  // NEW — Part 2 §2.4/§2.7: non-null exactly when the live run is
+  // currently paused at a human-in-the-loop checkpoint. Holds the role
+  // name so AgentStepList.jsx/RoutingTraceGraph.jsx know which step to
+  // decorate with the "awaiting_approval" status/actions — the actual
+  // full output is already sitting on that step from its own agent_done
+  // event, this is just the "and now it's paused" flag layered on top.
+  const [pausedApproval, setPausedApproval] = useState(null);
+  // NEW — Part 2 §2.4/§2.7: {taskText, sessionId} for the run currently
+  // paused, so resumeRun() can finalize the assistant message once the
+  // human's decision lets the run actually finish. Distinct from
+  // pausedApproval (which role is paused) since this survives across
+  // possibly several consecutive pauses in the same run.
+  const [pausedRun, setPausedRun] = useState(null);
 
   // --- NEW: on mount, load the chat list, then restore the last active
   // chat (or create the very first one). This replaces the old
@@ -284,6 +297,25 @@ export function SessionProvider({ children }) {
         );
         stepsRef.current = updated;
         setLiveSteps(updated);
+        return;
+      }
+      // NEW — Part 2 §2.4/§2.7: eo/executor.py emits this AFTER the
+      // role's own normal agent_done (which already closed its step with
+      // status "done" and the full output). This just overlays the
+      // paused flag on that same step — found by role name, most recent
+      // match, since a role can in principle run more than once in a
+      // session (recheck/escalate) and it's the LATEST run of it that's
+      // actually paused.
+      if (eventType === "awaiting_approval") {
+        const roleName = payload?.role || payload?.label || agent;
+        const idx = [...stepsRef.current].map((s) => s.role).lastIndexOf(roleName);
+        if (idx !== -1) {
+          const updated = stepsRef.current.map((s, i) => (i === idx ? { ...s, status: "awaiting_approval" } : s));
+          stepsRef.current = updated;
+          setLiveSteps(updated);
+        }
+        setPausedApproval({ role: roleName });
+        return;
       }
     });
     return () => {
@@ -622,15 +654,64 @@ async function deleteWorkspace(wsId) {
         body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
       });
       const data = await res.json();
+      // Part 2 §2.4/§2.7: post_task() blocks synchronously until either
+      // finished or paused at an approval_roles checkpoint, so a
+      // "paused" status can come back on this very first response.
+      // The Pusher awaiting_approval event has already updated liveSteps
+      // by the time this resolves — just remember what's needed to
+      // finalize the message once resumeRun() eventually finishes it,
+      // and leave `loading` true (the run genuinely isn't done).
+      if (data.status === "paused") {
+        setPausedRun({ taskText, sessionId: data.session_id || sessionId });
+        return;
+      }
       const assistantMessage = _buildAssistantMessage(taskText, data);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);   // NEW
+      setLoading(false);
     } catch (err) {
       const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);   // NEW
-    } finally {
       setLoading(false);
+    }
+  }
+
+  // Part 2 §2.4/§2.7 — resolves the checkpoint AgentStepList.jsx's
+  // approval actions raised. `decision` is {action: "approve"|"edit"|
+  // "reject_redo", text?}, passed straight through to POST /api/resume.
+  // A "paused" result means the run hit ANOTHER approval_roles role
+  // further down the pipeline — the Pusher awaiting_approval event for
+  // that new role has already updated liveSteps/pausedApproval, so this
+  // just leaves `loading`/`pausedRun` as they are and returns. Anything
+  // else (finished or errored) finalizes the message exactly like
+  // sendTask()'s own direct-dispatch path.
+  async function resumeRun(decision) {
+    if (!pausedRun) return;
+    try {
+      const res = await fetch(`${API_URL}/api/resume`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
+        },
+        body: JSON.stringify({ session_id: pausedRun.sessionId, ...decision }),
+      });
+      const data = await res.json();
+      setPausedApproval(null);
+      if (data.status === "paused") return;
+      const assistantMessage = _buildAssistantMessage(pausedRun.taskText, data);
+      setMessages((prev) => [...prev, assistantMessage]);
+      persistMessage(assistantMessage);
+      setLoading(false);
+      setPausedRun(null);
+    } catch (err) {
+      const assistantMessage = _buildAssistantMessage(pausedRun.taskText, { status: "error", message: String(err) });
+      setMessages((prev) => [...prev, assistantMessage]);
+      persistMessage(assistantMessage);
+      setPausedApproval(null);
+      setLoading(false);
+      setPausedRun(null);
     }
   }
 
@@ -726,6 +807,8 @@ async function deleteWorkspace(wsId) {
   // NEW — Part 2 §2.5: manual role editing before dispatch
   reviewBeforeDispatch, setReviewBeforeDispatch,
   pendingHireReview, confirmHireReview, cancelHireReview,
+  // NEW — Part 2 §2.4/§2.7: human-in-the-loop checkpoints
+  pausedApproval, resumeRun,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

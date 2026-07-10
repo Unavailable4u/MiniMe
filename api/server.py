@@ -23,8 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Union, Any
 
-from api.task_runner import run_task, preview_task, confirm_task   # preview/confirm NEW — Part 2 §2.5
+from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template   # preview/confirm NEW — Part 2 §2.5, run_task_from_template NEW — Part 2 §2.7
 from eo.executor import resume_graph   # NEW — Part 2 §2.4
+from eo.registry import list_known_roles, get_role_metadata, update_role_prompt   # NEW — Part 2 §2.7: Role Library panel
+from eo.structure import (   # NEW — Part 2 §2.7: Workflow Template builder
+    save_workflow_template, list_workflow_templates, delete_workflow_template,
+)
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
 from eo import chat_store
 from eo import memory_batch
@@ -593,6 +597,117 @@ def post_resume(req: ResumeRequest):
         result={"output": result, "answer": answer, "final_role": final_role},
         message=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Part 2 §2.7 — thin HTTP layer over eo/registry.py's Role Library (§2.2)
+# and eo/structure.py's Workflow Templates (§2.3/§2.6). Both backing
+# stores and their functions already existed; these five routes are the
+# only thing that was actually missing before the frontend panels below
+# could read or write real data.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/roles", dependencies=[Depends(require_auth)])
+def get_roles():
+    """Every role the system has ever briefed, metadata included — the
+    Role Library panel's one data source. Shape: [{role, brief, source,
+    updated_at, times_hired}, ...]."""
+    roles = []
+    for name in list_known_roles():
+        meta = get_role_metadata(name) or {}
+        roles.append({"role": name, **meta})
+    return roles
+
+
+class UpdateRoleRequest(BaseModel):
+    brief: str
+
+
+@app.put("/api/roles/{role_name}", dependencies=[Depends(require_auth)])
+def put_role(role_name: str, req: UpdateRoleRequest):
+    """Saves an inline Role Library edit. Always source="user_edited" —
+    this is the one path that's allowed to claim that (see
+    eo/registry.py's update_role_prompt() docstring)."""
+    update_role_prompt(role_name, req.brief, source="user_edited")
+    return {"role": role_name, **(get_role_metadata(role_name) or {})}
+
+
+class SaveWorkflowTemplateRequest(BaseModel):
+    name: str
+    roles: list   # role-name strings, or nested lists of them for a
+                  # concurrent group (eo/structure.py §2.6) — validated
+                  # by save_workflow_template() itself.
+    description: str = ""
+    domain_hint: Optional[str] = None
+    approval_roles: Optional[list[str]] = None
+    no_conversation_context_roles: Optional[list[str]] = None
+    created_by: Optional[str] = None
+
+
+@app.get("/api/workflow-templates", dependencies=[Depends(require_auth)])
+def get_workflow_templates():
+    """Every saved template, newest first — for the template picker and
+    the Workflow Template builder's own list view."""
+    return list_workflow_templates()
+
+
+@app.post("/api/workflow-templates", dependencies=[Depends(require_auth)])
+def post_workflow_template(req: SaveWorkflowTemplateRequest):
+    """Covers both write paths the design calls for: "save from a
+    finished run" (caller passes that run's own execution_order as
+    `roles`) and "build from scratch" (caller passes a list assembled in
+    the Role Library UI) — both are just a plain roles list here."""
+    try:
+        return save_workflow_template(
+            name=req.name,
+            roles=req.roles,
+            description=req.description,
+            domain_hint=req.domain_hint,
+            approval_roles=req.approval_roles,
+            no_conversation_context_roles=req.no_conversation_context_roles,
+            created_by=req.created_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/workflow-templates/{template_id}", dependencies=[Depends(require_auth)])
+def delete_workflow_template_endpoint(template_id: str):
+    deleted = delete_workflow_template(template_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Unknown template_id={template_id!r}")
+    return {"status": "deleted", "template_id": template_id}
+
+
+class RunFromTemplateRequest(BaseModel):
+    template_id: str
+    task_text: str
+    session_id: Optional[str] = None
+    mode: Optional[str] = "auto"
+    project_unique_name: Optional[str] = None
+
+
+@app.post("/api/task/from-template", response_model=TaskResponse, dependencies=[Depends(require_auth)])
+def post_task_from_template(req: RunFromTemplateRequest):
+    """Part 2 §2.3/§2.6 — starts a new task from a saved workflow
+    template instead of running Inspector/Panel classification.
+    Mirrors post_task()'s exact error-handling shape."""
+    try:
+        return run_task_from_template(
+            template_id=req.template_id,
+            task_text=req.task_text,
+            session_id=req.session_id,
+            mode=req.mode,
+            project_unique_name=req.project_unique_name,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        return TaskResponse(
+            decision={}, tier=-1, status="error", result=None,
+            message=f"{exc.__class__.__name__}: {exc}",
+        )
 
 
 @app.get("/api/health")
