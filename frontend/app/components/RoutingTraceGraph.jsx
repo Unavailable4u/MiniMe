@@ -261,6 +261,7 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-emerald-500" /> done</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-amber-500" /> running</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-red-500" /> error</span>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border-2 border-yellow-500" style={{ borderStyle: "dashed" }} /> awaiting approval</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-neutral-500" style={{ borderStyle: "dashed" }} /> pending</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-cyan-400" /> requested</span>
     </>
@@ -298,8 +299,17 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
         // Endpoint nodes (Input/Output) get a slightly larger badge so
         // they read as the start/end of the flow, not just another step.
         const r = node.isEndpoint ? 13 : 11;
+        // Part 2 §2.4/§2.7 — "awaiting_approval" gets its own distinct
+        // ring color (not just amber's "running" — a paused run needs to
+        // read as visibly DIFFERENT from one still actively working, not
+        // just slow) plus a pulsing dash so a paused node is obviously
+        // paused on the graph itself, not only in the step list. Falls
+        // back gracefully for every other status, same as before — this
+        // is purely additive.
+        const isPaused = node.status === "awaiting_approval";
         const ringColor =
           node.status === "error" ? "#ef4444" :
+          isPaused ? "#eab308" :
           node.status === "running" ? "#f59e0b" :
           node.status === "done" ? "#22c55e" :
           node.status === "pending" ? "#525252" : "#525252";
@@ -308,11 +318,19 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
         ctx.beginPath();
         ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
         ctx.fillStyle = color;
-        ctx.globalAlpha = node.status === "pending" ? 0.22 : node.status === "running" ? 0.6 : 0.92;
+        ctx.globalAlpha = node.status === "pending" ? 0.22 : node.status === "running" || isPaused ? 0.6 : 0.92;
         ctx.fill();
         ctx.globalAlpha = 1;
-        ctx.lineWidth = node === hoveredNode ? 3 : 2;
+        ctx.lineWidth = node === hoveredNode ? 3 : isPaused ? 3 : 2;
         if (node.status === "pending") ctx.setLineDash([2, 2]);
+        // Pulsing dashed ring for a paused node — dash offset animates
+        // off Date.now() so it visibly "breathes" on every animation
+        // frame the force graph already re-renders for physics anyway,
+        // no extra timer needed.
+        if (isPaused) {
+          ctx.setLineDash([4, 3]);
+          ctx.lineDashOffset = -(Date.now() / 60) % 7;
+        }
         ctx.strokeStyle = ringColor;
         ctx.stroke();
         ctx.setLineDash([]);

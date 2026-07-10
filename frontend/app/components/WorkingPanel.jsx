@@ -6,6 +6,7 @@ import AgentStepList from "./AgentStepList";
 import RoutingTraceGraph from "./RoutingTraceGraph";
 import DependencyGraph from "./DependencyGraph";
 import MermaidDiagram from "./MermaidDiagram";
+import SaveRunAsTemplate from "./SaveRunAsTemplate";
 
 // One section per assistant message that carries a snapshot (steps /
 // routeTrace / dependencyMap / structurePlan — all attached by
@@ -32,6 +33,8 @@ export default function WorkingPanel({ isSyncingRef }) {
     structurePlan,
     sessionId,   // NEW — §4
     batches,     // NEW — §4
+    resumeRun,   // NEW — Part 2 §2.4/§2.7: only ever wired to the LIVE section below — a finished message's own step snapshot can't be resumed.
+    API_URL,     // NEW — Part 2 §2.7: SaveRunAsTemplate needs this to POST /api/workflow-templates
   } = useSession();
 
   // NEW — §4: answers "which chats is *this* chat currently pulling
@@ -123,6 +126,19 @@ export default function WorkingPanel({ isSyncingRef }) {
         >
           <p className="text-xs text-neutral-500 truncate">{m.task}</p>
           {m.data?.decision && <RoutingTraceCard decision={m.data.decision} />}
+          {/* Part 2 §2.3/§2.7 — "save from a finished run" write path.
+              execution_order is the Panel/Inspector's own already-decided
+              role order for this run, identical in shape to a workflow
+              template's `roles` — only shown once a run actually has one
+              (tier 0/1/2 runs, or a run with a single/empty pipeline,
+              have nothing meaningful to save here). */}
+          {m.data?.decision?.execution_order?.length > 0 && (
+            <SaveRunAsTemplate
+              apiUrl={API_URL}
+              roles={m.data.decision.execution_order}
+              domainHint={m.data.decision.domain}
+            />
+          )}
           {m.steps?.length > 0 && <AgentStepList steps={m.steps} />}
           {/*
             FIX: this used to require `m.routeTrace?.length > 1` before
@@ -183,7 +199,7 @@ export default function WorkingPanel({ isSyncingRef }) {
                 <DependencyGraph map={dependencyMap} />
               )}
               {structurePlan && <MermaidDiagram mermaidText={structurePlan} />}
-              <AgentStepList steps={liveSteps} />
+              <AgentStepList steps={liveSteps} onResume={resumeRun} />
             </>
           )}
         </div>
