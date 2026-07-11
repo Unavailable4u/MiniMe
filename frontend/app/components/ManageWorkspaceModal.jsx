@@ -32,7 +32,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-1 mb-3">
           {editingName ? (
             <>
@@ -41,16 +41,16 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && saveName()}
-                className="flex-1 bg-neutral-950 border border-neutral-700 rounded px-1.5 py-0.5 text-sm outline-none"
+                className="flex-1 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-sm outline-none"
               />
               <button onClick={saveName}><Check size={14} className="text-green-400" /></button>
-              <button onClick={() => { setName(workspace.name); setEditingName(false); }}><X size={14} className="text-neutral-500" /></button>
+              <button onClick={() => { setName(workspace.name); setEditingName(false); }}><X size={14} className="text-[var(--neutral-500)]" /></button>
             </>
           ) : (
             <>
-              <h3 className="text-sm font-medium text-neutral-200 flex-1 truncate">{workspace.name}</h3>
+              <h3 className="text-sm font-medium text-[var(--neutral-200)] flex-1 truncate">{workspace.name}</h3>
               <button onClick={() => setEditingName(true)} title="Rename project">
-                <Pencil size={13} className="text-neutral-500 hover:text-neutral-200" />
+                <Pencil size={13} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
               </button>
             </>
           )}
@@ -58,24 +58,24 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
 
         <div className="space-y-1 mb-3">
           {members.map((chat) => (
-            <div key={chat.id} className="flex items-center justify-between gap-2 text-xs text-neutral-300 py-1">
+            <div key={chat.id} className="flex items-center justify-between gap-2 text-xs text-[var(--neutral-300)] py-1">
               <span className="truncate">{chat.title}</span>
               <div className="flex items-center gap-2 shrink-0">
-                <button onClick={() => setPendingRemove({ chat, deleteChat: false })} title="Remove from project" className="text-neutral-500 hover:text-neutral-200">
+                <button onClick={() => setPendingRemove({ chat, deleteChat: false })} title="Remove from project" className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]">
                   <FolderMinus size={13} />
                 </button>
-                <button onClick={() => setPendingRemove({ chat, deleteChat: true })} title="Delete chat entirely" className="text-neutral-500 hover:text-red-400">
+                <button onClick={() => setPendingRemove({ chat, deleteChat: true })} title="Delete chat entirely" className="text-[var(--neutral-500)] hover:text-red-400">
                   <Trash2 size={13} />
                 </button>
               </div>
             </div>
           ))}
-          {members.length === 0 && <p className="text-xs text-neutral-600">No chats in this project yet.</p>}
+          {members.length === 0 && <p className="text-xs text-[var(--neutral-600)]">No chats in this project yet.</p>}
         </div>
 
-        <div className="flex justify-between items-center pt-2 border-t border-neutral-800">
+        <div className="flex justify-between items-center pt-2 border-t border-[var(--neutral-800)]">
           <button onClick={() => setPendingDeleteWs(true)} className="text-xs text-red-400/80 hover:text-red-400">Delete project</button>
-          <button onClick={onClose} className="text-xs text-neutral-400 px-3 py-1.5">Close</button>
+          <button onClick={onClose} className="text-xs text-[var(--neutral-400)] px-3 py-1.5">Close</button>
         </div>
       </div>
 

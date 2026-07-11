@@ -40,11 +40,17 @@ AGENT_CAPABILITIES = {
     },
 
     # --- Groq: Reviewer Pool — base 3, reserve 2 (Part 3 §4.2) ---
-    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor"]},
-    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor"]},
-    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor"]},
-    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor"]},
-    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor"]},
+    # Part 3 §3.5: "extraction_table_builder" added to this same pool's
+    # tags, not a new pool -- structured multi-paper extraction is a
+    # fast, cheap, genuinely-parallel Groq-tier job (short JSON fields
+    # from one abstract each), the same shape as this pool's existing
+    # per-item review work, just a different role name reusing the
+    # identical base-3/reserve-2 accounts and fairness rotation.
+    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
+    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
+    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
+    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
+    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
 
     # --- Groq: Structure Architect (isolated single account) ---
     "GROQ_API_KEY_9": {
@@ -163,6 +169,40 @@ ROLE_PROMPTS_SEED = {
     "researcher": "You gather and synthesize information on a topic from provided sources or general knowledge. Flag anything you're unsure of rather than stating it as fact.",
     "writer": "You draft prose to a specified tone, length, and format from a brief or outline.",
     "fact_checker": "You review a draft against source material or general knowledge and flag unsupported claims. You do not rewrite — only annotate.",
+
+    # Part 3 §3.6 — hand-written up front, same reasoning as the persona
+    # briefs below: a bad first-draft brief becomes permanent once
+    # written, and this role has a specific failure mode worth heading
+    # off explicitly (rubber-stamping the pre-filter's candidates instead
+    # of actually judging them).
+    "contradiction_detector": (
+        "You review a deterministic pre-filter's candidate contradiction "
+        "pairs and candidate coverage gaps from a research extraction "
+        "table (provided as prior context). The pre-filter is a cheap "
+        "keyword/counting heuristic, not a verdict — for each candidate, "
+        "judge on the actual paper content whether it's a genuine, "
+        "meaningful disagreement or blind spot, or just noisy wording "
+        "that doesn't really conflict. State plainly which candidates "
+        "you're confirming, which you're dismissing and why, and note "
+        "any real contradiction or gap the pre-filter missed."
+    ),
+    # Part 3 §3.8 — same hand-written-brief reasoning as contradiction_detector
+    # above. Deliberately references source_quality_flagger's output by
+    # name so this role actually weights sources instead of treating
+    # every citation as equally reliable — that's the entire point of
+    # having both roles in the same domain.
+    "consensus_meter": (
+        "You read a research extraction table (and any source-quality or "
+        "contradiction flags already surfaced, given as prior context) "
+        "and assess overall consensus across the sources: where most "
+        "sources genuinely agree, how strong that agreement really is "
+        "(many consistent studies vs. one lone result), and where "
+        "agreement breaks down. Weight a source flagged as low-quality, "
+        "an unreviewed preprint, or a near-duplicate accordingly — don't "
+        "count it the same as an unflagged source. Do not manufacture a "
+        "false consensus by glossing over real disagreement, and do not "
+        "treat a single study as proof of a broad claim."
+    ),
 
     # Part 1 §1.3 — hand-written up front rather than left to the
     # cold-start brief writer, since a bad first-draft persona brief
@@ -292,7 +332,8 @@ def _wrap_legacy_entry(role_name: str, brief: str) -> dict:
     UI correctly flags it as an unreviewed cold-start brief instead of
     silently implying a human wrote it."""
     source = "seed" if ROLE_PROMPTS_SEED.get(role_name) == brief else "panel_brief_writer"
-    return {"brief": brief, "source": source, "updated_at": None, "times_hired": 0}
+    return {"brief": brief, "source": source, "updated_at": None, "times_hired": 0,
+            "pinned": False, "pinned_at": None}
 
 
 def _load_prompts() -> dict:
@@ -357,11 +398,18 @@ def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_write
     than resetting it, since re-briefing a role isn't the same event
     as it being hired."""
     prompts = _load_prompts()
+    existing = prompts.get(role_name, {})
     prompts[role_name] = {
         "brief": brief,
         "source": source,
         "updated_at": _utcnow_iso(),
-        "times_hired": prompts.get(role_name, {}).get("times_hired", 0),
+        "times_hired": existing.get("times_hired", 0),
+        # Pin state is a display preference, not part of what a brief
+        # edit/rewrite is about — preserved across brief updates the
+        # same way times_hired already is, rather than reset to
+        # unpinned every time a role's brief changes.
+        "pinned": existing.get("pinned", False),
+        "pinned_at": existing.get("pinned_at"),
     }
     write(ROLE_PROMPTS_KEY, prompts)
 
@@ -389,10 +437,34 @@ def record_role_hire(role_name: str) -> None:
     entry = prompts.get(role_name) or {
         "brief": None, "source": "panel_brief_writer",
         "updated_at": None, "times_hired": 0,
+        "pinned": False, "pinned_at": None,
     }
     entry["times_hired"] = entry.get("times_hired", 0) + 1
     prompts[role_name] = entry
     write(ROLE_PROMPTS_KEY, prompts)
+
+
+def set_role_pinned(role_name: str, pinned: bool) -> dict:
+    """New — Role Library pinned-roles feature. Toggles a role's pinned
+    state, persisted server-side alongside its brief/metadata so it
+    syncs across devices (same store, same key, as everything else in
+    this module — no new storage mechanism). Creates a bare entry (like
+    record_role_hire() above) if the role has no brief yet — a role can
+    in principle be pinned from a picker before it's ever actually been
+    hired/briefed. Returns the updated entry so the API layer can hand
+    the fresh {role, brief, source, ..., pinned, pinned_at} straight
+    back to the frontend without a second read."""
+    prompts = _load_prompts()
+    entry = prompts.get(role_name) or {
+        "brief": None, "source": "panel_brief_writer",
+        "updated_at": None, "times_hired": 0,
+        "pinned": False, "pinned_at": None,
+    }
+    entry["pinned"] = bool(pinned)
+    entry["pinned_at"] = _utcnow_iso() if pinned else None
+    prompts[role_name] = entry
+    write(ROLE_PROMPTS_KEY, prompts)
+    return entry
 
 
 def list_known_roles() -> list:
@@ -400,6 +472,18 @@ def list_known_roles() -> list:
     return contract (sorted list of role-name strings) even though the
     underlying store now holds richer objects per role."""
     return sorted(_load_prompts().keys())
+
+
+def list_role_metadata() -> list:
+    """Bulk counterpart to get_role_metadata() — one single read of the
+    store instead of N. list_known_roles()+get_role_metadata() per role
+    was doing an N+1 read against the memory bus; this returns the same
+    data (sorted by role name) in exactly one read() call."""
+    prompts = _load_prompts()
+    return sorted(
+        ({"role": name, **meta} for name, meta in prompts.items()),
+        key=lambda r: r["role"],
+    )
 
 # Migration Part 10 §2.1 — replaces Part 5's ROLE_TO_AGENT-based
 # resolve_role(). Only roles that perform a real action (write files to
@@ -425,6 +509,19 @@ REAL_ACTION_ROLES = {
     "duplication_checker": "duplication_checker",
     "structure_architect": "structure_architect",
     "memory_search": "memory_search",
+    # Part 3 — research domain's real-action roles. Each performs a real
+    # action (external HTTP calls, or writes structured data a
+    # downstream role consumes as JSON, not free text) rather than pure
+    # reasoning, same category as idea_planner/prompt_writer/test_writer
+    # above. "contradiction_detector" and "consensus_meter" are
+    # deliberately absent from this map — both require genuine judgment
+    # and resolve to "generic_worker" like any reasoning role.
+    "academic_search": "academic_search",
+    "source_quality_flagger": "source_quality_flagger",
+    "citation_graph_builder": "citation_graph_builder",
+    "extraction_table_builder": "extraction_table_builder",
+    "contradiction_prefilter": "contradiction_prefilter",
+    "dataset_analyst": "dataset_analyst",  # Part 3 §3.7
 }
 
 
@@ -458,6 +555,12 @@ from agents import (
     code_writer_lean,
     reviewer_fixer_lean,
     generic_worker,
+    academic_search,  # Part 3 §3.3 — was missing from this block, see fix note
+    extraction_table_builder,  # Part 3 §3.5
+    contradiction_prefilter,  # Part 3 §3.6
+    dataset_analyst,  # Part 3 §3.7
+    source_quality_flagger,  # Part 3 §3.8
+    citation_graph_builder,  # Part 3
 )
 
 # name -> {"callable": fn, "needs_cycle_num": bool}
@@ -521,6 +624,25 @@ REGISTRY = {
     # find the callable; eo/executor.py's dispatch is what supplies the
     # real role/input_keys/session_id/key_override arguments.
     "generic_worker":         {"callable": generic_worker.run,                "needs_cycle_num": False},
+    # --- Part 3 research-domain real-action roles ---
+    # academic_search (§3.3) was resolvable via REAL_ACTION_ROLES and
+    # dispatched by name in executor.py, but had no REGISTRY entry until
+    # this line — resolve("academic_search") was a guaranteed KeyError.
+    "academic_search":        {"callable": academic_search.run,               "needs_cycle_num": False},
+    "extraction_table_builder": {"callable": extraction_table_builder.run,    "needs_cycle_num": False},
+    # contradiction_prefilter (§3.6) is the deterministic pre-filter half
+    # of the contradiction/gap detector; "contradiction_detector" itself
+    # has no entry here — it's a genuine generic_worker judgment role.
+    "contradiction_prefilter": {"callable": contradiction_prefilter.run,      "needs_cycle_num": False},
+    # dataset_analyst (§3.7) wraps sandbox_tester.py's _run_one_module()
+    # for real, computed dataset analysis rather than an LLM's guess.
+    "dataset_analyst": {"callable": dataset_analyst.run,                      "needs_cycle_num": False},
+    # source_quality_flagger (§3.8): deterministic quality flags + reused
+    # (agents/duplication_checker.py) near-duplicate detection.
+    "source_quality_flagger": {"callable": source_quality_flagger.run,        "needs_cycle_num": False},
+    # citation_graph_builder: read-only view over the "cites" edges
+    # academic_search.py already writes — no new nodes/edges of its own.
+    "citation_graph_builder": {"callable": citation_graph_builder.run,        "needs_cycle_num": False},
 }
 def resolve(agent_name: str):
     """Return the callable for `agent_name`, or raise KeyError with a

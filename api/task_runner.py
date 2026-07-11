@@ -55,7 +55,7 @@ from eo.sga import attempt as sga_attempt
 from eo.semantic_cache import check_cache, write_cache
 from eo.panel import staff_task
 from eo.registry import update_role_prompt   # NEW — Part 2 §2.5
-from eo.structure import get_workflow_template, classification_from_template   # NEW — Part 2 §2.3/§2.6
+from eo.structure import get_workflow_template, classification_from_template, record_template_run   # NEW — Part 2 §2.3/§2.6; record_template_run NEW — recent templates
 from eo import code_loader
 from eo import routing_memory
 from eo import conversation_memory
@@ -424,6 +424,12 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     template = get_workflow_template(template_id)
     if template is None:
         raise KeyError(f"No workflow template found for template_id={template_id!r}")
+    # Recent-templates feature — stamp the moment this template is
+    # actually dispatched. Deliberately here (once run_task_from_template
+    # is genuinely committed to running it) rather than inside a
+    # separate "did the user click run" API call, so recency reflects
+    # real dispatches, not just opening the picker.
+    record_template_run(template_id)
 
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)

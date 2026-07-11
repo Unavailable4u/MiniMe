@@ -83,7 +83,7 @@ def new_chat_id() -> str:
     return f"chat_{uuid.uuid4().hex[:12]}"
 
 
-def create_chat(title: str = "New Chat", tags: list | None = None) -> dict:
+def create_chat(title: str = "New Chat", tags: list | None = None, template_id: str | None = None) -> dict:
     """Creates an empty chat file + index entry. Returns the chat dict."""
     with _lock:
         _ensure_dirs()  # NEW — guards a fresh install with no data/chats/ yet
@@ -95,6 +95,7 @@ def create_chat(title: str = "New Chat", tags: list | None = None) -> dict:
             "updated_at": _now(),
             "linked_chat_ids": [],
             "tags": _clean_tags(tags),   # NEW — §0.4 unified tagging
+            "template_id": template_id,   # NEW — one chat per template
             "messages": [],
         }
         with open(_chat_path(chat_id), "w") as f:
@@ -111,9 +112,23 @@ def create_chat(title: str = "New Chat", tags: list | None = None) -> dict:
             "tags": chat["tags"],   # NEW — kept in the index too, so tag
                                      # filtering (list_chats_by_tag below)
                                      # doesn't need to open every chat file.
+            "template_id": template_id,   # NEW — kept in the index too, so
+                                           # find_chat_for_template() below
+                                           # doesn't need to open every chat file.
         })
         _write_index(index)
         return chat
+
+
+def find_chat_for_template(template_id: str) -> dict | None:
+    """The chat this template already has, if any — reused by every
+    subsequent run instead of minting a new chat each time. Most
+    recently updated wins if somehow more than one exists."""
+    index = _read_index()
+    matches = [c for c in index["chats"] if c.get("template_id") == template_id]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda c: c["updated_at"], reverse=True)[0]
 
 
 def list_chats() -> list:

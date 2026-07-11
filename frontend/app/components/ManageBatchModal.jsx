@@ -52,7 +52,7 @@ export default function ManageBatchModal({ batch, allChats, onClose }) {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && commitRename()}
-                className="flex-1 bg-black/30 border border-neutral-700 rounded px-2 py-1 text-sm"
+                className="flex-1 bg-black/30 border border-[var(--neutral-700)] rounded px-2 py-1 text-sm"
               />
               <button onClick={commitRename} className="text-xs" style={{ color: "var(--cyber-cyan)" }}>
                 Save

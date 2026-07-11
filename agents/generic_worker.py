@@ -51,7 +51,7 @@ from eo.registry import get_role_prompt, AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
 from eo import conversation_memory   # NEW — Part 23
 from utils.llm_client import generate_text
-from memory.bus import read as bus_read, write as bus_write
+from memory.bus import read as bus_read, write as bus_write, KEYS
 # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
 # module level here. eo.registry.py now imports this module (generic_worker)
 # at load time so resolve("generic_worker") works, and eo.panel.py imports
@@ -94,17 +94,22 @@ NEXT_TAG_INSTRUCTION = (
 # Migration Part 12 §3.4 — see module docstring. A role not in this map
 # (most non-coding roles) only gets the normal stage_output:* treatment.
 #
-# Migration Part A fix (registry.py's REAL_ACTION_ROLES): idea_planner,
-# prompt_writer, and test_writer were moved back to their dedicated
-# real-action modules (they produce structured JSON that code_writers.py/
-# sandbox_tester.py need in dict shape, not free-text reasoning output —
-# routing them through generic_worker was writing plain strings into
-# module_specs/current_plan/test_code, which crashed the first real-action
-# consumer downstream). None of the three resolve to "generic_worker"
-# anymore, so this map is intentionally empty now — left in place as a
-# dict (rather than removed outright) in case a genuinely new role is
-# ever added that needs the same style of legacy-key bridge.
-LEGACY_BUS_KEY_MAP = {}
+# Migration Part A fix: idea_planner, prompt_writer, and test_writer were
+# moved back to their dedicated real-action modules (they produce
+# structured JSON, not free-text reasoning output), so none of the three
+# resolve to "generic_worker" anymore.
+#
+# Part 3 §3.8: extraction_table_builder is a real-action role that writes
+# KEYS["extraction_table"], never a stage_output:* entry. Without this
+# bridge, any generic_worker role hired after it (consensus_meter,
+# contradiction_detector, researcher, writer, editor...) would list it in
+# input_keys but find nothing there. Other Part 3 real-action roles don't
+# need an entry: academic_search's output isn't read by name downstream,
+# and contradiction_prefilter/source_quality_flagger already write their
+# own stage_output entry directly.
+LEGACY_BUS_KEY_MAP = {
+    "extraction_table_builder": KEYS["extraction_table"],
+}
 
 
 def _chain_step_for(agent_key: str) -> dict:

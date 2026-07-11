@@ -4,7 +4,7 @@ import { useSession } from "../../context/SessionContext";
 import MessageBubble from "../MessageBubble";
 import WorkingPanel from "../WorkingPanel";
 import HireReviewScreen from "../HireReviewScreen";
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck } from "lucide-react";
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose } from "lucide-react";
 
 // Icon + label per mode, shared between the trigger button and the
 // dropdown list. Swap these for any other lucide-react icon you like —
@@ -18,6 +18,14 @@ const MODES = [
 ];
 
 const WORKING_PANEL_KEY = "minime_working_panel_collapsed";
+const WORKING_PANEL_WIDTH_KEY = "minime_working_panel_width";
+const WORKING_PANEL_DEFAULT_WIDTH = 420;
+const WORKING_PANEL_MIN_WIDTH = 280;
+const WORKING_PANEL_MAX_WIDTH = 720;
+
+function clampWorkingPanelWidth(w) {
+  return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
+}
 
 export default function ChatTab() {
   const {
@@ -34,15 +42,54 @@ export default function ChatTab() {
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+  const [workingPanelWidth, setWorkingPanelWidth] = useState(WORKING_PANEL_DEFAULT_WIDTH);
+  const resizeCleanupRef = useRef(null); // holds the active mousemove/mouseup remover, if a drag is in progress
 
   useEffect(() => {
     setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
+    const savedWidth = parseInt(localStorage.getItem(WORKING_PANEL_WIDTH_KEY), 10);
+    if (!Number.isNaN(savedWidth)) setWorkingPanelWidth(clampWorkingPanelWidth(savedWidth));
+    // If the tab unmounts mid-drag (e.g. clicking another top-level tab
+    // without releasing the mouse), make sure the window listeners below
+    // don't leak.
+    return () => resizeCleanupRef.current?.();
   }, []);
   function toggleWorkingPanel() {
     setWorkingPanelCollapsed((prev) => {
       localStorage.setItem(WORKING_PANEL_KEY, !prev ? "1" : "0");
       return !prev;
     });
+  }
+
+  // Drag-to-resize — handle sits on the panel's left edge (it's docked
+  // to the right), so dragging left grows it and dragging right shrinks
+  // it. Width only hits localStorage once on mouseup, not on every
+  // mousemove, to avoid hammering it during the drag.
+  function startWorkingPanelResize(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = workingPanelWidth;
+
+    function onMouseMove(ev) {
+      const deltaX = ev.clientX - startX;
+      setWorkingPanelWidth(clampWorkingPanelWidth(startWidth - deltaX));
+    }
+    function onMouseUp() {
+      cleanup();
+      setWorkingPanelWidth((w) => {
+        localStorage.setItem(WORKING_PANEL_WIDTH_KEY, String(w));
+        return w;
+      });
+    }
+    function cleanup() {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      resizeCleanupRef.current = null;
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    resizeCleanupRef.current = cleanup;
   }
 
   useEffect(() => {
@@ -104,9 +151,9 @@ export default function ChatTab() {
   return (
     <div className="flex h-full max-w-6xl mx-auto">
       {/* LEFT — Chat Box */}
-      <div className="flex flex-col flex-1 min-w-0 border-r border-neutral-800">
-        <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
-          <span className="text-xs font-medium text-neutral-400">Chat Box</span>
+      <div className="flex flex-col flex-1 min-w-0 border-r border-[var(--neutral-800)]">
+        <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
+          <span className="text-xs font-medium text-[var(--neutral-400)]">Chat Box</span>
           <div className="flex items-center gap-3">
             {/* NEW — Part 2 §2.5: per-session toggle, off by default —
                 most tasks should stay one-click. When on, sendTask()
@@ -118,21 +165,13 @@ export default function ChatTab() {
               title="Review staffed roles before a run starts"
               className={`flex items-center gap-1 text-xs px-2 py-1 rounded-md border transition-colors ${
                 reviewBeforeDispatch
-                  ? "border-neutral-500 text-neutral-200 bg-neutral-800/70"
-                  : "border-neutral-800 text-neutral-500 hover:text-neutral-300"
+                  ? "border-[var(--neutral-500)] text-[var(--neutral-200)] bg-[var(--neutral-800-a70)]"
+                  : "border-[var(--neutral-800)] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
               }`}
             >
               <ClipboardCheck size={12} />
               Review hires
             </button>
-            {workingPanelCollapsed && (
-              <button
-                onClick={toggleWorkingPanel}
-                className="text-xs text-neutral-500 hover:text-neutral-300 flex items-center gap-1"
-              >
-                Show Working Panel
-              </button>
-            )}
           </div>
         </div>
 
@@ -142,7 +181,7 @@ export default function ChatTab() {
           className="flex-1 overflow-y-auto px-4 py-6 space-y-4"
         >
           {messages.length === 0 && (
-            <p className="text-neutral-500 text-sm">
+            <p className="text-[var(--neutral-500)] text-sm">
               Send a task — the EO layer will classify it and route it through
               the appropriate tier.
             </p>
@@ -157,7 +196,7 @@ export default function ChatTab() {
             </div>
           ))}
           {loading && (
-            <div className="text-neutral-500 text-sm animate-pulse">Working…</div>
+            <div className="text-[var(--neutral-500)] text-sm animate-pulse">Working…</div>
           )}
           <div ref={bottomRef} />
         </div>
@@ -167,7 +206,7 @@ export default function ChatTab() {
             has dispatched yet, so there's nothing for the compose bar to
             usefully do until Confirm/Cancel resolves it. */}
         {pendingHireReview ? (
-          <div className="border-t border-neutral-800 p-4">
+          <div className="border-t border-[var(--neutral-800)] p-4">
             <HireReviewScreen
               hires={pendingHireReview.hires}
               onConfirm={confirmHireReview}
@@ -175,7 +214,7 @@ export default function ChatTab() {
             />
           </div>
         ) : (
-        <form onSubmit={handleSubmit} className="border-t border-neutral-800 p-4 flex gap-2 items-end">
+        <form onSubmit={handleSubmit} className="border-t border-[var(--neutral-800)] p-4 flex gap-2 items-end">
           {/* Mode picker — custom dropdown (not a native <select>) so each
               option can carry its own icon. */}
           <div className="relative">
@@ -183,14 +222,14 @@ export default function ChatTab() {
               type="button"
               disabled={loading}
               onClick={() => setModeOpen((o) => !o)}
-              className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm outline-none disabled:opacity-50 hover:border-neutral-600 transition-colors"
+              className="flex items-center gap-1.5 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none disabled:opacity-50 hover:border-[var(--neutral-600)] transition-colors"
             >
               <ActiveIcon size={14} />
               {activeMode.label}
               <ChevronDown size={13} className={`transition-transform ${modeOpen ? "rotate-180" : ""}`} />
             </button>
             {modeOpen && (
-              <div className="absolute bottom-full mb-2 left-0 w-56 rounded-lg border border-neutral-800 bg-neutral-900 shadow-xl overflow-hidden z-10">
+              <div className="absolute bottom-full mb-2 left-0 w-56 rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-xl overflow-hidden z-10">
                 {MODES.map((m) => {
                   const Icon = m.icon;
                   return (
@@ -201,14 +240,14 @@ export default function ChatTab() {
                         setMode(m.id);
                         setModeOpen(false);
                       }}
-                      className={`w-full flex items-start gap-2 px-3 py-2 text-left text-sm hover:bg-neutral-800 transition-colors ${
-                        m.id === mode ? "bg-neutral-800/70" : ""
+                      className={`w-full flex items-start gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--neutral-800)] transition-colors ${
+                        m.id === mode ? "bg-[var(--neutral-800-a70)]" : ""
                       }`}
                     >
                       <Icon size={15} className="mt-0.5 shrink-0" />
                       <span>
-                        <span className="block text-neutral-200">{m.label}</span>
-                        <span className="block text-[11px] text-neutral-500">{m.hint}</span>
+                        <span className="block text-[var(--neutral-200)]">{m.label}</span>
+                        <span className="block text-[11px] text-[var(--neutral-500)]">{m.hint}</span>
                       </span>
                     </button>
                   );
@@ -225,12 +264,12 @@ export default function ChatTab() {
             placeholder="Describe a task... (Shift+Enter for a new line)"
             disabled={loading}
             rows={1}
-            className="flex-1 resize-none bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm outline-none focus:border-neutral-600 disabled:opacity-50 leading-relaxed"
+            className="flex-1 resize-none bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--neutral-600)] disabled:opacity-50 leading-relaxed"
           />
           <button
             type="submit"
             disabled={loading || !draft.trim()}
-            className="bg-neutral-100 text-neutral-900 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end"
+            className="bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end"
           >
             Send
           </button>
@@ -238,20 +277,46 @@ export default function ChatTab() {
         )}
       </div>
 
-      {/* RIGHT — Working Panel, foldable */}
-      {!workingPanelCollapsed && (
-        <div className="w-[420px] shrink-0 hidden lg:flex flex-col">
-          <div className="px-4 py-2 border-b border-neutral-800 flex items-center justify-between">
-            <span className="text-xs font-medium text-neutral-400">Working Panel</span>
-            <button onClick={toggleWorkingPanel} className="text-xs text-neutral-500 hover:text-neutral-300">
-              Hide
+      {/* RIGHT — Working Panel: resizable when open, collapses to a slim
+          icon rail (rather than vanishing entirely) so there's always a
+          visible way back in. Stays hidden below lg same as before —
+          there's no room for a rail either at that width. */}
+      <div className="hidden lg:flex shrink-0">
+        {workingPanelCollapsed ? (
+          <div className="w-10 flex flex-col items-center border-l border-[var(--neutral-800)] pt-2">
+            <button
+              onClick={toggleWorkingPanel}
+              title="Show Working Panel"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
+            >
+              <PanelRightOpen size={16} />
             </button>
           </div>
-          <div className="flex-1 min-h-0">
-            <WorkingPanel isSyncingRef={isSyncingRef} />
+        ) : (
+          <div className="flex" style={{ width: workingPanelWidth }}>
+            <div
+              onMouseDown={startWorkingPanelResize}
+              title="Drag to resize"
+              className="w-1.5 shrink-0 cursor-col-resize hover:bg-[var(--neutral-700)] active:bg-[var(--neutral-600)] transition-colors"
+            />
+            <div className="flex-1 min-w-0 flex flex-col border-l border-[var(--neutral-800)]">
+              <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
+                <span className="text-xs font-medium text-[var(--neutral-400)]">Working Panel</span>
+                <button
+                  onClick={toggleWorkingPanel}
+                  title="Collapse"
+                  className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                >
+                  <PanelRightClose size={14} />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0">
+                <WorkingPanel isSyncingRef={isSyncingRef} />
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

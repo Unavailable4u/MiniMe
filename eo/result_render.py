@@ -56,6 +56,30 @@ def _looks_like_module_map(result: dict) -> bool:
     )
 
 
+def _render_extraction_table(result: dict) -> str:
+    """agents/extraction_table_builder.py's shape (Part 3 §3.5): one row
+    per paper, columns are Title/Year plus whatever's in field_names.
+    GFM pipe-table syntax -- frontend/app/components/Markdown.jsx already
+    has real styled table/thead/th/td components via remark-gfm, so this
+    renders as an actual table, not a second thing to build in React."""
+    papers = result.get("papers") or []
+    field_names = result.get("field_names") or []
+    if not papers:
+        return "_(no papers extracted)_"
+
+    def esc(v) -> str:
+        if v is None or v == "":
+            return "—"
+        return str(v).replace("|", "\\|").replace("\n", " ")
+
+    headers = ["Title", "Year"] + [f.replace("_", " ").title() for f in field_names]
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
+    for p in papers:
+        row = [esc(p.get("title")), esc(p.get("year"))] + [esc(p.get(f)) for f in field_names]
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
 def render_agent_result(result, limit: int = 9000) -> str:
     """Best-effort human-readable markdown for ANY agent result shape in
     this codebase. Replaces the old str(result)-on-anything-unrecognized
@@ -91,11 +115,25 @@ def render_agent_result(result, limit: int = 9000) -> str:
             text = result["code"]
         elif result.get("answer"):
             text = str(result["answer"])
+        elif "papers" in result and isinstance(result.get("field_names"), list):
+            # agents/extraction_table_builder.py's shape (Part 3 §3.5) —
+            # checked via field_names specifically so this doesn't also
+            # catch agents/academic_search.py's {"papers", "edges_written"}
+            # shape, which has no field_names and reads better as its own
+            # summary line below.
+            text = _render_extraction_table(result)
         elif _looks_like_module_map(result):
             # agents/code_writers.py ("implementer") / agents/test_writer.py
             # ("test_writer") flat {module: code} shape, including the
             # legitimate empty-dict "no tests generated" case.
             text = _render_code_modules(result)
+        elif isinstance(result.get("summary"), str) and result.get("summary"):
+            # Part 3's other real-action roles (academic_search,
+            # contradiction_prefilter, source_quality_flagger,
+            # citation_graph_builder, ...) all already produce a
+            # human-readable "summary" string for exactly this purpose —
+            # use it instead of falling through to a raw JSON dump.
+            text = result["summary"]
         else:
             # Genuinely unrecognized shape — still don't print a raw
             # Python repr; pretty-printed JSON (double-quoted, indented)

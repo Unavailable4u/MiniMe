@@ -80,8 +80,8 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 
   if (collapsed) {
     return (
-      <div className="w-10 shrink-0 border-r border-neutral-800 flex flex-col items-center py-3">
-        <button onClick={onToggle} className="text-neutral-500 hover:text-neutral-300" title="Show chats">
+      <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3">
+        <button onClick={onToggle} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show chats">
           <ChevronRight size={16} />
         </button>
       </div>
@@ -115,8 +115,8 @@ export default function ChatSidebar({ collapsed, onToggle }) {
     return (
       <div
         key={chat.id}
-        className={`group px-3 py-2 border-b border-neutral-900 cursor-pointer ${indent ? "pl-6" : ""} ${
-          chat.id === sessionId ? "bg-neutral-800/70" : "hover:bg-neutral-900"
+        className={`group px-3 py-2 border-b border-[var(--neutral-900)] cursor-pointer ${indent ? "pl-6" : ""} ${
+          chat.id === sessionId ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
         }`}
         style={accentColor ? { borderLeft: `2px solid ${accentColor}` } : undefined}
         onClick={() => editingId !== chat.id && switchChat(chat.id)}
@@ -128,20 +128,20 @@ export default function ChatSidebar({ collapsed, onToggle }) {
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && commitRename(chat.id)}
-              className="flex-1 bg-neutral-950 border border-neutral-700 rounded px-1.5 py-0.5 text-xs outline-none"
+              className="flex-1 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-xs outline-none"
             />
             <button onClick={() => commitRename(chat.id)}><Check size={13} className="text-green-400" /></button>
-            <button onClick={() => setEditingId(null)}><X size={13} className="text-neutral-500" /></button>
+            <button onClick={() => setEditingId(null)}><X size={13} className="text-[var(--neutral-500)]" /></button>
           </div>
         ) : (
           <div className="flex items-center justify-between gap-1">
-            <span className="text-xs text-neutral-200 truncate">{chat.title}</span>
+            <span className="text-xs text-[var(--neutral-200)] truncate">{chat.title}</span>
             <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
               {/* Batched chats already show a badge in their batch header
                   above, so only render the per-row Link2 badge for chats
                   linked the old, non-batch way. */}
               {!indent && chat.linked_chat_ids?.length > 0 && (
-                <Link2 size={12} className="text-neutral-500" title={`Linked to ${chat.linked_chat_ids.length} chat(s)`} />
+                <Link2 size={12} className="text-[var(--neutral-500)]" title={`Linked to ${chat.linked_chat_ids.length} chat(s)`} />
               )}
               {/* Manual per-chat link button hidden once a chat is
                   batched — batch membership (managed via §5's "Manage
@@ -150,14 +150,14 @@ export default function ChatSidebar({ collapsed, onToggle }) {
                   memory_batch.py's _sync_members on the next batch edit. */}
               {!indent && (
                 <button onClick={(e) => { e.stopPropagation(); setLinkingId(chat.id); }} title="Share memory with other chats">
-                  <Link2 size={12} className="text-neutral-500 hover:text-neutral-200" />
+                  <Link2 size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                 </button>
               )}
               <button onClick={(e) => { e.stopPropagation(); startRename(chat); }} title="Rename">
-                <Pencil size={12} className="text-neutral-500 hover:text-neutral-200" />
+                <Pencil size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
               </button>
               <button onClick={(e) => { e.stopPropagation(); askDelete(chat); }} title="Delete">
-                <Trash2 size={12} className="text-neutral-500 hover:text-red-400" />
+                <Trash2 size={12} className="text-[var(--neutral-500)] hover:text-red-400" />
               </button>
             </div>
           </div>
@@ -167,28 +167,28 @@ export default function ChatSidebar({ collapsed, onToggle }) {
   }
 
   return (
-    <div className="w-64 shrink-0 border-r border-neutral-800 flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-3 border-b border-neutral-800">
-        <span className="text-xs font-medium text-neutral-400">Chats</span>
+    <div className="w-64 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
+      <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
+        <span className="text-xs font-medium text-[var(--neutral-400)]">Chats</span>
         <div className="flex items-center gap-2">
-          <button onClick={createNewChat} title="New chat" className="text-neutral-400 hover:text-neutral-100">
+          <button onClick={createNewChat} title="New chat" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
             <Plus size={15} />
           </button>
-          <button onClick={() => setCreatingWorkspace(true)} title="New project" className="text-neutral-400 hover:text-neutral-100">
+          <button onClick={() => setCreatingWorkspace(true)} title="New project" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
             <FolderPlus size={15} />
           </button>
-          <button onClick={onToggle} title="Hide chats" className="text-neutral-500 hover:text-neutral-300">
+          <button onClick={onToggle} title="Hide chats" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
             <ChevronLeft size={15} />
           </button>
         </div>
       </div>
 
-      <div className="px-3 py-2 border-b border-neutral-900">
+      <div className="px-3 py-2 border-b border-[var(--neutral-900)]">
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search chats, batches, projects…"
-          className="w-full bg-black/30 border border-neutral-800 rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
         />
       </div>
 
@@ -200,17 +200,17 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           // straight to the chat you searched for).
           const visibleMembers = ws.name.toLowerCase().includes(q) ? memberChats : memberChats.filter(chatMatches);
           return (
-            <div key={ws.id} className="border-b border-neutral-900">
+            <div key={ws.id} className="border-b border-[var(--neutral-900)]">
               <div className="flex items-center justify-between px-3 py-1.5 bg-black/20">
                 <span className="text-[10px] uppercase tracking-wide" style={{ color: "var(--cyber-magenta)" }}>
                   {ws.name} · {ws.chat_ids.length}
                 </span>
                 <div className="flex items-center gap-2">
                   <button onClick={() => setAddingToWorkspace(ws)} title="Add chat to project">
-                    <FolderInput size={11} className="text-neutral-500 hover:text-neutral-200" />
+                    <FolderInput size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                   </button>
                   <button onClick={() => setManagingWorkspace(ws)} title="Manage project">
-                    <Settings2 size={11} className="text-neutral-500 hover:text-neutral-200" />
+                    <Settings2 size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                   </button>
                 </div>
               </div>
@@ -228,14 +228,14 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           if (visibleMembers.length === 0) return null;
           const accentColor = hashBatchColor(batch.id);
           return (
-            <div key={batch.id} className="border-b border-neutral-900">
+            <div key={batch.id} className="border-b border-[var(--neutral-900)]">
               <div className="flex items-center justify-between px-3 py-1.5 bg-black/20">
                 <span className="text-[10px] uppercase tracking-wide flex items-center" style={{ color: accentColor }}>
                   <Link2 size={10} className="inline mr-1" />
                   {batch.name} · {memberChats.length}
                 </span>
                 <button onClick={() => openManageBatch(batch)} title="Manage batch">
-                  <Settings2 size={11} className="text-neutral-500 hover:text-neutral-200" />
+                  <Settings2 size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                 </button>
               </div>
               {visibleMembers.map((chat) => renderChatRow(chat, { indent: true, accentColor }))}
@@ -343,36 +343,36 @@ function LinkChatsModal({ chatId, allChats, onClose }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
-        className="bg-neutral-900 border border-neutral-700 rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto"
+        className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="text-sm font-medium text-neutral-200 mb-1">Share memory with "{current?.title}"</h3>
-        <p className="text-xs text-neutral-500 mb-3">
+        <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-1">Share memory with "{current?.title}"</h3>
+        <p className="text-xs text-[var(--neutral-500)] mb-3">
           Pick chats to group with this one — they'll all share memory with each other as a batch.
         </p>
         <div className="space-y-1">
           {allChats.filter((c) => c.id !== chatId).map((c) => (
-            <label key={c.id} className="flex items-center gap-2 text-xs text-neutral-300 py-1 cursor-pointer">
+            <label key={c.id} className="flex items-center gap-2 text-xs text-[var(--neutral-300)] py-1 cursor-pointer">
               <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
               {c.title}
             </label>
           ))}
           {allChats.length <= 1 && (
-            <p className="text-xs text-neutral-600">No other chats yet.</p>
+            <p className="text-xs text-[var(--neutral-600)]">No other chats yet.</p>
           )}
         </div>
 
         {/* NEW — §9.2: goes right here, between the checkbox list and the
             Cancel/Save row — so it's the last thing you see before deciding */}
         {estimate && selected.size > 0 && (
-          <p className={`text-[11px] mt-3 ${estimate.max_tokens_per_message > 800 ? "text-red-400" : "text-neutral-500"}`}>
+          <p className={`text-[11px] mt-3 ${estimate.max_tokens_per_message > 800 ? "text-red-400" : "text-[var(--neutral-500)]"}`}>
             ~{estimate.max_tokens_per_message} tokens of shared context injected per message across {estimate.member_count} chats
           </p>
         )}
 
         <div className="flex justify-end gap-2 mt-4">
-          <button onClick={onClose} className="text-xs text-neutral-400 px-3 py-1.5">Cancel</button>
-          <button onClick={save} className="text-xs bg-neutral-100 text-neutral-900 rounded px-3 py-1.5 font-medium">Save</button>
+          <button onClick={onClose} className="text-xs text-[var(--neutral-400)] px-3 py-1.5">Cancel</button>
+          <button onClick={save} className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium">Save</button>
         </div>
       </div>
     </div>

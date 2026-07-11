@@ -37,11 +37,38 @@ STRUCTURE_TEMPLATES = {
     "creative_writing": [
         "brainstormer", "outliner", "writer", "fact_checker", "editor",
     ],
+    # Part 3 §3.2 — extends the original five-role synthesis/writing
+    # layer (still exactly right for the end of the pipeline) with the
+    # discovery/verification layer upstream of it. Menu, not a fixed
+    # pipeline, same as "simulate" above: a real task hires a subset
+    # (e.g. "find recent papers on X" only needs academic_search +
+    # writer). academic_search, source_quality_flagger,
+    # citation_graph_builder, extraction_table_builder, and (Part 3
+    # §3.6) contradiction_prefilter are real-action roles
+    # (REAL_ACTION_ROLES, below); contradiction_detector and
+    # consensus_meter require genuine judgment and run through
+    # generic_worker like any other reasoning role. contradiction_prefilter
+    # is deliberately positioned directly before contradiction_detector
+    # -- it's the deterministic narrowing pass contradiction_detector's
+    # LLM judgment reads as prior context (agents/generic_worker.py's
+    # input_keys mechanism), so hiring one without the other ahead of it
+    # in the order leaves contradiction_detector with no candidates to
+    # judge.
     "research": [
-        "researcher", "fact_checker", "analyst", "writer", "editor",
+        "academic_search", "source_quality_flagger", "citation_graph_builder",
+        "extraction_table_builder", "contradiction_prefilter", "contradiction_detector",
+        "consensus_meter", "researcher", "fact_checker", "analyst", "writer", "editor",
     ],
+    # Part 3 §3.7 — dataset_analyst is a real-action role (REAL_ACTION_ROLES,
+    # below): it actually runs computed analysis code against the
+    # dataset in a sandbox, distinct from "analyst" below, which is a
+    # pure-reasoning generic_worker role that writes ABOUT a result
+    # (e.g. dataset_analyst's own output, read via input_keys) rather
+    # than computing one. Positioned first for the same reason
+    # academic_search leads "research": the real data has to exist
+    # before anything downstream can reason about it.
     "data_analysis": [
-        "analyst", "formatter", "writer", "editor",
+        "dataset_analyst", "analyst", "formatter", "writer", "editor",
     ],
     # Part 1 §1.2 — a menu, not a fixed pipeline (see this dict's own
     # docstring above): a real task only hires 2-4 of these. Persona
@@ -100,6 +127,8 @@ def _rough_domain_guess(task_text: str) -> str | None:
         return "creative_writing"
     if any(kw in text for kw in (
         "research", "investigate", "sources", "citations", "survey",
+        "paper", "citation", "literature review", "arxiv",
+        "peer-reviewed", "study",
     )):
         return "research"
     if any(kw in text for kw in (
@@ -265,6 +294,10 @@ def save_workflow_template(name: str, roles: list, description: str = "",
         "no_conversation_context_roles": list(no_conversation_context_roles) if no_conversation_context_roles else [],
         "created_by": created_by,
         "created_at": _utcnow_iso(),
+        # Recent-templates feature — None until the template is actually
+        # run for the first time via run_task_from_template(); see
+        # record_template_run() below, called from api/task_runner.py.
+        "last_run_at": None,
     }
     templates[template_id] = template
     _bus_write(WORKFLOW_TEMPLATES_KEY, templates)
@@ -280,6 +313,43 @@ def list_workflow_templates() -> list:
     """Every saved template, newest first — for a template-picker UI."""
     templates = list(_load_templates().values())
     return sorted(templates, key=lambda t: t.get("created_at") or "", reverse=True)
+
+
+def record_template_run(template_id: str) -> dict | None:
+    """New — "recently run" templates feature. Stamps last_run_at on a
+    template every time it's actually dispatched, called from
+    api/task_runner.py's run_task_from_template() right after it
+    confirms the template exists. Same single-key-single-dict store as
+    everything else here, so this syncs across devices for free — no
+    separate storage mechanism needed. Returns the updated template, or
+    None if template_id doesn't exist (mirrors get_workflow_template()'s
+    own not-found contract; the caller already raises KeyError before
+    reaching this point in practice, so None here is just defensive)."""
+    templates = _load_templates()
+    template = templates.get(template_id)
+    if template is None:
+        return None
+    template["last_run_at"] = _utcnow_iso()
+    templates[template_id] = template
+    _bus_write(WORKFLOW_TEMPLATES_KEY, templates)
+    return template
+
+
+def update_workflow_template(template_id: str, **fields) -> dict | None:
+    """Partial update — only overwrites keys actually passed. Returns
+    the updated template, or None if template_id doesn't exist."""
+    templates = _load_templates()
+    template = templates.get(template_id)
+    if template is None:
+        return None
+    if "roles" in fields and fields["roles"] is not None:
+        _validate_roles_shape(fields["roles"])
+    for key in ("name", "description", "roles", "domain_hint", "approval_roles", "no_conversation_context_roles"):
+        if key in fields and fields[key] is not None:
+            template[key] = fields[key]
+    templates[template_id] = template
+    _bus_write(WORKFLOW_TEMPLATES_KEY, templates)
+    return template
 
 
 def delete_workflow_template(template_id: str) -> bool:

@@ -262,7 +262,7 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-amber-500" /> running</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-red-500" /> error</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border-2 border-yellow-500" style={{ borderStyle: "dashed" }} /> awaiting approval</span>
-      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-neutral-500" style={{ borderStyle: "dashed" }} /> pending</span>
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-[var(--neutral-500)]" style={{ borderStyle: "dashed" }} /> pending</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-cyan-400" /> requested</span>
     </>
   );

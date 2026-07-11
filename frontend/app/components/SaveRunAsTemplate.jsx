@@ -70,7 +70,7 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex items-center gap-1 text-[11px] text-neutral-500 hover:text-neutral-300"
+        className="flex items-center gap-1 text-[11px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
         title="Save this run's role pipeline as a reusable workflow template"
       >
         <Bookmark size={11} />
@@ -80,12 +80,12 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
   }
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-2.5 space-y-1.5 text-xs">
+    <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-950-a50)] p-2.5 space-y-1.5 text-xs">
       <div className="flex items-center justify-between">
-        <span className="text-neutral-400">
+        <span className="text-[var(--neutral-400)]">
           Save this run's {roles.length}-role pipeline as a template
         </span>
-        <button type="button" onClick={() => setOpen(false)} className="text-neutral-600 hover:text-neutral-300">
+        <button type="button" onClick={() => setOpen(false)} className="text-[var(--neutral-600)] hover:text-[var(--neutral-300)]">
           <X size={12} />
         </button>
       </div>
@@ -93,13 +93,13 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder="Template name"
-        className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1 text-xs text-neutral-300 outline-none focus:border-neutral-600"
+        className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2 py-1 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
       />
       <input
         value={description}
         onChange={(e) => setDescription(e.target.value)}
         placeholder="Description (optional)"
-        className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-2 py-1 text-xs text-neutral-300 outline-none focus:border-neutral-600"
+        className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2 py-1 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
       />
       {err && <p className="text-red-400">{err}</p>}
       <div className="flex justify-end gap-2">
@@ -107,7 +107,7 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
           type="button"
           disabled={saving}
           onClick={save}
-          className="flex items-center gap-1 bg-neutral-100 text-neutral-900 rounded-lg px-2.5 py-1 font-medium disabled:opacity-50"
+          className="flex items-center gap-1 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-2.5 py-1 font-medium disabled:opacity-50"
         >
           <Check size={11} />
           {saving ? "Saving…" : "Save"}
