@@ -31,7 +31,7 @@ export default function ForceGraphBase({
   nodes,
   links,
   height = 360,
-  backgroundColor = "#0a0a0a",
+  backgroundColor, // omit to follow the theme; pass a literal color to override
   linkColor,
   linkWidth,
   linkLabel,
@@ -50,6 +50,16 @@ export default function ForceGraphBase({
   const containerRef = useRef(null);
   const [dims, setDims] = useState({ width: 600, height });
   const lastZoomRef = useRef(0);
+  // Canvas fillStyle can't resolve "var(--neutral-950)" itself the way a
+  // CSS property can, so when no literal backgroundColor override is
+  // passed, resolve the current --neutral-950 value from the DOM once on
+  // mount (single dark theme, so the value never changes at runtime).
+  const [resolvedBg, setResolvedBg] = useState("#0a0a0a");
+  useEffect(() => {
+    if (backgroundColor) return;
+    const v = getComputedStyle(document.documentElement).getPropertyValue("--neutral-950").trim();
+    if (v) setResolvedBg(v);
+  }, [backgroundColor]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -62,13 +72,13 @@ export default function ForceGraphBase({
   }, [height]);
 
   return (
-    <div ref={containerRef} className="relative rounded-lg border border-neutral-800 overflow-hidden">
+    <div ref={containerRef} className="relative rounded-lg border border-[var(--neutral-800)] overflow-hidden">
       <ForceGraph2D
         ref={fgRef}
         graphData={{ nodes, links }}
         width={dims.width}
         height={dims.height}
-        backgroundColor={backgroundColor}
+        backgroundColor={backgroundColor || resolvedBg}
         linkColor={linkColor}
         linkCurvature={linkCurvature}
         linkDirectionalArrowLength={linkDirectionalArrowLength}
@@ -93,7 +103,7 @@ export default function ForceGraphBase({
         nodePointerAreaPaint={nodePointerAreaPaint}
       />
       {legend && (
-        <div className="absolute bottom-1 right-1 flex flex-wrap items-center gap-2 rounded bg-black/60 px-2 py-1 text-[10px] text-neutral-400 max-w-[90%]">
+        <div className="absolute bottom-1 right-1 flex flex-wrap items-center gap-2 rounded bg-black/60 px-2 py-1 text-[10px] text-[var(--neutral-400)] max-w-[90%]">
           {legend}
         </div>
       )}

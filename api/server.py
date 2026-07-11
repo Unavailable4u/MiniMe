@@ -25,9 +25,9 @@ from typing import Optional, Union, Any
 
 from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template   # preview/confirm NEW — Part 2 §2.5, run_task_from_template NEW — Part 2 §2.7
 from eo.executor import resume_graph   # NEW — Part 2 §2.4
-from eo.registry import list_known_roles, get_role_metadata, update_role_prompt   # NEW — Part 2 §2.7: Role Library panel
+from eo.registry import list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned, list_role_metadata   # NEW — Part 2 §2.7: Role Library panel; set_role_pinned NEW — pinned roles; list_role_metadata NEW — bulk read, fixes N+1
 from eo.structure import (   # NEW — Part 2 §2.7: Workflow Template builder
-    save_workflow_template, list_workflow_templates, delete_workflow_template,
+    save_workflow_template, list_workflow_templates, delete_workflow_template, update_workflow_template,
 )
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
 from eo import chat_store
@@ -66,6 +66,7 @@ class RegisterProjectRequest(BaseModel):
 
 class CreateChatRequest(BaseModel):
     title: Optional[str] = "New Chat"
+    template_id: Optional[str] = None   # NEW — one chat per template
 
 
 class RenameChatRequest(BaseModel):
@@ -146,7 +147,7 @@ def get_chats():
 
 @app.post("/api/chats", dependencies=[Depends(require_auth)])
 def create_chat(req: CreateChatRequest):
-    return chat_store.create_chat(title=req.title or "New Chat")
+    return chat_store.create_chat(title=req.title or "New Chat", template_id=req.template_id)
 
 
 @app.get("/api/chats/{chat_id}", dependencies=[Depends(require_auth)])
@@ -611,12 +612,10 @@ def post_resume(req: ResumeRequest):
 def get_roles():
     """Every role the system has ever briefed, metadata included — the
     Role Library panel's one data source. Shape: [{role, brief, source,
-    updated_at, times_hired}, ...]."""
-    roles = []
-    for name in list_known_roles():
-        meta = get_role_metadata(name) or {}
-        roles.append({"role": name, **meta})
-    return roles
+    updated_at, times_hired}, ...]. Uses list_role_metadata() for a
+    single bulk read instead of list_known_roles()+get_role_metadata()
+    per role, which was doing N+1 round-trips against the memory bus."""
+    return list_role_metadata()
 
 
 class UpdateRoleRequest(BaseModel):
@@ -630,6 +629,20 @@ def put_role(role_name: str, req: UpdateRoleRequest):
     eo/registry.py's update_role_prompt() docstring)."""
     update_role_prompt(role_name, req.brief, source="user_edited")
     return {"role": role_name, **(get_role_metadata(role_name) or {})}
+
+
+class SetRolePinnedRequest(BaseModel):
+    pinned: bool
+
+
+@app.patch("/api/roles/{role_name}/pin", dependencies=[Depends(require_auth)])
+def patch_role_pinned(role_name: str, req: SetRolePinnedRequest):
+    """Pinned-roles feature — server-persisted so it syncs across
+    devices, same store as everything else in the Role Library. Doesn't
+    require the role to already have a brief; a role can be pinned from
+    a picker before it's ever been hired."""
+    entry = set_role_pinned(role_name, req.pinned)
+    return {"role": role_name, **entry}
 
 
 class SaveWorkflowTemplateRequest(BaseModel):
@@ -651,6 +664,14 @@ def get_workflow_templates():
     return list_workflow_templates()
 
 
+@app.get("/api/workflow-templates/{template_id}/chat", dependencies=[Depends(require_auth)])
+def get_template_chat(template_id: str):
+    """The one chat this template already owns, if any — lets the
+    frontend reuse it instead of minting a new chat on every run."""
+    chat = chat_store.find_chat_for_template(template_id)
+    return chat or {}
+
+
 @app.post("/api/workflow-templates", dependencies=[Depends(require_auth)])
 def post_workflow_template(req: SaveWorkflowTemplateRequest):
     """Covers both write paths the design calls for: "save from a
@@ -669,6 +690,20 @@ def post_workflow_template(req: SaveWorkflowTemplateRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/api/workflow-templates/{template_id}", dependencies=[Depends(require_auth)])
+def put_workflow_template(template_id: str, req: SaveWorkflowTemplateRequest):
+    """Template editing — there was previously no update path at all,
+    only save (create) and delete."""
+    updated = update_workflow_template(
+        template_id, name=req.name, roles=req.roles, description=req.description,
+        domain_hint=req.domain_hint, approval_roles=req.approval_roles,
+        no_conversation_context_roles=req.no_conversation_context_roles,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Unknown template_id={template_id!r}")
+    return updated
 
 
 @app.delete("/api/workflow-templates/{template_id}", dependencies=[Depends(require_auth)])

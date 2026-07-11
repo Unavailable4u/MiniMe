@@ -50,9 +50,9 @@ export default function MermaidDiagram({ mermaidText }) {
     // to match the plain fenced-code-block look Markdown.jsx already uses
     // for non-mermaid code, since this is effectively the same case.
     return (
-      <div className="text-[11px] text-neutral-500 space-y-1.5">
+      <div className="text-[11px] text-[var(--neutral-500)] space-y-1.5">
         <div>Couldn't render this diagram — showing the raw source instead:</div>
-        <pre className="overflow-x-auto p-3 text-xs bg-black/30 rounded-md border border-neutral-800">
+        <pre className="overflow-x-auto p-3 text-xs bg-black/30 rounded-md border border-[var(--neutral-800)]">
           <code>{mermaidText}</code>
         </pre>
       </div>

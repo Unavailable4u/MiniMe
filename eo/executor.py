@@ -75,6 +75,16 @@ MAX_STAGE_REVISITS = 2
 UNSCOPED_TIER_AGENTS = {
     "dependency_mapper", "documentation_agent", "duplication_checker",
     "memory_search",
+    # Part 3 §3.6 — same (session_id, tier, domain) signature as the four
+    # above; its real input is KEYS["extraction_table"], read straight
+    # off the bus, not task_text/path.
+    "contradiction_prefilter",
+    # Part 3 §3.8 — same signature again; real input is
+    # KEYS["academic_search_report"].
+    "source_quality_flagger",
+    # Part 3 — same signature; read-only, no bus-key input at all beyond
+    # KEYS["academic_search_report"] and eo/graph_edges.py's list_edges().
+    "citation_graph_builder",
 }
 # "structure_architect" is deliberately NOT in the set above — its
 # no-code planning path needs task_text (to plan a folder/file scaffold
@@ -271,6 +281,27 @@ def _summarize(result, limit: int = 9000) -> str:
     return render_agent_result(result, limit=limit)
 
 
+# 4000 chars leaves room alongside _summarize()'s own text within
+# Pusher's ~10KB-per-event limit -- the two share one payload. A result
+# with an "image" key over this (e.g. agents/citation_graph_builder.py's
+# SVG, for a large graph) still has it in the KEYS[...] bus value for
+# anyone reading the bus directly; it's only the live Pusher stream that
+# drops it, same "skip rather than corrupt the event" posture
+# _summarize()'s own truncation already takes toward oversized text.
+MAX_IMAGE_DATA_URI_CHARS = 4000
+
+
+def _extract_image(result) -> str | None:
+    """Any REAL_ACTION_ROLES module can opt in by putting a data-URI
+    string under result["image"] -- generic by key, not by role name, so
+    a future module gets this for free without another executor.py edit."""
+    if isinstance(result, dict) and isinstance(result.get("image"), str):
+        image = result["image"]
+        if 0 < len(image) <= MAX_IMAGE_DATA_URI_CHARS:
+            return image
+    return None
+
+
 def execute_graph(agent_names: list, role_names: list = None, task_text: str = None,
                    cycle_num: int = None, session_id: str = None, path: str = None,
                    mode: str = None, key_overrides: dict = None,
@@ -422,7 +453,13 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # agents/code_writers.py's _derive_specs_from_task_text()).
                 result = fn(session_id=session_id, path=path, expanded=expanded,
                             key_override=override, task_text=task_text, domain=domain)
-            elif current_name in ("reviewer", "security_scanner"):
+            elif current_name in ("reviewer", "security_scanner", "extraction_table_builder"):
+                # extraction_table_builder (§3.5): no task_text needed —
+                # its real input is KEYS["academic_search_report"], read
+                # straight off the bus. If empty, run() raises
+                # MissingDependencyError("academic_search") itself (see
+                # its own docstring), letting the self-heal branch below
+                # splice that step in first on the adaptive path.
                 result = fn(session_id=session_id, path=path, expanded=expanded,
                             key_override=override, domain=domain)
             elif current_name == "fixer_pool":
@@ -435,6 +472,17 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # folder/file scaffold when there's no code to organize.
                 result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
                             domain=domain)
+            elif current_name == "academic_search":
+                # Needs task_text as the search query (no other bus key
+                # holds it yet — this IS the first data-gathering step)
+                # and tier for write_node()'s usage logging.
+                result = fn(task_text=task_text, session_id=session_id,
+                            tier=PATH_TO_TIER.get(path), domain=domain)
+            elif current_name == "dataset_analyst":
+                # Needs task_text as the analysis request, same reasoning
+                # as academic_search above. No key_override/expanded —
+                # single-pass generation + sandbox execution, not a pool.
+                result = fn(task_text=task_text, session_id=session_id, path=path, domain=domain)
             elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
                 # Kept as a three-name case rather than a single
                 # "file_manager" case — dropping back to one name would
@@ -519,8 +567,15 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # generic_worker hires in the same plan.
         results[role] = result
         print(f"  [Executor] done: {current_name}")
-        emit_event("agent_done", session_id=session_id, agent=current_name, path=path,
-                    payload={"summary": _summarize(result), "duration_ms": duration_ms})
+        image = _extract_image(result)
+        # Text budget shrinks when an image rides along in the same
+        # event, so the two together still fit Pusher's ~10KB cap
+        # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
+        summary_limit = 9000 - len(image) if image else 9000
+        payload = {"summary": _summarize(result, limit=summary_limit), "duration_ms": duration_ms}
+        if image:
+            payload["image"] = image
+        emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
 
         # Human-in-the-loop pause point. See this function's own
         # docstring above for exactly what state has and hasn't advanced
@@ -608,14 +663,24 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     this role. Both are meant to be caught at the API layer and turned
     into 404 / 409 responses respectively.
 
-    Scope limit: this calls _run_loop() directly, NOT
-    eo/loop_controller.py's run_with_looping(). If the paused run is part
-    of an expert/beast-mode macro-loop, resuming it here finishes that
-    one execute_graph() pass but does NOT re-enter run_with_looping()'s
-    gatekeeper check afterward. Fine for a single adaptive pass (the
-    common case this targets), but worth knowing before this gets
-    exercised under expert/beast mode with an approval_roles role in the
-    plan.
+    Macro-loop continuation: this calls _run_loop() directly, not
+    eo/loop_controller.py's run_with_looping() — but if the snapshot
+    carries the macro_loop_num/macro_current_order/macro_results/... 
+    fields that run_with_looping() writes on pause (see that function's
+    docstring), finishing this one _run_loop() pass cleanly does NOT
+    return straight to the caller. Instead this function re-enters a
+    small variant of run_with_looping()'s own tail from the resumed
+    loop_num/current_order onward — merging into macro_results, running
+    the gatekeeper, and possibly starting further execute_graph()
+    passes — exactly as run_with_looping() would have if the pause had
+    never happened. If the resumed pass pauses again (either
+    immediately, on a later role in the same pass, or in a later macro
+    pass reached via the gatekeeper's CONTINUE), the macro-loop fields
+    are re-attached to whatever fresh paused_execution:{session_id}
+    snapshot _run_loop() just wrote, so a chain of pauses across
+    multiple macro-loop passes never loses state. A snapshot with no
+    macro_loop_num (the plain adaptive-pass case, still the common one)
+    behaves exactly as before: _run_loop()'s result is returned as-is.
     """
     from memory.bus import read, write, delete, set_app_slug
     from eo.dispatcher import next_step
@@ -645,6 +710,19 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     no_conversation_context_roles = set(snapshot.get("no_conversation_context_roles") or [])
     domain = snapshot.get("domain")
     expanded = (mode or "auto").lower() in ("expert", "beast")
+
+    # Macro-loop state (eo/loop_controller.py's run_with_looping()) —
+    # present only if the pause happened during an expert/beast-mode
+    # macro-loop. None for the plain single-pass adaptive case, which
+    # is the signal used below to skip macro continuation entirely.
+    macro_loop_num = snapshot.get("macro_loop_num")
+    macro_current_order = snapshot.get("macro_current_order")
+    macro_results = snapshot.get("macro_results")
+    macro_mode = snapshot.get("macro_mode")
+    macro_hires = snapshot.get("macro_hires")
+    macro_execution_order = snapshot.get("macro_execution_order")
+    macro_domain = snapshot.get("macro_domain")
+    macro_project_unique_name = snapshot.get("macro_project_unique_name")
 
     role = role_names[idx]
     action = decision.get("action")
@@ -700,7 +778,29 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     emit_event("execution_resumed", session_id=session_id, path=path,
                 payload={"label": role, "action": decision.get("action")})
 
-    return _run_loop(
+    def _reattach_macro_state(target_loop_num, target_current_order, target_results):
+        """Copies the macro-loop fields onto whatever fresh
+        paused_execution:{session_id} snapshot _run_loop() (or the
+        macro-continuation loop below) just wrote, so a pause that
+        happens anywhere downstream of this resume — same pass, later
+        role, or a later macro pass — doesn't lose the state needed to
+        keep resuming correctly. No-op if nothing wrote a snapshot
+        (shouldn't happen alongside a "paused" result, but guards
+        against a race rather than raising)."""
+        new_snapshot = read(f"paused_execution:{session_id}", default=None)
+        if new_snapshot is None:
+            return
+        new_snapshot["macro_loop_num"] = target_loop_num
+        new_snapshot["macro_current_order"] = target_current_order
+        new_snapshot["macro_results"] = target_results
+        new_snapshot["macro_mode"] = macro_mode
+        new_snapshot["macro_hires"] = macro_hires
+        new_snapshot["macro_execution_order"] = macro_execution_order
+        new_snapshot["macro_domain"] = macro_domain
+        new_snapshot["macro_project_unique_name"] = macro_project_unique_name
+        write(f"paused_execution:{session_id}", new_snapshot)
+
+    result = _run_loop(
         agent_names=agent_names, role_names=role_names, idx=idx, results=results,
         auto_inserted=auto_inserted, stage_revisits=stage_revisits, task_text=task_text,
         session_id=session_id, path=path, mode=mode, key_overrides=key_overrides,
@@ -709,6 +809,69 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         no_conversation_context_roles=no_conversation_context_roles,
         domain=domain,
     )
+
+    if isinstance(result, dict) and result.get("status") == "paused":
+        if macro_loop_num is not None:
+            _reattach_macro_state(macro_loop_num, macro_current_order, macro_results)
+        return result
+
+    # This resumed pass finished cleanly with no further pause. If it
+    # wasn't part of a macro-loop, this IS the finished shape callers
+    # expect — return it unchanged, same as before this correction.
+    if macro_loop_num is None:
+        return result
+
+    # It WAS part of an expert/beast-mode macro-loop (Correction 1):
+    # don't treat "this one pass finished" as "the whole run finished".
+    # Re-enter run_with_looping()'s own tail from here — merge into the
+    # results accumulated before this pass, run the gatekeeper, and
+    # possibly continue into further execute_graph() passes — the same
+    # sequence run_with_looping() itself would run, just resumed from
+    # loop_num/current_order instead of starting at loop_num=1.
+    from eo.loop_controller import _run_gatekeeper, MAX_MACRO_LOOPS
+    from eo.router import build_execution_graph_from_hires
+
+    pass_results = result
+    combined_results = dict(macro_results or {})
+    combined_results.update(pass_results)
+    final_role = list(pass_results.keys())[-1] if pass_results else None
+    loop_num = macro_loop_num
+    current_order = macro_current_order
+    effective_mode = macro_mode or mode
+
+    while True:
+        if effective_mode.lower() not in ("expert", "beast") or loop_num >= MAX_MACRO_LOOPS:
+            break
+
+        gate_decision = _run_gatekeeper(combined_results, task_text, session_id, loop_num)
+        if gate_decision["action"] in ("STOP", "PAUSE_FOR_HUMAN"):
+            break
+        loop_num += 1
+        current_order = gate_decision.get("redo_roles") or macro_execution_order
+
+        next_agent_names, next_role_names, next_key_overrides = build_execution_graph_from_hires(
+            macro_hires, current_order)
+        pass_results = execute_graph(
+            next_agent_names, role_names=next_role_names, task_text=task_text,
+            session_id=session_id, path=path, key_overrides=next_key_overrides,
+            project_unique_name=macro_project_unique_name, mode=effective_mode,
+            approval_roles=approval_roles,
+            no_conversation_context_roles=no_conversation_context_roles,
+            domain=macro_domain,
+        )
+
+        if isinstance(pass_results, dict) and pass_results.get("status") == "paused":
+            # A later macro-loop pass paused too — persist macro state
+            # exactly like run_with_looping() does on its own first
+            # pause, so this can keep resuming across passes.
+            _reattach_macro_state(loop_num, current_order, combined_results)
+            return pass_results
+
+        combined_results.update(pass_results)
+        if pass_results:
+            final_role = list(pass_results.keys())[-1]
+
+    return {"results": combined_results, "final_role": final_role}
 
 
 if __name__ == "__main__":

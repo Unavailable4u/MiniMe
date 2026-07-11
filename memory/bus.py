@@ -198,7 +198,14 @@ KEYS = {
     # --- new: the 6 backfilled tier-3 agents ---
     "retrieved_context": "retrieved_context",        # #0 Cross-Cycle Memory Search output
     "dependency_map": "dependency_map",               # #4 Module Dependency Mapper
-    "duplication_report": "duplication_report",       # #7 Duplication/Similarity Checker
+    "duplication_report": "duplication_report",         # #7 Duplication/Similarity Checker
+    "academic_search_report": "academic_search_report",  # Part 3 §3.3
+    "extraction_table": "extraction_table",              # Part 3 §3.5
+    "contradiction_candidates": "contradiction_candidates",  # Part 3 §3.6
+    "dataset_analysis": "dataset_analysis",              # Part 3 §3.7
+    "dataset_path": "dataset_path",                      # Part 3 §3.7 — reserved, no writer yet
+    "source_quality_report": "source_quality_report",    # Part 3 §3.8
+    "citation_graph": "citation_graph",                   # Part 3
     "security_scan_results": "security_scan_results", # #12 Security/Dependency Scanner Pool
     "doc_output": "doc_output",                        # #14 Documentation Agent
     "final_qa_verdict": "final_qa_verdict",             # #16 Final QA/Acceptance Reviewer

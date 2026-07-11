@@ -40,11 +40,11 @@ export default function HireReviewScreen({ hires, onConfirm, onCancel }) {
   }
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-4 space-y-3">
+    <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-950-a50)] p-4 space-y-3">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium text-neutral-200">Review hires before dispatch</h3>
-          <p className="text-xs text-neutral-500 mt-0.5">
+          <h3 className="text-sm font-medium text-[var(--neutral-200)]">Review hires before dispatch</h3>
+          <p className="text-xs text-[var(--neutral-500)] mt-0.5">
             {edited.length} role{edited.length === 1 ? "" : "s"} staffed for this task. Edit any
             brief below, or confirm to run as-is.
           </p>
@@ -57,24 +57,24 @@ export default function HireReviewScreen({ hires, onConfirm, onCancel }) {
           const category = categorize(hire.role);
           const isDirty = hire.brief !== original.brief;
           return (
-            <div key={`${hire.role}-${i}`} className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+            <div key={`${hire.role}-${i}`} className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900-a50)] p-3">
               <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="flex items-center gap-1.5 text-sm font-medium" style={{ color: category.color }}>
                   <span>{category.icon}</span>
                   {hire.role}
                 </span>
-                <span className="text-[11px] text-neutral-500 font-mono">{hire.agent_key}</span>
+                <span className="text-[11px] text-[var(--neutral-500)] font-mono">{hire.agent_key}</span>
               </div>
 
               <textarea
                 value={hire.brief}
                 onChange={(e) => updateBrief(i, e.target.value)}
                 rows={3}
-                className="w-full resize-none bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600 leading-relaxed"
+                className="w-full resize-none bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)] leading-relaxed"
               />
 
               <div className="flex items-center justify-between mt-2">
-                <div className={`flex items-center gap-3 text-[11px] ${isDirty ? "text-neutral-300" : "text-neutral-600"}`}>
+                <div className={`flex items-center gap-3 text-[11px] ${isDirty ? "text-[var(--neutral-300)]" : "text-[var(--neutral-600)]"}`}>
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="radio"
@@ -100,7 +100,7 @@ export default function HireReviewScreen({ hires, onConfirm, onCancel }) {
                   <button
                     type="button"
                     onClick={() => resetBrief(i)}
-                    className="flex items-center gap-1 text-[11px] text-neutral-500 hover:text-neutral-300"
+                    className="flex items-center gap-1 text-[11px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
                     title="Revert to the original brief"
                   >
                     <RotateCcw size={11} />
@@ -117,7 +117,7 @@ export default function HireReviewScreen({ hires, onConfirm, onCancel }) {
         <button
           type="button"
           onClick={onCancel}
-          className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-neutral-200 px-3 py-1.5"
+          className="flex items-center gap-1.5 text-xs text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-3 py-1.5"
         >
           <X size={13} />
           Cancel
@@ -125,7 +125,7 @@ export default function HireReviewScreen({ hires, onConfirm, onCancel }) {
         <button
           type="button"
           onClick={() => onConfirm(edited)}
-          className="flex items-center gap-1.5 text-xs bg-neutral-100 text-neutral-900 rounded-lg px-3 py-1.5 font-medium"
+          className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium"
         >
           <Check size={13} />
           Confirm & Run

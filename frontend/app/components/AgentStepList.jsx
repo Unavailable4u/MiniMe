@@ -2,6 +2,7 @@
 import { useState } from "react";
 import Markdown from "./Markdown";
 import { Check, Pencil, RotateCcw } from "lucide-react";
+import { categorize } from "./agentRoleIcons";
 
 // Each `step` is one agent_start/agent_done pair pushed by
 // SessionContext.jsx's Pusher handler, in arrival order. Safe to render
@@ -45,7 +46,7 @@ const ROLE_COLORS = [
   "text-rose-400", "text-cyan-400", "text-fuchsia-400", "text-lime-400",
 ];
 function roleColor(role) {
-  if (!role) return "text-neutral-400";
+  if (!role) return "text-[var(--neutral-400)]";
   let hash = 0;
   for (let i = 0; i < role.length; i++) hash = (hash * 31 + role.charCodeAt(i)) >>> 0;
   return ROLE_COLORS[hash % ROLE_COLORS.length];
@@ -58,9 +59,10 @@ function StepRow({ step, onResume }) {
   // showing regardless of the collapsible toggle below.
   const isPaused = step.status === "awaiting_approval";
   const [open, setOpen] = useState(isPaused);
-  const hasBody = Boolean(step.text || step.summary);
+  const hasBody = Boolean(step.text || step.summary || step.image);
   const wasTruncated = !step.text && step.summary && TRUNCATED_SUFFIX.test(step.summary);
   const color = step.status === "error" ? "text-red-400" : roleColor(step.role);
+  const category = categorize(step.role);
 
   return (
     <div
@@ -70,8 +72,8 @@ function StepRow({ step, onResume }) {
           : isPaused
           ? "border-amber-700 bg-amber-950/20"
           : step.status === "done"
-          ? "border-neutral-800 bg-neutral-950/50"
-          : "border-neutral-700 bg-neutral-900/50"
+          ? "border-[var(--neutral-800)] bg-[var(--neutral-950-a50)]"
+          : "border-[var(--neutral-700)] bg-[var(--neutral-900-a50)]"
       }`}
     >
       <button
@@ -82,25 +84,38 @@ function StepRow({ step, onResume }) {
         }`}
       >
         <span className={`flex items-center gap-1.5 font-medium ${color}`}>
-          {hasBody && <span className="text-neutral-600">{open ? "▾" : "▸"}</span>}
+          {hasBody && <span className="text-[var(--neutral-600)]">{open ? "▾" : "▸"}</span>}
+          <span style={{ color: category.color }} aria-hidden="true">{category.icon}</span>
           {step.role}
         </span>
-        <span className={step.status === "running" ? "animate-pulse text-neutral-500" : isPaused ? "text-amber-500" : "text-neutral-500"}>
+        <span className={step.status === "running" ? "animate-pulse text-[var(--neutral-500)]" : isPaused ? "text-amber-500" : "text-[var(--neutral-500)]"}>
           {isPaused ? "awaiting approval" : step.status}
           {step.durationMs != null ? ` · ${step.durationMs}ms` : ""}
         </span>
       </button>
       {open && hasBody && (
-        <div className="border-t border-neutral-800 px-3 py-2">
+        <div className="border-t border-[var(--neutral-800)] px-3 py-2">
           {step.status === "error" ? (
             <div className="text-red-400 whitespace-pre-wrap">{step.summary}</div>
           ) : (
             <>
+              {step.image && (
+                // e.g. agents/citation_graph_builder.py's SVG data URI —
+                // a data: URI, not a fetched URL, so no next/image;
+                // sized/framed by Markdown.jsx's own img: override for
+                // visual consistency, reused here directly.
+                <img
+                  src={step.image}
+                  alt={`${step.role} visualization`}
+                  loading="lazy"
+                  className="max-w-full h-auto rounded-lg border border-[var(--neutral-800)] mb-2"
+                />
+              )}
               <div className="max-h-64 overflow-y-auto">
                 <Markdown>{step.text || step.summary}</Markdown>
               </div>
               {wasTruncated && (
-                <p className="mt-1 text-neutral-600 text-xs">
+                <p className="mt-1 text-[var(--neutral-600)] text-xs">
                   This output was too long to stream in full and was
                   truncated.
                 </p>
@@ -147,14 +162,14 @@ function ApprovalActions({ step, onResume }) {
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={5}
-            className="w-full resize-none bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600 leading-relaxed"
+            className="w-full resize-none bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)] leading-relaxed"
           />
           <div className="flex justify-end gap-2">
             <button
               type="button"
               disabled={busy}
               onClick={() => setEditing(false)}
-              className="text-neutral-500 hover:text-neutral-300 px-2 py-1"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] px-2 py-1"
             >
               Cancel
             </button>
@@ -162,7 +177,7 @@ function ApprovalActions({ step, onResume }) {
               type="button"
               disabled={busy}
               onClick={() => act("edit", { text })}
-              className="flex items-center gap-1.5 bg-neutral-100 text-neutral-900 rounded-lg px-3 py-1.5 font-medium"
+              className="flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium"
             >
               <Check size={12} />
               Save & Continue
@@ -175,7 +190,7 @@ function ApprovalActions({ step, onResume }) {
             type="button"
             disabled={busy}
             onClick={() => act("reject_redo")}
-            className="flex items-center gap-1.5 text-neutral-400 hover:text-neutral-200 px-2 py-1"
+            className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
           >
             <RotateCcw size={12} />
             Reject & Redo
@@ -184,7 +199,7 @@ function ApprovalActions({ step, onResume }) {
             type="button"
             disabled={busy}
             onClick={() => setEditing(true)}
-            className="flex items-center gap-1.5 text-neutral-400 hover:text-neutral-200 px-2 py-1"
+            className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
           >
             <Pencil size={12} />
             Edit & Continue
@@ -193,7 +208,7 @@ function ApprovalActions({ step, onResume }) {
             type="button"
             disabled={busy}
             onClick={() => act("approve")}
-            className="flex items-center gap-1.5 bg-neutral-100 text-neutral-900 rounded-lg px-3 py-1.5 font-medium"
+            className="flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium"
           >
             <Check size={12} />
             Approve

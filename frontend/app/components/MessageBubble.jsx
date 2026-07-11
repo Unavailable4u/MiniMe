@@ -18,7 +18,7 @@ const ERROR_STYLE = { label: "Error", text: "text-red-400", dot: "bg-red-500" };
 
 function tierStyle(data) {
   if (data.status === "error") return ERROR_STYLE;
-  return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-neutral-400", dot: "bg-neutral-500" };
+  return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
 }
 
 export default function MessageBubble({ message }) {
@@ -28,7 +28,7 @@ export default function MessageBubble({ message }) {
         {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
             pasted code) actually keeps its line breaks and indentation
             instead of collapsing to one line. */}
-        <div className="bg-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%] whitespace-pre-wrap">
+        <div className="bg-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-[80%] whitespace-pre-wrap leading-[var(--density-line-height)]">
           {message.text}
         </div>
       </div>
@@ -39,11 +39,11 @@ export default function MessageBubble({ message }) {
   const style = tierStyle(data);
   return (
     <div className="flex justify-start">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm max-w-[80%] space-y-1.5">
+      <div className="bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-[80%] space-y-[var(--density-card-gap)]">
         <div className={`flex items-center gap-1.5 text-xs font-medium ${style.text}`}>
           <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
           {style.label}
-          <span className="text-neutral-600 font-normal">· {data.status}</span>
+          <span className="text-[var(--neutral-600)] font-normal">· {data.status}</span>
         </div>
         <ResultBody data={data} />
       </div>
@@ -74,6 +74,30 @@ function looksLikeModuleMap(result) {
   return values.every(
     (v) => typeof v === "string" || (v && typeof v === "object" && "code" in v)
   );
+}
+
+// Mirrors eo/result_render.py's _render_extraction_table() —
+// agents/extraction_table_builder.py's shape (Part 3 §3.5).
+function renderExtractionTable(result) {
+  const papers = result.papers || [];
+  const fieldNames = result.field_names || [];
+  if (papers.length === 0) return "_(no papers extracted)_";
+
+  const esc = (v) => {
+    if (v === null || v === undefined || v === "") return "—";
+    return String(v).replaceAll("|", "\\|").replaceAll("\n", " ");
+  };
+
+  const headers = ["Title", "Year", ...fieldNames.map((f) => f.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()))];
+  const lines = [
+    "| " + headers.join(" | ") + " |",
+    "|" + headers.map(() => "---").join("|") + "|",
+  ];
+  for (const p of papers) {
+    const row = [esc(p.title), esc(p.year), ...fieldNames.map((f) => esc(p[f]))];
+    lines.push("| " + row.join(" | ") + " |");
+  }
+  return lines.join("\n");
 }
 
 function answerTextOf(result) {
@@ -109,11 +133,28 @@ function answerTextOf(result) {
   if (result.code) return result.code;
   if (result.answer) return String(result.answer);
 
+  if (Array.isArray(result.papers) && Array.isArray(result.field_names)) {
+    // agents/extraction_table_builder.py's shape (Part 3 §3.5) — checked
+    // via field_names specifically so this doesn't also catch
+    // agents/academic_search.py's {"papers", "edges_written"} shape,
+    // which has no field_names and reads better as its own summary
+    // line below.
+    return renderExtractionTable(result);
+  }
+
   if (looksLikeModuleMap(result)) {
     // agents/code_writers.py ("implementer") / agents/test_writer.py
     // ("test_writer") flat {module: code} shape, including the
     // legitimate empty-object "no tests generated" case.
     return renderCodeModules(result);
+  }
+
+  if (typeof result.summary === "string" && result.summary) {
+    // Part 3's other real-action roles (academic_search,
+    // contradiction_prefilter, source_quality_flagger,
+    // citation_graph_builder, ...) all already produce a human-readable
+    // "summary" string for exactly this purpose.
+    return result.summary;
   }
 
   // Genuinely unrecognized shape — pretty-printed JSON (still readable)
@@ -141,8 +182,8 @@ function ResultBody({ data }) {
     // things like underscores (_snake_case_) as italics. Styled the same
     // as Markdown's own fenced-code blocks for visual consistency.
     return (
-      <div className="rounded-lg border border-neutral-800 bg-black/50 overflow-hidden">
-        <pre className="overflow-x-auto p-3 text-xs text-neutral-300">
+      <div className="rounded-lg border border-[var(--neutral-800)] bg-black/50 overflow-hidden">
+        <pre className="overflow-x-auto p-3 text-xs text-[var(--neutral-300)]">
           <code>{data.result?.code}</code>
         </pre>
       </div>
@@ -207,11 +248,11 @@ function AgentTraceDisclosure({ output, finalRole }) {
   const [open, setOpen] = useState(false);
   const roles = Object.keys(output);
   return (
-    <div className="pt-1 border-t border-neutral-800/70">
+    <div className="pt-1 border-t border-[var(--neutral-800-a70)]">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="text-[11px] text-neutral-500 hover:text-neutral-300 transition-colors flex items-center gap-1"
+        className="text-[11px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)] transition-colors flex items-center gap-1"
       >
         <span>{open ? "▾" : "▸"}</span>
         {open ? "Hide" : "Show"} all {roles.length} agent outputs
@@ -219,10 +260,10 @@ function AgentTraceDisclosure({ output, finalRole }) {
       {open && (
         <div className="mt-2 space-y-2">
           {roles.map((role) => (
-            <div key={role} className="rounded-lg border border-neutral-800 bg-black/30 p-2">
+            <div key={role} className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-2">
               <div
                 className={`text-[11px] font-medium mb-1 ${
-                  role === finalRole ? "text-amber-400" : "text-neutral-500"
+                  role === finalRole ? "text-amber-400" : "text-[var(--neutral-500)]"
                 }`}
               >
                 {role}

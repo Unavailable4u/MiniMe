@@ -148,6 +148,20 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
     Callers must check for "status" == "paused" before assuming the
     finished shape above — see api/task_runner.py's _run_tier3_hires()
     for the one place that already does.
+
+    On a pause, this function also enriches the paused_execution:
+    {session_id} snapshot that eo/executor.py's _run_loop() already
+    persisted (agent_names/role_names/idx/results/...) with this
+    macro-loop's OWN state — macro_loop_num, macro_current_order,
+    macro_results (everything accumulated before this pass),
+    macro_hires, macro_execution_order, macro_mode, macro_domain,
+    macro_project_unique_name — under keys namespaced so they can't
+    collide with any of _run_loop()'s own snapshot fields. Without
+    this, a pause during macro-loop pass 2+ would lose which pass this
+    is, what the previous gatekeeper redo decision was, and everything
+    earlier passes already produced — see eo/executor.py's
+    resume_graph() for the matching read side that re-enters this loop
+    from that state.
     """
     current_order = execution_order
     loop_num = 1
@@ -170,6 +184,24 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
         # write "status"/"paused_at_role" into `results` as if they were
         # role names.
         if isinstance(pass_results, dict) and pass_results.get("status") == "paused":
+            # Enrich the snapshot _run_loop() already wrote under this
+            # same key with the macro-loop state that lives entirely
+            # outside execute_graph()/`pass_results` — none of it would
+            # otherwise be recoverable on resume. `results` here is
+            # everything accumulated BEFORE this pass (the pass that
+            # just paused hasn't been merged in yet — see the comment
+            # below this block for why that merge has to wait).
+            snapshot = read(f"paused_execution:{session_id}", default=None)
+            if snapshot is not None:
+                snapshot["macro_loop_num"] = loop_num
+                snapshot["macro_current_order"] = current_order
+                snapshot["macro_results"] = results
+                snapshot["macro_mode"] = mode
+                snapshot["macro_hires"] = hires
+                snapshot["macro_execution_order"] = execution_order
+                snapshot["macro_domain"] = domain
+                snapshot["macro_project_unique_name"] = project_unique_name
+                write(f"paused_execution:{session_id}", snapshot)
             return {
                 "status": "paused",
                 "paused_at_role": pass_results["paused_at_role"],

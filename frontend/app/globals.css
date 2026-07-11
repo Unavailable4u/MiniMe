@@ -25,6 +25,64 @@
 }
 
 /* ---------------------------------------------------------------
+   Theme tokens — one variable per Tailwind `neutral-*` shade that was
+   previously hard-coded as a literal utility class (bg-neutral-900,
+   text-neutral-300, etc.) across every component. Components use
+   Tailwind's arbitrary-value syntax against these vars instead, e.g.
+   `bg-[var(--neutral-900)]` in place of `bg-neutral-900`.
+
+   Single dark theme only — no [data-theme] switching.
+----------------------------------------------------------------*/
+:root {
+  --neutral-100: #f5f5f5;
+  --neutral-200: #e5e5e5;
+  --neutral-300: #d4d4d4;
+  --neutral-400: #a3a3a3;
+  --neutral-500: #737373;
+  --neutral-600: #525252;
+  --neutral-700: #404040;
+  --neutral-800: #262626;
+  --neutral-900: #171717;
+  --neutral-950: #0a0a0a;
+
+  --neutral-950-a50: rgba(10, 10, 10, 0.5);
+  --neutral-900-a50: rgba(23, 23, 23, 0.5);
+  --neutral-800-a70: rgba(38, 38, 38, 0.7);
+
+  /* Accent — currently just mirrors neutral-100/900 (today's literal
+     "bg-neutral-100 text-neutral-900" primary-button pattern), kept as
+     its own pair so an accent-color picker can retarget just these two
+     later without touching the neutral ramp. */
+  --accent: var(--neutral-100);
+  --accent-text: var(--neutral-900);
+}
+
+/* ---------------------------------------------------------------
+   Density tokens — Comfortable (default) vs Compact, toggled via a
+   `data-density` attribute on <html> (see hooks/useDensity.js). Cards
+   (RoleCard, TemplateCard) and message bubbles reference these instead
+   of hard-coded padding/gap/leading utilities so one toggle reflows all
+   three at once. Comfortable values match what was previously
+   hard-coded (p-3/space-y-2/leading-relaxed, px-3 py-2 bubbles).
+----------------------------------------------------------------*/
+:root,
+[data-density="comfortable"] {
+  --density-card-padding: 0.75rem;
+  --density-card-gap: 0.5rem;
+  --density-line-height: 1.625;
+  --density-bubble-padding-x: 0.75rem;
+  --density-bubble-padding-y: 0.5rem;
+}
+
+[data-density="compact"] {
+  --density-card-padding: 0.5rem;
+  --density-card-gap: 0.25rem;
+  --density-line-height: 1.375;
+  --density-bubble-padding-x: 0.625rem;
+  --density-bubble-padding-y: 0.25rem;
+}
+
+/* ---------------------------------------------------------------
    Base page styling
 ----------------------------------------------------------------*/
 html, body {
@@ -32,8 +90,8 @@ html, body {
 }
 
 body {
-  background-color: var(--cyber-bg);
-  color: var(--cyber-text);
+  background-color: var(--neutral-950);
+  color: var(--neutral-100);
   font-family: 'Rajdhani', sans-serif;
   position: relative;
   min-height: 100vh;
@@ -71,7 +129,7 @@ code, pre, .font-mono {
 ----------------------------------------------------------------*/
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--cyber-cyan) var(--cyber-panel);
+  scrollbar-color: var(--neutral-600) var(--neutral-900);
 }
 
 *::-webkit-scrollbar {
@@ -79,14 +137,14 @@ code, pre, .font-mono {
   height: 8px;
 }
 *::-webkit-scrollbar-track {
-  background: var(--cyber-panel);
+  background: var(--neutral-900);
 }
 *::-webkit-scrollbar-thumb {
-  background-color: var(--cyber-border);
+  background-color: var(--neutral-700);
   border-radius: 4px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background-color: var(--cyber-cyan);
+  background-color: var(--neutral-500);
 }
 
 /* ---------------------------------------------------------------

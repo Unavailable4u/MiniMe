@@ -71,6 +71,23 @@ export const ROLE_CATEGORIES = [
   { key: "personal-assistant", test: /assistant|scheduler|calendar/i, icon: "\u{1F5D3}\uFE0F", color: "#fda4af" }, // 🗓️
 
   // ---- Research / data / science ----
+  // Part 3 — these must sit ABOVE the broader "research" pattern just
+  // below (same matching rule as the Simulate & Test block above):
+  // dataset_analyst would otherwise fall into "research" itself (it
+  // contains "analyst"), and every other role here would otherwise fall
+  // to DEFAULT_CATEGORY (none of these role names contain "research",
+  // "analyst", or "investigat"). Matched on the exact role-name strings
+  // from eo/registry.py's REAL_ACTION_ROLES / eo/structure.py's
+  // STRUCTURE_TEMPLATES["research"].
+  { key: "academic-search", test: /academic_search/i, icon: "\u{1F4DA}", color: "#a5b4fc" }, // 📚
+  { key: "source-quality", test: /source_quality_flagger/i, icon: "\u{1F6A9}", color: "#fbbf24" }, // 🚩
+  { key: "citation-graph", test: /citation_graph_builder/i, icon: "\u{1F578}\uFE0F", color: "#818cf8" }, // 🕸️
+  { key: "extraction-table", test: /extraction_table_builder/i, icon: "\u{1F4D1}", color: "#38bdf8" }, // 📑
+  { key: "contradiction-prefilter", test: /contradiction_prefilter/i, icon: "\u{1F500}", color: "#f87171" }, // 🔀
+  { key: "contradiction-detector", test: /contradiction_detector/i, icon: "\u2694\uFE0F", color: "#ef4444" }, // ⚔️
+  { key: "consensus-meter", test: /consensus_meter/i, icon: "\u{1F3AF}", color: "#4ade80" }, // 🎯
+  { key: "dataset-analyst", test: /dataset_analyst/i, icon: "\u{1F4C8}", color: "#34d399" }, // 📈
+
   { key: "research", test: /research|analyst|investigat/i, icon: "\u{1F52C}", color: "#818cf8" }, // 🔬
   { key: "data-science", test: /data_scientist|statistic/i, icon: "\u{1F4CA}", color: "#60a5fa" }, // 📊
   { key: "science", test: /scientist|physic|chemist|biolog/i, icon: "\u{1F52D}", color: "#38bdf8" }, // 🔭

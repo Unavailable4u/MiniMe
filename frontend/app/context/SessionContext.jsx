@@ -110,6 +110,19 @@ export function SessionProvider({ children }) {
   // possibly several consecutive pauses in the same run.
   const [pausedRun, setPausedRun] = useState(null);
 
+  // NEW — Workflow Templates fix: a template run's {running, result,
+  // chatId} keyed by template_id, kept HERE rather than as local state
+  // inside WorkflowTemplatesTab/TemplateCard. AppShell fully unmounts
+  // the inactive tab's component tree on every tab switch (`<Active />`
+  // swaps component identity), so any state that needs to survive a
+  // tab switch — same requirement `loading`/`messages` already have for
+  // the Chat tab — has to live in SessionProvider, above that boundary,
+  // not in the tab component itself. Deliberately does NOT touch
+  // `sessionId`/`messages` — a template run happens in its own
+  // background chat and must not hijack whatever chat is currently open
+  // in the Chat tab.
+  const [templateRuns, setTemplateRuns] = useState({});
+
   // --- NEW: on mount, load the chat list, then restore the last active
   // chat (or create the very first one). This replaces the old
   // `useState(() => "sess_" + ...)` initializer — sessionId is no longer
@@ -254,6 +267,7 @@ export function SessionProvider({ children }) {
           role: payload?.label || agent,            // actual role — payload.label per executor.py's emit_event() call
           text: "",
           summary: null,
+          image: null,
           durationMs: null,
           status: "running",
         };
@@ -281,7 +295,7 @@ export function SessionProvider({ children }) {
         openStepStack.current = openStepStack.current.slice(0, -1);                 // NEW — bug fix: pop
         const updated = stepsRef.current.map((s) =>
           s.id === targetId
-            ? { ...s, status: "done", summary: payload?.summary, durationMs: payload?.duration_ms }
+            ? { ...s, status: "done", summary: payload?.summary, durationMs: payload?.duration_ms, image: payload?.image || null }
             : s
         );
         stepsRef.current = updated;
@@ -329,6 +343,61 @@ export function SessionProvider({ children }) {
   // linking chats. sessionId and chat_id are the same string everywhere
   // (see eo/chat_store.py's docstring), so these just move sessionId
   // around and keep the persisted chat store + local state in sync.
+  // NOTE: SessionContext.jsx itself was not present in the uploaded repo
+// (both repomix dumps are backend-only — eo/, api/, utils/). This is the
+// runTemplate() function as specified, to paste into your actual
+// SessionContext.jsx in place of the current implementation.
+
+async function runTemplate(templateId, taskText) {
+  setTemplateRuns((prev) => ({
+    ...prev,
+    [templateId]: { running: true, result: null, chatId: prev[templateId]?.chatId ?? null },
+  }));
+
+  let chatId;
+  try {
+    const existing = await fetch(`${API_URL}/api/workflow-templates/${templateId}/chat`, {
+      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    }).then((r) => r.json());
+    chatId = existing?.id;
+    if (!chatId) {
+      const res = await fetch(`${API_URL}/api/chats`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        body: JSON.stringify({ title: taskText.trim().slice(0, 60) || "Template run", template_id: templateId }),
+      });
+      chatId = (await res.json()).id;
+    }
+  } catch (err) {
+    setTemplateRuns((prev) => ({
+      ...prev,
+      [templateId]: { running: false, result: { status: "error", message: `Couldn't create chat: ${err.message || err}` }, chatId: null },
+    }));
+    return;
+  }
+
+  // NEW — show "Open chat" right away, not just once the run finishes.
+  setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: true, result: null, chatId } }));
+
+  await persistMessageTo(chatId, { role: "user", text: taskText });
+  await refreshChatList();
+
+  try {
+    const res = await fetch(`${API_URL}/api/task/from-template`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ template_id: templateId, task_text: taskText, session_id: chatId }),
+    });
+    const data = await res.json();
+    await persistMessageTo(chatId, { role: "assistant", data, task: taskText });
+    setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: data, chatId } }));
+  } catch (err) {
+    const errData = { status: "error", message: String(err) };
+    await persistMessageTo(chatId, { role: "assistant", data: errData, task: taskText });
+    setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: errData, chatId } }));
+  }
+  await refreshChatList();
+}
 
   async function refreshChatList() {
     const res = await fetch(`${API_URL}/api/chats`, {
@@ -551,6 +620,90 @@ async function deleteWorkspace(wsId) {
     } catch (err) {
       console.error("Failed to persist message:", err);
     }
+  }
+
+  // NEW — Workflow Templates fix. createNewChat()/persistMessage() above
+  // both act on the CURRENTLY ACTIVE chat (they read/write `sessionId`),
+  // which is exactly right for the Chat tab's own compose bar but wrong
+  // here — running a template must not silently swap out whatever chat
+  // the person currently has open. These two are the same two API calls,
+  // parameterized by an explicit chatId instead of the active sessionId.
+  async function createChatSilently(title) {
+    const res = await fetch(`${API_URL}/api/chats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      body: JSON.stringify({ title: title || "New Chat" }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const chat = await res.json();
+    return chat.id;
+  }
+
+  async function persistMessageTo(chatId, message) {
+    try {
+      await fetch(`${API_URL}/api/chats/${chatId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        body: JSON.stringify({ message }),
+      });
+    } catch (err) {
+      console.error("Failed to persist message:", err);
+    }
+  }
+
+  // NEW — Workflow Templates fix. Mirrors sendTask()'s dispatch +
+  // persistence shape, but:
+  //   1. State lives in `templateRuns` (this provider), not inside the
+  //      tab component — see that state's own comment above for why.
+  //   2. Creates its OWN chat via createChatSilently() instead of
+  //      reusing `sessionId`/persistMessage(), and never calls
+  //      setSessionId/setMessages — so a template run always becomes a
+  //      real, findable entry in the chat sidebar (fixes "I can't find
+  //      it anywhere"), without ever touching whatever chat is
+  //      currently open in the Chat tab.
+  //   3. Passes that new chat's id as `session_id` on
+  //      /api/task/from-template, so the backend's Pusher events and
+  //      any approval_roles pause land on the same channel/session the
+  //      chat now represents, exactly like a normal /api/task run.
+  //   4. Stores the resulting chatId in templateRuns so the UI can
+  //      offer a real "Open chat" action instead of an inert session_id
+  //      string.
+  async function runTemplate(templateId, taskText) {
+    setTemplateRuns((prev) => ({
+      ...prev,
+      [templateId]: { running: true, result: null, chatId: prev[templateId]?.chatId ?? null },
+    }));
+
+    let chatId;
+    try {
+      chatId = await createChatSilently(taskText.trim().slice(0, 60) || "Template run");
+    } catch (err) {
+      setTemplateRuns((prev) => ({
+        ...prev,
+        [templateId]: { running: false, result: { status: "error", message: `Couldn't create chat: ${err.message || err}` }, chatId: null },
+      }));
+      return;
+    }
+
+    await persistMessageTo(chatId, { role: "user", text: taskText });
+    await refreshChatList();   // shows up in the sidebar right away, not just once the run finishes
+
+    try {
+      const res = await fetch(`${API_URL}/api/task/from-template`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        body: JSON.stringify({ template_id: templateId, task_text: taskText, session_id: chatId }),
+      });
+      const data = await res.json();
+      const assistantMessage = { role: "assistant", data, task: taskText };
+      await persistMessageTo(chatId, assistantMessage);
+      setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: data, chatId } }));
+    } catch (err) {
+      const errData = { status: "error", message: String(err) };
+      await persistMessageTo(chatId, { role: "assistant", data: errData, task: taskText });
+      setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: errData, chatId } }));
+    }
+    await refreshChatList();
   }
 
   // Part 2 §2.5 — pulled out of sendTask() so confirmHireReview() (below)
@@ -809,6 +962,9 @@ async function deleteWorkspace(wsId) {
   pendingHireReview, confirmHireReview, cancelHireReview,
   // NEW — Part 2 §2.4/§2.7: human-in-the-loop checkpoints
   pausedApproval, resumeRun,
+  // NEW — Workflow Templates fix: survives tab switches, see
+  // templateRuns' own comment above.
+  templateRuns, runTemplate,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

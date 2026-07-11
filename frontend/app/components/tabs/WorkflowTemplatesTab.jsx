@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
+import RolePickerOverlay from "../RolePickerOverlay";
 import { Trash2, Plus, Play, X } from "lucide-react";
 
 // Part 2 §2.7 — Workflow Template builder. Covers both write paths
@@ -23,13 +24,14 @@ import { Trash2, Plus, Play, X } from "lucide-react";
 // per §2.7, that's an optional convenience to layer on once the Role
 // Library and Workflow Template panels alone make the underlying data
 // reachable.
-export default function WorkflowTemplatesTab() {
+export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles }) {
   const { API_URL } = useSession();
   const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
 
   const [templates, setTemplates] = useState(null);
   const [error, setError] = useState(null);
   const [showBuilder, setShowBuilder] = useState(false);
+  const [builderInitialRoles, setBuilderInitialRoles] = useState([]);
 
   async function load() {
     setError(null);
@@ -48,6 +50,21 @@ export default function WorkflowTemplatesTab() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [API_URL]);
+
+  // NEW — Role Library's sticky selection bar hands off a role list via
+  // AppShell (see AppShell.jsx's pendingTemplateRoles). Snapshot it into
+  // local state for TemplateBuilder's initial mount, then immediately
+  // tell AppShell to clear it — otherwise switching tabs away and back,
+  // or clicking "New template" again later, would keep re-opening the
+  // builder with the same stale roles.
+  useEffect(() => {
+    if (initialTemplateRoles && initialTemplateRoles.length > 0) {
+      setBuilderInitialRoles(initialTemplateRoles);
+      setShowBuilder(true);
+      onConsumeInitialTemplateRoles?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTemplateRoles]);
 
   async function deleteTemplate(templateId) {
     const res = await fetch(`${API_URL}/api/workflow-templates/${templateId}`, {
@@ -70,22 +87,26 @@ export default function WorkflowTemplatesTab() {
     const saved = await res.json();
     setTemplates((prev) => [saved, ...(prev || [])]);
     setShowBuilder(false);
+    setBuilderInitialRoles([]);
   }
 
   return (
     <div className="h-full overflow-y-auto px-4 py-6 max-w-3xl mx-auto space-y-4">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h2 className="text-sm font-medium text-neutral-200">Workflow Templates</h2>
-          <p className="text-xs text-neutral-500 mt-1">
+          <h2 className="text-sm font-medium text-[var(--neutral-200)]">Workflow Templates</h2>
+          <p className="text-xs text-[var(--neutral-500)] mt-1">
             Saved role pipelines you can start a task from directly,
             skipping automatic classification.
           </p>
         </div>
         <button
           type="button"
-          onClick={() => setShowBuilder((s) => !s)}
-          className="flex items-center gap-1.5 text-xs bg-neutral-100 text-neutral-900 rounded-lg px-3 py-1.5 font-medium shrink-0"
+          onClick={() => {
+            setBuilderInitialRoles([]);
+            setShowBuilder((s) => !s);
+          }}
+          className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium shrink-0"
         >
           <Plus size={13} />
           New template
@@ -93,7 +114,13 @@ export default function WorkflowTemplatesTab() {
       </div>
 
       {showBuilder && (
-        <TemplateBuilder onSave={saveTemplate} onCancel={() => setShowBuilder(false)} />
+        <TemplateBuilder
+          onSave={saveTemplate}
+          onCancel={() => { setShowBuilder(false); setBuilderInitialRoles([]); }}
+          apiUrl={API_URL}
+          apiKey={API_KEY}
+          initialRoles={builderInitialRoles}
+        />
       )}
 
       {error && (
@@ -102,9 +129,9 @@ export default function WorkflowTemplatesTab() {
           <code className="font-mono">GET /api/workflow-templates</code> is reachable.
         </p>
       )}
-      {!error && templates === null && <p className="text-xs text-neutral-500">Loading…</p>}
+      {!error && templates === null && <p className="text-xs text-[var(--neutral-500)]">Loading…</p>}
       {!error && templates !== null && templates.length === 0 && !showBuilder && (
-        <p className="text-xs text-neutral-500">
+        <p className="text-xs text-[var(--neutral-500)]">
           No saved templates yet. Build one from the Role Library, or
           click "New template" above.
         </p>
@@ -112,29 +139,27 @@ export default function WorkflowTemplatesTab() {
 
       <div className="space-y-2">
         {(templates || []).map((t) => (
-          <TemplateCard key={t.template_id} template={t} apiUrl={API_URL} apiKey={API_KEY} onDelete={deleteTemplate} />
+          <TemplateCard key={t.template_id} template={t} apiUrl={API_URL} apiKey={API_KEY} onDelete={deleteTemplate} onOpenChat={onOpenChat} />
         ))}
       </div>
     </div>
   );
 }
 
-function TemplateBuilder({ onSave, onCancel }) {
+function TemplateBuilder({ onSave, onCancel, apiUrl, apiKey, initialRoles }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [rolesText, setRolesText] = useState("");
-  const [approvalText, setApprovalText] = useState("");
+  const [roles, setRoles] = useState(() => initialRoles || []);
+  const [approvalRoles, setApprovalRoles] = useState([]);
   const [domainHint, setDomainHint] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
 
   async function submit() {
-    const roles = rolesText.split(",").map((r) => r.trim()).filter(Boolean);
     if (!name.trim() || roles.length === 0) {
       setErr("A name and at least one role are required.");
       return;
     }
-    const approval_roles = approvalText.split(",").map((r) => r.trim()).filter(Boolean);
     setSaving(true);
     setErr(null);
     try {
@@ -142,7 +167,7 @@ function TemplateBuilder({ onSave, onCancel }) {
         name: name.trim(),
         description: description.trim(),
         roles,
-        approval_roles,
+        approval_roles: approvalRoles,
         domain_hint: domainHint.trim() || null,
       });
     } catch (e) {
@@ -153,73 +178,68 @@ function TemplateBuilder({ onSave, onCancel }) {
   }
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-4 space-y-3">
+    <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-950-a50)] p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-neutral-200">Build a template</h3>
-        <button type="button" onClick={onCancel} className="text-neutral-500 hover:text-neutral-300">
+        <h3 className="text-sm font-medium text-[var(--neutral-200)]">Build a template</h3>
+        <button type="button" onClick={onCancel} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
           <X size={14} />
         </button>
       </div>
 
-      <label className="block text-xs text-neutral-500">
+      <label className="block text-xs text-[var(--neutral-500)]">
         Name
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Blog post pipeline"
-          className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600"
+          className="mt-1 w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
         />
       </label>
 
-      <label className="block text-xs text-neutral-500">
+      <label className="block text-xs text-[var(--neutral-500)]">
         Description (optional)
         <input
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600"
+          className="mt-1 w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
         />
       </label>
 
-      <label className="block text-xs text-neutral-500">
-        Roles, in order (comma-separated role names — see the Role Library for known names)
-        <input
-          value={rolesText}
-          onChange={(e) => setRolesText(e.target.value)}
-          placeholder="e.g. brainstormer, outliner, writer, editor"
-          className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600 font-mono"
-        />
-      </label>
+      {/* Combobox overlay — picks known roles (fetched from the Role
+          Library) or lets you type a new one, keeps them in pipeline
+          order, and folds the old separate "approval roles" text field
+          into a per-chip ✋ toggle so it can only ever reference a role
+          that's actually selected. */}
+      <RolePickerOverlay
+        apiUrl={apiUrl}
+        apiKey={apiKey}
+        roles={roles}
+        onRolesChange={setRoles}
+        approvalRoles={approvalRoles}
+        onApprovalRolesChange={setApprovalRoles}
+      />
 
-      <label className="block text-xs text-neutral-500">
-        Require approval after these roles (optional, comma-separated)
-        <input
-          value={approvalText}
-          onChange={(e) => setApprovalText(e.target.value)}
-          className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600 font-mono"
-        />
-      </label>
-
-      <label className="block text-xs text-neutral-500">
+      <label className="block text-xs text-[var(--neutral-500)]">
         Domain hint (optional)
         <input
           value={domainHint}
           onChange={(e) => setDomainHint(e.target.value)}
           placeholder="e.g. creative_writing"
-          className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600"
+          className="mt-1 w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
         />
       </label>
 
       {err && <p className="text-xs text-red-400">{err}</p>}
 
       <div className="flex justify-end gap-2">
-        <button type="button" onClick={onCancel} className="text-xs text-neutral-400 hover:text-neutral-200 px-3 py-1.5">
+        <button type="button" onClick={onCancel} className="text-xs text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-3 py-1.5">
           Cancel
         </button>
         <button
           type="button"
           disabled={saving}
           onClick={submit}
-          className="text-xs bg-neutral-100 text-neutral-900 rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save template"}
         </button>
@@ -228,46 +248,37 @@ function TemplateBuilder({ onSave, onCancel }) {
   );
 }
 
-function TemplateCard({ template, apiUrl, apiKey, onDelete }) {
+function TemplateCard({ template, apiUrl, apiKey, onDelete, onOpenChat }) {
+  // NEW — running/result now live in SessionContext's `templateRuns`,
+  // keyed by template_id, instead of local useState here. AppShell
+  // fully unmounts this component whenever the person switches tabs
+  // (`<Active />` swaps component identity), which was silently
+  // discarding local `running`/`result` state — the run kept going on
+  // the backend the whole time, the UI just had no memory of it once
+  // you came back. See SessionContext.jsx's templateRuns/runTemplate
+  // for the actual dispatch + chat-persistence logic.
+  const { runTemplate, templateRuns } = useSession();
   const [taskText, setTaskText] = useState("");
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
+  const runState = templateRuns[template.template_id] || { running: false, result: null, chatId: null };
 
-  async function run() {
-    if (!taskText.trim()) return;
-    setRunning(true);
-    setResult(null);
-    try {
-      const res = await fetch(`${apiUrl}/api/task/from-template`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { "x-api-key": apiKey } : {}),
-        },
-        body: JSON.stringify({ template_id: template.template_id, task_text: taskText }),
-      });
-      const data = await res.json();
-      setResult(data);
-    } catch (err) {
-      setResult({ status: "error", message: String(err) });
-    } finally {
-      setRunning(false);
-    }
+  function run() {
+    if (!taskText.trim() || runState.running) return;
+    runTemplate(template.template_id, taskText);
   }
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3 space-y-2">
+    <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900-a50)] p-[var(--density-card-padding)] space-y-[var(--density-card-gap)]">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-sm font-medium text-neutral-200">{template.name}</div>
+          <div className="text-sm font-medium text-[var(--neutral-200)]">{template.name}</div>
           {template.description && (
-            <p className="text-xs text-neutral-500 mt-0.5">{template.description}</p>
+            <p className="text-xs text-[var(--neutral-500)] mt-0.5">{template.description}</p>
           )}
         </div>
         <button
           type="button"
           onClick={() => onDelete(template.template_id)}
-          className="shrink-0 text-neutral-600 hover:text-red-400"
+          className="shrink-0 text-[var(--neutral-600)] hover:text-red-400"
           title="Delete template"
         >
           <Trash2 size={13} />
@@ -283,7 +294,7 @@ function TemplateCard({ template, apiUrl, apiKey, onDelete }) {
             return (
               <span
                 key={`${i}-${roleName}`}
-                className="flex items-center gap-1 text-[11px] rounded border border-neutral-800 px-1.5 py-0.5"
+                className="flex items-center gap-1 text-[11px] rounded border border-[var(--neutral-800)] px-1.5 py-0.5"
                 style={{ color: category.color }}
               >
                 {category.icon} {roleName}
@@ -301,26 +312,43 @@ function TemplateCard({ template, apiUrl, apiKey, onDelete }) {
           value={taskText}
           onChange={(e) => setTaskText(e.target.value)}
           placeholder="Task text to run through this template…"
-          className="flex-1 bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-300 outline-none focus:border-neutral-600"
+          className="flex-1 bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
         />
         <button
           type="button"
-          disabled={running || !taskText.trim()}
+          disabled={runState.running || !taskText.trim()}
           onClick={run}
-          className="flex items-center gap-1.5 text-xs bg-neutral-100 text-neutral-900 rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+          className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
         >
           <Play size={12} />
-          {running ? "Running…" : "Run"}
+          {runState.running ? "Running…" : "Run"}
         </button>
       </div>
 
-      {result && (
-        <div className={`text-xs rounded-md border px-2.5 py-1.5 ${result.status === "error" ? "border-red-900 text-red-400" : "border-neutral-800 text-neutral-400"}`}>
-          {result.status === "error"
-            ? `Error: ${result.message}`
-            : result.status === "paused"
-            ? `Paused for approval at role "${result.result?.paused_at_role}" — open Chat to review it.`
-            : `Status: ${result.status}. Session: ${result.session_id || "—"}. Open Chat to see the full trace.`}
+      {runState.running && (
+        <div className="text-xs rounded-md border border-[var(--neutral-800)] px-2.5 py-1.5 text-[var(--neutral-500)] animate-pulse">
+          Running — you can switch tabs, this keeps going in the background.
+        </div>
+      )}
+
+      {!runState.running && runState.result && (
+        <div className={`flex items-center justify-between gap-2 text-xs rounded-md border px-2.5 py-1.5 ${runState.result.status === "error" ? "border-red-900 text-red-400" : "border-[var(--neutral-800)] text-[var(--neutral-400)]"}`}>
+          <span>
+            {runState.result.status === "error"
+              ? `Error: ${runState.result.message}`
+              : runState.result.status === "paused"
+              ? `Paused for approval at role "${runState.result.result?.paused_at_role}".`
+              : `Status: ${runState.result.status}.`}
+          </span>
+          {runState.chatId && (
+            <button
+              type="button"
+              onClick={() => onOpenChat?.(runState.chatId)}
+              className="shrink-0 underline text-[var(--neutral-300)] hover:text-[var(--neutral-100)]"
+            >
+              Open chat →
+            </button>
+          )}
         </div>
       )}
     </div>

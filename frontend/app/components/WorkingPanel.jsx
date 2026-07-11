@@ -113,7 +113,7 @@ export default function WorkingPanel({ isSyncingRef }) {
         className="flex-1 overflow-y-auto p-3 space-y-6"
       >
       {snapshotMessages.length === 0 && !loading && (
-        <p className="text-neutral-600 text-xs p-4">
+        <p className="text-[var(--neutral-600)] text-xs p-4">
           Routing and structure info will appear here once a task runs.
         </p>
       )}
@@ -122,9 +122,9 @@ export default function WorkingPanel({ isSyncingRef }) {
         <div
           key={m.index}
           ref={(el) => (sectionRefs.current[m.index] = el)}
-          className="space-y-2 border-b border-neutral-800 pb-4"
+          className="space-y-2 border-b border-[var(--neutral-800)] pb-4"
         >
-          <p className="text-xs text-neutral-500 truncate">{m.task}</p>
+          <p className="text-xs text-[var(--neutral-500)] truncate">{m.task}</p>
           {m.data?.decision && <RoutingTraceCard decision={m.data.decision} />}
           {/* Part 2 §2.3/§2.7 — "save from a finished run" write path.
               execution_order is the Panel/Inspector's own already-decided
@@ -172,9 +172,9 @@ export default function WorkingPanel({ isSyncingRef }) {
           used to render standalone; absorbed here per Part 21 Step 5. */}
       {loading && (
         <div className="space-y-2">
-          <p className="text-xs text-neutral-500">Running…</p>
+          <p className="text-xs text-[var(--neutral-500)]">Running…</p>
           {!liveDecision ? (
-            <div className="text-neutral-500 text-sm animate-pulse">
+            <div className="text-[var(--neutral-500)] text-sm animate-pulse">
               Classifying and routing...
             </div>
           ) : (
