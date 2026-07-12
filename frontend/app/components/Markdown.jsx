@@ -8,7 +8,21 @@ import MermaidDiagram from "./MermaidDiagram";
 // relying on @tailwindcss/typography, since this repo doesn't have that
 // plugin installed — keeps the dependency footprint to just
 // react-markdown + remark-gfm (tables, strikethrough, task lists).
-export default function Markdown({ children }) {
+// §4.7 — a private URL scheme, not a real link: [[node_id]] markers (the
+// citation format the notes-domain Q&A/report/mapper roles are asked to
+// emit when grounding a claim in an ingested source) get rewritten to
+// this before ReactMarkdown ever sees them, purely so remark's normal
+// link-parsing machinery does the heavy lifting instead of a custom
+// inline-token plugin. The `a` renderer below intercepts this scheme and
+// never lets it reach an actual <a href>, so it can't navigate away or
+// leak into a real link's target.
+const NODE_CITE_SCHEME = "notecite://";
+
+function rewriteCitationMarkers(text) {
+  return String(text).replace(/\[\[([^\[\]]+)\]\]/g, (_, id) => `[${id}](${NODE_CITE_SCHEME}${encodeURIComponent(id)})`);
+}
+
+export default function Markdown({ children, onCitationClick }) {
   if (!children) return null;
   return (
     <div className="markdown-body text-sm leading-relaxed text-[var(--neutral-200)] space-y-3">
@@ -22,9 +36,30 @@ export default function Markdown({ children }) {
           ul: (p) => <ul className="list-disc pl-5 space-y-1 text-[var(--neutral-300)]" {...p} />,
           ol: (p) => <ol className="list-decimal pl-5 space-y-1 text-[var(--neutral-300)]" {...p} />,
           li: (p) => <li className="marker:text-[var(--neutral-600)]" {...p} />,
-          a: (p) => (
-            <a className="text-cyan-400 underline underline-offset-2 hover:text-cyan-300" target="_blank" rel="noreferrer" {...p} />
-          ),
+          a: ({ href, children: linkChildren, ...rest }) => {
+            if (href?.startsWith(NODE_CITE_SCHEME)) {
+              const nodeId = decodeURIComponent(href.slice(NODE_CITE_SCHEME.length));
+              // Styled as a small superscript-ish citation chip rather
+              // than a normal link -- distinct enough that it doesn't
+              // read as "click to leave the page," which is what a
+              // plain cyan underlined link would otherwise imply.
+              return (
+                <button
+                  type="button"
+                  onClick={() => onCitationClick?.(nodeId)}
+                  title={`Jump to source: ${nodeId}`}
+                  className="inline-flex items-center px-1 rounded bg-cyan-950/60 border border-cyan-800/60 text-[0.75em] text-cyan-300 hover:bg-cyan-900/60 hover:text-cyan-200 align-middle"
+                >
+                  {linkChildren}
+                </button>
+              );
+            }
+            return (
+              <a className="text-cyan-400 underline underline-offset-2 hover:text-cyan-300" href={href} target="_blank" rel="noreferrer" {...rest}>
+                {linkChildren}
+              </a>
+            );
+          },
           blockquote: (p) => (
             <blockquote className="border-l-2 border-[var(--neutral-700)] pl-3 text-[var(--neutral-400)] italic" {...p} />
           ),
@@ -91,7 +126,7 @@ export default function Markdown({ children }) {
           },
         }}
       >
-        {children}
+        {rewriteCitationMarkers(children)}
       </ReactMarkdown>
     </div>
   );

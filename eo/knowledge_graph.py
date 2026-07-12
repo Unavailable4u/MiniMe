@@ -104,14 +104,10 @@ def write_node(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "title": title,
         "tags": tags or [],
-        # Bug fix (Part 0 §0.5 integration): content was embedded above
-        # but never actually stored, so get_node()/search_nodes() had no
-        # way to return a node's own text -- only its title and tags. A
-        # node exists to be re-read (rendered, exported, cited), not just
-        # matched against; storing it here is what makes that possible.
-        # Same "summary for long sources" guidance from this module's own
-        # docstring keeps this bounded -- callers already pass a summary
-        # rather than a full PDF's text, so this isn't a new size concern.
+        # Stored, not just embedded: a node exists to be re-read
+        # (rendered, exported, cited), not just matched against. Same
+        # "summary for long sources" guidance from this module's own
+        # docstring keeps this bounded.
         "content": content,
     }
 
@@ -193,4 +189,60 @@ def search_nodes(
         node_id = match.id.split(":", 2)[-1] if hasattr(match, "id") else None
         nodes.append({"node_id": node_id, "vector_id": getattr(match, "id", None),
                        "score": getattr(match, "score", None), **meta})
+    return nodes
+
+
+def list_nodes(
+    workspace_id: str,
+    node_type: str | None = None,
+    include_vectors: bool = False,
+) -> list[dict]:
+    """Part 4 §4.3 — every node in a workspace, not just the top_k most
+    similar to some query. search_nodes() above needs a query_text
+    because Vector's query() is inherently a similarity search; backlink
+    detection (scanning every note's content for every other note's
+    title) and auto-clustering (KMeans/HDBSCAN over a whole workspace's
+    embeddings) both need the actual full set instead, which is what
+    Vector's range() is for: a paginated scan with the same metadata
+    filter syntax query() uses, no query vector required.
+
+    Pages through range()'s cursor rather than a single unbounded call,
+    since a workspace's node count isn't bounded the way top_k already
+    bounds search_nodes(). include_vectors=True is for auto-clustering's
+    benefit (it needs the raw embeddings, not just metadata) -- left
+    False by default since backlink detection only needs title/content
+    and fetching every node's full vector unnecessarily is wasted
+    bandwidth for that caller.
+
+    Degrades to whatever was collected so far on failure (same posture
+    as search_nodes() degrading to []), rather than raising, so a
+    Vector hiccup mid-scan doesn't take down whatever's calling this.
+    """
+    filter_clauses = [f"workspace_id = '{workspace_id}'"]
+    if node_type:
+        filter_clauses.append(f"node_type = '{node_type}'")
+    filter_str = " AND ".join(filter_clauses)
+
+    nodes = []
+    cursor = ""
+    try:
+        while True:
+            page = vector_index().range(
+                cursor=cursor, limit=100,
+                include_metadata=True, include_vectors=include_vectors,
+                filter=filter_str,
+            )
+            for v in page.vectors:
+                meta = getattr(v, "metadata", None) or {}
+                node_id = v.id.split(":", 2)[-1]
+                node = {"node_id": node_id, "vector_id": v.id, **meta}
+                if include_vectors:
+                    node["vector"] = v.vector
+                nodes.append(node)
+            cursor = page.next_cursor
+            if not cursor:
+                break
+    except Exception as exc:
+        print(f"  [Knowledge Graph] list_nodes failed (partial results kept): {exc}")
+
     return nodes

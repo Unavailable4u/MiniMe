@@ -472,6 +472,8 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # folder/file scaffold when there's no code to organize.
                 result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
                             domain=domain)
+            elif current_name in ("architecture_diagrammer", "schema_diagrammer", "handoff_packager"):
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text, domain=domain)
             elif current_name == "academic_search":
                 # Needs task_text as the search query (no other bus key
                 # holds it yet — this IS the first data-gathering step)

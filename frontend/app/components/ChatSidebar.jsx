@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";   // CHANGED — add useEffect
 import { useSession } from "../context/SessionContext";
-import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
+import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput, NotebookText, FlaskConical } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
 import CreateWorkspaceModal from "./CreateWorkspaceModal";
 import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";
@@ -28,7 +28,7 @@ function hashBatchColor(batchId) {
   return BATCH_ACCENTS[Math.abs(hash) % BATCH_ACCENTS.length];
 }
 
-export default function ChatSidebar({ collapsed, onToggle }) {
+export default function ChatSidebar({ collapsed, onToggle, onOpenNotebooks, onOpenResearch }) {
   const { chats, batches, workspaces, sessionId, switchChat, createNewChat, renameChat, deleteChat, linkChats } = useSession();
   const [editingId, setEditingId] = useState(null);
   const [editTitle, setEditTitle] = useState("");
@@ -80,9 +80,17 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 
   if (collapsed) {
     return (
-      <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3">
+      <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
         <button onClick={onToggle} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show chats">
           <ChevronRight size={16} />
+        </button>
+        <button onClick={onOpenNotebooks} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Notebooks">
+          <NotebookText size={15} />
+        </button>
+        {/* Research §3.9 — same "dedicated top-level tab, one-button
+            hand-off" shape as the Notebooks button just above. */}
+        <button onClick={onOpenResearch} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Research">
+          <FlaskConical size={15} />
         </button>
       </div>
     );
@@ -182,6 +190,35 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           </button>
         </div>
       </div>
+
+      {/* §4.7 — Notebooks is its own top-level section (see AppShell's
+          TABS), not something built inline into this sidebar. This
+          button is the only thing that lives here: it just switches
+          AppShell over to that dedicated tab, same "hand off, don't
+          rebuild" shape as the sidebar's own openChat() flow. */}
+      <button
+        onClick={onOpenNotebooks}
+        className="flex items-center gap-2 px-3 py-2 border-b border-[var(--neutral-800)] text-xs text-[var(--neutral-300)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-100)]"
+      >
+        <NotebookText size={14} className="text-[var(--cyber-cyan)]" />
+        Notebooks
+      </button>
+
+      {/* Research (Part 3 §3.9) — its own top-level section (see
+          AppShell's TABS), not built inline into this sidebar or folded
+          into Notebooks. Same "hand off to the parent" shape as the
+          Notebooks button directly above: this button only ever
+          switches AppShell over to the "research" tab. Uses the same
+          violet accent KnowledgeGraphView.jsx's SECTION_COLORS already
+          assigns to section: "research" nodes, so the color means the
+          same thing here as it does on the citation graph. */}
+      <button
+        onClick={onOpenResearch}
+        className="flex items-center gap-2 px-3 py-2 border-b border-[var(--neutral-800)] text-xs text-[var(--neutral-300)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-100)]"
+      >
+        <FlaskConical size={14} className="text-[var(--cyber-violet)]" />
+        Research
+      </button>
 
       <div className="px-3 py-2 border-b border-[var(--neutral-900)]">
         <input

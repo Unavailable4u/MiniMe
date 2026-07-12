@@ -93,6 +93,45 @@ STRUCTURE_TEMPLATES = {
         "marketplace_review_batch",
         "simulation_synthesizer",
     ],
+    # Part 4 §4.1 — menu, not a fixed pipeline, same as every entry above.
+    # source_ingestor covers the Capture step (Part 4 §4.2); everything
+    # else here is an existing role library brief reused under this
+    # domain, per that section's per-case reuse-vs-alias note.
+    "notes": [
+        "source_ingestor", "researcher", "fact_checker", "writer",
+        "mapper", "report_writer", "slide_planner", "podcast_scriptwriter",
+        "infographic_designer", "flashcard_writer", "quiz_writer",
+        "study_guide_writer", "editor",
+    ],
+    # Part 5 §5.1 — menu, not a fixed pipeline, same as every entry
+    # above. Registry classification (§5.1's own table, not yet wired
+    # into REAL_ACTION_ROLES until each module actually exists —
+    # see eo/registry.py's REAL_ACTION_ROLES comment on why a name
+    # showing up there before its REGISTRY entry exists is a guaranteed
+    # KeyError, the exact bug Part 3's academic_search hit once already):
+    #   generic_worker (reasoning, no dedicated module):
+    #     intake_interviewer, question_forcer, prd_writer,
+    #     api_contract_writer, devils_advocate, feasibility_estimator
+    #   REAL_ACTION_ROLES (structured-plan-in, deterministic-render-out):
+    #     architecture_diagrammer, schema_diagrammer (§5.3, Mermaid via
+    #     the same JSON-proposes/code-renders split structure_architect.py
+    #     already proved out — a new sibling module, not an edit to that
+    #     file), handoff_packager (§5.6, zero LLM calls — pure
+    #     memory-bus reads/writes into idea_planner.py's own KEYS shape)
+    # question_forcer is deliberately positioned right after
+    # intake_interviewer and ahead of prd_writer: it's the one role in
+    # this domain marked as an approval_roles checkpoint (Part 2 §2.4)
+    # so a run visibly pauses for a real human answer before prd_writer
+    # is allowed to write over an unstated assumption (§5.2). wireframe_sketcher
+    # is deliberately NOT in this reference list -- §5.5 calls it out as
+    # optional/secondary to the core PRD, the same "not every role belongs
+    # in the reference structure" allowance Part 1 §1.4 already used for
+    # roles meant to be hired situationally rather than by default.
+    "plan": [
+        "intake_interviewer", "question_forcer", "prd_writer",
+        "architecture_diagrammer", "schema_diagrammer", "api_contract_writer",
+        "devils_advocate", "feasibility_estimator", "handoff_packager",
+    ],
 }
 
 
@@ -125,6 +164,15 @@ def _rough_domain_guess(task_text: str) -> str | None:
         "story", "poem", "song", "lyrics", "novel", "creative", "brainstorm",
     )):
         return "creative_writing"
+    # Checked before "research" deliberately: research's own "sources"
+    # keyword below would otherwise catch notebook-flavored phrasing
+    # first. These are mostly multi-word and specific to notebook/study
+    # tooling, so this costs nothing on genuine research requests.
+    if any(kw in text for kw in (
+        "notebook", "sources", "flashcard", "study guide", "podcast",
+        "summarize this pdf",
+    )):
+        return "notes"
     if any(kw in text for kw in (
         "research", "investigate", "sources", "citations", "survey",
         "paper", "citation", "literature review", "arxiv",
@@ -135,6 +183,18 @@ def _rough_domain_guess(task_text: str) -> str | None:
         "data", "csv", "spreadsheet", "dataset", "analysis", "chart",
     )):
         return "data_analysis"
+    # Checked last, same reasoning every prior addition to this function
+    # gives for its own placement: these phrases are mostly multi-word
+    # and specific to plan/spec-writing, and don't overlap any keyword
+    # already checked above (e.g. "api" alone is a coding keyword, but
+    # "requirements doc" and "before we build" aren't ambiguous with it)
+    # -- so placement here costs nothing on any earlier domain's genuine
+    # requests.
+    if any(kw in text for kw in (
+        "prd", "spec", "blueprint", "requirements doc", "plan out",
+        "before we build",
+    )):
+        return "plan"
     return None
 
 
@@ -418,3 +478,49 @@ def classification_from_template(template: dict) -> dict:
         "approval_roles": list(template.get("approval_roles") or []),
         "no_conversation_context_roles": list(template.get("no_conversation_context_roles") or []),
     }
+
+
+# ---------------------------------------------------------------------------
+# Part 5 §5.2 — Default workflow templates. Unlike eo/registry.py's
+# role-prompt store, an empty workflow_templates store is a perfectly
+# normal starting state (see _load_templates()'s own docstring) -- this
+# exists purely so the one template Part 5's intro explicitly calls out
+# ("a 'Plan a new app' workflow template is a natural first thing to save
+# here") actually exists at runtime, since question_forcer's approval
+# pause (DoD #2) has nothing to attach to without a saved template that
+# sets approval_roles.
+# ---------------------------------------------------------------------------
+DEFAULT_WORKFLOW_TEMPLATES = [
+    {
+        "name": "Plan a new app",
+        "description": (
+            "Turns a raw idea, uploaded brief, or pasted brain-dump into "
+            "a full PRD, architecture/schema diagrams, an API contract, "
+            "a devil's-advocate critique, and a feasibility read -- "
+            "pausing once for you to answer question_forcer's clarifying "
+            "questions before prd_writer commits to any of them."
+        ),
+        "roles": STRUCTURE_TEMPLATES["plan"],
+        "domain_hint": "plan",
+        "approval_roles": ["question_forcer"],
+    },
+]
+
+
+def seed_default_workflow_templates() -> None:
+    """Idempotent — matches by `name`, safe to call on every app startup
+    without creating duplicates. Call this once from wherever the app
+    already does startup bootstrapping (the same place, if any, that
+    would call eo.registry's role-prompt bootstrap)."""
+    existing_names = {t["name"] for t in list_workflow_templates()}
+    for tpl in DEFAULT_WORKFLOW_TEMPLATES:
+        if tpl["name"] in existing_names:
+            continue
+        save_workflow_template(
+            name=tpl["name"],
+            roles=tpl["roles"],
+            description=tpl["description"],
+            domain_hint=tpl["domain_hint"],
+            approval_roles=tpl["approval_roles"],
+            created_by="system_seed",
+        )

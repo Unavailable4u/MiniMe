@@ -126,13 +126,12 @@ def delete_workspace(ws_id: str) -> None:
 
 
 def workspace_for_chat(chat_id: str) -> dict | None:
-    """NEW — Part 0 Section 0.3. Mirrors eo/memory_batch.py's
-    batch_for_chat(): given a chat_id (== session_id everywhere in this
-    system, per api/server.py's own comment), find which workspace it
-    belongs to, if any. This is the missing link that lets
-    eo/conversation_memory.py resolve session_id -> workspace_id ->
-    workspace_facts without the caller having to pass workspace_id
-    through every layer explicitly."""
+    """Mirrors eo/memory_batch.py's batch_for_chat(): given a chat_id
+    (== session_id everywhere in this system, per api/server.py's own
+    comment), find which workspace it belongs to, if any. This is the
+    missing link that lets eo/conversation_memory.py resolve
+    session_id -> workspace_id -> workspace_facts without the caller
+    having to pass workspace_id through every layer explicitly."""
     for w in list_workspaces():
         if chat_id in w["chat_ids"]:
             return w

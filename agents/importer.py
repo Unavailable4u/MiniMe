@@ -162,8 +162,18 @@ def _read_csv(path: str) -> dict:
     return {"title": title, "sections": sections, "metadata": {}}
 
 
-def _read_md(path: str) -> dict:
-    """Parses blank-line-delimited blocks rather than individual lines.
+def parse_markdown_text(text: str, default_title: str = "Untitled") -> dict:
+    """The actual markdown -> {title, sections, metadata} parser. Split
+    out of _read_md() below so Part 4 §4.4's generator roles (mapper,
+    report_writer, slide_planner, podcast_scriptwriter — every one of
+    which asks generic_worker for headered Markdown via its
+    MARKDOWN_INSTRUCTION) can turn their raw output straight into an
+    exportable artifact without going through a temp file first. This
+    is the only place that understands the heading/"Sources:" grammar;
+    _read_md() and graph/adapters.py's markdown_text_to_artifact() both
+    call this rather than re-implementing it.
+
+    Parses blank-line-delimited blocks rather than individual lines.
     This matters because _write_md() writes a section's whole `content`
     string as a single block (which may itself contain internal '\\n\\n'
     paragraph breaks) — parsing line-by-line would insert an extra blank
@@ -172,11 +182,8 @@ def _read_md(path: str) -> dict:
     inverts that, including the case where a content block's own internal
     '\\n\\n' causes it to split into more than one block here.
     """
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-
     blocks = [b for b in text.split("\n\n")]
-    title = os.path.splitext(os.path.basename(path))[0]
+    title = default_title
     sections = []
     current = None
 
@@ -199,6 +206,13 @@ def _read_md(path: str) -> dict:
             _append_content(current, block.strip("\n"))
 
     return {"title": title, "sections": sections, "metadata": {}}
+
+
+def _read_md(path: str) -> dict:
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    default_title = os.path.splitext(os.path.basename(path))[0]
+    return parse_markdown_text(text, default_title)
 
 
 def _read_json(path: str) -> dict:

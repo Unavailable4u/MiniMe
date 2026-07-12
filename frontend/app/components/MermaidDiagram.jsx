@@ -16,7 +16,12 @@ import mermaid from "mermaid";
 // control of what the user sees.
 mermaid.initialize({ startOnLoad: false, theme: "dark", suppressErrorRendering: true });
 
-export default function MermaidDiagram({ mermaidText }) {
+// §4.7 — mind-map nodes only get the "click me" affordance when a
+// handler is actually wired up (e.g. the Notebooks tab's mind map), so
+// every OTHER caller of this component (structure-plan views, ordinary
+// chat-rendered diagrams) keeps today's static, non-interactive look
+// with zero behavior change.
+export default function MermaidDiagram({ mermaidText, onNodeClick }) {
   const ref = useRef(null);
   const [failed, setFailed] = useState(false);
 
@@ -29,6 +34,27 @@ export default function MermaidDiagram({ mermaidText }) {
         .then(({ svg }) => {
           if (!cancelled && ref.current) {
             ref.current.innerHTML = svg;
+            // §4.7 — wire click handling onto the rendered nodes. Mermaid
+            // gives every node group a `.node` class regardless of
+            // diagram type (mindmap/flowchart/graph), so this one
+            // delegated listener covers all of them without needing to
+            // know which diagram type was actually rendered. The node's
+            // own visible label text is the closest thing to a stable
+            // identifier available client-side (mermaid doesn't expose
+            // the author's original node id in the rendered DOM for
+            // every diagram type) -- good enough to hand off to a
+            // sub-chat prompt ("tell me more about <label>"), which is
+            // all onNodeClick is for.
+            if (onNodeClick) {
+              const nodeEls = ref.current.querySelectorAll(".node, .mindmap-node");
+              nodeEls.forEach((el) => {
+                el.style.cursor = "pointer";
+                el.addEventListener("click", () => {
+                  const label = el.querySelector("text, .nodeLabel")?.textContent?.trim() || el.textContent?.trim();
+                  if (label) onNodeClick(label);
+                });
+              });
+            }
           }
         })
         .catch((err) => {
@@ -42,7 +68,7 @@ export default function MermaidDiagram({ mermaidText }) {
         });
     }
     return () => { cancelled = true; };
-  }, [mermaidText]);
+  }, [mermaidText, onNodeClick]);
 
   if (failed) {
     // Fall back to the raw diagram source instead of a blank/broken box,
