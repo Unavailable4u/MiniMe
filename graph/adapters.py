@@ -24,6 +24,16 @@ glue described in Part 0 §0.5. This module has two jobs:
                                 the graph without the user seeing it
                                 first.
 
+  3. markdown_text_to_artifact() — Part 4 §4.4: the same {title,
+                                sections} shape, but built directly from
+                                a generic_worker role's raw Markdown
+                                output (mapper/report_writer/
+                                slide_planner/podcast_scriptwriter)
+                                rather than from a node or an imported
+                                file. Reuses agents/importer.py's own
+                                Markdown grammar instead of parsing it
+                                twice.
+
 This module intentionally has NO hard dependency on memory.bus / the
 Upstash Vector client / eo.errors -- it's called by code that already
 has a node record in hand (however that node was fetched), so it stays
@@ -99,6 +109,35 @@ def node_to_artifact(node: dict, related_nodes: Optional[list] = None) -> dict:
             "source_node_id": node.get("node_id"),
         },
     }
+
+
+def markdown_text_to_artifact(text: str, title_fallback: str = "Untitled",
+                               workspace_id: Optional[str] = None,
+                               tags: Optional[list] = None,
+                               created_by: Optional[str] = None) -> dict:
+    """Part 4 §4.4 — the adapter for generic_worker's generator roles
+    (mapper, report_writer, slide_planner, podcast_scriptwriter): every
+    one of them returns Markdown (generic_worker.py's own
+    MARKDOWN_INSTRUCTION asks for '##'-headed sections), and this is
+    what turns that raw stage_output text straight into the same
+    {title, sections} shape agents/exporter.py consumes -- the same
+    "one adapter per domain" role this module already plays for graph
+    nodes, just fed LLM text instead of a stored node.
+
+    No new parsing code: agents/importer.py's parse_markdown_text() is
+    the exact "##-headed Markdown -> sections" grammar this needs,
+    already built and tested for the file-import direction. Reused
+    here as-is, late-imported for the same testability reason the rest
+    of this module's cross-imports are.
+    """
+    from agents.importer import parse_markdown_text
+    artifact = parse_markdown_text(text, default_title=title_fallback)
+    artifact["metadata"] = {
+        "workspace_id": workspace_id,
+        "tags": tags or [],
+        "created_by": created_by,
+    }
+    return artifact
 
 
 def artifact_to_candidate_node(artifact: dict, workspace_id: str, section: str,

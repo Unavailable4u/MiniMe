@@ -64,6 +64,21 @@ export const ROLE_CATEGORIES = [
   { key: "testing", test: /test_writer|sandbox_tester|\btester\b|qa\b/i, icon: "\u{1F9EA}", color: "#34d399" }, // 🧪
   { key: "fact-check", test: /fact.?check/i, icon: "\u2705", color: "#4ade80" }, // ✅
 
+  // ---- Notes domain (Part 4) ----
+  // Sit above the broader "files"/"docs"/"planning" patterns just below
+  // (same matching-order rule this file's header documents) — several of
+  // these role names would otherwise be swallowed by those first (e.g.
+  // "mapper" doesn't collide, but "study_guide_writer" would fall into
+  // no existing bucket and land on DEFAULT_CATEGORY without an explicit
+  // entry here).
+  { key: "source-ingestor", test: /source_ingestor/i, icon: "\u{1F4E5}", color: "#38bdf8" }, // 📥
+  { key: "mapper", test: /^mapper$/i, icon: "\u{1F9E0}", color: "#a78bfa" }, // 🧠 (mind map)
+  { key: "podcast-scriptwriter", test: /podcast_scriptwriter/i, icon: "\u{1F3D9}\uFE0F", color: "#f472b6" }, // 🏙️ (two-host banter, closest free glyph to "podcast")
+  { key: "slide-planner", test: /slide_planner/i, icon: "\u{1F4FA}", color: "#fbbf24" }, // 📺
+  { key: "flashcard-writer", test: /flashcard_writer/i, icon: "\u{1F0CF}", color: "#4ade80" }, // 🃏
+  { key: "quiz-writer", test: /quiz_writer/i, icon: "\u2753", color: "#fb923c" }, // ❓
+  { key: "study-guide-writer", test: /study_guide_writer/i, icon: "\u{1F4D3}", color: "#93c5fd" }, // 📓
+
   // ---- Files / docs ----
   { key: "files", test: /file_manager|structure_architect/i, icon: "\u{1F5C2}\uFE0F", color: "#22d3ee" }, // 🗂️
   { key: "docs", test: /documentation|report_writer/i, icon: "\u{1F4C4}", color: "#a3e635" }, // 📄

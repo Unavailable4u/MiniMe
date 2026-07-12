@@ -13,11 +13,12 @@ tighten this before deploying anywhere real.
 import os
 import sys
 import traceback
+import tempfile
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Query
+from fastapi import FastAPI, Request, HTTPException, Depends, Query, UploadFile, File, Form
 from eo.project_registry import list_projects, generate_control_unit, register_project
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -31,12 +32,37 @@ from eo.structure import (   # NEW — Part 2 §2.7: Workflow Template builder
 )
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
 from eo import chat_store
+from eo import quiz_progress
 from eo import memory_batch
 from eo import chat_workspace
 from eo import workspace_facts
 from eo import graph_edges
+from eo import note_candidates   # NEW — §4.7: silent note-taker's propose/accept/reject surface
+from eo.knowledge_graph import list_nodes   # NEW — §4.7: Notebooks tab source list / mind map / backlinks all read this
+from agents.backlink_detector import detect_backlinks
+from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
+    accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
+from agents.note_table_builder import build_table
+from agents.web_clipper import clip_url
+from agents.video_ingestor import ingest_video
+from agents.voice_ingestor import ingest_voice
+from agents.importer import import_artifact, SUPPORTED_FORMATS as IMPORTABLE_FORMATS
+from agents.source_ingestor import write_ingested_source
+from agents.tts_synthesizer import synthesize_podcast
+from agents.video_overview_builder import build_video_overview
+from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FORMATS
+from graph.adapters import markdown_text_to_artifact
+from fastapi.responses import FileResponse
 
 app = FastAPI(title="MiniMe v6 — EO layer API")
+
+# Part 4 §4.4 -- where generated reports/decks/scripts land before being
+# handed back as a download. Sibling to eo/graph_edges.py's data/graph/
+# and eo/chat_workspace.py's data/chats/ -- same "small dedicated
+# subfolder under data/" convention this codebase already uses throughout.
+NOTES_EXPORTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "exports",
+)
 
 API_AUTH_MODE = os.getenv("API_AUTH_MODE", "api_key")
 API_AUTH_SECRET = os.getenv("API_AUTH_SECRET")
@@ -126,6 +152,49 @@ class CreateEdgeRequest(BaseModel):
     from_node_id: str
     to_node_id: str
     relation: str = "related"
+
+
+class ClipUrlRequest(BaseModel):
+    url: str
+    workspace_id: str
+
+
+class ExportArtifactRequest(BaseModel):
+    text: str                    # a generator role's raw Markdown stage_output
+    title: str = "Untitled"
+    fmt: str                     # one of agents/exporter.py's SUPPORTED_FORMATS
+    workspace_id: Optional[str] = None
+    tags: Optional[list[str]] = None
+
+
+class BuildTableRequest(BaseModel):
+    field_names: list[str]
+    node_type: Optional[str] = None
+    expanded: bool = False
+
+
+class SynthesizePodcastRequest(BaseModel):
+    script_text: str             # podcast_scriptwriter's raw Markdown stage_output
+    title: str = "podcast"
+
+class RecordQuizAttemptRequest(BaseModel):
+    workspace_id: str
+    quiz_node_id: str            # vector_id of the exported/stored quiz node
+    quiz_text: str                # quiz_writer's raw Markdown stage_output
+    answers: list[int]            # one option-index per question, in question order
+
+
+class GradeQuizRequest(BaseModel):
+    quiz_text: str                # quiz_writer's raw Markdown stage_output
+    answers: list[int]
+
+class BuildVideoOverviewRequest(BaseModel):
+    slide_text: str               # slide_planner's raw Markdown stage_output
+    podcast_title: str            # the `title` used in a prior POST
+                                   # /api/notes/podcast/synthesize call for
+                                   # this notebook -- locates that mp3 on
+                                   # disk rather than re-synthesizing it
+    title: str = "video_overview"
 
 
 @app.post("/api/projects", dependencies=[Depends(require_auth)])
@@ -370,6 +439,314 @@ def delete_graph_edge(edge_id: str):
         raise HTTPException(status_code=404, detail="Unknown edge_id")
     return {"status": "deleted", "id": edge_id}
 
+
+# --- knowledge-graph nodes (see eo/knowledge_graph.py, §0.1) -------------
+# §4.7: the Notebooks tab's one read for "everything in this notebook" —
+# the source list, the mind map's underlying content, and
+# KnowledgeGraphView's backlink visualization all page through this same
+# list_nodes() call rather than each inventing their own fetch.
+
+@app.get("/api/workspaces/{ws_id}/nodes", dependencies=[Depends(require_auth)])
+def get_workspace_nodes(ws_id: str, node_type: Optional[str] = Query(None)):
+    try:
+        chat_workspace.get_workspace(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    return list_nodes(ws_id, node_type=node_type)
+
+
+# --- silent note-taking agent candidates (see eo/note_candidates.py, §4.6)
+# Same propose/accept/reject shape as workspace-fact candidates and
+# cluster candidates above — a candidate note proposed by agents/note_taker.py
+# while watching other chats in this workspace, never auto-committed.
+
+@app.get("/api/workspaces/{ws_id}/notes/candidates", dependencies=[Depends(require_auth)])
+def get_note_candidates(ws_id: str):
+    return note_candidates.list_candidates(ws_id)
+
+
+@app.post("/api/workspaces/{ws_id}/notes/candidates/{index}/accept", dependencies=[Depends(require_auth)])
+def accept_note_candidate(ws_id: str, index: int):
+    try:
+        return {"node_id": note_candidates.accept_candidate(ws_id, index)}
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Unknown candidate index")
+
+
+@app.delete("/api/workspaces/{ws_id}/notes/candidates/{index}", dependencies=[Depends(require_auth)])
+def reject_note_candidate(ws_id: str, index: int):
+    try:
+        note_candidates.reject_candidate(ws_id, index)
+    except IndexError:
+        raise HTTPException(status_code=404, detail="Unknown candidate index")
+    return {"status": "rejected", "index": index}
+
+
+@app.post("/api/workspaces/{ws_id}/backlinks/detect", dependencies=[Depends(require_auth)])
+def detect_backlinks_endpoint(ws_id: str):
+    """Part 4 §4.3 -- on-demand rescan rather than wired into every
+    ingestion call: re-running this is cheap (edges_between() already
+    skips anything already linked) and a manual "detect backlinks" action
+    is simpler to reason about than re-scanning a whole workspace after
+    every single new node."""
+    try:
+        chat_workspace.get_workspace(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    return {"edges_created": detect_backlinks(ws_id)}
+
+
+# --- auto-clustering (see agents/note_clusterer.py, Part 4 §4.3) ---------
+# Same on-demand-rescan + candidate accept/reject shape as backlinks and
+# workspace-fact proposals above -- the third use of this affordance in
+# the build order, not a new UX pattern.
+
+@app.post("/api/workspaces/{ws_id}/clusters/propose", dependencies=[Depends(require_auth)])
+def propose_clusters_endpoint(ws_id: str):
+    try:
+        chat_workspace.get_workspace(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    return {"candidates": propose_clusters(ws_id)}
+
+
+@app.get("/api/workspaces/{ws_id}/clusters/candidates", dependencies=[Depends(require_auth)])
+def get_cluster_candidates(ws_id: str):
+    return list_cluster_candidates(ws_id)
+
+
+@app.post("/api/workspaces/{ws_id}/clusters/candidates/{candidate_id}/accept", dependencies=[Depends(require_auth)])
+def accept_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
+    try:
+        return {"edges_created": accept_cluster_candidate(ws_id, candidate_id)}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
+
+
+@app.delete("/api/workspaces/{ws_id}/clusters/candidates/{candidate_id}", dependencies=[Depends(require_auth)])
+def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
+    try:
+        reject_cluster_candidate(ws_id, candidate_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
+    return {"status": "rejected", "id": candidate_id}
+
+
+# --- data tables from scattered facts (see agents/note_table_builder.py,
+# Part 4 §4.4) --------------------------------------------------------------
+# Same directly-called, own-endpoint shape as backlinks/clustering above,
+# not routed through the Panel/executor role-hiring pipeline -- see that
+# module's docstring for why.
+
+@app.post("/api/workspaces/{ws_id}/table", dependencies=[Depends(require_auth)])
+def build_table_endpoint(ws_id: str, req: BuildTableRequest):
+    try:
+        chat_workspace.get_workspace(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    try:
+        return build_table(ws_id, req.field_names, node_type=req.node_type, expanded=req.expanded)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- notes domain: capture (see agents/web_clipper.py, Part 4 §4.2) ------
+# Driven by a small bookmarklet/extension that POSTs the current page's
+# URL here. One new ingestion endpoint, not a new backend paradigm --
+# same shape as every other write endpoint above, just backed by a
+# deterministic tool agent instead of a memory-bus write. PDF/Office/
+# video/voice ingestion land the same way once those ingestors exist;
+# this is the first one wired end to end.
+
+@app.post("/api/notes/clip", dependencies=[Depends(require_auth)])
+def clip_url_endpoint(req: ClipUrlRequest):
+    try:
+        artifact = clip_url(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    node_ids = write_ingested_source(artifact, req.workspace_id, created_by="user")
+    return {"node_ids": node_ids, "title": artifact["title"]}
+
+
+@app.post("/api/notes/video", dependencies=[Depends(require_auth)])
+def ingest_video_endpoint(req: ClipUrlRequest):
+    # Reuses ClipUrlRequest -- identical {url, workspace_id} shape, no
+    # reason for a separate model.
+    try:
+        artifact = ingest_video(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    node_ids = write_ingested_source(artifact, req.workspace_id, created_by="user")
+    return {"node_ids": node_ids, "title": artifact["title"]}
+
+
+@app.post("/api/notes/import", dependencies=[Depends(require_auth)])
+async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile = File(...)):
+    """Office/docx/pptx/xlsx/csv/md/json ingestion. No new parsing code —
+    agents/importer.py (Part 0 §0.5) already reads every one of these
+    formats back into the common artifact shape; this endpoint is just
+    that plus write_ingested_source(), the same two-step shape
+    /api/notes/clip above already uses. PDF is deliberately absent from
+    IMPORTABLE_FORMATS -- that's agents/pdf_ingestor.py's job, not
+    agents/importer.py's (see that module's own docstring)."""
+    ext = os.path.splitext(file.filename or "")[1].lstrip(".").lower()
+    if ext not in IMPORTABLE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported import format '{ext}'. Supported: {', '.join(IMPORTABLE_FORMATS)}.",
+        )
+    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        artifact = import_artifact(tmp_path, fmt=ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        os.remove(tmp_path)
+    node_ids = write_ingested_source(artifact, workspace_id, created_by="user")
+    return {"node_ids": node_ids, "title": artifact["title"]}
+
+
+@app.post("/api/notes/voice", dependencies=[Depends(require_auth)])
+async def ingest_voice_endpoint(workspace_id: str = Form(...), file: UploadFile = File(...)):
+    """Voice notes / meeting recordings -- agents/voice_ingestor.py
+    transcribes locally (faster-whisper, no API key), same temp-file-
+    then-cleanup shape as /api/notes/import above. No format allowlist
+    here: unlike Office import, faster-whisper/ffmpeg handles a broad
+    range of audio containers, and an unsupported one already surfaces
+    as ingest_voice()'s own ValueError -> 400 rather than needing a
+    second check here."""
+    suffix = os.path.splitext(file.filename or "")[1] or ".audio"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        artifact = ingest_voice(tmp_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        os.remove(tmp_path)
+    node_ids = write_ingested_source(artifact, workspace_id, created_by="user")
+    return {"node_ids": node_ids, "title": artifact["title"]}
+
+
+# --- notes domain: generate (see agents/exporter.py, Part 0 §0.5 /
+# graph/adapters.py, Part 4 §4.4) ------------------------------------------
+# Turns a generator role's raw Markdown stage_output (mapper, report_writer,
+# slide_planner, podcast_scriptwriter -- every one asks for headered
+# Markdown via generic_worker.py's MARKDOWN_INSTRUCTION) into a real file.
+# Takes the text straight from the client rather than re-reading it off
+# the memory bus here: stage_output:* keys are app_slug-namespaced
+# (memory/bus.py's _namespaced()), and the client already has the exact
+# text it rendered to the user, so this sidesteps reconstructing that
+# namespace server-side.
+
+@app.post("/api/notes/export", dependencies=[Depends(require_auth)])
+def export_artifact_endpoint(req: ExportArtifactRequest):
+    fmt = req.fmt.lower().lstrip(".")
+    if fmt not in EXPORTABLE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported export format '{fmt}'. Supported: {', '.join(EXPORTABLE_FORMATS)}.",
+        )
+    artifact = markdown_text_to_artifact(
+        req.text, title_fallback=req.title,
+        workspace_id=req.workspace_id, tags=req.tags,
+    )
+    path = export_artifact(artifact, fmt, NOTES_EXPORTS_DIR)
+    return FileResponse(path, filename=os.path.basename(path))
+
+
+# --- notes domain: podcast synthesis (see agents/tts_synthesizer.py,
+# Part 4 §4.4) --------------------------------------------------------------
+# Synthesis half of Audio Overview. Takes podcast_scriptwriter's raw
+# Markdown stage_output straight from the client, same take-the-text-
+# from-the-client reasoning export_artifact_endpoint above already uses —
+# no re-read off the namespaced memory bus here either. No LLM call in
+# this handler; synthesize_podcast() is pure edge-tts.
+
+@app.post("/api/notes/podcast/synthesize", dependencies=[Depends(require_auth)])
+def synthesize_podcast_endpoint(req: SynthesizePodcastRequest):
+    safe_title = "".join(c for c in req.title if c.isalnum() or c in ("-", "_")) or "podcast"
+    out_path = os.path.join(NOTES_EXPORTS_DIR, f"{safe_title}.mp3")
+    try:
+        synthesize_podcast(req.script_text, out_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileResponse(out_path, filename=os.path.basename(out_path))
+
+
+# --- notes domain: Video Overview (see agents/video_overview_builder.py,
+# Part 4 §4.4) ----------------------------------------------------------
+# Labeled "narrated slideshow" in-product, not "video" -- see that
+# module's docstring for why. Reuses slide_planner's own Markdown via the
+# same markdown_text_to_artifact() adapter export_artifact_endpoint above
+# already uses. The podcast audio is NOT re-synthesized here -- it's
+# located on disk by `podcast_title`, the same safe-slugified filename
+# synthesize_podcast_endpoint above already writes to NOTES_EXPORTS_DIR.
+# This by-title lookup is a deliberate simplification (no session_id/
+# workspace_id-keyed store for exports exists yet); call podcast
+# synthesis first with a title, then pass that same title here.
+
+@app.post("/api/notes/video-overview/build", dependencies=[Depends(require_auth)])
+def build_video_overview_endpoint(req: BuildVideoOverviewRequest):
+    safe_podcast_title = "".join(c for c in req.podcast_title if c.isalnum() or c in ("-", "_")) or "podcast"
+    audio_path = os.path.join(NOTES_EXPORTS_DIR, f"{safe_podcast_title}.mp3")
+    if not os.path.exists(audio_path):
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No synthesized podcast audio found for title {req.podcast_title!r}. "
+                     "Call POST /api/notes/podcast/synthesize with this title first."),
+        )
+    slide_artifact = markdown_text_to_artifact(req.slide_text, title_fallback=req.title)
+    safe_title = "".join(c for c in req.title if c.isalnum() or c in ("-", "_")) or "video_overview"
+    out_path = os.path.join(NOTES_EXPORTS_DIR, f"{safe_title}.mp4")
+    try:
+        build_video_overview(slide_artifact, audio_path, out_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileResponse(out_path, filename=os.path.basename(out_path))
+
+# --- notes domain: study tools (see eo/quiz_progress.py, Part 4 §4.5) -----
+# flashcard_writer/study_guide_writer need no new endpoint -- both already
+# use the '# Title' / '## Heading' grammar export_artifact_endpoint above
+# already handles, same as report_writer. quiz_writer's output round-trips
+# through that same endpoint too (its '- [ ]'/'- [x]' lines are just
+# ordinary section content to markdown_text_to_artifact()) -- these
+# endpoints only cover what export/import can't: grading a submission
+# against quiz_writer's own Markdown and recording the result.
+
+@app.post("/api/notes/study/quiz/grade", dependencies=[Depends(require_auth)])
+def grade_quiz_endpoint(req: GradeQuizRequest):
+    """Grades without persisting -- lets the frontend show results before
+    committing an attempt (e.g. a "check my answers" button before final
+    submit). POST .../attempts below does the same grading AND records
+    it; this is the preview-only half."""
+    return quiz_progress.grade_quiz(req.quiz_text, req.answers)
+
+
+@app.post("/api/notes/study/quiz/attempts", dependencies=[Depends(require_auth)])
+def record_quiz_attempt_endpoint(req: RecordQuizAttemptRequest):
+    return quiz_progress.record_attempt(
+        workspace_id=req.workspace_id,
+        quiz_node_id=req.quiz_node_id,
+        quiz_markdown=req.quiz_text,
+        answers=req.answers,
+        created_by="user",
+    )
+
+
+@app.get("/api/notes/study/quiz/attempts", dependencies=[Depends(require_auth)])
+def list_quiz_attempts_endpoint(workspace_id: str = Query(...),
+                                 quiz_node_id: Optional[str] = Query(None)):
+    return quiz_progress.list_attempts(workspace_id, quiz_node_id)
+
+
+@app.get("/api/notes/study/quiz/missed", dependencies=[Depends(require_auth)])
+def missed_quiz_questions_endpoint(workspace_id: str = Query(...),
+                                    quiz_node_id: str = Query(...)):
+    return quiz_progress.get_missed_questions(workspace_id, quiz_node_id)
 
 class TaskRequest(BaseModel):
     task_text: str

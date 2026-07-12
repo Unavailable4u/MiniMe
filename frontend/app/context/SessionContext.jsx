@@ -506,6 +506,156 @@ async function deleteWorkspace(wsId) {
   await refreshChatList();
 }
 
+// --- NEW — §4.7: Notebooks tab. A "notebook" is a workspace (§4.3), so
+// these all just parameterize the existing /api/workspaces/{ws_id}/...
+// surface — no new container concept, matching the domain doc's own
+// framing of notebook == workspace_id.
+
+async function fetchWorkspaceNodes(wsId, nodeType) {
+  const qs = nodeType ? `?node_type=${encodeURIComponent(nodeType)}` : "";
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes${qs}`, {
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function fetchGraphEdges(wsId) {
+  const res = await fetch(`${API_URL}/api/graph/edges?workspace_id=${encodeURIComponent(wsId)}`, {
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+// Capture — one function per ingestor family (§4.2), all landing through
+// write_ingested_source() server-side into the exact same node shape, so
+// IngestionDropzone.jsx can treat every one of these identically: call,
+// await {node_ids, title}, done.
+
+async function ingestClip(wsId, url) {
+  const res = await fetch(`${API_URL}/api/notes/clip`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ url, workspace_id: wsId }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function ingestVideoUrl(wsId, url) {
+  const res = await fetch(`${API_URL}/api/notes/video`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ url, workspace_id: wsId }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function ingestFile(wsId, file) {
+  const form = new FormData();
+  form.append("workspace_id", wsId);
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/notes/import`, {
+    method: "POST",
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: form,
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function ingestVoiceFile(wsId, file) {
+  const form = new FormData();
+  form.append("workspace_id", wsId);
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/notes/voice`, {
+    method: "POST",
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: form,
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+// Organize — on-demand rescans (§4.3), same "candidate, not auto-applied"
+// posture as note-candidates below.
+
+async function detectBacklinks(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/backlinks/detect`, {
+    method: "POST",
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  return res.json();
+}
+
+// Silent note-taking agent candidates (§4.6) — never auto-committed;
+// accept/reject here is the review step Definition-of-Done #6 requires.
+
+async function fetchNoteCandidates(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates`, {
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function acceptNoteCandidate(wsId, index) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${index}/accept`, {
+    method: "POST",
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+  return res.json();
+}
+
+async function rejectNoteCandidate(wsId, index) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${index}`, {
+    method: "DELETE",
+    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+  });
+}
+
+// §4.7 — "click a mind-map node, open a scoped sub-chat": creates a new
+// chat, folds it into this notebook's workspace (so it shares memory
+// with the rest of the notebook and shows up under it in the sidebar),
+// then dispatches taskText as its first message. Returns the new
+// chat_id so the caller (NotebooksTab) can hand off to AppShell's
+// openChat() to actually land on it.
+async function gradeQuiz(quizText, answers) {
+  const res = await fetch(`${API_URL}/api/notes/study/quiz/grade`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ quiz_text: quizText, answers }),
+  });
+  return res.json();
+}
+
+async function recordQuizAttempt(wsId, quizNodeId, quizText, answers) {
+  const res = await fetch(`${API_URL}/api/notes/study/quiz/attempts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    body: JSON.stringify({ workspace_id: wsId, quiz_node_id: quizNodeId, quiz_text: quizText, answers }),
+  });
+  return res.json();
+}
+
+async function fetchMissedQuestions(wsId, quizNodeId) {
+  const res = await fetch(
+    `${API_URL}/api/notes/study/quiz/missed?workspace_id=${encodeURIComponent(wsId)}&quiz_node_id=${encodeURIComponent(quizNodeId)}`,
+    { headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY } }
+  );
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function openScopedSubChat(wsId, taskText) {
+  const chatId = await createNewChat();
+  await addWorkspaceChat(wsId, chatId);
+  await sendTask(taskText);
+  return chatId;
+}
+
   // NEW — §5: manage-batch modal actions (rename / unlink members /
   // delete the whole batch). All three touch batch membership, which
   // also changes linked_chat_ids server-side (see eo/memory_batch.py),
@@ -965,6 +1115,13 @@ async function deleteWorkspace(wsId) {
   // NEW — Workflow Templates fix: survives tab switches, see
   // templateRuns' own comment above.
   templateRuns, runTemplate,
+  // NEW — §4.7: Notebooks tab
+  fetchWorkspaceNodes, fetchGraphEdges,
+  ingestClip, ingestVideoUrl, ingestFile, ingestVoiceFile,
+  detectBacklinks,
+  fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
+  openScopedSubChat,
+  gradeQuiz, recordQuizAttempt, fetchMissedQuestions,
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

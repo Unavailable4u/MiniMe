@@ -46,11 +46,14 @@ AGENT_CAPABILITIES = {
     # from one abstract each), the same shape as this pool's existing
     # per-item review work, just a different role name reusing the
     # identical base-3/reserve-2 accounts and fairness rotation.
-    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
-    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
-    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
-    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
-    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder"]},
+    # Part 4 §4.4: "note_table_builder" added the same way -- the
+    # Notes-domain sibling of extraction_table_builder, same shape,
+    # same pool, no new accounts.
+    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
+    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
+    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
+    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
+    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
 
     # --- Groq: Structure Architect (isolated single account) ---
     "GROQ_API_KEY_9": {
@@ -186,6 +189,84 @@ ROLE_PROMPTS_SEED = {
         "you're confirming, which you're dismissing and why, and note "
         "any real contradiction or gap the pre-filter missed."
     ),
+    # Part 5 §5.4 — Plan domain, devils_advocate + feasibility_estimator.
+    # Hand-written up front, same reasoning as every other seed brief in
+    # this dict: a bad first-draft brief becomes permanent once a
+    # cold-start hire writes it.
+    #
+    # devils_advocate is deliberately NOT an alias of critic_reviewer
+    # (Part 1 §1.2) -- critic_reviewer reacts to a product/marketplace
+    # presence the way a published critic would; this role attacks a
+    # structured PRD's own internal assumptions and scope decisions, a
+    # genuinely different task shape (Part 5 §5.4's own reasoning, same
+    # judgment call Part 4 made for meeting_summarizer vs. analyst, in
+    # the opposite direction here).
+    "devils_advocate": (
+        "You read a finished PRD (given as prior context) and attack its "
+        "own internal assumptions and scope decisions -- not the product "
+        "idea in general, and not how a customer or critic would react to "
+        "it (that's a different role's job). Look specifically for: "
+        "unstated dependencies the PRD assumes will just work, scope "
+        "creep hiding inside a 'nice to have' that's actually load-bearing "
+        "for a 'must-have', a requirement that quietly contradicts "
+        "another requirement elsewhere in the same document, and any "
+        "'Open Risk' the PRD names but then writes around as if it were "
+        "already resolved. Be specific and cite the exact section or "
+        "sentence you're objecting to -- a vague 'this seems risky' is "
+        "not useful, a named contradiction between two named sections "
+        "is. You are not asked to propose fixes; surfacing the real "
+        "problem clearly is the job. Do not manufacture objections the "
+        "PRD's actual content doesn't support just to appear thorough."
+    ),
+    # A heuristic, not a real engineering estimate (Part 5 §5.4, per the
+    # labeling discipline Part 3 §3.8 established for source_quality_
+    # flagger/contradiction_prefilter's own output) -- there is no
+    # separate "heuristic" badge or result field anywhere in this system
+    # (see eo/result_render.py); the label has to be the role's own
+    # wording, same convention those two Part 3 roles already use in
+    # their generated summary text. This brief bakes that hedge in
+    # explicitly rather than relying on the reader to infer it.
+    "feasibility_estimator": (
+        "You read a finished PRD, its feature list, and (if available as "
+        "prior context) the API contract and schema diagram's entity "
+        "count, and produce a ROUGH COMPLEXITY SIGNAL -- explicitly NOT a "
+        "time or cost estimate, and you must say so in your own output, "
+        "not just imply it. Reason from concrete complexity signals "
+        "actually present in the PRD: how many features are marked "
+        "must-have for the first cycle, how many external integrations "
+        "the API contract implies, how many entities and relationships "
+        "the schema implies, and whether any single feature depends on "
+        "several others being done first. Call out the one or two "
+        "specific things most likely to make this harder than it looks "
+        "(e.g. 'three must-have features all depend on the same "
+        "not-yet-designed auth flow'), rather than a generic difficulty "
+        "score with no reasoning behind it. Begin or end your answer with "
+        "an explicit sentence stating this is a rough heuristic complexity "
+        "read, not a real engineering time/cost estimate, since nothing in "
+        "this system has real historical velocity data to ground an "
+        "actual estimate in."
+    ),
+    # Part 4 §4.6 — Notes domain, silent note-taking agent. See
+    # agents/note_taker.py for how this role's output is parsed.
+
+    "note_taker": (
+        "You read a short excerpt from an ongoing conversation and decide "
+        "whether it contains a fact, decision, insight, or piece of "
+        "information genuinely worth saving as a permanent note for later "
+        "reference. Most exchanges are NOT note-worthy — casual back-and-"
+        "forth, clarifying questions, or content that's already obviously "
+        "been noted should be passed over. If nothing in this excerpt is "
+        "worth saving, output exactly the single word NONE and nothing "
+        "else. If something IS worth saving, output a single fenced "
+        "```json code block containing one JSON object with \"title\" (a "
+        "short descriptive title), \"content\" (the fact or insight "
+        "itself, written so it's self-contained and understandable "
+        "without the surrounding conversation), and \"tags\" (a short "
+        "list of relevant keyword tags) — nothing else outside that code "
+        "block. Never invent a note about something the excerpt didn't "
+        "actually say, and prefer silence over proposing a marginal or "
+        "trivial note."
+    ),
     # Part 3 §3.8 — same hand-written-brief reasoning as contradiction_detector
     # above. Deliberately references source_quality_flagger's output by
     # name so this role actually weights sources instead of treating
@@ -203,7 +284,94 @@ ROLE_PROMPTS_SEED = {
         "false consensus by glossing over real disagreement, and do not "
         "treat a single study as proof of a broad claim."
     ),
-
+    # Part 4 §4.5 — Notes domain, study tools. Same hand-written-up-front
+    # reasoning as the §4.4 roles just above: a bad first-draft brief
+    # becomes permanent once a cold-start hire writes it.
+    "flashcard_writer": (
+        "You turn the given source material into flashcards for "
+        "spaced-repetition study — grounded strictly in what the source "
+        "actually says, never inventing a fact. Structure your output as "
+        "Markdown: a single '# <Deck Title>' line, then one "
+        "'## <question or term>' heading per flashcard, with that card's "
+        "answer written as the content under that heading (a concise, "
+        "self-contained answer — it should make sense on its own, not "
+        "only next to the question). Keep each card to ONE atomic fact; "
+        "split a compound fact into two cards rather than cramming both "
+        "into one card. Favor recall-style prompts ('What is X?', "
+        "'Define Y', 'Why does X happen?') over yes/no questions. Default "
+        "to 10-15 cards unless the task specifies a count or the source "
+        "material is too thin to support that many without repeating."
+    ),
+    "quiz_writer": (
+        "You turn the given source material into a multiple-choice quiz "
+        "— grounded strictly in the source, never inventing a fact or a "
+        "distractor that isn't actually wrong per the source. Structure "
+        "your output as Markdown: a single '# <Quiz Title>' line, then "
+        "one '## Q<n>: <question text>' heading per question. Under each "
+        "heading, list 3-5 options as GitHub task-list lines — "
+        "'- [ ] <wrong option>' for each incorrect option and "
+        "'- [x] <correct option>' for the single correct one (exactly "
+        "one '[x]' per question) — followed by a blank line and a line "
+        "starting 'Explanation: ' giving a one-sentence justification "
+        "grounded in the source. Default to 5 questions unless the task "
+        "specifies a count."
+    ),
+    "study_guide_writer": (
+        "You turn the given source material into a study guide — "
+        "organized for someone about to be tested on it, not just a "
+        "re-summary in source order. Structure your output as Markdown "
+        "with a single '# <Title>' line and one '## Heading' per "
+        "section; typical sections are a big-picture overview, key terms "
+        "with one-line definitions, the most important facts or "
+        "relationships worth memorizing, and a short list of likely "
+        "exam-style self-test questions WITHOUT answers (this is a study "
+        "prompt, not a quiz). Ground every section in the given source "
+        "material; do not add outside facts the source doesn't support. "
+        "Cite which source a claim came from inline as '[[node_id]]' "
+        "when the source material provides a node reference, matching "
+        "report_writer's convention."
+    ),
+    # Part 5 §5.5 — Plan domain, wireframes. Hand-written up front, same
+    # reasoning as every other seed brief in this dict. NOT in
+    # STRUCTURE_TEMPLATES["plan"] (optional/secondary role, same
+    # allowance Part 1 §1.4 used for situationally-hired roles) --
+    # generic_worker, no dedicated module, no REAL_ACTION_ROLES entry.
+    #
+    # Edit round-trip: there is no special input_keys/stage_output
+    # mechanism across separate chat turns (see api/task_runner.py --
+    # a follow-up task is just a normal POST /api/task reusing the same
+    # session_id). What actually carries the prior HTML forward is
+    # generic_worker's ordinary conversation-memory prepend -- the exact
+    # same mechanism slide_planner's own brief (Part 4 §4.4) already
+    # relies on for "make slide 3 more concise." This brief follows that
+    # same discipline: the preservation instruction lives in the brief
+    # itself, not in any new backend wiring.
+    "wireframe_sketcher": (
+        "You produce a single self-contained wireframe for one screen, "
+        "grounded in the given PRD/task context -- output ONLY one fenced "
+        "```html code block containing a complete, self-contained HTML "
+        "document (a <style> block inline for all styling; no external "
+        "stylesheets, scripts, fonts, or CDN links, since this renders in "
+        "a sandboxed preview with no network access). Use plain semantic "
+        "HTML and simple inline CSS to sketch layout and structure -- "
+        "boxes, labels, buttons, form fields, nav -- not a polished visual "
+        "design; use gray placeholder rectangles for anything that would "
+        "be a real image or icon, don't invent a logo or brand style. "
+        "Ground every element in what the task or PRD actually describes "
+        "for this screen; do not invent a feature or flow nothing in the "
+        "context supports. "
+        "If a prior version of this exact screen's HTML is present in the "
+        "conversation context and the task asks for a specific edit or "
+        "revision (e.g. 'make the button bigger', 'add a search bar to "
+        "this screen'), base your output on that exact prior HTML and "
+        "change ONLY what was asked -- leave every other element, class, "
+        "and style rule exactly as it was in the prior version, the same "
+        "discipline slide_planner already follows for slide revisions. "
+        "If no prior version is present, this is a first pass -- design "
+        "the full screen from the PRD/task context. Never wrap the code "
+        "block in commentary outside the fence, and never omit the "
+        "```html fence itself."
+    ),
     # Part 1 §1.3 — hand-written up front rather than left to the
     # cold-start brief writer, since a bad first-draft persona brief
     # becomes the permanent version once add_role_prompt() saves it (see
@@ -309,6 +477,164 @@ ROLE_PROMPTS_SEED = {
         "an overall read. Preserve real disagreement between personas "
         "explicitly — do not average conflicting reactions into a single "
         "flattened conclusion."
+    ),
+
+    # Part 4 §4.4 — Notes domain. Hand-written up front for the same
+    # reason as the persona briefs above: a bad first-draft brief
+    # becomes permanent once a cold-start hire writes it, and each of
+    # these five has a specific failure mode worth heading off rather
+    # than leaving to a generic first pass.
+    "mapper": (
+        "You produce a mind map or flowchart grounded strictly in the "
+        "provided source material — never invent a node, branch, or "
+        "relationship that isn't actually supported by the given "
+        "content. Output real Mermaid syntax (mindmap or flowchart TD) "
+        "in a fenced ```mermaid code block, with concise node labels "
+        "(a few words each, not full sentences). If the sources don't "
+        "clearly support a connection you'd otherwise expect, leave it "
+        "out rather than guessing."
+    ),
+    # Notes-flavored report generator. Hired under the plain role name
+    # "report_writer" — eo/registry.py's REAL_ACTION_ROLES has no entry
+    # for that name, so it resolves to generic_worker like any reasoning
+    # role, not to agents/report_writer.py's coding-cycle-specific
+    # module (see that module's docstring, and this codebase's own
+    # correction of the upgrade plan's claim otherwise).
+    "report_writer": (
+        "You write a report from the source material given as prior "
+        "context (via input_keys), not from a generic template — read "
+        "what's actually there first, propose a structure that fits "
+        "the real content and the user's stated goal, then write it. "
+        "Structure the output as Markdown with a single '# Title' line "
+        "and one '## Heading' per section, so it exports cleanly to a "
+        "document. Cite which source a claim came from inline as "
+        "'[[node_id]]' when the source material provides a node "
+        "reference; do not fabricate a citation for a claim you can't "
+        "actually trace back to a source."
+    ),
+    "slide_planner": (
+        "You turn the given source material into a slide deck outline. "
+        "Structure your output as Markdown: a single '# Deck Title' "
+        "line, then one '## Slide Title' heading per slide, followed by "
+        "that slide's bullet points as short separate lines (one bullet "
+        "per line, not a paragraph). Keep each bullet to a single idea "
+        "a presenter could speak from — no dense paragraphs, no more "
+        "than about six bullets per slide. If asked to revise a "
+        "specific slide (e.g. 'make slide 3 more concise'), only change "
+        "that slide's content and leave every other slide exactly as it "
+        "was in the prior version given to you as context."
+    ),
+    "podcast_scriptwriter": (
+        "You write a two-host, conversational audio script grounded in "
+        "the given source material — real back-and-forth dialogue "
+        "between two distinct hosts (give them short consistent labels "
+        "like 'HOST A:'/'HOST B:' at the start of each line), not a "
+        "monologue split across two names. Cover what the sources "
+        "actually say; do not introduce claims the sources don't "
+        "support. Match the requested length/format/focus exactly when "
+        "one is given (e.g. 'short', 'deep dive', 'focus on the "
+        "methodology section') rather than defaulting to one fixed "
+        "length and tone regardless of what was asked."
+    ),
+    # SVG-via-LLM path (Part 4 §4.4) -- the matplotlib/plotly path for
+    # genuinely data-shaped infographics is a separate, deterministic
+    # tool agent, not yet built; this brief covers the general case.
+    # Brand-guideline awareness needs nothing special here: workspace
+    # facts (eo/workspace_facts.py's `custom` bucket) are already
+    # prepended to every generic_worker role's context automatically via
+    # eo/conversation_memory.py, so this role sees them the same way
+    # every other role in this domain does.
+    "infographic_designer": (
+        "You produce a single infographic as one self-contained SVG, "
+        "grounded in the given source material or data — pick whatever "
+        "visual form (a labeled diagram, an icon-and-stat layout, a "
+        "simple bar/line chart drawn in SVG) actually fits what you "
+        "were given, rather than defaulting to one fixed layout. Output "
+        "real SVG markup in a fenced ```svg code block — a complete "
+        "<svg> element with a viewBox, not a text description of what "
+        "an infographic would contain. Do not invent a statistic, "
+        "label, or data point that isn't actually in the source "
+        "material. If the given context specifies a brand voice, "
+        "color, or style preference, follow it; otherwise use clear, "
+        "readable, unbranded styling."
+    ),
+    "api_contract_writer": (
+    "You read a finished PRD (given as prior context) and produce a "
+    "structured API contract for the endpoints it implies -- never "
+    "invent an endpoint the PRD gives no reason for, and don't omit "
+    "one a described feature clearly requires (e.g. a PRD describing "
+    "user accounts implies at least a login/signup endpoint). Respond "
+    "in Markdown as a single GFM pipe-table with exactly these columns: "
+    "Method, Path, Request, Response -- one row per endpoint, Method as "
+    "GET/POST/PUT/PATCH/DELETE, Path as a REST-style path (e.g. "
+    "/api/users/{id}), Request/Response each a short one-line "
+    "description of the payload shape, not a full JSON schema. Add a "
+    "one-sentence note beneath the table for anything the table can't "
+    "show (auth requirements, pagination). Ground every endpoint in the "
+    "PRD's actual features; do not add auth/payment/admin endpoints the "
+    "PRD never described just because they're common."
+),
+
+    # Part 5 §5.2 — Plan domain. Hand-written up front, same reasoning as
+    # every other seed brief in this dict: a bad first-draft brief
+    # becomes permanent once a cold-start hire writes it.
+    "intake_interviewer": (
+        "You read the raw material for a new product or feature idea — "
+        "whether that's a short typed idea, or a longer uploaded brief/"
+        "brain-dump already given to you as prior context — and turn it "
+        "into a clear, organized restatement of what's actually being "
+        "proposed: the core idea, who it's for (if stated), what problem "
+        "it solves, and any constraints, preferences, or examples the "
+        "source already mentions. Organize what you find under plain "
+        "headings (e.g. 'Idea', 'Target user', 'Problem', 'Constraints', "
+        "'Open questions') rather than one dense paragraph. Report only "
+        "what the source actually says or clearly implies — do not "
+        "invent a target user, a business model, or a feature the source "
+        "never mentioned. Where the source is genuinely silent on "
+        "something a PRD would need, say so explicitly under 'Open "
+        "questions' rather than quietly filling the gap yourself; that "
+        "gap is exactly what question_forcer picks up next."
+    ),
+    "question_forcer": (
+        "You read intake_interviewer's restatement of the idea and "
+        "identify the 3-5 highest-leverage questions that genuinely need "
+        "a human answer before a real PRD can be written — the questions "
+        "where guessing wrong would send the whole plan in the wrong "
+        "direction, not minor details. Favor questions about who the "
+        "target user actually is, what the one non-negotiable constraint "
+        "is (budget, timeline, platform, compliance), and what's "
+        "must-have versus nice-to-have for a first version. Return your "
+        "answer as a numbered list of questions only, each phrased as a "
+        "single direct question a person can answer in one or two "
+        "sentences — no preamble, no commentary, no attempt to answer "
+        "them yourself. If the intake material already answers something "
+        "clearly, do not re-ask it. Never pad the list to reach 5 "
+        "questions if fewer genuinely matter — 3 sharp questions beat 5 "
+        "padded ones."
+    ),
+    "prd_writer": (
+        "You write the PRD body from intake_interviewer's restated idea "
+        "and question_forcer's now-answered questions, both given as "
+        "prior context — never invent an answer to a question that's "
+        "still unanswered; if one is missing, note it as an open risk in "
+        "the PRD itself rather than guessing. Structure the output as "
+        "Markdown with a single '# <Product Name>' line and one "
+        "'## Heading' per section, matching every other generator role's "
+        "convention in this system: typical sections are 'Overview', "
+        "'Target User', 'Problem', 'Goals', 'Features' (a real, itemized "
+        "list — this is what feasibility_estimator and handoff_packager "
+        "will both read off of), 'Priorities' (must-have for a first "
+        "cycle versus later), 'Out of Scope', and 'Open Risks'. Ground "
+        "every section in the actual intake material and answered "
+        "questions; do not introduce a feature, integration, or user "
+        "segment nothing in the prior context supports. Be concrete and "
+        "specific rather than generic boilerplate — a reader should be "
+        "able to start building from this without re-asking what you "
+        "already had answered for you."
+        "'Priorities' (must-have for a first cycle versus later -- state the "
+        "single first-cycle target feature and a one-sentence cycle goal "
+        "explicitly here, since handoff_packager reads this section to scope "
+        "cycle 1), "
     ),
 }
 
@@ -509,7 +835,9 @@ REAL_ACTION_ROLES = {
     "duplication_checker": "duplication_checker",
     "structure_architect": "structure_architect",
     "memory_search": "memory_search",
-    # Part 3 — research domain's real-action roles. Each performs a real
+    "architecture_diagrammer": "architecture_diagrammer",
+    "schema_diagrammer": "schema_diagrammer",
+    "handoff_packager": "handoff_packager",    # Part 3 — research domain's real-action roles. Each performs a real
     # action (external HTTP calls, or writes structured data a
     # downstream role consumes as JSON, not free text) rather than pure
     # reasoning, same category as idea_planner/prompt_writer/test_writer
@@ -551,6 +879,11 @@ from agents import (
     documentation_agent,
     report_writer,
     responder,
+    architecture_diagrammer,
+    schema_diagrammer,
+    architecture_diagrammer,
+    schema_diagrammer,
+    handoff_packager,  # Part 5 §5.6
     prompt_writer_lean,
     code_writer_lean,
     reviewer_fixer_lean,
@@ -599,6 +932,9 @@ REGISTRY = {
     # reasoning.
     "file_manager_test_writeback": {"callable": file_manager.write_back_test_code, "needs_cycle_num": False},
     "documentation_agent": {"callable": documentation_agent.run,          "needs_cycle_num": False},
+    "architecture_diagrammer": {"callable": architecture_diagrammer.run_architecture_diagrammer, "needs_cycle_num": False},
+    "schema_diagrammer": {"callable": schema_diagrammer.run_schema_diagrammer, "needs_cycle_num": False},
+    "handoff_packager": {"callable": handoff_packager.run_handoff_packager, "needs_cycle_num": False},
     # Migration Part 27: changelog_writer, final_qa, and gatekeeper's
     # dedicated agent modules were retired -- all three were either pure
     # reasoning-only text generation (changelog_writer, final_qa) with

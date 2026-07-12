@@ -66,6 +66,22 @@ def append_turn(session_id: str, role: str, text: str) -> None:
     if len(turns) > MAX_STORED_TURNS:
         turns = turns[-MAX_STORED_TURNS:]
     write(_key(session_id), turns)
+    # NEW — Part 4 §4.6: fire the silent note-taking agent once a
+    # complete exchange exists (right after the assistant's half lands,
+    # not the user's half alone -- a note about "what was discussed"
+    # needs both sides). Deferred import: agents.note_taker imports
+    # agents.generic_worker, which itself imports THIS module for its
+    # Part 23 context prepend -- importing note_taker at this module's
+    # top level would close that cycle. Fire-and-forget (background
+    # thread, not awaited) so this never adds latency to whatever's
+    # waiting on append_turn() to return.
+    if role == "assistant":
+        try:
+            from agents.note_taker import note_from_latest_turn_async
+            user_text = next((t["text"] for t in reversed(turns[:-1]) if t["role"] == "user"), "")
+            note_from_latest_turn_async(session_id, user_text, text)
+        except Exception as exc:
+            print(f"  [Conversation Memory] note-taker dispatch skipped: {exc}")
 
 
 def get_full_context(session_id: str, max_turns: int = FULL_CONTEXT_TURNS) -> str:

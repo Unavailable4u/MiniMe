@@ -109,7 +109,8 @@ def _run_tier1(task_text: str, decision: dict, run_tests: bool, session_id: str)
 def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: list,
                       project_unique_name: str = None, mode: str = "auto",
                       approval_roles: set = None,
-                      no_conversation_context_roles: set = None) -> dict:
+                      no_conversation_context_roles: set = None,
+                      app_slug: str = None) -> dict:
     """
     Routes through eo/loop_controller.py's run_with_looping() rather than
     calling execute_graph() directly, so the adaptive-looping machinery
@@ -148,7 +149,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # didn't pass one), so this is safe unconditionally. Folding in a
     # slug of the task text keeps the eventual apps/<slug>/ disk folder
     # human-readable instead of a bare opaque UUID.
-    set_app_slug(f"{slugify(task_text)}_{session_id[:8]}")
+    set_app_slug(app_slug or f"{slugify(task_text)}_{session_id[:8]}")
 
     looped = run_with_looping(
         hires, decision.get("execution_order"), task_text, session_id=session_id,
@@ -587,7 +588,8 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
             return _run_tier3_hires(task_text, decision, session_id, hires=hires,
                                      project_unique_name=project_unique_name, mode=mode,
                                      approval_roles=approval_roles,
-                                     no_conversation_context_roles=no_conversation_context_roles)
+                                     no_conversation_context_roles=no_conversation_context_roles,
+                                     app_slug=app_slug)
         return {
             "decision": decision, "tier": 3, "session_id": session_id,
             "status": "not_wired_yet", "result": None,

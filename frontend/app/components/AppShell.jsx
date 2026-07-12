@@ -7,9 +7,13 @@ import TokenUsageTab from "./tabs/TokenUsageTab";
 import SettingsTab from "./tabs/SettingsTab";
 import RoleLibraryTab from "./tabs/RoleLibraryTab";
 import WorkflowTemplatesTab from "./tabs/WorkflowTemplatesTab";
+import NotebooksTab from "./tabs/NotebooksTab";   // NEW — §4.7: dedicated Notebooks section
+import ResearchTab from "./tabs/ResearchTab";     // NEW — Part 3 §3.9: dedicated Research section
 
 const TABS = [
   { id: "chat", label: "Chat", render: ChatTab },
+  { id: "notebooks", label: "Notebooks", render: NotebooksTab },   // NEW — §4.7
+  { id: "research", label: "Research", render: ResearchTab },     // NEW — Part 3 §3.9
   { id: "roles", label: "Role Library", render: RoleLibraryTab },
   { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
@@ -86,7 +90,14 @@ function AppShellBody() {
         </nav>
       </header>
       <div className="flex flex-1 min-h-0">
-        {activeTab === "chat" && <ChatSidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />}
+        {activeTab === "chat" && (
+          <ChatSidebar
+            collapsed={sidebarCollapsed}
+            onToggle={toggleSidebar}
+            onOpenNotebooks={() => setActiveTab("notebooks")}
+            onOpenResearch={() => setActiveTab("research")}
+          />
+        )}
         <div className="flex-1 min-h-0">
           {/* onOpenChat: only WorkflowTemplatesTab reads this prop today;
               onStartTemplate: only RoleLibraryTab reads this;
