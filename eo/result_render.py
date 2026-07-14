@@ -18,6 +18,11 @@ Every REAL_ACTION_ROLES module has its own return shape:
     {module_name: {"language", "code"}}
   - responder.py / prompt_writer_lean-backed tiers: plain str, or
     {"code": ...} / {"answer": ...}
+  - agents/content_adapter_pool.py (Part 6 §6.2, "content_adapter_pool"
+    role): a flat {platform: content_string} dict.
+  - agents/content_calendar_builder's generic_worker output, parsed into
+    the structured Part 6 §6.4 shape: a list of
+    {"date", "platform", "content_ref"} dicts.
 
 Rather than teach every call site (eo/executor.py's _summarize(),
 api/task_runner.py's answer extraction, and — mirrored in JS —
@@ -25,6 +30,15 @@ frontend/app/components/MessageBubble.jsx's answerTextOf()) each of
 these shapes separately (and inevitably drifting), this is the one
 place that knows all of them. Keep the JS mirror in sync if a new shape
 is added here.
+
+`role` (Part 6): threaded through from every call site below so the
+content_adapter_pool branch can be gated on WHICH role produced a flat
+{key: string} dict, not shape alone — a platform->content map and a
+code_writers-style {module: code} map are structurally identical, so
+shape alone can't tell them apart. Defaults to None (today's exact
+behavior for every caller that doesn't pass one): a flat string-map
+falls back to being read as code modules, same as before this role
+param existed.
 """
 import json
 
@@ -56,6 +70,74 @@ def _looks_like_module_map(result: dict) -> bool:
     )
 
 
+def _looks_like_platform_content_map(result: dict, role: str = None) -> bool:
+    """Part 6 §6.2 — agents/content_adapter_pool.py's flat
+    {platform: content} shape. Gated on role, not shape alone: without
+    checking which role actually produced it, this is indistinguishable
+    from _looks_like_module_map()'s {module: code} shape above, and a
+    set of platform variants would get mistakenly rendered as source
+    code."""
+    if role != "content_adapter_pool":
+        return False
+    if not result:
+        return False
+    return all(isinstance(v, str) for v in result.values())
+
+
+def _render_platform_content_map(result: dict) -> str:
+    """Text fallback for a platform->content map. The live agent-step
+    panel and the finished-message trace disclosure both render this as
+    an actual card grid client-side (frontend/app/components/
+    MessageBubble.jsx's PlatformVariantCards) rather than through this
+    function's markdown string — this exists so any OTHER caller of
+    render_agent_result() (a plain-text export, a log line, ...) still
+    gets something readable instead of a raw dict repr."""
+    parts = []
+    for platform, content in result.items():
+        label = platform.replace("_", " ")
+        parts.append(f"**{label}**\n\n{content}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _looks_like_calendar_entries(result) -> bool:
+    """Part 6 §6.4 — content_calendar_builder's structured
+    {date, platform, content_ref} row list. Checked before
+    _looks_like_module_map() below: a list isn't a dict (module maps are
+    always dicts), so this never actually collides with it, but the
+    explicit check keeps that from being an incidental fact this module
+    quietly depends on."""
+    return (
+        isinstance(result, list)
+        and len(result) > 0
+        and all(
+            isinstance(row, dict)
+            and ("date" in row or "platform" in row or "content_ref" in row)
+            for row in result
+        )
+    )
+
+
+def _render_content_calendar(entries: list) -> str:
+    """Same date/platform/content markdown table shape
+    agents/exporter.py's _write_calendar_md() writer produces, so the
+    in-chat preview and the downloadable .md export always show
+    identical column order/labels."""
+    if not entries:
+        return "_(no calendar entries)_"
+
+    def esc(v) -> str:
+        s = str(v if v is not None else "").strip()
+        return s.replace("|", "\\|") if s else "—"
+
+    lines = ["| Date | Platform | Content |", "|------|----------|---------|"]
+    for row in entries:
+        lines.append(
+            f"| {esc(row.get('date'))} | {esc(row.get('platform'))} | "
+            f"{esc(row.get('content_ref'))} |"
+        )
+    return "\n".join(lines)
+
+
 def _render_extraction_table(result: dict) -> str:
     """agents/extraction_table_builder.py's shape (Part 3 §3.5): one row
     per paper, columns are Title/Year plus whatever's in field_names.
@@ -80,12 +162,21 @@ def _render_extraction_table(result: dict) -> str:
     return "\n".join(lines)
 
 
-def render_agent_result(result, limit: int = 9000) -> str:
+def render_agent_result(result, role: str = None, limit: int = 9000) -> str:
     """Best-effort human-readable markdown for ANY agent result shape in
     this codebase. Replaces the old str(result)-on-anything-unrecognized
-    fallback that printed raw Python dict reprs."""
+    fallback that printed raw Python dict reprs.
+
+    role: which role produced `result` (Part 6) — optional, defaults to
+    None. Only currently consulted by the content_adapter_pool branch
+    below; every other shape check is still purely structural and
+    unaffected by whether a caller passes this."""
     if isinstance(result, str):
         text = result
+    elif _looks_like_calendar_entries(result):
+        # Part 6 §6.4 — checked ahead of the dict-only branches below
+        # since this shape is a list, not a dict.
+        text = _render_content_calendar(result)
     elif isinstance(result, dict):
         if result.get("text"):
             text = result["text"]
@@ -122,6 +213,11 @@ def render_agent_result(result, limit: int = 9000) -> str:
             # shape, which has no field_names and reads better as its own
             # summary line below.
             text = _render_extraction_table(result)
+        elif _looks_like_platform_content_map(result, role):
+            # Part 6 §6.2 — checked ahead of _looks_like_module_map()
+            # below, which would otherwise also match this exact shape
+            # (a flat map of string values) and misrender it as code.
+            text = _render_platform_content_map(result)
         elif _looks_like_module_map(result):
             # agents/code_writers.py ("implementer") / agents/test_writer.py
             # ("test_writer") flat {module: code} shape, including the

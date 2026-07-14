@@ -124,7 +124,7 @@ def _ensure_staffable(decision: dict) -> dict:
 
 
 def _get_decision(task_text: str, tier_override: int, directed_override: str,
-                   session_id: str = None) -> dict:
+                   session_id: str = None, owner_id: str = None) -> dict:
     """
     ...docstring unchanged...
 
@@ -134,9 +134,14 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
     merged alongside routing_memory's similar-past-tasks context into the
     same `context` slot classify() already treats as pure evidence, never
     an instruction -- see eo/inspector.py's classify() docstring.
+
+    owner_id: NEW — threaded through to conversation_memory.get_light_context()
+    so its cross-chat linked-context lookup (chat_store.py) can enforce
+    ownership. Optional because non-HTTP callers (the CLI path further
+    down this file) have no authenticated owner_id to give it.
     """
     context = routing_memory.retrieve_similar_outcomes(task_text)
-    conv_context = conversation_memory.get_light_context(session_id)   # NEW — Part 23
+    conv_context = conversation_memory.get_light_context(session_id, owner_id)   # FIXED — Part 23, now passes owner_id
     combined_context = "\n\n".join(c for c in [context, conv_context] if c) or None   # NEW — Part 23
     try:
         draft = classify(task_text, context=combined_context, session_id=session_id)   # CHANGED — Part 26, was missing session_id entirely, so classify()'s own agent_start/routing_decision/agent_done events were silent no-ops
@@ -145,6 +150,7 @@ def _get_decision(task_text: str, tier_override: int, directed_override: str,
         print(f"  [Inspector] classification failed ({exc.__class__.__name__}: {exc}), "
               f"defaulting to a conservative Ultimate Structure (tier 3) draft.")
         draft = dict(_CLASSIFY_FAILURE_DRAFT)
+    # ... rest of function unchanged ...
 
     should_escalate = draft["confidence"] < CONFIDENCE_THRESHOLD or draft["tier"] >= 2
     if should_escalate:

@@ -48,6 +48,19 @@ export const ROLE_CATEGORIES = [
   { key: "strategy", test: /strategist|roadmap/i, icon: "\u265F\uFE0F", color: "#c4b5fd" }, // ♟️
   { key: "project-mgmt", test: /project_manager|scrum_master|coordinator/i, icon: "\u{1F4CB}", color: "#93c5fd" }, // 📋
 
+  // ---- Coding domain — deployment / integrations (Part 7 §7.3/§7.4) ----
+  // Must sit ABOVE "coding"/"devops" just below (same matching-order
+  // rule this file's header documents): deploy_config_writer contains
+  // the substring "deploy" and would otherwise silently fall into the
+  // broad "devops" bucket (☁️, meant for roles that actually touch
+  // infrastructure) even though it never deploys anything itself --
+  // it only ever proposes a config file, same "propose, don't execute"
+  // role structure_architect.py plays (see its own docstring).
+  // integration_flagger doesn't collide with anything below, but would
+  // otherwise fall through to DEFAULT_CATEGORY with no entry here.
+  { key: "integration-flagger", test: /integration_flagger/i, icon: "\u{1F50C}", color: "#c084fc" }, // 🔌
+  { key: "deploy-config-writer", test: /deploy_config_writer/i, icon: "\u{1F9FE}", color: "#7dd3fc" }, // 🧾
+
   // ---- Software / engineering ----
   { key: "coding", test: /implementer|code.?writer|frontend|backend|full.?stack/i, icon: "\u{1F4BB}", color: "#38bdf8" }, // 💻
   { key: "fixing", test: /\bfixer\b|debugg/i, icon: "\u{1F527}", color: "#fb7185" }, // 🔧
@@ -124,6 +137,22 @@ export const ROLE_CATEGORIES = [
   { key: "photo", test: /photo|image_edit/i, icon: "\u{1F4F7}", color: "#fdba74" }, // 📷
   { key: "gaming", test: /game_design|gaming|esport/i, icon: "\u{1F3AE}", color: "#a78bfa" }, // 🎮
   { key: "social-media", test: /social_media|community_manager/i, icon: "\u{1F4F1}", color: "#7dd3fc" }, // 📱
+
+  // ---- Growth & Marketing domain (Part 6) ----
+  // Sit above the broader "marketing" pattern in the Business/finance/
+  // legal block just below (same matching-order rule this file's header
+  // documents) — every one of these role names contains "content" or
+  // otherwise wouldn't trip that pattern anyway, but keeping the whole
+  // domain grouped together, above the generic bucket it would
+  // otherwise share, matches how every other domain in this file
+  // (Simulate & Test, Notes, Research) is broken out on its own. Matched
+  // on the exact role-name strings from eo/structure.py's
+  // STRUCTURE_TEMPLATES["growth"].
+  { key: "content-adapter-pool", test: /content_adapter_pool/i, icon: "\u{1F501}", color: "#fb923c" }, // 🔁 (fan-out, mirrors the coding pool's own visual language)
+  { key: "brand-voice-checker", test: /brand_voice_checker/i, icon: "\u{1F39A}\uFE0F", color: "#f472b6" }, // 🎚️ (consistency/calibration check)
+  { key: "content-calendar-builder", test: /content_calendar_builder/i, icon: "\u{1F4C5}", color: "#4ade80" }, // 📅
+  { key: "seo-structure-auditor", test: /seo_structure_auditor/i, icon: "\u{1F9F1}", color: "#a3a3a3" }, // 🧱 (structure, not ranking — see Part 6 §6.5)
+  { key: "outreach-categorizer", test: /outreach_categorizer/i, icon: "\u{1F4E8}", color: "#60a5fa" }, // 📨
 
   // ---- Business / finance / legal ----
   { key: "finance", test: /finance|accountant|bookkeep|budget/i, icon: "\u{1F4B0}", color: "#facc15" }, // 💰

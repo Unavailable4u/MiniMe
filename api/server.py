@@ -14,9 +14,62 @@ import os
 import sys
 import traceback
 import tempfile
+import zipfile   # NEW — Part 8.7: bundling multi-chat file exports
+import json   # NEW — Part 7 §7.3: parsing integration_flagger's fenced json block
+import re     # NEW — Part 7 §7.3
+import requests  # NEW — Part 8.3: Admin API lookup for workspace-invite-by-email
+import secrets   # NEW — Part 8.5: OAuth state tokens
+import urllib.parse  # NEW — Part 8.5: building the Google consent URL
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # fine if python-dotenv isn't installed; real env vars can be set directly instead
+
+import jwt
+from jwt import PyJWKClient
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # only used as a fallback for
+                                                          # projects still on the legacy
+                                                          # shared HS256 secret — most
+                                                          # current Supabase projects sign
+                                                          # with an asymmetric key instead
+                                                          # (see require_auth() below).
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # NEW — Part 8.3: admin
+                                                          # key, used ONLY to resolve an
+                                                          # invited collaborator's email to
+                                                          # their user_id. Never sent to a
+                                                          # client, never used for auth.
+
+# NEW — Part 8.5: Google Calendar OAuth. Same "read from env, fail loud at
+# the point of use if missing" convention as the Supabase vars above.
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_OAUTH_REDIRECT_URI = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
+# e.g. "https://your-api-host/api/integrations/google_calendar/callback"
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Lazily-built JWKS client — fetches and caches Supabase's public signing
+# keys from its well-known endpoint. This is what verifies the asymmetric
+# (ES256/RS256) tokens that current Supabase projects issue by default.
+# No secret involved on this path: these are public keys, safe to fetch
+# over the network on every cold start.
+_jwk_client: PyJWKClient | None = None
+
+
+def _get_jwk_client() -> PyJWKClient:
+    global _jwk_client
+    if _jwk_client is None:
+        if not SUPABASE_URL:
+            raise HTTPException(
+                status_code=500,
+                detail="Server misconfigured: SUPABASE_URL is not set.",
+            )
+        _jwk_client = PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json")
+    return _jwk_client
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Query, UploadFile, File, Form
 from eo.project_registry import list_projects, generate_control_unit, register_project
@@ -31,10 +84,17 @@ from eo.structure import (   # NEW — Part 2 §2.7: Workflow Template builder
     save_workflow_template, list_workflow_templates, delete_workflow_template, update_workflow_template,
 )
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
+from memory.bus import read_many as bus_read_many, set_app_slug, KEYS   # NEW — Part 7 §7.2: GET /api/tasks/{session_id}
+from eo.errors import MissingDependencyError   # NEW — Part 7 §7.4: deploy endpoints' 409 handling
 from eo import chat_store
 from eo import quiz_progress
 from eo import memory_batch
 from eo import chat_workspace
+from eo import audit_log   # NEW — Part 8.6: audit log read endpoints
+from eo import integrations   # NEW — Part 8.5: third-party OAuth credential storage
+from agents import calendar_agent   # NEW — Part 8.5: Google Calendar connector
+from agents.calendar_agent import IntegrationNotConnectedError   # NEW — Part 8.5
+from fastapi.responses import RedirectResponse   # NEW — Part 8.5: OAuth callback redirect
 from eo import workspace_facts
 from eo import graph_edges
 from eo import note_candidates   # NEW — §4.7: silent note-taker's propose/accept/reject surface
@@ -43,6 +103,8 @@ from agents.backlink_detector import detect_backlinks
 from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
 from agents.note_table_builder import build_table
+from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
+from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
 from agents.web_clipper import clip_url
 from agents.video_ingestor import ingest_video
 from agents.voice_ingestor import ingest_voice
@@ -51,7 +113,7 @@ from agents.source_ingestor import write_ingested_source
 from agents.tts_synthesizer import synthesize_podcast
 from agents.video_overview_builder import build_video_overview
 from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FORMATS
-from graph.adapters import markdown_text_to_artifact
+from graph.adapters import markdown_text_to_artifact, chat_to_artifact   # chat_to_artifact NEW — Part 8.7
 from fastapi.responses import FileResponse
 
 app = FastAPI(title="MiniMe v6 — EO layer API")
@@ -64,17 +126,142 @@ NOTES_EXPORTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "exports",
 )
 
-API_AUTH_MODE = os.getenv("API_AUTH_MODE", "api_key")
-API_AUTH_SECRET = os.getenv("API_AUTH_SECRET")
+def require_auth(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = auth_header[len("Bearer "):].strip()
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    alg = header.get("alg", "")
+
+    try:
+        if alg == "HS256":
+            # Legacy shared-secret projects only.
+            if not SUPABASE_JWT_SECRET:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Server misconfigured: SUPABASE_JWT_SECRET is not set.",
+                )
+            payload = jwt.decode(
+                token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated",
+            )
+        else:
+            # Current Supabase default: asymmetric signing (ES256/RS256).
+            # get_signing_key_from_jwt looks up the right public key by the
+            # token's own `kid`, so this works whether Supabase issued
+            # ES256, RS256, or rotates keys later — nothing here is
+            # hardcoded to one algorithm except what the token itself claims.
+            signing_key = _get_jwk_client().get_signing_key_from_jwt(token)
+            payload = jwt.decode(
+                token, signing_key.key, algorithms=[alg], audience="authenticated",
+            )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token missing subject")
+
+    request.state.user_id = user_id  # kept for any code that reads it off the request directly
+    return user_id
 
 
-def require_auth(request: Request):
-    if not API_AUTH_SECRET:
-        return  # auth disabled if no secret configured — same
-                # fail-open-to-local-dev behavior the CORS default has
-    provided = request.headers.get("x-api-key")
-    if provided != API_AUTH_SECRET:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+def _lookup_user_id_by_email(email: str) -> str | None:
+    """Admin-API lookup, used only by the workspace-invite endpoint to
+    turn 'alice@example.com' into a user_id. Paginates and matches
+    exactly rather than trusting the API's own email filter — it did
+    not reliably filter server-side during testing (see scripts/
+    get_test_jwt.py's find_user_by_email, which hit the same issue and
+    was fixed the same way)."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured: SUPABASE_SERVICE_ROLE_KEY is not set.",
+        )
+    page = 1
+    per_page = 200
+    while True:
+        resp = requests.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+            params={"page": page, "per_page": per_page},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        users = resp.json().get("users", [])
+        if not users:
+            return None
+        for u in users:
+            if (u.get("email") or "").lower() == email.lower():
+                return u["id"]
+        if len(users) < per_page:
+            return None
+        page += 1
+
+
+def _lookup_users_by_ids(user_ids: set[str]) -> dict:
+    """Admin-API lookup, the reverse of _lookup_user_id_by_email — turns a
+    set of user_ids into {id: {email, name, avatar_url}} so member rosters
+    can show a real identity instead of a raw UUID. Same single-pass,
+    early-exit-once-all-found pagination as the email lookup above; a
+    workspace roster is small (partners/moderators/etc., not a whole
+    user base), so this stays cheap even without caching.
+
+    'name' falls back through user_metadata's common shapes (Supabase
+    email/password signup doesn't set any of these — only OAuth
+    providers or an app-side profile step would — so the final fallback
+    is the local part of the email, then the raw id if even email is
+    somehow missing).
+    """
+    if not user_ids:
+        return {}
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured: SUPABASE_SERVICE_ROLE_KEY is not set.",
+        )
+    remaining = set(user_ids)
+    found = {}
+    page = 1
+    per_page = 200
+    while remaining:
+        resp = requests.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+            params={"page": page, "per_page": per_page},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        users = resp.json().get("users", [])
+        if not users:
+            break
+        for u in users:
+            if u["id"] in remaining:
+                meta = u.get("user_metadata") or {}
+                email = u.get("email")
+                found[u["id"]] = {
+                    "email": email,
+                    "name": meta.get("full_name") or meta.get("name")
+                            or (email.split("@")[0] if email else u["id"]),
+                    "avatar_url": meta.get("avatar_url") or meta.get("picture"),
+                }
+                remaining.discard(u["id"])
+        if len(users) < per_page:
+            break
+        page += 1
+    return found
 
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
@@ -131,6 +318,39 @@ class RenameWorkspaceRequest(BaseModel):
 class WorkspaceChatRequest(BaseModel):
     chat_id: str
     delete_chat: Optional[bool] = False
+
+
+class CreateWorkspaceChatRequest(BaseModel):
+    title: Optional[str] = "New Chat"
+
+
+class AddWorkspaceMemberRequest(BaseModel):
+    email: str
+    role: str = "viewer"  # 'viewer' or 'editor'
+
+
+class UpdateWorkspaceMemberRequest(BaseModel):
+    role: str  # 'viewer', 'editor', 'moderator', or 'partner'
+
+
+class LeaveWorkspaceRequest(BaseModel):
+    successor_id: Optional[str] = None  # owner-only; must be a current partner
+
+
+class CastVoteRequest(BaseModel):
+    vote_target: Optional[str] = None  # another partner's user_id, or None = "stay joint"
+
+
+class SetAttributionRequest(BaseModel):
+    show: bool
+
+
+class AttributionGrantRequest(BaseModel):
+    can_toggle: bool
+
+
+class ImportWorkspaceDataRequest(BaseModel):
+    manifest: dict   # the exact object returned by GET /api/workspaces/{ws_id}/export
 
 
 class AppendMessageRequest(BaseModel):
@@ -209,107 +429,163 @@ def register_project_endpoint(req: RegisterProjectRequest):
 # the sidebar creates a chat_id via POST /api/chats, and that value is
 # passed straight through as session_id on /api/task.
 
-@app.get("/api/chats", dependencies=[Depends(require_auth)])
-def get_chats():
-    return chat_store.list_chats()
+def _resolve_chat_or_404(chat_id: str, user_id: str, require_edit: bool = False) -> str:
+    """Confirms user_id has access to chat_id — as its owner, or as a
+    workspace collaborator — and returns the chat's REAL owner_id, which
+    every chat_store function below must be called with (never the
+    requester's own id, unless they happen to be the same person).
+    Raises 404 for no access at all (never distinguishes 'doesn't
+    exist' from 'exists but isn't shared with you'), and 403 if the
+    requester has viewer-only access but the route needs edit rights."""
+    resolved = chat_store.resolve_chat_access(chat_id, user_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+    real_owner_id, role = resolved
+    if require_edit and role == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer access does not permit this action")
+    return real_owner_id
 
 
-@app.post("/api/chats", dependencies=[Depends(require_auth)])
-def create_chat(req: CreateChatRequest):
-    return chat_store.create_chat(title=req.title or "New Chat", template_id=req.template_id)
+@app.get("/api/chats")
+def get_chats(owner_id: str = Depends(require_auth)):
+    return chat_store.list_chats(owner_id)
 
 
-@app.get("/api/chats/{chat_id}", dependencies=[Depends(require_auth)])
-def get_chat(chat_id: str):
+@app.post("/api/chats")
+def create_chat(req: CreateChatRequest, owner_id: str = Depends(require_auth)):
+    return chat_store.create_chat(owner_id, title=req.title or "New Chat", template_id=req.template_id)
+
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str, owner_id: str = Depends(require_auth)):
+    real_owner_id = _resolve_chat_or_404(chat_id, owner_id)
     try:
-        return chat_store.get_chat(chat_id)
+        chat = chat_store.get_chat(chat_id, real_owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+    # Part 8.4: strip author_id from each message if this requester's
+    # role/workspace setting says they shouldn't see who-wrote-what.
+    # `owner_id` here is the ACTUAL caller (pre-resolution) — the right
+    # identity to check attribution visibility against, not real_owner_id.
+    ws_id = chat.get("workspace_id")
+    if ws_id and not chat_workspace.can_see_attribution(ws_id, owner_id):
+        chat["messages"] = [
+            {k: v for k, v in m.items() if k != "author_id"} for m in chat.get("messages", [])
+        ]
+    return chat
+
+
+@app.patch("/api/chats/{chat_id}/rename")
+def rename_chat(chat_id: str, req: RenameChatRequest, owner_id: str = Depends(require_auth)):
+    real_owner_id = _resolve_chat_or_404(chat_id, owner_id, require_edit=True)
+    try:
+        return chat_store.rename_chat(chat_id, real_owner_id, req.title)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown chat_id")
 
 
-@app.patch("/api/chats/{chat_id}/rename", dependencies=[Depends(require_auth)])
-def rename_chat(chat_id: str, req: RenameChatRequest):
+@app.patch("/api/chats/{chat_id}/links")
+def link_chats(chat_id: str, req: LinkChatsRequest, owner_id: str = Depends(require_auth)):
+    real_owner_id = _resolve_chat_or_404(chat_id, owner_id, require_edit=True)
     try:
-        return chat_store.rename_chat(chat_id, req.title)
+        return chat_store.set_linked_chats(chat_id, real_owner_id, req.linked_chat_ids)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown chat_id")
 
 
-@app.patch("/api/chats/{chat_id}/links", dependencies=[Depends(require_auth)])
-def link_chats(chat_id: str, req: LinkChatsRequest):
-    try:
-        return chat_store.set_linked_chats(chat_id, req.linked_chat_ids)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Unknown chat_id")
+@app.post("/api/chats/{chat_id}/messages")
+def append_message(chat_id: str, req: AppendMessageRequest, owner_id: str = Depends(require_auth)):
+    # append_message historically auto-creates the chat row on first
+    # use (a brand-new chat_id with no row yet) — that path stays
+    # owner_id-scoped to the caller, since it's genuinely their new
+    # chat. Only route through the collaborator resolver when the
+    # chat_id already belongs to someone else.
+    if chat_store.chat_exists(chat_id, owner_id):
+        real_owner_id = owner_id
+    else:
+        resolved = chat_store.resolve_chat_access(chat_id, owner_id)
+        if resolved is None:
+            real_owner_id = owner_id  # genuinely new chat_id — caller becomes its owner
+        else:
+            real_owner_id, role = resolved
+            if role == "viewer":
+                raise HTTPException(status_code=403, detail="Viewer access does not permit this action")
+
+    # Part 8.4: stamp the ACTUAL acting user (owner_id, pre-resolution) as
+    # author_id — never real_owner_id, which is the chat's owner and may be
+    # a different person than whoever is actually typing this message.
+    message = dict(req.message)
+    message["author_id"] = owner_id
+    return chat_store.append_message(chat_id, real_owner_id, message)
 
 
-@app.post("/api/chats/{chat_id}/messages", dependencies=[Depends(require_auth)])
-def append_message(chat_id: str, req: AppendMessageRequest):
-    return chat_store.append_message(chat_id, req.message)
-
-
-@app.delete("/api/chats/{chat_id}", dependencies=[Depends(require_auth)])
-def delete_chat(chat_id: str):
-    chat_store.delete_chat(chat_id)
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str, owner_id: str = Depends(require_auth)):
+    # Deliberately NOT routed through the collaborator resolver — outright
+    # deletion stays owner-only, same discipline as workspace deletion. An
+    # editor can remove a chat from the workspace grouping (see
+    # chat_workspace.remove_chat) but cannot delete someone else's chat.
+    chat_store.delete_chat(chat_id, owner_id)
     return {"status": "deleted", "id": chat_id}
 
 
 # --- memory batches: mutual-membership groups (see eo/memory_batch.py) ---
 
-@app.get("/api/batches", dependencies=[Depends(require_auth)])
-def get_batches():
-    return memory_batch.list_batches()
+@app.get("/api/batches")
+def get_batches(owner_id: str = Depends(require_auth)):
+    return memory_batch.list_batches(owner_id)
 
 
-@app.post("/api/batches/estimate", dependencies=[Depends(require_auth)])
-def estimate_batch(req: EstimateBatchRequest):
+@app.post("/api/batches/estimate")
+def estimate_batch(req: EstimateBatchRequest, owner_id: str = Depends(require_auth)):
     """Called live from the create-batch modal as the user checks/unchecks
     chats — NOT tied to an existing batch_id, since the whole point is to
     show the cost BEFORE creating one. See chat_store.estimate_batch_context_tokens."""
-    return chat_store.estimate_batch_context_tokens(req.chat_ids)
+    return chat_store.estimate_batch_context_tokens(owner_id, req.chat_ids)
 
 
-@app.post("/api/batches", dependencies=[Depends(require_auth)])
-def create_batch(req: CreateBatchRequest):
+@app.post("/api/batches")
+def create_batch(req: CreateBatchRequest, owner_id: str = Depends(require_auth)):
     try:
-        return memory_batch.create_batch(req.name, req.member_chat_ids)
+        return memory_batch.create_batch(owner_id, req.name, req.member_chat_ids)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.patch("/api/batches/{batch_id}/rename", dependencies=[Depends(require_auth)])
-def rename_batch(batch_id: str, req: RenameBatchRequest):
+@app.patch("/api/batches/{batch_id}/rename")
+def rename_batch(batch_id: str, req: RenameBatchRequest, owner_id: str = Depends(require_auth)):
     try:
-        return memory_batch.rename_batch(batch_id, req.name)
+        return memory_batch.rename_batch(batch_id, owner_id, req.name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown batch_id")
 
 
-@app.post("/api/batches/{batch_id}/unlink", dependencies=[Depends(require_auth)])
-def unlink_batch_members(batch_id: str, req: BatchMembersRequest):
+@app.post("/api/batches/{batch_id}/unlink")
+def unlink_batch_members(batch_id: str, req: BatchMembersRequest, owner_id: str = Depends(require_auth)):
     """Returns {"dissolved": true} if removing these members collapsed the
     batch to <=1, otherwise returns the updated batch."""
     try:
-        result = memory_batch.unlink_members(batch_id, req.chat_ids)
+        result = memory_batch.unlink_members(batch_id, owner_id, req.chat_ids)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown batch_id")
     return result if result else {"dissolved": True, "id": batch_id}
 
 
-@app.post("/api/batches/{batch_id}/members", dependencies=[Depends(require_auth)])
-def add_batch_member(batch_id: str, req: BatchMembersRequest):
+@app.post("/api/batches/{batch_id}/members")
+def add_batch_member(batch_id: str, req: BatchMembersRequest, owner_id: str = Depends(require_auth)):
     try:
         for cid in req.chat_ids:
-            memory_batch.add_member(batch_id, cid)
-        return memory_batch.get_batch(batch_id)
+            memory_batch.add_member(batch_id, owner_id, cid)
+        return memory_batch.get_batch(batch_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown batch_id")
 
 
-@app.delete("/api/batches/{batch_id}", dependencies=[Depends(require_auth)])
-def delete_batch(batch_id: str):
+@app.delete("/api/batches/{batch_id}")
+def delete_batch(batch_id: str, owner_id: str = Depends(require_auth)):
     try:
-        memory_batch.delete_batch(batch_id)
+        memory_batch.delete_batch(batch_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown batch_id")
     return {"status": "deleted", "id": batch_id}
@@ -320,48 +596,510 @@ def delete_batch(batch_id: str):
 # code to avoid colliding with eo/project_registry.py, which tracks
 # external codebase roots for Cross-Project File Control (unrelated
 # concept, same word).
+#
+# Part 8.3: `owner_id` below is what require_auth's dependency-injected
+# param has always been called — for these routes it now really means
+# "the acting user's id", which may be the workspace's real owner OR a
+# collaborator (viewer/editor). chat_workspace.py's functions resolve
+# actual access themselves; these routes just map its exceptions to the
+# right HTTP status: FileNotFoundError -> 404 (no access at all, same
+# opacity as "doesn't exist"), WorkspaceAccessError -> 403 (some access,
+# not enough for this action).
 
-@app.get("/api/workspaces", dependencies=[Depends(require_auth)])
-def get_workspaces():
-    return chat_workspace.list_workspaces()
+@app.get("/api/workspaces")
+def get_workspaces(owner_id: str = Depends(require_auth)):
+    return chat_workspace.list_workspaces(owner_id)
 
 
-@app.post("/api/workspaces", dependencies=[Depends(require_auth)])
-def create_workspace(req: CreateWorkspaceRequest):
-    return chat_workspace.create_workspace(req.name)
+@app.post("/api/workspaces")
+def create_workspace(req: CreateWorkspaceRequest, owner_id: str = Depends(require_auth)):
+    return chat_workspace.create_workspace(owner_id, req.name)
 
 
-@app.patch("/api/workspaces/{ws_id}/rename", dependencies=[Depends(require_auth)])
-def rename_workspace(ws_id: str, req: RenameWorkspaceRequest):
+@app.get("/api/workspaces/{ws_id}")
+def get_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
     try:
-        return chat_workspace.rename_workspace(ws_id, req.name)
+        return chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
 
 
-@app.post("/api/workspaces/{ws_id}/chats", dependencies=[Depends(require_auth)])
-def add_workspace_chat(ws_id: str, req: WorkspaceChatRequest):
+@app.patch("/api/workspaces/{ws_id}/rename")
+def rename_workspace(ws_id: str, req: RenameWorkspaceRequest, owner_id: str = Depends(require_auth)):
     try:
-        return chat_workspace.add_chat(ws_id, req.chat_id)
+        return chat_workspace.rename_workspace(ws_id, owner_id, req.name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
-@app.delete("/api/workspaces/{ws_id}/chats/{chat_id}", dependencies=[Depends(require_auth)])
-def remove_workspace_chat(ws_id: str, chat_id: str, delete_chat: bool = Query(False)):
+@app.post("/api/workspaces/{ws_id}/chats")
+def add_workspace_chat(ws_id: str, req: WorkspaceChatRequest, owner_id: str = Depends(require_auth)):
     try:
-        return chat_workspace.remove_chat(ws_id, chat_id, delete_chat=delete_chat)
+        return chat_workspace.add_chat(ws_id, owner_id, req.chat_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
-@app.delete("/api/workspaces/{ws_id}", dependencies=[Depends(require_auth)])
-def delete_workspace(ws_id: str):
+@app.post("/api/workspaces/{ws_id}/chats/create")
+def create_workspace_chat(ws_id: str, req: CreateWorkspaceChatRequest,
+                           owner_id: str = Depends(require_auth)):
+    """One-step version of create-then-attach — a collaborator (owner or
+    editor) creates a brand-new chat that's immediately part of this
+    workspace, instead of two round trips. Same access rules as
+    add_workspace_chat: requires edit access to ws_id."""
     try:
-        chat_workspace.delete_workspace(ws_id)
+        return chat_workspace.create_chat_in_workspace(ws_id, owner_id, title=req.title or "New Chat")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.delete("/api/workspaces/{ws_id}/chats/{chat_id}")
+def remove_workspace_chat(ws_id: str, chat_id: str, delete_chat: bool = Query(False),
+                           owner_id: str = Depends(require_auth)):
+    try:
+        return chat_workspace.remove_chat(ws_id, owner_id, chat_id, delete_chat=delete_chat)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.delete("/api/workspaces/{ws_id}")
+def delete_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.delete_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return {"status": "deleted", "id": ws_id}
+
+
+# --- Part 8.3: workspace membership (owner-only) --------------------------
+
+@app.get("/api/workspaces/{ws_id}/members")
+def get_workspace_members(ws_id: str, owner_id: str = Depends(require_auth)):
+    """Returns one flat array, owner first (if any), then
+    workspace_members rows — the frontend renders this uniformly rather
+    than special-casing the owner, even though the owner isn't actually
+    a workspace_members row in the database (see chat_workspace.py).
+    Each entry is enriched with email/name/avatar_url via the Admin API
+    so the UI never has to show a raw user_id."""
+    try:
+        members = chat_workspace.list_members(ws_id, owner_id)
+        ws = chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    all_ids = {m["user_id"] for m in members}
+    if ws["owner_id"]:
+        all_ids.add(ws["owner_id"])
+    profiles = _lookup_users_by_ids(all_ids)
+
+    def _enrich(uid: str, extra: dict) -> dict:
+        p = profiles.get(uid, {})
+        return {
+            "user_id": uid,
+            "email": p.get("email"),
+            "name": p.get("name"),
+            "avatar_url": p.get("avatar_url"),
+            **extra,
+        }
+
+    result = []
+    if ws["owner_id"]:
+        result.append(_enrich(ws["owner_id"], {
+            "role": "owner", "can_toggle_attribution": True, "added_at": None,
+        }))
+    for m in members:
+        result.append(_enrich(m["user_id"], {
+            "role": m["role"],
+            "can_toggle_attribution": m["can_toggle_attribution"],
+            "added_at": m["added_at"],
+        }))
+    return result
+
+
+@app.post("/api/workspaces/{ws_id}/members")
+def add_workspace_member(ws_id: str, req: AddWorkspaceMemberRequest, owner_id: str = Depends(require_auth)):
+    target_user_id = _lookup_user_id_by_email(req.email)
+    if not target_user_id:
+        raise HTTPException(status_code=404, detail=f"No user found with email {req.email!r}")
+    try:
+        return chat_workspace.add_member(ws_id, owner_id, target_user_id, role=req.role)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/api/workspaces/{ws_id}/members/{target_user_id}")
+def update_workspace_member(ws_id: str, target_user_id: str, req: UpdateWorkspaceMemberRequest,
+                             owner_id: str = Depends(require_auth)):
+    try:
+        return chat_workspace.update_member_role(ws_id, owner_id, target_user_id, req.role)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e) or "Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/workspaces/{ws_id}/members/{target_user_id}")
+def remove_workspace_member(ws_id: str, target_user_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.remove_member(ws_id, owner_id, target_user_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    return {"status": "removed", "workspace_id": ws_id, "user_id": target_user_id}
+
+
+# --- Part 8.4: ownership transitions, voting, attribution ------------------
+
+@app.post("/api/workspaces/{ws_id}/leave")
+def leave_workspace_endpoint(ws_id: str, req: LeaveWorkspaceRequest,
+                              owner_id: str = Depends(require_auth)):
+    """Any member (including the owner) can leave voluntarily. If the
+    caller is the owner and names a successor, ownership transfers
+    directly. If the owner names no successor, the workspace becomes
+    joint. Non-owners just drop their own membership row —
+    successor_id is ignored for them."""
+    try:
+        chat_workspace.leave_workspace(ws_id, owner_id, successor_id=req.successor_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "left", "workspace_id": ws_id, "user_id": owner_id}
+
+
+@app.post("/api/workspaces/{ws_id}/owner/remove")
+def remove_owner_endpoint(ws_id: str, owner_id: str = Depends(require_auth)):
+    """Forced removal — caller must be a partner. Ejects the current
+    owner with no successor choice and puts the workspace into joint
+    state. Named 'owner_id' for consistency with every other route's
+    Depends(require_auth) parameter, but here it's the ACTING PARTNER,
+    not the workspace's owner — same overloaded-name convention noted
+    in chat_workspace.py's Part 8.3 section."""
+    try:
+        return chat_workspace.remove_owner(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/workspaces/{ws_id}/votes")
+def get_workspace_votes(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        return chat_workspace.get_vote_status(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+
+@app.post("/api/workspaces/{ws_id}/votes")
+def cast_workspace_vote(ws_id: str, req: CastVoteRequest, owner_id: str = Depends(require_auth)):
+    try:
+        return chat_workspace.cast_vote(ws_id, owner_id, req.vote_target)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/api/workspaces/{ws_id}/attribution")
+def set_workspace_attribution(ws_id: str, req: SetAttributionRequest,
+                               owner_id: str = Depends(require_auth)):
+    try:
+        return chat_workspace.set_show_attribution(ws_id, owner_id, req.show)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.patch("/api/workspaces/{ws_id}/members/{target_user_id}/attribution-grant")
+def set_member_attribution_grant(ws_id: str, target_user_id: str, req: AttributionGrantRequest,
+                                  owner_id: str = Depends(require_auth)):
+    """Owner/partner-only: grant or revoke a specific moderator's right
+    to toggle workspace-wide attribution visibility."""
+    try:
+        return chat_workspace.set_moderator_attribution_grant(
+            ws_id, owner_id, target_user_id, req.can_toggle
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e) or "Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/workspaces/{ws_id}/audit")
+def get_workspace_audit(ws_id: str, limit: int = Query(100, le=500),
+                         owner_id: str = Depends(require_auth)):
+    """Part 8.6: 'what happened to this workspace' — owner/partner-tier
+    only, same restriction as delete_workspace/set_moderator_attribution_grant,
+    since this surfaces every member add/remove/role-change and every
+    ownership transition, not just the caller's own actions."""
+    role = chat_workspace.member_role(ws_id, owner_id)
+    if role is None:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    if role not in ("owner", "partner"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"user {owner_id} must be an owner or partner of workspace {ws_id} to view its audit log",
+        )
+    return audit_log.list_for_target("workspace", ws_id, limit=limit)
+
+
+@app.get("/api/audit/me")
+def get_my_audit(limit: int = Query(100, le=500), owner_id: str = Depends(require_auth)):
+    """Part 8.6: 'what have I done' — always self-scoped by the
+    authenticated caller's own id, so no separate access check is
+    needed beyond require_auth itself."""
+    return audit_log.list_for_user(owner_id, limit=limit)
+
+
+# --- Part 8.5: third-party integrations ------------------------------------
+#
+# Google Calendar is the first connector built; Gmail/Slack/Jira-Asana-
+# Linear repeat this exact shape (eo/integrations.py's storage is already
+# provider-agnostic) against a different base URL/payload. See
+# eo/integrations.py and agents/calendar_agent.py.
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+
+# In-memory state->user_id map for the OAuth redirect round-trip. Process-
+# local, same class of gap Part 8.1 flagged for the old file-store locks —
+# fine for a single server instance, but move this into Redis (via
+# memory/bus.py, already connected) with a short TTL if this deployment
+# ever runs multiple replicas behind a load balancer.
+_oauth_state: dict[str, str] = {}
+
+
+@app.get("/api/integrations")
+def list_integrations(owner_id: str = Depends(require_auth)):
+    """Everything this user has connected, for the frontend's
+    integrations panel. Never returns tokens — see
+    eo.integrations.list_connected()'s own docstring."""
+    return integrations.list_connected(owner_id)
+
+
+@app.get("/api/integrations/google_calendar/connect")
+def connect_google_calendar(owner_id: str = Depends(require_auth)):
+    """Returns the Google consent URL for the frontend to redirect the
+    browser to. Doesn't redirect itself — this route is hit by frontend
+    JS, not a real browser navigation, same as every other JSON endpoint
+    in this file; only the callback below is a real browser redirect
+    target."""
+    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="Server misconfigured: Google OAuth env vars not set.")
+
+    state = secrets.token_urlsafe(24)
+    _oauth_state[state] = owner_id
+
+    params = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_CALENDAR_SCOPE,
+        "access_type": "offline",   # required to get a refresh_token back
+        "prompt": "consent",        # forces a refresh_token on every connect,
+                                     # not just the first-ever consent — otherwise
+                                     # a user who disconnects and reconnects gets
+                                     # no refresh_token the second time.
+        "state": state,
+    }
+    return {"auth_url": f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@app.get("/api/integrations/google_calendar/callback")
+def google_calendar_callback(code: str = Query(...), state: str = Query(...)):
+    """Google redirects the user's browser here directly — this route is
+    NOT behind require_auth, because the browser arrives via Google's own
+    redirect, not an Authorization header. Identity instead comes from the
+    state token minted in connect_google_calendar() above, which only
+    that authenticated user's own browser could have received. An
+    unknown/expired state is rejected outright."""
+    owner_id = _oauth_state.pop(state, None)
+    if not owner_id:
+        raise HTTPException(status_code=400, detail="Unknown or expired OAuth state")
+
+    resp = requests.post(GOOGLE_TOKEN_URL, data={
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }, timeout=15)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Google token exchange failed: {resp.text}")
+    payload = resp.json()
+
+    # account_label: which Google account this actually is, for the UI —
+    # a second, cheap call, same "fetch identity via the token itself"
+    # pattern _lookup_user_id_by_email uses the service-role key for.
+    account_label = None
+    try:
+        userinfo = requests.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {payload['access_token']}"},
+            timeout=10,
+        )
+        if userinfo.status_code == 200:
+            account_label = userinfo.json().get("email")
+    except Exception:
+        pass  # cosmetic only — a missing label never blocks the connection itself
+
+    integrations.save_credentials(
+        owner_id, "google_calendar", payload["access_token"],
+        refresh_token=payload.get("refresh_token"),
+        expires_in=payload.get("expires_in"),
+        scope=payload.get("scope"),
+        account_label=account_label,
+    )
+    # Redirect back into the app rather than returning raw JSON — this
+    # endpoint is hit by a real browser navigation, unlike every other
+    # route in this file.
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/settings/integrations?connected=google_calendar")
+
+
+@app.delete("/api/integrations/{provider}")
+def disconnect_integration(provider: str, owner_id: str = Depends(require_auth)):
+    integrations.disconnect(owner_id, provider)
+    return {"provider": provider, "disconnected": True}
+
+
+class CreateEventRequest(BaseModel):
+    summary: str
+    start: str              # RFC3339
+    end: str                 # RFC3339
+    description: str = ""
+    location: str = ""
+
+
+@app.get("/api/integrations/google_calendar/events")
+def get_calendar_events(time_min: str = Query(...), time_max: str = Query(...),
+                         owner_id: str = Depends(require_auth)):
+    try:
+        return calendar_agent.list_events(owner_id, time_min, time_max)
+    except IntegrationNotConnectedError:
+        raise HTTPException(status_code=409, detail="Google Calendar is not connected for this user")
+
+
+@app.post("/api/integrations/google_calendar/events")
+def post_calendar_event(req: CreateEventRequest, owner_id: str = Depends(require_auth)):
+    try:
+        return calendar_agent.create_event(
+            owner_id, req.summary, req.start, req.end,
+            description=req.description, location=req.location,
+        )
+    except IntegrationNotConnectedError:
+        raise HTTPException(status_code=409, detail="Google Calendar is not connected for this user")
+
+
+@app.delete("/api/integrations/google_calendar/events/{event_id}")
+def delete_calendar_event(event_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        return calendar_agent.delete_event(owner_id, event_id)
+    except IntegrationNotConnectedError:
+        raise HTTPException(status_code=409, detail="Google Calendar is not connected for this user")
+
+
+@app.get("/api/workspaces/{ws_id}/export")
+def export_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
+    """Part 8.7: any current member can export — a portable JSON backup
+    of the CALLER's own chats in this workspace (never a collaborator's,
+    see chat_workspace.export_workspace_data's docstring). Not a
+    docx/pptx/etc. file — agents/exporter.py's format writers weren't in
+    scope this session, so this is the JSON interchange format the
+    restore path below actually consumes."""
+    try:
+        return chat_workspace.export_workspace_data(ws_id, owner_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e) or "Unknown workspace_id")
+
+
+@app.post("/api/workspaces/{ws_id}/import")
+def import_workspace(ws_id: str, req: ImportWorkspaceDataRequest,
+                      owner_id: str = Depends(require_auth)):
+    """Part 8.7: restores a manifest's chats as new chats owned by the
+    caller, attached to ws_id. Requires edit-tier+ access to ws_id."""
+    try:
+        return chat_workspace.import_workspace_data(ws_id, owner_id, req.manifest)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e) or "Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@app.get("/api/workspaces/{ws_id}/export/files")
+def export_workspace_files(ws_id: str, fmt: str = Query("md"),
+                            owner_id: str = Depends(require_auth)):
+    """Part 8.7 (file-format path): human-readable export of the
+    caller's own chats in this workspace via agents/exporter.py, using
+    graph/adapters.py's chat_to_artifact() to shape each chat into the
+    {title, sections} artifact every exporter in that module already
+    consumes — same "one adapter per domain, one exporter set total"
+    discipline node_to_artifact/markdown_text_to_artifact already
+    follow, just fed a chat instead of a node or raw Markdown.
+
+    This is deliberately separate from GET /export (the JSON backup):
+    that one preserves exact message structure for restore_chats() to
+    replay losslessly; this one produces a real docx/pptx/pdf/md/csv/json
+    file meant for a human to read, not for round-tripping back through
+    import. A single chat downloads directly; more than one gets zipped
+    (FileResponse can only serve one file per request)."""
+    fmt = fmt.lower().lstrip(".")
+    if fmt not in EXPORTABLE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported export format '{fmt}'. Supported: {', '.join(EXPORTABLE_FORMATS)}.",
+        )
+    try:
+        manifest = chat_workspace.export_workspace_data(ws_id, owner_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e) or "Unknown workspace_id")
+
+    chats = manifest["chats"]
+    if not chats:
+        raise HTTPException(status_code=404, detail="No chats to export for this user in this workspace")
+
+    paths = []
+    for chat in chats:
+        artifact = chat_to_artifact(chat)
+        path = export_artifact(artifact, fmt, NOTES_EXPORTS_DIR)
+        paths.append(path)
+
+    if len(paths) == 1:
+        return FileResponse(paths[0], filename=os.path.basename(paths[0]))
+
+    zip_path = os.path.join(NOTES_EXPORTS_DIR, f"{ws_id}_export.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in paths:
+            zf.write(p, arcname=os.path.basename(p))
+    return FileResponse(zip_path, filename=os.path.basename(zip_path))
 
 
 # --- workspace facts: tier-3 memory (see eo/workspace_facts.py, §0.3) ----
@@ -371,16 +1109,19 @@ def delete_workspace(ws_id: str):
 # inside eo/conversation_memory.py; nothing here needs to be called at
 # generation time, only when the user views/edits the panel.
 
-@app.get("/api/workspaces/{ws_id}/facts", dependencies=[Depends(require_auth)])
-def get_workspace_facts(ws_id: str):
-    chat_workspace.get_workspace(ws_id)  # 404s if the workspace doesn't exist
+@app.get("/api/workspaces/{ws_id}/facts")
+def get_workspace_facts(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)  # 404s if the workspace doesn't exist / isn't owned
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
     return workspace_facts.get_facts(ws_id)
 
 
-@app.put("/api/workspaces/{ws_id}/facts", dependencies=[Depends(require_auth)])
-def put_workspace_facts(ws_id: str, req: WorkspaceFactsRequest):
+@app.put("/api/workspaces/{ws_id}/facts")
+def put_workspace_facts(ws_id: str, req: WorkspaceFactsRequest, owner_id: str = Depends(require_auth)):
     try:
-        chat_workspace.get_workspace(ws_id)
+        chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     # exclude_unset -> a save that only touched brand_voice doesn't wipe
@@ -446,10 +1187,11 @@ def delete_graph_edge(edge_id: str):
 # KnowledgeGraphView's backlink visualization all page through this same
 # list_nodes() call rather than each inventing their own fetch.
 
-@app.get("/api/workspaces/{ws_id}/nodes", dependencies=[Depends(require_auth)])
-def get_workspace_nodes(ws_id: str, node_type: Optional[str] = Query(None)):
+@app.get("/api/workspaces/{ws_id}/nodes")
+def get_workspace_nodes(ws_id: str, node_type: Optional[str] = Query(None),
+                         owner_id: str = Depends(require_auth)):
     try:
-        chat_workspace.get_workspace(ws_id)
+        chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     return list_nodes(ws_id, node_type=node_type)
@@ -482,15 +1224,15 @@ def reject_note_candidate(ws_id: str, index: int):
     return {"status": "rejected", "index": index}
 
 
-@app.post("/api/workspaces/{ws_id}/backlinks/detect", dependencies=[Depends(require_auth)])
-def detect_backlinks_endpoint(ws_id: str):
+@app.post("/api/workspaces/{ws_id}/backlinks/detect")
+def detect_backlinks_endpoint(ws_id: str, owner_id: str = Depends(require_auth)):
     """Part 4 §4.3 -- on-demand rescan rather than wired into every
     ingestion call: re-running this is cheap (edges_between() already
     skips anything already linked) and a manual "detect backlinks" action
     is simpler to reason about than re-scanning a whole workspace after
     every single new node."""
     try:
-        chat_workspace.get_workspace(ws_id)
+        chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     return {"edges_created": detect_backlinks(ws_id)}
@@ -501,10 +1243,10 @@ def detect_backlinks_endpoint(ws_id: str):
 # workspace-fact proposals above -- the third use of this affordance in
 # the build order, not a new UX pattern.
 
-@app.post("/api/workspaces/{ws_id}/clusters/propose", dependencies=[Depends(require_auth)])
-def propose_clusters_endpoint(ws_id: str):
+@app.post("/api/workspaces/{ws_id}/clusters/propose")
+def propose_clusters_endpoint(ws_id: str, owner_id: str = Depends(require_auth)):
     try:
-        chat_workspace.get_workspace(ws_id)
+        chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     return {"candidates": propose_clusters(ws_id)}
@@ -538,10 +1280,10 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
 # not routed through the Panel/executor role-hiring pipeline -- see that
 # module's docstring for why.
 
-@app.post("/api/workspaces/{ws_id}/table", dependencies=[Depends(require_auth)])
-def build_table_endpoint(ws_id: str, req: BuildTableRequest):
+@app.post("/api/workspaces/{ws_id}/table")
+def build_table_endpoint(ws_id: str, req: BuildTableRequest, owner_id: str = Depends(require_auth)):
     try:
-        chat_workspace.get_workspace(ws_id)
+        chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     try:
@@ -785,7 +1527,7 @@ class TaskResponse(BaseModel):
 
 
 @app.post("/api/task", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task(req: TaskRequest):
+def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXED — capture owner_id
     try:
         return run_task(
             task_text=req.task_text,
@@ -796,13 +1538,10 @@ def post_task(req: TaskRequest):
             session_id=req.session_id,
             mode=req.mode,
             project_unique_name=req.project_unique_name,
-            approval_roles=set(req.approval_roles) if req.approval_roles else None,   # NEW
+            approval_roles=set(req.approval_roles) if req.approval_roles else None,
+            owner_id=owner_id,   # FIXED — thread it down to run_task()
         )
     except Exception as exc:
-        # No relay-based error surface here, so a stack trace on the
-        # server console is the only debugging signal you get — keep it,
-        # but also return a clean JSON error instead of a raw 500 with no
-        # body.
         traceback.print_exc()
         return TaskResponse(
             decision={},
@@ -852,14 +1591,8 @@ class ConfirmTaskRequest(BaseModel):
 
 
 @app.post("/api/task/preview", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_preview(req: PreviewTaskRequest):
-    """Part 2 §2.5 — runs classification + staff_task() and stops before
-    dispatch whenever there's a real, editable hires list (tier 2/3).
-    Everything else (cache hit, SGA, needs_beast_mode_*, tier 0/1,
-    hires-empty tier 2/3) runs straight through to a normal finished
-    response, exactly like POST /api/task — there's nothing to review
-    on those paths, so this endpoint doesn't invent an empty review step
-    for them. See preview_task()'s own docstring for the full breakdown."""
+def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_auth)):   # FIXED
+    """... docstring unchanged ..."""
     try:
         return preview_task(
             task_text=req.task_text,
@@ -870,6 +1603,7 @@ def post_task_preview(req: PreviewTaskRequest):
             session_id=req.session_id,
             mode=req.mode,
             project_unique_name=req.project_unique_name,
+            owner_id=owner_id,   # FIXED
         )
     except Exception as exc:
         traceback.print_exc()
@@ -920,12 +1654,24 @@ class ResumeResponse(BaseModel):
     message: Optional[str] = None
 
 
-@app.post("/api/resume", response_model=ResumeResponse, dependencies=[Depends(require_auth)])
-def post_resume(req: ResumeRequest):
+@app.post("/api/resume", response_model=ResumeResponse)
+def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
     """Part 2 §2.4: resumes a run paused at an approval_roles checkpoint.
     Mirrors post_task()'s error-handling shape (clean JSON on unexpected
     failure, real HTTP status codes for the specific, anticipated
-    failure modes resume_graph() raises)."""
+    failure modes resume_graph() raises).
+
+    Part 8.8 regression fix: session_id and chat_id are the same string
+    everywhere in this system (see the comment above _resolve_chat_or_404),
+    so the resuming caller's access is checked exactly the same way every
+    other chat route checks it — owner or workspace collaborator, edit-tier
+    required (approving/editing/rejecting a paused run is not a read-only
+    action). Without this, any authenticated user who knew or guessed
+    another user's session_id could resume/approve/edit their paused run;
+    resume_graph() itself has no identity concept at all, so this check
+    has to happen here, before it's ever called."""
+    _resolve_chat_or_404(req.session_id, owner_id, require_edit=True)
+
     decision = {"action": req.action}
     if req.action == "edit":
         decision["text"] = req.text or ""
@@ -985,40 +1731,47 @@ def post_resume(req: ResumeRequest):
 # could read or write real data.
 # ---------------------------------------------------------------------------
 
-@app.get("/api/roles", dependencies=[Depends(require_auth)])
-def get_roles():
+@app.get("/api/roles")
+def get_roles(owner_id: str = Depends(require_auth)):
     """Every role the system has ever briefed, metadata included — the
     Role Library panel's one data source. Shape: [{role, brief, source,
     updated_at, times_hired}, ...]. Uses list_role_metadata() for a
     single bulk read instead of list_known_roles()+get_role_metadata()
-    per role, which was doing N+1 round-trips against the memory bus."""
-    return list_role_metadata()
+    per role, which was doing N+1 round-trips against the memory bus.
+
+    owner_id (Part 8.3): always passed through to eo.registry now — it's
+    only actually USED to select a per-user store if this deployment set
+    ROLE_LIBRARY_SCOPE=per_user; with the default "global" scope every
+    caller's owner_id is accepted but ignored (see eo/registry.py's
+    _role_prompts_key()), so this route's behavior is unchanged for the
+    common case."""
+    return list_role_metadata(owner_id)
 
 
 class UpdateRoleRequest(BaseModel):
     brief: str
 
 
-@app.put("/api/roles/{role_name}", dependencies=[Depends(require_auth)])
-def put_role(role_name: str, req: UpdateRoleRequest):
+@app.put("/api/roles/{role_name}")
+def put_role(role_name: str, req: UpdateRoleRequest, owner_id: str = Depends(require_auth)):
     """Saves an inline Role Library edit. Always source="user_edited" —
     this is the one path that's allowed to claim that (see
     eo/registry.py's update_role_prompt() docstring)."""
-    update_role_prompt(role_name, req.brief, source="user_edited")
-    return {"role": role_name, **(get_role_metadata(role_name) or {})}
+    update_role_prompt(role_name, req.brief, source="user_edited", user_id=owner_id)
+    return {"role": role_name, **(get_role_metadata(role_name, owner_id) or {})}
 
 
 class SetRolePinnedRequest(BaseModel):
     pinned: bool
 
 
-@app.patch("/api/roles/{role_name}/pin", dependencies=[Depends(require_auth)])
-def patch_role_pinned(role_name: str, req: SetRolePinnedRequest):
+@app.patch("/api/roles/{role_name}/pin")
+def patch_role_pinned(role_name: str, req: SetRolePinnedRequest, owner_id: str = Depends(require_auth)):
     """Pinned-roles feature — server-persisted so it syncs across
     devices, same store as everything else in the Role Library. Doesn't
     require the role to already have a brief; a role can be pinned from
     a picker before it's ever been hired."""
-    entry = set_role_pinned(role_name, req.pinned)
+    entry = set_role_pinned(role_name, req.pinned, user_id=owner_id)
     return {"role": role_name, **entry}
 
 
@@ -1041,11 +1794,11 @@ def get_workflow_templates():
     return list_workflow_templates()
 
 
-@app.get("/api/workflow-templates/{template_id}/chat", dependencies=[Depends(require_auth)])
-def get_template_chat(template_id: str):
+@app.get("/api/workflow-templates/{template_id}/chat")
+def get_template_chat(template_id: str, owner_id: str = Depends(require_auth)):
     """The one chat this template already owns, if any — lets the
     frontend reuse it instead of minting a new chat on every run."""
-    chat = chat_store.find_chat_for_template(template_id)
+    chat = chat_store.find_chat_for_template(owner_id, template_id)
     return chat or {}
 
 
@@ -1153,6 +1906,224 @@ def usage_history(
     if domain or workspace_id:
         return get_usage_history_scoped(days=days, domain=domain, workspace_id=workspace_id)
     return get_usage_history(days=days)
+
+
+def _parse_fenced_json(text):
+    """integration_flagger (Part 7 §7.3) is a generic_worker role, so its
+    output lands in stage_output:* as plain text -- a strict fenced
+    ```json code block per its ROLE_PROMPTS_SEED brief, not real
+    structured output the way a REAL_ACTION_ROLES module's return value
+    would be. Same strip-the-fence approach agents/prompt_writer.py and
+    agents/idea_planner.py already use on their own raw LLM text before
+    json.loads(), just tolerant of surrounding prose since a
+    generic_worker role's brief-enforced discipline is never as airtight
+    as a dedicated module's own parsing. Returns [] (not None) on
+    anything unparseable, so the checklist UI can render "no integrations
+    flagged yet" rather than an error state for a role that hasn't run.
+    """
+    if not text:
+        return []
+    match = re.search(r"```json\s*(.*?)```", text, re.DOTALL)
+    raw = match.group(1) if match else text
+    try:
+        parsed = json.loads(raw.strip())
+        return parsed.get("integrations", []) if isinstance(parsed, dict) else []
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+def _sentry_status(module_specs: dict, submitted_code: dict) -> str:
+    """Part 7 §7.5. Three states, not a bare yes/no, so the monitoring
+    widget can be honest about where things stand:
+      - "not_planned"  -- integration_flagger hasn't flagged monitoring
+                          yet, or prompt_writer.py hasn't run this cycle
+      - "planned"      -- monitoring_setup is in this cycle's
+                          module_specs, but code_writers.py hasn't
+                          generated it yet
+      - "configured"   -- it's in submitted_code, i.e. real code exists
+
+    "monitoring_setup" is agents/prompt_writer.py's own
+    MONITORING_MODULE_NAME constant; matched here by the same literal
+    string rather than importing it, same "agents/ and api/ don't share
+    private internals across the layer boundary" reasoning
+    agents/deploy_config_writer.py's own docstring already gives for
+    duplicating structure_architect.py's _get_project_tree() instead of
+    importing it.
+    """
+    names = {
+        (m.get("name") or "").strip().lower()
+        for m in (module_specs.get("modules") or [])
+    }
+    if "monitoring_setup" not in names:
+        return "not_planned"
+    if "monitoring_setup" in (submitted_code or {}):
+        return "configured"
+    return "planned"
+
+
+@app.get("/api/tasks/{session_id}", dependencies=[Depends(require_auth)])
+def get_tasks(session_id: str):
+    """Part 7 §7.2 — read-only kanban view over data idea_planner.py and
+    prompt_writer.py already write every cycle. No new storage: this just
+    exposes current_plan / feature_status / module_specs as one combined
+    object.
+
+    set_app_slug(session_id) scopes the read the same way every tier-3
+    adaptive-path run already scopes its writes (see memory/bus.py's
+    set_app_slug() docstring) -- without it, read_many() would fall back
+    to whatever app_slug happens to be the persisted Redis global, which
+    is exactly the cross-session collision Migration Part B fixed on the
+    write side. This is the read-side equivalent of that same fix.
+
+    Uses read_many() -- the same batched MGET helper
+    eo/quota_sentinel.py's get_usage_history() already uses -- so this is
+    one Redis round trip, not one-per-key.
+
+    Part 7 §7.3 -- also reads integration_flagger's stage_output entry
+    (cached once per session, never re-run per cycle, per that role's own
+    seed brief) and parses its fenced ```json block into a plain
+    "integrations" list for the checklist rendered alongside the board.
+
+    Part 7 §7.5 addition -- also reads deploy_config_plan /
+    last_deploy_config_summary / last_deploy_trigger_result (so the
+    frontend's deploy button + status indicator has something to render
+    without a second round trip) and derives monitoring status: Sentry
+    from module_specs/submitted_code (see _sentry_status() above),
+    UptimeRobot verbatim from last_uptimerobot_registration. One combined
+    object, same "one call, not four" reasoning §7.2/§7.3 already used
+    when they extended this same endpoint.
+    """
+    set_app_slug(session_id)
+    data = bus_read_many(
+        [KEYS["current_plan"], KEYS["feature_status"], KEYS["module_specs"],
+         KEYS["submitted_code"],
+         f"stage_output:{session_id}:integration_flagger",
+         deploy_config_writer_agent.DEPLOY_CONFIG_PLAN_KEY,
+         deploy_agent_module.LAST_DEPLOY_CONFIG_SUMMARY_KEY,
+         "last_deploy_trigger_result",
+         deploy_agent_module.LAST_UPTIMEROBOT_REGISTRATION_KEY],
+        default=None,
+    )
+    module_specs = data[KEYS["module_specs"]] or {}
+    submitted_code = data[KEYS["submitted_code"]] or {}
+    return {
+        "current_plan": data[KEYS["current_plan"]] or {},
+        "feature_status": data[KEYS["feature_status"]] or {},
+        "module_specs": module_specs,
+        "integrations": _parse_fenced_json(data[f"stage_output:{session_id}:integration_flagger"]),
+        "deploy_config_plan": data[deploy_config_writer_agent.DEPLOY_CONFIG_PLAN_KEY],
+        "last_deploy_config_summary": data[deploy_agent_module.LAST_DEPLOY_CONFIG_SUMMARY_KEY],
+        "last_deploy_trigger_result": data["last_deploy_trigger_result"],
+        "monitoring": {
+            "sentry_status": _sentry_status(module_specs, submitted_code),
+            "uptimerobot": data[deploy_agent_module.LAST_UPTIMEROBOT_REGISTRATION_KEY],
+        },
+    }
+
+
+# --- Part 7 §7.4 — Deploy action button. Deliberately three separate
+# endpoints for three separate-risk actions, same split as
+# agents/deploy_config_writer.py / agents/deploy_agent.py themselves:
+# propose (LLM call, no filesystem write), write (filesystem write,
+# reversible, no confirmation), go-live (irreversible, gated behind
+# _confirm_deploy()'s interactive y/N prompt every time). These call the
+# agent modules directly rather than going through eo.registry.resolve()/
+# eo/executor.py -- same "import an agent module, call it straight from a
+# route" convention this file already uses for agents.backlink_detector /
+# agents.note_table_builder, appropriate here since this is a one-off
+# UI-button action, not a Panel-hired pipeline step (see
+# agents/deploy_agent.py's own docstring).
+class DeployActionRequest(BaseModel):
+    project_unique_name: Optional[str] = None
+
+
+@app.post("/api/deploy/{session_id}/propose", dependencies=[Depends(require_auth)])
+def deploy_propose(session_id: str, req: DeployActionRequest = DeployActionRequest()):
+    """Runs deploy_config_writer.py -- proposes a platform + config file
+    content, does NOT write anything to disk yet. Safe to call more than
+    once; each call overwrites the prior proposal."""
+    set_app_slug(session_id)
+    return deploy_config_writer_agent.run_deploy_config_writer(session_id=session_id)
+
+
+@app.post("/api/deploy/{session_id}/write", dependencies=[Depends(require_auth)])
+def deploy_write(session_id: str, req: DeployActionRequest = DeployActionRequest()):
+    """Writes the proposed config file to disk. Reversible, low-stakes --
+    no confirmation gate, matching file_manager.py's own treatment of an
+    ordinary file write."""
+    set_app_slug(session_id)
+    try:
+        return deploy_agent_module.write_deploy_config(
+            project_unique_name=req.project_unique_name, session_id=session_id
+        )
+    except MissingDependencyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/deploy/{session_id}/go-live", dependencies=[Depends(require_auth)])
+def deploy_go_live(session_id: str, req: DeployActionRequest = DeployActionRequest()):
+    """The actual "push this live" trigger -- blocks on an interactive
+    y/N confirmation (agents/deploy_agent.py's _confirm_deploy()) every
+    single call, regardless of target, before returning. See that
+    module's docstring for why nothing is silently pushed live past this
+    point yet (no real per-host API client exists in this codebase)."""
+    set_app_slug(session_id)
+    try:
+        return deploy_agent_module.trigger_live_deploy(
+            project_unique_name=req.project_unique_name, session_id=session_id
+        )
+    except MissingDependencyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+# --- Part 7 §7.5 — Monitoring hooks. Sentry needs no endpoint at all --
+# it's an ordinary module_specs/submitted_code entry now
+# (agents/prompt_writer.py's _maybe_add_monitoring_module()), same pool
+# as everything else code_writers.py generates. UptimeRobot is the one
+# piece that needs real endpoints, since it needs a user-supplied API
+# key and an explicit URL (agents/deploy_agent.py's trigger_live_deploy()
+# has no real deployed URL to read automatically yet -- see that
+# module's docstring).
+class UptimeRobotKeyRequest(BaseModel):
+    api_key: str
+
+
+class UptimeRobotRegisterRequest(BaseModel):
+    url: str
+    friendly_name: Optional[str] = None
+
+
+@app.post("/api/monitoring/{session_id}/uptimerobot-key", dependencies=[Depends(require_auth)])
+def set_uptimerobot_key(session_id: str, req: UptimeRobotKeyRequest):
+    """Stores the user's UptimeRobot API key against this session's
+    workspace (eo/workspace_facts.py's `custom` dict, via
+    agents/deploy_agent.py's set_uptimerobot_api_key()). 409 if this
+    session isn't part of a workspace -- there's nowhere durable to put
+    the key for an ad-hoc chat."""
+    try:
+        deploy_agent_module.set_uptimerobot_api_key(session_id, req.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "saved"}
+
+
+@app.post("/api/monitoring/{session_id}/uptimerobot-register", dependencies=[Depends(require_auth)])
+def register_uptimerobot(session_id: str, req: UptimeRobotRegisterRequest):
+    """Registers req.url as a new UptimeRobot HTTP(s) monitor -- a real
+    external call, made immediately with no confirmation gate. Different
+    risk class than the live-deploy trigger on purpose: see
+    agents/deploy_agent.py's register_uptimerobot_monitor() docstring
+    for why (reversible, and the URL is already public by the time this
+    runs, unlike a live-deploy trigger which is the act of making
+    something public)."""
+    set_app_slug(session_id)
+    try:
+        return deploy_agent_module.register_uptimerobot_monitor(
+            req.url, session_id=session_id, friendly_name=req.friendly_name
+        )
+    except MissingDependencyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/projects", dependencies=[Depends(require_auth)])

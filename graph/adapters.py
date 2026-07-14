@@ -140,6 +140,46 @@ def markdown_text_to_artifact(text: str, title_fallback: str = "Untitled",
     return artifact
 
 
+def chat_to_artifact(chat: dict) -> dict:
+    """Part 8.7: the same {title, sections} shape node_to_artifact() and
+    markdown_text_to_artifact() already produce, this time built from a
+    raw chat dict (eo/chat_store.py's create_chat()/get_chat() shape:
+    id, title, messages, tags, ...) rather than a graph node or LLM
+    Markdown output. One section per message, so a chat exported to
+    docx/pdf/md reads as a real back-and-forth transcript rather than a
+    single flattened blob.
+
+    Deliberately lossy in one direction: this is for human-readable file
+    export (docx/pptx/pdf/md/csv via agents/exporter.py) — it does NOT
+    preserve enough structure to reconstruct the original messages list
+    exactly (author_id, exact role tagging beyond what's in the heading,
+    etc.). For a backup that needs to round-trip back into
+    chat_store.restore_chats() losslessly, use the raw chat dict itself
+    (chat_store.export_chats()), not this adapter — Part 8.7's JSON
+    backup path intentionally does NOT go through this function for
+    exactly that reason.
+    """
+    sections = []
+    for msg in chat.get("messages", []):
+        role = msg.get("role", "unknown")
+        ts = msg.get("ts", "")
+        heading = f"{role} — {ts}" if ts else role
+        sections.append({
+            "heading": heading,
+            "content": msg.get("content", "") or "",
+            "node_refs": [],
+        })
+    return {
+        "title": chat.get("title", "Untitled Chat"),
+        "sections": sections,
+        "metadata": {
+            "chat_id": chat.get("id"),
+            "tags": chat.get("tags", []),
+            "workspace_id": chat.get("workspace_id"),
+        },
+    }
+
+
 def artifact_to_candidate_node(artifact: dict, workspace_id: str, section: str,
                                 node_type: str, created_by: str) -> dict:
     """Shapes an imported artifact (agents/importer.py's output) into a

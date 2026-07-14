@@ -45,6 +45,32 @@ def propose_note(workspace_id: str, title: str, content: str,
                  "proposed_by": proposed_by}
     candidates.append(candidate)
     write(_key(workspace_id), candidates)
+
+    # NEW — Part 8.4: fan out to everyone who can see this workspace.
+    # This is the real event driving §8.9's notification bell — the
+    # person who needs to review a proposed note is almost never the
+    # person currently looking at whatever chat the note-taker was
+    # silently watching. Deferred imports, same reasoning write_node's
+    # own deferred import already follows in accept_candidate() below:
+    # keeps this module importable without the DB/Pusher stack wired up.
+    try:
+        from eo.chat_workspace import list_notify_targets
+        from relay.emitter import emit_user_event
+        for target_user_id in list_notify_targets(workspace_id):
+            emit_user_event(
+                "notification", target_user_id,
+                payload={
+                    "kind": "note_proposed",
+                    "workspace_id": workspace_id,
+                    "title": title,
+                    "proposed_by": proposed_by,
+                },
+            )
+    except Exception as exc:
+        # Fire-and-forget, same discipline as relay/emitter.py itself —
+        # a failed notification must never block the candidate save.
+        print(f"  [note_candidates] notification emit failed: {exc}")
+
     return candidate
 
 

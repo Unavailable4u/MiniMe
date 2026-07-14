@@ -52,6 +52,11 @@ from eo.quota_sentinel import get_quota_snapshot
 from eo import conversation_memory   # NEW — Part 23
 from utils.llm_client import generate_text
 from memory.bus import read as bus_read, write as bus_write, KEYS
+# Part 6 §6.4 bridge — see LEGACY_BUS_KEY_MAP below. No circularity risk:
+# agents/handoff_packager.py imports only memory.bus/relay.emitter/
+# eo.errors/agents.architecture_diagrammer/agents.schema_diagrammer, none
+# of which import this module or eo.registry.
+from agents.handoff_packager import PLAN_HANDOFF_PACKAGE_KEY
 # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
 # module level here. eo.registry.py now imports this module (generic_worker)
 # at load time so resolve("generic_worker") works, and eo.panel.py imports
@@ -109,6 +114,23 @@ NEXT_TAG_INSTRUCTION = (
 # own stage_output entry directly.
 LEGACY_BUS_KEY_MAP = {
     "extraction_table_builder": KEYS["extraction_table"],
+    # Part 6 §6.4 — handoff_packager is a REAL_ACTION_ROLES module
+    # (dispatched directly by eo/executor.py, not through this file), so
+    # it never gets a stage_output:{session_id}:handoff_packager entry
+    # the way a generic_worker role's own output automatically does.
+    # Without this bridge, content_calendar_builder listing
+    # "handoff_packager" in its input_keys would ALWAYS find nothing —
+    # even when handoff_packager genuinely ran earlier in the same
+    # execution graph — and would silently always take the "no handoff
+    # exists" relative-sequencing fallback instead of the real one.
+    # PLAN_HANDOFF_PACKAGE_KEY is app_slug-namespaced (memory/bus.py's
+    # _namespaced()), scoped by the set_app_slug() call
+    # handoff_packager.py itself makes right before writing it — this
+    # bridge only finds real data when content_calendar_builder runs in
+    # the SAME session/task context afterward (the ContextVar-scoped
+    # app_slug is still active), which is exactly the "hired in the same
+    # plan" case this bridge exists for.
+    "handoff_packager": PLAN_HANDOFF_PACKAGE_KEY,
 }
 
 

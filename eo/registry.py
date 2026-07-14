@@ -70,14 +70,23 @@ AGENT_CAPABILITIES = {
     "EO_INSPECTOR_GROQ_KEY_2": {"provider": "groq", "strengths": ["triage"], "natural_roles": ["inspector"]},
 
     # --- Cerebras: Code Writer Pool — base 5, reserve 3 (Part 3 §4.1) ---
-    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
-    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer"]},
+    # Part 6 §6.2: "content_writer" added to this same pool's tags, not a
+    # new pool -- content fan-out is a fast, cheap, genuinely-parallel
+    # per-platform generation job, the same shape as this pool's existing
+    # per-module code-writing work, just a different role name reusing
+    # the identical base-5/reserve-3 accounts and fairness rotation
+    # (agents/content_adapter_pool.py, via eo/worker_pool.py's shared
+    # role_tag-parameterized selection). No separate keys provisioned —
+    # quota-aware ranking already spreads load across whatever's
+    # least-used regardless of which tag(s) an account carries.
+    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
+    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer"]},
 
     # --- Cerebras: Fixer Pool (fixed 3, no reserve tier defined anywhere in Parts 1-8) ---
     "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
@@ -160,6 +169,56 @@ AGENT_CAPABILITIES = {
 
 
 ROLE_PROMPTS_KEY = "registry:role_prompts"
+
+# --- Part 8.3: global-vs-per-user decision (multi-user deployments only) ---
+#
+# DECIDED: role briefs are SHARED/GLOBAL by default, same behavior this
+# module has always had — a single-tenant deployment (or a multi-user
+# deployment that WANTS a shared community library, e.g. a small team
+# that's happy for anyone's edit to a role's brief to improve it for
+# everyone) needs to do nothing and gets exactly today's behavior.
+#
+# Per-user isolation is an explicit opt-in, not a silent side effect of
+# Part 8.2's multi-user migration landing: set ROLE_LIBRARY_SCOPE=per_user
+# in the deployment's env. When set, every function below scopes its
+# storage key by user_id instead of using the one shared key — User A
+# editing critic_reviewer's brief no longer changes what User B's next
+# task hires; each user gets their own independently-seeded library.
+#
+# Deliberately NOT a Postgres column (unlike every other Part 8.2/8.3
+# ownership change in this codebase) — this module's storage was never
+# migrated off the memory bus's key-value store (registry:-prefixed keys
+# are intentionally non-namespaced, see Part 7 §0), so "shared vs.
+# per-user" is expressed as which KEY a call reads/writes, not a row's
+# owner_id column. Every function keeps user_id as an OPTIONAL trailing
+# parameter (default None) specifically so every existing non-web caller
+# (agents/generic_worker.py, eo/panel.py) keeps working unmodified when
+# ROLE_LIBRARY_SCOPE is left at its default — same "every call site's
+# signature keeps working" discipline eo/chat_store.py's own migration
+# followed in §8.2, just applied to a module that stayed on the memory
+# bus instead of moving to Postgres.
+ROLE_LIBRARY_SCOPE = os.getenv("ROLE_LIBRARY_SCOPE", "global")  # "global" | "per_user"
+
+
+def _role_prompts_key(user_id: str | None = None) -> str:
+    """Single place that decides WHICH key a role-library call touches.
+    Every function below calls this instead of using ROLE_PROMPTS_KEY
+    directly, so the global-vs-per-user decision lives in exactly one
+    spot. Raises rather than silently falling back to the shared key if
+    a deployment has opted into per_user scope but a caller didn't pass
+    a user_id — a silent fallback here would quietly leak that caller's
+    read/write into the shared library, which is the exact bug this
+    decision exists to prevent."""
+    if ROLE_LIBRARY_SCOPE == "per_user":
+        if not user_id:
+            raise ValueError(
+                "ROLE_LIBRARY_SCOPE=per_user is set, but this call didn't "
+                "provide a user_id. Every eo.registry role-library function "
+                "needs the caller's user_id threaded through when per-user "
+                "isolation is enabled — see eo/registry.py's Part 8.3 notes."
+            )
+        return f"{ROLE_PROMPTS_KEY}:{user_id}"
+    return ROLE_PROMPTS_KEY
 
 # What used to be the live ROLE_PROMPTS dict is now only a SEED — the
 # starting contents on a totally fresh system, before the Panel has ever
@@ -636,6 +695,133 @@ ROLE_PROMPTS_SEED = {
         "explicitly here, since handoff_packager reads this section to scope "
         "cycle 1), "
     ),
+
+    # Part 6 §6.3 — Growth domain. Hand-written up front, same reasoning
+    # as every other seed brief in this dict: a bad first-draft brief
+    # becomes permanent once a cold-start hire writes it. This role is
+    # deliberately a second, explicit verification pass rather than
+    # trusting generation-time workspace_facts injection alone — the
+    # same reasoning simulation_synthesizer and contradiction_detector
+    # already establish for "a role that only produces content shouldn't
+    # also be the only thing checking its own output against a stated
+    # constraint."
+    "brand_voice_checker": (
+        "You read the platform content variants from content_adapter_pool "
+        "and this workspace's stated brand voice (both given as prior "
+        "context) and check EACH variant against that stated voice — do "
+        "not just skim for a general impression. For each platform, state "
+        "plainly whether it matches the brand voice or drifts from it, and "
+        "if it drifts, say exactly how: wrong tone (e.g. too casual/formal "
+        "relative to what's stated), a claim or framing the brand voice "
+        "explicitly avoids, or terminology inconsistent with what the "
+        "workspace facts establish (e.g. a product name, category, or "
+        "phrase used differently than specified). If no brand voice is "
+        "on file for this workspace, say so explicitly rather than "
+        "inventing a voice to check against, and note that this check "
+        "could not be meaningfully performed. Do not rewrite the "
+        "variants yourself — flagging clearly is the job."
+    ),
+
+    # Part 6 §6.4 — Growth domain. content_calendar_builder reads Part 5's
+    # finished PRD/handoff bundle for anything date- or milestone-shaped.
+    # Structured-not-prose discipline, same as Part 3's extraction table
+    # and Part 5's API contract table.
+    "content_calendar_builder": (
+        "You read the platform content variants from content_adapter_pool "
+        "and, if given as prior context, a finished PRD or handoff "
+        "package from the Plan domain — and sequence each platform "
+        "variant against any launch date, phased-rollout section, or "
+        "feature-by-feature ship dates the PRD/handoff states. Output a "
+        "structured list, one row per platform variant, each row exactly "
+        "'- date: <date or relative label> | platform: <platform> | "
+        "content_ref: <short description of which variant this is>' — "
+        "not prose. If a real launch date or milestone is available in "
+        "prior context, use it. If NO Plan-domain handoff or launch date "
+        "is available in prior context, do not invent one — fall back to "
+        "relative sequencing instead ('day of launch', 'day 3', 'week 2', "
+        "etc.) and say explicitly in a closing note that no real dates "
+        "were available, so relative sequencing was used instead."
+    ),
+
+    # Part 6 §6.5 — Growth domain. Scoped honestly to what's actually
+    # checkable without a paid data provider (Ahrefs/SEMrush and similar)
+    # — same "label it as a structural check, not a ranking signal"
+    # discipline Part 3 §3.8 already applied to source-quality flagging.
+    "seo_structure_auditor": (
+        "You audit a piece of content's STRUCTURE ONLY — heading "
+        "hierarchy (is there a clear H1/H2 progression, or is it flat), "
+        "keyword presence and rough density relative to the content's own "
+        "stated topic, meta-description length if one is given or implied "
+        "(ideal roughly 150-160 characters), and general readability "
+        "(sentence length, paragraph length, jargon density). You have NO "
+        "access to real search-ranking data, backlink data, or keyword-"
+        "volume data — those require a paid data provider this system "
+        "does not have. Never phrase a finding as if it reflects actual "
+        "search performance or ranking potential ('this will rank well', "
+        "'this hurts your SEO') — phrase every finding as a structural "
+        "observation only ('this section lacks a clear H2', 'the meta "
+        "description is longer than the typical display limit'). Begin "
+        "or end your answer with an explicit sentence stating this is a "
+        "content-structure audit, not an SEO or GEO ranking audit, since "
+        "no ranking-signal data was available to check against."
+    ),
+
+    # Part 6 §6.6 — Growth domain. Same honesty discipline as
+    # seo_structure_auditor just above: there is no free "find me real "
+    # journalists/influencers" API, so this role suggests categories,
+    # never named contacts (which would be fabricated or stale the
+    # moment they're generated).
+    "outreach_categorizer": (
+        "You suggest outlet/creator TYPES to target for outreach — never "
+        "named contacts, publications, or individual people, since a "
+        "generated name would either be fabricated or stale the moment "
+        "it's written. Base your suggestions on the target user described "
+        "in any PRD/handoff given as prior context, and on the actual "
+        "subject matter of the content itself. Phrase each suggestion as "
+        "a category (e.g. 'developer-focused technical newsletters', "
+        "'B2B SaaS-focused podcasts', 'regional tech press covering this "
+        "market', 'micro-influencers in this specific niche') with a "
+        "one-sentence reason it fits this launch. Return 4-8 categories, "
+        "not a padded longer list. Begin or end your answer with an "
+        "explicit sentence stating these are category suggestions, not a "
+        "contact list, since no real outreach-contact database is "
+        "available to this system."
+    ),
+    # Part 7 §7.3 — Coding domain, Integration checklist. Hand-written up
+    # front, same reasoning as every other seed brief in this dict.
+    # Deliberately mirrors "note_taker" above's fenced-```json convention
+    # (a generic_worker role can still produce real structured output —
+    # it just has to be enforced by the brief itself, since
+    # agents/generic_worker.py applies the same MARKDOWN_INSTRUCTION/
+    # NEXT_TAG_INSTRUCTION wrapper and stage_output:* text storage to
+    # every role, structured or not). Fixed six-category vocabulary
+    # (rather than letting the model invent categories) so the checklist
+    # UI (frontend TasksTab.jsx) never has to render an unknown tag —
+    # "monitoring" is included even though Part 7 §7.3's own integration
+    # list only names five, because §7.5 depends on this role being able
+    # to flag it too.
+    "integration_flagger": (
+        "You read the task text (and, if this run started from a "
+        "Plan→Build handoff, the richer PRD/architecture/API-contract "
+        "content given as prior context) and tag which common "
+        "integrations the spec implies. Check specifically for exactly "
+        "these six categories: \"auth\" (user accounts, login, sessions, "
+        "permissions), \"payments\" (billing, checkout, subscriptions), "
+        "\"email_notifications\" (transactional email, push, SMS), "
+        "\"analytics\" (usage tracking, event logging, dashboards), "
+        "\"file_storage\" (uploads, attachments, media/blob storage), "
+        "and \"monitoring\" (error tracking, uptime checks, logging/"
+        "observability). Output ONLY a single fenced ```json code block "
+        "containing one JSON object with an \"integrations\" key: a list "
+        "of objects, each with \"type\" (one of the six category names "
+        "above, spelled exactly as given) and \"evidence\" (the specific "
+        "phrase or requirement in the spec that implies it) — nothing "
+        "else outside that code block. Only include a category the spec "
+        "genuinely implies; do not tag one 'just in case', and do not "
+        "invent a category outside this fixed list of six. If nothing in "
+        "the spec implies any of these, output a fenced ```json block "
+        "containing {\"integrations\": []}."
+    ),
 }
 
 
@@ -662,7 +848,7 @@ def _wrap_legacy_entry(role_name: str, brief: str) -> dict:
             "pinned": False, "pinned_at": None}
 
 
-def _load_prompts() -> dict:
+def _load_prompts(user_id: str | None = None) -> dict:
     """Single read path for every function below. Bootstraps from
     ROLE_PROMPTS_SEED on the very first call if the memory bus has
     nothing yet (unchanged behavior), and migrates any bare-string
@@ -670,14 +856,22 @@ def _load_prompts() -> dict:
     separate migration script needed, per Part 2 §2.2's design. Writes
     back to the bus only when bootstrap or migration actually changed
     something, so a store that's already fully migrated costs one read
-    and zero writes."""
-    prompts = read(ROLE_PROMPTS_KEY, default=None)
+    and zero writes.
+
+    user_id (Part 8.3): forwarded to _role_prompts_key() to pick which
+    store this reads/bootstraps — the shared one (default) or this
+    user's own, isolated one (ROLE_LIBRARY_SCOPE=per_user). A per-user
+    store bootstraps from the SAME ROLE_PROMPTS_SEED as the shared one
+    the first time that specific user is ever seen, so nobody's library
+    starts empty."""
+    key = _role_prompts_key(user_id)
+    prompts = read(key, default=None)
     if prompts is None:
         prompts = {
             name: _wrap_legacy_entry(name, brief)
             for name, brief in ROLE_PROMPTS_SEED.items()
         }
-        write(ROLE_PROMPTS_KEY, prompts)
+        write(key, prompts)
         return prompts
 
     changed = False
@@ -686,30 +880,35 @@ def _load_prompts() -> dict:
             prompts[role_name] = _wrap_legacy_entry(role_name, value)
             changed = True
     if changed:
-        write(ROLE_PROMPTS_KEY, prompts)
+        write(key, prompts)
     return prompts
 
 
-def get_role_prompt(role_name: str) -> str | None:
+def get_role_prompt(role_name: str, user_id: str | None = None) -> str | None:
     """Returns the stored brief for this role as a plain string, or
     None if it's never been written — exactly today's return contract.
     Every existing caller (agents/generic_worker.py's run(),
     eo/panel.py's _get_or_write_role_prompt()) keeps working
-    unmodified even though the underlying storage shape widened."""
-    entry = _load_prompts().get(role_name)
+    unmodified even though the underlying storage shape widened, as
+    long as ROLE_LIBRARY_SCOPE stays at its default "global" — those
+    callers don't have a user_id to pass yet, so per-user isolation
+    isn't usable from agent code until they're updated to thread one
+    through (see Part 8.3 notes above ROLE_PROMPTS_KEY)."""
+    entry = _load_prompts(user_id).get(role_name)
     return entry["brief"] if entry else None
 
 
-def get_role_metadata(role_name: str) -> dict | None:
+def get_role_metadata(role_name: str, user_id: str | None = None) -> dict | None:
     """New in Part 2 §2.2 — returns the full {brief, source,
     updated_at, times_hired} object for the Role Library UI, or None
     if this role has never been briefed. get_role_prompt() above stays
     the string-only contract every non-UI caller already depends on;
     this is the richer read path for the new frontend panel only."""
-    return _load_prompts().get(role_name)
+    return _load_prompts(user_id).get(role_name)
 
 
-def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_writer") -> None:
+def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_writer",
+                     user_id: str | None = None) -> None:
     """Writes a newly-generated brief back into the persistent store.
     This is what makes the registry actually grow instead of writing
     the same role's brief on every single task that needs it.
@@ -723,7 +922,8 @@ def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_write
     brief instead. Preserves any existing times_hired count rather
     than resetting it, since re-briefing a role isn't the same event
     as it being hired."""
-    prompts = _load_prompts()
+    key = _role_prompts_key(user_id)
+    prompts = _load_prompts(user_id)
     existing = prompts.get(role_name, {})
     prompts[role_name] = {
         "brief": brief,
@@ -737,21 +937,24 @@ def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_write
         "pinned": existing.get("pinned", False),
         "pinned_at": existing.get("pinned_at"),
     }
-    write(ROLE_PROMPTS_KEY, prompts)
+    write(key, prompts)
 
 
-def update_role_prompt(role_name: str, new_brief: str, source: str = "user_edited") -> None:
+def update_role_prompt(role_name: str, new_brief: str, source: str = "user_edited",
+                        user_id: str | None = None) -> None:
     """New in Part 2 §2.2 — thin wrapper over add_role_prompt(), just
     setting source explicitly so the Role Library UI can visually
     distinguish "you wrote this" from "the system generated this and
     nobody's reviewed it yet." This is what the UI's inline-edit save
     action calls; it directly surfaces the exact risk Part 1 §1.3
     flagged (an unreviewed cold-start brief silently becoming
-    permanent)."""
-    add_role_prompt(role_name, new_brief, source=source)
+    permanent). user_id (Part 8.3): the editing user — api/server.py's
+    PUT /api/roles/{role_name} passes the caller's own owner_id here,
+    which matters only if ROLE_LIBRARY_SCOPE=per_user."""
+    add_role_prompt(role_name, new_brief, source=source, user_id=user_id)
 
 
-def record_role_hire(role_name: str) -> None:
+def record_role_hire(role_name: str, user_id: str | None = None) -> None:
     """New in Part 2 §2.2 — increments times_hired for a role that was
     just staffed. Not yet called from eo/panel.py in this pass (that's
     a one-line addition inside staff_task() once panel.py is in scope
@@ -759,7 +962,8 @@ def record_role_hire(role_name: str) -> None:
     call. Creates a bare counter entry rather than raising if the role
     somehow isn't in the store yet (a hire can in principle race a
     first-ever brief write)."""
-    prompts = _load_prompts()
+    key = _role_prompts_key(user_id)
+    prompts = _load_prompts(user_id)
     entry = prompts.get(role_name) or {
         "brief": None, "source": "panel_brief_writer",
         "updated_at": None, "times_hired": 0,
@@ -767,10 +971,10 @@ def record_role_hire(role_name: str) -> None:
     }
     entry["times_hired"] = entry.get("times_hired", 0) + 1
     prompts[role_name] = entry
-    write(ROLE_PROMPTS_KEY, prompts)
+    write(key, prompts)
 
 
-def set_role_pinned(role_name: str, pinned: bool) -> dict:
+def set_role_pinned(role_name: str, pinned: bool, user_id: str | None = None) -> dict:
     """New — Role Library pinned-roles feature. Toggles a role's pinned
     state, persisted server-side alongside its brief/metadata so it
     syncs across devices (same store, same key, as everything else in
@@ -780,7 +984,8 @@ def set_role_pinned(role_name: str, pinned: bool) -> dict:
     hired/briefed. Returns the updated entry so the API layer can hand
     the fresh {role, brief, source, ..., pinned, pinned_at} straight
     back to the frontend without a second read."""
-    prompts = _load_prompts()
+    key = _role_prompts_key(user_id)
+    prompts = _load_prompts(user_id)
     entry = prompts.get(role_name) or {
         "brief": None, "source": "panel_brief_writer",
         "updated_at": None, "times_hired": 0,
@@ -789,23 +994,23 @@ def set_role_pinned(role_name: str, pinned: bool) -> dict:
     entry["pinned"] = bool(pinned)
     entry["pinned_at"] = _utcnow_iso() if pinned else None
     prompts[role_name] = entry
-    write(ROLE_PROMPTS_KEY, prompts)
+    write(key, prompts)
     return entry
 
 
-def list_known_roles() -> list:
+def list_known_roles(user_id: str | None = None) -> list:
     """Every role the system has ever written a brief for — unchanged
     return contract (sorted list of role-name strings) even though the
     underlying store now holds richer objects per role."""
-    return sorted(_load_prompts().keys())
+    return sorted(_load_prompts(user_id).keys())
 
 
-def list_role_metadata() -> list:
+def list_role_metadata(user_id: str | None = None) -> list:
     """Bulk counterpart to get_role_metadata() — one single read of the
     store instead of N. list_known_roles()+get_role_metadata() per role
     was doing an N+1 read against the memory bus; this returns the same
     data (sorted by role name) in exactly one read() call."""
-    prompts = _load_prompts()
+    prompts = _load_prompts(user_id)
     return sorted(
         ({"role": name, **meta} for name, meta in prompts.items()),
         key=lambda r: r["role"],
@@ -850,6 +1055,25 @@ REAL_ACTION_ROLES = {
     "extraction_table_builder": "extraction_table_builder",
     "contradiction_prefilter": "contradiction_prefilter",
     "dataset_analyst": "dataset_analyst",  # Part 3 §3.7
+    # Part 6 §6.1/§6.2 — growth domain. content_adapter_pool performs
+    # real, self-contained fan-out work with its own internal
+    # concurrency, same category as code_writers/reviewer/fixer_pool —
+    # not a generic_worker reasoning role. brand_voice_checker,
+    # content_calendar_builder, seo_structure_auditor, and
+    # outreach_categorizer are deliberately ABSENT from this map: all
+    # four are reasoning-with-structured-input roles that resolve to
+    # "generic_worker" like any other reasoning role (Part 6 §6.1).
+    "content_adapter_pool": "content_adapter_pool",
+    # Part 7 §7.4 — same category as structure_architect above: pure
+    # reasoning with no real filesystem action of its own, but it needs
+    # real on-disk file-tree access generic_worker.py's run() can't give
+    # it, so it's a dedicated module rather than a generic_worker role.
+    # deploy_agent (the module that actually writes the config file /
+    # gates the live-deploy confirmation) is deliberately NOT in this map
+    # — see agents/deploy_agent.py's own docstring for why it's dispatched
+    # directly from a UI-button API endpoint instead of through the
+    # Panel-hire/executor.py path this map feeds.
+    "deploy_config_writer": "deploy_config_writer",
 }
 
 
@@ -894,6 +1118,8 @@ from agents import (
     dataset_analyst,  # Part 3 §3.7
     source_quality_flagger,  # Part 3 §3.8
     citation_graph_builder,  # Part 3
+    content_adapter_pool,  # Part 6 §6.2
+    deploy_config_writer,  # Part 7 §7.4
 )
 
 # name -> {"callable": fn, "needs_cycle_num": bool}
@@ -979,6 +1205,13 @@ REGISTRY = {
     # citation_graph_builder: read-only view over the "cites" edges
     # academic_search.py already writes — no new nodes/edges of its own.
     "citation_graph_builder": {"callable": citation_graph_builder.run,        "needs_cycle_num": False},
+    # Part 6 §6.2 — growth domain's dedicated parallel content fan-out
+    # pool. See REAL_ACTION_ROLES above for why this has a dedicated
+    # module instead of resolving to "generic_worker".
+    "content_adapter_pool": {"callable": content_adapter_pool.run,            "needs_cycle_num": False},
+    # Part 7 §7.4 — see REAL_ACTION_ROLES above for why this is a
+    # dedicated module rather than a generic_worker role.
+    "deploy_config_writer": {"callable": deploy_config_writer.run_deploy_config_writer, "needs_cycle_num": False},
 }
 def resolve(agent_name: str):
     """Return the callable for `agent_name`, or raise KeyError with a

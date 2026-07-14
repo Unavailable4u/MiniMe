@@ -33,6 +33,7 @@ import os
 import csv
 import json
 import re
+import datetime as _dt
 
 from docx import Document
 from docx.shared import Pt
@@ -287,4 +288,203 @@ if __name__ == "__main__":
     }
     for f in SUPPORTED_FORMATS:
         path = export_artifact(demo, f, "/tmp/export_demo")
+        print(f"wrote {path}")
+
+
+# ---------------------------------------------------------------------------
+# Part 6 §6.4 — Content calendar export. Deliberately NOT built on top of
+# export_artifact()/the common {title, sections} artifact shape above:
+# content_calendar_builder's real output is a structured
+# {date, platform, content_ref} row list, not prose sections with
+# node_refs, so squeezing it into the generic shape would either lose the
+# structure or force a fake single "section" with the rows crammed into
+# free text. Same deterministic, structured-in/file-out discipline as
+# every writer above (no LLM call here either) — just a second, small,
+# parallel entry point for a genuinely different input shape.
+# ---------------------------------------------------------------------------
+
+CALENDAR_FORMATS = ("ics", "csv", "md")
+
+# Recognizes content_calendar_builder's own documented fallback labels
+# (its seed brief in eo/registry.py: "day of launch", "day 3", "week 2",
+# etc.) so the .ics writer below can still place a relative-sequencing
+# calendar on a real timeline instead of silently refusing to export it.
+# CSV/Markdown don't need this -- they show whatever date string was
+# given, verbatim, since neither format requires a machine-parseable
+# date.
+_RELATIVE_DATE_RE = re.compile(
+    r"^\s*(?:day\s+of\s+launch|day\s*0)\s*$|^\s*day\s+(\d+)\s*$|^\s*week\s+(\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _validate_calendar_entries(entries: list) -> list:
+    """Fills in defaults the same permissive way _validate_artifact()
+    does above -- a row missing a platform or content_ref is still worth
+    exporting, so this only raises on a non-list input, the one thing
+    that would make every writer below fail identically."""
+    if not isinstance(entries, list):
+        raise ValueError("entries must be a list of "
+                          "{date, platform, content_ref} dicts")
+    normalized = []
+    for e in entries:
+        e = e or {}
+        normalized.append({
+            "date": str(e.get("date", "") or "").strip(),
+            "platform": str(e.get("platform", "") or "").strip(),
+            "content_ref": str(e.get("content_ref", "") or "").strip(),
+        })
+    return normalized
+
+
+def _resolve_calendar_date(date_str: str, row_index: int,
+                            anchor: _dt.date = None) -> _dt.date:
+    """Best-effort mapping of one row's date field to a real calendar
+    date, for the .ics writer only (CSV/Markdown show date_str verbatim
+    and never call this).
+
+    Tries, in order:
+      1. A real ISO date ("2026-07-20") -- used exactly as given.
+      2. content_calendar_builder's own relative labels ("day of
+         launch"/"day 0", "day N", "week N") -- resolved as an offset
+         from `anchor` (defaults to today, the date this file is being
+         exported, since that's the only reasonable anchor a mechanical
+         exporter has for a launch date it was never given).
+      3. Anything else unparseable -- falls back to `anchor` + row_index
+         days, purely so every row still lands on a distinct, ascending
+         date in the .ics file rather than all stacking on one day.
+    """
+    anchor = anchor or _dt.date.today()
+    try:
+        return _dt.date.fromisoformat(date_str)
+    except ValueError:
+        pass
+    m = _RELATIVE_DATE_RE.match(date_str)
+    if m:
+        if m.group(1):
+            return anchor + _dt.timedelta(days=int(m.group(1)))
+        if m.group(2):
+            return anchor + _dt.timedelta(days=int(m.group(2)) * 7)
+        return anchor  # "day of launch" / "day 0"
+    return anchor + _dt.timedelta(days=row_index)
+
+
+def _ics_escape(text: str) -> str:
+    """RFC 5545 §3.3.11 text escaping -- backslash, semicolon, comma,
+    then literal newlines, in that order (escaping the backslash first
+    matters, or a later-inserted backslash would get re-escaped)."""
+    return (text.replace("\\", "\\\\")
+                .replace(";", "\\;")
+                .replace(",", "\\,")
+                .replace("\n", "\\n"))
+
+
+def _write_calendar_ics(entries: list, output_path: str, title: str) -> None:
+    """Hand-written ICS text via the stdlib only -- no icalendar PyPI
+    dependency, matching this module's existing "deterministic and
+    auditable" discipline. One all-day VEVENT per row; relative-label
+    rows are placed via _resolve_calendar_date() above rather than
+    omitted, so a calendar built without a real launch date (Part 6
+    §6.4's documented fallback) still produces a genuinely importable
+    .ics instead of an empty or invalid one."""
+    anchor = _dt.date.today()
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Growth Domain//Content Calendar//EN",
+        "CALSCALE:GREGORIAN",
+    ]
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for i, row in enumerate(entries):
+        event_date = _resolve_calendar_date(row["date"], i, anchor)
+        dtstart = event_date.strftime("%Y%m%d")
+        dtend = (event_date + _dt.timedelta(days=1)).strftime("%Y%m%d")
+        summary = _ics_escape(f"{row['platform'] or 'content'} — {title}")
+        description_bits = []
+        if row["content_ref"]:
+            description_bits.append(f"Content: {row['content_ref']}")
+        if row["date"] and row["date"] != event_date.isoformat():
+            description_bits.append(f"Original schedule label: {row['date']}")
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{i}-{stamp}@growth-domain-calendar",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART;VALUE=DATE:{dtstart}",
+            f"DTEND;VALUE=DATE:{dtend}",
+            f"SUMMARY:{summary}",
+        ]
+        if description_bits:
+            lines.append(f"DESCRIPTION:{_ics_escape(chr(10).join(description_bits))}")
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+    # RFC 5545 §3.1 requires CRLF line endings.
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        f.write("\r\n".join(lines) + "\r\n")
+
+
+def _write_calendar_csv(entries: list, output_path: str, title: str) -> None:
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "platform", "content_ref"])
+        for row in entries:
+            writer.writerow([row["date"], row["platform"], row["content_ref"]])
+
+
+def _write_calendar_md(entries: list, output_path: str, title: str) -> None:
+    lines = [f"# {title}", "", "| Date | Platform | Content |",
+             "|------|----------|---------|"]
+    for row in entries:
+        # Pipe characters in a cell would break the table -- escape same
+        # as _write_md() would if it ever needed table cells (it doesn't,
+        # today), so a content_ref containing "|" can't corrupt the row.
+        cells = [c.replace("|", "\\|") for c in
+                 (row["date"], row["platform"], row["content_ref"])]
+        lines.append(f"| {cells[0]} | {cells[1]} | {cells[2]} |")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+_CALENDAR_WRITERS = {
+    "ics": _write_calendar_ics,
+    "csv": _write_calendar_csv,
+    "md": _write_calendar_md,
+}
+
+
+def export_content_calendar(entries: list, fmt: str, output_dir: str,
+                             title: str = "Content Calendar",
+                             filename: str = None) -> str:
+    """The content-calendar counterpart to export_artifact() above.
+
+    entries: the structured {date, platform, content_ref} list
+        content_calendar_builder produces (Part 6 §6.4) -- date may be a
+        real ISO date OR one of its documented relative-sequencing
+        fallback labels ("day of launch", "day 3", "week 2") when no
+        real launch date was available upstream.
+    fmt: one of CALENDAR_FORMATS ("ics", "csv", "md").
+    Returns the full path written.
+    """
+    fmt = fmt.lower().lstrip(".")
+    if fmt not in CALENDAR_FORMATS:
+        raise ValueError(f"Unsupported calendar export format '{fmt}'. "
+                          f"Supported: {', '.join(CALENDAR_FORMATS)}")
+
+    entries = _validate_calendar_entries(entries)
+    filename = filename or _slugify_filename(title, fmt)
+    if not filename.endswith(f".{fmt}"):
+        filename = f"{filename}.{fmt}"
+
+    output_path = _safe_output_path(output_dir, filename)
+    _CALENDAR_WRITERS[fmt](entries, output_path, title)
+    return output_path
+
+
+if __name__ == "__main__":
+    demo_calendar = [
+        {"date": "day of launch", "platform": "twitter", "content_ref": "Launch announcement (short)"},
+        {"date": "day 3", "platform": "linkedin", "content_ref": "Launch announcement (long-form)"},
+        {"date": "week 2", "platform": "press_release", "content_ref": "Press release"},
+    ]
+    for f in CALENDAR_FORMATS:
+        path = export_content_calendar(demo_calendar, f, "/tmp/export_demo")
         print(f"wrote {path}")

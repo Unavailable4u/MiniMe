@@ -35,8 +35,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from eo.registry import AGENT_CAPABILITIES
-from eo.quota_sentinel import get_quota_snapshot
+from eo.worker_pool import _select_workers as _select_workers_for_role
 
 load_dotenv()
 
@@ -65,29 +64,17 @@ MODELS = [
 ROLE_TAG = "implementer"
 
 
-def _eligible_pool() -> list:
-    """Every account tagged for this role — base AND reserve accounts
-    alike. Mode plays no part in who's ELIGIBLE; only in how many of
-    them get used at once (see run(), below)."""
-    return [key for key, info in AGENT_CAPABILITIES.items() if ROLE_TAG in info.get("natural_roles", [])]
-
-
 def _select_workers(worker_count: int, key_override=None) -> list:
-    """Panel-driven hires (Part 5's key_override) always win outright —
-    the Panel already made a specific, informed choice. Otherwise, rank
-    the FULL eligible pool (base + reserve together) by today's live
-    usage and take the `worker_count` least-used accounts. This is the
-    fairness rotation: a reserve account with less usage than a base
-    account gets picked ahead of it on a totally ordinary Simple-mode
-    run — it's not gated behind Expert/Beast, only the COUNT is."""
-    if key_override:
-        return key_override if isinstance(key_override, list) else [key_override]
-    pool = _eligible_pool()
-    if not pool:
-        raise RuntimeError("code_writers: no accounts tagged 'implementer' in AGENT_CAPABILITIES.")
-    snapshot = get_quota_snapshot()
-    ranked = sorted(pool, key=lambda k: (snapshot.get(k) or {}).get("pct") or 0.0)
-    return ranked[:worker_count]
+    """Thin wrapper over eo/worker_pool.py's shared, role_tag-parameterized
+    selection (Part 6 §6.2 extraction). Byte-for-byte the same fairness
+    rotation this module always had — _eligible_pool()/_select_workers()
+    used to be defined here directly; they now live in eo/worker_pool.py
+    so agents/content_adapter_pool.py can reuse the exact same logic
+    instead of a copy-pasted second implementation. Kept as a local
+    wrapper (rather than rewriting every call site below to import
+    _select_workers_for_role directly) so this file's own run() doesn't
+    need to change at all."""
+    return _select_workers_for_role(ROLE_TAG, worker_count, key_override)
 
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
 for the module described below. Follow the spec exactly. Include basic input validation.

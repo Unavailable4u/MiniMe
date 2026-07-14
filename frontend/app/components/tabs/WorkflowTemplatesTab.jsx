@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useSession } from "../../context/SessionContext";
+import { useSession, authHeaders } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
 import RolePickerOverlay from "../RolePickerOverlay";
 import { Trash2, Plus, Play, X } from "lucide-react";
@@ -26,7 +26,6 @@ import { Trash2, Plus, Play, X } from "lucide-react";
 // reachable.
 export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles }) {
   const { API_URL } = useSession();
-  const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
 
   const [templates, setTemplates] = useState(null);
   const [error, setError] = useState(null);
@@ -37,7 +36,7 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
     setError(null);
     try {
       const res = await fetch(`${API_URL}/api/workflow-templates`, {
-        headers: API_KEY ? { "x-api-key": API_KEY } : {},
+        headers: await authHeaders(),
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       setTemplates(await res.json());
@@ -69,7 +68,7 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
   async function deleteTemplate(templateId) {
     const res = await fetch(`${API_URL}/api/workflow-templates/${templateId}`, {
       method: "DELETE",
-      headers: API_KEY ? { "x-api-key": API_KEY } : {},
+      headers: await authHeaders(),
     });
     if (res.ok) setTemplates((prev) => (prev || []).filter((t) => t.template_id !== templateId));
   }
@@ -77,10 +76,7 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
   async function saveTemplate(payload) {
     const res = await fetch(`${API_URL}/api/workflow-templates`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(API_KEY ? { "x-api-key": API_KEY } : {}),
-      },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -118,7 +114,6 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
           onSave={saveTemplate}
           onCancel={() => { setShowBuilder(false); setBuilderInitialRoles([]); }}
           apiUrl={API_URL}
-          apiKey={API_KEY}
           initialRoles={builderInitialRoles}
         />
       )}
@@ -139,14 +134,14 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
 
       <div className="space-y-2">
         {(templates || []).map((t) => (
-          <TemplateCard key={t.template_id} template={t} apiUrl={API_URL} apiKey={API_KEY} onDelete={deleteTemplate} onOpenChat={onOpenChat} />
+          <TemplateCard key={t.template_id} template={t} apiUrl={API_URL} onDelete={deleteTemplate} onOpenChat={onOpenChat} />
         ))}
       </div>
     </div>
   );
 }
 
-function TemplateBuilder({ onSave, onCancel, apiUrl, apiKey, initialRoles }) {
+function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [roles, setRoles] = useState(() => initialRoles || []);
@@ -212,7 +207,6 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, apiKey, initialRoles }) {
           that's actually selected. */}
       <RolePickerOverlay
         apiUrl={apiUrl}
-        apiKey={apiKey}
         roles={roles}
         onRolesChange={setRoles}
         approvalRoles={approvalRoles}
@@ -248,7 +242,7 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, apiKey, initialRoles }) {
   );
 }
 
-function TemplateCard({ template, apiUrl, apiKey, onDelete, onOpenChat }) {
+function TemplateCard({ template, apiUrl, onDelete, onOpenChat }) {
   // NEW — running/result now live in SessionContext's `templateRuns`,
   // keyed by template_id, instead of local useState here. AppShell
   // fully unmounts this component whenever the person switches tabs
