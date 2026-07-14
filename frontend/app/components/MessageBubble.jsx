@@ -100,7 +100,53 @@ function renderExtractionTable(result) {
   return lines.join("\n");
 }
 
-function answerTextOf(result) {
+// Part 6 §6.4 — content_calendar_builder's structured
+// {date, platform, content_ref} row list (agents/exporter.py's
+// export_content_calendar() input shape, unchanged here). Rendered as
+// the same date/platform/content markdown table exporter.py's own
+// _write_calendar_md() writer produces, so the in-chat preview and the
+// downloadable .md export always show identical column order/labels —
+// deliberately NOT reusing renderExtractionTable's headers (papers has
+// its own Title/Year/field shape; this is a different structured list).
+function isCalendarEntryList(result) {
+  return (
+    Array.isArray(result) &&
+    result.length > 0 &&
+    result.every((r) => r && typeof r === "object" && !Array.isArray(r) &&
+      ("date" in r || "platform" in r || "content_ref" in r))
+  );
+}
+
+function renderContentCalendar(entries) {
+  if (entries.length === 0) return "_(no calendar entries)_";
+  const esc = (v) => {
+    const s = String(v ?? "").trim();
+    return s ? s.replaceAll("|", "\\|") : "—";
+  };
+  const lines = [
+    "| Date | Platform | Content |",
+    "|------|----------|---------|",
+  ];
+  for (const row of entries) {
+    lines.push(`| ${esc(row.date)} | ${esc(row.platform)} | ${esc(row.content_ref)} |`);
+  }
+  return lines.join("\n");
+}
+
+// Part 6 §6.2/§6.7 — content_adapter_pool's {platform: content} fan-out
+// (agents/content_adapter_pool.py). Gated on role, not shape alone:
+// a flat map of platform -> string is structurally indistinguishable
+// from looksLikeModuleMap()'s {module: code} shape below, so without
+// checking which role actually produced it, a set of platform variants
+// would get mistakenly rendered as source-code blocks.
+function isPlatformContentMap(result, role) {
+  if (role !== "content_adapter_pool") return false;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+  const values = Object.values(result);
+  return values.length > 0 && values.every((v) => typeof v === "string");
+}
+
+function answerTextOf(result, role) {
   if (result == null) return "";
   if (typeof result === "string") return result;
   if (typeof result !== "object") return String(result);
@@ -142,6 +188,28 @@ function answerTextOf(result) {
     return renderExtractionTable(result);
   }
 
+  if (isCalendarEntryList(result)) {
+    // Part 6 §6.4 — checked before looksLikeModuleMap below since a
+    // calendar row list is an array (Object.values on it would return
+    // its row objects, which happen to fail looksLikeModuleMap's check
+    // anyway — but being explicit here keeps this from ever depending
+    // on that incidental fact).
+    return renderContentCalendar(result);
+  }
+
+  if (isPlatformContentMap(result, role)) {
+    // Part 6 §6.2 — handled as JSX (PlatformVariantCards) at the
+    // AgentTraceDisclosure call site below, not here: answerTextOf only
+    // ever returns markdown text, and a per-platform card grid needs
+    // real layout, not a markdown string. This branch exists so any
+    // OTHER caller of answerTextOf (e.g. a future plain-text export)
+    // still gets a readable fallback instead of being mistaken for code
+    // modules by looksLikeModuleMap() just below.
+    return Object.entries(result)
+      .map(([platform, content]) => `**${platform.replaceAll("_", " ")}**\n\n${content}`)
+      .join("\n\n---\n\n");
+  }
+
   if (looksLikeModuleMap(result)) {
     // agents/code_writers.py ("implementer") / agents/test_writer.py
     // ("test_writer") flat {module: code} shape, including the
@@ -164,6 +232,41 @@ function answerTextOf(result) {
   } catch {
     return String(result);
   }
+}
+
+// Part 6 §6.2/§6.7 — one card per platform variant instead of joined
+// markdown text: these are N independent, unrelated outputs from one
+// brief (Part 6 §6.2's fan-out), so concatenating them into a single
+// markdown blob makes it hard to tell where one platform's copy ends
+// and the next begins. Ships as plain stacked/grid cards, no carousel or
+// tabs — same "build a comparison view only if scanning plain text
+// proves genuinely hard" discipline Part 6 §6.7 calls for; a labeled
+// grid is already enough to scan side by side.
+const PLATFORM_LABELS = {
+  twitter: "Twitter / X",
+  linkedin: "LinkedIn",
+  instagram_caption: "Instagram Caption",
+  press_release: "Press Release",
+};
+
+function PlatformVariantCards({ data }) {
+  const platforms = Object.keys(data || {});
+  if (platforms.length === 0) return <Markdown>{"_(no platform variants)_"}</Markdown>;
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      {platforms.map((platform) => (
+        <div
+          key={platform}
+          className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-2.5 space-y-1.5"
+        >
+          <div className="text-[11px] font-medium text-[var(--neutral-400)] uppercase tracking-wide">
+            {PLATFORM_LABELS[platform] || platform.replaceAll("_", " ")}
+          </div>
+          <Markdown>{String(data[platform] ?? "")}</Markdown>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function ResultBody({ data }) {
@@ -221,7 +324,8 @@ function ResultBody({ data }) {
     const fallbackText = answerTextOf(
       data.result?.output && data.result?.final_role
         ? data.result.output[data.result.final_role]
-        : null
+        : null,
+      data.result?.final_role
     );
     return fallbackText ? (
       <Markdown>{fallbackText}</Markdown>
@@ -269,7 +373,11 @@ function AgentTraceDisclosure({ output, finalRole }) {
                 {role}
                 {role === finalRole ? " · final" : ""}
               </div>
-              <Markdown>{answerTextOf(output[role])}</Markdown>
+              {isPlatformContentMap(output[role], role) ? (
+                <PlatformVariantCards data={output[role]} />
+              ) : (
+                <Markdown>{answerTextOf(output[role], role)}</Markdown>
+              )}
             </div>
           ))}
         </div>

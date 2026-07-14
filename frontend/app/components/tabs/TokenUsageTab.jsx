@@ -1,7 +1,7 @@
 "use client";
 import { useMemo, useState, useEffect } from "react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
-import { useSession } from "../../context/SessionContext";
+import { useSession, authHeaders } from "../../context/SessionContext";
 
 const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
 
@@ -29,13 +29,6 @@ const TOOLTIP_STYLE = {
 
 const DAY_RANGES = [7, 14, 30];
 
-// Reads NEXT_PUBLIC_API_KEY if you've set one for the frontend to send as
-// x-api-key -- matches server.py's require_auth() header check. If your
-// SessionContext.jsx already attaches this header some other way (e.g. a
-// value read from context instead of env), swap this constant for that
-// instead; this is just the simplest thing that matches server.py as
-// written.
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
 
 function UsageHistoryPanel({ apiUrl }) {
   const [days, setDays] = useState(7);
@@ -47,9 +40,9 @@ function UsageHistoryPanel({ apiUrl }) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch(`${apiUrl}/api/usage/history?days=${days}`, {
-      headers: API_KEY ? { "x-api-key": API_KEY } : {},
-    })
+    authHeaders().then((headers) =>
+      fetch(`${apiUrl}/api/usage/history?days=${days}`, { headers })
+    )
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.json();
@@ -105,8 +98,7 @@ function UsageHistoryPanel({ apiUrl }) {
       {error && (
         <p className="text-xs text-rose-400">
           Couldn't load usage history: {error}. Check that <code className="font-mono">GET /api/usage/history</code> is
-          reachable and, if <code className="font-mono">API_AUTH_SECRET</code> is set on the backend, that{" "}
-          <code className="font-mono">NEXT_PUBLIC_API_KEY</code> is set to match on the frontend.
+          reachable and that you're signed in with a valid session.
         </p>
       )}
       {!loading && !error && providerNames.length === 0 && (
@@ -178,9 +170,9 @@ function ProjectSectionUsagePanel({ apiUrl }) {
     const params = new URLSearchParams({ days: String(days) });
     if (domain) params.set("domain", domain);
     if (workspaceId) params.set("workspace_id", workspaceId);
-    fetch(`${apiUrl}/api/usage/history?${params.toString()}`, {
-      headers: API_KEY ? { "x-api-key": API_KEY } : {},
-    })
+    authHeaders().then((headers) =>
+      fetch(`${apiUrl}/api/usage/history?${params.toString()}`, { headers })
+    )
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.json();

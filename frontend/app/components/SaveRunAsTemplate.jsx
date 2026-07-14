@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { Bookmark, Check, X } from "lucide-react";
+import { authHeaders } from "../context/SessionContext";
 
 // Part 2 §2.3 — the "save from a finished run" write path. A run's own
 // `execution_order` (already returned by the Panel/Inspector's
@@ -21,8 +22,6 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState(null);
 
-  const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
-
   if (!roles || roles.length === 0) return null;
 
   async function save() {
@@ -35,10 +34,7 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
     try {
       const res = await fetch(`${apiUrl}/api/workflow-templates`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(API_KEY ? { "x-api-key": API_KEY } : {}),
-        },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim(),

@@ -9,11 +9,15 @@ import RoleLibraryTab from "./tabs/RoleLibraryTab";
 import WorkflowTemplatesTab from "./tabs/WorkflowTemplatesTab";
 import NotebooksTab from "./tabs/NotebooksTab";   // NEW — §4.7: dedicated Notebooks section
 import ResearchTab from "./tabs/ResearchTab";     // NEW — Part 3 §3.9: dedicated Research section
+import TasksTab from "./tabs/TasksTab";           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
+import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
+import NotificationBell from "./NotificationBell";   // NEW — Part 8.9: cross-chat notification inbox
 
 const TABS = [
   { id: "chat", label: "Chat", render: ChatTab },
   { id: "notebooks", label: "Notebooks", render: NotebooksTab },   // NEW — §4.7
   { id: "research", label: "Research", render: ResearchTab },     // NEW — Part 3 §3.9
+  { id: "tasks", label: "Tasks", render: TasksTab },               // NEW — Part 7 §7.2
   { id: "roles", label: "Role Library", render: RoleLibraryTab },
   { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
@@ -88,6 +92,10 @@ function AppShellBody() {
             </button>
           ))}
         </nav>
+        <div className="ml-auto flex items-center gap-3">
+          <NotificationBell onOpenChat={openChat} />
+          <AccountMenu />
+        </div>
       </header>
       <div className="flex flex-1 min-h-0">
         {activeTab === "chat" && (

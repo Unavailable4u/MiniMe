@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { useSession } from "../../context/SessionContext";
+import { useSession, authHeaders } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
 import { Pencil, Check, X, RotateCcw, ListChecks, Copy, LayoutTemplate } from "lucide-react";
 
@@ -159,13 +159,11 @@ export default function RoleLibraryTab({ onStartTemplate }) {
   const [selected, setSelected] = useState([]); // array (not Set) so selection order survives into "use in new template"
   const [copyFeedback, setCopyFeedback] = useState(false);
 
-  const API_KEY = process.env.NEXT_PUBLIC_API_KEY || null;
-
   async function load() {
     setError(null);
     try {
       const res = await fetch(`${API_URL}/api/roles`, {
-        headers: API_KEY ? { "x-api-key": API_KEY } : {},
+        headers: await authHeaders(),
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       setRoles(await res.json());
@@ -182,10 +180,7 @@ export default function RoleLibraryTab({ onStartTemplate }) {
   async function saveRole(role, brief) {
     const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(role)}`, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        ...(API_KEY ? { "x-api-key": API_KEY } : {}),
-      },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ brief }),
     });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);

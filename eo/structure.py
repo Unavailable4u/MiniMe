@@ -29,9 +29,29 @@ TIER_TO_PATH = {v: k for k, v in PATH_TO_TIER.items()}
 
 STRUCTURE_TEMPLATES = {
     "coding": [
-        "idea_planner", "prompt_writer", "implementer", "test_writer",
+        "idea_planner", "prompt_writer",
+        # Part 7 §7.3 — deliberately positioned right after prompt_writer
+        # and before implementer: it only needs task_text (or, via the
+        # LEGACY_BUS_KEY_MAP bridge, handoff_packager's PRD content if
+        # this run started from a Plan→Build handoff), not module_specs,
+        # and its output is meant to be cached once and read by later
+        # cycles rather than re-derived every cycle the way idea_planner
+        # re-runs. See eo/registry.py's ROLE_PROMPTS_SEED entry for why
+        # this stays a generic_worker role (structured JSON via a strict
+        # fenced ```json brief, same convention as "note_taker" below)
+        # instead of a REAL_ACTION_ROLES module like extraction_table_builder.
+        "integration_flagger",
+        "implementer", "test_writer",
         "sandbox_tester", "verifier", "fixer", "security_reviewer",
-        "file_manager", "documentation_writer", "changelog_writer",
+        "file_manager",
+        # Part 7 §7.4 — deliberately after file_manager: it needs a real
+        # on-disk file tree to inspect (see agents/deploy_config_writer.py's
+        # own docstring for why this is a REAL_ACTION_ROLES module, not a
+        # generic_worker role, despite also never touching disk itself).
+        # deploy_agent.py is NOT listed here — it's a UI-button action,
+        # not a Panel-hireable role (Part 7 §7.6).
+        "deploy_config_writer",
+        "documentation_writer", "changelog_writer",
         "final_qa", "report_writer", "gatekeeper",
     ],
     "creative_writing": [
@@ -132,6 +152,27 @@ STRUCTURE_TEMPLATES = {
         "architecture_diagrammer", "schema_diagrammer", "api_contract_writer",
         "devils_advocate", "feasibility_estimator", "handoff_packager",
     ],
+    # Part 6 §6.1 — menu, not a fixed pipeline, same as every entry above.
+    # Registry classification:
+    #   REAL_ACTION_ROLES: content_adapter_pool (§6.2 — real, self-
+    #     contained parallel fan-out work, same category as
+    #     code_writers/reviewer/fixer_pool)
+    #   generic_worker (reasoning-with-structured-input, no dedicated
+    #     module): brand_voice_checker, content_calendar_builder,
+    #     seo_structure_auditor, outreach_categorizer — each reads
+    #     workspace_facts/the handoff package the same way any
+    #     multi-stage generic_worker role reads input_keys.
+    # content_adapter_pool leads deliberately: everything else in this
+    # domain (brand-voice check, calendar sequencing, structure audit)
+    # reads ITS output via input_keys, so nothing downstream has
+    # anything to read until it's run first — the same "real data has to
+    # exist before anything downstream can reason about it" placement
+    # research's academic_search and data_analysis's dataset_analyst
+    # already use for the same reason.
+    "growth": [
+        "content_adapter_pool", "brand_voice_checker", "content_calendar_builder",
+        "seo_structure_auditor", "outreach_categorizer", "writer", "editor",
+    ],
 }
 
 
@@ -155,6 +196,16 @@ def _rough_domain_guess(task_text: str) -> str | None:
         "spread of reviews", "app review",
     )):
         return "simulate"
+    # Checked before "coding" deliberately, same reasoning as "simulate"
+    # just above: "launch" and "campaign" could otherwise false-positive
+    # into a coding read on a phrase like "launch the app" if checked
+    # after coding's broad "app" keyword. Growth's own phrases here are
+    # specific enough that this costs nothing on a genuine coding request.
+    if any(kw in text for kw in (
+        "launch", "marketing", "social post", "campaign",
+        "content calendar", "outreach",
+    )):
+        return "growth"
     if any(kw in text for kw in (
         "code", "bug", "function", "script", "app", "refactor", "api",
         "test", "debug", "repo", "codebase",

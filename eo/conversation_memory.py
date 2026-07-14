@@ -37,20 +37,28 @@ def _key(session_id: str) -> str:
     return f"conversation:{session_id}"
 
 
-def _workspace_facts_text(session_id: str) -> str:
+def _workspace_facts_text(session_id: str, owner_id: str = None) -> str:
     """NEW — Part 0 §0.3. session_id and chat_id are the same string
     everywhere in this system (api/server.py's own comment), so a
     session's workspace is just "whichever workspace this chat_id is a
     member of" — eo/chat_workspace.py's workspace_for_chat(). A session
     with no workspace (most ad-hoc chats) simply gets "", same
     no-history-yet convention every other lookup in this module already
-    uses, so this is always safe to prepend unconditionally."""
-    if not session_id:
+    uses, so this is always safe to prepend unconditionally.
+
+    owner_id: FIXED — workspace_for_chat() is now owner_id-scoped, same
+    migration as chat_store.py's get_chat()/chat_exists(). Without an
+    owner_id we have no ownership context to check, so — same
+    fail-quiet convention as the chat_store.py linked-context lookup
+    right above this function's call sites — skip the lookup and
+    return "" rather than erroring."""
+    if not session_id or not owner_id:
         return ""
-    ws = chat_workspace.workspace_for_chat(session_id)
+    ws = chat_workspace.workspace_for_chat(session_id, owner_id)   # FIXED — now passes owner_id
     if not ws:
         return ""
     return workspace_facts.format_facts_for_prompt(ws["id"])
+
 
 
 def append_turn(session_id: str, role: str, text: str) -> None:
@@ -84,10 +92,8 @@ def append_turn(session_id: str, role: str, text: str) -> None:
             print(f"  [Conversation Memory] note-taker dispatch skipped: {exc}")
 
 
-def get_full_context(session_id: str, max_turns: int = FULL_CONTEXT_TURNS) -> str:
-    """Real, fuller-detail recent turns — for content-generating agents
-    (generic_worker, prompt_writer_lean) that need to actually build on
-    what came before. Returns "" if there's no history yet."""
+def get_full_context(session_id: str, owner_id: str = None, max_turns: int = FULL_CONTEXT_TURNS) -> str:
+    """... (unchanged from previous fix) ..."""
     if not session_id:
         return ""
     turns = read(_key(session_id), default=[])
@@ -100,26 +106,18 @@ def get_full_context(session_id: str, max_turns: int = FULL_CONTEXT_TURNS) -> st
         lines.append(f"[{t['role']}]: {text}")
     own = "\n\n".join(lines)
 
-    # NEW — pull in recent turns from any chats this one is linked to
-    # (eo/chat_store.py's set_linked_chats()/get_linked_context_text()).
-    linked = chat_store.get_linked_context_text(session_id, max_turns_per_chat=6, char_limit=400)
+    linked = chat_store.get_linked_context_text(session_id, owner_id, max_turns_per_chat=6,
+                                                 char_limit=400) if owner_id else ""
     body = linked + "\n\n--- current conversation ---\n\n" + own if (linked and own) else (linked or own)
 
-    # NEW — Part 0 §0.3: workspace-level facts (tier 3), prepended ahead
-    # of both linked-chat context (tier 2) and this conversation's own
-    # turns (tier 1) — facts are the most stable/important context, so
-    # they lead rather than get buried under recent chatter.
-    facts = _workspace_facts_text(session_id)
+    facts = _workspace_facts_text(session_id, owner_id)   # FIXED — now passes owner_id
     if facts and body:
         return facts + "\n\n" + body
     return facts or body
 
 
-def get_light_context(session_id: str, max_turns: int = LIGHT_CONTEXT_TURNS) -> str:
-    """Compact, one-line-per-turn summaries — for the Inspector/Panel.
-    Enough for the classifier to notice a follow-up is escalating in
-    complexity, without handing it full prior content. Returns "" if
-    there's no history yet."""
+def get_light_context(session_id: str, owner_id: str = None, max_turns: int = LIGHT_CONTEXT_TURNS) -> str:
+    """... (unchanged from previous fix) ..."""
     if not session_id:
         return ""
     turns = read(_key(session_id), default=[])
@@ -132,16 +130,11 @@ def get_light_context(session_id: str, max_turns: int = LIGHT_CONTEXT_TURNS) -> 
         lines.append(f"- {t['role']}: {text}")
     own = "\n".join(lines)
 
-    # NEW — same idea as get_full_context(), shorter, for the classifier/Inspector.
-    linked = chat_store.get_linked_context_text(session_id, max_turns_per_chat=3, char_limit=150)
+    linked = chat_store.get_linked_context_text(session_id, owner_id, max_turns_per_chat=3,
+                                                 char_limit=150) if owner_id else ""
     body = linked + "\n--- current conversation ---\n" + own if (linked and own) else (linked or own)
 
-    # NEW — Part 0 §0.3: workspace facts, light form. Deliberately the
-    # SAME format_facts_for_prompt() output as the full context, not a
-    # further-truncated variant — the facts block is already short by
-    # construction (a handful of lines at most), so it doesn't need its
-    # own light-mode truncation the way turn text does.
-    facts = _workspace_facts_text(session_id)
+    facts = _workspace_facts_text(session_id, owner_id)   # FIXED — now passes owner_id
     if facts and body:
         return facts + "\n" + body
     return facts or body

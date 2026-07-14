@@ -1,9 +1,29 @@
 "use client";
 import { createContext, useContext, useState, useRef, useEffect } from "react";
 import Pusher from "pusher-js";
+import { supabase } from "../lib/supabaseClient";
+import { useAuth } from "./AuthContext";   // NEW — Part 8.9: notification bell's per-user Pusher channel
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — persists which chat to reopen on refresh
+
+// Part 8.2/8.9: replaces the old static `x-api-key` header everywhere in
+// this file. The backend's require_auth() (api/server.py) now verifies a
+// real per-user Supabase JWT via `Authorization: Bearer <token>`, not a
+// shared secret — every fetch() call below was updated to call this
+// instead of sending process.env.NEXT_PUBLIC_API_KEY. Pulls the current
+// access_token fresh on every call rather than caching it, since
+// supabase-js's client already keeps the in-memory session current
+// (including silent refresh) — reading it live here means a call made
+// right after a token refresh never races against a stale cached value.
+export async function authHeaders(opts = {}) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  const headers = {};
+  if (opts.json) headers["Content-Type"] = "application/json";
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
 
 const SessionContext = createContext(null);
 
@@ -82,6 +102,8 @@ export function SessionProvider({ children }) {
   const [structurePlan, setStructurePlan] = useState(null);
   const [mode, setMode] = useState("auto");
   const [pusherConnected, setPusherConnected] = useState(false); // NEW — Settings tab diagnostic, §6
+  const [notifications, setNotifications] = useState([]);   // NEW — Part 8.9: newest first
+  const [unreadCount, setUnreadCount] = useState(0);          // NEW — Part 8.9
   const [activeMessageIndex, setActiveMessageIndex] = useState(null); // NEW — Part 21: shared scroll-sync index between Chat and Working panels
   // NEW — Part 2 §2.5: gates whether sendTask() calls /api/task directly
   // (today's exact one-click behavior, default) or /api/task/preview
@@ -132,9 +154,20 @@ export function SessionProvider({ children }) {
   useEffect(() => {
     (async () => {
       const res = await fetch(`${API_URL}/api/chats`, {
-        headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        headers: await authHeaders(),
       });
-      const list = await res.json();
+      const body = await res.json();
+      // Guard against a non-array response (e.g. an error body like
+      // {"detail": "..."} from require_auth()/a 500) ever reaching
+      // ChatSidebar.jsx's chats.filter() — fail visibly in the console
+      // instead of crashing the whole app on a backend error.
+      if (!res.ok || !Array.isArray(body)) {
+        console.error("Failed to load chats:", res.status, body);
+        setChats([]);
+        setChatsLoading(false);
+        return;
+      }
+      const list = body;
       setChats(list);
       fetchBatches();   // NEW — §4: don't block chat restore on this, batches are additive UI
       fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
@@ -339,6 +372,44 @@ export function SessionProvider({ children }) {
     };
   }, [sessionId]);
 
+  // NEW — Part 8.4/8.9: second Pusher subscription, on the user's own
+  // channel rather than the current chat's. Deliberately a SEPARATE
+  // effect/subscription from the session one above — different channel
+  // scheme, different lifecycle (this one only remounts when the signed-
+  // in user changes, not on every switchChat()), same "add a scheme
+  // alongside, don't touch the existing one" instruction from §8.4.
+  const { user } = useAuth();
+  useEffect(() => {
+    if (!user?.id) return;
+    const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+    const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
+    if (!key || !cluster) return; // SettingsTab's pusherConnected diagnostic already covers the "not configured" case
+
+    const pusher = new Pusher(key, { cluster });
+    const channelName = `user-${user.id.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
+    const channel = pusher.subscribe(channelName);
+    channel.bind("notification", (data) => {
+      const note = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: data?.payload?.kind,
+        payload: data?.payload,
+        timestamp: data?.timestamp || new Date().toISOString(),
+        read: false,
+      };
+      setNotifications((prev) => [note, ...prev].slice(0, 50)); // cap, same reasoning usageHistory's 300-cap follows
+      setUnreadCount((prev) => prev + 1);
+    });
+    return () => {
+      pusher.unsubscribe(channelName);
+      pusher.disconnect();
+    };
+  }, [user?.id]);
+
+  function markNotificationsRead() {
+    setUnreadCount(0);
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  }
+
   // --- NEW: chat list + switching / creating / renaming / deleting /
   // linking chats. sessionId and chat_id are the same string everywhere
   // (see eo/chat_store.py's docstring), so these just move sessionId
@@ -357,13 +428,13 @@ async function runTemplate(templateId, taskText) {
   let chatId;
   try {
     const existing = await fetch(`${API_URL}/api/workflow-templates/${templateId}/chat`, {
-      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders(),
     }).then((r) => r.json());
     chatId = existing?.id;
     if (!chatId) {
       const res = await fetch(`${API_URL}/api/chats`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ title: taskText.trim().slice(0, 60) || "Template run", template_id: templateId }),
       });
       chatId = (await res.json()).id;
@@ -385,7 +456,7 @@ async function runTemplate(templateId, taskText) {
   try {
     const res = await fetch(`${API_URL}/api/task/from-template`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ template_id: templateId, task_text: taskText, session_id: chatId }),
     });
     const data = await res.json();
@@ -401,7 +472,7 @@ async function runTemplate(templateId, taskText) {
 
   async function refreshChatList() {
     const res = await fetch(`${API_URL}/api/chats`, {
-      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders(),
     });
     setChats(await res.json());
   }
@@ -416,7 +487,7 @@ async function runTemplate(templateId, taskText) {
   async function createBatch(name, memberChatIds) {
     await fetch(`${API_URL}/api/batches`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ name, member_chat_ids: memberChatIds }),
     });
     await fetchBatches();
@@ -428,14 +499,14 @@ async function runTemplate(templateId, taskText) {
   async function estimateBatch(chatIds) {
     const res = await fetch(`${API_URL}/api/batches/estimate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ chat_ids: chatIds }),
     });
     return res.json();
   }
   async function fetchBatches() {
     const res = await fetch(`${API_URL}/api/batches`, {
-      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders(),
     });
     setBatches(await res.json());
   }
@@ -446,7 +517,7 @@ async function runTemplate(templateId, taskText) {
 
 async function fetchWorkspaces() {
   const res = await fetch(`${API_URL}/api/workspaces`, {
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   setWorkspaces(await res.json());
 }
@@ -454,7 +525,7 @@ async function fetchWorkspaces() {
 async function createWorkspace(name) {
   await fetch(`${API_URL}/api/workspaces`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ name }),
   });
   await fetchWorkspaces();
@@ -463,7 +534,7 @@ async function createWorkspace(name) {
 async function renameWorkspace(wsId, name) {
   await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ name }),
   });
   await fetchWorkspaces();
@@ -472,7 +543,7 @@ async function renameWorkspace(wsId, name) {
 async function addWorkspaceChat(wsId, chatId) {
   await fetch(`${API_URL}/api/workspaces/${wsId}/chats`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ chat_id: chatId }),
   });
   await fetchWorkspaces();
@@ -482,7 +553,7 @@ async function addWorkspaceChat(wsId, chatId) {
 async function removeWorkspaceChat(wsId, chatId, deleteChat = false) {
   await fetch(
     `${API_URL}/api/workspaces/${wsId}/chats/${chatId}?delete_chat=${deleteChat}`,
-    { method: "DELETE", headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY } }
+    { method: "DELETE", headers: await authHeaders() }
   );
   await fetchWorkspaces();
   if (deleteChat && chatId === sessionId) {
@@ -500,10 +571,185 @@ async function removeWorkspaceChat(wsId, chatId, deleteChat = false) {
 async function deleteWorkspace(wsId) {
   await fetch(`${API_URL}/api/workspaces/${wsId}`, {
     method: "DELETE",
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   await fetchWorkspaces();
   await refreshChatList();
+}
+
+// --- NEW — Part 8.9: workspace membership, ownership transitions, voting,
+// and attribution. Mirrors eo/chat_workspace.py's role model 1:1 (viewer <
+// editor < moderator < partner <= owner). Unlike the workspace CRUD
+// functions above, these throw on a non-2xx response instead of silently
+// no-op'ing: permission edges here are common and expected, and the
+// caller (the modal) needs the server's actual detail message to show.
+// Members/votes are intentionally NOT stored in `workspaces` state —
+// fetched fresh by whichever modal is open, same ephemeral-per-modal
+// treatment as estimateBatch() above.
+
+// NEW — Part 8.7: per-workspace backup/restore, using the existing
+// GET/POST /api/workspaces/{id}/export|import routes. Same throw-on-
+// non-2xx convention as the membership functions below, since
+// ManageWorkspaceModal needs a real error message to show on failure.
+
+async function exportWorkspace(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/export`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Export failed (${res.status})`);
+  }
+  return res.json(); // the manifest itself — caller decides what to do with it (e.g. trigger a download)
+}
+
+async function importWorkspace(wsId, manifest) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/import`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ manifest }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Import failed (${res.status})`);
+  }
+  await fetchWorkspaces();
+  await refreshChatList();
+  return res.json();
+}
+
+async function fetchWorkspaceMembers(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to load members (${res.status})`);
+  }
+  return res.json();
+}
+
+async function addWorkspaceMember(wsId, email, role = "viewer") {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ email, role }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to add member (${res.status})`);
+  }
+  return res.json();
+}
+
+async function updateWorkspaceMemberRole(wsId, targetUserId, role) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
+    method: "PATCH",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to update role (${res.status})`);
+  }
+  return res.json();
+}
+
+async function removeWorkspaceMember(wsId, targetUserId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to remove member (${res.status})`);
+  }
+  return res.json();
+}
+
+async function leaveWorkspaceMembership(wsId, successorId = null) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/leave`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ successor_id: successorId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to leave project (${res.status})`);
+  }
+  await fetchWorkspaces();
+  await refreshChatList();
+}
+
+async function forceRemoveOwner(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/owner/remove`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to remove owner (${res.status})`);
+  }
+  const updated = await res.json();
+  await fetchWorkspaces();
+  return updated;
+}
+
+async function fetchWorkspaceVotes(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to load vote status (${res.status})`);
+  }
+  return res.json();
+}
+
+async function castWorkspaceVote(wsId, voteTarget = null) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ vote_target: voteTarget }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to cast vote (${res.status})`);
+  }
+  const result = await res.json();
+  await fetchWorkspaces(); // a vote may have just resolved ownership — owner_id can change
+  return result;
+}
+
+async function setWorkspaceAttribution(wsId, show) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/attribution`, {
+    method: "PATCH",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ show }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to update attribution setting (${res.status})`);
+  }
+  const updated = await res.json();
+  await fetchWorkspaces();
+  return updated;
+}
+
+async function setMemberAttributionGrant(wsId, targetUserId, canToggle) {
+  const res = await fetch(
+    `${API_URL}/api/workspaces/${wsId}/members/${targetUserId}/attribution-grant`,
+    {
+      method: "PATCH",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify({ can_toggle: canToggle }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to update attribution grant (${res.status})`);
+  }
+  return res.json();
 }
 
 // --- NEW — §4.7: Notebooks tab. A "notebook" is a workspace (§4.3), so
@@ -514,7 +760,7 @@ async function deleteWorkspace(wsId) {
 async function fetchWorkspaceNodes(wsId, nodeType) {
   const qs = nodeType ? `?node_type=${encodeURIComponent(nodeType)}` : "";
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes${qs}`, {
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
@@ -522,7 +768,7 @@ async function fetchWorkspaceNodes(wsId, nodeType) {
 
 async function fetchGraphEdges(wsId) {
   const res = await fetch(`${API_URL}/api/graph/edges?workspace_id=${encodeURIComponent(wsId)}`, {
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
@@ -536,7 +782,7 @@ async function fetchGraphEdges(wsId) {
 async function ingestClip(wsId, url) {
   const res = await fetch(`${API_URL}/api/notes/clip`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ url, workspace_id: wsId }),
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
@@ -546,7 +792,7 @@ async function ingestClip(wsId, url) {
 async function ingestVideoUrl(wsId, url) {
   const res = await fetch(`${API_URL}/api/notes/video`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ url, workspace_id: wsId }),
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
@@ -559,7 +805,7 @@ async function ingestFile(wsId, file) {
   form.append("file", file);
   const res = await fetch(`${API_URL}/api/notes/import`, {
     method: "POST",
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
     body: form,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
@@ -572,7 +818,7 @@ async function ingestVoiceFile(wsId, file) {
   form.append("file", file);
   const res = await fetch(`${API_URL}/api/notes/voice`, {
     method: "POST",
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
     body: form,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
@@ -585,7 +831,7 @@ async function ingestVoiceFile(wsId, file) {
 async function detectBacklinks(wsId) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/backlinks/detect`, {
     method: "POST",
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   return res.json();
 }
@@ -595,7 +841,7 @@ async function detectBacklinks(wsId) {
 
 async function fetchNoteCandidates(wsId) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates`, {
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
@@ -604,7 +850,7 @@ async function fetchNoteCandidates(wsId) {
 async function acceptNoteCandidate(wsId, index) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${index}/accept`, {
     method: "POST",
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
   return res.json();
 }
@@ -612,7 +858,7 @@ async function acceptNoteCandidate(wsId, index) {
 async function rejectNoteCandidate(wsId, index) {
   await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${index}`, {
     method: "DELETE",
-    headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders(),
   });
 }
 
@@ -625,7 +871,7 @@ async function rejectNoteCandidate(wsId, index) {
 async function gradeQuiz(quizText, answers) {
   const res = await fetch(`${API_URL}/api/notes/study/quiz/grade`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ quiz_text: quizText, answers }),
   });
   return res.json();
@@ -634,7 +880,7 @@ async function gradeQuiz(quizText, answers) {
 async function recordQuizAttempt(wsId, quizNodeId, quizText, answers) {
   const res = await fetch(`${API_URL}/api/notes/study/quiz/attempts`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+    headers: await authHeaders({ json: true }),
     body: JSON.stringify({ workspace_id: wsId, quiz_node_id: quizNodeId, quiz_text: quizText, answers }),
   });
   return res.json();
@@ -643,7 +889,7 @@ async function recordQuizAttempt(wsId, quizNodeId, quizText, answers) {
 async function fetchMissedQuestions(wsId, quizNodeId) {
   const res = await fetch(
     `${API_URL}/api/notes/study/quiz/missed?workspace_id=${encodeURIComponent(wsId)}&quiz_node_id=${encodeURIComponent(quizNodeId)}`,
-    { headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY } }
+    { headers: await authHeaders() }
   );
   if (!res.ok) return [];
   return res.json();
@@ -665,7 +911,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function renameBatch(batchId, name) {
     await fetch(`${API_URL}/api/batches/${batchId}/rename`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ name }),
     });
     await fetchBatches();
@@ -674,7 +920,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function unlinkBatchMembers(batchId, chatIds) {
     await fetch(`${API_URL}/api/batches/${batchId}/unlink`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ chat_ids: chatIds }),
     });
     await fetchBatches();
@@ -684,7 +930,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function deleteBatch(batchId) {
     await fetch(`${API_URL}/api/batches/${batchId}`, {
       method: "DELETE",
-      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders(),
     });
     await fetchBatches();
     await refreshChatList();
@@ -692,7 +938,7 @@ async function openScopedSubChat(wsId, taskText) {
 
   async function switchChat(chatId, { skipListReload = false } = {}) {
     const res = await fetch(`${API_URL}/api/chats/${chatId}`, {
-      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders(),
     });
     if (!res.ok) return;
     const chat = await res.json();
@@ -714,7 +960,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function createNewChat() {
     const res = await fetch(`${API_URL}/api/chats`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ title: "New Chat" }),
     });
     const chat = await res.json();
@@ -728,7 +974,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function renameChat(chatId, title) {
     await fetch(`${API_URL}/api/chats/${chatId}/rename`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ title }),
     });
     await refreshChatList();
@@ -737,7 +983,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function deleteChat(chatId) {
     await fetch(`${API_URL}/api/chats/${chatId}`, {
       method: "DELETE",
-      headers: { "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders(),
     });
     if (chatId === sessionId) {
       const remaining = chats.filter((c) => c.id !== chatId);
@@ -751,7 +997,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function linkChats(chatId, linkedChatIds) {
     await fetch(`${API_URL}/api/chats/${chatId}/links`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ linked_chat_ids: linkedChatIds }),
     });
     await refreshChatList();
@@ -764,7 +1010,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       await fetch(`${API_URL}/api/chats/${sessionId}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ message }),
       });
     } catch (err) {
@@ -781,7 +1027,7 @@ async function openScopedSubChat(wsId, taskText) {
   async function createChatSilently(title) {
     const res = await fetch(`${API_URL}/api/chats`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+      headers: await authHeaders({ json: true }),
       body: JSON.stringify({ title: title || "New Chat" }),
     });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -793,7 +1039,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       await fetch(`${API_URL}/api/chats/${chatId}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ message }),
       });
     } catch (err) {
@@ -841,7 +1087,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       const res = await fetch(`${API_URL}/api/task/from-template`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": process.env.NEXT_PUBLIC_API_KEY },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ template_id: templateId, task_text: taskText, session_id: chatId }),
       });
       const data = await res.json();
@@ -909,10 +1155,7 @@ async function openScopedSubChat(wsId, taskText) {
       try {
         const res = await fetch(`${API_URL}/api/task/preview`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
-          },
+          headers: await authHeaders({ json: true }),
           body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
         });
         const data = await res.json();
@@ -950,10 +1193,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       const res = await fetch(`${API_URL}/api/task`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
-        },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
       });
       const data = await res.json();
@@ -994,10 +1234,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       const res = await fetch(`${API_URL}/api/resume`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
-        },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ session_id: pausedRun.sessionId, ...decision }),
       });
       const data = await res.json();
@@ -1031,10 +1268,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       const res = await fetch(`${API_URL}/api/task/confirm`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
-        },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({
           task_text: taskText,
           decision,
@@ -1074,10 +1308,7 @@ async function openScopedSubChat(wsId, taskText) {
     try {
       const res = await fetch(`${API_URL}/api/projects`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_API_KEY,
-        },
+        headers: await authHeaders({ json: true }),
         body: JSON.stringify({ path, display_name: name }),
       });
       const data = await res.json();
@@ -1100,11 +1331,18 @@ async function openScopedSubChat(wsId, taskText) {
   renameBatch, unlinkBatchMembers, deleteBatch,
   workspaces, fetchWorkspaces, createWorkspace, renameWorkspace,
   addWorkspaceChat, removeWorkspaceChat, deleteWorkspace,   // NEW — §7
+  // NEW — Part 8.9: workspace membership, ownership, voting, attribution
+  fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
+  removeWorkspaceMember, leaveWorkspaceMembership, forceRemoveOwner,
+  fetchWorkspaceVotes, castWorkspaceVote,
+  setWorkspaceAttribution, setMemberAttributionGrant,
   liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
   macroLoopDecisions,
   roleRequests,
   mode, setMode,
   pusherConnected,
+  notifications, unreadCount, markNotificationsRead,   // NEW — Part 8.9
+  exportWorkspace, importWorkspace,                       // NEW — Part 8.7
   activeMessageIndex, setActiveMessageIndex,
   sendTask, registerProject,
   // NEW — Part 2 §2.5: manual role editing before dispatch

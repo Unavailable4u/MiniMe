@@ -219,4 +219,11 @@ KEYS = {
     "tier1_review_notes": "tier1_review_notes",
     "tier1_fixed_code": "tier1_fixed_code",
     "tier1_test_results": "tier1_test_results",
+    # --- Part 6 §6.2 — growth domain's content fan-out pool. Same
+    # relationship to "content_adapter_pool" that "module_specs"/
+    # "submitted_code" have to "code_writers": an upstream generic_worker
+    # role (or a task-text fallback) writes content_targets, the pool
+    # reads it and writes platform_content back.
+    "content_targets": "content_targets",
+    "platform_content": "platform_content",
 }

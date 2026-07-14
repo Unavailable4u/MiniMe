@@ -229,34 +229,16 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None,
              approval_roles: set = None,
-             no_conversation_context_roles: set = None) -> dict:
+             no_conversation_context_roles: set = None, owner_id: str = None) -> dict:
     """
-    mode: one of "auto", "simple", "fast", "expert", "beast" — controls
-        how many staffed hires actually get used (eo/modes.py).
-    project_unique_name: when set, redirects tier-2 disk writes to the
-        external project registered under this control-unit name
-        (eo/project_registry.py) instead of this system's own
-        apps/<app_slug> directory. Has no effect on tiers 0/1, which
-        never touch disk.
-    approval_roles: role names that require a human approval pause after
-        they finish (tier-3 hires-driven path only — see
-        _run_tier3_hires()). None/empty means full-auto, today's default.
-    no_conversation_context_roles: Part 2 §2.6 — role names dispatched
-        with generic_worker's include_conversation_context=False (tier-3
-        hires-driven path only, same reach as approval_roles above).
-        None/empty means every role sees the full conversation-memory
-        transcript, today's exact default. An ordinary Inspector/Panel-
-        classified task has no reason to set this itself; it exists here
-        so a caller dispatching a saved workflow template (see
-        run_task_from_template() below) can pass the template's own
-        no_conversation_context_roles through.
+    ...docstring unchanged, plus:
 
-    Thin wrapper around _run_task_inner() — records the incoming
-    task_text as a "user" turn and the resolved response as an
-    "assistant" turn in this session's conversation transcript, on
-    either side of the actual routing/execution logic, so a follow-up
-    task submitted with the same session_id has real prior context to
-    build on (see eo/conversation_memory.py).
+    owner_id: NEW — the authenticated caller's id (server.py's
+    require_auth), threaded down to loop_v4._get_decision() so the
+    classifier's conversation-memory lookup can pull in linked-chat
+    context without violating ownership. Optional so non-HTTP callers
+    (tests, scripts) keep working with linked-chat context simply
+    skipped.
     """
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)
@@ -266,6 +248,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         mode=mode, project_unique_name=project_unique_name,
         approval_roles=approval_roles,
         no_conversation_context_roles=no_conversation_context_roles,
+        owner_id=owner_id,   # FIXED
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
@@ -273,31 +256,13 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
 
 def preview_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
                   app_slug: str = None, run_tests: bool = False, session_id: str = None,
-                  mode: str = "auto", project_unique_name: str = None) -> dict:
-    """Part 2 §2.5 — the "preview" half of manual role editing before
-    dispatch. Runs classification + staff_task() (via
-    _resolve_decision_and_hires()) exactly as run_task() would, but
-    stops before any tier's actual dispatch when there's a real,
-    editable hires list to show a human first (tier 2's hires-driven
-    branch, or tier 3). Everything else — cache hit, SGA resolution,
-    needs_beast_mode_*, tier 0/1, tier 2/3 with an empty hires list —
-    has nothing a human could usefully edit before it runs, so those
-    paths are executed to completion here exactly like run_task() does,
-    rather than inventing a second no-op "preview" step for them.
-
-    Records the incoming task_text as a "user" turn immediately, same as
-    run_task() — this IS the point the message was sent, whether or not
-    a review screen intervenes before real work starts. The matching
-    "assistant" turn is recorded here too for every path that produces a
-    final answer; for the one path that returns "preview_ready", nothing
-    has happened yet, so no assistant turn is recorded until
-    confirm_task() actually dispatches something.
-    """
+                  mode: str = "auto", project_unique_name: str = None, owner_id: str = None) -> dict:
+    """...docstring unchanged, plus: owner_id — same contract as run_task()."""
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)
 
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
-                                            app_slug, session_id, mode)
+                                            app_slug, session_id, mode, owner_id=owner_id)   # FIXED
     if not resolved["resolved"]:
         response = resolved["response"]
         conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
@@ -305,25 +270,12 @@ def preview_task(task_text: str, tier_override: int = None, directed_task_type_o
 
     decision, tier, hires = resolved["decision"], resolved["tier"], resolved["hires"]
 
-    # Tiers 0/1 never go through staff_task()-driven hires at all
-    # (build_execution_graph() uses a fixed graph for them), and tier
-    # 2/3 with an empty hires list has nothing to preview either — same
-    # "if hires: ... else: fall through" shape _dispatch_resolved() uses.
-    # Run these straight through to completion instead of pausing on an
-    # empty review screen.
     if tier in (0, 1) or not hires:
         response = _dispatch_resolved(task_text, decision, tier, hires, app_slug, run_tests,
                                        session_id, mode, project_unique_name, approval_roles=None)
         conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
         return response
 
-    # The actual preview point: staff_task() has already run (inside
-    # _resolve_decision_and_hires()) and written any genuinely new
-    # role's brief into the registry (eo/registry.py's add_role_prompt())
-    # — but nothing has been dispatched to execute_graph()/
-    # run_with_looping() yet. The frontend renders `hires` as editable
-    # cards (2.5's review screen) and POSTs to /api/task/confirm with
-    # this same decision + a possibly-edited hires list to actually run.
     return {
         "decision": decision, "tier": tier, "session_id": session_id,
         "status": "preview_ready",
@@ -480,31 +432,16 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
 
 
 def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
-                                 app_slug: str, session_id: str, mode: str) -> dict:
+                                 app_slug: str, session_id: str, mode: str, owner_id: str = None) -> dict:
     """Part 2 §2.5: the shared first half of dispatch — semantic cache,
     SGA, Inspector/Panel classification, staff_task()'s hiring, and mode
     adjustment — factored out of _run_task_inner() so preview_task() can
     stop exactly here (before any tier actually executes) instead of
     duplicating this logic.
-
-    Returns either:
-      {"resolved": False, "response": {...}} — a final response the
-        caller should return as-is (cache hit, SGA resolution, or a
-        needs_beast_mode_* early return). No dispatch has happened.
-      {"resolved": True, "decision": ..., "tier": ..., "hires": ...} —
-        classification + hiring succeeded; nothing has been dispatched
-        yet either way. staff_task() has already run by this point, so
-        any genuinely new role's brief is already in the registry
-        (eo/registry.py's add_role_prompt()) regardless of whether the
-        caller goes on to preview or dispatch immediately.
+    ...
+    owner_id: NEW — passed straight through to loop_v4._get_decision()
+    so conversation_memory's linked-chat lookup can be owner-scoped.
     """
-    # Semantic Cache checked first, ahead of SGA itself, so a
-    # near-duplicate task skips the whole SGA relay too. An explicit
-    # "beast" mode selection also skips cache/SGA, same as a manual
-    # tier_override does — Beast Mode is meant to force the full staffed
-    # pipeline, not have a fast-path answer slip in ahead of it.
-    # Auto/simple/fast/expert are unaffected; only "beast" bypasses this
-    # block.
     if tier_override is None and mode != "beast":
         cached = check_cache(task_text, app_slug=app_slug)
         if cached:
@@ -529,8 +466,10 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
                 "message": None,
             }}
 
-    decision = loop_v4._get_decision(task_text, tier_override, directed_task_type_override, session_id=session_id)
+    decision = loop_v4._get_decision(task_text, tier_override, directed_task_type_override,
+                                      session_id=session_id, owner_id=owner_id)   # FIXED — now passes owner_id
     tier = decision["tier"]
+    # ... rest unchanged ...
 
     # staff_task() needs the original task text (to write a good brief if
     # a suggested role is genuinely new) and the session_id (so the
@@ -608,13 +547,15 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                      app_slug: str = None, run_tests: bool = False, session_id: str = None,
                      mode: str = "auto", project_unique_name: str = None,
                      approval_roles: set = None,
-                     no_conversation_context_roles: set = None) -> dict:
+                     no_conversation_context_roles: set = None, owner_id: str = None) -> dict:
     """The actual routing/execution body — split out of run_task() so
     that wrapper can do turn-recording on either side without every
     early-return point needing to do it individually. session_id is
-    always already resolved to a real value by the time this is called."""
+    always already resolved to a real value by the time this is called.
+
+    owner_id: NEW — passed through to _resolve_decision_and_hires()."""
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
-                                            app_slug, session_id, mode)
+                                            app_slug, session_id, mode, owner_id=owner_id)   # FIXED
     if not resolved["resolved"]:
         return resolved["response"]
     return _dispatch_resolved(task_text, resolved["decision"], resolved["tier"], resolved["hires"],

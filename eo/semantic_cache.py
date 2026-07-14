@@ -23,7 +23,12 @@ def check_cache(task_text: str, app_slug: str = None) -> dict | None:
     """Returns a cached answer if a close-enough match exists, else None.
     Scoped by app_slug when given, so a cached answer from one project
     never leaks into another (blueprint §24, risk #6)."""
-    vector = embed_text(task_text)
+    try:
+        vector = embed_text(task_text)
+    except Exception:
+        # Embedding failure (timeout, cold start, HF outage, etc.) should
+        # degrade to "cache miss," not crash the whole task pipeline.
+        return None
     index = vector_index()
     results = index.query(vector=vector, top_k=1, include_metadata=True,
                           filter=f"project = '{app_slug}'" if app_slug else "project = 'global'")
@@ -36,7 +41,11 @@ def check_cache(task_text: str, app_slug: str = None) -> dict | None:
 
 
 def write_cache(task_text: str, answer: str, app_slug: str = None) -> None:
-    vector = embed_text(task_text)
+    try:
+        vector = embed_text(task_text)
+    except Exception:
+        # Best-effort cache write; losing one write isn't worth crashing the task.
+        return
     index = vector_index()
     index.upsert(vectors=[{
         "id": f"semcache_{hash(task_text)}",

@@ -1,6 +1,7 @@
 "use client";
 import { useSession } from "../../context/SessionContext";
 import { useDensity } from "../../hooks/useDensity";
+import IntegrationsPanel from "../IntegrationsPanel";   // NEW — Part 8.5/8.9
 
 const DENSITY_OPTIONS = [
   { id: "comfortable", label: "Comfortable" },
@@ -52,6 +53,10 @@ export default function SettingsTab() {
           Registers a folder for cross-project control (tier 2 tasks can then
           target it via <code>project_unique_name</code>).
         </p>
+      </section>
+      <section>
+        <h2 className="text-[var(--neutral-400)] font-medium mb-2">Integrations</h2>
+        <IntegrationsPanel />
       </section>
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Connection</h2>

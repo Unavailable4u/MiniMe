@@ -45,7 +45,7 @@ def embed_text(text: str) -> list:
         url,
         headers={"Authorization": f"Bearer {api_key}"},
         json={"inputs": text, "options": {"wait_for_model": True}},
-        timeout=30,
+        timeout=(10, 90),  # (connect, read) — wait_for_model can mean a real cold-start wait
     )
     response.raise_for_status()
     embedding = response.json()

@@ -253,7 +253,7 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
         results[member_role] = result
         duration_ms = int((_time.monotonic() - started_at[member_role]) * 1000)
         emit_event("agent_done", session_id=session_id, agent=f"generic:{member_role}", path=path,
-                    payload={"summary": _summarize(result), "duration_ms": duration_ms})
+                    payload={"summary": _summarize(result, role=member_role), "duration_ms": duration_ms})
         votes.append(result.get("next_destination") if isinstance(result, dict) else None)
 
     merged_next = _merge_group_next_destinations(votes)
@@ -264,13 +264,22 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     return next_idx, reason
 
 
-def _summarize(result, limit: int = 9000) -> str:
+def _summarize(result, role: str = None, limit: int = 9000) -> str:
     """Best-effort human-readable summary for an agent_done payload.
     Results vary in shape (str, dict, ...) across the agent roster —
     eo/result_render.py's render_agent_result() knows every shape
     (generic_worker's {"text"}, reviewer's {"issues"}, fixer_pool's
     {"fixed_code"}, code_writers'/test_writer's flat {module: code} map,
+    content_adapter_pool's flat {platform: content} map,
+    content_calendar_builder's {date, platform, content_ref} row list,
     ...) and turns each into markdown instead of a raw dict repr.
+
+    role (Part 6): forwarded to render_agent_result() so its
+    content_adapter_pool branch can be gated on WHICH role produced
+    `result`, not shape alone — a flat {platform: content} map is
+    otherwise indistinguishable from code_writers'/test_writer's flat
+    {module: code} map. Defaults to None (today's exact behavior for
+    every call site that doesn't pass one).
 
     limit defaults to 9000: Pusher enforces a hard ~10KB payload limit
     per event, and the event envelope around this string costs a few
@@ -278,7 +287,7 @@ def _summarize(result, limit: int = 9000) -> str:
     genuinely oversized results (e.g. a full multi-module code
     submission) still get cut, and now say so explicitly."""
     from eo.result_render import render_agent_result
-    return render_agent_result(result, limit=limit)
+    return render_agent_result(result, role=role, limit=limit)
 
 
 # 4000 chars leaves room alongside _summarize()'s own text within
@@ -453,6 +462,15 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # agents/code_writers.py's _derive_specs_from_task_text()).
                 result = fn(session_id=session_id, path=path, expanded=expanded,
                             key_override=override, task_text=task_text, domain=domain)
+            elif current_name == "content_adapter_pool":
+                # Part 6 §6.2 — needs task_text as a fallback seed for its
+                # own content_targets synthesis when hired without an
+                # upstream generic_worker role having written a brief
+                # first (see agents/content_adapter_pool.py's
+                # _derive_brief_from_task_text()), same reasoning as
+                # code_writers' task_text handling just above.
+                result = fn(session_id=session_id, path=path, expanded=expanded,
+                            key_override=override, task_text=task_text, domain=domain)
             elif current_name in ("reviewer", "security_scanner", "extraction_table_builder"):
                 # extraction_table_builder (§3.5): no task_text needed —
                 # its real input is KEYS["academic_search_report"], read
@@ -470,6 +488,13 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # Needs task_text (see UNSCOPED_TIER_AGENTS comment above)
                 # — its no-code planning path uses it to plan a
                 # folder/file scaffold when there's no code to organize.
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
+                            domain=domain)
+            elif current_name == "deploy_config_writer":
+                # Part 7 §7.4 — same call shape as structure_architect
+                # just above: reads real on-disk project state itself
+                # (via get_current_app_slug()), task_text is only a minor
+                # extra signal, not a hard requirement.
                 result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
                             domain=domain)
             elif current_name in ("architecture_diagrammer", "schema_diagrammer", "handoff_packager"):
@@ -574,7 +599,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # event, so the two together still fit Pusher's ~10KB cap
         # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
         summary_limit = 9000 - len(image) if image else 9000
-        payload = {"summary": _summarize(result, limit=summary_limit), "duration_ms": duration_ms}
+        payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
         if image:
             payload["image"] = image
         emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)

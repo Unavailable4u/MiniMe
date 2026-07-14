@@ -45,6 +45,14 @@ VALID_EVENT_TYPES = {
     # either path crashed the whole run with a ValueError instead of
     # degrading gracefully like every other dispatcher event does.
     "hallucinated_role_rejected", "revisit_cap_reached",
+    # NEW — Part 8.4: cross-chat/cross-session notifications, fired on
+    # a user-{user_id} channel (see _user_channel_name/emit_user_event
+    # below) rather than the per-session channel every other event
+    # above uses. One event type covers every notification "kind"
+    # (note_proposed today, workspace_shared/etc. later) — the kind
+    # lives in payload, same as every other event's payload already
+    # carries type-specific fields.
+    "notification",
 }
 
 _pusher_client = None
@@ -57,6 +65,15 @@ def _channel_name(session_id: str) -> str:
     since it may eventually come from a frontend-supplied value."""
     safe = re.sub(r"[^A-Za-z0-9_=@,.;-]", "-", session_id)
     return f"session-{safe}"
+
+
+def _user_channel_name(user_id: str) -> str:
+    """Part 8.4: the new, second channel scheme — one per PERSON rather
+    than one per running task. Same sanitization as _channel_name above,
+    since user_id (a Supabase auth uuid) is safe today but this is
+    defensive against that ever changing."""
+    safe = re.sub(r"[^A-Za-z0-9_=@,.;-]", "-", user_id)
+    return f"user-{safe}"
 
 
 def _get_client():
@@ -142,4 +159,49 @@ def emit_event(
         # Fire-and-forget: log, never raise. A dead relay must not take
         # down the agent whose progress it was trying to report.
         print(f"  [relay] emit_event({event_type!r}) failed: {exc}")
+        return False
+
+
+def emit_user_event(
+    event_type: str,
+    user_id: str = None,
+    agent: str = None,
+    payload: dict = None,
+) -> bool:
+    """Part 8.4: same fire-and-forget contract as emit_event() above,
+    just publishing on a user's personal channel instead of a session's.
+    Kept as a separate function rather than an optional param on
+    emit_event() — the two channel schemes have different "no-op if
+    missing" keys (session_id vs user_id) and different intended
+    callers (agents mid-run vs internal system code like
+    eo/note_candidates.py), so collapsing them into one function with
+    branching behavior would make both call sites harder to read than
+    two small functions.
+    """
+    if user_id is None:
+        return False  # no-op path: no channel to publish on
+
+    if event_type not in VALID_EVENT_TYPES:
+        raise ValueError(
+            f"[relay] Unknown event type {event_type!r}. "
+            f"Must be one of {sorted(VALID_EVENT_TYPES)}."
+        )
+
+    client = _get_client()
+    if client is None:
+        return False
+
+    event = {
+        "type": event_type,
+        "user_id": user_id,
+        "agent": agent,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": payload or {},
+    }
+
+    try:
+        client.trigger(_user_channel_name(user_id), event_type, event)
+        return True
+    except Exception as exc:
+        print(f"  [relay] emit_user_event({event_type!r}) failed: {exc}")
         return False

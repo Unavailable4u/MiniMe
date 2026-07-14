@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { categorize, DEFAULT_CATEGORY } from "./agentRoleIcons";
+import { authHeaders } from "../context/SessionContext";
 import { Plus, X, ChevronUp, ChevronDown, Check } from "lucide-react";
 
 // Searchable multi-select combobox for building an ordered role
@@ -22,7 +23,6 @@ import { Plus, X, ChevronUp, ChevronDown, Check } from "lucide-react";
 // closed set.
 export default function RolePickerOverlay({
   apiUrl,
-  apiKey,
   roles,
   onRolesChange,
   approvalRoles,
@@ -41,7 +41,7 @@ export default function RolePickerOverlay({
       setKnownError(null);
       try {
         const res = await fetch(`${apiUrl}/api/roles`, {
-          headers: apiKey ? { "x-api-key": apiKey } : {},
+          headers: await authHeaders(),
         });
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const data = await res.json();
@@ -54,7 +54,7 @@ export default function RolePickerOverlay({
     return () => {
       cancelled = true;
     };
-  }, [apiUrl, apiKey]);
+  }, [apiUrl]);
 
   // Click-outside + Escape both close the overlay, same convention as
   // ChatTab's mode picker dropdown.
