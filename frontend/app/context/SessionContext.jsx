@@ -774,6 +774,33 @@ async function fetchGraphEdges(wsId) {
   return res.json();
 }
 
+// §3.5 — auto-generates a structured table from a workspace's own
+// ingested nodes (agents/note_table_builder.py), instead of the user
+// manually pasting a chat run's markdown table output. Throws on
+// non-2xx so the caller can surface the server's actual error message
+// (e.g. "no ingested sources with content found") rather than silently
+// returning nothing.
+async function buildExtractionTable(wsId, fieldNames, { nodeType, expanded } = {}) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/table`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({
+      field_names: fieldNames,
+      node_type: nodeType || null,
+      expanded: !!expanded,
+    }),
+  });
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 // Capture — one function per ingestor family (§4.2), all landing through
 // write_ingested_source() server-side into the exact same node shape, so
 // IngestionDropzone.jsx can treat every one of these identically: call,
@@ -862,12 +889,148 @@ async function rejectNoteCandidate(wsId, index) {
   });
 }
 
+// Workspace facts (eo/workspace_facts.py, Part 0 §0.3) — durable
+// brand_voice/target_user/tech_stack/custom facts for a workspace, plus
+// the agent-proposed candidates queue. Same accept/reject shape as the
+// note candidates just above (workspace_facts.py's accept_candidate/
+// reject_candidate take a plain list index, not an id).
+
+async function fetchWorkspaceFacts(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return { brand_voice: "", target_user: "", tech_stack: [], custom: {} };
+  return res.json();
+}
+
+async function saveWorkspaceFacts(wsId, facts) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
+    method: "PUT",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify(facts),
+  });
+  return res.json();
+}
+
+async function fetchFactCandidates(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function acceptFactCandidate(wsId, index) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${index}/accept`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return res.json();
+}
+
+async function rejectFactCandidate(wsId, index) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${index}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+}
+
+// Note clustering (agents/note_clusterer.py, Part 4 §4.3) — deterministic
+// KMeans over each node's existing embedding, proposed as accept/reject
+// candidates (never auto-applied). Unlike facts/notes candidates,
+// note_clusterer.py's candidates are keyed by candidate_id, not list
+// index, and propose_clusters() is an explicit rescan (like backlink
+// detection), not a passive fetch — see NotebooksTab.jsx's "Detect
+// clusters" button.
+
+async function proposeClusters(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/clusters/propose`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+  });
+  const data = await res.json();
+  return data.candidates;
+}
+
+async function fetchClusterCandidates(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/clusters/candidates`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function acceptClusterCandidate(wsId, candidateId) {
+  const res = await fetch(
+    `${API_URL}/api/workspaces/${wsId}/clusters/candidates/${encodeURIComponent(candidateId)}/accept`,
+    { method: "POST", headers: await authHeaders({ json: true }) }
+  );
+  return res.json(); // { edges_created: [...] }
+}
+
+async function rejectClusterCandidate(wsId, candidateId) {
+  await fetch(
+    `${API_URL}/api/workspaces/${wsId}/clusters/candidates/${encodeURIComponent(candidateId)}`,
+    { method: "DELETE", headers: await authHeaders() }
+  );
+}
+
 // §4.7 — "click a mind-map node, open a scoped sub-chat": creates a new
 // chat, folds it into this notebook's workspace (so it shares memory
 // with the rest of the notebook and shows up under it in the sidebar),
 // then dispatches taskText as its first message. Returns the new
 // chat_id so the caller (NotebooksTab) can hand off to AppShell's
 // openChat() to actually land on it.
+// NEW — Part 4 §4.4: podcast synthesis (agents/tts_synthesizer.py). Unlike
+// every other helper in this file, POST /api/notes/podcast/synthesize
+// returns a FileResponse (raw mp3 bytes), not JSON — so this reads the
+// response as a blob and hands back an object URL for an <audio> element,
+// rather than calling res.json() like gradeQuiz() etc. below. The call is
+// synchronous server-side (no job/poll pattern — synthesize_podcast()
+// blocks on edge-tts for the whole script), so callers should show a
+// loading state for the duration of this await rather than expecting a
+// fast round trip.
+async function synthesizePodcast(scriptText, title) {
+  const res = await fetch(`${API_URL}/api/notes/podcast/synthesize`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ script_text: scriptText, title: title || "podcast" }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Podcast synthesis failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+// NEW — Part 4 §4.4: Video Overview (agents/video_overview_builder.py).
+// Same raw-file-response shape as synthesizePodcast() above (blob → object
+// URL, not JSON), and the same synchronous-server-side caveat — moviepy's
+// write_videofile() blocks for the whole render, so callers should show a
+// loading state for the duration of this await. Requires podcastTitle to
+// match a title already used in a prior synthesizePodcast() call for this
+// notebook: the backend locates that mp3 on disk by slugified filename
+// rather than re-synthesizing it, and 404s with a clear message if it
+// isn't there yet.
+async function buildVideoOverview(slideText, podcastTitle, title) {
+  const res = await fetch(`${API_URL}/api/notes/video-overview/build`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({
+      slide_text: slideText,
+      podcast_title: podcastTitle || "podcast",
+      title: title || "video_overview",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Video overview build failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 async function gradeQuiz(quizText, answers) {
   const res = await fetch(`${API_URL}/api/notes/study/quiz/grade`, {
     method: "POST",
@@ -895,9 +1058,56 @@ async function fetchMissedQuestions(wsId, quizNodeId) {
   return res.json();
 }
 
+// NEW — Part 8.6: audit log reads. Throws (rather than the silent
+// empty-array pattern used by e.g. fetchClusterCandidates) because a 403
+// here means "you're not owner/partner" — a real, distinct state the UI
+// needs to show, not "there's nothing to show yet."
+async function fetchWorkspaceAudit(wsId, limit = 100) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/audit?limit=${limit}`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to load audit log (${res.status})`);
+  }
+  return res.json();
+}
+
+async function fetchMyAudit(limit = 100) {
+  const res = await fetch(`${API_URL}/api/audit/me?limit=${limit}`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to load your activity (${res.status})`);
+  }
+  return res.json();
+}
+
+// Was: createNewChat() then addWorkspaceChat() — two round trips where the
+// second one always immediately followed the first. Swapped for the
+// one-step backend endpoint built for exactly this (api/server.py's
+// POST /api/workspaces/{ws_id}/chats/create). Same local-state side effects
+// as createNewChat() (sessionId, ACTIVE_CHAT_KEY, messages) plus the
+// workspace-list refresh addWorkspaceChat used to do, just in one fetch.
+async function createWorkspaceChat(wsId, title = "New Chat") {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/chats/create`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error("Failed to create workspace chat");
+  const chat = await res.json();
+  setSessionId(chat.id);
+  localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
+  setMessages([]);
+  await fetchWorkspaces();   // membership changed server-side
+  await refreshChatList();
+  return chat.id;
+}
+
 async function openScopedSubChat(wsId, taskText) {
-  const chatId = await createNewChat();
-  await addWorkspaceChat(wsId, chatId);
+  const chatId = await createWorkspaceChat(wsId);
   await sendTask(taskText);
   return chatId;
 }
@@ -1330,7 +1540,7 @@ async function openScopedSubChat(wsId, taskText) {
   createBatch, estimateBatch,
   renameBatch, unlinkBatchMembers, deleteBatch,
   workspaces, fetchWorkspaces, createWorkspace, renameWorkspace,
-  addWorkspaceChat, removeWorkspaceChat, deleteWorkspace,   // NEW — §7
+  addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,   // NEW — §7
   // NEW — Part 8.9: workspace membership, ownership, voting, attribution
   fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
   removeWorkspaceMember, leaveWorkspaceMembership, forceRemoveOwner,
@@ -1354,12 +1564,21 @@ async function openScopedSubChat(wsId, taskText) {
   // templateRuns' own comment above.
   templateRuns, runTemplate,
   // NEW — §4.7: Notebooks tab
-  fetchWorkspaceNodes, fetchGraphEdges,
+  fetchWorkspaceNodes, fetchGraphEdges, buildExtractionTable,
   ingestClip, ingestVideoUrl, ingestFile, ingestVoiceFile,
   detectBacklinks,
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
+  fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
+  proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,
   gradeQuiz, recordQuizAttempt, fetchMissedQuestions,
+  synthesizePodcast,   // NEW — Part 4 §4.4: podcast synthesis
+  buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
+  fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
   };
-  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+  return (
+    <SessionContext.Provider value={value}>
+      {children}
+    </SessionContext.Provider>
+  );
 }

@@ -12,6 +12,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Calendar, Check, Loader2 } from "lucide-react";
 import { useSession, authHeaders } from "../context/SessionContext";
+import CalendarEventsPanel from "./CalendarEventsPanel";
 
 const PROVIDERS = [
   {
@@ -100,34 +101,38 @@ export default function IntegrationsPanel() {
         const Icon = provider.icon;
         const busy = busyProvider === provider.id;
         return (
-          <div
-            key={provider.id}
-            className="flex items-center justify-between border border-[var(--neutral-800)] rounded-lg px-3 py-2"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <Icon size={14} className="text-[var(--neutral-500)] shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-[var(--neutral-300)]">{provider.label}</p>
-                {isConnected && (
-                  <p className="text-[10px] text-[var(--neutral-600)] truncate flex items-center gap-1">
-                    <Check size={10} className="text-emerald-500 shrink-0" />
-                    {info.account_label || "Connected"}
-                  </p>
-                )}
+          <div key={provider.id} className="space-y-2">
+            <div className="flex items-center justify-between border border-[var(--neutral-800)] rounded-lg px-3 py-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Icon size={14} className="text-[var(--neutral-500)] shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs text-[var(--neutral-300)]">{provider.label}</p>
+                  {isConnected && (
+                    <p className="text-[10px] text-[var(--neutral-600)] truncate flex items-center gap-1">
+                      <Check size={10} className="text-emerald-500 shrink-0" />
+                      {info.account_label || "Connected"}
+                    </p>
+                  )}
+                </div>
               </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => (isConnected ? handleDisconnect(provider) : handleConnect(provider))}
+                className={`shrink-0 text-xs rounded-lg px-3 py-1.5 disabled:opacity-50 ${
+                  isConnected
+                    ? "text-[var(--neutral-500)] hover:text-[var(--neutral-300)] border border-[var(--neutral-800)]"
+                    : "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                }`}
+              >
+                {busy ? <Loader2 size={12} className="animate-spin" /> : isConnected ? "Disconnect" : "Connect"}
+              </button>
             </div>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => (isConnected ? handleDisconnect(provider) : handleConnect(provider))}
-              className={`shrink-0 text-xs rounded-lg px-3 py-1.5 disabled:opacity-50 ${
-                isConnected
-                  ? "text-[var(--neutral-500)] hover:text-[var(--neutral-300)] border border-[var(--neutral-800)]"
-                  : "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
-              }`}
-            >
-              {busy ? <Loader2 size={12} className="animate-spin" /> : isConnected ? "Disconnect" : "Connect"}
-            </button>
+            {/* Direct list/create/delete UI for this provider's events —
+                separate from the agent's indirect access via
+                agents/calendar_agent.py during task runs. Only shown once
+                connected; every endpoint it calls 409s otherwise anyway. */}
+            {provider.id === "google_calendar" && isConnected && <CalendarEventsPanel />}
           </div>
         );
       })}

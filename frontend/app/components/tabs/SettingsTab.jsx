@@ -2,6 +2,7 @@
 import { useSession } from "../../context/SessionContext";
 import { useDensity } from "../../hooks/useDensity";
 import IntegrationsPanel from "../IntegrationsPanel";   // NEW — Part 8.5/8.9
+import AuditLogTab from "./AuditLogTab";   // NEW — Part 8.6: audit log
 
 const DENSITY_OPTIONS = [
   { id: "comfortable", label: "Comfortable" },
@@ -57,6 +58,12 @@ export default function SettingsTab() {
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Integrations</h2>
         <IntegrationsPanel />
+      </section>
+      <section>
+        <h2 className="text-[var(--neutral-400)] font-medium mb-2">Activity</h2>
+        <div className="border border-[var(--neutral-800)] rounded-lg">
+          <AuditLogTab />
+        </div>
       </section>
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Connection</h2>

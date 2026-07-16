@@ -29,6 +29,133 @@ const TOOLTIP_STYLE = {
 
 const DAY_RANGES = [7, 14, 30];
 
+// Best-effort provider guess from an agent_key's naming convention
+// (e.g. "EO_INSPECTOR_GROQ_KEY_1" -> "groq"), purely for a color accent
+// in the list below — get_quota_snapshot()'s response deliberately
+// doesn't include a provider field per-entry, so this is display-only
+// and never used for any actual grouping/calculation.
+function guessProvider(agentKey) {
+  const upper = (agentKey || "").toUpperCase();
+  return Object.keys(PROVIDER_COLOR).find((p) => upper.includes(p.toUpperCase())) || null;
+}
+
+// The real thing quota_sentinel.py computes and no UI ever showed
+// (§3 of the audit): TODAY's usage per account, cross-session,
+// verified against utils/llm_client.py's QUOTA_CONFIG — not the
+// client-side, session-only, guessed-limit numbers OverallRollup below
+// shows. Kept as a clearly separate, clearly labeled panel rather than
+// merged into OverallRollup, so "today, verified, everyone" is never
+// confused with "this session, live, on this device".
+function QuotaPanel({ apiUrl }) {
+  const [snapshot, setSnapshot] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshedAt, setRefreshedAt] = useState(null);
+
+  function load() {
+    setLoading(true);
+    setError(null);
+    authHeaders()
+      .then((headers) => fetch(`${apiUrl}/api/quota`, { headers }))
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((data) => {
+        setSnapshot(data);
+        setRefreshedAt(new Date());
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiUrl]);
+
+  const rows = useMemo(() => {
+    if (!snapshot) return [];
+    return Object.entries(snapshot)
+      .map(([agentKey, info]) => ({ agentKey, provider: guessProvider(agentKey), ...info }))
+      .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+  }, [snapshot]);
+
+  const anyNearLimit = rows.some((r) => r.pct !== null && r.pct >= 0.8);
+
+  return (
+    <Card
+      title="Quota (today, verified, cross-session)"
+      action={
+        <button
+          onClick={load}
+          disabled={loading}
+          className="font-display text-[10px] uppercase tracking-wide rounded px-2 py-1 border border-cyber-border text-cyber-dim hover:text-cyber-text disabled:opacity-50"
+        >
+          {loading ? "Refreshing…" : "Refresh"}
+        </button>
+      }
+    >
+      {error && (
+        <p className="text-xs text-rose-400">
+          Couldn't load quota: {error}. Check that <code className="font-mono">GET /api/quota</code> is reachable.
+        </p>
+      )}
+      {!error && loading && !snapshot && <p className="text-xs text-cyber-dim">Loading…</p>}
+      {!error && !loading && rows.length === 0 && (
+        <p className="text-xs text-cyber-dim">No accounts configured.</p>
+      )}
+      {!error && rows.length > 0 && (
+        <>
+          {anyNearLimit && (
+            <p className="text-[11px] text-amber-500 mb-2">
+              One or more accounts are at 80%+ of today's quota.
+            </p>
+          )}
+          <div className="space-y-1.5">
+            {rows.map((r) => {
+              const near = r.pct !== null && r.pct >= 0.8;
+              const pctDisplay = r.pct !== null ? Math.min(100, Math.round(r.pct * 100)) : null;
+              return (
+                <div key={r.agentKey} className="text-[11px] font-mono">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      {r.provider && (
+                        <span
+                          className="w-1.5 h-1.5 rounded-full shrink-0"
+                          style={{ background: colorFor(r.provider) }}
+                        />
+                      )}
+                      <span className="truncate text-cyber-text">{r.agentKey}</span>
+                    </span>
+                    <span className={`shrink-0 ${near ? "text-amber-500" : "text-cyber-dim"}`}>
+                      {r.used.toLocaleString()}
+                      {r.quota ? ` / ${r.quota.toLocaleString()} (${pctDisplay}%)` : " tokens — no verified limit"}
+                    </span>
+                  </div>
+                  {r.quota && (
+                    <div className="h-1 rounded-full bg-black/50 border border-cyber-border overflow-hidden mt-0.5">
+                      <div
+                        className={`h-full rounded-full transition-all ${near ? "bg-amber-500" : "bg-cyber-cyan"}`}
+                        style={{ width: `${pctDisplay}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {refreshedAt && (
+            <p className="text-[10px] text-cyber-dim mt-2">
+              Updated {refreshedAt.toLocaleTimeString()}
+            </p>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 
 function UsageHistoryPanel({ apiUrl }) {
   const [days, setDays] = useState(7);
@@ -291,6 +418,7 @@ export default function TokenUsageTab() {
           No usage events yet this session. Send a task from Chat — accounts
           light up here as soon as they make their first call today.
         </p>
+        <QuotaPanel apiUrl={API_URL} />
         <UsageHistoryPanel apiUrl={API_URL} />
         <ProjectSectionUsagePanel apiUrl={API_URL} />
         <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
@@ -300,6 +428,7 @@ export default function TokenUsageTab() {
 
   return (
     <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-6">
+      <QuotaPanel apiUrl={API_URL} />
       <OverallRollup byProvider={byProvider} />
       {combinedUsageHistory.length > 0 && (
         <Card title="All providers, this session">
@@ -348,7 +477,7 @@ function OverallRollup({ byProvider }) {
   }
   const pct = totalLimit ? Math.min(100, Math.round((totalUsed / totalLimit) * 100)) : null;
   return (
-    <Card title="Overall, this session">
+    <Card title="This session, live (estimated)">
       <div className="flex items-baseline justify-between">
         <span className="font-display text-2xl text-cyber-cyan cyber-glow-text">{totalUsed.toLocaleString()}</span>
         <span className="text-xs text-cyber-dim">
@@ -367,9 +496,10 @@ function OverallRollup({ byProvider }) {
       )}
       {unmeasuredProviders.length > 0 && (
         <p className="text-[11px] text-cyber-dim mt-2">
-          Capacity estimate excludes {unmeasuredProviders.join(", ")} — no verified
+          This session's estimate excludes {unmeasuredProviders.join(", ")} — no verified
           daily limit configured for {unmeasuredProviders.length === 1 ? "it" : "them"} yet
           (see <code className="font-mono">utils/llm_client.py</code>'s <code className="font-mono">QUOTA_CONFIG</code>).
+          For real cross-session numbers, see the Quota panel above.
         </p>
       )}
     </Card>

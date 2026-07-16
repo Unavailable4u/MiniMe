@@ -6,7 +6,7 @@ import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
-  RefreshCw, ExternalLink, FolderOpen,
+  RefreshCw, ExternalLink, FolderOpen, Plus, X, Loader2, Sparkles,
 } from "lucide-react";
 
 // Part 3 §3.9 — Research as a dedicated top-level section, same shape as
@@ -21,16 +21,20 @@ import {
 // data via the same fetchWorkspaceNodes()/fetchGraphEdges() Notebooks
 // already uses, no new endpoints needed.
 //
-// Extraction table / contradictions / consensus meter / dataset analysis
-// are different: they're written to session-scoped memory-bus keys
-// (KEYS["extraction_table"], KEYS["contradiction_candidates"], etc.), not
-// to persistent per-workspace storage -- there's no GET endpoint that
-// hands one of these back outside of the chat run that produced it. So,
-// same "known simplification, flagged not hidden" the Notebooks README
-// already used for Mind Map/Study (paste the role's raw output in), those
-// three sub-tabs take pasted markdown from a completed chat run rather
-// than auto-fetching "the latest one" -- there's no per-project "last
-// extraction/contradiction output" store yet.
+// Contradictions/consensus meter and dataset analysis are still paste-
+// or handoff-based: they're written to session-scoped memory-bus keys
+// (KEYS["contradiction_candidates"], etc.), not persistent per-workspace
+// storage, so there's no GET endpoint to fetch "the latest one" outside
+// the chat run that produced it. Same known simplification the Notebooks
+// README used for Mind Map/Study.
+//
+// Extraction Table is the exception: agents/note_table_builder.py has
+// its own direct endpoint (POST /api/workspaces/{id}/table) that reads
+// a workspace's ingested nodes and extracts user-specified fields on
+// demand — no chat run or memory-bus key required — so that sub-tab
+// below calls it directly instead of asking the user to paste anything.
+// Manual paste is kept as a fallback for markdown table output that
+// came from elsewhere.
 
 const SUB_TABS = [
   { id: "sources", label: "Sources", icon: Search },
@@ -50,7 +54,7 @@ function bareNodeId(fullId) {
 }
 
 export default function ResearchTab({ onOpenChat }) {
-  const { workspaces, fetchWorkspaceNodes, fetchGraphEdges, openScopedSubChat } = useSession();
+  const { workspaces, fetchWorkspaceNodes, fetchGraphEdges, openScopedSubChat, buildExtractionTable } = useSession();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
 
@@ -120,7 +124,7 @@ export default function ResearchTab({ onOpenChat }) {
           ) : subTab === "graph" ? (
             <CitationGraphPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} fetchGraphEdges={fetchGraphEdges} />
           ) : subTab === "extraction" ? (
-            <ExtractionPanel />
+            <ExtractionPanel wsId={activeWs.id} buildExtractionTable={buildExtractionTable} />
           ) : subTab === "contradictions" ? (
             <ContradictionsPanel />
           ) : (
@@ -279,27 +283,151 @@ function CitationGraphPanel({ wsId, fetchWorkspaceNodes, fetchGraphEdges }) {
   );
 }
 
-// --- Extraction Table (§3.5) — the one genuinely new UI component
-// (ExtractionTableView), fed by pasting a completed extraction_table_builder
-// run's markdown output (same GFM pipe-table eo/result_render.py already
-// renders in chat).
-function ExtractionPanel() {
+// --- Extraction Table (§3.5) — auto-generated via
+// agents/note_table_builder.py (POST /api/workspaces/{id}/table): the
+// user names the fields they want, we extract them from every ingested
+// source in the project, one LLM call per source, merged into one row
+// each. Manual paste is kept as a fallback for output from a chat run
+// that used a different role, but it's no longer the primary path.
+const NODE_TYPE_OPTIONS = [
+  { value: "", label: "All content" },
+  { value: "source", label: "Sources only" },
+];
+
+function ExtractionPanel({ wsId, buildExtractionTable }) {
+  const [fields, setFields] = useState([]);
+  const [fieldDraft, setFieldDraft] = useState("");
+  const [nodeType, setNodeType] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+  const [showPaste, setShowPaste] = useState(false);
   const [raw, setRaw] = useState("");
+
+  function addField() {
+    const name = fieldDraft.trim();
+    if (!name || fields.includes(name)) return;
+    setFields((f) => [...f, name]);
+    setFieldDraft("");
+  }
+
+  function removeField(name) {
+    setFields((f) => f.filter((x) => x !== name));
+  }
+
+  async function generate() {
+    if (fields.length === 0 || !wsId) return;
+    setGenerating(true);
+    setError(null);
+    try {
+      const data = await buildExtractionTable(wsId, fields, { nodeType, expanded });
+      setResult(data);
+    } catch (e) {
+      setError(e.message || "Failed to generate table.");
+      setResult(null);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   return (
-    <div className="space-y-3">
-      <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste an extraction_table_builder run's markdown table output (from a chat message) below.
-        There's no per-project "last extraction" store yet — this is a manual paste step, same as
-        Notebooks' Mind Map/Study tabs.
-      </p>
-      <textarea
-        value={raw}
-        onChange={(e) => setRaw(e.target.value)}
-        placeholder="| Title | Year | Sample Size | Methodology | ... |&#10;|---|---|---|---|---|&#10;| ... |"
-        rows={6}
-        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
-      />
-      <ExtractionTableView text={raw} />
+    <div className="space-y-4">
+      <div className="border border-[var(--neutral-800)] rounded-lg p-3 space-y-3">
+        <div>
+          <label className="text-[11px] text-[var(--neutral-500)]">Fields to extract</label>
+          <div className="flex flex-wrap gap-1.5 mt-1.5 mb-2">
+            {fields.map((f) => (
+              <span
+                key={f}
+                className="flex items-center gap-1 text-[11px] bg-[var(--cyber-violet)]/10 text-[var(--cyber-violet)] rounded px-2 py-1"
+              >
+                {f}
+                <button onClick={() => removeField(f)} className="hover:text-[var(--neutral-100)]">
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+            {fields.length === 0 && (
+              <span className="text-[11px] text-[var(--neutral-600)]">
+                e.g. "sample size", "methodology", "key finding"
+              </span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={fieldDraft}
+              onChange={(e) => setFieldDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addField(); } }}
+              placeholder="Add a field name and press Enter"
+              className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-1.5 text-xs outline-none focus:border-[var(--cyber-violet)]"
+            />
+            <button
+              onClick={addField}
+              disabled={!fieldDraft.trim()}
+              className="text-xs text-[var(--neutral-300)] border border-[var(--neutral-800)] rounded px-2.5 py-1.5 hover:border-[var(--neutral-700)] disabled:opacity-30 flex items-center gap-1"
+            >
+              <Plus size={12} /> Add
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="flex items-center gap-2">
+            <label className="text-[11px] text-[var(--neutral-500)]">Source scope</label>
+            <select
+              value={nodeType}
+              onChange={(e) => setNodeType(e.target.value)}
+              className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-violet)]"
+            >
+              {NODE_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <label className="flex items-center gap-1.5 text-[11px] text-[var(--neutral-500)] cursor-pointer">
+            <input type="checkbox" checked={expanded} onChange={(e) => setExpanded(e.target.checked)} />
+            Thorough mode (more workers, slower)
+          </label>
+        </div>
+
+        <button
+          onClick={generate}
+          disabled={generating || fields.length === 0 || !wsId}
+          className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
+        >
+          {generating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+          {generating ? "Extracting…" : "Generate table"}
+        </button>
+
+        {error && <p className="text-[11px] text-red-400">{error}</p>}
+      </div>
+
+      {result?.summary && (
+        <p className="text-[11px] text-[var(--neutral-500)]">{result.summary}</p>
+      )}
+      {result && <ExtractionTableView data={result} />}
+
+      <div>
+        <button
+          onClick={() => setShowPaste((s) => !s)}
+          className="text-[11px] text-[var(--neutral-600)] hover:text-[var(--neutral-400)] underline underline-offset-2"
+        >
+          {showPaste ? "Hide manual paste" : "Or paste a table from a chat run instead"}
+        </button>
+        {showPaste && (
+          <div className="space-y-2 mt-2">
+            <textarea
+              value={raw}
+              onChange={(e) => setRaw(e.target.value)}
+              placeholder="| Title | Year | Sample Size | Methodology | ... |&#10;|---|---|---|---|---|&#10;| ... |"
+              rows={6}
+              className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
+            />
+            {raw.trim() && <ExtractionTableView text={raw} />}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
