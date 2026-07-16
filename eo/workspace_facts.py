@@ -85,6 +85,31 @@ def update_custom_fact(workspace_id: str, key: str, value) -> dict:
     return facts
 
 
+# NOT CURRENTLY CALLED ANYWHERE — audited 2026-07-16. This function, and
+# the accept/reject/list machinery below it, are fully wired end to end
+# on every OTHER layer: the API routes (GET/PUT .../facts,
+# .../facts/candidates, accept/reject) and the frontend FactsView UI
+# (agent-suggested-facts panel with accept/discard buttons) are both
+# live and correct. What's missing is a caller: no agent in agents/
+# invokes propose_fact() today.
+#
+# It's not a simple wiring gap, either. Every agent that scans a real
+# NOTEBOOK (this module's actual workspace_id, from eo/chat_workspace.py)
+# is note_clusterer.py, and its job is topic clustering, not fact
+# extraction — it has no signal that maps to brand_voice/tech_stack.
+# Every OTHER agent that resolves something called "workspace_id"
+# (contradiction_prefilter.py, source_quality_flagger.py,
+# dataset_analyst.py) is actually scoped to the tier-3 build/research
+# PIPELINE's per-session id (get_current_app_slug() or original_idea),
+# which is a different, unrelated value that happens to share a name —
+# calling propose_fact() from one of those would write candidates under
+# an id no real notebook will ever read back.
+#
+# So this needs a small, purpose-built agent (same shape as
+# note_clusterer.py: real workspace_id param, deterministic-first) that
+# doesn't exist yet, not a one-line hookup into something already here.
+# Left dormant on purpose until that agent is built — do not wire this
+# into an unrelated pipeline agent just to make it "used."
 def propose_fact(workspace_id: str, key: str, value, proposed_by: str) -> dict:
     """Agent-proposed addition, held separately under
     `workspace_facts_candidates:{workspace_id}` until the user accepts

@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
-import { Pencil, Check, X, RotateCcw, ListChecks, Copy, LayoutTemplate } from "lucide-react";
+import { Pencil, Check, X, RotateCcw, ListChecks, Copy, LayoutTemplate, Pin } from "lucide-react";
 
 // Part 2 §2.7 — Role Library panel. Lists every role the system has
 // ever briefed (eo/registry.py's list_known_roles() + get_role_metadata(),
@@ -41,10 +41,11 @@ function SourceBadge({ source }) {
   );
 }
 
-function RoleCard({ entry, onSave, selectable, selected, onToggleSelect }) {
+function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onTogglePin }) {
   const [editing, setEditing] = useState(false);
   const [brief, setBrief] = useState(entry.brief || "");
   const [saving, setSaving] = useState(false);
+  const [pinning, setPinning] = useState(false);
   const category = categorize(entry.role) || DEFAULT_CATEGORY;
   const isDirty = brief !== (entry.brief || "");
 
@@ -55,6 +56,15 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect }) {
       setEditing(false);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function togglePin() {
+    setPinning(true);
+    try {
+      await onTogglePin(entry.role, !entry.pinned);
+    } finally {
+      setPinning(false);
     }
   }
 
@@ -86,6 +96,19 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect }) {
           {entry.times_hired > 0 && (
             <span className="text-[10px] text-[var(--neutral-500)]">hired {entry.times_hired}×</span>
           )}
+          <button
+            type="button"
+            onClick={togglePin}
+            disabled={pinning}
+            title={entry.pinned ? "Unpin role" : "Pin role"}
+            className={`p-0.5 rounded transition-colors disabled:opacity-50 ${
+              entry.pinned
+                ? "text-amber-400 hover:text-amber-300"
+                : "text-[var(--neutral-600)] hover:text-[var(--neutral-300)]"
+            }`}
+          >
+            <Pin size={12} fill={entry.pinned ? "currentColor" : "none"} />
+          </button>
         </div>
       </div>
 
@@ -188,6 +211,26 @@ export default function RoleLibraryTab({ onStartTemplate }) {
     setRoles((prev) => (prev || []).map((r) => (r.role === role ? updated : r)));
   }
 
+  // Role pinning — server-persisted (syncs across devices) via the
+  // previously-unreachable PATCH /api/roles/{role}/pin. Optimistic
+  // update so the star flips instantly; rolled back if the request
+  // fails so the UI never silently disagrees with the server.
+  async function togglePin(role, pinned) {
+    setRoles((prev) => (prev || []).map((r) => (r.role === role ? { ...r, pinned } : r)));
+    try {
+      const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(role)}/pin`, {
+        method: "PATCH",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ pinned }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const updated = await res.json();
+      setRoles((prev) => (prev || []).map((r) => (r.role === role ? { ...r, ...updated } : r)));
+    } catch {
+      setRoles((prev) => (prev || []).map((r) => (r.role === role ? { ...r, pinned: !pinned } : r)));
+    }
+  }
+
   const grouped = useMemo(() => {
     const filtered = (roles || []).filter((r) =>
       !filter || r.role.toLowerCase().includes(filter.toLowerCase())
@@ -198,6 +241,12 @@ export default function RoleLibraryTab({ onStartTemplate }) {
       (groups[category.key] ||= { category, entries: [] }).entries.push(entry);
     }
     return Object.values(groups).sort((a, b) => a.category.key.localeCompare(b.category.key));
+  }, [roles, filter]);
+
+  const pinnedEntries = useMemo(() => {
+    return (roles || [])
+      .filter((r) => r.pinned)
+      .filter((r) => !filter || r.role.toLowerCase().includes(filter.toLowerCase()));
   }, [roles, filter]);
 
   const visibleRoleNames = useMemo(
@@ -284,6 +333,29 @@ export default function RoleLibraryTab({ onStartTemplate }) {
           <p className="text-xs text-[var(--neutral-500)]">No roles match that filter.</p>
         )}
 
+        {pinnedEntries.length > 0 && (
+          <section className="space-y-2">
+            <h3 className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+              <Pin size={12} className="text-amber-400" fill="currentColor" />
+              Pinned
+              <span className="text-[var(--neutral-600)]">({pinnedEntries.length})</span>
+            </h3>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {pinnedEntries.map((entry) => (
+                <RoleCard
+                  key={`pinned-${entry.role}`}
+                  entry={entry}
+                  onSave={saveRole}
+                  onTogglePin={togglePin}
+                  selectable={selectMode}
+                  selected={selected.includes(entry.role)}
+                  onToggleSelect={toggleRoleSelected}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         <div className="space-y-5">
           {grouped.map(({ category, entries }) => (
             <section key={category.key} className="space-y-2">
@@ -298,6 +370,7 @@ export default function RoleLibraryTab({ onStartTemplate }) {
                     key={entry.role}
                     entry={entry}
                     onSave={saveRole}
+                    onTogglePin={togglePin}
                     selectable={selectMode}
                     selected={selected.includes(entry.role)}
                     onToggleSelect={toggleRoleSelected}

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
 import RolePickerOverlay from "../RolePickerOverlay";
-import { Trash2, Plus, Play, X } from "lucide-react";
+import { Trash2, Plus, Play, X, Pencil } from "lucide-react";
 
 // Part 2 §2.7 — Workflow Template builder. Covers both write paths
 // §2.3's design calls for against a single GET/POST/DELETE
@@ -31,6 +31,7 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
   const [error, setError] = useState(null);
   const [showBuilder, setShowBuilder] = useState(false);
   const [builderInitialRoles, setBuilderInitialRoles] = useState([]);
+  const [editingTemplateId, setEditingTemplateId] = useState(null);
 
   async function load() {
     setError(null);
@@ -86,6 +87,21 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
     setBuilderInitialRoles([]);
   }
 
+  // Template editing — POST/DELETE existed already; this is the missing
+  // update path onto PUT /api/workflow-templates/{id} (previously dead:
+  // no UI ever called it, so the endpoint was unreachable).
+  async function updateTemplate(templateId, payload) {
+    const res = await fetch(`${API_URL}/api/workflow-templates/${templateId}`, {
+      method: "PUT",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const updated = await res.json();
+    setTemplates((prev) => (prev || []).map((t) => (t.template_id === templateId ? updated : t)));
+    setEditingTemplateId(null);
+  }
+
   return (
     <div className="h-full overflow-y-auto px-4 py-6 max-w-3xl mx-auto space-y-4">
       <div className="flex items-start justify-between gap-2">
@@ -100,6 +116,7 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
           type="button"
           onClick={() => {
             setBuilderInitialRoles([]);
+            setEditingTemplateId(null);
             setShowBuilder((s) => !s);
           }}
           className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium shrink-0"
@@ -134,19 +151,29 @@ export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles,
 
       <div className="space-y-2">
         {(templates || []).map((t) => (
-          <TemplateCard key={t.template_id} template={t} apiUrl={API_URL} onDelete={deleteTemplate} onOpenChat={onOpenChat} />
+          <TemplateCard
+            key={t.template_id}
+            template={t}
+            apiUrl={API_URL}
+            onDelete={deleteTemplate}
+            onOpenChat={onOpenChat}
+            isEditing={editingTemplateId === t.template_id}
+            onStartEdit={() => { setShowBuilder(false); setEditingTemplateId(t.template_id); }}
+            onCancelEdit={() => setEditingTemplateId(null)}
+            onUpdate={updateTemplate}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles }) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [roles, setRoles] = useState(() => initialRoles || []);
-  const [approvalRoles, setApprovalRoles] = useState([]);
-  const [domainHint, setDomainHint] = useState("");
+function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues, heading = "Build a template", submitLabel = "Save template", savingLabel = "Saving…" }) {
+  const [name, setName] = useState(initialValues?.name || "");
+  const [description, setDescription] = useState(initialValues?.description || "");
+  const [roles, setRoles] = useState(() => initialValues?.roles || initialRoles || []);
+  const [approvalRoles, setApprovalRoles] = useState(initialValues?.approval_roles || []);
+  const [domainHint, setDomainHint] = useState(initialValues?.domain_hint || "");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -175,7 +202,7 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles }) {
   return (
     <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-950-a50)] p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-[var(--neutral-200)]">Build a template</h3>
+        <h3 className="text-sm font-medium text-[var(--neutral-200)]">{heading}</h3>
         <button type="button" onClick={onCancel} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
           <X size={14} />
         </button>
@@ -235,14 +262,14 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles }) {
           onClick={submit}
           className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save template"}
+          {saving ? savingLabel : submitLabel}
         </button>
       </div>
     </div>
   );
 }
 
-function TemplateCard({ template, apiUrl, onDelete, onOpenChat }) {
+function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onStartEdit, onCancelEdit, onUpdate }) {
   // NEW — running/result now live in SessionContext's `templateRuns`,
   // keyed by template_id, instead of local useState here. AppShell
   // fully unmounts this component whenever the person switches tabs
@@ -260,6 +287,30 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat }) {
     runTemplate(template.template_id, taskText);
   }
 
+  // Template editing (previously dead PUT endpoint) — reuses the same
+  // TemplateBuilder form the "New template" flow uses, just prefilled
+  // and wired to onUpdate() instead of onSave(), inline in place of the
+  // card's normal display.
+  if (isEditing) {
+    return (
+      <TemplateBuilder
+        apiUrl={apiUrl}
+        heading={`Edit "${template.name}"`}
+        submitLabel="Save changes"
+        savingLabel="Saving…"
+        initialValues={{
+          name: template.name,
+          description: template.description || "",
+          roles: template.roles || [],
+          approval_roles: template.approval_roles || [],
+          domain_hint: template.domain_hint || "",
+        }}
+        onSave={(payload) => onUpdate(template.template_id, payload)}
+        onCancel={onCancelEdit}
+      />
+    );
+  }
+
   return (
     <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900-a50)] p-[var(--density-card-padding)] space-y-[var(--density-card-gap)]">
       <div className="flex items-start justify-between gap-2">
@@ -269,14 +320,24 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat }) {
             <p className="text-xs text-[var(--neutral-500)] mt-0.5">{template.description}</p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => onDelete(template.template_id)}
-          className="shrink-0 text-[var(--neutral-600)] hover:text-red-400"
-          title="Delete template"
-        >
-          <Trash2 size={13} />
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onStartEdit}
+            className="text-[var(--neutral-600)] hover:text-[var(--neutral-300)]"
+            title="Edit template"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onDelete(template.template_id)}
+            className="text-[var(--neutral-600)] hover:text-red-400"
+            title="Delete template"
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1.5">
