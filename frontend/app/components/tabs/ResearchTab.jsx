@@ -1,12 +1,14 @@
-"use client";
 import { useState, useEffect, useMemo } from "react";
 import { useSession } from "../../context/SessionContext";
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
+import ConfirmDialog from "../ConfirmDialog";   // NEW — §2 fix: same delete affordance as Notebooks' Sources tab
+import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2b: embedded chat + WorkingPanel dock, same as Notebooks
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
-  RefreshCw, ExternalLink, FolderOpen, Plus, X, Loader2, Sparkles,
+  RefreshCw, ExternalLink, FolderOpen, Plus, X, Loader2, Sparkles, Trash2, MessageSquare,
+  ArrowUpRight,
 } from "lucide-react";
 
 // Part 3 §3.9 — Research as a dedicated top-level section, same shape as
@@ -53,16 +55,94 @@ function bareNodeId(fullId) {
   return parts.length >= 3 ? parts.slice(2).join(":") : fullId;
 }
 
-export default function ResearchTab({ onOpenChat }) {
-  const { workspaces, fetchWorkspaceNodes, fetchGraphEdges, openScopedSubChat, buildExtractionTable } = useSession();
+// NEW — §6.2b: right-hand chat dock collapse key. Deliberately separate
+// from Notebooks' own "minime_notebooks_chatdock_collapsed" (and from
+// WorkspaceChatPanel's internal WORKING_PANEL_KEY) — folding the dock
+// away in Research shouldn't affect Notebooks' dock state or vice versa,
+// same reasoning §6.2a already applied.
+const CHAT_DOCK_KEY = "minime_research_chatdock_collapsed";
+
+export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
+  const { workspaces, fetchWorkspaces, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, switchChat, fetchPanelContent, savePanelContent } = useSession();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
+  // NEW — §8 fix: promote-to-Plan busy/error state, same shape as
+  // NotebooksTab's promote-to-Research and TasksTab's promote-to-Test —
+  // this link was missing entirely (ResearchTab never destructured
+  // promoteWorkspace before), which silently stranded every research
+  // project with no way to reach Plan.
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState(null);
+  // NEW — §6.2b: right-hand chat dock collapse state, restored from
+  // localStorage on mount — same pattern as NotebooksTab's chatDockCollapsed.
+  const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
 
   useEffect(() => {
-    if (!activeWsId && workspaces.length > 0) setActiveWsId(workspaces[0].id);
-  }, [workspaces, activeWsId]);
+    setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+  }, []);
 
-  const activeWs = workspaces.find((w) => w.id === activeWsId) || null;
+  function toggleChatDock() {
+    setChatDockCollapsed((prev) => {
+      localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+  // NEW — same "switch + expand, no tab jump" helper as NotebooksTab.
+  async function openInDock(chatId) {
+    await switchChat(chatId);
+    if (chatDockCollapsed) toggleChatDock();
+  }
+
+  // NEW — §8: Research only shows research-stage workspaces now — a
+  // notebook promoted from Notebooks lands here, not in both tabs.
+  const researchProjects = workspaces.filter((w) => w.stage === "research");
+
+  // NEW — §8: a promote-and-navigate hand-off from Notebooks (via
+  // AppShell) pre-selects the just-promoted workspace, then clears
+  // itself so it doesn't re-fire on a later unrelated tab switch.
+  useEffect(() => {
+    if (initialWorkspaceId) {
+      setActiveWsId(initialWorkspaceId);
+      onConsumeInitialWorkspaceId?.();
+    }
+  }, [initialWorkspaceId, onConsumeInitialWorkspaceId]);
+
+  useEffect(() => {
+    if (!activeWsId && researchProjects.length > 0) setActiveWsId(researchProjects[0].id);
+  }, [researchProjects, activeWsId]);
+
+  const activeWs = researchProjects.find((w) => w.id === activeWsId) || null;
+
+  // FIX — sub-tabs were conditionally rendered (ternary chain below),
+  // which unmounts whichever sub-tab you leave and destroys its local
+  // state (a paste-box's contents, an in-progress search, an in-flight
+  // IngestionDropzone-style upload's own progress). Same "stays
+  // mounted, hidden via CSS" technique AppShell.jsx already uses for
+  // top-level tabs, just applied one level down for this tab's own
+  // sub-tabs.
+  const [visitedSubTabs, setVisitedSubTabs] = useState(() => new Set([subTab]));
+  useEffect(() => {
+    setVisitedSubTabs((prev) => (prev.has(subTab) ? prev : new Set(prev).add(subTab)));
+  }, [subTab]);
+
+  // NEW — §8 fix: promotes the research project to Plan and hands off
+  // navigation to AppShell, same onPromoted(nextStage, wsId) contract
+  // NotebooksTab and TasksTab already use — AppShell switches tabs and
+  // pre-selects it there via PlanTab's own initialWorkspaceId prop
+  // (added alongside this fix, same shape as ResearchTab's own).
+  async function handlePromote(wsId) {
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      await promoteWorkspace(wsId, "plan");
+      await fetchWorkspaces();
+      onPromoted?.("plan", wsId);
+    } catch (err) {
+      setPromoteError(err.message);
+    } finally {
+      setPromoting(false);
+    }
+  }
 
   return (
     <div className="flex h-full">
@@ -73,12 +153,12 @@ export default function ResearchTab({ onOpenChat }) {
           <span className="text-xs font-medium text-[var(--neutral-400)]">Research projects</span>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {workspaces.length === 0 && (
+          {researchProjects.length === 0 && (
             <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
-              No projects yet. Create one from the chat sidebar's <FolderOpen size={11} className="inline" /> button, then come back here.
+              No research projects yet — promote a notebook from the Notebooks tab, or create one from the chat sidebar's <FolderOpen size={11} className="inline" /> button.
             </p>
           )}
-          {workspaces.map((ws) => (
+          {researchProjects.map((ws) => (
             <button
               key={ws.id}
               onClick={() => setActiveWsId(ws.id)}
@@ -96,6 +176,25 @@ export default function ResearchTab({ onOpenChat }) {
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col">
+        {/* NEW — §8 fix: title + promote row, same shape as NotebooksTab's
+            header — this was missing entirely, so a research project had
+            no path forward to Plan. */}
+        {activeWs && (
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--neutral-800)]">
+            <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
+            <button
+              onClick={() => handlePromote(activeWs.id)}
+              disabled={promoting}
+              className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+            >
+              {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+              Promote to Plan →
+            </button>
+          </div>
+        )}
+        {promoteError && (
+          <p className="text-xs text-red-400 px-3 pt-2">{promoteError}</p>
+        )}
         <div className="flex items-center gap-1 px-3 py-2 border-b border-[var(--neutral-800)] overflow-x-auto">
           {SUB_TABS.map((t) => {
             const Icon = t.icon;
@@ -119,19 +218,61 @@ export default function ResearchTab({ onOpenChat }) {
         <div className="flex-1 min-h-0 overflow-y-auto p-4">
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
-          ) : subTab === "sources" ? (
-            <SourcesPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} openScopedSubChat={openScopedSubChat} onOpenChat={onOpenChat} />
-          ) : subTab === "graph" ? (
-            <CitationGraphPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} fetchGraphEdges={fetchGraphEdges} />
-          ) : subTab === "extraction" ? (
-            <ExtractionPanel wsId={activeWs.id} buildExtractionTable={buildExtractionTable} />
-          ) : subTab === "contradictions" ? (
-            <ContradictionsPanel />
           ) : (
-            <DatasetPanel wsId={activeWs.id} openScopedSubChat={openScopedSubChat} onOpenChat={onOpenChat} />
+            SUB_TABS.filter((t) => visitedSubTabs.has(t.id)).map((t) => (
+              <div key={t.id} style={{ display: subTab === t.id ? "contents" : "none" }}>
+                {t.id === "sources" && (
+                  <SourcesPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} deleteWorkspaceNode={deleteWorkspaceNode} openScopedSubChat={openScopedSubChat} openInDock={openInDock} />
+                )}
+                {t.id === "graph" && (
+                  <CitationGraphPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} fetchGraphEdges={fetchGraphEdges} />
+                )}
+                {t.id === "extraction" && (
+                  <ExtractionPanel
+                    wsId={activeWs.id}
+                    buildExtractionTable={buildExtractionTable}
+                    fetchPanelContent={fetchPanelContent}
+                    savePanelContent={savePanelContent}
+                  />
+                )}
+                {t.id === "contradictions" && (
+                  <ContradictionsPanel
+                    workspaceId={activeWs.id}
+                    fetchPanelContent={fetchPanelContent}
+                    savePanelContent={savePanelContent}
+                  />
+                )}
+                {t.id === "dataset" && (
+                  <DatasetPanel wsId={activeWs.id} openScopedSubChat={openScopedSubChat} openInDock={openInDock} />
+                )}
+              </div>
+            ))
           )}
         </div>
       </div>
+
+      {/* NEW — §6.2b: embedded chat + WorkingPanel dock, scoped to whatever
+          chat is currently active in SessionContext — same dock Notebooks
+          uses, own independent collapse state/localStorage key so the two
+          tabs' dock visibility don't interfere with each other. Hidden
+          below lg, matching Notebooks' and WorkingPanel's own breakpoint. */}
+      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+      </div>
+      {!chatDockCollapsed && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+        </div>
+      )}
+      {chatDockCollapsed && (
+        <button
+          onClick={toggleChatDock}
+          title="Open chat"
+          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--cyber-violet)] text-black rounded-full p-3 shadow-lg"
+        >
+          <MessageSquare size={18} />
+        </button>
+      )}
     </div>
   );
 }
@@ -142,11 +283,13 @@ export default function ResearchTab({ onOpenChat }) {
 // (researcher/fact_checker/writer/editor) run exactly as the Panel would
 // normally staff them. The list below reads back what that run wrote as
 // nodes -- real, persisted, live-fetched data, not a paste box.
-function SourcesPanel({ wsId, fetchWorkspaceNodes, openScopedSubChat, onOpenChat }) {
+function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScopedSubChat, openInDock }) {
   const [query, setQuery] = useState("");
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null); // NEW — §2 fix
+  const [deleting, setDeleting] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -162,9 +305,21 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, openScopedSubChat, onOpenChat
     setSearching(true);
     try {
       const chatId = await openScopedSubChat(wsId, `Find recent papers about: ${query.trim()}`);
-      onOpenChat?.(chatId);
+      await openInDock(chatId);
     } finally {
       setSearching(false);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await deleteWorkspaceNode(wsId, pendingDelete.node_id);
+      setPendingDelete(null);
+      await load();
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -205,15 +360,22 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, openScopedSubChat, onOpenChat
 
       <div className="space-y-2">
         {sources.map((s) => (
-          <div key={s.node_id} className="border border-[var(--neutral-800)] rounded-lg p-3">
+          <div key={s.node_id} className="group border border-[var(--neutral-800)] rounded-lg p-3">
             <div className="flex items-start justify-between gap-2">
               <span className="text-xs font-medium text-[var(--neutral-100)]">{s.title}</span>
-              <div className="flex gap-1 shrink-0">
+              <div className="flex items-center gap-1.5 shrink-0">
                 {(s.tags || []).map((tag) => (
                   <span key={tag} className="text-[10px] uppercase tracking-wide text-[var(--cyber-violet)] bg-[var(--cyber-violet)]/10 rounded px-1.5 py-0.5">
                     {tag}
                   </span>
                 ))}
+                <button
+                  onClick={() => setPendingDelete(s)}
+                  title="Delete source"
+                  className="text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
+                >
+                  <Trash2 size={13} />
+                </button>
               </div>
             </div>
             {s.content && (
@@ -222,6 +384,14 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, openScopedSubChat, onOpenChat
           </div>
         ))}
       </div>
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title="Delete source"
+        message={`Delete "${pendingDelete?.title || pendingDelete?.node_id}"? This also removes any links to it in the Citation Graph.`}
+        confirmLabel={deleting ? "Deleting…" : "Delete"}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
@@ -294,7 +464,7 @@ const NODE_TYPE_OPTIONS = [
   { value: "source", label: "Sources only" },
 ];
 
-function ExtractionPanel({ wsId, buildExtractionTable }) {
+function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePanelContent }) {
   const [fields, setFields] = useState([]);
   const [fieldDraft, setFieldDraft] = useState("");
   const [nodeType, setNodeType] = useState("");
@@ -303,7 +473,41 @@ function ExtractionPanel({ wsId, buildExtractionTable }) {
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [showPaste, setShowPaste] = useState(false);
+  // FIX — the manual-paste fallback now persists through
+  // eo/panel_content.py under panel_key "extraction_manual", same
+  // pattern as ContradictionsPanel just below (and PlanTab.jsx's
+  // MarkdownPastePanel). Previously this was pure local state and lost
+  // its content on unmount or project switch just like Contradictions
+  // did before that fix. Note: the auto-generated `result` above (from
+  // buildExtractionTable) is deliberately NOT persisted here — it's a
+  // live endpoint call, same class as Sources/Citation Graph, and can
+  // be regenerated on demand rather than needing a saved copy.
   const [raw, setRaw] = useState("");
+  const [rawLoading, setRawLoading] = useState(true);
+  const [rawSaving, setRawSaving] = useState(false);
+  const [rawSavedAt, setRawSavedAt] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRawLoading(true);
+    setRawSavedAt(null);
+    fetchPanelContent(wsId, "extraction_manual").then((saved) => {
+      if (cancelled) return;
+      setRaw(saved?.content || "");
+      setRawLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [wsId, fetchPanelContent]);
+
+  async function handleRawSave() {
+    setRawSaving(true);
+    try {
+      await savePanelContent(wsId, "extraction_manual", raw);
+      setRawSavedAt(Date.now());
+    } finally {
+      setRawSaving(false);
+    }
+  }
 
   function addField() {
     const name = fieldDraft.trim();
@@ -416,16 +620,36 @@ function ExtractionPanel({ wsId, buildExtractionTable }) {
           {showPaste ? "Hide manual paste" : "Or paste a table from a chat run instead"}
         </button>
         {showPaste && (
-          <div className="space-y-2 mt-2">
-            <textarea
-              value={raw}
-              onChange={(e) => setRaw(e.target.value)}
-              placeholder="| Title | Year | Sample Size | Methodology | ... |&#10;|---|---|---|---|---|&#10;| ... |"
-              rows={6}
-              className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
-            />
-            {raw.trim() && <ExtractionTableView text={raw} />}
-          </div>
+          rawLoading ? (
+            <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 mt-2">
+              <Loader2 size={12} className="animate-spin" /> Loading…
+            </div>
+          ) : (
+            <div className="space-y-2 mt-2">
+              <p className="text-[11px] text-[var(--neutral-600)]">
+                Saved per project — pasting here again for the same project overwrites the
+                previous paste.
+              </p>
+              <textarea
+                value={raw}
+                onChange={(e) => setRaw(e.target.value)}
+                placeholder="| Title | Year | Sample Size | Methodology | ... |&#10;|---|---|---|---|---|&#10;| ... |"
+                rows={6}
+                className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleRawSave}
+                  disabled={rawSaving}
+                  className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+                >
+                  {rawSaving ? "Saving…" : "Save"}
+                </button>
+                {rawSavedAt && !rawSaving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+              </div>
+              {raw.trim() && <ExtractionTableView text={raw} />}
+            </div>
+          )
         )}
       </div>
     </div>
@@ -436,12 +660,52 @@ function ExtractionPanel({ wsId, buildExtractionTable }) {
 // AI-estimated-stance banner is Definition-of-Done #6's requirement that
 // approximated results (consensus meter especially) are never presented
 // with a trained model's implied confidence.
-function ContradictionsPanel() {
+//
+// FIX — this now persists through eo/panel_content.py under panel_key
+// "contradictions", keyed per workspaceId — same pattern PlanTab.jsx's
+// MarkdownPastePanel already uses for PRD/API Contract/Devil's Advocate/
+// Feasibility. Previously this was pure local state: since this panel
+// stays mounted across sub-tab switches (visitedSubTabs) AND across
+// switching which research project is active, a paste would silently
+// keep showing on screen even after switching to a *different* project.
+// Fetches fresh content on every workspaceId change instead.
+function ContradictionsPanel({ workspaceId, fetchPanelContent, savePanelContent }) {
   const [raw, setRaw] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setSavedAt(null);
+    fetchPanelContent(workspaceId, "contradictions").then((saved) => {
+      if (cancelled) return;
+      setRaw(saved?.content || "");
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchPanelContent]);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await savePanelContent(workspaceId, "contradictions", raw);
+      setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+  }
+
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste a contradiction_detector or consensus_meter run's output below.
+        Paste a contradiction_detector or consensus_meter run's output below. Saved per
+        project — pasting here again for the same project overwrites the previous paste.
       </p>
       <textarea
         value={raw}
@@ -450,6 +714,16 @@ function ContradictionsPanel() {
         rows={6}
         className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
       />
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+      </div>
       {raw.trim() && (
         <div className="border border-[var(--cyber-amber)]/40 bg-[var(--cyber-amber)]/5 rounded-lg p-3">
           <p className="text-[10px] uppercase tracking-wide text-[var(--cyber-amber)] mb-2">
@@ -469,7 +743,7 @@ function ContradictionsPanel() {
 // off to a scoped sub-chat exactly like Sources' search does. Any chart
 // the sandbox generates renders inline in that chat's AgentStepList step,
 // not a second time here.
-function DatasetPanel({ wsId, openScopedSubChat, onOpenChat }) {
+function DatasetPanel({ wsId, openScopedSubChat, openInDock }) {
   const [task, setTask] = useState("");
   const [running, setRunning] = useState(false);
 
@@ -478,7 +752,7 @@ function DatasetPanel({ wsId, openScopedSubChat, onOpenChat }) {
     setRunning(true);
     try {
       const chatId = await openScopedSubChat(wsId, task.trim());
-      onOpenChat?.(chatId);
+      await openInDock(chatId);
     } finally {
       setRunning(false);
     }

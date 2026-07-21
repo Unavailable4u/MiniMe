@@ -1,9 +1,21 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
+import { Layers, Loader2, ArrowUpRight, ChevronRight } from "lucide-react";
 // Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
+
+// §7 fix: Tasks is now scoped to a build-stage workspace instead of
+// whatever chat happens to be open. Same left-hand picker pattern as
+// NotebooksTab.jsx (localStorage-persisted selection, auto-select first
+// item once loaded), filtered to workspace.stage === "build" instead of
+// "note". Requires the backend's SELECTs in eo/chat_workspace.py's
+// list_workspaces()/get_workspace() to actually return w.stage --
+// right now they don't, so every workspace reads as stage "note" and
+// this filter would show nothing. That's a pre-existing bug, not
+// something introduced here, but it blocks this feature until fixed.
+const SELECTED_BUILD_WS_KEY = "minime_tasks_selected_ws_id";
 
 // feature_status's own value vocabulary (see agents/idea_planner.py's
 // SYSTEM_PROMPT) -- "done" | "in_progress" | missing. No new taxonomy
@@ -336,16 +348,57 @@ function MonitoringWidget({ sessionId, apiUrl, monitoring, onRefresh }) {
   );
 }
 
-export default function TasksTab() {
-  const { sessionId, API_URL } = useSession();
+export default function TasksTab({ onPromoted }) {
+  // §7 fix: workspaces + promoteWorkspace come from the same
+  // SessionContext NotebooksTab/ResearchTab already use — no new context
+  // plumbing needed, Tasks just reads the shared list and filters it.
+  const { workspaces, fetchWorkspaces, promoteWorkspace, API_URL } = useSession();
+
+  // Build-stage workspaces only -- the "picked" list for this tab, same
+  // shape as NotebooksTab's `notebooks` / ResearchTab's `researchProjects`.
+  const buildProjects = workspaces.filter((w) => w.stage === "build");
+
+  const [selectedWsId, setSelectedWsId] = useState(null);
+  const [restoredSelection, setRestoredSelection] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expandedFeature, setExpandedFeature] = useState(null);
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState(null);
+
+  // Restore last-selected build project on mount (same pattern as
+  // NotebooksTab's SELECTED_NOTEBOOK_KEY restore effect).
+  useEffect(() => {
+    const savedId = localStorage.getItem(SELECTED_BUILD_WS_KEY);
+    if (savedId) setSelectedWsId(savedId);
+    setRestoredSelection(true);
+  }, []);
+
+  useEffect(() => {
+    if (!restoredSelection || !selectedWsId) return;
+    localStorage.setItem(SELECTED_BUILD_WS_KEY, selectedWsId);
+  }, [selectedWsId, restoredSelection]);
+
+  // Auto-select the first build project once loaded, or recover if a
+  // previously-saved selection was promoted onward / deleted.
+  useEffect(() => {
+    if (!restoredSelection || buildProjects.length === 0) return;
+    const stillExists = selectedWsId && buildProjects.some((w) => w.id === selectedWsId);
+    if (!stillExists) setSelectedWsId(buildProjects[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildProjects, selectedWsId, restoredSelection]);
+
+  // data._session_id is the raw chat_id the backend resolved ws_id to
+  // (see api/server.py's get_tasks_for_workspace) -- DeployPanel and
+  // MonitoringWidget still hit /api/deploy/{session_id}/... and
+  // /api/monitoring/{session_id}/... directly, unchanged, so they need
+  // that resolved id rather than the workspace id.
+  const resolvedSessionId = data?._session_id || null;
 
   async function refresh() {
-    if (!sessionId) return;
-    const res = await fetch(`${API_URL}/api/tasks/${sessionId}`, {
+    if (!selectedWsId) return;
+    const res = await fetch(`${API_URL}/api/tasks/workspace/${selectedWsId}`, {
       headers: await authHeaders(),
     });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -355,7 +408,8 @@ export default function TasksTab() {
   }
 
   useEffect(() => {
-    if (!sessionId) {
+    if (!selectedWsId) {
+      setData(null);
       setLoading(false);
       return;
     }
@@ -370,87 +424,147 @@ export default function TasksTab() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [API_URL, sessionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [API_URL, selectedWsId]);
 
-  if (loading) {
-    return (
-      <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto">
-        <p className="text-xs text-cyber-dim">Loading board...</p>
-      </div>
-    );
+  async function handlePromote(wsId) {
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      await promoteWorkspace(wsId, "test");
+      await fetchWorkspaces();
+      onPromoted?.("test", wsId);
+    } catch (err) {
+      setPromoteError(err.message);
+    } finally {
+      setPromoting(false);
+    }
   }
 
-  if (error) {
-    return (
-      <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto">
-        <p className="text-xs text-rose-400">
-          Couldn't load the task board: {error}. Check that{" "}
-          <code className="font-mono">GET /api/tasks/{"{session_id}"}</code> is reachable and that
-          you're signed in with a valid session.
-        </p>
-      </div>
-    );
-  }
+  const selected = buildProjects.find((w) => w.id === selectedWsId);
 
   const features = data?.current_plan?.features || [];
   const featureStatus = data?.feature_status || {};
   const targetFeature = data?.current_plan?.target_feature || null;
   const targetModules = data?.module_specs?.modules || null;
-
-  if (features.length === 0) {
-    return (
-      <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto">
-        <p className="text-cyber-dim text-sm">
-          No plan yet for this session. Once a coding-domain build cycle runs,
-          its features and status will show up here.
-        </p>
-      </div>
-    );
-  }
-
   const byColumn = COLUMNS.map((col) => ({
     ...col,
     features: features.filter((f) => statusFor(featureStatus, f) === col.status),
   }));
 
   return (
-    <div className="h-full overflow-y-auto px-4 py-6 max-w-4xl mx-auto space-y-4">
-      <div className="grid gap-4 sm:grid-cols-3">
-        {byColumn.map((col) => (
-          <Card key={col.status} title={`${col.label} (${col.features.length})`}>
-            <div className="space-y-2">
-              {col.features.length === 0 && (
-                <p className="text-[11px] text-cyber-dim">Nothing here.</p>
-              )}
-              {col.features.map((name) => (
-                <FeatureCard
-                  key={name}
-                  name={name}
-                  isTarget={name === targetFeature}
-                  targetModules={name === targetFeature ? targetModules : null}
-                  expanded={expandedFeature === name}
-                  onToggle={() => setExpandedFeature(expandedFeature === name ? null : name)}
-                />
-              ))}
-            </div>
-          </Card>
-        ))}
+    <div className="flex h-full">
+      {/* Build-project picker -- same left column pattern as
+          NotebooksTab/ResearchTab, filtered to stage === "build" instead
+          of "note"/"research". */}
+      <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
+        <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
+          <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+            <Layers size={13} /> Build
+          </span>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {buildProjects.map((ws) => (
+            <button
+              key={ws.id}
+              onClick={() => setSelectedWsId(ws.id)}
+              className={`w-full flex items-center justify-between gap-1 px-3 py-2 text-left border-b border-[var(--neutral-900)] ${
+                ws.id === selectedWsId ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
+              }`}
+            >
+              <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
+              {ws.id === selectedWsId && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+            </button>
+          ))}
+          {buildProjects.length === 0 && (
+            <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
+              No build-stage projects yet — promote a project to Build from the Plan tab to see it here.
+            </p>
+          )}
+        </div>
       </div>
-      <IntegrationChecklist integrations={data?.integrations} />
-      <div className="grid gap-4 sm:grid-cols-2">
-        <DeployPanel
-          sessionId={sessionId}
-          apiUrl={API_URL}
-          deployConfigPlan={data?.deploy_config_plan}
-          lastDeployConfigSummary={data?.last_deploy_config_summary}
-          onRefresh={refresh}
-        />
-        <MonitoringWidget
-          sessionId={sessionId}
-          apiUrl={API_URL}
-          monitoring={data?.monitoring}
-          onRefresh={refresh}
-        />
+
+      {/* Selected project's board */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {!selected ? (
+          <div className="h-full flex items-center justify-center text-sm text-[var(--neutral-600)]">
+            Select a build project to see its task board.
+          </div>
+        ) : loading ? (
+          <div className="px-4 py-6 max-w-4xl mx-auto">
+            <p className="text-xs text-cyber-dim">Loading board...</p>
+          </div>
+        ) : error ? (
+          <div className="px-4 py-6 max-w-4xl mx-auto">
+            <p className="text-xs text-rose-400">
+              Couldn't load the task board: {error}. Check that{" "}
+              <code className="font-mono">GET /api/tasks/workspace/{"{ws_id}"}</code> is reachable
+              and that you're signed in with a valid session.
+            </p>
+          </div>
+        ) : (
+          <div className="px-4 py-6 max-w-4xl mx-auto space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
+              <button
+                onClick={() => handlePromote(selected.id)}
+                disabled={promoting}
+                className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+              >
+                {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                Promote to Test →
+              </button>
+            </div>
+            {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
+
+            {features.length === 0 ? (
+              <p className="text-cyber-dim text-sm">
+                No plan yet for this project. Once a coding-domain build cycle runs, its features
+                and status will show up here.
+              </p>
+            ) : (
+              <>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  {byColumn.map((col) => (
+                    <Card key={col.status} title={`${col.label} (${col.features.length})`}>
+                      <div className="space-y-2">
+                        {col.features.length === 0 && (
+                          <p className="text-[11px] text-cyber-dim">Nothing here.</p>
+                        )}
+                        {col.features.map((name) => (
+                          <FeatureCard
+                            key={name}
+                            name={name}
+                            isTarget={name === targetFeature}
+                            targetModules={name === targetFeature ? targetModules : null}
+                            expanded={expandedFeature === name}
+                            onToggle={() => setExpandedFeature(expandedFeature === name ? null : name)}
+                          />
+                        ))}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+                <IntegrationChecklist integrations={data?.integrations} />
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <DeployPanel
+                    sessionId={resolvedSessionId}
+                    apiUrl={API_URL}
+                    deployConfigPlan={data?.deploy_config_plan}
+                    lastDeployConfigSummary={data?.last_deploy_config_summary}
+                    onRefresh={refresh}
+                  />
+                  <MonitoringWidget
+                    sessionId={resolvedSessionId}
+                    apiUrl={API_URL}
+                    monitoring={data?.monitoring}
+                    onRefresh={refresh}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

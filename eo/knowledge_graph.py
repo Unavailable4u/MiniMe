@@ -136,6 +136,23 @@ def get_node(workspace_id: str, node_id: str) -> dict | None:
     return {"node_id": node_id, "vector_id": vector_id, **match.metadata}
 
 
+def delete_node(workspace_id: str, node_id: str) -> None:
+    """Removes a single node from the vector index. This module stays
+    domain-agnostic (see the module docstring) and doesn't know about
+    graph_edges or note/cluster candidates that might reference this
+    node -- cascading to those is the caller's job (api/server.py's
+    delete endpoint), same boundary write_node() already draws around
+    embedding/upsert failures being this module's concern and nothing
+    else's.
+    """
+    vector_id = _node_vector_id(workspace_id, node_id)
+    try:
+        vector_index().delete(ids=[vector_id])
+    except Exception as exc:
+        print(f"  [Knowledge Graph] delete failed: {exc}")
+        raise
+
+
 def search_nodes(
     workspace_id: str,
     query_text: str,

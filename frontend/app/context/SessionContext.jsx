@@ -577,6 +577,26 @@ async function deleteWorkspace(wsId) {
   await refreshChatList();
 }
 
+// NEW — §8: advances a workspace one step along the fixed stage sequence
+// (note -> research -> plan -> build -> test -> growth). Throws on
+// failure (unlike the other CRUD functions above, which silently no-op)
+// because a rejected promote -- wrong stage order, no edit access -- is
+// something the calling button needs to surface, same reasoning already
+// used for the Part 8.9 membership functions below.
+async function promoteWorkspace(wsId, toStage) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/promote`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ to_stage: toStage }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `${res.status} ${res.statusText}`);
+  }
+  await fetchWorkspaces();
+  return res.json();
+}
+
 // --- NEW — Part 8.9: workspace membership, ownership transitions, voting,
 // and attribution. Mirrors eo/chat_workspace.py's role model 1:1 (viewer <
 // editor < moderator < partner <= owner). Unlike the workspace CRUD
@@ -766,6 +786,19 @@ async function fetchWorkspaceNodes(wsId, nodeType) {
   return res.json();
 }
 
+// NEW — §2 fix: deletes a single ingested source/node. Caller is
+// responsible for refetching the node list afterward (same pattern
+// ingestFile()'s callers already follow via onIngested), since the
+// delete endpoint itself only returns {status, id}, not a fresh list.
+async function deleteWorkspaceNode(wsId, nodeId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 async function fetchGraphEdges(wsId) {
   const res = await fetch(`${API_URL}/api/graph/edges?workspace_id=${encodeURIComponent(wsId)}`, {
     headers: await authHeaders(),
@@ -789,6 +822,86 @@ async function buildExtractionTable(wsId, fieldNames, { nodeType, expanded } = {
       node_type: nodeType || null,
       expanded: !!expanded,
     }),
+  });
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Test tab / "simulate" domain — reads back whatever persona roles +
+// simulation_synthesizer already wrote to the memory bus for a given
+// (finished or in-progress) simulate-domain chat run. Read-only despite
+// being a POST, same shape as buildExtractionTable above; see
+// api/server.py's get_simulation_results() docstring for why this reads
+// the bus instead of wrapping review_aggregator.py.
+async function fetchSimulationResults(wsId, sessionId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/simulate`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Test tab / `personas` sub-tab — thin client for the same Role Library
+// store the Role Library panel already reads/writes via GET/PUT/PATCH
+// /api/roles (eo/registry.py's list_role_metadata/update_role_prompt/
+// set_role_pinned). No new backend surface: `personas` just calls these
+// three and filters the result to the "simulate" domain's own role list
+// client-side, same "reuse, don't rebuild" reasoning the /simulate
+// endpoint itself used for stage_output reads.
+
+async function fetchRoles() {
+  const res = await fetch(`${API_URL}/api/roles`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function updateRolePrompt(roleName, brief) {
+  const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}`, {
+    method: "PUT",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ brief }),
+  });
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function setRolePinned(roleName, pinned) {
+  const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}/pin`, {
+    method: "PATCH",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ pinned }),
   });
   if (!res.ok) {
     let detail = `Request failed (${res.status})`;
@@ -831,6 +944,19 @@ async function ingestFile(wsId, file) {
   form.append("workspace_id", wsId);
   form.append("file", file);
   const res = await fetch(`${API_URL}/api/notes/import`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function ingestPdfFile(wsId, file) {
+  const form = new FormData();
+  form.append("workspace_id", wsId);
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/api/notes/pdf`, {
     method: "POST",
     headers: await authHeaders(),
     body: form,
@@ -933,6 +1059,30 @@ async function rejectFactCandidate(wsId, index) {
     method: "DELETE",
     headers: await authHeaders(),
   });
+}
+
+// Generic paste-panel content (eo/panel_content.py) — backs Mind Map,
+// Study (flashcards/quiz/study guide), and the other "paste the chat's
+// output into a box" panels in NotebooksTab.jsx. Same fetch/save shape
+// as workspace facts above; panelKey must be one of
+// eo/panel_content.py's VALID_PANEL_KEYS (e.g. "mindmap",
+// "study_flashcards", "study_quiz", "study_guide", "prd", ...).
+
+async function fetchPanelContent(wsId, panelKey) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return { workspace_id: wsId, panel_key: panelKey, content: "", updated_at: null, updated_by: null };
+  return res.json();
+}
+
+async function savePanelContent(wsId, panelKey, content) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
+    method: "PUT",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ content }),
+  });
+  return res.json();
 }
 
 // Note clustering (agents/note_clusterer.py, Part 4 §4.3) — deterministic
@@ -1540,7 +1690,7 @@ async function openScopedSubChat(wsId, taskText) {
   createBatch, estimateBatch,
   renameBatch, unlinkBatchMembers, deleteBatch,
   workspaces, fetchWorkspaces, createWorkspace, renameWorkspace,
-  addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,   // NEW — §7
+  addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace, promoteWorkspace,   // NEW — §7 / §8
   // NEW — Part 8.9: workspace membership, ownership, voting, attribution
   fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
   removeWorkspaceMember, leaveWorkspaceMembership, forceRemoveOwner,
@@ -1564,11 +1714,14 @@ async function openScopedSubChat(wsId, taskText) {
   // templateRuns' own comment above.
   templateRuns, runTemplate,
   // NEW — §4.7: Notebooks tab
-  fetchWorkspaceNodes, fetchGraphEdges, buildExtractionTable,
-  ingestClip, ingestVideoUrl, ingestFile, ingestVoiceFile,
+  fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, buildExtractionTable,
+  fetchSimulationResults,   // NEW — Test tab: reads simulate-domain stage_output back off the bus
+  fetchRoles, updateRolePrompt, setRolePinned,   // NEW — Test tab `personas`: thin client over the Role Library store
+  ingestClip, ingestVideoUrl, ingestFile, ingestPdfFile, ingestVoiceFile,
   detectBacklinks,
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
   fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
+  fetchPanelContent, savePanelContent,   // NEW — generic paste-panel persistence (eo/panel_content.py)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,
   gradeQuiz, recordQuizAttempt, fetchMissedQuestions,

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import IngestionDropzone from "../notebooks/IngestionDropzone";
 import FlashcardFlipper from "../notebooks/FlashcardFlipper";
@@ -7,9 +7,13 @@ import QuizRunner from "../notebooks/QuizRunner";
 import StudyGuideViewer from "../notebooks/StudyGuideViewer";
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import MermaidDiagram from "../MermaidDiagram";
+import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: was already built, unused here
+import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
+import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
 import {
   NotebookText, Plus, MessageSquareText, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
+  Trash2, MoreVertical, ArrowUpRight,
 } from "lucide-react";
 
 const SUB_TABS = [
@@ -22,6 +26,17 @@ const SUB_TABS = [
   { id: "candidates", label: "Suggested notes", icon: Sparkles },
 ];
 
+// NEW — §4 fix: persist which notebook and sub-tab were selected, same
+// localStorage pattern AppShell.jsx uses for ACTIVE_TAB_KEY, so a page
+// refresh doesn't drop you back to "no notebook selected."
+const SELECTED_NOTEBOOK_KEY = "minime_notebooks_selected_id";
+const SUB_TAB_KEY = "minime_notebooks_subtab";
+// NEW — §6.2: separate collapse key from WorkspaceChatPanel's own internal
+// WORKING_PANEL_KEY — this one folds away the *whole* dock (chat +
+// WorkingPanel together), same "own toggle, own storage key" pattern the
+// left ChatSidebar already uses for itself.
+const CHAT_DOCK_KEY = "minime_notebooks_chatdock_collapsed";
+
 function timeAgo(iso) {
   if (!iso) return "";
   try { return new Date(iso).toLocaleDateString(); } catch { return ""; }
@@ -29,7 +44,21 @@ function timeAgo(iso) {
 
 // --- Sources sub-view ------------------------------------------------------
 
-function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode }) {
+function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode, onDeleteNode }) {
+  const [pendingDelete, setPendingDelete] = useState(null); // NEW — §2 fix: node awaiting delete confirmation
+  const [deleting, setDeleting] = useState(false);
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await onDeleteNode(pendingDelete.node_id);
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <IngestionDropzone workspaceId={workspaceId} onIngested={onIngested} />
@@ -39,20 +68,39 @@ function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode }) 
         </div>
         <div className="space-y-1">
           {nodes.map((n) => (
-            <button
+            <div
               key={n.node_id}
-              onClick={() => onSelectNode(n)}
-              className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--neutral-800)] hover:border-[var(--neutral-700)] text-left"
+              className="group w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--neutral-800)] hover:border-[var(--neutral-700)]"
             >
-              <span className="text-xs text-[var(--neutral-200)] truncate">{n.title || n.node_id}</span>
-              <span className="text-[10px] text-[var(--neutral-600)] shrink-0">{timeAgo(n.created_at)}</span>
-            </button>
+              <button
+                onClick={() => onSelectNode(n)}
+                className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left"
+              >
+                <span className="text-xs text-[var(--neutral-200)] truncate">{n.title || n.node_id}</span>
+                <span className="text-[10px] text-[var(--neutral-600)] shrink-0">{timeAgo(n.created_at)}</span>
+              </button>
+              <button
+                onClick={() => setPendingDelete(n)}
+                title="Delete source"
+                className="shrink-0 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
           ))}
           {!loading && nodes.length === 0 && (
             <p className="text-xs text-[var(--neutral-600)]">No sources ingested yet — drop a file or paste a link above.</p>
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title="Delete source"
+        message={`Delete "${pendingDelete?.title || pendingDelete?.node_id}"? This also removes any links to it in Backlinks and Clusters.`}
+        confirmLabel={deleting ? "Deleting…" : "Delete"}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
@@ -61,13 +109,44 @@ function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode }) 
 // §4.7: extends MermaidDiagram.jsx (currently static, non-interactive
 // SVG) with click handling that opens a scoped sub-chat. The mind map's
 // own Mermaid source comes from the `mapper` role's chat output — pasted
-// in here rather than re-fetched, since no dedicated "latest mind map"
-// store exists yet (same reasoning the domain doc gives for Video
-// Overview's audio lookup-by-title being a deliberate simplification).
+// in here, then saved to eo/panel_content.py under panel_key "mindmap"
+// so it survives a reload or a sub-tab switch instead of vanishing with
+// local component state (the previous behavior).
 
-function MindMapView({ workspaceId, onOpenSubChat }) {
+function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, savePanelContent }) {
   const [text, setText] = useState("");
   const [rendered, setRendered] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchPanelContent(workspaceId, "mindmap").then((saved) => {
+      if (cancelled) return;
+      const content = saved?.content || "";
+      setText(content);
+      setRendered(content);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchPanelContent]);
+
+  async function handleRender() {
+    setRendered(text);
+    setSaving(true);
+    try {
+      await savePanelContent(workspaceId, "mindmap", text);
+      setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+  }
 
   return (
     <div className="space-y-3">
@@ -81,12 +160,16 @@ function MindMapView({ workspaceId, onOpenSubChat }) {
         rows={5}
         className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
       />
-      <button
-        onClick={() => setRendered(text)}
-        className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium"
-      >
-        Render
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleRender}
+          disabled={saving}
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Render & Save"}
+        </button>
+        {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+      </div>
       {rendered && (
         <div className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-4 overflow-auto">
           <MermaidDiagram
@@ -131,11 +214,49 @@ function BacklinksView({ nodes, edges, loading, onDetect, onSelectNode }) {
 // stage_output text" pattern the Mind Map view above already uses.
 
 function StudyView({ workspaceId }) {
-  const { synthesizePodcast, buildVideoOverview } = useSession();
+  const { synthesizePodcast, buildVideoOverview, fetchPanelContent, savePanelContent } = useSession();
   const [kind, setKind] = useState("flashcards");
   const [text, setText] = useState("");
   const [rendered, setRendered] = useState("");
   const [quizNodeId, setQuizNodeId] = useState("");
+  // NEW — persistence for the three paste-and-Load kinds (flashcards,
+  // quiz, study_guide) via eo/panel_content.py, panel_key
+  // "study_<kind>". Podcast script / video slide text stay ephemeral —
+  // those round-trip through the synthesis/build endpoints and produce
+  // a durable audio/video file of their own, so the pasted source text
+  // isn't the thing worth persisting there.
+  const PERSISTED_KINDS = ["flashcards", "quiz", "study_guide"];
+  const [loadingText, setLoadingText] = useState(true);
+  const [savingText, setSavingText] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  useEffect(() => {
+    if (!PERSISTED_KINDS.includes(kind)) { setLoadingText(false); return; }
+    let cancelled = false;
+    setLoadingText(true);
+    setSavedAt(null);
+    fetchPanelContent(workspaceId, `study_${kind}`).then((saved) => {
+      if (cancelled) return;
+      const content = saved?.content || "";
+      setText(content);
+      setRendered(content);
+      setLoadingText(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, kind]);
+
+  async function handleLoad() {
+    setRendered(text);
+    if (!PERSISTED_KINDS.includes(kind)) return;
+    setSavingText(true);
+    try {
+      await savePanelContent(workspaceId, `study_${kind}`, text);
+      setSavedAt(Date.now());
+    } finally {
+      setSavingText(false);
+    }
+  }
 
   // NEW — Part 4 §4.4: podcast synthesis state. Kept separate from
   // `rendered` (the paste-and-Load flow above) since this kind doesn't
@@ -198,7 +319,7 @@ function StudyView({ workspaceId }) {
         {["flashcards", "quiz", "study_guide", "podcast", "video_overview"].map((k) => (
           <button
             key={k}
-            onClick={() => { setKind(k); setRendered(""); }}
+            onClick={() => { setKind(k); setRendered(""); setText(""); }}
             className={`text-xs rounded-lg px-3 py-1 ${kind === k ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"}`}
           >
             {k === "flashcards" ? "Flashcards" : k === "quiz" ? "Quiz" : k === "study_guide" ? "Study guide" : k === "podcast" ? "Podcast" : "Video overview"}
@@ -215,7 +336,9 @@ function StudyView({ workspaceId }) {
           Paste the Markdown from a <code className="text-amber-300">{kind === "flashcards" ? "flashcard_writer" : kind === "quiz" ? "quiz_writer" : kind === "study_guide" ? "study_guide_writer" : "podcast_scriptwriter"}</code> chat run.
         </p>
       )}
-      {kind !== "video_overview" && (
+      {kind !== "video_overview" && loadingText && PERSISTED_KINDS.includes(kind) ? (
+        <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading saved text…</div>
+      ) : kind !== "video_overview" && (
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -320,12 +443,16 @@ function StudyView({ workspaceId }) {
         </div>
       ) : (
         <>
-          <button
-            onClick={() => setRendered(text)}
-            className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium"
-          >
-            Load
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleLoad}
+              disabled={savingText}
+              className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
+            >
+              {savingText ? "Saving…" : "Load & Save"}
+            </button>
+            {savedAt && !savingText && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+          </div>
 
           {rendered && (
             <div className="rounded-lg border border-[var(--neutral-800)] p-4">
@@ -432,7 +559,16 @@ function ClustersView({ candidates, loading, scanning, onScan, onAccept, onRejec
 // shape as the Suggested Notes tab, so an agent guess never silently
 // clobbers something the user set on purpose.
 
-function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate }) {
+// NEW — exported (not just used internally) so GrowthTab's `voice`
+// sub-tab can import this directly instead of re-implementing fact
+// editing a second time. Design doc §2.2: "Directly reuse NotebooksTab's
+// FactsView component... eo/workspace_facts.py is already
+// workspace-scoped, not domain-scoped, so a Growth-stage workspace
+// calling the same fetchWorkspaceFacts/saveWorkspaceFacts functions
+// NotebooksTab already uses gets brand voice for free." No behavior
+// change here — same component, same props contract, just no longer
+// module-private.
+export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate }) {
   const [facts, setFacts] = useState({ brand_voice: "", target_user: "", tech_stack: [], custom: {} });
   const [techStackText, setTechStackText] = useState("");
   const [customEntries, setCustomEntries] = useState([]); // [{key, value}]
@@ -626,15 +762,21 @@ function NodePreviewModal({ node, onClose }) {
 
 // --- Main tab ------------------------------------------------------
 
-export default function NotebooksTab({ onOpenChat }) {
-  const {
-    workspaces, fetchWorkspaces, createWorkspace,
-    fetchWorkspaceNodes, fetchGraphEdges, detectBacklinks,
-    fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
-    fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
-    proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
-    openScopedSubChat, createNewChat, addWorkspaceChat,
+export default function NotebooksTab({ onPromoted }) {
+   const {
+     workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
+     fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, detectBacklinks,
+     fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
+     fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
+     fetchPanelContent, savePanelContent,
+     proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
+    openScopedSubChat, createNewChat, addWorkspaceChat, switchChat,
   } = useSession();
+
+  // NEW — §8: Notebooks only ever shows note-stage workspaces now — once
+  // promoted, a workspace moves to the Research tab instead of appearing
+  // in both places.
+  const notebooks = workspaces.filter((w) => w.stage === "note");
 
   const [selectedId, setSelectedId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
@@ -648,10 +790,65 @@ export default function NotebooksTab({ onOpenChat }) {
   const [previewNode, setPreviewNode] = useState(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+  // NEW — §3 fix: which notebook's kebab menu (rename/delete/members) is
+  // open. ManageWorkspaceModal already existed fully built, just never
+  // wired into any tab's UI.
+  const [managingWorkspace, setManagingWorkspace] = useState(null);
+  // NEW — §8: promote-to-Research busy/error state for the button next
+  // to "Open chat".
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState(null);
+  // NEW — §6.2: right-hand chat dock collapse state, restored from
+  // localStorage on mount (same pattern as sidebarCollapsed elsewhere).
+  const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
 
   useEffect(() => {
-    if (!selectedId && workspaces.length > 0) setSelectedId(workspaces[0].id);
-  }, [workspaces, selectedId]);
+    setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+  }, []);
+
+  function toggleChatDock() {
+    setChatDockCollapsed((prev) => {
+      localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+  // NEW — §4 fix: guards the auto-select effect below until we've had a
+  // chance to read a saved selection from localStorage, so it doesn't
+  // jump to workspaces[0] before the restore runs.
+  const [restoredSelection, setRestoredSelection] = useState(false);
+
+  // NEW — §4 fix: restore the last-selected notebook and sub-tab on
+  // mount.
+  useEffect(() => {
+    const savedId = localStorage.getItem(SELECTED_NOTEBOOK_KEY);
+    const savedSubTab = localStorage.getItem(SUB_TAB_KEY);
+    if (savedId) setSelectedId(savedId);
+    if (savedSubTab && SUB_TABS.some((t) => t.id === savedSubTab)) setSubTab(savedSubTab);
+    setRestoredSelection(true);
+  }, []);
+
+  // NEW — §4 fix: persist selection changes. Guarded on restoredSelection
+  // so the initial (pre-restore) null/"sources" values don't overwrite
+  // what's already saved before the restore effect above has run.
+  useEffect(() => {
+    if (!restoredSelection || !selectedId) return;
+    localStorage.setItem(SELECTED_NOTEBOOK_KEY, selectedId);
+  }, [selectedId, restoredSelection]);
+
+  useEffect(() => {
+    if (!restoredSelection) return;
+    localStorage.setItem(SUB_TAB_KEY, subTab);
+  }, [subTab, restoredSelection]);
+
+  useEffect(() => {
+    // Falls back to the first workspace once workspaces have loaded, but
+    // only after the restore effect above has had a chance to set
+    // selectedId from localStorage — and also recovers if a previously
+    // saved id no longer exists (e.g. that notebook was deleted).
+    if (!restoredSelection || notebooks.length === 0) return;
+    const stillExists = selectedId && notebooks.some((w) => w.id === selectedId);
+    if (!stillExists) setSelectedId(notebooks[0].id);
+  }, [notebooks, selectedId, restoredSelection]);
 
   async function loadNotebookData(wsId) {
     setLoadingNodes(true);
@@ -662,6 +859,11 @@ export default function NotebooksTab({ onOpenChat }) {
       fetchNoteCandidates(wsId),
       fetchClusterCandidates(wsId),
     ]);
+    // FIX — if the user has since selected a different notebook while
+    // this fetch was in flight, this result is stale: drop it instead of
+    // overwriting what's currently on screen. (Loading flags only get
+    // cleared by whichever call actually IS still relevant.)
+    if (selectedIdRef.current !== wsId) return;
     setNodes(nodeList);
     setEdges(edgeList);
     setCandidates(candidateList);
@@ -669,6 +871,17 @@ export default function NotebooksTab({ onOpenChat }) {
     setLoadingNodes(false);
     setLoadingClusters(false);
   }
+
+  // FIX — stale-response guard: `loadNotebookData` is async and can be
+  // in flight when the user switches notebooks (e.g. via a slow upload's
+  // onIngested callback firing after selectedId has already moved on —
+  // see IngestionDropzone). Without this ref, whichever fetch resolves
+  // last wins and can silently overwrite the currently-viewed notebook's
+  // nodes/edges with a different notebook's data. This ref always holds
+  // the *current* selection so loadNotebookData can check "is my result
+  // still relevant?" right before committing state.
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
   useEffect(() => {
     if (selectedId) loadNotebookData(selectedId);
@@ -703,25 +916,47 @@ export default function NotebooksTab({ onOpenChat }) {
     setCreating(false);
     await fetchWorkspaces();
   }
+  // NEW — switches the active chat locally and makes sure the dock (or,
+  // below `lg`, the full-screen overlay) is showing it — no tab jump,
+  // this tab is self-contained regardless of viewport width.
+  async function openInDock(chatId) {
+    await switchChat(chatId);
+    if (chatDockCollapsed) toggleChatDock();
+  }
 
   async function handleOpenChat(wsId) {
     const ws = workspaces.find((w) => w.id === wsId);
     const chatId = ws?.chat_ids?.[0] || null;
     if (chatId) {
-      await onOpenChat(chatId);
+      await openInDock(chatId);
     } else {
       const newChatId = await createNewChat();
       await addWorkspaceChat(wsId, newChatId);
-      await onOpenChat(newChatId);
+      await openInDock(newChatId);
     }
   }
 
   async function handleOpenSubChat(wsId, prompt) {
     const chatId = await openScopedSubChat(wsId, prompt);
-    await onOpenChat(chatId);
+    await openInDock(chatId);
   }
 
-  const selected = workspaces.find((w) => w.id === selectedId);
+  // NEW — §8: promotes the notebook to Research and hands off navigation
+  // to AppShell, which switches tabs and pre-selects it there.
+  async function handlePromote(wsId) {
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      await promoteWorkspace(wsId, "research");
+      onPromoted?.("research", wsId);
+    } catch (err) {
+      setPromoteError(err.message);
+    } finally {
+      setPromoting(false);
+    }
+  }
+
+  const selected = notebooks.find((w) => w.id === selectedId);
   const ActiveIcon = SUB_TABS.find((t) => t.id === subTab)?.icon || FileText;
 
   return (
@@ -750,19 +985,30 @@ export default function NotebooksTab({ onOpenChat }) {
           </form>
         )}
         <div className="flex-1 overflow-y-auto">
-          {workspaces.map((ws) => (
-            <button
+          {notebooks.map((ws) => (
+            <div
               key={ws.id}
-              onClick={() => setSelectedId(ws.id)}
-              className={`w-full flex items-center justify-between gap-1 px-3 py-2 border-b border-[var(--neutral-900)] text-left ${
+              className={`group flex items-center gap-1 border-b border-[var(--neutral-900)] ${
                 ws.id === selectedId ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
               }`}
             >
-              <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
-              {ws.id === selectedId && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
-            </button>
+              <button
+                onClick={() => setSelectedId(ws.id)}
+                className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
+              >
+                <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
+                {ws.id === selectedId && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+              </button>
+              <button
+                onClick={() => setManagingWorkspace(ws)}
+                title="Rename or delete notebook"
+                className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
+              >
+                <MoreVertical size={13} />
+              </button>
+            </div>
           ))}
-          {workspaces.length === 0 && (
+          {notebooks.length === 0 && (
             <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
           )}
         </div>
@@ -778,13 +1024,24 @@ export default function NotebooksTab({ onOpenChat }) {
           <div className="p-5 space-y-4 max-w-3xl">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
-              <button
-                onClick={() => handleOpenChat(selected.id)}
-                className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium"
-              >
-                <MessageSquareText size={13} /> Open chat
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleOpenChat(selected.id)}
+                  className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium"
+                >
+                  <MessageSquareText size={13} /> Open chat
+                </button>
+                <button
+                  onClick={() => handlePromote(selected.id)}
+                  disabled={promoting}
+                  className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+                >
+                  {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                  Promote to Research →
+                </button>
+              </div>
             </div>
+            {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
 
             <nav className="flex gap-1 border-b border-[var(--neutral-800)] pb-2">
               {SUB_TABS.map((t) => (
@@ -813,10 +1070,19 @@ export default function NotebooksTab({ onOpenChat }) {
                 loading={loadingNodes}
                 onIngested={() => loadNotebookData(selected.id)}
                 onSelectNode={setPreviewNode}
+                onDeleteNode={async (nodeId) => {
+                  await deleteWorkspaceNode(selected.id, nodeId);
+                  await loadNotebookData(selected.id);
+                }}
               />
             )}
             {subTab === "mindmap" && (
-              <MindMapView workspaceId={selected.id} onOpenSubChat={handleOpenSubChat} />
+              <MindMapView
+                workspaceId={selected.id}
+                onOpenSubChat={handleOpenSubChat}
+                fetchPanelContent={fetchPanelContent}
+                savePanelContent={savePanelContent}
+              />
             )}
             {subTab === "backlinks" && (
               <BacklinksView
@@ -860,7 +1126,36 @@ export default function NotebooksTab({ onOpenChat }) {
         )}
       </div>
 
+      {/* Desktop dock — side-by-side, lg+. */}
+      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+      </div>
+
+      {/* Below lg — full-screen overlay instead of a side dock, so this
+          tab never depends on the standalone Chat tab, at any width. */}
+      {!chatDockCollapsed && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+        </div>
+      )}
+      {chatDockCollapsed && (
+        <button
+          onClick={toggleChatDock}
+          title="Open chat"
+          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
+        >
+          <MessageSquareText size={18} />
+        </button>
+      )}
+
       <NodePreviewModal node={previewNode} onClose={() => setPreviewNode(null)} />
+      {managingWorkspace && (
+        <ManageWorkspaceModal
+          workspace={managingWorkspace}
+          allChats={chats}
+          onClose={() => setManagingWorkspace(null)}
+        />
+      )}
     </div>
   );
 }
