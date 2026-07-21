@@ -20,6 +20,8 @@ import re     # NEW — Part 7 §7.3
 import requests  # NEW — Part 8.3: Admin API lookup for workspace-invite-by-email
 import secrets   # NEW — Part 8.5: OAuth state tokens
 import urllib.parse  # NEW — Part 8.5: building the Google consent URL
+from eo import panel_content
+from agents import pagespeed_agent   # NEW — Step 2: PageSpeed Insights connector for GrowthTab's Content Audit
 
 try:
     from dotenv import load_dotenv
@@ -82,6 +84,7 @@ from eo.executor import resume_graph   # NEW — Part 2 §2.4
 from eo.registry import list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned, list_role_metadata   # NEW — Part 2 §2.7: Role Library panel; set_role_pinned NEW — pinned roles; list_role_metadata NEW — bulk read, fixes N+1
 from eo.structure import (   # NEW — Part 2 §2.7: Workflow Template builder
     save_workflow_template, list_workflow_templates, delete_workflow_template, update_workflow_template,
+    STRUCTURE_TEMPLATES,   # NEW — Test tab: /simulate reads the "simulate" domain's own role list
 )
 from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
 from memory.bus import read_many as bus_read_many, set_app_slug, KEYS   # NEW — Part 7 §7.2: GET /api/tasks/{session_id}
@@ -98,7 +101,7 @@ from fastapi.responses import RedirectResponse   # NEW — Part 8.5: OAuth callb
 from eo import workspace_facts
 from eo import graph_edges
 from eo import note_candidates   # NEW — §4.7: silent note-taker's propose/accept/reject surface
-from eo.knowledge_graph import list_nodes   # NEW — §4.7: Notebooks tab source list / mind map / backlinks all read this
+from eo.knowledge_graph import list_nodes, delete_node   # NEW — §2 fix: delete_node was added, list_nodes already here
 from agents.backlink_detector import detect_backlinks
 from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
@@ -109,6 +112,7 @@ from agents.web_clipper import clip_url
 from agents.video_ingestor import ingest_video
 from agents.voice_ingestor import ingest_voice
 from agents.importer import import_artifact, SUPPORTED_FORMATS as IMPORTABLE_FORMATS
+from agents.pdf_ingestor import ingest_pdf   # NEW — §1 fix: PDF ingestion, was never wired to an endpoint
 from agents.source_ingestor import write_ingested_source
 from agents.tts_synthesizer import synthesize_podcast
 from agents.video_overview_builder import build_video_overview
@@ -314,6 +318,9 @@ class CreateWorkspaceRequest(BaseModel):
 class RenameWorkspaceRequest(BaseModel):
     name: str
 
+class PromoteWorkspaceRequest(BaseModel):
+    to_stage: str
+
 
 class WorkspaceChatRequest(BaseModel):
     chat_id: str
@@ -367,6 +374,8 @@ class WorkspaceFactsRequest(BaseModel):
     tech_stack: Optional[list[str]] = None
     custom: Optional[dict[str, Any]] = None
 
+class PanelContentRequest(BaseModel):
+    content: str
 
 class CreateEdgeRequest(BaseModel):
     from_node_id: str
@@ -391,6 +400,10 @@ class BuildTableRequest(BaseModel):
     field_names: list[str]
     node_type: Optional[str] = None
     expanded: bool = False
+
+
+class SimulateRequest(BaseModel):
+    session_id: str
 
 
 class SynthesizePodcastRequest(BaseModel):
@@ -632,7 +645,16 @@ def rename_workspace(ws_id: str, req: RenameWorkspaceRequest, owner_id: str = De
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     except chat_workspace.WorkspaceAccessError as e:
         raise HTTPException(status_code=403, detail=str(e))
-
+@app.post("/api/workspaces/{ws_id}/promote")
+def promote_workspace(ws_id: str, req: PromoteWorkspaceRequest, owner_id: str = Depends(require_auth)):
+    try:
+        return chat_workspace.promote(ws_id, owner_id, req.to_stage)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    except chat_workspace.WorkspaceAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/workspaces/{ws_id}/chats")
 def add_workspace_chat(ws_id: str, req: WorkspaceChatRequest, owner_id: str = Depends(require_auth)):
@@ -1152,7 +1174,65 @@ def reject_workspace_fact_candidate(ws_id: str, index: int):
         raise HTTPException(status_code=404, detail="Unknown candidate index")
     return {"status": "rejected", "index": index}
 
+# --- generic paste-panel content (see eo/panel_content.py) ---------------
+# Same "gone on reload" fix as workspace facts, generalized to every
+# paste-a-chat's-output-into-a-box panel: Mind Map, Study
+# (flashcards/quiz/study guide), PRD, Architecture, Schema, API
+# Contract, Devil's Advocate, Feasibility, Wireframes, Contradictions.
 
+@app.get("/api/workspaces/{ws_id}/panels", dependencies=[Depends(require_auth)])
+def list_workspace_panel_content(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    return panel_content.list_content(ws_id)
+
+
+@app.get("/api/workspaces/{ws_id}/panels/{panel_key}", dependencies=[Depends(require_auth)])
+def get_workspace_panel_content(ws_id: str, panel_key: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    try:
+        return panel_content.get_content(ws_id, panel_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/workspaces/{ws_id}/panels/{panel_key}", dependencies=[Depends(require_auth)])
+def put_workspace_panel_content(ws_id: str, panel_key: str, req: PanelContentRequest,
+                                 owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    try:
+        return panel_content.set_content(ws_id, panel_key, req.content, owner_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# --- content audit: PageSpeed Insights (see agents/pagespeed_agent.py) --
+# Live-fetched, not persisted — same "fetch fresh on load/refresh, no
+# backing store" pattern GrowthTab's CalendarView already uses for
+# Google Calendar events, not the panel_content paste-and-save pattern.
+# ws_id is only used for the same ownership gate every workspace-scoped
+# route already applies; the audit itself isn't workspace-specific data.
+
+@app.get("/api/workspaces/{ws_id}/audit/pagespeed", dependencies=[Depends(require_auth)])
+def get_pagespeed_audit(ws_id: str, url: str = Query(...), strategy: str = Query("mobile"),
+                         owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    try:
+        return pagespeed_agent.run_audit(url, strategy)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except pagespeed_agent.PageSpeedError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 # --- knowledge-graph edges (see eo/graph_edges.py, §0.2) -----------------
 # Auto-created edges are written directly by whichever agent produced
 # them (no HTTP round-trip). This is the manual path: the "link to..."
@@ -1195,6 +1275,46 @@ def get_workspace_nodes(ws_id: str, node_type: Optional[str] = Query(None),
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     return list_nodes(ws_id, node_type=node_type)
+
+
+# NEW — §2 fix: there was no way to delete an individual ingested
+# source/node -- SourcesView's rows only ever *selected* a node, no
+# delete affordance existed on either end. Cascades to graph_edges
+# referencing this node (edges store the full "node:{ws_id}:{node_id}"
+# vector id on from_node_id/to_node_id -- see ResearchTab.jsx's own
+# bareNodeId() comment -- so we build that same prefixed id to match)
+# and to cluster candidates that included this node, so neither dangles
+# pointing at a node that no longer exists. Note-candidates aren't
+# node-linked (see their {title, content} shape in CandidatesView.jsx),
+# so there's nothing to cascade there.
+@app.delete("/api/workspaces/{ws_id}/nodes/{node_id}", dependencies=[Depends(require_auth)])
+def delete_workspace_node(ws_id: str, node_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    delete_node(ws_id, node_id)
+
+    # eo/graph_edges.py's own edges_for_node() docstring: "what a 'delete
+    # this node' flow needs to know what it would orphan" -- built for
+    # exactly this, confirmed against that module's source rather than
+    # guessed.
+    full_node_id = f"node:{ws_id}:{node_id}"
+    for edge in graph_edges.edges_for_node(full_node_id):
+        try:
+            graph_edges.delete_edge(edge["edge_id"])
+        except FileNotFoundError:
+            pass
+
+    for candidate in list_cluster_candidates(ws_id):
+        if node_id in (candidate.get("node_ids") or []):
+            try:
+                reject_cluster_candidate(ws_id, candidate["candidate_id"])
+            except FileNotFoundError:
+                pass
+
+    return {"status": "deleted", "id": node_id}
 
 
 # --- silent note-taking agent candidates (see eo/note_candidates.py, §4.6)
@@ -1292,6 +1412,73 @@ def build_table_endpoint(ws_id: str, req: BuildTableRequest, owner_id: str = Dep
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# --- Test tab / "simulate" domain (see eo/structure.py's STRUCTURE_TEMPLATES
+# ["simulate"], Part 1) -----------------------------------------------------
+# Test tab design spec's Build Order step 1 originally called for wrapping
+# agents/review_aggregator.py's aggregate_reviews() merge step here -- that
+# doesn't actually fit: aggregate_reviews expects each member's output
+# already shaped as {"issues": [...], "summary": ...} (Reviewer Pool's
+# structured JSON), while every persona role's own ROLE_PROMPTS_SEED brief
+# (persona_customer, persona_skeptic, critic_reviewer, usability_walkthrough,
+# red_team, pricing_sensitivity, support_ticket_predictor, competitor_response)
+# is a plain generic_worker role writing free-form in-character prose, not
+# structured issues -- there'd be nothing for aggregate_reviews to parse.
+# More importantly, simulation_synthesizer's own brief explicitly rejects
+# review_aggregator-style merging ("Preserve real disagreement between
+# personas explicitly -- do not average conflicting reactions into a single
+# flattened conclusion"). The synthesis this tab needs already runs as part
+# of the domain's own execution order -- simulation_synthesizer is
+# deliberately hired last, after every persona (see STRUCTURE_TEMPLATES'
+# own comment), so it can read their outputs via input_keys. So this
+# endpoint's job is just reading back what already ran off the memory bus,
+# same pattern GET /api/tasks/{session_id} already uses for
+# integration_flagger's stage_output -- not a new merge step.
+#
+# marketplace_review_batch is read separately from the other persona roles
+# since its own brief specifies a different, already-structured fenced-json
+# shape (a bare array of {"rating","sentiment","text"}) rather than free
+# prose -- each role's own brief decides its shape, this endpoint just
+# reads it back either way.
+
+@app.post("/api/workspaces/{ws_id}/simulate")
+def get_simulation_results(ws_id: str, req: SimulateRequest, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    session_id = req.session_id
+    persona_roles = [r for r in STRUCTURE_TEMPLATES["simulate"] if r != "simulation_synthesizer"]
+
+    # Same read-side app_slug scoping GET /api/tasks/{session_id} uses for
+    # stage_output:* keys -- without it, read_many() falls back to
+    # whatever app_slug happens to be the persisted Redis global, the
+    # exact cross-session collision Migration Part B fixed on the write
+    # side.
+    set_app_slug(session_id)
+    keys = [f"stage_output:{session_id}:{role}" for role in persona_roles]
+    synthesis_key = f"stage_output:{session_id}:simulation_synthesizer"
+    data = bus_read_many(keys + [synthesis_key], default=None)
+
+    personas = []
+    for role in persona_roles:
+        text = data[f"stage_output:{session_id}:{role}"]
+        if not text:
+            continue
+        if role == "marketplace_review_batch":
+            reviews = _parse_marketplace_reviews(text)
+            if reviews:
+                personas.append({"role": role, "reviews": reviews})
+        else:
+            personas.append({"role": role, "text": text})
+
+    return {
+        "session_id": session_id,
+        "synthesis": data[synthesis_key],
+        "personas": personas,
+    }
+
+
 # --- notes domain: capture (see agents/web_clipper.py, Part 4 §4.2) ------
 # Driven by a small bookmarklet/extension that POSTs the current page's
 # URL here. One new ingestion endpoint, not a new backend paradigm --
@@ -1342,6 +1529,27 @@ async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile =
         tmp_path = tmp.name
     try:
         artifact = import_artifact(tmp_path, fmt=ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        os.remove(tmp_path)
+    node_ids = write_ingested_source(artifact, workspace_id, created_by="user")
+    return {"node_ids": node_ids, "title": artifact["title"]}
+
+
+@app.post("/api/notes/pdf", dependencies=[Depends(require_auth)])
+async def ingest_pdf_endpoint(workspace_id: str = Form(...), file: UploadFile = File(...)):
+    """PDF ingestion -- agents/pdf_ingestor.py (pdfplumber, page-by-page
+    extraction) already exists and was fully implemented, it just had no
+    endpoint calling it. PDF is deliberately absent from IMPORTABLE_FORMATS
+    (see /api/notes/import above) -- this is that "other job", same
+    temp-file-then-cleanup, two-step write_ingested_source() shape as
+    every other ingestor here."""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        artifact = ingest_pdf(tmp_path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -1932,6 +2140,27 @@ def _parse_fenced_json(text):
         return []
 
 
+def _parse_marketplace_reviews(text):
+    """marketplace_review_batch (Part 1 §1.4 track 2) is a generic_worker
+    role whose own ROLE_PROMPTS_SEED brief instructs it to emit a single
+    fenced ```json code block containing a bare array of
+    {"rating", "sentiment", "text"} objects -- not the {"integrations":
+    [...]} wrapper shape _parse_fenced_json above expects, since that's
+    what THIS role's own brief specifies. Same strip-the-fence-then-
+    json.loads approach, same "[] on anything unparseable, never an
+    error state" posture as _parse_fenced_json.
+    """
+    if not text:
+        return []
+    match = re.search(r"```json\s*(.*?)```", text, re.DOTALL)
+    raw = match.group(1) if match else text
+    try:
+        parsed = json.loads(raw.strip())
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
 def _sentry_status(module_specs: dict, submitted_code: dict) -> str:
     """Part 7 §7.5. Three states, not a bare yes/no, so the monitoring
     widget can be honest about where things stand:
@@ -2020,6 +2249,42 @@ def get_tasks(session_id: str):
         },
     }
 
+@app.get("/api/tasks/workspace/{ws_id}", dependencies=[Depends(require_auth)])
+def get_tasks_for_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
+    """§7 — Tasks scoped to a workspace instead of a raw chat session.
+    Resolves ws_id -> a chat_id using the exact same "first chat_id, or
+    create one" convention NotebooksTab/ResearchTab's handleOpenChat
+    already established, then delegates to get_tasks()'s existing
+    memory-bus read unchanged. current_plan/feature_status/etc. still
+    live in the bus keyed by app_slug=session_id -- this route only
+    changes what session_id gets resolved and passed in; nothing about
+    how idea_planner.py or any other agent writes.
+
+    Also stamps the resolved session_id back onto the response as
+    "_session_id" -- TasksTab.jsx's DeployPanel/MonitoringWidget still
+    call /api/deploy/{session_id}/... and /api/monitoring/{session_id}/...
+    directly (those routes are unchanged, still session-keyed), so the
+    frontend needs this id rather than re-deriving ws.chat_ids[0] itself,
+    which could be stale on the very first call when no chat existed yet
+    and one was just created here.
+    """
+    try:
+        ws = chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    chat_ids = ws["chat_ids"]
+    if chat_ids:
+        session_id = chat_ids[0]
+    else:
+        created = chat_workspace.create_chat_in_workspace(
+            ws_id, owner_id, title=f"{ws['name']} — Build"
+        )
+        session_id = created["chat_ids"][0]
+
+    data = get_tasks(session_id)
+    data["_session_id"] = session_id
+    return data
 
 # --- Part 7 §7.4 — Deploy action button. Deliberately three separate
 # endpoints for three separate-risk actions, same split as

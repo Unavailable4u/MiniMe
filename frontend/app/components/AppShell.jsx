@@ -9,7 +9,10 @@ import RoleLibraryTab from "./tabs/RoleLibraryTab";
 import WorkflowTemplatesTab from "./tabs/WorkflowTemplatesTab";
 import NotebooksTab from "./tabs/NotebooksTab";   // NEW — §4.7: dedicated Notebooks section
 import ResearchTab from "./tabs/ResearchTab";     // NEW — Part 3 §3.9: dedicated Research section
+import PlanTab from "./tabs/PlanTab";             // FIX — Part 5: was built as a file but never registered here, so it had no top-nav entry and no way to receive a promoted workspace
 import TasksTab from "./tabs/TasksTab";           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
+import TestTab from "./tabs/TestTab";             // NEW — Test tab design spec §1: simulate & test
+import GrowthTab from "./tabs/GrowthTab";           // NEW — Growth tab design spec §2: growth & marketing
 import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
 import NotificationBell from "./NotificationBell";   // NEW — Part 8.9: cross-chat notification inbox
 
@@ -17,7 +20,10 @@ const TABS = [
   { id: "chat", label: "Chat", render: ChatTab },
   { id: "notebooks", label: "Notebooks", render: NotebooksTab },   // NEW — §4.7
   { id: "research", label: "Research", render: ResearchTab },     // NEW — Part 3 §3.9
+  { id: "plan", label: "Plan", render: PlanTab },                 // FIX — Part 5: was missing from this array entirely
   { id: "tasks", label: "Tasks", render: TasksTab },               // NEW — Part 7 §7.2
+  { id: "test", label: "Test", render: TestTab },                   // NEW — Test tab design spec §1
+  { id: "growth", label: "Growth", render: GrowthTab },               // NEW — Growth tab design spec §2
   { id: "roles", label: "Role Library", render: RoleLibraryTab },
   { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
@@ -25,6 +31,15 @@ const TABS = [
 ];
 
 const SIDEBAR_KEY = "minime_sidebar_collapsed";
+const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refresh, same pattern as SIDEBAR_KEY
+
+// NEW — §8: which tab owns each workspace stage.
+// FIX — plan/build were missing here even though Plan/Tasks tabs exist
+// (or now exist, in Plan's case): promoting into either stage updated
+// the backend correctly but silently failed to navigate anywhere.
+// FIX — test was missing the same way until TestTab existed to receive
+// a Build→Test promote.
+const STAGE_TAB_MAP = { note: "notebooks", research: "research", plan: "plan", build: "tasks", test: "test", growth: "growth" };
 
 export default function AppShell() {
   return (
@@ -41,13 +56,36 @@ export default function AppShell() {
 // ever printing a session_id with nowhere to go.
 function AppShellBody() {
   const { switchChat } = useSession();
-  const [activeTab, setActiveTab] = useState("chat");
+  const [activeTab, setActiveTabState] = useState("chat");
+  // NEW — §4 fix: tabs that have been visited at least once stay mounted
+  // (hidden via CSS, not unmounted) so their in-memory state — sub-tab,
+  // an in-progress Mind Map paste, previewNode, scroll position — survives
+  // switching away and back. Starts with "chat" since that's the initial
+  // activeTab.
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set(["chat"]));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [pendingTemplateRoles, setPendingTemplateRoles] = useState(null); // NEW — Role Library's sticky multi-select bar hands a role list here, WorkflowTemplatesTab consumes it once
+  const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState(null); // NEW — §8: { tabId, wsId } handed off by a promote action, consumed once by the destination tab
 
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
+    // NEW — §4 fix: restore last active tab so a refresh doesn't always
+    // land back on Chat.
+    const savedTab = localStorage.getItem(ACTIVE_TAB_KEY);
+    if (savedTab && TABS.some((t) => t.id === savedTab)) {
+      setActiveTabState(savedTab);
+      setVisitedTabs((prev) => new Set(prev).add(savedTab));
+    }
   }, []);
+
+  // NEW — §4 fix: every tab switch both updates the active tab and marks
+  // it as visited (so it starts rendering, and then stays mounted), and
+  // persists the choice so a page refresh reopens the same tab.
+  function setActiveTab(id) {
+    setActiveTabState(id);
+    setVisitedTabs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    localStorage.setItem(ACTIVE_TAB_KEY, id);
+  }
 
   function toggleSidebar() {
     setSidebarCollapsed((prev) => {
@@ -74,7 +112,18 @@ function AppShellBody() {
     setActiveTab("templates");
   }
 
-  const Active = TABS.find((t) => t.id === activeTab)?.render ?? ChatTab;
+  // NEW — §8: called by a tab after a successful promoteWorkspace().
+  // Navigates to whichever tab owns the new stage (if one exists yet)
+  // and pre-selects the workspace there, so it doesn't just disappear
+  // from the current tab with no visible destination.
+  function handlePromoted(nextStage, wsId) {
+    const targetTab = STAGE_TAB_MAP[nextStage];
+    if (targetTab) {
+      setPendingWorkspaceSelection({ tabId: targetTab, wsId });
+      setActiveTab(targetTab);
+    }
+  }
+
   return (
     <div className="flex flex-col h-screen">
       <header className="border-b border-[var(--neutral-800)] px-4 py-3 flex items-center gap-6">
@@ -102,22 +151,38 @@ function AppShellBody() {
           <ChatSidebar
             collapsed={sidebarCollapsed}
             onToggle={toggleSidebar}
-            onOpenNotebooks={() => setActiveTab("notebooks")}
-            onOpenResearch={() => setActiveTab("research")}
           />
         )}
         <div className="flex-1 min-h-0">
-          {/* onOpenChat: only WorkflowTemplatesTab reads this prop today;
+          {/* NEW — §4 fix: every visited tab stays mounted (display: none
+              instead of unmounting) so switching tabs doesn't wipe out
+              in-component state. Only tabs that have actually been opened
+              render at all, so we don't eagerly fetch data for every tab
+              on first load.
+              onOpenChat: only WorkflowTemplatesTab reads this prop today;
               onStartTemplate: only RoleLibraryTab reads this;
               initialTemplateRoles/onConsumeInitialTemplateRoles: only
               WorkflowTemplatesTab reads these. Every other tab ignores
               props it doesn't use harmlessly. */}
-          <Active
-            onOpenChat={openChat}
-            onStartTemplate={startTemplateWithRoles}
-            initialTemplateRoles={pendingTemplateRoles}
-            onConsumeInitialTemplateRoles={() => setPendingTemplateRoles(null)}
-          />
+          {TABS.filter((t) => visitedTabs.has(t.id)).map((t) => {
+            const TabComponent = t.render;
+            return (
+              <div
+                key={t.id}
+                style={{ display: activeTab === t.id ? "contents" : "none" }}
+              >
+                <TabComponent
+                  onOpenChat={openChat}
+                  onStartTemplate={startTemplateWithRoles}
+                  initialTemplateRoles={pendingTemplateRoles}
+                  onConsumeInitialTemplateRoles={() => setPendingTemplateRoles(null)}
+                  initialWorkspaceId={pendingWorkspaceSelection?.tabId === t.id ? pendingWorkspaceSelection.wsId : null}
+                  onConsumeInitialWorkspaceId={() => setPendingWorkspaceSelection(null)}
+                  onPromoted={handlePromoted}
+                />
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

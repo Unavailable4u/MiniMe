@@ -1,9 +1,10 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import { UploadCloud, Link2, CheckCircle2, XCircle, Loader2, Mic } from "lucide-react";
 
-const OFFICE_EXTS = ["pdf", "docx", "pptx", "xlsx", "xls", "csv", "md", "json"];
+const OFFICE_EXTS = ["docx", "pptx", "xlsx", "xls", "csv", "md", "json"];
+const PDF_EXT = "pdf";
 const AUDIO_EXTS = ["mp3", "wav", "m4a", "ogg", "webm", "flac"];
 const YOUTUBE_RE = /(youtube\.com\/watch|youtu\.be\/)/i;
 
@@ -29,11 +30,21 @@ function ProgressRow({ item }) {
 }
 
 export default function IngestionDropzone({ workspaceId, onIngested }) {
-  const { ingestClip, ingestVideoUrl, ingestFile, ingestVoiceFile } = useSession();
+  const { ingestClip, ingestVideoUrl, ingestFile, ingestPdfFile, ingestVoiceFile } = useSession();
   const [items, setItems] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [urlDraft, setUrlDraft] = useState("");
   const inputRef = useRef(null);
+  // FIX — this component unmounts whenever the sub-tab or notebook
+  // selection changes away from Sources while an upload is still in
+  // flight. Without this guard, the awaited ingest call still resolves
+  // and calls setItems on a component that's no longer mounted (a no-op
+  // at best, a console warning at worst). The *data* race — a slow
+  // upload's onIngested firing after the user has moved to a different
+  // notebook — is guarded separately in NotebooksTab.loadNotebookData,
+  // since that's the state that actually gets displayed.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   function pushItem(name) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -42,6 +53,7 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
   }
 
   function settleItem(id, status, message) {
+    if (!mountedRef.current) return;
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, status, message } : it)));
   }
 
@@ -53,6 +65,8 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
         let result;
         if (AUDIO_EXTS.includes(ext)) {
           result = await ingestVoiceFile(workspaceId, file);
+        } else if (ext === PDF_EXT) {
+          result = await ingestPdfFile(workspaceId, file);
         } else if (OFFICE_EXTS.includes(ext)) {
           result = await ingestFile(workspaceId, file);
         } else {
@@ -104,7 +118,7 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
           Drop PDFs, docs, slides, sheets, or audio here — or click to browse
         </div>
         <div className="text-[10px] text-[var(--neutral-600)]">
-          {OFFICE_EXTS.join(", ")} · {AUDIO_EXTS.join(", ")}
+          {[PDF_EXT, ...OFFICE_EXTS].join(", ")} · {AUDIO_EXTS.join(", ")}
         </div>
         <input
           ref={inputRef}

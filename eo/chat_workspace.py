@@ -105,10 +105,12 @@ Flagged here rather than silently decided.
 -----------------------------------------------------------------------------
 """
 import uuid
+import json
 from datetime import datetime, timezone
 from eo import db
 from eo import chat_store
 from eo.audit_log import write_audit
+
 
 
 class WorkspaceAccessError(PermissionError):
@@ -117,6 +119,51 @@ class WorkspaceAccessError(PermissionError):
     (api/server.py) map this to HTTP 403."""
     pass
 
+_STAGE_SEQUENCE = ["note", "research", "plan", "build", "test", "growth"]
+
+
+def _next_stage(current: str) -> str | None:
+    try:
+        idx = _STAGE_SEQUENCE.index(current)
+    except ValueError:
+        return None
+    if idx + 1 >= len(_STAGE_SEQUENCE):
+        return None
+    return _STAGE_SEQUENCE[idx + 1]
+
+
+def promote(ws_id: str, user_id: str, to_stage: str) -> dict:
+    """Advances a workspace exactly one step along the fixed stage
+    sequence (note -> research -> plan -> build -> test -> growth).
+    No skipping, no going backwards -- to_stage must be the current
+    stage's immediate successor. Requires edit-tier+ access, same bar
+    as rename_workspace (a stage move is a content edit, not a
+    membership/ownership action)."""
+    _require_edit_access(ws_id, user_id)
+    with db.cursor() as cur:
+        cur.execute("select stage, stage_history from workspaces where id = %s", (ws_id,))
+        row = cur.fetchone()
+        if not row:
+            raise FileNotFoundError(ws_id)
+        current_stage = row["stage"]
+        expected = _next_stage(current_stage)
+        if expected is None:
+            raise ValueError(f"workspace {ws_id} is already at its final stage ({current_stage!r})")
+        if to_stage != expected:
+            raise ValueError(
+                f"cannot promote workspace {ws_id} from {current_stage!r} to {to_stage!r} — "
+                f"the only valid next stage is {expected!r}"
+            )
+        history = (row["stage_history"] or []) + [
+            {"from": current_stage, "to": to_stage, "at": _iso(_now()), "by": user_id}
+        ]
+        cur.execute(
+            "update workspaces set stage = %s, stage_history = %s, updated_at = %s where id = %s",
+            (to_stage, json.dumps(history), _now(), ws_id),
+        )
+    write_audit(user_id, "workspace.promote", "workspace", ws_id,
+                {"from": current_stage, "to": to_stage})
+    return get_workspace(ws_id, user_id)
 
 _VALID_ROLES = ("viewer", "editor", "moderator", "partner")
 _ROLE_RANK = {"viewer": 0, "editor": 1, "moderator": 2, "partner": 3, "owner": 3}
@@ -137,6 +184,8 @@ def _row_to_workspace(row: dict) -> dict:
         "owner_id": row.get("owner_id"),
         "is_joint": row.get("owner_id") is None,
         "show_attribution": row.get("show_attribution", True),
+        "stage": row.get("stage", "note"),
+        "stage_history": row.get("stage_history") or [],
         "chat_ids": row.get("chat_ids") or [],
         "created_at": _iso(row["created_at"]),
         "updated_at": _iso(row["updated_at"]),
@@ -248,7 +297,7 @@ def list_workspaces(user_id: str) -> list:
     with db.cursor() as cur:
         cur.execute(
             f"""
-            select w.id, w.name, w.owner_id, w.show_attribution, w.created_at, w.updated_at,
+            select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.stage_history, w.created_at, w.updated_at,
                    {_chat_ids_sql()}
             from workspaces w
             left join chats c on c.workspace_id = w.id
@@ -268,7 +317,7 @@ def get_workspace(ws_id: str, user_id: str) -> dict:
     with db.cursor() as cur:
         cur.execute(
             f"""
-            select w.id, w.name, w.owner_id, w.show_attribution, w.created_at, w.updated_at,
+            select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.stage_history, w.created_at, w.updated_at,
                    {_chat_ids_sql()}
             from workspaces w
             left join chats c on c.workspace_id = w.id
