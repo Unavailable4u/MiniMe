@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useSession } from "../../context/SessionContext";
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
+import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   FlaskConical, Users, ClipboardList, ShieldAlert, History,
   Loader2, RefreshCw, MessageSquare, ArrowUpRight, Sparkles,
@@ -327,7 +328,12 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
           })}
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
+          <WorkspaceDataBubble
+            workspaceId={activeWs?.id}
+            workspaceName={activeWs?.name}
+            storageKey="minime_test_data_bubble_collapsed"
+          />
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
           ) : (

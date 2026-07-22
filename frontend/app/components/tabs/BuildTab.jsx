@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
+import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import { Layers, Loader2, ArrowUpRight, ChevronRight, MessageSquare } from "lucide-react";
 // Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
@@ -670,7 +671,12 @@ export default function BuildTab({ onPromoted }) {
             </p>
           </div>
         ) : (
-          <div className="px-4 py-6 max-w-4xl mx-auto space-y-4">
+          <div className="relative px-4 py-6 max-w-4xl mx-auto space-y-4">
+            <WorkspaceDataBubble
+              workspaceId={selected.id}
+              workspaceName={selected.name}
+              storageKey="minime_build_data_bubble_collapsed"
+            />
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
               <div className="flex items-center gap-2 shrink-0">

@@ -10,6 +10,7 @@ import MermaidDiagram from "../MermaidDiagram";
 import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: was already built, unused here
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
+import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   NotebookText, Plus, MessageSquareText, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
@@ -1182,7 +1183,12 @@ export default function NotebooksTab({ onPromoted }) {
             Select or create a notebook to get started.
           </div>
         ) : (
-          <div className="p-5 space-y-4 max-w-3xl">
+          <div className="relative p-5 space-y-4 max-w-3xl">
+            <WorkspaceDataBubble
+              workspaceId={selected.id}
+              workspaceName={selected.name}
+              storageKey="minime_notebooks_data_bubble_collapsed"
+            />
             <div className="flex items-center justify-between">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
               <div className="flex items-center gap-2">
