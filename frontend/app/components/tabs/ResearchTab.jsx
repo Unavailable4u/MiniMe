@@ -5,6 +5,7 @@ import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
 import ConfirmDialog from "../ConfirmDialog";   // NEW — §2 fix: same delete affordance as Notebooks' Sources tab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2b: embedded chat + WorkingPanel dock, same as Notebooks
+import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
   RefreshCw, ExternalLink, FolderOpen, Plus, X, Loader2, Sparkles, Trash2, MessageSquare,
@@ -237,7 +238,12 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
           })}
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
+          <WorkspaceDataBubble
+            workspaceId={activeWs?.id}
+            workspaceName={activeWs?.name}
+            storageKey="minime_research_data_bubble_collapsed"
+          />
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
           ) : (

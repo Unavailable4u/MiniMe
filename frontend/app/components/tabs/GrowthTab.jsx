@@ -7,6 +7,7 @@ import {
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
+import WorkspaceDataBubble from "../../components/WorkspaceDataBubble";
 import Markdown from "../Markdown";
 
 // RESOLVED (was TODO(confirm)): design doc §2.2 "voice" — this sub-tab
@@ -128,7 +129,12 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
           })}
         </nav>
 
-        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
+          <WorkspaceDataBubble
+            workspaceId={selectedWsId}
+            workspaceName={(growthWorkspaces.find((w) => w.id === selectedWsId) || {}).name}
+            storageKey="minime_growth_data_bubble_collapsed"
+          />
           {!selectedWsId && (
             <div className="text-sm text-[var(--neutral-500)]">
               Select a Growth workspace on the left to get started.

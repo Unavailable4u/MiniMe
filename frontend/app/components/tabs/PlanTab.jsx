@@ -6,6 +6,7 @@ import WireframePreview from "../WireframePreview";
 import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
+import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
 import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
 import MechView from "../MechView";                           // NEW — Blueprint sub-tab
@@ -349,7 +350,12 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
           })}
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
+          <WorkspaceDataBubble
+            workspaceId={activeWs?.id}
+            workspaceName={activeWs?.name}
+            storageKey="minime_plan_data_bubble_collapsed"
+          />
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
           ) : (
