@@ -36,6 +36,14 @@ const SUB_TAB_KEY = "minime_notebooks_subtab";
 // WorkingPanel together), same "own toggle, own storage key" pattern the
 // left ChatSidebar already uses for itself.
 const CHAT_DOCK_KEY = "minime_notebooks_chatdock_collapsed";
+const PROMOTE_TARGETS = ["research", "plan", "build", "test", "growth"];
+const PROMOTE_LABELS = {
+  research: "Research",
+  plan: "Plan",
+  build: "Build",
+  test: "Test",
+  growth: "Growth",
+};
 
 function timeAgo(iso) {
   if (!iso) return "";
@@ -950,6 +958,7 @@ export default function NotebooksTab({ onPromoted }) {
   // to "Open chat".
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
+  const [promoteTargetStage, setPromoteTargetStage] = useState("research");
   // NEW — §6.2: right-hand chat dock collapse state, restored from
   // localStorage on mount (same pattern as sidebarCollapsed elsewhere).
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
@@ -1095,12 +1104,12 @@ export default function NotebooksTab({ onPromoted }) {
 
   // NEW — §8: promotes the notebook to Research and hands off navigation
   // to AppShell, which switches tabs and pre-selects it there.
-  async function handlePromote(wsId) {
+  async function handlePromote(wsId, toStage = promoteTargetStage) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      await promoteWorkspace(wsId, "research");
-      onPromoted?.("research", wsId);
+      await promoteWorkspace(wsId, toStage);
+      onPromoted?.(toStage, wsId);
     } catch (err) {
       setPromoteError(err.message);
     } finally {
@@ -1183,14 +1192,28 @@ export default function NotebooksTab({ onPromoted }) {
                 >
                   <MessageSquareText size={13} /> Open chat
                 </button>
-                <button
-                  onClick={() => handlePromote(selected.id)}
-                  disabled={promoting}
-                  className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
-                >
-                  {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-                  Promote to Research →
-                </button>
+                <div className="flex items-center gap-2">
+                  <label className="sr-only" htmlFor="notebooks-promote-target">Promote to</label>
+                  <select
+                    id="notebooks-promote-target"
+                    value={promoteTargetStage}
+                    onChange={(e) => setPromoteTargetStage(e.target.value)}
+                    disabled={promoting}
+                    className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+                  >
+                    {PROMOTE_TARGETS.map((stage) => (
+                      <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => handlePromote(selected.id)}
+                    disabled={promoting}
+                    className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+                  >
+                    {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                    Promote to {PROMOTE_LABELS[promoteTargetStage]} →
+                  </button>
+                </div>
               </div>
             </div>
             {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}

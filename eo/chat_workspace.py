@@ -132,13 +132,13 @@ def _next_stage(current: str) -> str | None:
     return _STAGE_SEQUENCE[idx + 1]
 
 
-def promote(ws_id: str, user_id: str, to_stage: str) -> dict:
-    """Advances a workspace exactly one step along the fixed stage
-    sequence (note -> research -> plan -> build -> test -> growth).
-    No skipping, no going backwards -- to_stage must be the current
-    stage's immediate successor. Requires edit-tier+ access, same bar
-    as rename_workspace (a stage move is a content edit, not a
-    membership/ownership action)."""
+def promote(ws_id: str, user_id: str, to_stage: str | None = None) -> dict:
+    """Advances a workspace along the fixed stage sequence
+    (note -> research -> plan -> build -> test -> growth).
+    Defaults to the immediate successor, but callers may explicitly
+    choose any later stage in the same sequence. Requires edit-tier+
+    access, same bar as rename_workspace (a stage move is a content
+    edit, not a membership/ownership action)."""
     _require_edit_access(ws_id, user_id)
     with db.cursor() as cur:
         cur.execute("select stage, stage_history from workspaces where id = %s", (ws_id,))
@@ -149,10 +149,23 @@ def promote(ws_id: str, user_id: str, to_stage: str) -> dict:
         expected = _next_stage(current_stage)
         if expected is None:
             raise ValueError(f"workspace {ws_id} is already at its final stage ({current_stage!r})")
-        if to_stage != expected:
+        if to_stage is None:
+            to_stage = expected
+        else:
+            try:
+                current_idx = _STAGE_SEQUENCE.index(current_stage)
+                target_idx = _STAGE_SEQUENCE.index(to_stage)
+            except ValueError:
+                raise ValueError(f"unknown workspace stage {to_stage!r}")
+            if target_idx <= current_idx:
+                raise ValueError(
+                    f"cannot promote workspace {ws_id} from {current_stage!r} to {to_stage!r} — "
+                    f"the target stage must be later in the sequence"
+                )
+        if to_stage not in _STAGE_SEQUENCE:
             raise ValueError(
                 f"cannot promote workspace {ws_id} from {current_stage!r} to {to_stage!r} — "
-                f"the only valid next stage is {expected!r}"
+                f"the only valid target stages are: {', '.join(_STAGE_SEQUENCE[_STAGE_SEQUENCE.index(current_stage) + 1:])}"
             )
         history = (row["stage_history"] or []) + [
             {"from": current_stage, "to": to_stage, "at": _iso(_now()), "by": user_id}

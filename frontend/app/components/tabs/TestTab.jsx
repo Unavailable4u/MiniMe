@@ -50,6 +50,8 @@ const SUB_TABS = [
   { id: "redteam",  label: "Red Team",         icon: ShieldAlert },
   { id: "history",  label: "History",          icon: History },
 ];
+const PROMOTE_TARGETS = ["growth"];
+const PROMOTE_LABELS = { growth: "Growth" };
 
 // §1.2 `run` — a fixed, labeled simulation-type list, each mapped to a
 // natural-language task lead that steers the Panel's own cold-start
@@ -144,6 +146,7 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
   const [subTab, setSubTab] = useState("run");
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
+  const [promoteTargetStage, setPromoteTargetStage] = useState("growth");
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
   // NEW — lifted here (not into RunSimulationPanel/ReportsPanel
   // directly) so a run dispatched from `run` is immediately visible to
@@ -230,13 +233,13 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
     setVisitedSubTabs((prev) => (prev.has(subTab) ? prev : new Set(prev).add(subTab)));
   }, [subTab]);
 
-  async function handlePromote(wsId) {
+  async function handlePromote(wsId, toStage = promoteTargetStage) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      await promoteWorkspace(wsId, "growth");
+      await promoteWorkspace(wsId, toStage);
       await fetchWorkspaces();
-      onPromoted?.("growth", wsId);
+      onPromoted?.(toStage, wsId);
     } catch (err) {
       setPromoteError(err.message);
     } finally {
@@ -277,14 +280,28 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
         {activeWs && (
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--neutral-800)]">
             <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
-            <button
-              onClick={() => handlePromote(activeWs.id)}
-              disabled={promoting}
-              className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
-            >
-              {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-              Promote to Growth →
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="sr-only" htmlFor="test-promote-target">Promote to</label>
+              <select
+                id="test-promote-target"
+                value={promoteTargetStage}
+                onChange={(e) => setPromoteTargetStage(e.target.value)}
+                disabled={promoting}
+                className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+              >
+                {PROMOTE_TARGETS.map((stage) => (
+                  <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => handlePromote(activeWs.id)}
+                disabled={promoting}
+                className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+              >
+                {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                Promote to {PROMOTE_LABELS[promoteTargetStage]} →
+              </button>
+            </div>
           </div>
         )}
         {promoteError && (

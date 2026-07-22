@@ -586,13 +586,15 @@ async function deleteWorkspace(wsId) {
   await refreshChatList();
 }
 
-// NEW — §8: advances a workspace one step along the fixed stage sequence
-// (note -> research -> plan -> build -> test -> growth). Throws on
-// failure (unlike the other CRUD functions above, which silently no-op)
-// because a rejected promote -- wrong stage order, no edit access -- is
+// NEW — §8: advances a workspace along the fixed stage sequence
+// (note -> research -> plan -> build -> test -> growth). Defaults to
+// the next stage when toStage is omitted, but callers can explicitly
+// choose a later stage in the same sequence. Throws on failure (unlike
+// the other CRUD functions above, which silently no-op) because a
+// rejected promote -- wrong stage order, no edit access -- is
 // something the calling button needs to surface, same reasoning already
 // used for the Part 8.9 membership functions below.
-async function promoteWorkspace(wsId, toStage) {
+async function promoteWorkspace(wsId, toStage = null) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/promote`, {
     method: "POST",
     headers: await authHeaders({ json: true }),

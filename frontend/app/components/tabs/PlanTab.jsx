@@ -41,6 +41,12 @@ import {
 // (the fuller, paste-parsing version below was previously dead code).
 const SELECTED_PLAN_WS_KEY = "minime_plan_selected_ws_id";
 const CHAT_DOCK_KEY = "minime_plan_chatdock_collapsed";
+const PROMOTE_TARGETS = ["build", "test", "growth"];
+const PROMOTE_LABELS = {
+  build: "Build",
+  test: "Test",
+  growth: "Growth",
+};
 
 // --- Start Building (§5.6) — the one genuinely live panel in this
 // domain. Auto-parses handoff_packager's own summary sentence
@@ -158,6 +164,7 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   // NotebooksTab's promote-to-Research and TasksTab's promote-to-Test.
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
+  const [promoteTargetStage, setPromoteTargetStage] = useState("build");
   // PARITY FIX — right-hand chat dock collapse state, same pattern as
   // Notebooks/Research (own independent localStorage key).
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
@@ -231,13 +238,13 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   // PARITY FIX — promotes the plan project to Build and hands off
   // navigation to AppShell, same onPromoted(nextStage, wsId) contract
   // NotebooksTab/ResearchTab/TasksTab already use.
-  async function handlePromote(wsId) {
+  async function handlePromote(wsId, toStage = promoteTargetStage) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      await promoteWorkspace(wsId, "build");
+      await promoteWorkspace(wsId, toStage);
       await fetchWorkspaces();
-      onPromoted?.("build", wsId);
+      onPromoted?.(toStage, wsId);
     } catch (err) {
       setPromoteError(err.message);
     } finally {
@@ -294,14 +301,28 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
         {activeWs && (
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--neutral-800)]">
             <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
-            <button
-              onClick={() => handlePromote(activeWs.id)}
-              disabled={promoting}
-              className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
-            >
-              {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-              Promote to Build →
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="sr-only" htmlFor="plan-promote-target">Promote to</label>
+              <select
+                id="plan-promote-target"
+                value={promoteTargetStage}
+                onChange={(e) => setPromoteTargetStage(e.target.value)}
+                disabled={promoting}
+                className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+              >
+                {PROMOTE_TARGETS.map((stage) => (
+                  <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => handlePromote(activeWs.id)}
+                disabled={promoting}
+                className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+              >
+                {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                Promote to {PROMOTE_LABELS[promoteTargetStage]} →
+              </button>
+            </div>
           </div>
         )}
         {promoteError && (
