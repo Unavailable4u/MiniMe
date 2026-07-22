@@ -99,7 +99,7 @@ def accept_candidate(workspace_id: str, index: int, section: str = "notes",
     # graph/adapters.py's write_imported_node() already gives for
     # late-importing this: keeps this module importable/testable without
     # the Vector stack wired up.
-    return write_node(
+    node_id = write_node(
         workspace_id=workspace_id,
         section=section,
         node_type="note",
@@ -108,6 +108,22 @@ def accept_candidate(workspace_id: str, index: int, section: str = "notes",
         created_by=accepted.get("proposed_by") or created_by,
         tags=accepted.get("tags", []),
     )
+
+    # NEW — this note is now durably part of the workspace's knowledge.
+    # Any cached answer semantically close to it may be stale or
+    # contradicted by it, so purge proactively rather than waiting on
+    # TTL/verification to catch it on the next read. Only bother if the
+    # write actually succeeded — no point invalidating cache over a note
+    # that never made it into the graph. Fire-and-forget: a failed purge
+    # must never block the accept itself.
+    if node_id:
+        try:
+            from eo.semantic_cache import invalidate_cache
+            invalidate_cache(f"{accepted['title']}\n{accepted['content']}", workspace_id=workspace_id)
+        except Exception as exc:
+            print(f"  [note_candidates] cache invalidation failed, skipped: {exc}")
+
+    return node_id
 
 
 def reject_candidate(workspace_id: str, index: int) -> None:

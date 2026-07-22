@@ -59,7 +59,7 @@ from eo.structure import get_workflow_template, classification_from_template, re
 from eo import code_loader
 from eo import routing_memory
 from eo import conversation_memory
-
+from eo import chat_workspace
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
     graph = build_execution_graph(tier=0)
@@ -288,7 +288,7 @@ def preview_task(task_text: str, tier_override: int = None, directed_task_type_o
 def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                   app_slug: str = None, mode: str = "auto", project_unique_name: str = None,
                   approval_roles: set = None,
-                  no_conversation_context_roles: set = None) -> dict:
+                  no_conversation_context_roles: set = None, owner_id: str = None) -> dict:   
     """Part 2 §2.5 — the "confirm" half: takes the (possibly user-edited)
     hires list straight from a preview_task() response and dispatches it
     directly, WITHOUT calling staff_task() a second time (a second call
@@ -332,12 +332,13 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                                        approval_roles=approval_roles,
                                        no_conversation_context_roles=no_conversation_context_roles)
 
-    conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
+    conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response), owner_id=owner_id)   
     return response
 
 
 def run_task_from_template(template_id: str, task_text: str, session_id: str = None,
-                            mode: str = "auto", project_unique_name: str = None) -> dict:
+                            mode: str = "auto", project_unique_name: str = None,
+                            owner_id: str = None) -> dict:   
     """Part 2 §2.3/§2.6 — the entrypoint eo/structure.py's
     save_workflow_template()/classification_from_template() were built
     for but, until now, had nothing on the API side actually calling
@@ -385,7 +386,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     record_template_run(template_id)
 
     session_id = session_id or str(uuid.uuid4())
-    conversation_memory.append_turn(session_id, "user", task_text)
+    conversation_memory.append_turn(session_id, "user", task_text, owner_id=owner_id)   
 
     decision = classification_from_template(template)
     tier = decision["tier"]
@@ -406,7 +407,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
             "status": "needs_beast_mode_confirmation", "result": {"suggested_hires": len(hires)},
             "message": "This template staffs more roles than the current mode expects. Switch to beast mode?",
         }
-        conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
+        conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response), owner_id=owner_id)   
         return response
     elif mode_result["action"] == "stop_ask_beast_mode":
         response = {
@@ -414,7 +415,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
             "status": "needs_beast_mode_choice", "result": None,
             "message": "Please choose Beast Mode explicitly for a template this large.",
         }
-        conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
+        conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response), owner_id=owner_id)
         return response
 
     approval_roles = set(decision.get("approval_roles") or [])
@@ -442,8 +443,13 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     owner_id: NEW — passed straight through to loop_v4._get_decision()
     so conversation_memory's linked-chat lookup can be owner-scoped.
     """
+    conv_context = conversation_memory.get_full_context(session_id)
+
+    workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
+    workspace_id = workspace["id"] if workspace else None
+
     if tier_override is None and mode != "beast":
-        cached = check_cache(task_text, app_slug=app_slug)
+        cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
         if cached:
             return {"resolved": False, "response": {
                 "decision": {},
@@ -454,10 +460,10 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
                 "message": None,
             }}
 
-        sga_result = sga_attempt(task_text, session_id=session_id)
-        if sga_result["resolved"]:
-            write_cache(task_text, sga_result["answer"], app_slug=app_slug)
-            return {"resolved": False, "response": {
+    sga_result = sga_attempt(task_text, session_id=session_id)
+    if sga_result["resolved"]:
+        write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
+        return {"resolved": False, "response": {
                 "decision": {},
                 "tier": "sga",
                 "session_id": session_id,

@@ -44,9 +44,9 @@ def _append_content(section: dict, text: str) -> None:
 # Format readers — each takes a file path and returns the common shape.
 # ---------------------------------------------------------------------------
 
-def _read_docx(path: str) -> dict:
+def _read_docx(path: str, default_title: str = None) -> dict:
     doc = Document(path)
-    title = os.path.splitext(os.path.basename(path))[0]
+    title = default_title or os.path.splitext(os.path.basename(path))[0]
     sections = []
     current = None
 
@@ -77,10 +77,10 @@ def _read_docx(path: str) -> dict:
     return {"title": title, "sections": sections, "metadata": {}}
 
 
-def _read_pptx(path: str) -> dict:
+def _read_pptx(path: str, default_title: str = None) -> dict:
     prs = Presentation(path)
     slides = list(prs.slides)
-    title = os.path.splitext(os.path.basename(path))[0]
+    title = default_title or os.path.splitext(os.path.basename(path))[0]
     sections = []
 
     for i, slide in enumerate(slides):
@@ -143,8 +143,8 @@ def _read_xlsx(path: str) -> dict:
     return {"title": title, "sections": sections, "metadata": {}}
 
 
-def _read_csv(path: str) -> dict:
-    title = os.path.splitext(os.path.basename(path))[0]
+def _read_csv(path: str, default_title: str = None) -> dict:
+    title = default_title or os.path.splitext(os.path.basename(path))[0]
     sections = []
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -208,10 +208,10 @@ def parse_markdown_text(text: str, default_title: str = "Untitled") -> dict:
     return {"title": title, "sections": sections, "metadata": {}}
 
 
-def _read_md(path: str) -> dict:
+def _read_md(path: str, default_title: str = None) -> dict:
     with open(path, encoding="utf-8") as f:
         text = f.read()
-    default_title = os.path.splitext(os.path.basename(path))[0]
+    default_title = default_title or os.path.splitext(os.path.basename(path))[0]
     return parse_markdown_text(text, default_title)
 
 
@@ -236,10 +236,19 @@ _READERS = {
 }
 
 
-def import_artifact(path: str, fmt: str = None) -> dict:
+def import_artifact(path: str, fmt: str = None, default_title: str = None) -> dict:
     """Mechanically parses a file at `path` back into the common
     {title, sections, metadata} shape. `fmt` is inferred from the file
     extension when not given explicitly.
+
+    `default_title`: the title fallback to use when the file itself has
+    no in-file title (e.g. no "Title"-styled paragraph in a docx, no "#
+    Heading" in markdown). Callers that read from a temp upload path
+    (api/server.py's /api/notes/import endpoint) should pass the
+    original uploaded filename here -- otherwise the fallback silently
+    becomes the temp file's random name (e.g. "tmp7nfj4s2h") instead of
+    something the user recognizes. When omitted, falls back to `path`'s
+    own basename, same as before.
     """
     if fmt is None:
         fmt = os.path.splitext(path)[1].lstrip(".").lower()
@@ -253,7 +262,13 @@ def import_artifact(path: str, fmt: str = None) -> dict:
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
-    return _READERS[fmt](path)
+    reader = _READERS[fmt]
+    if fmt in ("xlsx", "json"):
+        # Neither reader's title comes from the temp path (xlsx uses the
+        # sheet name, json uses/rejects its own "title" field), so
+        # there's no random-name fallback to override here.
+        return reader(path)
+    return reader(path, default_title=default_title)
 
 
 if __name__ == "__main__":

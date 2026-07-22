@@ -348,7 +348,154 @@ function MonitoringWidget({ sessionId, apiUrl, monitoring, onRefresh }) {
   );
 }
 
-export default function TasksTab({ onPromoted }) {
+// Parts pricing — live-fetch panel, same shape as DeployPanel/
+// MonitoringWidget above: a direct fetch() with authHeaders(), not the
+// paste-panel pattern PlanTab.jsx uses. Parts live in
+// workspace_facts.custom.parts (see api/server.py's refresh_part_prices),
+// read back via the existing GET /api/workspaces/{ws_id}/facts endpoint
+// rather than a new one -- no dedicated parts store exists yet.
+function PartsPanel({ wsId, apiUrl }) {
+  const [parts, setParts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [newPartName, setNewPartName] = useState("");
+  const [newPartQty, setNewPartQty] = useState(1);
+
+  async function loadFacts() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/workspaces/${wsId}/facts`, {
+        headers: await authHeaders(),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const facts = await res.json();
+      setParts(facts?.custom?.parts || []);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (wsId) loadFacts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId]);
+
+  function addPart() {
+    if (!newPartName.trim()) return;
+    setParts((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), name: newPartName.trim(), qty: Number(newPartQty) || 1 },
+    ]);
+    setNewPartName("");
+    setNewPartQty(1);
+  }
+
+  function removePart(id) {
+    setParts((prev) => prev.filter((p) => p.id !== id));
+  }
+
+  async function refreshPrices(forceRefresh = false) {
+    if (parts.length === 0) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/workspaces/${wsId}/parts/refresh-prices`, {
+        method: "POST",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ parts, force_refresh: forceRefresh }),
+      });
+      if (!res.ok) {
+        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+      }
+      const { parts: updated } = await res.json();
+      setParts(updated);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  return (
+    <Card
+      title={`Parts${parts.length ? ` (${parts.length})` : ""}`}
+      action={
+        <button
+          type="button"
+          disabled={refreshing || parts.length === 0}
+          onClick={() => refreshPrices(false)}
+          className="font-display text-[10px] uppercase tracking-wide border border-cyber-cyan/40 text-cyber-cyan rounded px-2 py-1 disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "Refresh prices"}
+        </button>
+      }
+    >
+      <div className="space-y-2 text-[11px]">
+        {loading ? (
+          <p className="text-cyber-dim">Loading...</p>
+        ) : (
+          <>
+            {parts.length === 0 && (
+              <p className="text-cyber-dim">No parts added yet.</p>
+            )}
+            {parts.map((p) => (
+              <div key={p.id} className="flex items-center justify-between gap-2 border-b border-cyber-border/50 pb-1.5">
+                <div className="min-w-0">
+                  <p className="text-cyber-text truncate">{p.name} <span className="text-cyber-dim/70">×{p.qty}</span></p>
+                  {p.estimated_price_bdt != null ? (
+                    <p className="text-cyber-dim">
+                      ৳{p.estimated_price_bdt}
+                      {p.vendor_url ? (
+                        <a href={p.vendor_url} target="_blank" rel="noreferrer" className="text-cyber-cyan ml-1 underline">
+                          {p.vendor_name || "source"}
+                        </a>
+                      ) : null}
+                      {p.price_checked_at && (
+                        <span className="text-cyber-dim/60"> — checked {new Date(p.price_checked_at).toLocaleDateString()}</span>
+                      )}
+                    </p>
+                  ) : (
+                    <p className="text-cyber-dim/60">Not priced yet</p>
+                  )}
+                </div>
+                <button onClick={() => removePart(p.id)} className="text-cyber-dim/60 hover:text-rose-400 shrink-0">✕</button>
+              </div>
+            ))}
+          </>
+        )}
+        {error && <p className="text-rose-400">{error}</p>}
+        <div className="flex gap-1.5 pt-1">
+          <input
+            value={newPartName}
+            onChange={(e) => setNewPartName(e.target.value)}
+            placeholder="Part name, e.g. HolyBro Kakute H7 V2"
+            className="flex-1 min-w-0 bg-black/30 border border-cyber-border rounded px-2 py-1 text-[11px] outline-none focus:border-cyber-cyan"
+          />
+          <input
+            type="number"
+            min={1}
+            value={newPartQty}
+            onChange={(e) => setNewPartQty(e.target.value)}
+            className="w-14 bg-black/30 border border-cyber-border rounded px-2 py-1 text-[11px] outline-none focus:border-cyber-cyan"
+          />
+          <button
+            type="button"
+            onClick={addPart}
+            className="font-display text-[10px] uppercase tracking-wide border border-cyber-cyan/40 text-cyber-cyan rounded px-2 py-1"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+export default function BuildTab({ onPromoted }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.

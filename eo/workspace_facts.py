@@ -69,6 +69,8 @@ def set_facts(workspace_id: str, facts: dict) -> dict:
     current = get_facts(workspace_id)
     current.update(facts or {})
     write(_key(workspace_id), current)
+
+    _invalidate_facts_cache(workspace_id, current)
     return current
 
 
@@ -82,8 +84,23 @@ def update_custom_fact(workspace_id: str, key: str, value) -> dict:
     facts = get_facts(workspace_id)
     facts["custom"][key] = value
     write(_key(workspace_id), facts)
-    return facts
 
+    _invalidate_facts_cache(workspace_id, facts, changed_key=key, changed_value=value)
+    return facts
+def _invalidate_facts_cache(workspace_id: str, facts: dict, changed_key: str = None,
+                             changed_value=None) -> None:
+    """Shared helper — a fact changing means any cached answer that
+    might reference it could now be stale. Fire-and-forget, same
+    discipline as every other side-effect in this file's neighbors."""
+    try:
+        from eo.semantic_cache import invalidate_cache
+        if changed_key:
+            text = f"{changed_key}: {changed_value}"
+        else:
+            text = format_facts_for_prompt(workspace_id) or workspace_id
+        invalidate_cache(text, workspace_id=workspace_id)
+    except Exception as exc:
+        print(f"  [workspace_facts] cache invalidation failed, skipped: {exc}")
 
 # NOT CURRENTLY CALLED ANYWHERE — audited 2026-07-16. This function, and
 # the accept/reject/list machinery below it, are fully wired end to end
