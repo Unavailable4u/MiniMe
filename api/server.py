@@ -22,7 +22,8 @@ import secrets   # NEW — Part 8.5: OAuth state tokens
 import urllib.parse  # NEW — Part 8.5: building the Google consent URL
 from eo import panel_content
 from agents import pagespeed_agent   # NEW — Step 2: PageSpeed Insights connector for GrowthTab's Content Audit
-
+from agents.part_price_finder import find_price
+from eo.knowledge_graph import list_nodes, delete_node, rename_node   # rename_node added
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -343,6 +344,8 @@ class UpdateWorkspaceMemberRequest(BaseModel):
 class LeaveWorkspaceRequest(BaseModel):
     successor_id: Optional[str] = None  # owner-only; must be a current partner
 
+class RenameNodeRequest(BaseModel):
+    title: str
 
 class CastVoteRequest(BaseModel):
     vote_target: Optional[str] = None  # another partner's user_id, or None = "stay joint"
@@ -363,6 +366,12 @@ class ImportWorkspaceDataRequest(BaseModel):
 class AppendMessageRequest(BaseModel):
     message: dict
 
+class RefreshPricesRequest(BaseModel):
+    parts: list[dict]        # each: {"id","name","category","qty", ...}
+    force_refresh: bool = False
+
+class ToggleInstructionStepRequest(BaseModel):
+    done: bool
 
 class WorkspaceFactsRequest(BaseModel):
     # Matches eo/workspace_facts.py's EMPTY_FACTS shape. All optional —
@@ -1149,8 +1158,96 @@ def put_workspace_facts(ws_id: str, req: WorkspaceFactsRequest, owner_id: str = 
     # exclude_unset -> a save that only touched brand_voice doesn't wipe
     # target_user/tech_stack/custom back to empty.
     return workspace_facts.set_facts(ws_id, req.dict(exclude_unset=True))
+@app.post("/api/workspaces/{ws_id}/parts/refresh-prices")
+def refresh_part_prices(ws_id: str, req: RefreshPricesRequest,
+                         owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
 
+    updated = []
+    for part in req.parts:
+        result = find_price(part["name"], force_refresh=req.force_refresh)
+        listing = result["listings"][0] if result["listings"] else None
+        updated.append({
+            **part,
+            "estimated_price_bdt": listing.get("price_bdt") if listing else None,
+            "vendor_name": listing.get("vendor") if listing else None,
+            "vendor_url": listing.get("url") if listing else None,
+            "price_checked_at": result["checked_at"],
+        })
 
+    # Merge into the existing custom bucket rather than overwriting it —
+    # `custom` already holds unrelated data (e.g. the UptimeRobot API key
+    # from deploy_agent.py's set_uptimerobot_api_key()). Read-modify-write
+    # at this level keeps that safe regardless of whether set_facts()
+    # itself does a shallow or deep merge internally.
+    facts = workspace_facts.get_facts(ws_id)
+    custom = dict(facts.get("custom") or {})
+    custom["parts"] = updated
+    workspace_facts.set_facts(ws_id, {"custom": custom})
+
+    return {"parts": updated}
+
+@app.get("/api/workspaces/{ws_id}/device-spec")
+def get_device_spec(ws_id: str, owner_id: str = Depends(require_auth)):
+    """Assembles agents/hardware_speccer.py's four sub-view slices back
+    into one response -- they're stored as four separate
+    workspace_facts.custom keys (parts/wiring/mech/instructions), not one
+    blob, so BlueprintView's single fetch-per-workspace-select needs this
+    endpoint to stitch them together rather than reading facts.custom
+    directly and hoping all four keys exist. Returns empty-but-valid
+    shapes for any key nothing has written yet (no device spec generated
+    == every sub-view renders its own empty state, not a 404 for the
+    whole page)."""
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+ 
+    custom = workspace_facts.get_facts(ws_id).get("custom") or {}
+    return {
+        "parts": custom.get("parts", []),
+        "wiring": custom.get("wiring", {"nodes": [], "edges": []}),
+        "mech": custom.get("mech", {"enclosure": {"w": 0, "h": 0, "d": 0}, "placements": []}),
+        "instructions": custom.get("instructions", {"phases": []}),
+    }
+ 
+ 
+@app.patch("/api/workspaces/{ws_id}/device-spec/instructions/steps/{step_id}")
+def toggle_instruction_step(ws_id: str, step_id: str, req: ToggleInstructionStepRequest,
+                             owner_id: str = Depends(require_auth)):
+    """Instructions is the only Blueprint sub-view with mutable state
+    (Blueprint design guide §5) -- everything else here is regenerated
+    wholesale by agents/hardware_speccer.py, so only this route needs a
+    read-modify-write-a-single-step shape rather than a full-object PUT.
+    Same custom-dict merge discipline as refresh_part_prices() above:
+    read the whole facts object, touch only custom["instructions"], write
+    the whole object back, so an in-flight price refresh and a step
+    toggle can't clobber each other's key."""
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+ 
+    facts = workspace_facts.get_facts(ws_id)
+    custom = dict(facts.get("custom") or {})
+    instructions = custom.get("instructions") or {"phases": []}
+ 
+    found = False
+    for phase in instructions.get("phases", []):
+        for step in phase.get("steps", []):
+            if step["id"] == step_id:
+                step["done"] = req.done
+                found = True
+    if not found:
+        raise HTTPException(status_code=404, detail="Unknown step_id")
+ 
+    custom["instructions"] = instructions
+    workspace_facts.set_facts(ws_id, {"custom": custom})
+    return {"status": "ok", "instructions": instructions}
+ 
 @app.get("/api/workspaces/{ws_id}/facts/candidates", dependencies=[Depends(require_auth)])
 def get_workspace_fact_candidates(ws_id: str):
     """Agent-proposed facts awaiting user accept/reject — see
@@ -1276,6 +1373,15 @@ def get_workspace_nodes(ws_id: str, node_type: Optional[str] = Query(None),
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     return list_nodes(ws_id, node_type=node_type)
 
+@app.patch("/api/workspaces/{ws_id}/nodes/{node_id}/rename", dependencies=[Depends(require_auth)])
+def rename_node_endpoint(ws_id: str, node_id: str, req: RenameNodeRequest):
+    title = req.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title can't be empty.")
+    ok = rename_node(ws_id, node_id, title)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Rename failed.")
+    return {"status": "ok", "node_id": node_id, "title": title}
 
 # NEW — §2 fix: there was no way to delete an individual ingested
 # source/node -- SourcesView's rows only ever *selected* a node, no
@@ -1528,7 +1634,8 @@ async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile =
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        artifact = import_artifact(tmp_path, fmt=ext)
+        original_title = os.path.splitext(file.filename or "")[0] or None
+        artifact = import_artifact(tmp_path, fmt=ext, default_title=original_title)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -1821,8 +1928,8 @@ def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_a
         )
 
 
-@app.post("/api/task/confirm", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_confirm(req: ConfirmTaskRequest):
+@app.post("/api/task/confirm", response_model=TaskResponse)
+def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_auth)):
     """Part 2 §2.5 — dispatches a (possibly user-edited) hires list from
     a prior POST /api/task/preview response, without calling staff_task()
     again. Each hire's `update_library` flag controls whether an edited
@@ -1838,6 +1945,7 @@ def post_task_confirm(req: ConfirmTaskRequest):
             mode=req.mode,
             project_unique_name=req.project_unique_name,
             approval_roles=set(req.approval_roles) if req.approval_roles else None,
+            owner_id=owner_id,   
         )
     except Exception as exc:
         traceback.print_exc()
@@ -2061,7 +2169,7 @@ class RunFromTemplateRequest(BaseModel):
 
 
 @app.post("/api/task/from-template", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_from_template(req: RunFromTemplateRequest):
+def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends(require_auth)):
     """Part 2 §2.3/§2.6 — starts a new task from a saved workflow
     template instead of running Inspector/Panel classification.
     Mirrors post_task()'s exact error-handling shape."""
@@ -2072,6 +2180,7 @@ def post_task_from_template(req: RunFromTemplateRequest):
             session_id=req.session_id,
             mode=req.mode,
             project_unique_name=req.project_unique_name,
+            owner_id=owner_id,   
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

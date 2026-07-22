@@ -437,14 +437,15 @@ def main():
     # CHANGE: --mode beast also skips cache/SGA, same as --tier does —
     # kept symmetric with api/task_runner.py's run_task().
     if opts["tier"] is None and opts["mode"] != "beast":
-        cached = check_cache(task_text, app_slug=opts["app"])
+        conv_context = conversation_memory.get_full_context(session_id)  # NEW
+        cached = check_cache(task_text, app_slug=opts["app"], context_text=conv_context)
         if cached:
             print(f"\n[Cache]\n{cached}\n")
             return
 
         sga_result = sga_attempt(task_text)
         if sga_result["resolved"]:
-            write_cache(task_text, sga_result["answer"], app_slug=opts["app"])
+            write_cache(task_text, sga_result["answer"], app_slug=opts["app"], context_text=conv_context)  # FIXED
             print(f"\n[SGA]\n{sga_result['answer']}\n")
             return
 

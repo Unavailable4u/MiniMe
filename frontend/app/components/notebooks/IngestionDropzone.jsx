@@ -8,6 +8,10 @@ const PDF_EXT = "pdf";
 const AUDIO_EXTS = ["mp3", "wav", "m4a", "ogg", "webm", "flac"];
 const YOUTUBE_RE = /(youtube\.com\/watch|youtu\.be\/)/i;
 
+// How long a "done" row stays visible before it auto-clears from the
+// progress list.
+const DONE_AUTOCLEAR_MS = 3000;
+
 function extOf(filename) {
   return (filename.split(".").pop() || "").toLowerCase();
 }
@@ -43,8 +47,23 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
   // upload's onIngested firing after the user has moved to a different
   // notebook — is guarded separately in NotebooksTab.loadNotebookData,
   // since that's the state that actually gets displayed.
+  //
+  // FIX — the ref must be reset to true on every mount, not just set
+  // once at useRef(true). In dev, React StrictMode deliberately mounts
+  // every component twice (mount -> unmount -> remount) to surface
+  // exactly this class of bug: the first phantom unmount's cleanup set
+  // mountedRef.current = false, and with only a bare useEffect(() => ()
+  // => {...}, []) — no reset in the effect body itself — it was never
+  // flipped back to true on the real mount that followed. Every
+  // settleItem() call after that silently no-op'd, so a finished
+  // upload's row stayed stuck on "pending"/"Ingesting…" forever; only a
+  // full page refresh (which wipes this component's state entirely)
+  // made the stuck row go away.
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   function pushItem(name) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -55,6 +74,15 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
   function settleItem(id, status, message) {
     if (!mountedRef.current) return;
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, status, message } : it)));
+    // Auto-clear completed rows after a few seconds so the progress
+    // list doesn't just accumulate every past upload for the session —
+    // errors stay put so they're not missed.
+    if (status === "done") {
+      setTimeout(() => {
+        if (!mountedRef.current) return;
+        setItems((prev) => prev.filter((it) => it.id !== id));
+      }, DONE_AUTOCLEAR_MS);
+    }
   }
 
   async function handleFiles(fileList) {

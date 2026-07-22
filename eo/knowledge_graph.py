@@ -151,7 +151,24 @@ def delete_node(workspace_id: str, node_id: str) -> None:
     except Exception as exc:
         print(f"  [Knowledge Graph] delete failed: {exc}")
         raise
-
+def rename_node(workspace_id: str, node_id: str, title: str) -> bool:
+    """Updates just a node's title, leaving content/tags/everything else
+    untouched -- PATCH mode does a JSON Merge Patch over the existing
+    metadata instead of OVERWRITE's full replace, so this can't
+    accidentally wipe a node's embedded content the way a naive
+    "refetch, mutate, reupsert" would.
+    """
+    from upstash_vector.types import MetadataUpdateMode
+    vector_id = _node_vector_id(workspace_id, node_id)
+    try:
+        return vector_index().update(
+            id=vector_id,
+            metadata={"title": title},
+            metadata_update_mode=MetadataUpdateMode.PATCH,
+        )
+    except Exception as exc:
+        print(f"  [Knowledge Graph] rename failed: {exc}")
+        return False
 
 def search_nodes(
     workspace_id: str,
@@ -235,11 +252,6 @@ def list_nodes(
     as search_nodes() degrading to []), rather than raising, so a
     Vector hiccup mid-scan doesn't take down whatever's calling this.
     """
-    filter_clauses = [f"workspace_id = '{workspace_id}'"]
-    if node_type:
-        filter_clauses.append(f"node_type = '{node_type}'")
-    filter_str = " AND ".join(filter_clauses)
-
     nodes = []
     cursor = ""
     try:
@@ -247,10 +259,13 @@ def list_nodes(
             page = vector_index().range(
                 cursor=cursor, limit=100,
                 include_metadata=True, include_vectors=include_vectors,
-                filter=filter_str,
             )
             for v in page.vectors:
                 meta = getattr(v, "metadata", None) or {}
+                if meta.get("workspace_id") != workspace_id:
+                    continue
+                if node_type and meta.get("node_type") != node_type:
+                    continue
                 node_id = v.id.split(":", 2)[-1]
                 node = {"node_id": node_id, "vector_id": v.id, **meta}
                 if include_vectors:
@@ -261,5 +276,4 @@ def list_nodes(
                 break
     except Exception as exc:
         print(f"  [Knowledge Graph] list_nodes failed (partial results kept): {exc}")
-
     return nodes

@@ -13,7 +13,7 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embed
 import {
   NotebookText, Plus, MessageSquareText, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
-  Trash2, MoreVertical, ArrowUpRight,
+  Trash2, MoreVertical, ArrowUpRight, Pencil,
 } from "lucide-react";
 
 const SUB_TABS = [
@@ -44,7 +44,175 @@ function timeAgo(iso) {
 
 // --- Sources sub-view ------------------------------------------------------
 
-function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode, onDeleteNode }) {
+// Groups flat source nodes into { root, children[] } trees using the
+// "same_source" edges eo/graph_edges.py already writes when a source
+// (e.g. a PDF) splits into multiple section nodes — see
+// agents/source_ingestor.py's write_ingested_source(): every section
+// after the first gets a same_source edge pointing back at the first
+// section, which is exactly the parent/child relationship this needs.
+// A source that never split (edges has nothing for it) just becomes a
+// childless root, same as before.
+function groupSourceNodes(nodes, edges) {
+  const parentOf = new Map(); // child node_id -> root node_id
+  for (const e of edges) {
+    if (e.relation !== "same_source") continue;
+    const fromId = (e.from_node_id || "").split(":", 3)[2];
+    const toId = (e.to_node_id || "").split(":", 3)[2];
+    if (fromId && toId) parentOf.set(fromId, toId);
+  }
+  const byId = new Map(nodes.map((n) => [n.node_id, n]));
+  const childrenOf = new Map(); // root node_id -> [child nodes]
+  for (const [childId, rootId] of parentOf) {
+    if (!byId.has(childId) || !byId.has(rootId)) continue;
+    if (!childrenOf.has(rootId)) childrenOf.set(rootId, []);
+    childrenOf.get(rootId).push(byId.get(childId));
+  }
+  const groups = [];
+  for (const n of nodes) {
+    if (parentOf.has(n.node_id)) continue; // it's a child, rendered under its root
+    const children = (childrenOf.get(n.node_id) || []).sort((a, b) =>
+      (a.title || "").localeCompare(b.title || "", undefined, { numeric: true })
+    );
+    groups.push({ root: n, children });
+  }
+  return groups;
+}
+
+// A root's title is written as "{title} — {heading}" when it has
+// siblings (write_ingested_source() above) — e.g. "Notes — Page 1".
+// Strip that trailing " — <heading>" for the group header so it reads
+// as the source's own name rather than repeating "— Page 1" on the
+// row that's about to show a "N pages" child list right underneath it.
+// Falls back to the raw title when there's nothing to strip (a
+// single-section source, or a root whose real title happens not to
+// contain " — ").
+function groupDisplayTitle(root, hasChildren) {
+  const title = root.title || root.node_id;
+  if (!hasChildren) return title;
+  const idx = title.lastIndexOf(" — ");
+  return idx > 0 ? title.slice(0, idx) : title;
+}
+
+function SourceRow({ node, onSelectNode, onRequestDelete, onRename, indent }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(node.title || node.node_id);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    const trimmed = draft.trim();
+    if (!trimmed || trimmed === node.title) { setEditing(false); setDraft(node.title || node.node_id); return; }
+    setSaving(true);
+    try {
+      await onRename(node, trimmed);
+      setEditing(false);
+    } catch (err) {
+      alert(`Rename failed: ${err.message || err}`); // NEW — simple inline failure surface, no toast system in this file yet
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--cyber-cyan)] ${indent ? "ml-5" : ""}`}>
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") { setEditing(false); setDraft(node.title || node.node_id); }
+          }}
+          disabled={saving}
+          className="flex-1 min-w-0 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+        />
+        <button onClick={save} disabled={saving} className="shrink-0 text-[var(--neutral-400)] hover:text-green-400 disabled:opacity-50">
+          <Check size={13} />
+        </button>
+        <button onClick={() => { setEditing(false); setDraft(node.title || node.node_id); }} disabled={saving} className="shrink-0 text-[var(--neutral-400)] hover:text-red-400 disabled:opacity-50">
+          <X size={13} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`group w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--neutral-800)] hover:border-[var(--neutral-700)] ${indent ? "ml-5" : ""}`}
+    >
+      <button
+        onClick={() => onSelectNode(node)}
+        className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left"
+      >
+        <span className="text-xs text-[var(--neutral-200)] truncate">{node.title || node.node_id}</span>
+        <span className="text-[10px] text-[var(--neutral-600)] shrink-0">{timeAgo(node.created_at)}</span>
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); setDraft(node.title || node.node_id); setEditing(true); }}
+        title="Rename source"
+        className="shrink-0 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--cyber-cyan)]"
+      >
+        <Pencil size={13} />
+      </button>
+      <button
+        onClick={() => onRequestDelete(node)}
+        title="Delete source"
+        className="shrink-0 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  );
+}
+
+function SourceGroup({ group, onSelectNode, onRequestDelete, onRename }) {
+  const [open, setOpen] = useState(false);
+  const hasChildren = group.children.length > 0;
+
+  if (!hasChildren) {
+    return <SourceRow node={group.root} onSelectNode={onSelectNode} onRequestDelete={onRequestDelete} onRename={onRename} />;
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="group w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--neutral-800)] hover:border-[var(--neutral-700)]">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex-1 min-w-0 flex items-center gap-1.5 text-left"
+        >
+          <ChevronRight size={13} className={`shrink-0 text-[var(--neutral-600)] transition-transform ${open ? "rotate-90" : ""}`} />
+          <span className="text-xs text-[var(--neutral-200)] truncate">{groupDisplayTitle(group.root, true)}</span>
+          <span className="text-[10px] text-[var(--neutral-600)] shrink-0">
+            {group.children.length + 1} pages
+          </span>
+        </button>
+        <button
+          onClick={() => onSelectNode(group.root)}
+          className="text-[10px] text-[var(--neutral-600)] shrink-0 hover:text-[var(--neutral-300)]"
+        >
+          {timeAgo(group.root.created_at)}
+        </button>
+        <button
+          onClick={() => onRequestDelete(group.root)}
+          title="Delete source"
+          className="shrink-0 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+      {open && (
+        <div className="space-y-1">
+          <SourceRow node={group.root} onSelectNode={onSelectNode} onRequestDelete={onRequestDelete} onRename={onRename} indent />
+          {group.children.map((c) => (
+            <SourceRow key={c.node_id} node={c} onSelectNode={onSelectNode} onRequestDelete={onRequestDelete} onRename={onRename} indent />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SourcesView({ workspaceId, nodes, edges, loading, onIngested, onSelectNode, onDeleteNode, onRenameNode }) {
   const [pendingDelete, setPendingDelete] = useState(null); // NEW — §2 fix: node awaiting delete confirmation
   const [deleting, setDeleting] = useState(false);
 
@@ -59,6 +227,8 @@ function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode, on
     }
   }
 
+  const groups = groupSourceNodes(nodes, edges || []);
+
   return (
     <div className="space-y-4">
       <IngestionDropzone workspaceId={workspaceId} onIngested={onIngested} />
@@ -67,26 +237,8 @@ function SourcesView({ workspaceId, nodes, loading, onIngested, onSelectNode, on
           {loading ? "Loading…" : `${nodes.length} source${nodes.length === 1 ? "" : "s"}`}
         </div>
         <div className="space-y-1">
-          {nodes.map((n) => (
-            <div
-              key={n.node_id}
-              className="group w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--neutral-800)] hover:border-[var(--neutral-700)]"
-            >
-              <button
-                onClick={() => onSelectNode(n)}
-                className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left"
-              >
-                <span className="text-xs text-[var(--neutral-200)] truncate">{n.title || n.node_id}</span>
-                <span className="text-[10px] text-[var(--neutral-600)] shrink-0">{timeAgo(n.created_at)}</span>
-              </button>
-              <button
-                onClick={() => setPendingDelete(n)}
-                title="Delete source"
-                className="shrink-0 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
+          {groups.map((g) => (
+            <SourceGroup key={g.root.node_id} group={g} onSelectNode={onSelectNode} onRequestDelete={setPendingDelete} onRename={onRenameNode} />
           ))}
           {!loading && nodes.length === 0 && (
             <p className="text-xs text-[var(--neutral-600)]">No sources ingested yet — drop a file or paste a link above.</p>
@@ -765,7 +917,7 @@ function NodePreviewModal({ node, onClose }) {
 export default function NotebooksTab({ onPromoted }) {
    const {
      workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
-     fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, detectBacklinks,
+     fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks,
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
      fetchPanelContent, savePanelContent,
@@ -1067,11 +1219,16 @@ export default function NotebooksTab({ onPromoted }) {
               <SourcesView
                 workspaceId={selected.id}
                 nodes={nodes}
+                edges={edges}
                 loading={loadingNodes}
                 onIngested={() => loadNotebookData(selected.id)}
                 onSelectNode={setPreviewNode}
                 onDeleteNode={async (nodeId) => {
                   await deleteWorkspaceNode(selected.id, nodeId);
+                  await loadNotebookData(selected.id);
+                }}
+                onRenameNode={async (node, title) => {
+                  await renameWorkspaceNode(selected.id, node.node_id, title);
                   await loadNotebookData(selected.id);
                 }}
               />

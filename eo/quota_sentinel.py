@@ -24,7 +24,42 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read as bus_read, read_many as bus_read_many
 from utils.llm_client import QUOTA_CONFIG
 from relay.emitter import emit_event
+TAVILY_MONTHLY_QUOTA = 1000  # Tavily's free tier: 1,000 searches/MONTH, not
+# daily like every other provider in QUOTA_CONFIG. Deliberately NOT added
+# to utils/llm_client.py's QUOTA_CONFIG -- that dict's own docstring
+# commits it to daily free-tier limits only, and folding a monthly cap
+# in there would make get_usage_history()'s date-scoped reads silently
+# wrong for this one provider. Tracked separately below instead.
+def _tavily_usage_this_month() -> int:
+    """Sums usage:tavily:TAVILY_API_KEY:{date} requests for every day
+    from the 1st of the current calendar month through today -- Tavily
+    has no daily reset, so reading just "today" (like get_quota_snapshot()
+    does for every other provider) would understate real usage against
+    its actual 1,000/month cap. One bus_read_many() round trip, same
+    "don't turn N days into N network calls" discipline get_usage_history()
+    already uses above."""
+    today = date.today()
+    dates = [date(today.year, today.month, d).isoformat() for d in range(1, today.day + 1)]
+    keys = [f"usage:tavily:TAVILY_API_KEY:{d}" for d in dates]
+    records = bus_read_many(keys, default={"requests": 0, "tokens": 0})
+    return sum(records[k].get("requests", 0) for k in keys)
 
+# Search-API keys aren't LLM agents, so they have no AGENT_CAPABILITIES
+    # entry to loop over above -- added as a one-off extra entry instead,
+    # and only when the key is actually configured, so an unused feature
+    # doesn't clutter the dashboard with a permanent phantom 0/1000 row.
+    # Monthly cap, not daily -- see _tavily_usage_this_month()'s docstring.
+    # check_and_alert() below needs no changes to cover this: it already
+    # iterates whatever get_quota_snapshot() returns.
+    if os.environ.get("TAVILY_API_KEY"):
+        used = _tavily_usage_this_month()
+        snapshot["tavily"] = {
+            "used": used,
+            "quota": TAVILY_MONTHLY_QUOTA,
+            "pct": used / TAVILY_MONTHLY_QUOTA,
+        }
+
+    return snapshot
 
 def _key_id_for(agent_key: str, provider: str) -> str:
     """For groq/cerebras/github/mistral, log_usage()'s key_id IS the

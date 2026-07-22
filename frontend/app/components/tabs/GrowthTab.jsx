@@ -1,4 +1,3 @@
-
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -8,6 +7,7 @@ import {
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
+import Markdown from "../Markdown";
 
 // RESOLVED (was TODO(confirm)): design doc §2.2 "voice" — this sub-tab
 // directly reuses NotebooksTab.jsx's FactsView component instead of
@@ -109,7 +109,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
         <nav className="flex gap-1 px-3 py-2 border-b border-[var(--neutral-800)]">
           {SUB_TABS.map((t) => {
             const Icon = t.icon;
-            const built = t.id === "voice" || t.id === "content" || t.id === "calendar"; // implemented so far
+            const built = t.id === "voice" || t.id === "content" || t.id === "calendar" || t.id === "audit"; // implemented so far
             return (
               <button
                 key={t.id}
@@ -141,7 +141,8 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
             <ContentView wsId={selectedWsId} onDispatched={() => setDockCollapsed(false)} />
           )}
           {selectedWsId && activeSubTab === "calendar" && <CalendarView />}
-          {selectedWsId && activeSubTab !== "voice" && activeSubTab !== "content" && activeSubTab !== "calendar" && (
+          {selectedWsId && activeSubTab === "audit" && <ContentAuditView wsId={selectedWsId} />}
+          {selectedWsId && activeSubTab !== "voice" && activeSubTab !== "content" && activeSubTab !== "calendar" && activeSubTab !== "audit" && (
             <ComingSoonPanel subTabId={activeSubTab} />
           )}
         </div>
@@ -907,14 +908,246 @@ function CalendarView() {
   );
 }
 
+// --- audit: Content Audit ------------------------------------------------
+// §2.2 "audit" -- two halves, deliberately never blended into one number
+// (design doc's honesty discipline, same reasoning as ContradictionsPanel's
+// amber banner / Feasibility's estimateBanner):
+//
+//   1. LLM-estimated: seo_structure_auditor's output, pasted in the same
+//      MarkdownPastePanel shape PlanTab.jsx uses for PRD/API Contract/
+//      Devil's Advocate/Feasibility -- panelKey "audit" (already in
+//      eo/panel_content.py's VALID_PANEL_KEYS), persisted via the same
+//      fetchPanelContent/savePanelContent pair off useSession() every
+//      other paste panel in this codebase uses.
+//   2. Real, measured: a live GET to
+//      /api/workspaces/{ws_id}/audit/pagespeed (agents/pagespeed_agent.py,
+//      already wired end-to-end server-side) -- fetched fresh on demand,
+//      not persisted, same "live, not a backing store" pattern
+//      CalendarView above already uses for Google Calendar events.
+//
+// MarkdownPastePanel itself isn't exported from PlanTab.jsx, so this is a
+// near-identical duplicate (ContentAuditPastePanel below) rather than a
+// new cross-tab import -- per the design doc §2.4's own "near-identical to
+// PlanTab.MarkdownPastePanel, just relabeled" line item.
+
+function ContentAuditView({ wsId }) {
+  const { API_URL, fetchPanelContent, savePanelContent } = useSession();
+
+  const [url, setUrl] = useState("");
+  const [strategy, setStrategy] = useState("mobile");
+  const [psLoading, setPsLoading] = useState(false);
+  const [psError, setPsError] = useState(null);
+  const [psResult, setPsResult] = useState(null);
+
+  async function runPagespeed() {
+    if (!url.trim()) return;
+    setPsLoading(true);
+    setPsError(null);
+    try {
+      const params = new URLSearchParams({ url: url.trim(), strategy });
+      const res = await fetch(`${API_URL}/api/workspaces/${wsId}/audit/pagespeed?${params}`, {
+        headers: await authHeaders(),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.detail || `PageSpeed check failed (${res.status})`);
+      }
+      setPsResult(await res.json());
+    } catch (e) {
+      setPsError(String(e.message || e));
+      setPsResult(null);
+    } finally {
+      setPsLoading(false);
+    }
+  }
+
+  return (
+    <div className="max-w-2xl space-y-8">
+      <section className="space-y-3">
+        <h3 className="text-xs font-medium uppercase tracking-wide text-[var(--neutral-500)]">
+          Content Quality Audit
+        </h3>
+        <ContentAuditPastePanel
+          workspaceId={wsId}
+          fetchPanelContent={fetchPanelContent}
+          savePanelContent={savePanelContent}
+        />
+      </section>
+
+      <section className="space-y-3 border-t border-[var(--neutral-800)] pt-6">
+        <h3 className="text-xs font-medium uppercase tracking-wide text-[var(--neutral-500)]">
+          PageSpeed Insights
+        </h3>
+        <p className="text-[11px] text-[var(--neutral-600)]">
+          A real Lighthouse run against a live URL -- kept separate from the
+          AI-estimated audit above, never blended into one score.
+        </p>
+        <div className="flex items-center gap-2">
+          <input
+            type="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://your-launch-page.com"
+            className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
+          />
+          <select
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+            className="text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
+          >
+            <option value="mobile">Mobile</option>
+            <option value="desktop">Desktop</option>
+          </select>
+          <button
+            onClick={runPagespeed}
+            disabled={psLoading || !url.trim()}
+            className="shrink-0 flex items-center gap-1.5 text-xs bg-[var(--cyber-amber)] text-black rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+          >
+            {psLoading ? <Loader2 size={12} className="animate-spin" /> : "Run check"}
+          </button>
+        </div>
+
+        {psError && (
+          <div className="flex items-start gap-2 text-xs text-red-400 border border-red-900/50 bg-red-950/20 rounded-lg px-3 py-2">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            <span>{psError}</span>
+          </div>
+        )}
+
+        {psResult && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-4 gap-2">
+              {["performance", "accessibility", "best_practices", "seo"].map((key) => (
+                <div key={key} className="border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-center">
+                  <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
+                    {key.replace("_", " ")}
+                  </p>
+                  <p className={`text-xl font-semibold ${scoreColor(psResult.scores?.[key])}`}>
+                    {psResult.scores?.[key] ?? "—"}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {psResult.issues?.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-[var(--neutral-500)]">
+                  {psResult.issues.length} issue{psResult.issues.length === 1 ? "" : "s"} flagged below the passing threshold:
+                </p>
+                {psResult.issues.map((issue) => (
+                  <div
+                    key={issue.id}
+                    className="flex items-center justify-between gap-2 border border-[var(--neutral-800)] rounded-lg px-3 py-2 bg-[var(--neutral-900)]"
+                  >
+                    <span className="text-xs text-[var(--neutral-300)]">{issue.title}</span>
+                    <span className={`text-xs font-medium ${scoreColor(issue.score)}`}>{issue.score}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {psResult.fetched_at && (
+              <p className="text-[10px] text-[var(--neutral-600)]">
+                Fetched {new Date(psResult.fetched_at).toLocaleString()}
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// Same 90/50 red-amber-green banding Lighthouse's own report UI uses, so a
+// score here reads consistently with what a person may have already seen
+// running Lighthouse themselves.
+function scoreColor(score) {
+  if (score == null) return "text-[var(--neutral-500)]";
+  if (score >= 90) return "text-green-400";
+  if (score >= 50) return "text-[var(--cyber-amber)]";
+  return "text-red-400";
+}
+
+// Near-identical to PlanTab.jsx's MarkdownPastePanel (not exported from
+// there, hence the duplication -- see the comment above ContentAuditView).
+// panelKey is fixed to "audit" rather than a prop since this component has
+// exactly one caller and one purpose, unlike PlanTab's shared version.
+function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelContent }) {
+  const panelKey = "audit";
+  const [raw, setRaw] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setSavedAt(null);
+    fetchPanelContent(workspaceId, panelKey).then((saved) => {
+      if (cancelled) return;
+      setRaw(saved?.content || "");
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, panelKey, fetchPanelContent]);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await savePanelContent(workspaceId, panelKey, raw);
+      setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-[var(--neutral-600)]">
+        Paste seo_structure_auditor's output below. Saved per project --
+        pasting again overwrites the previous paste, same as Plan's
+        PRD/Feasibility tabs.
+      </p>
+      <textarea
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        placeholder="Paste the role's markdown output here…"
+        rows={8}
+        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="text-xs bg-[var(--cyber-amber)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+      </div>
+      {raw.trim() && (
+        <div className="border border-[var(--cyber-amber)]/40 bg-[var(--cyber-amber)]/5 rounded-lg p-3">
+          <p className="text-[10px] uppercase tracking-wide text-[var(--cyber-amber)] mb-2">
+            AI-estimated -- not verified against real ranking/search data
+          </p>
+          <Markdown>{raw}</Markdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ComingSoonPanel({ subTabId }) {
   const label = SUB_TABS.find((t) => t.id === subTabId)?.label || subTabId;
   return (
     <div className="text-sm text-[var(--neutral-500)]">
       {label} isn't built yet — see build order §4 (design spec). Brand
-      Voice, Content Fan-out, and Calendar are done; next up is
-      Audit, then Analytics (step 6).
+      Voice, Content Fan-out, Calendar, and Content Audit are done; next up
+      is Analytics (step 6).
     </div>
   );
 }
-

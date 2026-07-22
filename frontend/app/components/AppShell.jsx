@@ -10,7 +10,7 @@ import WorkflowTemplatesTab from "./tabs/WorkflowTemplatesTab";
 import NotebooksTab from "./tabs/NotebooksTab";   // NEW — §4.7: dedicated Notebooks section
 import ResearchTab from "./tabs/ResearchTab";     // NEW — Part 3 §3.9: dedicated Research section
 import PlanTab from "./tabs/PlanTab";             // FIX — Part 5: was built as a file but never registered here, so it had no top-nav entry and no way to receive a promoted workspace
-import TasksTab from "./tabs/TasksTab";           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
+import BuildTab from "./tabs/BuildTab";           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
 import TestTab from "./tabs/TestTab";             // NEW — Test tab design spec §1: simulate & test
 import GrowthTab from "./tabs/GrowthTab";           // NEW — Growth tab design spec §2: growth & marketing
 import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
@@ -21,7 +21,7 @@ const TABS = [
   { id: "notebooks", label: "Notebooks", render: NotebooksTab },   // NEW — §4.7
   { id: "research", label: "Research", render: ResearchTab },     // NEW — Part 3 §3.9
   { id: "plan", label: "Plan", render: PlanTab },                 // FIX — Part 5: was missing from this array entirely
-  { id: "tasks", label: "Tasks", render: TasksTab },               // NEW — Part 7 §7.2
+  { id: "build", label: "Build", render: BuildTab },               // NEW — Part 7 §7.2; label renamed Tasks→Build, id/component/localStorage keys left as "tasks" intentionally
   { id: "test", label: "Test", render: TestTab },                   // NEW — Test tab design spec §1
   { id: "growth", label: "Growth", render: GrowthTab },               // NEW — Growth tab design spec §2
   { id: "roles", label: "Role Library", render: RoleLibraryTab },

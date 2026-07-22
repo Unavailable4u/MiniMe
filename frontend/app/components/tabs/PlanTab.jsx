@@ -6,10 +6,14 @@ import WireframePreview from "../WireframePreview";
 import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
+import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
+import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
+import MechView from "../MechView";                           // NEW — Blueprint sub-tab
+import InstructionChecklist from "../InstructionChecklist";   // NEW — Blueprint sub-tab
 import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
   LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
-  Loader2, ChevronRight, MessageSquare,
+  Loader2, ChevronRight, MessageSquare, Cpu,
 } from "lucide-react";
 
 // Part 5 — Plan as a dedicated top-level section, same shape as Notebooks
@@ -126,6 +130,7 @@ const SUB_TABS = [
   { id: "devils_advocate", label: "Devil's Advocate", icon: Skull },
   { id: "feasibility", label: "Feasibility", icon: Calculator },
   { id: "wireframes", label: "Wireframes", icon: LayoutTemplate },
+  { id: "blueprint", label: "Blueprint", icon: Cpu },
   { id: "start_building", label: "Start Building", icon: Rocket },
 ];
 
@@ -138,7 +143,8 @@ function unfenceMermaid(text) {
 
 export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, sessionId, sendTask, openScopedSubChat, switchChat,
-    fetchPanelContent, savePanelContent } = useSession();
+    fetchPanelContent, savePanelContent,
+    fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
 
   // PARITY FIX — Plan only shows plan-stage workspaces now, same as every
   // other stage tab; a research project promoted from Research lands
@@ -391,6 +397,14 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
                     savePanelContent={savePanelContent}
                     sessionId={sessionId}
                     sendTask={sendTask}
+                  />
+                )}
+                {t.id === "blueprint" && (
+                  <BlueprintView
+                    workspaceId={activeWs.id}
+                    fetchDeviceSpec={fetchDeviceSpec}
+                    refreshPartPrices={refreshPartPrices}
+                    toggleInstructionStep={toggleInstructionStep}
                   />
                 )}
                 {t.id === "start_building" && (
@@ -668,6 +682,108 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
         screenLabel="Pasted wireframe"
         onRequestEdit={sendTask ? (instruction) => sendTask(instruction) : undefined}
       />
+    </div>
+  );
+}
+
+// --- Blueprint — Parts / Wiring / Mech / Instructions. UNLIKE every
+// other sub-tab above, this isn't a paste-and-save panel: it reads
+// agents/hardware_speccer.py's structured output (device_spec: parts,
+// wiring, mech, instructions), fetched once per workspace select via
+// fetchDeviceSpec — persisted under eo/workspace_facts.py's `custom`
+// dict (see api/server.py's GET .../device-spec), not
+// eo/panel_content.py, since panel_content is for one opaque pasted
+// string and this has real per-part/per-step structure. A nested small-
+// tab-bar picks which of the four slices to render, same pattern
+// NotebooksTab.jsx already uses for its own seven sub-views.
+const BLUEPRINT_VIEWS = [
+  { id: "parts", label: "Parts" },
+  { id: "wiring", label: "Wiring" },
+  { id: "mech", label: "Mech" },
+  { id: "instructions", label: "Instructions" },
+];
+
+function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggleInstructionStep }) {
+  const [spec, setSpec] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("parts");
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchDeviceSpec(workspaceId).then((data) => {
+      if (cancelled) return;
+      setSpec(data);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchDeviceSpec]);
+
+  async function handleRefreshPrices() {
+    setRefreshing(true);
+    try {
+      const updatedParts = await refreshPartPrices(workspaceId, spec.parts);
+      setSpec((prev) => ({ ...prev, parts: updatedParts }));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleToggleStep(phaseId, stepId, done) {
+    const result = await toggleInstructionStep(workspaceId, stepId, done);
+    // toggle endpoint returns the full updated `instructions` object
+    // (api/server.py's toggle_instruction_step) -- swap it in directly
+    // rather than re-fetching the whole device spec for a one-step change.
+    if (result?.instructions) {
+      setSpec((prev) => ({ ...prev, instructions: result.instructions }));
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+        <Loader2 size={12} className="animate-spin" /> Loading…
+      </div>
+    );
+  }
+
+  const hasSpec = spec && (spec.parts?.length || spec.wiring?.nodes?.length || spec.instructions?.phases?.length);
+
+  if (!hasSpec) {
+    return (
+      <p className="text-xs text-[var(--neutral-600)]">
+        No device spec generated yet — run hardware_speccer from this project's chat once a PRD exists.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <nav className="flex gap-1">
+        {BLUEPRINT_VIEWS.map((v) => (
+          <button
+            key={v.id}
+            onClick={() => setView(v.id)}
+            className={`text-xs rounded px-2.5 py-1 ${
+              view === v.id
+                ? "bg-[var(--cyber-amber)] text-black font-medium"
+                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </nav>
+
+      {view === "parts" && (
+        <PartsTable parts={spec.parts} refreshing={refreshing} onRefreshPrices={handleRefreshPrices} />
+      )}
+      {view === "wiring" && <WiringGraph wiring={spec.wiring} />}
+      {view === "mech" && <MechView mech={spec.mech} parts={spec.parts} />}
+      {view === "instructions" && (
+        <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />
+      )}
     </div>
   );
 }

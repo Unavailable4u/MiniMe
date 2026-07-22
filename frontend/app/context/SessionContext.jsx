@@ -519,7 +519,16 @@ async function fetchWorkspaces() {
   const res = await fetch(`${API_URL}/api/workspaces`, {
     headers: await authHeaders(),
   });
-  setWorkspaces(await res.json());
+  const body = await res.json();
+  // Same guard as fetchChats() above — never let a non-array response
+  // (e.g. {"detail": "..."} from an auth/server error) reach
+  // GrowthTab.jsx's workspaces.filter() and crash the app.
+  if (!res.ok || !Array.isArray(body)) {
+    console.error("Failed to load workspaces:", res.status, body);
+    setWorkspaces([]);
+    return;
+  }
+  setWorkspaces(body);
 }
 
 async function createWorkspace(name) {
@@ -794,6 +803,16 @@ async function deleteWorkspaceNode(wsId, nodeId) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}`, {
     method: "DELETE",
     headers: await authHeaders(),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function renameWorkspaceNode(wsId, nodeId, title) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}/rename`, {
+    method: "PATCH",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
@@ -1081,6 +1100,53 @@ async function savePanelContent(wsId, panelKey, content) {
     method: "PUT",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ content }),
+  });
+  return res.json();
+}
+// Device spec (Blueprint sub-tab: Parts/Wiring/Mech/Instructions) --
+// agents/hardware_speccer.py's output, persisted as four keys under
+// eo/workspace_facts.py's per-workspace `custom` dict rather than through
+// eo/panel_content.py -- panel_content is for opaque pasted text (one
+// `content` string), and Blueprint has real structure plus (for
+// Instructions) per-step mutation, which that shape doesn't fit. See
+// api/server.py's GET/PATCH .../device-spec... routes.
+
+async function fetchDeviceSpec(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/device-spec`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    return {
+      parts: [],
+      wiring: { nodes: [], edges: [] },
+      mech: { enclosure: { w: 0, h: 0, d: 0 }, placements: [] },
+      instructions: { phases: [] },
+    };
+  }
+  return res.json();
+}
+
+// PartsTable.jsx's "Refresh prices" button. Unlike fetchPanelContent's
+// no-args-needed GET, this one has to send the CURRENT parts list in the
+// body -- api/server.py's refresh-prices endpoint re-prices exactly the
+// parts it's handed rather than re-reading a stored spec, so BlueprintView
+// must pass spec.parts through here, not just a workspace id.
+async function refreshPartPrices(wsId, parts) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/parts/refresh-prices`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ parts, force_refresh: true }),
+  });
+  if (!res.ok) return { parts };  // degrade to the unchanged list rather than throwing
+  const data = await res.json();
+  return data.parts;
+}
+
+async function toggleInstructionStep(wsId, stepId, done) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/device-spec/instructions/steps/${stepId}`, {
+    method: "PATCH",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ done }),
   });
   return res.json();
 }
@@ -1722,6 +1788,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
   fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
   fetchPanelContent, savePanelContent,   // NEW — generic paste-panel persistence (eo/panel_content.py)
+  fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,
   gradeQuiz, recordQuizAttempt, fetchMissedQuestions,

@@ -51,16 +51,16 @@ from eo import note_candidates
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
 
-def _resolve_workspace(session_id: str):
+def _resolve_workspace(session_id: str, owner_id: str):
     """session_id/chat_id are the same string everywhere in this system
     (api/server.py's own comment) — same workspace lookup
     eo/conversation_memory.py's _workspace_facts_text() already does.
     Returns None if this chat isn't in any workspace, same "nothing to
     do" convention that function uses — a note has nowhere to file
     without a workspace_id."""
-    if not session_id:
+    if not session_id or not owner_id:
         return None
-    ws = chat_workspace.workspace_for_chat(session_id)
+    ws = chat_workspace.workspace_for_chat(session_id, owner_id)
     return ws["id"] if ws else None
 
 
@@ -130,7 +130,7 @@ def _propose_from_context(session_id: str, workspace_id: str, context_text: str)
     )
 
 
-def note_from_latest_turn(session_id: str, user_text: str, assistant_text: str):
+def note_from_latest_turn(session_id: str, owner_id: str, user_text: str, assistant_text: str):
     """The automatic, per-turn trigger's synchronous half — scoped to
     just this one exchange (not the full recent-turns window
     scan_conversation() reads), the natural cheap unit of work for
@@ -141,7 +141,7 @@ def note_from_latest_turn(session_id: str, user_text: str, assistant_text: str):
     synchronous caller can inspect the result — the actual background
     trigger uses the _async wrapper below and ignores this return value.
     """
-    workspace_id = _resolve_workspace(session_id)
+    workspace_id = _resolve_workspace(session_id, owner_id)
     if not workspace_id:
         return None
     excerpt = f"[user]: {user_text}\n\n[assistant]: {assistant_text}"
@@ -152,19 +152,19 @@ def note_from_latest_turn(session_id: str, user_text: str, assistant_text: str):
         return None
 
 
-def note_from_latest_turn_async(session_id: str, user_text: str, assistant_text: str) -> None:
+def note_from_latest_turn_async(session_id: str, owner_id: str, user_text: str, assistant_text: str) -> None:
     """Fire-and-forget wrapper — what eo/conversation_memory.py's
     append_turn() actually calls. Kept separate from
     note_from_latest_turn() itself so a caller that WANTS to block on
     the result (e.g. a test, or a future synchronous caller) still can."""
     threading.Thread(
         target=note_from_latest_turn,
-        args=(session_id, user_text, assistant_text),
+        args=(session_id, owner_id, user_text, assistant_text),
         daemon=True,
     ).start()
 
 
-def scan_conversation(session_id: str) -> dict:
+def scan_conversation(session_id: str, owner_id: str) -> dict:
     """The explicit, on-demand trigger — an API endpoint calls this
     directly. Reads the same recent-turns window every content-
     generating role sees (eo/conversation_memory.py's get_full_context())
@@ -172,11 +172,8 @@ def scan_conversation(session_id: str) -> dict:
     worth a note that only makes sense in light of several turns, not
     just the most recent one.
     """
-    from eo import conversation_memory   # deferred for consistency with
-    # this module's other cross-package imports, though not actually
-    # cyclic in this direction (conversation_memory only imports THIS
-    # module's functions, not the reverse, at its own deferred call site)
-    workspace_id = _resolve_workspace(session_id)
+    from eo import conversation_memory
+    workspace_id = _resolve_workspace(session_id, owner_id)
     if not workspace_id:
         return None
     context_text = conversation_memory.get_full_context(session_id)
