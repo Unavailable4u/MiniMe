@@ -65,6 +65,8 @@ def create_edge(from_node_id: str, to_node_id: str, relation: str, created_by: s
         raise ValueError("from_node_id and to_node_id are required")
     if from_node_id == to_node_id:
         raise ValueError("an edge can't connect a node to itself")
+    if _workspace_of(from_node_id) != _workspace_of(to_node_id):
+        raise ValueError("cannot create edge across workspaces")
 
     edge = {
         "edge_id": f"edge_{uuid.uuid4().hex[:10]}",
