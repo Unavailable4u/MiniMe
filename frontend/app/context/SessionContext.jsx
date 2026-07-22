@@ -532,12 +532,23 @@ async function fetchWorkspaces() {
 }
 
 async function createWorkspace(name) {
-  await fetch(`${API_URL}/api/workspaces`, {
+  const res = await fetch(`${API_URL}/api/workspaces`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ name }),
   });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const workspace = await res.json();
   await fetchWorkspaces();
+  return workspace;
+}
+
+async function createWorkspaceWithChats(name, chatIds = []) {
+  const workspace = await createWorkspace(name);
+  for (const chatId of chatIds) {
+    await addWorkspaceChat(workspace.id, chatId);
+  }
+  return workspace;
 }
 
 async function renameWorkspace(wsId, name) {
@@ -1757,7 +1768,7 @@ async function openScopedSubChat(wsId, taskText) {
   batches, fetchBatches,
   createBatch, estimateBatch,
   renameBatch, unlinkBatchMembers, deleteBatch,
-  workspaces, fetchWorkspaces, createWorkspace, renameWorkspace,
+  workspaces, fetchWorkspaces, createWorkspace, createWorkspaceWithChats, renameWorkspace,
   addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace, promoteWorkspace,   // NEW — §7 / §8
   // NEW — Part 8.9: workspace membership, ownership, voting, attribution
   fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
