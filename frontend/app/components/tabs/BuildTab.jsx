@@ -18,6 +18,11 @@ import { Layers, Loader2, ArrowUpRight, ChevronRight, MessageSquare } from "luci
 // something introduced here, but it blocks this feature until fixed.
 const SELECTED_BUILD_WS_KEY = "minime_tasks_selected_ws_id";
 const CHAT_DOCK_KEY = "minime_build_chatdock_collapsed";
+const PROMOTE_TARGETS = ["test", "growth"];
+const PROMOTE_LABELS = {
+  test: "Test",
+  growth: "Growth",
+};
 
 // feature_status's own value vocabulary (see agents/idea_planner.py's
 // SYSTEM_PROMPT) -- "done" | "in_progress" | missing. No new taxonomy
@@ -515,6 +520,7 @@ export default function BuildTab({ onPromoted }) {
   const [expandedFeature, setExpandedFeature] = useState(null);
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
+  const [promoteTargetStage, setPromoteTargetStage] = useState("test");
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
 
   useEffect(() => {
@@ -588,13 +594,13 @@ export default function BuildTab({ onPromoted }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [API_URL, selectedWsId]);
 
-  async function handlePromote(wsId) {
+  async function handlePromote(wsId, toStage = promoteTargetStage) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      await promoteWorkspace(wsId, "test");
+      await promoteWorkspace(wsId, toStage);
       await fetchWorkspaces();
-      onPromoted?.("test", wsId);
+      onPromoted?.(toStage, wsId);
     } catch (err) {
       setPromoteError(err.message);
     } finally {
@@ -665,16 +671,30 @@ export default function BuildTab({ onPromoted }) {
           </div>
         ) : (
           <div className="px-4 py-6 max-w-4xl mx-auto space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
-              <button
-                onClick={() => handlePromote(selected.id)}
-                disabled={promoting}
-                className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
-              >
-                {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-                Promote to Test →
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <label className="sr-only" htmlFor="build-promote-target">Promote to</label>
+                <select
+                  id="build-promote-target"
+                  value={promoteTargetStage}
+                  onChange={(e) => setPromoteTargetStage(e.target.value)}
+                  disabled={promoting}
+                  className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+                >
+                  {PROMOTE_TARGETS.map((stage) => (
+                    <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => handlePromote(selected.id)}
+                  disabled={promoting}
+                  className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+                >
+                  {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                  Promote to {PROMOTE_LABELS[promoteTargetStage]} →
+                </button>
+              </div>
             </div>
             {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
 

@@ -320,7 +320,7 @@ class RenameWorkspaceRequest(BaseModel):
     name: str
 
 class PromoteWorkspaceRequest(BaseModel):
-    to_stage: str
+    to_stage: Optional[str] = None
 
 
 class WorkspaceChatRequest(BaseModel):

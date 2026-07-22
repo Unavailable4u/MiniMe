@@ -61,6 +61,13 @@ function bareNodeId(fullId) {
 // away in Research shouldn't affect Notebooks' dock state or vice versa,
 // same reasoning §6.2a already applied.
 const CHAT_DOCK_KEY = "minime_research_chatdock_collapsed";
+const PROMOTE_TARGETS = ["plan", "build", "test", "growth"];
+const PROMOTE_LABELS = {
+  plan: "Plan",
+  build: "Build",
+  test: "Test",
+  growth: "Growth",
+};
 
 export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
   const { workspaces, fetchWorkspaces, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, switchChat, fetchPanelContent, savePanelContent } = useSession();
@@ -73,6 +80,7 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
   // project with no way to reach Plan.
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
+  const [promoteTargetStage, setPromoteTargetStage] = useState("plan");
   // NEW — §6.2b: right-hand chat dock collapse state, restored from
   // localStorage on mount — same pattern as NotebooksTab's chatDockCollapsed.
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
@@ -130,13 +138,13 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
   // NotebooksTab and TasksTab already use — AppShell switches tabs and
   // pre-selects it there via PlanTab's own initialWorkspaceId prop
   // (added alongside this fix, same shape as ResearchTab's own).
-  async function handlePromote(wsId) {
+  async function handlePromote(wsId, toStage = promoteTargetStage) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      await promoteWorkspace(wsId, "plan");
+      await promoteWorkspace(wsId, toStage);
       await fetchWorkspaces();
-      onPromoted?.("plan", wsId);
+      onPromoted?.(toStage, wsId);
     } catch (err) {
       setPromoteError(err.message);
     } finally {
@@ -182,14 +190,28 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
         {activeWs && (
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--neutral-800)]">
             <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
-            <button
-              onClick={() => handlePromote(activeWs.id)}
-              disabled={promoting}
-              className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
-            >
-              {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-              Promote to Plan →
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="sr-only" htmlFor="research-promote-target">Promote to</label>
+              <select
+                id="research-promote-target"
+                value={promoteTargetStage}
+                onChange={(e) => setPromoteTargetStage(e.target.value)}
+                disabled={promoting}
+                className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+              >
+                {PROMOTE_TARGETS.map((stage) => (
+                  <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => handlePromote(activeWs.id)}
+                disabled={promoting}
+                className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+              >
+                {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                Promote to {PROMOTE_LABELS[promoteTargetStage]} →
+              </button>
+            </div>
           </div>
         )}
         {promoteError && (
