@@ -1187,6 +1187,22 @@ def refresh_part_prices(ws_id: str, req: RefreshPricesRequest,
     custom = dict(facts.get("custom") or {})
     custom["parts"] = updated
     workspace_facts.set_facts(ws_id, {"custom": custom})
+    workspace_facts.record_section_entries(
+        ws_id,
+        "hardware",
+        [
+            {
+                "key": part.get("id") or part.get("name") or f"part_{index}",
+                "title": part.get("name") or part.get("id") or f"Part {index + 1}",
+                "summary": f"{part.get('category') or 'module'} ×{part.get('qty') or 1}",
+                "data": part,
+            }
+            for index, part in enumerate(updated)
+        ],
+        source="refresh_part_prices",
+        source_ref=ws_id,
+        event="parts_refresh",
+    )
 
     return {"parts": updated}
 
@@ -1246,6 +1262,22 @@ def toggle_instruction_step(ws_id: str, step_id: str, req: ToggleInstructionStep
  
     custom["instructions"] = instructions
     workspace_facts.set_facts(ws_id, {"custom": custom})
+    workspace_facts.record_section_entries(
+        ws_id,
+        "instructions",
+        [
+            {
+                "key": phase.get("id") or phase.get("name") or f"phase_{phase_index}",
+                "title": phase.get("name") or phase.get("id") or f"Phase {phase_index + 1}",
+                "summary": f"{len(phase.get('steps', []))} step(s)",
+                "data": phase,
+            }
+            for phase_index, phase in enumerate(instructions.get("phases", []))
+        ],
+        source="toggle_instruction_step",
+        source_ref=step_id,
+        event="instruction_step",
+    )
     return {"status": "ok", "instructions": instructions}
  
 @app.get("/api/workspaces/{ws_id}/facts/candidates", dependencies=[Depends(require_auth)])
@@ -1513,7 +1545,29 @@ def build_table_endpoint(ws_id: str, req: BuildTableRequest, owner_id: str = Dep
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     try:
-        return build_table(ws_id, req.field_names, node_type=req.node_type, expanded=req.expanded)
+        table = build_table(ws_id, req.field_names, node_type=req.node_type, expanded=req.expanded)
+        workspace_facts.record_section_entries(
+            ws_id,
+            "extractions",
+            [
+                {
+                    "key": row.get("node_id") or row.get("title") or f"row_{index}",
+                    "title": row.get("title") or row.get("node_id") or f"Row {index + 1}",
+                    "summary": ", ".join(
+                        f"{field}={row.get(field)!r}"
+                        for field in req.field_names
+                        if row.get(field) not in (None, "")
+                    ) or table.get("summary") or "Extraction row",
+                    "text": row.get("title") or "",
+                    "data": row,
+                }
+                for index, row in enumerate(table.get("rows", []))
+            ],
+            source="note_table_builder",
+            source_ref="/api/workspaces/{ws_id}/table",
+            event="extraction",
+        )
+        return table
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

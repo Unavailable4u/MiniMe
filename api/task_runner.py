@@ -60,6 +60,7 @@ from eo import code_loader
 from eo import routing_memory
 from eo import conversation_memory
 from eo import chat_workspace
+from eo import workspace_facts
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
     graph = build_execution_graph(tier=0)
@@ -475,6 +476,28 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     decision = loop_v4._get_decision(task_text, tier_override, directed_task_type_override,
                                       session_id=session_id, owner_id=owner_id)   # FIXED — now passes owner_id
     tier = decision["tier"]
+
+    if workspace_id:
+        decision_key = ":".join([
+            "routing",
+            str(decision.get("tier", "unknown")),
+            str(decision.get("action") or "decision").lower(),
+            str(decision.get("directed_task_type") or decision.get("path") or "general").lower(),
+        ])
+        workspace_facts.record_section_entry(
+            workspace_id,
+            "decisions",
+            {
+                "key": decision_key,
+                "title": decision.get("directed_task_type") or decision.get("path") or decision.get("action") or "Routing decision",
+                "summary": decision.get("reasoning") or decision.get("action") or "Routing decision",
+                "text": task_text,
+                "data": decision,
+            },
+            source="chat_task_runner",
+            source_ref=session_id,
+            event="decision",
+        )
     # ... rest unchanged ...
 
     # staff_task() needs the original task text (to write a good brief if
