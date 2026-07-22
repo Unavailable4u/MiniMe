@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
-import { Layers, Loader2, ArrowUpRight, ChevronRight } from "lucide-react";
+import WorkspaceChatPanel from "../WorkspaceChatPanel";
+import { Layers, Loader2, ArrowUpRight, ChevronRight, MessageSquare } from "lucide-react";
 // Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -16,6 +17,7 @@ import { Layers, Loader2, ArrowUpRight, ChevronRight } from "lucide-react";
 // this filter would show nothing. That's a pre-existing bug, not
 // something introduced here, but it blocks this feature until fixed.
 const SELECTED_BUILD_WS_KEY = "minime_tasks_selected_ws_id";
+const CHAT_DOCK_KEY = "minime_build_chatdock_collapsed";
 
 // feature_status's own value vocabulary (see agents/idea_planner.py's
 // SYSTEM_PROMPT) -- "done" | "in_progress" | missing. No new taxonomy
@@ -513,6 +515,18 @@ export default function BuildTab({ onPromoted }) {
   const [expandedFeature, setExpandedFeature] = useState(null);
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
+  const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
+
+  useEffect(() => {
+    setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+  }, []);
+
+  function toggleChatDock() {
+    setChatDockCollapsed((prev) => {
+      localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
 
   // Restore last-selected build project on mount (same pattern as
   // NotebooksTab's SELECTED_NOTEBOOK_KEY restore effect).
@@ -713,6 +727,24 @@ export default function BuildTab({ onPromoted }) {
           </div>
         )}
       </div>
+
+      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+      </div>
+      {!chatDockCollapsed && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+        </div>
+      )}
+      {chatDockCollapsed && (
+        <button
+          onClick={toggleChatDock}
+          title="Open chat"
+          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--cyber-amber)] text-black rounded-full p-3 shadow-lg"
+        >
+          <MessageSquare size={18} />
+        </button>
+      )}
     </div>
   );
 }

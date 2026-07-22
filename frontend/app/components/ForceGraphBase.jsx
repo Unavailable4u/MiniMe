@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useMemo } from "react";
 import dynamic from "next/dynamic";
 
 // react-force-graph-2d touches the canvas/window at import time, so it
@@ -26,6 +26,19 @@ const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false 
  * restarting) should keep one persistent object per node id themselves
  * (see RoutingTraceGraph.jsx's nodeObjectsRef) and pass THOSE objects in,
  * mutated in place rather than rebuilt from scratch each render.
+ *
+ * FIX (nodes fly away on hover, part 2): stable node objects alone
+ * aren't enough. react-force-graph's prop diffing checks the `graphData`
+ * prop itself by reference -- if this component builds a fresh
+ * `{ nodes, links }` object literal on every render (as it used to,
+ * inline in JSX), that counts as "new data" even when the nodes/links
+ * arrays inside are unchanged. Setting graphData again reheats the
+ * simulation (alpha -> 1), which flings already-settled nodes apart.
+ * Since onNodeHover causes callers to re-render this component on every
+ * mouse-move over the canvas, that reheat was firing constantly.
+ * Memoizing graphData on [nodes, links] keeps its reference stable
+ * across hover-driven re-renders, so only genuine data changes reheat
+ * the sim.
  */
 export default function ForceGraphBase({
   nodes,
@@ -71,11 +84,17 @@ export default function ForceGraphBase({
     return () => observer.disconnect();
   }, [height]);
 
+  // See FIX comment above the component docstring: this reference must
+  // stay stable across renders that don't actually change the node/link
+  // data (e.g. hover-driven re-renders), or react-force-graph reheats
+  // the simulation and already-settled nodes go flying.
+  const graphData = useMemo(() => ({ nodes, links }), [nodes, links]);
+
   return (
     <div ref={containerRef} className="relative rounded-lg border border-[var(--neutral-800)] overflow-hidden">
       <ForceGraph2D
         ref={fgRef}
-        graphData={{ nodes, links }}
+        graphData={graphData}
         width={dims.width}
         height={dims.height}
         backgroundColor={backgroundColor || resolvedBg}
