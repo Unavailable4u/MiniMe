@@ -227,6 +227,88 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     custom["instructions"] = spec.get("instructions", {})
     workspace_facts.set_facts(workspace_id, {"custom": custom})
 
+    workspace_facts.record_section_entries(
+      workspace_id,
+      "hardware",
+      [
+        {
+          "key": part.get("id") or part.get("name") or f"part_{index}",
+          "title": part.get("name") or part.get("id") or f"Part {index + 1}",
+          "summary": f"{part.get('category') or 'module'} ×{part.get('qty') or 1}",
+          "data": part,
+        }
+        for index, part in enumerate(spec.get("parts", []))
+      ],
+      source="hardware_speccer",
+      source_ref=session_id,
+      event="parts",
+    )
+    workspace_facts.record_section_entries(
+      workspace_id,
+      "components",
+      [
+        {
+          "key": node.get("id") or f"node_{index}",
+          "title": node.get("label") or node.get("id") or f"Node {index + 1}",
+          "summary": node.get("type") or node.get("kind") or "component",
+          "data": node,
+        }
+        for index, node in enumerate(spec.get("wiring", {}).get("nodes", []))
+      ],
+      source="hardware_speccer",
+      source_ref=session_id,
+      event="wiring_nodes",
+    )
+    workspace_facts.record_section_entries(
+      workspace_id,
+      "connections",
+      [
+        {
+          "key": f"{edge.get('from') or 'from'}->{edge.get('to') or 'to'}:{edge.get('kind') or 'link'}",
+          "title": f"{edge.get('from') or '?'} -> {edge.get('to') or '?'}",
+          "summary": edge.get("kind") or "connection",
+          "data": edge,
+        }
+        for edge in spec.get("wiring", {}).get("edges", [])
+      ],
+      source="hardware_speccer",
+      source_ref=session_id,
+      event="wiring_edges",
+    )
+    workspace_facts.record_section_entries(
+      workspace_id,
+      "instructions",
+      [
+        {
+          "key": phase.get("id") or phase.get("name") or f"phase_{index}",
+          "title": phase.get("name") or phase.get("id") or f"Phase {index + 1}",
+          "summary": f"{len(phase.get('steps', []))} step(s)",
+          "data": phase,
+        }
+        for index, phase in enumerate(spec.get("instructions", {}).get("phases", []))
+      ],
+      source="hardware_speccer",
+      source_ref=session_id,
+      event="instructions",
+    )
+    workspace_facts.record_section_entries(
+      workspace_id,
+      "instructions",
+      [
+        {
+          "key": step.get("id") or f"step_{phase_index}_{step_index}",
+          "title": step.get("title") or step.get("id") or f"Step {step_index + 1}",
+          "summary": "done" if step.get("done") else "pending",
+          "data": {"phase_id": phase.get("id"), **step},
+        }
+        for phase_index, phase in enumerate(spec.get("instructions", {}).get("phases", []))
+        for step_index, step in enumerate(phase.get("steps", []))
+      ],
+      source="hardware_speccer",
+      source_ref=session_id,
+      event="instruction_steps",
+    )
+
     emit_event("device_spec", session_id, agent="hardware_speccer",
                payload={"part_count": len(spec.get("parts", []))})
     return {"text": json.dumps(spec), "spec": spec}
