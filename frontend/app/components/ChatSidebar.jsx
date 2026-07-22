@@ -4,6 +4,7 @@ import { useSession } from "../context/SessionContext";
 import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
 import CreateWorkspaceModal from "./CreateWorkspaceModal";
+import AttachChatToWorkspaceModal from "./AttachChatToWorkspaceModal";
 import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";
 import ManageWorkspaceModal from "./ManageWorkspaceModal";
 import ConfirmDialog from "./ConfirmDialog";
@@ -40,6 +41,8 @@ export default function ChatSidebar({ collapsed, onToggle }) {
   const [managingBatch, setManagingBatch] = useState(null);
   const [managingWorkspace, setManagingWorkspace] = useState(null);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+  const [creatingProjectFrom, setCreatingProjectFrom] = useState(null);
+  const [attachingChatToProject, setAttachingChatToProject] = useState(null);
   const [addingToWorkspace, setAddingToWorkspace] = useState(null);
   // NEW — §8: search bar. Client-side only — chats/batches/workspaces are
   // already loaded in state, no backend endpoint needed.
@@ -102,6 +105,14 @@ export default function ChatSidebar({ collapsed, onToggle }) {
     setPendingDelete(chat);
   }
 
+  function openCreateProject(chatIds, initialName) {
+    setCreatingProjectFrom({ chatIds, initialName });
+  }
+
+  function openAttachToProject(chat) {
+    setAttachingChatToProject(chat);
+  }
+
   async function confirmDelete() {
     await deleteChat(pendingDelete.id);
     setPendingDelete(null);
@@ -111,7 +122,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
   // unbatched chats render identically — same click/rename/link/delete
   // behavior either way, just an indent + no per-row Link2 badge once a
   // chat is grouped (the batch header above it already communicates that).
-  function renderChatRow(chat, { indent = false, accentColor = null } = {}) {
+  function renderChatRow(chat, { indent = false, accentColor = null, allowProjectActions = false } = {}) {
     return (
       <div
         key={chat.id}
@@ -137,6 +148,16 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           <div className="flex items-center justify-between gap-1">
             <span className="text-xs text-[var(--neutral-200)] truncate">{chat.title}</span>
             <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
+              {allowProjectActions && (
+                <>
+                  <button onClick={(e) => { e.stopPropagation(); openCreateProject([chat.id], chat.title); }} title="Create project from chat">
+                    <FolderPlus size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); openAttachToProject(chat); }} title="Add chat to project">
+                    <FolderInput size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                  </button>
+                </>
+              )}
               {/* Batched chats already show a badge in their batch header
                   above, so only render the per-row Link2 badge for chats
                   linked the old, non-batch way. */}
@@ -234,16 +255,21 @@ export default function ChatSidebar({ collapsed, onToggle }) {
                   <Link2 size={10} className="inline mr-1" />
                   {batch.name} · {memberChats.length}
                 </span>
-                <button onClick={() => openManageBatch(batch)} title="Manage batch">
-                  <Settings2 size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => openCreateProject(memberChats.map((chat) => chat.id), batch.name)} title="Create project from batch">
+                    <FolderPlus size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                  </button>
+                  <button onClick={() => openManageBatch(batch)} title="Manage batch">
+                    <Settings2 size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                  </button>
+                </div>
               </div>
               {visibleMembers.map((chat) => renderChatRow(chat, { indent: true, accentColor }))}
             </div>
           );
         })}
 
-        {filteredUnbatchedChats.map((chat) => renderChatRow(chat))}
+        {filteredUnbatchedChats.map((chat) => renderChatRow(chat, { allowProjectActions: true }))}
       </div>
 
       {linkingId && (
@@ -273,6 +299,22 @@ export default function ChatSidebar({ collapsed, onToggle }) {
       />
 
       {creatingWorkspace && <CreateWorkspaceModal onClose={() => setCreatingWorkspace(false)} />}
+
+      {creatingProjectFrom && (
+        <CreateWorkspaceModal
+          onClose={() => setCreatingProjectFrom(null)}
+          initialName={creatingProjectFrom.initialName}
+          sourceChatIds={creatingProjectFrom.chatIds}
+        />
+      )}
+
+      {attachingChatToProject && (
+        <AttachChatToWorkspaceModal
+          chat={attachingChatToProject}
+          workspaces={workspaces}
+          onClose={() => setAttachingChatToProject(null)}
+        />
+      )}
 
       {addingToWorkspace && (
         <AddChatToWorkspaceModal
