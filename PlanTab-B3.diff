@@ -1,0 +1,79 @@
+diff --git a/frontend/app/components/tabs/PlanTab.jsx b/frontend/app/components/tabs/PlanTab.jsx
+index c8a123f..67815af 100644
+--- a/frontend/app/components/tabs/PlanTab.jsx
++++ b/frontend/app/components/tabs/PlanTab.jsx
+@@ -8,6 +8,7 @@ import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fi
+ import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
+ import { useWorkspaceDock, useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
+ import WorkspaceDataBubble from "../WorkspaceDataBubble";
++import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
+ import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
+ import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
+ import MechView from "../MechView";                           // NEW — Blueprint sub-tab
+@@ -15,7 +16,7 @@ import InstructionChecklist from "../InstructionChecklist";   // NEW — Bluepri
+ import {
+   FileText, GitBranch, Database, Webhook, Skull, Calculator,
+   LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
+-  Loader2, ChevronRight, MessageSquare, Cpu,
++  Loader2, ChevronRight, MessageSquare, Cpu, Plus,
+ } from "lucide-react";
+ 
+ // Part 5 — Plan as a dedicated top-level section, same shape as Notebooks
+@@ -187,6 +188,12 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
+   // is open. ManageWorkspaceModal already exists fully built, just never
+   // wired into this tab.
+   const [managingWorkspace, setManagingWorkspace] = useState(null);
++  // NEW — item #10 / B3: native "create project" trigger, same pattern
++  // as ResearchTab's B2. This tab can now create its own plan-stage
++  // workspace directly, instead of requiring a promotion from Research
++  // or the chat sidebar's folder button — those remain valid paths in,
++  // this is just no longer the only one.
++  const [showCreateModal, setShowCreateModal] = useState(false);
+ 
+   useEffect(() => {
+     setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+@@ -280,13 +287,22 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
+       {/* Project picker — a "plan project" is just a workspace, same as a
+           "notebook"/"research project" is. No new container concept. */}
+       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
+-        <div className="px-3 py-3 border-b border-[var(--neutral-800)]">
++        <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
+           <span className="text-xs font-medium text-[var(--neutral-400)]">Plan projects</span>
++          {/* NEW — item #10 / B3: native create, same stage-aware modal
++              ResearchTab's B2 wired up first. */}
++          <button
++            onClick={() => setShowCreateModal(true)}
++            title="New plan project"
++            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++          >
++            <Plus size={14} />
++          </button>
+         </div>
+         <div className="flex-1 overflow-y-auto">
+           {planProjects.length === 0 && (
+             <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
+-              No plan projects yet — promote a research project from the Research tab, or create one from the chat sidebar's <FolderOpen size={11} className="inline" /> button.
++              No plan projects yet — create one above, promote a research project from the Research tab, or use the chat sidebar's <FolderOpen size={11} className="inline" /> button.
+             </p>
+           )}
+           {planProjects.map((ws) => (
+@@ -550,6 +566,19 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
+           onClose={() => setManagingWorkspace(null)}
+         />
+       )}
++
++      {/* NEW — item #10 / B3: stage-aware create modal (B1). Auto-selects
++          the created project so the user lands straight in it instead of
++          having to find it in the list themselves — same as ResearchTab's B2. */}
++      {showCreateModal && (
++        <CreateWorkspaceModal
++          stage="plan"
++          onClose={(created) => {
++            setShowCreateModal(false);
++            if (created) setActiveWsId(created.id);
++          }}
++        />
++      )}
+     </div>
+   );
+ }
