@@ -481,6 +481,20 @@ async function runTemplate(templateId, taskText) {
     setChats(await res.json());
   }
 
+  // NEW — step 3e prereq: pure lookup, no state mutation. Same check
+  // ChatTab.jsx already did inline to find its activeWorkspace. Exposed
+  // here (rather than left duplicated) so WorkspaceDockContext's
+  // switchChat/createNewChat/etc. can resolve "which dock key does this
+  // chatId belong to" without importing this file or duplicating the
+  // `workspaces` state itself — it's passed down as a callback prop
+  // instead (see AppShell.jsx's WorkspaceDockBridge).
+  function getWorkspaceIdForChat(chatId) {
+    const ws = (workspaces || []).find(
+      (w) => Array.isArray(w.chat_ids) && w.chat_ids.includes(chatId)
+    );
+    return ws?.id ?? null;
+  }
+
   // NEW — §4: loads memory_batch groups so the sidebar can render batch
   // sections and the Working Panel can show "sharing memory with..."
   // for the active chat. §5 adds create/rename/unlink/delete on top of
@@ -1769,6 +1783,7 @@ async function openScopedSubChat(wsId, taskText) {
   sessionId, API_URL,
   messages, loading,
   chats, chatsLoading, switchChat, createNewChat, renameChat, deleteChat, linkChats,
+  refreshChatList, getWorkspaceIdForChat,   // NEW — step 3e prereq: threaded into WorkspaceDockProvider as props
   batches, fetchBatches,
   createBatch, estimateBatch,
   renameBatch, unlinkBatchMembers, deleteBatch,

@@ -1,25 +1,32 @@
 "use client";
 // frontend/app/context/WorkspaceDockContext.jsx
 //
-// Step 3a+3b of the §2.6 build order (architecture doc §2.3/§2.4/§2.5).
-// 3a built the state shape + keying. 3b (this pass) adds the
-// session-Pusher-channel subscription and its bind_global handler,
-// owned by the store and parameterized per dock — per the doc: "This
-// provider is also what owns the session-${sessionId} Pusher channel
-// subscription going forward... same pattern as step 2, just relocated
-// and parameterized per dock instead of one global instance."
+// Step 3a/3b/3c of the §2.6 build order (architecture doc §2.3/§2.4/§2.5),
+// PLUS a step identified while starting 3e (not separately lettered in the
+// original doc): 3a built the state shape + keying, 3b added the
+// session-Pusher-channel subscription, 3c ported the run functions
+// (sendTask/resumeRun/confirmHireReview/persistMessage/etc). This pass
+// additionally ports switchChat/createNewChat/renameChat/deleteChat/
+// linkChats — needed before ANY consumer can safely be rewired to pass a
+// real workspaceId in (see WorkspaceChatPanel's 3d comment): those five
+// are what actually populate a dock's sessionId/messages in the first
+// place, and until they existed here, flipping a consumer to dock mode
+// would just show it empty. See WorkspaceDockProvider's own comment for
+// why they needed refreshChatList/getWorkspaceIdForChat/getChats threaded
+// in as props rather than an import from SessionContext.
 //
-// Still NOT done: 3c (move the run functions: sendTask, resumeRun,
-// persistMessage, etc.), 3d (rewire WorkspaceChatPanel), 3e (rewire the
-// remaining 8 consumers). SessionContext.jsx is UNTOUCHED by this patch
-// — it keeps its own, independent subscription to the same channel name
-// for now. That means, for any dock actually wired up post-3d/3e, a
-// chat's events get processed twice (once by SessionContext's copy,
-// once by this one) until 3e removes SessionContext's copy. That's
-// intentional: nothing calls useWorkspaceDock() from real UI yet (3d/3e
-// haven't landed), so today this is dormant — the double-processing
-// scenario doesn't exist in the running app yet, only once wiring
-// starts. Flagging so it isn't a surprise when 3d lands.
+// Still NOT done: 3d (rewire WorkspaceChatPanel — landed separately,
+// dual-mode) and 3e (rewire the remaining 8 consumers, one at a time).
+// SessionContext.jsx is UNTOUCHED by this patch — it keeps its own,
+// independent subscription to the same channel name for now, AND its own
+// (now-duplicate) copies of switchChat/createNewChat/etc. That means, for
+// any dock actually wired up post-3e, a chat's events get processed twice
+// (once by SessionContext's copy, once by this one) until 3e removes
+// SessionContext's copies. That's intentional: nothing calls
+// useWorkspaceDock()/useWorkspaceDockActions() from real UI yet (3e hasn't
+// landed for any of the 8 remaining consumers), so today this is dormant —
+// the double-processing scenario doesn't exist in the running app yet,
+// only once wiring starts. Flagging so it isn't a surprise when 3e lands.
 //
 // KNOWN OPEN QUESTION for 3e: two branches of the original handler —
 // usage_update and quota_alert — feed usageStats/usageHistory/
@@ -70,6 +77,9 @@ import { supabase } from "../lib/supabaseClient";
 // shared apiClient.js so neither file owns the canonical copy.
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// Duplicated from SessionContext.jsx for the same reason as API_URL above.
+const ACTIVE_CHAT_KEY = "minime_active_chat_id";
+
 async function authHeaders(opts = {}) {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
@@ -109,11 +119,32 @@ function makeInitialDockState() {
 
 const WorkspaceDockStoreContext = createContext(null);
 
-export function WorkspaceDockProvider({ children }) {
-  // Lazily build one store for the provider's lifetime. Kept in a ref
-  // (not state) since the store object itself never needs to trigger a
-  // re-render — only per-key notifications do, via useSyncExternalStore
-  // in the consumer hook below.
+export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceIdForChat, getChats }) {
+  // Option 1 (chosen over letting every UI call site hand-coordinate a
+  // SessionContext write + a dock write, or over a thinner wrapper hook
+  // with the same fragility): switchChat/createNewChat/renameChat/
+  // deleteChat/linkChats move HERE, fully, rather than staying split
+  // across two files. They still need three things that only
+  // SessionContext actually owns — refreshChatList (app-wide `chats`
+  // list), a chatId->workspaceId lookup (also over app-wide `workspaces`),
+  // and the current `chats` array itself (for deleteChat's "switch to
+  // another chat" fallback). Rather than import SessionContext (the
+  // mother/child rule from 3b/3c), these three are passed down as props
+  // from a small bridge component that sits inside SessionProvider and
+  // calls useSession() itself — see AppShell.jsx's WorkspaceDockBridge.
+  //
+  // These props are NOT read directly by the store below. The store is
+  // built once, lazily, in a ref (storeRef, further down) — capturing
+  // these props directly in that one-time closure would freeze them at
+  // whatever they were on the provider's first render, which goes stale
+  // the moment `chats`/`workspaces` change on SessionContext. Instead
+  // they're kept in a ref that's reassigned every render, and the store's
+  // action functions read `callbacksRef.current.xxx` at call time. Same
+  // "avoid a stale closure via a ref" pattern this file already uses for
+  // stepSeqs/openStepStacks/channelBindings.
+  const callbacksRef = useRef({});
+  callbacksRef.current = { refreshChatList, getWorkspaceIdForChat, getChats };
+
   const storeRef = useRef(null);
   if (storeRef.current === null) {
     const states = new Map(); // dock key -> dock state object
@@ -544,9 +575,87 @@ export function WorkspaceDockProvider({ children }) {
       setState(key, { pendingHireReview: null });
     };
 
+    // Direct port of SessionContext.jsx's switchChat/createNewChat/
+    // renameChat/deleteChat/linkChats (lines ~1382-1447 there), same API
+    // calls, same behavior — retargeted from setSessionId/setMessages/etc.
+    // to store.setState(key, ...), where `key` is resolved per-call from
+    // the chatId involved (via callbacksRef.current.getWorkspaceIdForChat),
+    // NOT fixed to one dock instance. That's the actual difference from
+    // sendTask/resumeRun/etc. above: those operate on "the dock this
+    // component is already showing" (key fixed by the calling component's
+    // own workspaceId/chatId props). These operate on "whichever dock a
+    // given chatId belongs to," because the caller (e.g. a chat list) is
+    // choosing among chats that can belong to different workspaces — the
+    // key isn't known until the chatId is. See useWorkspaceDockActions()
+    // below, a second, key-agnostic hook for exactly this reason.
+    const switchChat = async (chatId, { skipListReload = false } = {}) => {
+      const res = await fetch(`${API_URL}/api/chats/${chatId}`, { headers: await authHeaders() });
+      if (!res.ok) return null;
+      const chat = await res.json();
+      const { getWorkspaceIdForChat, refreshChatList } = callbacksRef.current;
+      const key = normalizeDockKey(getWorkspaceIdForChat?.(chatId) ?? null, chatId);
+      if (key) {
+        setState(key, { sessionId: chatId, messages: chat.messages || [] });
+        resetLiveRunState(key);
+      }
+      localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
+      if (!skipListReload) await refreshChatList?.();
+      return chat;
+    };
+
+    const createNewChat = async () => {
+      const res = await fetch(`${API_URL}/api/chats`, {
+        method: "POST",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ title: "New Chat" }),
+      });
+      const chat = await res.json();
+      const { getWorkspaceIdForChat, refreshChatList } = callbacksRef.current;
+      // A brand-new chat has no workspace yet — getWorkspaceIdForChat
+      // returns null, normalizeDockKey falls back to chat:${chat.id}.
+      const key = normalizeDockKey(getWorkspaceIdForChat?.(chat.id) ?? null, chat.id);
+      if (key) setState(key, { sessionId: chat.id, messages: [] });
+      localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
+      await refreshChatList?.();
+      return chat.id;
+    };
+
+    const renameChat = async (chatId, title) => {
+      await fetch(`${API_URL}/api/chats/${chatId}/rename`, {
+        method: "PATCH",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ title }),
+      });
+      await callbacksRef.current.refreshChatList?.();
+    };
+
+    const deleteChat = async (chatId) => {
+      await fetch(`${API_URL}/api/chats/${chatId}`, { method: "DELETE", headers: await authHeaders() });
+      const { getWorkspaceIdForChat, getChats, refreshChatList } = callbacksRef.current;
+      const key = normalizeDockKey(getWorkspaceIdForChat?.(chatId) ?? null, chatId);
+      const wasActive = key ? states.get(key)?.sessionId === chatId : false;
+      if (wasActive) {
+        const remaining = (getChats?.() || []).filter((c) => c.id !== chatId);
+        if (remaining.length > 0) await switchChat(remaining[0].id);
+        else await createNewChat();
+      } else {
+        await refreshChatList?.();
+      }
+    };
+
+    const linkChats = async (chatId, linkedChatIds) => {
+      await fetch(`${API_URL}/api/chats/${chatId}/links`, {
+        method: "PATCH",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ linked_chat_ids: linkedChatIds }),
+      });
+      await callbacksRef.current.refreshChatList?.();
+    };
+
     storeRef.current = {
       getState, subscribe, setState, remove,
       persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
+      switchChat, createNewChat, renameChat, deleteChat, linkChats,
     };
   }
 
@@ -570,10 +679,14 @@ function normalizeDockKey(workspaceId, chatId) {
 /**
  * useWorkspaceDock(workspaceId, chatId?)
  *
- * SKELETON ONLY (3a) — returns { key, state, setDockState } for the dock
- * slot keyed by workspaceId (or chatId when there's no workspace).
- * Nothing calls this yet. SessionContext still owns the real, live
- * version of every one of these fields until 3c/3d/3e land.
+ * Returns { key, state, setDockState, sendTask, resumeRun,
+ * confirmHireReview, cancelHireReview } for the dock slot keyed by
+ * workspaceId (or chatId when there's no workspace). Used by
+ * WorkspaceChatPanel.jsx (3d, dual-mode) when a caller passes it a
+ * workspaceId/chatId — every current call site still passes neither, so
+ * this resolves to a null key and inert fields for them, same as before.
+ * See useWorkspaceDockActions() below for switchChat/createNewChat/etc,
+ * which aren't tied to one fixed key.
  */
 export function useWorkspaceDock(workspaceId, chatId = null) {
   const store = useContext(WorkspaceDockStoreContext);
@@ -623,4 +736,25 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
   );
 
   return { key, state, setDockState, sendTask, resumeRun, confirmHireReview, cancelHireReview };
+}
+
+/**
+ * useWorkspaceDockActions()
+ *
+ * Step 3e prereq. Separate from useWorkspaceDock(workspaceId) on purpose:
+ * switchChat/createNewChat/renameChat/deleteChat/linkChats don't operate
+ * on one fixed dock — a chat list (e.g. ChatSidebar) picks among chats
+ * that can belong to different workspaces, so the key is resolved from
+ * whichever chatId is passed to the call, not from this hook's own props
+ * (it takes none). Any component that needs these — without needing a
+ * specific dock's live state/sendTask — uses this instead of
+ * useWorkspaceDock(someFixedId).
+ */
+export function useWorkspaceDockActions() {
+  const store = useContext(WorkspaceDockStoreContext);
+  if (!store) {
+    throw new Error("useWorkspaceDockActions must be used within a WorkspaceDockProvider");
+  }
+  const { switchChat, createNewChat, renameChat, deleteChat, linkChats } = store;
+  return { switchChat, createNewChat, renameChat, deleteChat, linkChats };
 }

@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { SessionProvider, useSession } from "../context/SessionContext";
+import { WorkspaceDockProvider } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below
 import ChatSidebar from "./ChatSidebar";
 import ChatTab from "./tabs/ChatTab";
 import TokenUsageTab from "./tabs/TokenUsageTab";
@@ -44,8 +45,33 @@ const STAGE_TAB_MAP = { note: "notebooks", research: "research", plan: "plan", b
 export default function AppShell() {
   return (
     <SessionProvider>
-      <AppShellBody />
+      <WorkspaceDockBridge />
     </SessionProvider>
+  );
+}
+
+// NEW — step 3e prereq: WorkspaceDockProvider needs refreshChatList/
+// getWorkspaceIdForChat/getChats to run switchChat/createNewChat/etc (see
+// WorkspaceDockContext.jsx's own comment on why — mother/child files don't
+// import each other). Those three only exist inside SessionProvider, so
+// this small bridge — same reasoning as AppShellBody's own split below —
+// sits inside SessionProvider, reads them off useSession(), and passes
+// them down as plain props. `getChats={() => chats}` is intentionally NOT
+// memoized: this component re-renders whenever `chats` changes (it
+// consumes the context), so a fresh inline closure each render is exactly
+// what keeps deleteChat's "switch to another chat" fallback from reading
+// a stale list — see WorkspaceDockProvider's callbacksRef for the other
+// half of that (it re-reads these props every render too).
+function WorkspaceDockBridge() {
+  const { refreshChatList, getWorkspaceIdForChat, chats } = useSession();
+  return (
+    <WorkspaceDockProvider
+      refreshChatList={refreshChatList}
+      getWorkspaceIdForChat={getWorkspaceIdForChat}
+      getChats={() => chats}
+    >
+      <AppShellBody />
+    </WorkspaceDockProvider>
   );
 }
 
