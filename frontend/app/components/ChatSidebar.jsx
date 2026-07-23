@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";   // CHANGED — add useEffect
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext"; // NEW — step 3e
-import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
+import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput, Notebook, Search, ClipboardList, Hammer, FlaskConical, TrendingUp } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
 import CreateWorkspaceModal from "./CreateWorkspaceModal";
 import AttachChatToWorkspaceModal from "./AttachChatToWorkspaceModal";
@@ -28,6 +28,42 @@ function hashBatchColor(batchId) {
     hash = (hash * 31 + batchId.charCodeAt(i)) | 0;
   }
   return BATCH_ACCENTS[Math.abs(hash) % BATCH_ACCENTS.length];
+}
+
+// NEW — §2.1: per-stage icon + label, so a workspace's row in the (global,
+// unfiltered — item #6/Option B) Chat sidebar shows at a glance which tabs
+// it's currently active in. Keys/order match AppShell.jsx's STAGE_TAB_MAP
+// exactly — same six promotable stages, "chat" excluded on purpose since a
+// workspace's chat-of-origin isn't a stage tracked in active_stages.
+const STAGE_ICON_MAP = {
+  note: { Icon: Notebook, label: "Notebooks" },
+  research: { Icon: Search, label: "Research" },
+  plan: { Icon: ClipboardList, label: "Plan" },
+  build: { Icon: Hammer, label: "Build" },
+  test: { Icon: FlaskConical, label: "Test" },
+  growth: { Icon: TrendingUp, label: "Growth" },
+};
+const STAGE_ORDER = ["note", "research", "plan", "build", "test", "growth"];
+
+// Small helper so both the workspace header row (below) and any future
+// caller (e.g. a promote-target list) render the same icon set the same
+// way — falls back to `[ws.stage]` for any workspace fetched before the
+// active_stages backfill lands on it client-side, same fallback pattern
+// already used in every stage tab's own filter.
+function WorkspaceStageIcons({ workspace }) {
+  const activeStages = workspace.active_stages || [workspace.stage];
+  const ordered = STAGE_ORDER.filter((s) => activeStages.includes(s));
+  if (ordered.length === 0) return null;
+  return (
+    <span className="flex items-center gap-1 mr-1.5">
+      {ordered.map((stage) => {
+        const entry = STAGE_ICON_MAP[stage];
+        if (!entry) return null;
+        const { Icon, label } = entry;
+        return <Icon key={stage} size={10} className="text-[var(--neutral-500)]" title={label} />;
+      })}
+    </span>
+  );
 }
 
 export default function ChatSidebar({ collapsed, onToggle }) {
@@ -239,6 +275,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
                   {ws.name} · {ws.chat_ids.length}
                 </span>
                 <div className="flex items-center gap-2">
+                  <WorkspaceStageIcons workspace={ws} />
                   <button onClick={() => setAddingToWorkspace(ws)} title="Add chat to project">
                     <FolderInput size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                   </button>
