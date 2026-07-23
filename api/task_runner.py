@@ -433,6 +433,46 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     return response
 
 
+def _record_routing_fact(workspace_id: str, tier, task_text: str, session_id: str, decision: dict = None) -> None:
+    """D1 — shared by every early-return branch of
+    _resolve_decision_and_hires() (cache hit, SGA-resolved) as well as
+    the full-decision path below, so a workspace_facts entry gets
+    written regardless of which tier a task actually resolves at.
+    Previously this was inlined only after the full Inspector decision
+    was computed, so the Cached and SGA fast paths — which `return`
+    before that point — never reached it at all.
+
+    decision is None for the cache/SGA fast paths (no Inspector
+    decision was ever computed for those); the key/title/summary below
+    fall back to tier-only labels in that case. This is still just
+    routing/tier metadata, not real conversational content — that
+    upgrade is D2, out of scope here."""
+    if not workspace_id:
+        return
+    decision = decision or {}
+    decision_key = ":".join([
+        "routing",
+        str(decision.get("tier", tier) or tier or "unknown"),
+        str(decision.get("action") or "decision").lower(),
+        str(decision.get("directed_task_type") or decision.get("path") or "general").lower(),
+    ])
+    workspace_facts.record_section_entry(
+        workspace_id,
+        "decisions",
+        {
+            "key": decision_key,
+            "title": decision.get("directed_task_type") or decision.get("path") or decision.get("action")
+                      or f"Routing decision (tier {tier})",
+            "summary": decision.get("reasoning") or decision.get("action") or f"Resolved at tier {tier}",
+            "text": task_text,
+            "data": decision or {"tier": tier},
+        },
+        source="chat_task_runner",
+        source_ref=session_id,
+        event="decision",
+    )
+
+
 def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
                                  app_slug: str, session_id: str, mode: str, owner_id: str = None) -> dict:
     """Part 2 §2.5: the shared first half of dispatch — semantic cache,
@@ -452,6 +492,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     if tier_override is None and mode != "beast":
         cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
         if cached:
+            _record_routing_fact(workspace_id, "cache", task_text, session_id)   # NEW — D1
             return {"resolved": False, "response": {
                 "decision": {},
                 "tier": "cache",
@@ -464,6 +505,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     sga_result = sga_attempt(task_text, session_id=session_id)
     if sga_result["resolved"]:
         write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
+        _record_routing_fact(workspace_id, "sga", task_text, session_id)   # NEW — D1
         return {"resolved": False, "response": {
                 "decision": {},
                 "tier": "sga",
@@ -477,27 +519,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
                                       session_id=session_id, owner_id=owner_id)   # FIXED — now passes owner_id
     tier = decision["tier"]
 
-    if workspace_id:
-        decision_key = ":".join([
-            "routing",
-            str(decision.get("tier", "unknown")),
-            str(decision.get("action") or "decision").lower(),
-            str(decision.get("directed_task_type") or decision.get("path") or "general").lower(),
-        ])
-        workspace_facts.record_section_entry(
-            workspace_id,
-            "decisions",
-            {
-                "key": decision_key,
-                "title": decision.get("directed_task_type") or decision.get("path") or decision.get("action") or "Routing decision",
-                "summary": decision.get("reasoning") or decision.get("action") or "Routing decision",
-                "text": task_text,
-                "data": decision,
-            },
-            source="chat_task_runner",
-            source_ref=session_id,
-            event="decision",
-        )
+    _record_routing_fact(workspace_id, tier, task_text, session_id, decision=decision)   # CHANGED — D1, now shared with cache/SGA branches above
     # ... rest unchanged ...
 
     # staff_task() needs the original task text (to write a good brief if
