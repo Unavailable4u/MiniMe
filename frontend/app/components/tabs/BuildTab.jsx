@@ -754,12 +754,19 @@ export default function BuildTab({ onPromoted }) {
         )}
       </div>
 
+      {/* CHANGED — step 3e: was rendered bare (legacy mode, reading the
+          global SessionContext sessionId regardless of which build
+          project was selected above). Now passes this tab's own
+          `selected` project so the dock resolves ws:${selected.id} and
+          shows/updates the right project's chat, same fix already
+          applied to NotebooksTab. BuildTab never called switchChat
+          itself, so no other change was needed here. */}
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} />
       </div>
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} />
         </div>
       )}
       {chatDockCollapsed && (
