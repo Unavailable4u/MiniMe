@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useEffect, useState } from "react";
 import { useSession } from "../context/SessionContext";
+import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
@@ -21,6 +22,33 @@ import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, Pane
 // domain tab and the user wants to fold it away entirely, same pattern as
 // the left ChatSidebar's collapse. The standalone ChatTab wrapper doesn't
 // pass these, so it always renders expanded, unchanged from today.
+//
+// Step 3d of the §2.6 build order: `workspaceId`/`chatId` are NEW,
+// OPTIONAL props. Neither is passed by any of the 7 current call sites
+// (Chat/Notebooks/Research/Plan/Build/Test/Growth tabs) — that rewiring is
+// 3e, one tab at a time. Until a caller passes one, this component is
+// byte-for-byte the same as before: it reads messages/sessionId/loading/
+// etc. off useSession(), exactly like today.
+//
+// DUAL MODE: `useWorkspaceDock(workspaceId, chatId)` is called
+// unconditionally (hooks can't be conditional) and resolves to a null key
+// when neither prop is passed — safe, since the hook already returns inert
+// no-op fields for a null key. `usingDock` below is the single switch that
+// picks dock state/actions vs. SessionContext's, field by field. Once 3e
+// starts passing a real workspaceId into a given call site, that one
+// instance flips to the dock; every other still-unwired call site keeps
+// behaving exactly as it does today. No cutover moment where every tab
+// switches at once.
+//
+// `mode`/`reviewBeforeDispatch`: SessionContext's sendTask() reads its own
+// `mode` state from closure (no param), while the dock's sendTask(key,
+// text, {mode, reviewBeforeDispatch}) takes them as call-site args (see
+// WorkspaceDockContext.jsx's note on this same question). Sharing one
+// global mode toggle across what could be several simultaneously-open dock
+// panels (the whole point of partial promotion) would be wrong, so in dock
+// mode these are local state on THIS component instance — not read from
+// SessionContext, not stored on the dock. In legacy mode they still come
+// straight from SessionContext, unchanged.
 const MODES = [
   { id: "auto", label: "Auto", icon: Sparkles, hint: "Let the Inspector decide" },
   { id: "simple", label: "Simple", icon: Feather, hint: "Cheapest capable tier only" },
@@ -39,13 +67,38 @@ function clampWorkingPanelWidth(w) {
   return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
 }
 
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null }) {
-  const {
-    messages, loading, sendTask, mode, setMode,
-    activeMessageIndex, setActiveMessageIndex,
-    reviewBeforeDispatch, setReviewBeforeDispatch,   // Part 2 §2.5
-    pendingHireReview, confirmHireReview, cancelHireReview,   // Part 2 §2.5
-  } = useSession();
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null }) {
+  const legacy = useSession();
+  const dock = useWorkspaceDock(workspaceId, chatId);
+  const usingDock = dock.key != null;
+
+  // Local to this component instance — only meaningful in dock mode. See
+  // header comment for why these can't come from SessionContext OR the
+  // dock store.
+  const [dockMode, setDockMode] = useState("auto");
+  const [dockReviewBeforeDispatch, setDockReviewBeforeDispatch] = useState(false);
+
+  const messages = usingDock ? dock.state.messages : legacy.messages;
+  const loading = usingDock ? dock.state.loading : legacy.loading;
+  const mode = usingDock ? dockMode : legacy.mode;
+  const setMode = usingDock ? setDockMode : legacy.setMode;
+  const activeMessageIndex = usingDock ? dock.state.activeMessageIndex : legacy.activeMessageIndex;
+  const setActiveMessageIndex = usingDock
+    ? (i) => dock.setDockState({ activeMessageIndex: i })
+    : legacy.setActiveMessageIndex;
+  const reviewBeforeDispatch = usingDock ? dockReviewBeforeDispatch : legacy.reviewBeforeDispatch;   // Part 2 §2.5
+  const setReviewBeforeDispatch = usingDock ? setDockReviewBeforeDispatch : legacy.setReviewBeforeDispatch;   // Part 2 §2.5
+  const pendingHireReview = usingDock ? dock.state.pendingHireReview : legacy.pendingHireReview;   // Part 2 §2.5
+  const confirmHireReview = usingDock ? dock.confirmHireReview : legacy.confirmHireReview;   // Part 2 §2.5
+  const cancelHireReview = usingDock ? dock.cancelHireReview : legacy.cancelHireReview;   // Part 2 §2.5
+
+  function sendTask(taskText) {
+    if (usingDock) {
+      return dock.sendTask(taskText, { mode, reviewBeforeDispatch });
+    }
+    return legacy.sendTask(taskText);
+  }
+
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const chatContainerRef = useRef(null);
