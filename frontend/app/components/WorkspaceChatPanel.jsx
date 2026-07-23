@@ -406,7 +406,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
                 </button>
               </div>
               <div className="flex-1 min-h-0">
-                <WorkingPanel isSyncingRef={isSyncingRef} />
+                <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} />
               </div>
             </div>
           </div>

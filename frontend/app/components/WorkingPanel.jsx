@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useEffect } from "react";
 import { useSession } from "../context/SessionContext";
+import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import RoutingTraceCard from "./RoutingTraceCard";
 import AgentStepList from "./AgentStepList";
 import RoutingTraceGraph from "./RoutingTraceGraph";
@@ -19,23 +20,36 @@ import SaveRunAsTemplate from "./SaveRunAsTemplate";
 // this panel's own onScroll doesn't immediately fire, recompute a
 // (possibly different) closest index, and bounce activeMessageIndex
 // back, which would fight ChatTab's handler forever.
-export default function WorkingPanel({ isSyncingRef }) {
-  const {
-    messages,
-    activeMessageIndex,
-    setActiveMessageIndex,
-    loading,
-    liveDecision,
-    liveSteps,
-    routeTrace,
-    roleRequests,
-    dependencyMap,
-    structurePlan,
-    sessionId,   // NEW — §4
-    batches,     // NEW — §4
-    resumeRun,   // NEW — Part 2 §2.4/§2.7: only ever wired to the LIVE section below — a finished message's own step snapshot can't be resumed.
-    API_URL,     // NEW — Part 2 §2.7: SaveRunAsTemplate needs this to POST /api/workflow-templates
-  } = useSession();
+//
+// `workspaceId`/`chatId` — NEW, OPTIONAL. Same dual-mode switch
+// WorkspaceChatPanel.jsx got in 3d: `useWorkspaceDock(workspaceId, chatId)`
+// is called unconditionally and resolves to a null key when neither prop
+// is passed, so an unwired caller (there are none left once
+// WorkspaceChatPanel.jsx passes its own workspaceId/chatId straight
+// through below) behaves byte-for-byte as before. `batches` and
+// `API_URL` stay off `useSession()` unconditionally either way — they're
+// app-wide (§2.4 "mother" state), not per-dock.
+export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null }) {
+  const legacy = useSession();
+  const dock = useWorkspaceDock(workspaceId, chatId);
+  const usingDock = dock.key != null;
+
+  const { batches, API_URL } = legacy; // NEW — §4 / Part 2 §2.7: app-wide in both modes
+
+  const messages = usingDock ? dock.state.messages : legacy.messages;
+  const activeMessageIndex = usingDock ? dock.state.activeMessageIndex : legacy.activeMessageIndex;
+  const setActiveMessageIndex = usingDock
+    ? (i) => dock.setDockState({ activeMessageIndex: i })
+    : legacy.setActiveMessageIndex;
+  const loading = usingDock ? dock.state.loading : legacy.loading;
+  const liveDecision = usingDock ? dock.state.liveDecision : legacy.liveDecision;
+  const liveSteps = usingDock ? dock.state.liveSteps : legacy.liveSteps;
+  const routeTrace = usingDock ? dock.state.routeTrace : legacy.routeTrace;
+  const roleRequests = usingDock ? dock.state.roleRequests : legacy.roleRequests;
+  const dependencyMap = usingDock ? dock.state.dependencyMap : legacy.dependencyMap;
+  const structurePlan = usingDock ? dock.state.structurePlan : legacy.structurePlan;
+  const sessionId = usingDock ? dock.state.sessionId : legacy.sessionId; // NEW — §4
+  const resumeRun = usingDock ? dock.resumeRun : legacy.resumeRun; // NEW — Part 2 §2.4/§2.7
 
   // NEW — §4: answers "which chats is *this* chat currently pulling
   // context from" right where the user is already looking, without

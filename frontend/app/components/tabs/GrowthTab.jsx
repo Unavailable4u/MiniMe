@@ -5,6 +5,7 @@ import {
   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink,
 } from "lucide-react";
 import { useSession, authHeaders } from "../../context/SessionContext";
+import { useWorkspaceDock } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock
 import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
 import WorkspaceDataBubble from "../../components/WorkspaceDataBubble";
@@ -171,7 +172,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
             dockCollapsed ? "w-10" : "w-[480px]"
           }`}
         >
-          <WorkspaceChatPanel collapsed={dockCollapsed} onToggleCollapse={toggleDock} />
+          <WorkspaceChatPanel collapsed={dockCollapsed} onToggleCollapse={toggleDock} workspaceId={selectedWsId} />
         </div>
       )}
     </div>
@@ -187,9 +188,14 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
 function VoiceView({ wsId }) {
   const {
     fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates,
-    acceptFactCandidate, rejectFactCandidate, openScopedSubChat,
-    messages, loading, sessionId,
+    acceptFactCandidate, rejectFactCandidate,
   } = useSession();
+  // NEW — step 3e follow-up: was destructured off useSession() (global
+  // sessionId/messages), which would silently stop matching what the
+  // dock-mode WorkspaceChatPanel above shows once it's keyed to wsId.
+  // Reading/writing the same ws:${wsId} dock slot instead.
+  const dock = useWorkspaceDock(wsId);
+  const { messages, loading, sessionId } = dock.state;
   const [draft, setDraft] = useState("");
   const [checking, setChecking] = useState(false);
   // Same settled-result tracking ContentView uses below: only trust
@@ -216,8 +222,7 @@ function VoiceView({ wsId }) {
     setChecking(true);
     setCheckedChatId(null);
     try {
-      const chatId = await openScopedSubChat(
-        wsId,
+      const chatId = await dock.openScopedSubChat(
         `Check this draft against our stored brand voice and flag any drift:\n\n${draft}`
       );
       setCheckedChatId(chatId);
@@ -362,7 +367,10 @@ const CONTENT_PLATFORMS = [
 ];
 
 function ContentView({ wsId, onDispatched }) {
-  const { openScopedSubChat, messages, loading, sessionId } = useSession();
+  // NEW — step 3e follow-up: same reasoning as VoiceView above — reads/
+  // writes the ws:${wsId} dock slot instead of global SessionContext state.
+  const dock = useWorkspaceDock(wsId);
+  const { messages, loading, sessionId } = dock.state;
   const [coreMessage, setCoreMessage] = useState("");
   const [selectedPlatforms, setSelectedPlatforms] = useState(["twitter", "linkedin"]);
   const [customPlatform, setCustomPlatform] = useState("");
@@ -396,9 +404,9 @@ function ContentView({ wsId, onDispatched }) {
       const task =
         `Adapt this core message for the following platforms: ` +
         `${selectedPlatforms.join(", ")}.\n\nCore message:\n${coreMessage.trim()}`;
-      const chatId = await openScopedSubChat(wsId, task);
+      const chatId = await dock.openScopedSubChat(task);
       // openScopedSubChat() awaits sendTask() internally, so `messages`
-      // (global session state) already has this chat's [user, assistant]
+      // (this dock's state) already has this chat's [user, assistant]
       // pair by the time we get here — no extra fetch needed.
       setDispatchedChatId(chatId);
       setDispatchedPlatforms(selectedPlatforms);

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useSession } from "../../context/SessionContext";
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
-import { useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
+import { useWorkspaceDockActions, useWorkspaceDock } from "../../context/WorkspaceDockContext"; // NEW — step 3e (+ follow-up fix below)
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   FlaskConical, Users, ClipboardList, ShieldAlert, History,
@@ -141,15 +141,21 @@ function pushRunHistory(wsId, entry) {
 export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
   const {
     workspaces, fetchWorkspaces, promoteWorkspace,
-    openScopedSubChat, fetchSimulationResults,
+    fetchSimulationResults,
     fetchRoles, updateRolePrompt, setRolePinned,
   } = useSession();
-  // NEW — step 3e: switchChat now resolves the dock for whichever
-  // workspace `chatId` actually belongs to (here, always `activeWs`,
-  // since that's the only workspace WorkspaceChatPanel below is showing)
-  // instead of writing into one shared SessionContext sessionId that the
-  // embedded WorkspaceChatPanel (already dock-driven since step 3d) never
-  // read from anyway.
+  // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
+  // NOT actually dock-driven despite this comment previously claiming so —
+  // it had no workspaceId prop, so it read messages/sessionId off
+  // useSession() (legacy/global) while `switchChat` here (dock-based)
+  // wrote into a ws:${activeWsId} slot nothing read. That meant the
+  // History panel's "Open chat" button (openInDock -> switchChat with no
+  // accompanying legacy write) silently did nothing visible. Fixed by
+  // passing workspaceId={activeWs?.id} to the panel below (now the same
+  // key switchChat already resolves to) and switching RunSimulationPanel's
+  // dispatch to the dock's own openScopedSubChat, so both the "dispatch a
+  // new run" and "reopen a past run" paths write into the same slot the
+  // panel reads.
   const { switchChat } = useWorkspaceDockActions();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("run");
@@ -200,6 +206,11 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
   }, [testProjects, activeWsId]);
 
   const activeWs = testProjects.find((w) => w.id === activeWsId) || null;
+  // NEW — step 3e follow-up: dock-aware openScopedSubChat, keyed to
+  // whichever project is selected. See comment above switchChat's
+  // destructure for why this is needed now that the panel gets a real
+  // workspaceId.
+  const dock = useWorkspaceDock(activeWs?.id);
 
   // Restore this workspace's last-dispatched session_id whenever the
   // active project changes — same "fetch fresh on workspaceId change"
@@ -350,7 +361,7 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
                 {t.id === "run" && (
                   <RunSimulationPanel
                     wsId={activeWs.id}
-                    openScopedSubChat={openScopedSubChat}
+                    openScopedSubChat={dock.openScopedSubChat}
                     openInDock={openInDock}
                     onDispatched={recordDispatch}
                   />
@@ -392,11 +403,11 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
       </div>
 
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} />
       </div>
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} />
         </div>
       )}
       {chatDockCollapsed && (
@@ -429,7 +440,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
       const task = `${chosen.taskLead}: ${target.trim()}.${
         thorough ? " Use additional personas/workers for a more thorough pass." : ""
       }`;
-      const chatId = await openScopedSubChat(wsId, task);
+      const chatId = await openScopedSubChat(task);
       onDispatched(chatId, { simTypeLabel: chosen.label, target: target.trim() });
       await openInDock(chatId);
     } finally {
