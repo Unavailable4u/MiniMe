@@ -16,6 +16,7 @@ import TestTab from "./tabs/TestTab";             // NEW — Test tab design spe
 import GrowthTab from "./tabs/GrowthTab";           // NEW — Growth tab design spec §2: growth & marketing
 import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
 import NotificationBell from "./NotificationBell";   // NEW — Part 8.9: cross-chat notification inbox
+import WorkspaceDataBubble from "./WorkspaceDataBubble";   // NEW — items #5/#13: relocated from floating-over-tab-content into the top nav
 
 const TABS = [
   { id: "chat", label: "Chat", render: ChatTab },
@@ -33,6 +34,12 @@ const TABS = [
 
 const SIDEBAR_KEY = "minime_sidebar_collapsed";
 const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refresh, same pattern as SIDEBAR_KEY
+
+// NEW — item #13: the 7 tabs that resolve a workspaceId and therefore
+// have a Data bubble to show in the nav. Role Library, Workflow
+// Templates, Token Usage, and Settings never have project data, so the
+// nav slot stays empty (not just hidden) on those tabs.
+const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth"]);
 
 // NEW — §8: which tab owns each workspace stage.
 // FIX — plan/build were missing here even though Plan/Tasks tabs exist
@@ -103,6 +110,22 @@ function AppShellBody() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [pendingTemplateRoles, setPendingTemplateRoles] = useState(null); // NEW — Role Library's sticky multi-select bar hands a role list here, WorkflowTemplatesTab consumes it once
   const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState(null); // NEW — §8: { tabId, wsId } handed off by a promote action, consumed once by the destination tab
+
+  // NEW — items #5/#13: { [tabId]: { id, name } | null } — each workspace-
+  // bearing tab reports its own currently-selected workspace here via
+  // onActiveWorkspaceChange, keyed by that tab's own id. Keyed per-tab
+  // (not a single shared value) so that switching to a tab that hasn't
+  // re-reported since its own last selection never shows another tab's
+  // leftover workspace — visited tabs stay mounted but don't re-render
+  // on a tab switch, so a single shared value would go stale exactly
+  // the way item #8 did for the bubble's own fetch effect.
+  const [workspaceContextByTab, setWorkspaceContextByTab] = useState({});
+
+  function setTabWorkspaceContext(tabId, ctx) {
+    setWorkspaceContextByTab((prev) => ({ ...prev, [tabId]: ctx }));
+  }
+
+  const activeWorkspaceContext = workspaceContextByTab[activeTab] || null;
 
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
@@ -179,6 +202,20 @@ function AppShellBody() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-3">
+          {/* NEW — items #5/#13: nav slot for the Data bubble. Only
+              mounted on the 7 tabs that resolve a workspaceId, and only
+              once that tab has actually reported one (a tab with no
+              project selected yet shows nothing here, not an empty
+              bubble). Role Library, Workflow Templates, Token Usage,
+              and Settings never hit WORKSPACE_TAB_IDS, so the slot is
+              simply absent there. */}
+          {WORKSPACE_TAB_IDS.has(activeTab) && activeWorkspaceContext?.id && (
+            <WorkspaceDataBubble
+              workspaceId={activeWorkspaceContext.id}
+              workspaceName={activeWorkspaceContext.name}
+              storageKey={`minime_databubble_collapsed_${activeWorkspaceContext.id}`}
+            />
+          )}
           <NotificationBell onOpenChat={openChat} />
           <AccountMenu />
         </div>
@@ -216,6 +253,11 @@ function AppShellBody() {
                   initialWorkspaceId={pendingWorkspaceSelection?.tabId === t.id ? pendingWorkspaceSelection.wsId : null}
                   onConsumeInitialWorkspaceId={() => setPendingWorkspaceSelection(null)}
                   onPromoted={handlePromoted}
+                  onActiveWorkspaceChange={
+                    WORKSPACE_TAB_IDS.has(t.id)
+                      ? (workspaceId, workspaceName) => setTabWorkspaceContext(t.id, workspaceId ? { id: workspaceId, name: workspaceName } : null)
+                      : undefined
+                  }
                 />
               </div>
             );
