@@ -6,7 +6,7 @@ import WireframePreview from "../WireframePreview";
 import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
-import { useWorkspaceDock, useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
+import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
@@ -163,6 +163,10 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   // already resolves to, and the same key `dock` below already uses for
   // WireframesPanel).
   const { switchChat } = useWorkspaceDockActions();
+  // NEW — item #11 / C1: same row-highlight source ChatSidebar's nested
+  // chat rows use, so a chat opened from here highlights consistently
+  // whether it was opened from the global sidebar or from in-tab.
+  const activeChatId = useLastActiveChatId();
 
   // PARITY FIX — Plan only shows plan-stage workspaces now, same as every
   // other stage tab; a research project promoted from Research lands
@@ -305,31 +309,59 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
               No plan projects yet — create one above, promote a research project from the Research tab, or use the chat sidebar's <FolderOpen size={11} className="inline" /> button.
             </p>
           )}
-          {planProjects.map((ws) => (
-            <div
-              key={ws.id}
-              className={`group flex items-center gap-1 border-b border-[var(--neutral-900)] ${
-                ws.id === activeWsId
-                  ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                  : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
-              }`}
-            >
-              <button
-                onClick={() => setActiveWsId(ws.id)}
-                className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
-              >
-                <span className="truncate">{ws.name}</span>
-                {ws.id === activeWsId && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
-              </button>
-              <button
-                onClick={() => setManagingWorkspace(ws)}
-                title="Rename or delete project"
-                className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
-              >
-                <MoreVertical size={13} />
-              </button>
-            </div>
-          ))}
+          {planProjects.map((ws) => {
+            // NEW — item #11 / C1: nested chat list, mirrors ChatSidebar's
+            // memberChats pattern. Unlike ChatSidebar (a flat, always-
+            // expanded list across every workspace), this tab already has
+            // a single-selection model — one project active at a time —
+            // so "expand" here just means "is the active project" (the
+            // existing ChevronRight already marked that row as selected;
+            // now it also means "expanded"). Selecting a different
+            // project collapses the previous one's chat list the same way
+            // it already swaps the whole right-hand panel.
+            const isActive = ws.id === activeWsId;
+            const memberChats = isActive ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+            return (
+              <div key={ws.id} className="border-b border-[var(--neutral-900)]">
+                <div
+                  className={`group flex items-center gap-1 ${
+                    isActive
+                      ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                      : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
+                  }`}
+                >
+                  <button
+                    onClick={() => setActiveWsId(ws.id)}
+                    className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
+                  >
+                    <span className="truncate">{ws.name}</span>
+                    {isActive && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+                  </button>
+                  <button
+                    onClick={() => setManagingWorkspace(ws)}
+                    title="Rename or delete project"
+                    className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
+                  >
+                    <MoreVertical size={13} />
+                  </button>
+                </div>
+                {memberChats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    onClick={() => openInDock(chat.id)}
+                    className={`w-full flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] truncate ${
+                      chat.id === activeChatId
+                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                    }`}
+                  >
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </div>
       </div>
 
