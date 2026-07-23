@@ -43,6 +43,15 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 
+# "ideas" and "context" — Part 1 of the Data-bubble content work. The
+# upcoming tier-2/3 summarizer classifies extracted facts into one of
+# {decision, preference, idea, context}; decision/preference already map
+# onto "decisions"/"instructions" below, but idea and context had no
+# home that wasn't the catch-all "extractions" bucket (explicitly the
+# thing we're trying to avoid dumping everything into). No other code
+# change needed for this: _coerce_section_bucket() and
+# format_facts_for_prompt() already handle arbitrary section names —
+# this tuple only controls render order.
 PROJECT_SECTION_ORDER = (
     "decisions",
     "entities",
@@ -51,7 +60,24 @@ PROJECT_SECTION_ORDER = (
     "hardware",
     "extractions",
     "instructions",
+    "ideas",
+    "context",
 )
+
+# Part 3 — where each of eo/fact_summarizer.py's structured `category`
+# values lands. decision/preference reuse existing sections (decisions
+# already receives D1's routing-metadata writes too, distinguished by
+# `source`; instructions is this module's own docstring-established
+# home for "custom instructions per notebook"). idea/context use the
+# two sections added above for exactly this purpose. Single source of
+# truth so eo/fact_summarizer.py's valid-category check and
+# api/task_runner.py's write-time lookup can't drift apart.
+CATEGORY_TO_SECTION = {
+    "decision": "decisions",
+    "preference": "instructions",
+    "idea": "ideas",
+    "context": "context",
+}
 
 EMPTY_FACTS = {
     "brand_voice": "",

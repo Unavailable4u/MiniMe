@@ -128,6 +128,20 @@ function makeInitialDockState() {
   };
 }
 
+// Bug fix: shared, stable default snapshot for the "no key resolved yet"
+// case in useWorkspaceDock()'s getSnapshot below. A null key means the
+// dock is inert (setDockState/sendTask/etc. are already no-ops for it),
+// so every consumer without a resolved key can safely share this one
+// reference — it's never mutated, only ever read. Calling
+// makeInitialDockState() fresh inside getSnapshot instead of reusing this
+// was the cause of the "Maximum update depth exceeded" crash: a new
+// object every call means useSyncExternalStore's Object.is check never
+// sees two equal snapshots in a row, so it re-renders forever. Since
+// every current consumer (3e hasn't landed yet for any of the 8 dock
+// consumers) resolves to a null key, this loop fired on every one of
+// them.
+const EMPTY_DOCK_STATE = makeInitialDockState();
+
 const WorkspaceDockStoreContext = createContext(null);
 
 export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces, onUsageEvent }) {
@@ -784,7 +798,7 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
     [store, key]
   );
   const getSnapshot = useCallback(
-    () => (key ? store.getState(key) : makeInitialDockState()),
+    () => (key ? store.getState(key) : EMPTY_DOCK_STATE),   // FIXED — was makeInitialDockState(), a fresh object every call
     [store, key]
   );
 

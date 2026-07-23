@@ -61,6 +61,7 @@ from eo import routing_memory
 from eo import conversation_memory
 from eo import chat_workspace
 from eo import workspace_facts
+from eo import fact_summarizer   # NEW — Part 3
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
     graph = build_execution_graph(tier=0)
@@ -473,6 +474,142 @@ def _record_routing_fact(workspace_id: str, tier, task_text: str, session_id: st
     )
 
 
+def _should_extract_content_fact(tier) -> bool:
+    """Part 2 (Data-bubble content work) — gates the upcoming *content*
+    summarizer (Part 3) separately from D1's _record_routing_fact()
+    above, which still fires unconditionally on every tier and keeps
+    writing cheap routing/classifier metadata regardless of this gate.
+
+    Only tier 2/3 reach Inspector classification + (often) Panel
+    staffing of real agents; that's where a task actually carries
+    durable, workspace-level content ("target this for students", "use
+    TypeScript", "the login bug is in the session refresh") as opposed
+    to the trivial lookups cache/SGA/tier-0 exist specifically to catch
+    cheaply and at high volume. Tier 1 is a judgment call being skipped
+    for now too, for the same reason — revisit if real content turns
+    out to be getting missed there in practice, rather than paying the
+    summarizer cost speculatively."""
+    return tier in (2, 3)
+
+
+def _maybe_extract_content_fact(workspace_id: str, tier, task_text: str, session_id: str, response: dict) -> None:
+    """Part 3 — the actual content summarizer, gated by
+    _should_extract_content_fact() above (tier 2/3 only). Two
+    independent fail-open layers, matching
+    eo/workspace_facts.py's own _invalidate_facts_cache() discipline
+    (try/except, print-and-continue) rather than adding a new way for
+    a task to fail:
+
+      1. eo/fact_summarizer.extract_fact() never raises — a model/
+         parse error there returns None, same as a genuine
+         worth_remembering: false judgment.
+      2. The record_section_entry() write below is still wrapped here,
+         since a storage-layer failure is a different failure mode
+         than a summarizer failure and callers of this function must
+         never see either one — the task's actual answer has already
+         been returned to the user by the time this runs.
+
+    Scoped to _run_task_inner()'s auto-dispatch path only for now —
+    confirm_task() and run_task_from_template() are separate dispatch
+    entrypoints that also reach tier 2/3 and would need this same call
+    added if/when content extraction should cover them too. Not done
+    here to keep this step to exactly what Part 2/3 need."""
+    if not workspace_id or not _should_extract_content_fact(tier):
+        return
+
+    answer_text = _extract_answer_text(response)
+    if not answer_text:
+        return
+
+    fact = fact_summarizer.extract_fact(task_text, answer_text, session_id=session_id)
+    if not fact:
+        return
+
+    section = workspace_facts.CATEGORY_TO_SECTION.get(fact["category"])
+    if not section:
+        return  # unreachable in practice — extract_fact() already validates category
+
+    try:
+        workspace_facts.record_section_entry(
+            workspace_id,
+            section,
+            {
+                "title": fact["title"],
+                "summary": fact["summary"],
+                "data": {"category": fact["category"], "tier": tier},
+            },
+            source="chat_summarizer",   # distinct from D1's source="chat_task_runner"
+            source_ref=session_id,
+            event="upsert",
+        )
+    except Exception as exc:
+        print(f"  [task_runner] content-fact write failed, skipped (fail-open): {exc}")
+
+
+_SGA_FACT_TITLE_MAX = 80
+_SGA_FACT_SUMMARY_MAX = 300
+
+
+def _maybe_record_sga_fact(workspace_id: str, task_text: str, session_id: str, sga_result: dict) -> None:
+    """Part 5 follow-up — the efficient answer to "run fact_summarizer
+    on SGA answers too, or skip it": skip it. SGA (eo/sga.py, Part 5)
+    already pays for exactly one LLM call per resolved task, and that
+    same JSON response now self-reports "memorable"/"category" for
+    free — running fact_summarizer.extract_fact() on top would be a
+    second LLM call to re-derive a judgment SGA already made. So this
+    writes directly off sga_result instead of calling the summarizer at
+    all.
+
+    Deliberately does NOT reuse _should_extract_content_fact() — that
+    gate (tier 2/3 only) governs the *summarizer* call's cost, which
+    doesn't apply here since there's no second call to gate. The SGA
+    fast path gets its own unconditional check: only whether
+    sga_result["memorable"] is true.
+
+    title/summary are truncated directly from task_text/answer rather
+    than generated — asking a model to write a good title/summary would
+    just be the second LLM call this function exists to avoid. A
+    slightly blunt title beats paying for a nicer one on every fast-path
+    hit.
+
+    Same fail-open discipline as _maybe_extract_content_fact(): a
+    storage-layer failure here must never surface past this point, since
+    the task's actual answer (sga_result["answer"]) has already been
+    returned to the user by the time this runs.
+    """
+    if not workspace_id or not sga_result.get("memorable"):
+        return
+
+    category = sga_result.get("category")
+    section = workspace_facts.CATEGORY_TO_SECTION.get(category)
+    if not section:
+        return  # unreachable in practice — eo/sga.py already validates category
+
+    title = (task_text or "").strip()
+    if len(title) > _SGA_FACT_TITLE_MAX:
+        title = title[:_SGA_FACT_TITLE_MAX - 1].rstrip() + "…"
+
+    summary = (sga_result.get("answer") or "").strip()
+    if len(summary) > _SGA_FACT_SUMMARY_MAX:
+        summary = summary[:_SGA_FACT_SUMMARY_MAX - 1].rstrip() + "…"
+
+    try:
+        workspace_facts.record_section_entry(
+            workspace_id,
+            section,
+            {
+                "title": title or category,
+                "summary": summary,
+                "data": {"category": category, "tier": "sga"},
+            },
+            source="chat_sga",   # distinct from "chat_summarizer" (Part 3) and "chat_task_runner" (D1)
+            source_ref=session_id,
+            event="upsert",
+        )
+    except Exception as exc:
+        print(f"  [task_runner] SGA fact write failed, skipped (fail-open): {exc}")
+
+
 def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
                                  app_slug: str, session_id: str, mode: str, owner_id: str = None) -> dict:
     """Part 2 §2.5: the shared first half of dispatch — semantic cache,
@@ -506,6 +643,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     if sga_result["resolved"]:
         write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
         _record_routing_fact(workspace_id, "sga", task_text, session_id)   # NEW — D1
+        _maybe_record_sga_fact(workspace_id, task_text, session_id, sga_result)   # NEW — Part 5 follow-up
         return {"resolved": False, "response": {
                 "decision": {},
                 "tier": "sga",
@@ -544,7 +682,8 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
             "message": "Please choose Beast Mode explicitly for a task this large.",
         }}
 
-    return {"resolved": True, "decision": decision, "tier": tier, "hires": mode_result["hires"]}
+    return {"resolved": True, "decision": decision, "tier": tier, "hires": mode_result["hires"],
+            "workspace_id": workspace_id}   # NEW — Part 2, so _run_task_inner can gate content-fact extraction
 
 
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
@@ -609,9 +748,11 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                                             app_slug, session_id, mode, owner_id=owner_id)   # FIXED
     if not resolved["resolved"]:
         return resolved["response"]
-    return _dispatch_resolved(task_text, resolved["decision"], resolved["tier"], resolved["hires"],
-                               app_slug, run_tests, session_id, mode, project_unique_name, approval_roles,
-                               no_conversation_context_roles=no_conversation_context_roles)
+    response = _dispatch_resolved(task_text, resolved["decision"], resolved["tier"], resolved["hires"],
+                                   app_slug, run_tests, session_id, mode, project_unique_name, approval_roles,
+                                   no_conversation_context_roles=no_conversation_context_roles)
+    _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response)   # NEW — Part 2
+    return response
 
 def _run_tier2(task_text: str, decision: dict, app_slug: str, session_id: str, hires: list = None,
                project_unique_name: str = None, mode: str = "auto") -> dict:
