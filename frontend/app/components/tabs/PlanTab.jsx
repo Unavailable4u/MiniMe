@@ -156,7 +156,7 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   // PARITY FIX — Plan only shows plan-stage workspaces now, same as every
   // other stage tab; a research project promoted from Research lands
   // here, not floating in every tab regardless of stage.
-  const planProjects = workspaces.filter((w) => w.stage === "plan");
+  const planProjects = workspaces.filter((w) => (w.active_stages || [w.stage]).includes("plan"));
 
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("prd");

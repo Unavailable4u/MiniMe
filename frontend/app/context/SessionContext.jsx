@@ -1,6 +1,6 @@
 "use client";
 import { createContext, useContext, useState, useRef, useEffect } from "react";
-import Pusher from "pusher-js";
+import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "./AuthContext";   // NEW — Part 8.9: notification bell's per-user Pusher channel
 
@@ -198,14 +198,11 @@ export function SessionProvider({ children }) {
   // and subscribes to the new one automatically whenever you switch.
   useEffect(() => {
     if (!sessionId) return;   // NEW — nothing to subscribe to until the first chat is loaded/created
-    const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
-    const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
-    if (!key || !cluster) {
+    const pusher = getPusherClient();
+    if (!pusher) {
       console.warn("Pusher env vars not set — live agent events disabled.");
       return;
     }
-    const pusher = new Pusher(key, { cluster });
-    setPusherConnected(true);
     const channelName = `session-${sessionId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
     const channel = pusher.subscribe(channelName);
     channel.bind_global((eventType, data) => {
@@ -367,10 +364,20 @@ export function SessionProvider({ children }) {
     });
     return () => {
       pusher.unsubscribe(channelName);
-      pusher.disconnect();
-      setPusherConnected(false);
     };
   }, [sessionId]);
+
+  // NEW — §2.5: pusherConnected now reflects the shared client's actual
+  // connection state (bound once, independent of sessionId/user), rather
+  // than each channel effect optimistically flipping it on construction
+  // and tearing it down again on every switchChat(). Runs once for the
+  // life of the app.
+  useEffect(() => {
+    const unsubscribe = onPusherConnectionChange((state) => {
+      setPusherConnected(state === "connected");
+    });
+    return unsubscribe;
+  }, []);
 
   // NEW — Part 8.4/8.9: second Pusher subscription, on the user's own
   // channel rather than the current chat's. Deliberately a SEPARATE
@@ -381,11 +388,9 @@ export function SessionProvider({ children }) {
   const { user } = useAuth();
   useEffect(() => {
     if (!user?.id) return;
-    const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
-    const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
-    if (!key || !cluster) return; // SettingsTab's pusherConnected diagnostic already covers the "not configured" case
+    const pusher = getPusherClient();
+    if (!pusher) return; // SettingsTab's pusherConnected diagnostic already covers the "not configured" case
 
-    const pusher = new Pusher(key, { cluster });
     const channelName = `user-${user.id.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
     const channel = pusher.subscribe(channelName);
     channel.bind("notification", (data) => {
@@ -401,7 +406,6 @@ export function SessionProvider({ children }) {
     });
     return () => {
       pusher.unsubscribe(channelName);
-      pusher.disconnect();
     };
   }, [user?.id]);
 

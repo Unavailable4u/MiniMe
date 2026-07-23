@@ -511,7 +511,7 @@ export default function BuildTab({ onPromoted }) {
 
   // Build-stage workspaces only -- the "picked" list for this tab, same
   // shape as NotebooksTab's `notebooks` / ResearchTab's `researchProjects`.
-  const buildProjects = workspaces.filter((w) => w.stage === "build");
+  const buildProjects = workspaces.filter((w) => (w.active_stages || [w.stage]).includes("build"));
 
   const [selectedWsId, setSelectedWsId] = useState(null);
   const [restoredSelection, setRestoredSelection] = useState(false);

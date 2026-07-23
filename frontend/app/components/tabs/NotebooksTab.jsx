@@ -937,7 +937,7 @@ export default function NotebooksTab({ onPromoted }) {
   // NEW — §8: Notebooks only ever shows note-stage workspaces now — once
   // promoted, a workspace moves to the Research tab instead of appearing
   // in both places.
-  const notebooks = workspaces.filter((w) => w.stage === "note");
+  const notebooks = workspaces.filter((w) => (w.active_stages || [w.stage]).includes("note"));
 
   const [selectedId, setSelectedId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
@@ -951,6 +951,7 @@ export default function NotebooksTab({ onPromoted }) {
   const [previewNode, setPreviewNode] = useState(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+  const [submittingNotebook, setSubmittingNotebook] = useState(false);
   // NEW — §3 fix: which notebook's kebab menu (rename/delete/members) is
   // open. ManageWorkspaceModal already existed fully built, just never
   // wired into any tab's UI.
@@ -1072,11 +1073,16 @@ export default function NotebooksTab({ onPromoted }) {
 
   async function handleCreateNotebook(e) {
     e.preventDefault();
-    if (!newName.trim()) return;
-    await createWorkspace(newName.trim());
-    setNewName("");
-    setCreating(false);
-    await fetchWorkspaces();
+    if (!newName.trim() || submittingNotebook) return;
+    setSubmittingNotebook(true);
+    try {
+      await createWorkspace(newName.trim());
+      setNewName("");
+      setCreating(false);
+      await fetchWorkspaces();
+    } finally {
+      setSubmittingNotebook(false);
+    }
   }
   // NEW — switches the active chat locally and makes sure the dock (or,
   // below `lg`, the full-screen overlay) is showing it — no tab jump,
@@ -1141,9 +1147,10 @@ export default function NotebooksTab({ onPromoted }) {
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="Notebook name"
-              className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-1.5 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+              disabled={submittingNotebook}
+              className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-1.5 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)] disabled:opacity-60"
             />
-            <button type="submit"><Check size={13} className="text-green-400" /></button>
+            <button type="submit" disabled={submittingNotebook || !newName.trim()}><Check size={13} className="text-green-400" /></button>
           </form>
         )}
         <div className="flex-1 overflow-y-auto">

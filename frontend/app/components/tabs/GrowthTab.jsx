@@ -39,7 +39,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
   const [activeSubTab, setActiveSubTab] = useState("voice"); // voice is the only fully-built sub-tab today
   const [dockCollapsed, setDockCollapsed] = useState(true); // §2.3: default collapsed, unlike Test
 
-  const growthWorkspaces = (workspaces || []).filter((w) => w.stage === "growth");
+  const growthWorkspaces = (workspaces || []).filter((w) => (w.active_stages || [w.stage]).includes("growth"));
 
   useEffect(() => {
     fetchWorkspaces();

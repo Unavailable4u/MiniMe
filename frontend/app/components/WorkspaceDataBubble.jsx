@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "../context/SessionContext";
 import { Database, PanelRightClose, ChevronDown, Loader2 } from "lucide-react";
 
@@ -37,30 +37,67 @@ export default function WorkspaceDataBubble({
   const [collapsed, setCollapsed] = useState(true);
   const [loading, setLoading] = useState(false);
   const [facts, setFacts] = useState(null);
+  const containerRef = useRef(null);
+  // NEW — item #8 fix: guards against an in-flight fetch resolving
+  // after a newer one was kicked off (e.g. a visibility-triggered
+  // refetch landing while the mount fetch is still pending).
+  const requestSeqRef = useRef(0);
 
   useEffect(() => {
     const saved = localStorage.getItem(storageKey);
     if (saved !== null) setCollapsed(saved === "1");
   }, [storageKey]);
 
+  function loadFacts(id) {
+    if (!id) return;
+    const seq = ++requestSeqRef.current;
+    setLoading(true);
+    fetchWorkspaceFacts(id)
+      .then((next) => {
+        if (seq === requestSeqRef.current) setFacts(next || null);
+      })
+      .finally(() => {
+        if (seq === requestSeqRef.current) setLoading(false);
+      });
+  }
+
   useEffect(() => {
     if (!workspaceId) {
+      requestSeqRef.current += 1; // invalidate any in-flight fetch
       setFacts(null);
       setLoading(false);
       return;
     }
-    let cancelled = false;
-    setLoading(true);
-    fetchWorkspaceFacts(workspaceId)
-      .then((next) => {
-        if (!cancelled) setFacts(next || null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    loadFacts(workspaceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  // NEW — item #8 fix: AppShell keeps every visited tab mounted
+  // (display:none instead of unmounting) rather than remounting it,
+  // so simply revisiting a tab does not rerun the [workspaceId] effect
+  // above, even though the facts may have changed while this tab was
+  // hidden. A tab regaining focus flips its wrapper from
+  // display:none -> display:contents, which removes/restores this
+  // node's layout box — IntersectionObserver reports that exact
+  // transition as isIntersecting going false -> true. We skip the
+  // very first callback (it just reports the initial mount, already
+  // covered by the effect above) and refetch on every later
+  // "became visible again" transition.
+  useEffect(() => {
+    if (!workspaceId || !containerRef.current) return;
+    let firstCallback = true;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (firstCallback) {
+          firstCallback = false;
+          return;
+        }
+        if (entry.isIntersecting) loadFacts(workspaceId);
+      },
+      { threshold: 0 }
+    );
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -82,7 +119,7 @@ export default function WorkspaceDataBubble({
   if (!workspaceId) return null;
 
   return (
-    <div className="absolute top-3 right-3 z-30 w-[min(22rem,calc(100vw-1.5rem))]">
+    <div ref={containerRef} className="absolute top-3 right-3 z-30 w-[min(22rem,calc(100vw-1.5rem))]">
       <button
         type="button"
         onClick={toggle}
