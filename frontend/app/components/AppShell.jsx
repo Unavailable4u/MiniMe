@@ -63,12 +63,13 @@ export default function AppShell() {
 // a stale list — see WorkspaceDockProvider's callbacksRef for the other
 // half of that (it re-reads these props every render too).
 function WorkspaceDockBridge() {
-  const { refreshChatList, getWorkspaceIdForChat, chats } = useSession();
+  const { refreshChatList, getWorkspaceIdForChat, chats, fetchWorkspaces } = useSession();
   return (
     <WorkspaceDockProvider
       refreshChatList={refreshChatList}
       getWorkspaceIdForChat={getWorkspaceIdForChat}
       getChats={() => chats}
+      fetchWorkspaces={fetchWorkspaces}
     >
       <AppShellBody />
     </WorkspaceDockProvider>

@@ -125,7 +125,7 @@ function makeInitialDockState() {
 
 const WorkspaceDockStoreContext = createContext(null);
 
-export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceIdForChat, getChats }) {
+export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces }) {
   // Option 1 (chosen over letting every UI call site hand-coordinate a
   // SessionContext write + a dock write, or over a thinner wrapper hook
   // with the same fragility): switchChat/createNewChat/renameChat/
@@ -149,7 +149,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
   // "avoid a stale closure via a ref" pattern this file already uses for
   // stepSeqs/openStepStacks/channelBindings.
   const callbacksRef = useRef({});
-  callbacksRef.current = { refreshChatList, getWorkspaceIdForChat, getChats };
+  callbacksRef.current = { refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces };
 
   const storeRef = useRef(null);
   if (storeRef.current === null) {
@@ -686,10 +686,47 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       await callbacksRef.current.refreshChatList?.();
     };
 
+    // NEW — GrowthTab Step 3e follow-up (design option 1 from the
+    // "investigated and explicitly deferred" note): dock-aware
+    // equivalent of SessionContext.jsx's openScopedSubChat(wsId, taskText).
+    // The legacy version writes to global setSessionId/setMessages, which
+    // is exactly the desync the handoff doc flagged — once a tab's
+    // embedded WorkspaceChatPanel is passed workspaceId (dock mode), a
+    // quick-action still writing to the global slot would silently stop
+    // showing up in that visible dock. This writes into the SAME
+    // ws:${workspaceId} slot the dock reads from instead, keyed the
+    // identical way useWorkspaceDock(workspaceId) resolves its key, so
+    // there is exactly one place a given workspace's chat state lives —
+    // no special-casing needed, same reasoning §2.4 gives for why partial
+    // promotion falls out of the keying scheme for free.
+    //
+    // Fixed to a workspaceId (never a bare chatId) on purpose: unlike
+    // switchChat/createNewChat, a scoped sub-chat always originates from
+    // a specific tab's specific project, so there's no "which dock does
+    // this belong to" ambiguity to resolve at call time the way those two
+    // have.
+    const openScopedSubChat = async (workspaceId, taskText) => {
+      const key = normalizeDockKey(workspaceId, null);
+      const res = await fetch(`${API_URL}/api/workspaces/${workspaceId}/chats/create`, {
+        method: "POST",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ title: "New Chat" }),
+      });
+      if (!res.ok) throw new Error("Failed to create workspace chat");
+      const chat = await res.json();
+      setState(key, { sessionId: chat.id, messages: [] });
+      resetLiveRunState(key);
+      const { fetchWorkspaces, refreshChatList } = callbacksRef.current;
+      await fetchWorkspaces?.(); // membership changed server-side — same as SessionContext.jsx's createWorkspaceChat
+      await refreshChatList?.();
+      await sendTask(key, taskText);
+      return chat.id;
+    };
+
     storeRef.current = {
       getState, subscribe, setState, remove,
       persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
-      switchChat, createNewChat, renameChat, deleteChat, linkChats,
+      switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat,
       getLastActiveChatId, setLastActiveChatId, subscribeLastActiveChatId,
     };
   }
@@ -770,7 +807,21 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
     [store, key]
   );
 
-  return { key, state, setDockState, sendTask, resumeRun, confirmHireReview, cancelHireReview };
+  // NEW — GrowthTab Step 3e follow-up. Unlike sendTask/resumeRun/etc.
+  // above (which operate on whatever key this hook already resolved,
+  // from workspaceId OR chatId), this is fixed to workspaceId
+  // specifically — a scoped sub-chat always originates from a workspace,
+  // never a bare chatId — so it rejects rather than silently resolving
+  // to a chat:${chatId} slot if only a chatId was passed to this hook.
+  const openScopedSubChat = useCallback(
+    (taskText) =>
+      workspaceId
+        ? store.openScopedSubChat(workspaceId, taskText)
+        : Promise.reject(new Error("openScopedSubChat requires a workspaceId")),
+    [store, workspaceId]
+  );
+
+  return { key, state, setDockState, sendTask, resumeRun, confirmHireReview, cancelHireReview, openScopedSubChat };
 }
 
 /**
