@@ -5,7 +5,7 @@ import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
 import ConfirmDialog from "../ConfirmDialog";   // NEW — §2 fix: same delete affordance as Notebooks' Sources tab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2b: embedded chat + WorkingPanel dock, same as Notebooks
-import { useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
+import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B2: native "create project" for this tab
 import {
@@ -73,7 +73,7 @@ const PROMOTE_LABELS = {
 };
 
 export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
-  const { workspaces, fetchWorkspaces, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
+  const { workspaces, fetchWorkspaces, chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite the old comment here claiming so —
   // it had no workspaceId prop, so it read messages/sessionId off
@@ -82,6 +82,10 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
   // workspaceId={activeWs?.id} to the panel (now the same key switchChat
   // already resolves to).
   const { switchChat } = useWorkspaceDockActions();
+  // NEW — item #11 / C1: same row-highlight source ChatSidebar's nested
+  // chat rows use, so a chat opened from here highlights consistently
+  // whether it was opened from the global sidebar or from in-tab.
+  const activeChatId = useLastActiveChatId();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
   // NEW — §8 fix: promote-to-Plan busy/error state, same shape as
@@ -197,20 +201,47 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
               No research projects yet — create one above, promote a notebook from the Notebooks tab, or use the chat sidebar's <FolderOpen size={11} className="inline" /> button.
             </p>
           )}
-          {researchProjects.map((ws) => (
-            <button
-              key={ws.id}
-              onClick={() => setActiveWsId(ws.id)}
-              className={`w-full text-left px-3 py-2 text-xs border-b border-[var(--neutral-900)] ${
-                ws.id === activeWsId
-                  ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                  : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
-              }`}
-            >
-              {ws.name}
-              <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
-            </button>
-          ))}
+          {researchProjects.map((ws) => {
+            // NEW — item #11 / C1: nested chat list, mirrors ChatSidebar's
+            // memberChats pattern. Unlike ChatSidebar (a flat, always-
+            // expanded list across every workspace), this tab already has
+            // a single-selection model — one project active at a time —
+            // so "expand" here just means "is the active project", no new
+            // toggle state needed. Selecting a different project collapses
+            // the previous one's chat list the same way it already swaps
+            // the whole right-hand panel.
+            const isActive = ws.id === activeWsId;
+            const memberChats = isActive ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+            return (
+              <div key={ws.id} className="border-b border-[var(--neutral-900)]">
+                <button
+                  onClick={() => setActiveWsId(ws.id)}
+                  className={`w-full text-left px-3 py-2 text-xs ${
+                    isActive
+                      ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                      : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
+                  }`}
+                >
+                  {ws.name}
+                  <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                </button>
+                {memberChats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    onClick={(e) => { e.stopPropagation(); openInDock(chat.id); }}
+                    className={`w-full flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] truncate ${
+                      chat.id === activeChatId
+                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                    }`}
+                  >
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </div>
       </div>
 
