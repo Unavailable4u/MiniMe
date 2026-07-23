@@ -1,0 +1,189 @@
+diff --git a/frontend/app/components/tabs/GrowthTab.jsx b/frontend/app/components/tabs/GrowthTab.jsx
+index b3fac57..4e393e4 100644
+--- a/frontend/app/components/tabs/GrowthTab.jsx
++++ b/frontend/app/components/tabs/GrowthTab.jsx
+@@ -3,12 +3,14 @@ import { useState, useEffect, useCallback } from "react";
+ import {
+   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
+   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
++  Pencil, X, Trash2,
+ } from "lucide-react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock; useWorkspaceDockActions/useLastActiveChatId added for item #11 / C2
+ import { FactsView } from "./NotebooksTab";
+ import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
+ import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
++import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
+ import Markdown from "../Markdown";
+ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+ 
+@@ -39,7 +41,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
+   const { workspaces, fetchWorkspaces, chats } = useSession();
+   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
+   // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.
+-  const { switchChat } = useWorkspaceDockActions();
++  const { switchChat, renameChat, deleteChat, createWorkspaceChat } = useWorkspaceDockActions();
+   const activeChatId = useLastActiveChatId();
+   const [selectedWsId, setSelectedWsId] = useState(null);
+   const [activeSubTab, setActiveSubTab] = useState("voice"); // voice is the only fully-built sub-tab today
+@@ -50,6 +52,12 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
+   // the chat sidebar's folder button — those remain valid paths in,
+   // this is just no longer the only one.
+   const [showCreateModal, setShowCreateModal] = useState(false);
++  // NEW — issue #3: nested-chat create/rename/delete state, same shape as
++  // ResearchTab's/NotebooksTab's/PlanTab's/BuildTab's/TestTab's own.
++  const [creatingChatForWs, setCreatingChatForWs] = useState(null);
++  const [editingChatId, setEditingChatId] = useState(null);
++  const [editChatTitle, setEditChatTitle] = useState("");
++  const [pendingDeleteChat, setPendingDeleteChat] = useState(null);
+ 
+   const growthWorkspaces = (workspaces || []).filter((w) => (w.active_stages || [w.stage]).includes("growth"));
+   const selectedGrowthWs = growthWorkspaces.find((w) => w.id === selectedWsId) || null;
+@@ -102,6 +110,39 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
+     if (dockCollapsed) toggleDock();
+   }
+ 
++  // NEW — issue #3: "+" beside a workspace's name. Creates a chat nested
++  // directly inside that workspace and opens it, same mechanic the Chat
++  // sidebar uses for "new chat in this group".
++  async function handleCreateChatInProject(ws) {
++    setCreatingChatForWs(ws.id);
++    try {
++      if (selectedWsId !== ws.id) selectWorkspace(ws.id);
++      await createWorkspaceChat(ws.id);
++      if (dockCollapsed) toggleDock();
++    } finally {
++      setCreatingChatForWs(null);
++    }
++  }
++
++  function startRenameChat(chat) {
++    setEditingChatId(chat.id);
++    setEditChatTitle(chat.title);
++  }
++
++  async function commitRenameChat(chatId) {
++    if (editChatTitle.trim()) await renameChat(chatId, editChatTitle.trim());
++    setEditingChatId(null);
++  }
++
++  function askDeleteChat(chat) {
++    setPendingDeleteChat(chat);
++  }
++
++  async function confirmDeleteChat() {
++    await deleteChat(pendingDeleteChat.id);
++    setPendingDeleteChat(null);
++  }
++
+   return (
+     <div className="flex h-full min-h-0">
+       {/* Left-hand project picker -- same contract as every other tab
+@@ -138,33 +179,76 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
+             const memberChats = isSelected ? chats.filter((c) => w.chat_ids.includes(c.id)) : [];
+             return (
+               <div key={w.id}>
+-                <button
+-                  onClick={() => selectWorkspace(w.id)}
+-                  className={`w-full flex items-center min-w-0 text-left px-3 py-2 text-sm transition-colors ${
++                <div
++                  className={`group w-full flex items-center min-w-0 text-left px-3 py-2 text-sm transition-colors cursor-pointer ${
+                     isSelected
+                       ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                       : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+                   }`}
++                  onClick={() => selectWorkspace(w.id)}
+                 >
+                   <WorkspaceStageIcons workspace={w} />
+-                  <span className="truncate">
++                  <span className="truncate flex-1 min-w-0">
+                     {w.name}
+                     <span className={isSelected ? "text-[var(--accent-text)]/70" : "text-[var(--neutral-600)]"}> · {w.chat_ids.length}</span>
+                   </span>
+-                </button>
+-                {memberChats.map((chat) => (
++                  {/* NEW — issue #3: "+" creates a chat nested in this
++                      workspace, same idea as starting a new chat under a
++                      group in the Chat sidebar. */}
+                   <button
++                    onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(w); }}
++                    title="New chat in this workspace"
++                    className={`shrink-0 opacity-0 group-hover:opacity-100 ${
++                      isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++                    }`}
++                    disabled={creatingChatForWs === w.id}
++                  >
++                    {creatingChatForWs === w.id ? (
++                      <Loader2 size={12} className="animate-spin" />
++                    ) : (
++                      <Plus size={12} />
++                    )}
++                  </button>
++                </div>
++                {memberChats.map((chat) => (
++                  <div
+                     key={chat.id}
+-                    onClick={(e) => { e.stopPropagation(); openInDock(chat.id); }}
+-                    className={`w-full flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] truncate ${
++                    onClick={() => editingChatId !== chat.id && openInDock(chat.id)}
++                    className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                       chat.id === activeChatId
+                         ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                         : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                     }`}
+                   >
+-                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+-                    <span className="truncate">{chat.title}</span>
+-                  </button>
++                    {editingChatId === chat.id ? (
++                      <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
++                        <input
++                          autoFocus
++                          value={editChatTitle}
++                          onChange={(e) => setEditChatTitle(e.target.value)}
++                          onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
++                          className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
++                        />
++                        <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
++                        <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
++                      </div>
++                    ) : (
++                      <>
++                        <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
++                        <span className="truncate flex-1 min-w-0">{chat.title}</span>
++                        {/* NEW — issue #3: rename/delete, same controls
++                            ChatSidebar's own chat rows already offer. */}
++                        <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
++                          <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
++                            <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
++                          </button>
++                          <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
++                            <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
++                          </button>
++                        </div>
++                      </>
++                    )}
++                  </div>
+                 ))}
+               </div>
+             );
+@@ -252,6 +336,19 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
+           }}
+         />
+       )}
++
++      {/* NEW — issue #3: same delete-confirmation affordance as
++          ChatSidebar's own per-chat delete, just scoped to a nested
++          project chat here. */}
++      <ConfirmDialog
++        open={!!pendingDeleteChat}
++        title="Delete chat"
++        message={`Delete "${pendingDeleteChat?.title}"? Its messages and memory can't be recovered.`}
++        confirmLabel="Delete"
++        tone="danger"
++        onConfirm={confirmDeleteChat}
++        onCancel={() => setPendingDeleteChat(null)}
++      />
+     </div>
+   );
+ }

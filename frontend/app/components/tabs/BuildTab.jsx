@@ -4,7 +4,7 @@ import { useSession, authHeaders } from "../../context/SessionContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
-import { Layers, Loader2, ArrowUpRight, ChevronRight, MessageSquare, Plus } from "lucide-react";
+import { Loader2, ArrowUpRight, ChevronRight, MessageSquare, Plus } from "lucide-react";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 // Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
@@ -658,7 +658,7 @@ export default function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
         <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
-            <Layers size={13} className={STAGE_THEME.build.color} /> Build
+            <STAGE_THEME.build.Icon size={13} className={STAGE_THEME.build.color} /> Build
           </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
