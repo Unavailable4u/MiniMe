@@ -34,18 +34,23 @@
 // the double-processing scenario doesn't exist in the running app yet,
 // only once wiring starts. Flagging so it isn't a surprise when 3e lands.
 //
-// KNOWN OPEN QUESTION for 3e: two branches of the original handler —
-// usage_update and quota_alert — feed usageStats/usageHistory/
+// RESOLVED (was an open question for 3e): two branches of the original
+// handler — usage_update and quota_alert — feed usageStats/usageHistory/
 // combinedUsageHistory, which §2.4 explicitly keeps app-wide on
-// SessionContext, not per-dock. This file deliberately does NOT handle
-// those two event types (see handleDockEvent below) — they're left for
-// SessionContext's existing subscription to keep handling. That's fine
-// today since SessionContext's subscription is still live. It stops
-// being fine once 3e deletes it, at which point something needs to keep
-// receiving usage_update/quota_alert. Not resolving that now — flagging
-// it as a real decision 3e needs to make (options include: SessionContext
-// keeps a slim subscription just for those two events, or the dock
-// forwards them up via a callback). Not guessing at the answer here.
+// SessionContext, not per-dock. Went with option 1 of the three raised:
+// this file's handleDockEvent still does NOT touch any dock's own state
+// for those two event types, but it does forward them, verbatim, to
+// SessionContext via a threaded-in `onUsageEvent` callback (same
+// round-trip shape as refreshChatList/getWorkspaceIdForChat/
+// fetchWorkspaces above — see AppShell.jsx's WorkspaceDockBridge, which
+// passes SessionContext's `handleUsageEvent` in as this prop).
+// SessionContext's own copy of that logic was extracted into
+// `handleUsageEvent` for exactly this reuse — no duplicated branch
+// bodies, one implementation, two call sites (its own subscription,
+// still live today, and this one). This is what actually clears
+// SessionContext's session-${sessionId} subscription for deletion once
+// 3e's remaining consumer parity (ResearchTab/PlanTab) lands — nothing
+// upstream of it would be orphaned anymore.
 //
 // KEYING (§2.4): one dock per `workspace_id`, or per standalone `chat_id`
 // for a Chat-tab chat that isn't wrapped in a workspace. Confirmed
@@ -125,7 +130,7 @@ function makeInitialDockState() {
 
 const WorkspaceDockStoreContext = createContext(null);
 
-export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces }) {
+export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces, onUsageEvent }) {
   // Option 1 (chosen over letting every UI call site hand-coordinate a
   // SessionContext write + a dock write, or over a thinner wrapper hook
   // with the same fragility): switchChat/createNewChat/renameChat/
@@ -149,7 +154,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
   // "avoid a stale closure via a ref" pattern this file already uses for
   // stepSeqs/openStepStacks/channelBindings.
   const callbacksRef = useRef({});
-  callbacksRef.current = { refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces };
+  callbacksRef.current = { refreshChatList, getWorkspaceIdForChat, getChats, fetchWorkspaces, onUsageEvent };
 
   const storeRef = useRef(null);
   if (storeRef.current === null) {
@@ -345,8 +350,15 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         });
         return;
       }
-      // usage_update, quota_alert: intentionally not handled — see
-      // file-header note.
+      // usage_update, quota_alert: NOT handled per-dock — these stay
+      // app-wide (§2.4), so hand them straight to SessionContext via the
+      // threaded-in onUsageEvent callback (3e usage-event ownership,
+      // option 1 — see file-header note) instead of updating any dock
+      // key's own state.
+      if (eventType === "usage_update" || eventType === "quota_alert") {
+        callbacksRef.current.onUsageEvent?.(eventType, payload);
+        return;
+      }
     };
 
     // Binds the session-${sessionId} channel for a dock key, if that

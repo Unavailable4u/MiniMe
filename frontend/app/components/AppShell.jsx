@@ -62,14 +62,21 @@ export default function AppShell() {
 // what keeps deleteChat's "switch to another chat" fallback from reading
 // a stale list — see WorkspaceDockProvider's callbacksRef for the other
 // half of that (it re-reads these props every render too).
+// Also threads handleUsageEvent through as `onUsageEvent` — 3e usage-
+// event ownership, option 1 (see WorkspaceDockContext.jsx's file-header
+// comment): usage_update/quota_alert are handled by the per-dock
+// subscription now, forwarded up through this callback so usageStats/
+// usageHistory/combinedUsageHistory can stay app-wide on SessionContext,
+// same intent as refreshChatList's existing round-trip.
 function WorkspaceDockBridge() {
-  const { refreshChatList, getWorkspaceIdForChat, chats, fetchWorkspaces } = useSession();
+  const { refreshChatList, getWorkspaceIdForChat, chats, fetchWorkspaces, handleUsageEvent } = useSession();
   return (
     <WorkspaceDockProvider
       refreshChatList={refreshChatList}
       getWorkspaceIdForChat={getWorkspaceIdForChat}
       getChats={() => chats}
       fetchWorkspaces={fetchWorkspaces}
+      onUsageEvent={handleUsageEvent}
     >
       <AppShellBody />
     </WorkspaceDockProvider>
