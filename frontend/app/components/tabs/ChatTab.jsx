@@ -1,9 +1,8 @@
 "use client";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useSession } from "../../context/SessionContext";
 import { useLastActiveChatId } from "../../context/WorkspaceDockContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
-import WorkspaceDataBubble from "../WorkspaceDataBubble";
 
 // CHANGED — §6 sub-step 1: this used to contain the entire chat box +
 // WorkingPanel composition directly. That composition now lives in
@@ -22,7 +21,7 @@ import WorkspaceDataBubble from "../WorkspaceDataBubble";
 // any tab, dock-side) and resolving its workspace via
 // `getWorkspaceIdForChat`, then handing both ids down to
 // WorkspaceChatPanel so it renders in dock mode instead of legacy mode.
-export default function ChatTab() {
+export default function ChatTab({ onActiveWorkspaceChange }) {
   const { workspaces, getWorkspaceIdForChat } = useSession();
   const lastActiveChatId = useLastActiveChatId();
   const activeWorkspaceId = lastActiveChatId ? getWorkspaceIdForChat(lastActiveChatId) : null;
@@ -31,14 +30,16 @@ export default function ChatTab() {
     [workspaces, activeWorkspaceId]
   );
 
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // workspace (if any) is active instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(activeWorkspace?.id || null, activeWorkspace?.name);
+  }, [activeWorkspace?.id, activeWorkspace?.name, onActiveWorkspaceChange]);
+
   return (
     <div className="relative h-full min-h-0">
       <WorkspaceChatPanel workspaceId={activeWorkspaceId} chatId={lastActiveChatId} />
-      <WorkspaceDataBubble
-        workspaceId={activeWorkspace?.id}
-        workspaceName={activeWorkspace?.name}
-        storageKey="minime_chat_data_bubble_collapsed"
-      />
     </div>
   );
 }

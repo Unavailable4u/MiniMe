@@ -2,10 +2,10 @@
 import { useEffect, useState } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
-import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
 import { Layers, Loader2, ArrowUpRight, ChevronRight, MessageSquare, Plus } from "lucide-react";
+import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 // Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -505,7 +505,7 @@ function PartsPanel({ wsId, apiUrl }) {
   );
 }
 
-export default function BuildTab({ onPromoted }) {
+export default function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.
@@ -634,6 +634,13 @@ export default function BuildTab({ onPromoted }) {
 
   const selected = buildProjects.find((w) => w.id === selectedWsId);
 
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // project (if any) is selected instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(selected?.id || null, selected?.name);
+  }, [selected?.id, selected?.name, onActiveWorkspaceChange]);
+
   const features = data?.current_plan?.features || [];
   const featureStatus = data?.feature_status || {};
   const targetFeature = data?.current_plan?.target_feature || null;
@@ -651,7 +658,7 @@ export default function BuildTab({ onPromoted }) {
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
         <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
-            <Layers size={13} /> Build
+            <Layers size={13} className={STAGE_THEME.build.color} /> Build
           </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
@@ -679,9 +686,12 @@ export default function BuildTab({ onPromoted }) {
                     isSelected ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
                   }`}
                 >
-                  <span className="text-xs text-[var(--neutral-200)] truncate">
-                    {ws.name}
-                    <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                  <span className="flex items-center min-w-0">
+                    <WorkspaceStageIcons workspace={ws} />
+                    <span className="text-xs text-[var(--neutral-200)] truncate">
+                      {ws.name}
+                      <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                    </span>
                   </span>
                   {isSelected && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
                 </button>
@@ -730,11 +740,6 @@ export default function BuildTab({ onPromoted }) {
           </div>
         ) : (
           <div className="relative px-4 py-6 max-w-4xl mx-auto space-y-4">
-            <WorkspaceDataBubble
-              workspaceId={selected.id}
-              workspaceName={selected.name}
-              storageKey="minime_build_data_bubble_collapsed"
-            />
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
               <div className="flex items-center gap-2 shrink-0">

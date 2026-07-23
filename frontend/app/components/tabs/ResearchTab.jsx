@@ -3,10 +3,10 @@ import { useSession } from "../../context/SessionContext";
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
+import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import ConfirmDialog from "../ConfirmDialog";   // NEW — §2 fix: same delete affordance as Notebooks' Sources tab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2b: embedded chat + WorkingPanel dock, same as Notebooks
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
-import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B2: native "create project" for this tab
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
@@ -72,7 +72,7 @@ const PROMOTE_LABELS = {
   growth: "Growth",
 };
 
-export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
+export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite the old comment here claiming so —
@@ -146,6 +146,13 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
 
   const activeWs = researchProjects.find((w) => w.id === activeWsId) || null;
 
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // project (if any) is active instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(activeWs?.id || null, activeWs?.name);
+  }, [activeWs?.id, activeWs?.name, onActiveWorkspaceChange]);
+
   // FIX — sub-tabs were conditionally rendered (ternary chain below),
   // which unmounts whichever sub-tab you leave and destroys its local
   // state (a paste-box's contents, an in-progress search, an in-flight
@@ -184,7 +191,9 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
           as a "notebook" is. No new container concept. */}
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
-          <span className="text-xs font-medium text-[var(--neutral-400)]">Research projects</span>
+          <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+            <STAGE_THEME.research.Icon size={13} className={STAGE_THEME.research.color} /> Research projects
+          </span>
           {/* NEW — item #10 / B2: native create, same stage-aware modal
               every other stage tab will wire up in B3. */}
           <button
@@ -216,14 +225,17 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
               <div key={ws.id} className="border-b border-[var(--neutral-900)]">
                 <button
                   onClick={() => setActiveWsId(ws.id)}
-                  className={`w-full text-left px-3 py-2 text-xs ${
+                  className={`w-full flex items-center gap-1.5 min-w-0 text-left px-3 py-2 text-xs ${
                     isActive
                       ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                       : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
                   }`}
                 >
-                  {ws.name}
-                  <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                  <WorkspaceStageIcons workspace={ws} />
+                  <span className="truncate">
+                    {ws.name}
+                    <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                  </span>
                 </button>
                 {memberChats.map((chat) => (
                   <button
@@ -351,11 +363,6 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          <WorkspaceDataBubble
-            workspaceId={activeWs?.id}
-            workspaceName={activeWs?.name}
-            storageKey="minime_research_data_bubble_collapsed"
-          />
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
           ) : (

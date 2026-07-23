@@ -3,8 +3,8 @@ import { useSession } from "../../context/SessionContext";
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e (+ follow-up fix below); useLastActiveChatId added for item #11 / C2
-import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
+import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import {
   FlaskConical, Users, ClipboardList, ShieldAlert, History,
   Loader2, RefreshCw, MessageSquare, ArrowUpRight, Sparkles,
@@ -139,7 +139,7 @@ function pushRunHistory(wsId, entry) {
   return next;
 }
 
-export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
+export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const {
     workspaces, fetchWorkspaces, promoteWorkspace,
     fetchSimulationResults,
@@ -221,6 +221,13 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
   }, [testProjects, activeWsId]);
 
   const activeWs = testProjects.find((w) => w.id === activeWsId) || null;
+
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // project (if any) is active instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(activeWs?.id || null, activeWs?.name);
+  }, [activeWs?.id, activeWs?.name, onActiveWorkspaceChange]);
   // NEW — step 3e follow-up: dock-aware openScopedSubChat, keyed to
   // whichever project is selected. See comment above switchChat's
   // destructure for why this is needed now that the panel gets a real
@@ -287,7 +294,9 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
     <div className="flex h-full">
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
-          <span className="text-xs font-medium text-[var(--neutral-400)]">Test projects</span>
+          <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+            <STAGE_THEME.test.Icon size={13} className={STAGE_THEME.test.color} /> Test projects
+          </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
           <button
@@ -315,14 +324,17 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
               <div key={ws.id} className="border-b border-[var(--neutral-900)]">
                 <button
                   onClick={() => setActiveWsId(ws.id)}
-                  className={`w-full text-left px-3 py-2 text-xs ${
+                  className={`w-full flex items-center gap-1.5 min-w-0 text-left px-3 py-2 text-xs ${
                     isActive
                       ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                       : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
                   }`}
                 >
-                  {ws.name}
-                  <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                  <WorkspaceStageIcons workspace={ws} />
+                  <span className="truncate">
+                    {ws.name}
+                    <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                  </span>
                 </button>
                 {memberChats.map((chat) => (
                   <button
@@ -450,11 +462,6 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          <WorkspaceDataBubble
-            workspaceId={activeWs?.id}
-            workspaceName={activeWs?.name}
-            storageKey="minime_test_data_bubble_collapsed"
-          />
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
           ) : (
