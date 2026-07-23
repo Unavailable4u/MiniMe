@@ -118,12 +118,18 @@ export default function WorkspaceDataBubble({
 
   if (!workspaceId) return null;
 
+  // NEW — items #5/#13: this used to float over the tab's own content
+  // (`absolute top-3 right-3` against a tab-level `relative` wrapper).
+  // Now it mounts in the top nav next to the notification bell instead,
+  // so the outer node just needs to anchor its own dropdown panel, not
+  // the whole page. AppShell positions the trigger itself; this wrapper
+  // only needs `relative` so the panel below can hang off it.
   return (
-    <div ref={containerRef} className="absolute top-3 right-3 z-30 w-[min(22rem,calc(100vw-1.5rem))]">
+    <div ref={containerRef} className="relative">
       <button
         type="button"
         onClick={toggle}
-        className={`ml-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs shadow-lg backdrop-blur-sm transition-colors ${
+        className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs shadow-lg backdrop-blur-sm transition-colors ${
           collapsed
             ? "border-[var(--neutral-800)] bg-[var(--neutral-950-a90)] text-[var(--neutral-300)] hover:text-[var(--neutral-100)]"
             : "border-[var(--accent)] bg-[var(--neutral-950-a95)] text-[var(--accent-text)]"
@@ -136,7 +142,7 @@ export default function WorkspaceDataBubble({
       </button>
 
       {!collapsed && (
-        <div className="mt-2 rounded-xl border border-[var(--neutral-800)] bg-[var(--neutral-950)]/96 shadow-2xl backdrop-blur-sm">
+        <div className="absolute right-0 top-full z-30 mt-2 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-[var(--neutral-800)] bg-[var(--neutral-950)]/96 shadow-2xl backdrop-blur-sm">
           <div className="flex items-center justify-between gap-2 border-b border-[var(--neutral-800)] px-3 py-2">
             <div className="min-w-0">
               <p className="text-xs font-medium text-[var(--neutral-200)]">{title}</p>
