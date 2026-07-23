@@ -749,10 +749,37 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       return chat.id;
     };
 
+    // NEW — issue #3 (per-project chat management): plain "create an
+    // empty chat nested in this project" version of openScopedSubChat
+    // above. Same one-step create-and-attach endpoint
+    // (POST /api/workspaces/{id}/chats/create), but — unlike
+    // openScopedSubChat — it does NOT call sendTask afterwards, since
+    // this is the "+" button beside a project name in a sidebar, not a
+    // quick-action that should immediately run something. Mirrors the
+    // "+" in ChatSidebar's own createNewChat, just workspace-scoped.
+    const createWorkspaceChat = async (workspaceId) => {
+      const key = normalizeDockKey(workspaceId, null);
+      const res = await fetch(`${API_URL}/api/workspaces/${workspaceId}/chats/create`, {
+        method: "POST",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ title: "New Chat" }),
+      });
+      if (!res.ok) throw new Error("Failed to create workspace chat");
+      const chat = await res.json();
+      setState(key, { sessionId: chat.id, messages: [] });
+      resetLiveRunState(key);
+      const { fetchWorkspaces, refreshChatList } = callbacksRef.current;
+      await fetchWorkspaces?.(); // membership changed server-side — same as openScopedSubChat
+      await refreshChatList?.();
+      localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
+      setLastActiveChatId(chat.id);
+      return chat.id;
+    };
+
     storeRef.current = {
       getState, subscribe, setState, remove,
       persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
-      switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat,
+      switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat, createWorkspaceChat,
       getLastActiveChatId, setLastActiveChatId, subscribeLastActiveChatId,
     };
   }
@@ -867,8 +894,8 @@ export function useWorkspaceDockActions() {
   if (!store) {
     throw new Error("useWorkspaceDockActions must be used within a WorkspaceDockProvider");
   }
-  const { switchChat, createNewChat, renameChat, deleteChat, linkChats } = store;
-  return { switchChat, createNewChat, renameChat, deleteChat, linkChats };
+  const { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat } = store;
+  return { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat };
 }
 
 /**
