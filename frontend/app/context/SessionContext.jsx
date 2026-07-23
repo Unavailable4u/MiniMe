@@ -572,11 +572,15 @@ async function fetchWorkspaces() {
   setWorkspaces(body);
 }
 
-async function createWorkspace(name) {
+async function createWorkspace(name, stage) {
+  // NEW — item #10 / B0: optional stage lets a caller (e.g. a stage
+  // tab's own "New project" button) create a workspace that natively
+  // belongs to that tab. Omitted = old behavior (backend defaults to
+  // "note"), so existing Chat/Notebooks callers are unaffected.
   const res = await fetch(`${API_URL}/api/workspaces`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(stage ? { name, stage } : { name }),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const workspace = await res.json();
@@ -584,8 +588,8 @@ async function createWorkspace(name) {
   return workspace;
 }
 
-async function createWorkspaceWithChats(name, chatIds = []) {
-  const workspace = await createWorkspace(name);
+async function createWorkspaceWithChats(name, chatIds = [], stage) {
+  const workspace = await createWorkspace(name, stage);
   for (const chatId of chatIds) {
     await addWorkspaceChat(workspace.id, chatId);
   }

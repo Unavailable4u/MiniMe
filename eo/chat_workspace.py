@@ -372,19 +372,25 @@ def get_workspace(ws_id: str, user_id: str) -> dict:
     return _row_to_workspace(row)
 
 
-def create_workspace(owner_id: str, name: str) -> dict:
+def create_workspace(owner_id: str, name: str, stage: str = "note") -> dict:
+    # NEW — item #10 / B0: previously this always inserted with no stage
+    # column at all, so every native-created workspace silently defaulted
+    # to "note" regardless of which tab created it (e.g. a workspace
+    # created from Research would show up under Notebooks instead). Any
+    # tab that wants to create its own project now passes its stage in.
     ws_id = f"ws_{uuid.uuid4().hex[:10]}"
     clean_name = name.strip() or "Untitled project"
+    clean_stage = stage if stage in _STAGE_SEQUENCE else "note"
     with db.cursor() as cur:
         cur.execute(
-            "insert into workspaces (id, name, owner_id) values (%s, %s, %s) "
-            "returning id, name, owner_id, show_attribution, created_at, updated_at",
-            (ws_id, clean_name, owner_id),
+            "insert into workspaces (id, name, owner_id, stage, active_stages) values (%s, %s, %s, %s, %s) "
+            "returning id, name, owner_id, show_attribution, stage, active_stages, created_at, updated_at",
+            (ws_id, clean_name, owner_id, clean_stage, [clean_stage]),
         )
         row = cur.fetchone()
     row = dict(row)
     row["chat_ids"] = []
-    write_audit(owner_id, "workspace.create", "workspace", ws_id, {"name": clean_name})
+    write_audit(owner_id, "workspace.create", "workspace", ws_id, {"name": clean_name, "stage": clean_stage})
     return _row_to_workspace(row)
 
 

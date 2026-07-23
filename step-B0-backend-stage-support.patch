@@ -1,0 +1,91 @@
+diff --git a/api/server.py b/api/server.py
+index 5e80b03..a2b795e 100644
+--- a/api/server.py
++++ b/api/server.py
+@@ -314,6 +314,9 @@ class BatchMembersRequest(BaseModel):
+ 
+ class CreateWorkspaceRequest(BaseModel):
+     name: str
++    # NEW — item #10 / B0: lets a caller specify which stage tab this
++    # project should natively belong to. Omitted = old behavior ("note").
++    stage: Optional[str] = None
+ 
+ 
+ class RenameWorkspaceRequest(BaseModel):
+@@ -639,7 +642,7 @@ def get_workspaces(owner_id: str = Depends(require_auth)):
+ 
+ @app.post("/api/workspaces")
+ def create_workspace(req: CreateWorkspaceRequest, owner_id: str = Depends(require_auth)):
+-    return chat_workspace.create_workspace(owner_id, req.name)
++    return chat_workspace.create_workspace(owner_id, req.name, stage=req.stage or "note")
+ 
+ 
+ @app.get("/api/workspaces/{ws_id}")
+diff --git a/eo/chat_workspace.py b/eo/chat_workspace.py
+index 82e0f3f..4ed03be 100644
+--- a/eo/chat_workspace.py
++++ b/eo/chat_workspace.py
+@@ -372,19 +372,25 @@ def get_workspace(ws_id: str, user_id: str) -> dict:
+     return _row_to_workspace(row)
+ 
+ 
+-def create_workspace(owner_id: str, name: str) -> dict:
++def create_workspace(owner_id: str, name: str, stage: str = "note") -> dict:
++    # NEW — item #10 / B0: previously this always inserted with no stage
++    # column at all, so every native-created workspace silently defaulted
++    # to "note" regardless of which tab created it (e.g. a workspace
++    # created from Research would show up under Notebooks instead). Any
++    # tab that wants to create its own project now passes its stage in.
+     ws_id = f"ws_{uuid.uuid4().hex[:10]}"
+     clean_name = name.strip() or "Untitled project"
++    clean_stage = stage if stage in _STAGE_SEQUENCE else "note"
+     with db.cursor() as cur:
+         cur.execute(
+-            "insert into workspaces (id, name, owner_id) values (%s, %s, %s) "
+-            "returning id, name, owner_id, show_attribution, created_at, updated_at",
+-            (ws_id, clean_name, owner_id),
++            "insert into workspaces (id, name, owner_id, stage, active_stages) values (%s, %s, %s, %s, %s) "
++            "returning id, name, owner_id, show_attribution, stage, active_stages, created_at, updated_at",
++            (ws_id, clean_name, owner_id, clean_stage, [clean_stage]),
+         )
+         row = cur.fetchone()
+     row = dict(row)
+     row["chat_ids"] = []
+-    write_audit(owner_id, "workspace.create", "workspace", ws_id, {"name": clean_name})
++    write_audit(owner_id, "workspace.create", "workspace", ws_id, {"name": clean_name, "stage": clean_stage})
+     return _row_to_workspace(row)
+ 
+ 
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index 2a91acd..2126ac1 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -572,11 +572,15 @@ async function fetchWorkspaces() {
+   setWorkspaces(body);
+ }
+ 
+-async function createWorkspace(name) {
++async function createWorkspace(name, stage) {
++  // NEW — item #10 / B0: optional stage lets a caller (e.g. a stage
++  // tab's own "New project" button) create a workspace that natively
++  // belongs to that tab. Omitted = old behavior (backend defaults to
++  // "note"), so existing Chat/Notebooks callers are unaffected.
+   const res = await fetch(`${API_URL}/api/workspaces`, {
+     method: "POST",
+     headers: await authHeaders({ json: true }),
+-    body: JSON.stringify({ name }),
++    body: JSON.stringify(stage ? { name, stage } : { name }),
+   });
+   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+   const workspace = await res.json();
+@@ -584,8 +588,8 @@ async function createWorkspace(name) {
+   return workspace;
+ }
+ 
+-async function createWorkspaceWithChats(name, chatIds = []) {
+-  const workspace = await createWorkspace(name);
++async function createWorkspaceWithChats(name, chatIds = [], stage) {
++  const workspace = await createWorkspace(name, stage);
+   for (const chatId of chatIds) {
+     await addWorkspaceChat(workspace.id, chatId);
+   }

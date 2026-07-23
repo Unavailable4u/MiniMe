@@ -314,6 +314,9 @@ class BatchMembersRequest(BaseModel):
 
 class CreateWorkspaceRequest(BaseModel):
     name: str
+    # NEW — item #10 / B0: lets a caller specify which stage tab this
+    # project should natively belong to. Omitted = old behavior ("note").
+    stage: Optional[str] = None
 
 
 class RenameWorkspaceRequest(BaseModel):
@@ -639,7 +642,7 @@ def get_workspaces(owner_id: str = Depends(require_auth)):
 
 @app.post("/api/workspaces")
 def create_workspace(req: CreateWorkspaceRequest, owner_id: str = Depends(require_auth)):
-    return chat_workspace.create_workspace(owner_id, req.name)
+    return chat_workspace.create_workspace(owner_id, req.name, stage=req.stage or "note")
 
 
 @app.get("/api/workspaces/{ws_id}")
