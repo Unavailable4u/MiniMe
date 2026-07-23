@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useSession } from "../../context/SessionContext";
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
-import { useWorkspaceDockActions, useWorkspaceDock } from "../../context/WorkspaceDockContext"; // NEW — step 3e (+ follow-up fix below)
+import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e (+ follow-up fix below); useLastActiveChatId added for item #11 / C2
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import {
@@ -144,6 +144,7 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
     workspaces, fetchWorkspaces, promoteWorkspace,
     fetchSimulationResults,
     fetchRoles, updateRolePrompt, setRolePinned,
+    chats,
   } = useSession();
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite this comment previously claiming so —
@@ -158,6 +159,9 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
   // new run" and "reopen a past run" paths write into the same slot the
   // panel reads.
   const { switchChat } = useWorkspaceDockActions();
+  // NEW — item #11 / C2: same row-highlight source ChatSidebar's nested
+  // chat rows use, same as ResearchTab/PlanTab's C1.
+  const activeChatId = useLastActiveChatId();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("run");
   const [promoting, setPromoting] = useState(false);
@@ -300,20 +304,43 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
               No test projects yet — create one above, or promote a built feature from the Tasks tab.
             </p>
           )}
-          {testProjects.map((ws) => (
-            <button
-              key={ws.id}
-              onClick={() => setActiveWsId(ws.id)}
-              className={`w-full text-left px-3 py-2 text-xs border-b border-[var(--neutral-900)] ${
-                ws.id === activeWsId
-                  ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                  : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
-              }`}
-            >
-              {ws.name}
-              <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
-            </button>
-          ))}
+          {testProjects.map((ws) => {
+            // NEW — item #11 / C2: nested chat list, same pattern as
+            // ResearchTab/PlanTab's C1 — "expand" just means "is the
+            // active project", no separate toggle state needed since
+            // this tab already has a single-selection model.
+            const isActive = ws.id === activeWsId;
+            const memberChats = isActive ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+            return (
+              <div key={ws.id} className="border-b border-[var(--neutral-900)]">
+                <button
+                  onClick={() => setActiveWsId(ws.id)}
+                  className={`w-full text-left px-3 py-2 text-xs ${
+                    isActive
+                      ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                      : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
+                  }`}
+                >
+                  {ws.name}
+                  <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                </button>
+                {memberChats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    onClick={(e) => { e.stopPropagation(); openInDock(chat.id); }}
+                    className={`w-full flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] truncate ${
+                      chat.id === activeChatId
+                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                    }`}
+                  >
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </div>
       </div>
 
