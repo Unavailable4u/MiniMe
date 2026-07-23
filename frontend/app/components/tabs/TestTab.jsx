@@ -178,7 +178,7 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
     if (chatDockCollapsed) toggleChatDock();
   }
 
-  const testProjects = workspaces.filter((w) => w.stage === "test");
+  const testProjects = workspaces.filter((w) => (w.active_stages || [w.stage]).includes("test"));
 
   useEffect(() => {
     if (initialWorkspaceId) {

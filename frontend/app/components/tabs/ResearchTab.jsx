@@ -104,7 +104,7 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
 
   // NEW — §8: Research only shows research-stage workspaces now — a
   // notebook promoted from Notebooks lands here, not in both tabs.
-  const researchProjects = workspaces.filter((w) => w.stage === "research");
+  const researchProjects = workspaces.filter((w) => (w.active_stages || [w.stage]).includes("research"));
 
   // NEW — §8: a promote-and-navigate hand-off from Notebooks (via
   // AppShell) pre-selects the just-promoted workspace, then clears

@@ -132,20 +132,35 @@ def _next_stage(current: str) -> str | None:
     return _STAGE_SEQUENCE[idx + 1]
 
 
-def promote(ws_id: str, user_id: str, to_stage: str | None = None) -> dict:
+def promote(ws_id: str, user_id: str, to_stage: str | None = None, mode: str = "complete") -> dict:
     """Advances a workspace along the fixed stage sequence
     (note -> research -> plan -> build -> test -> growth).
     Defaults to the immediate successor, but callers may explicitly
     choose any later stage in the same sequence. Requires edit-tier+
     access, same bar as rename_workspace (a stage move is a content
-    edit, not a membership/ownership action)."""
+    edit, not a membership/ownership action).
+
+    mode="complete" (default): today's unchanged behavior — the
+    workspace leaves its old tab entirely. active_stages becomes
+    [to_stage] and stage (primary) moves to to_stage.
+
+    mode="partial": the workspace becomes active in to_stage's tab
+    WHILE remaining active wherever it already was. to_stage is
+    appended to active_stages; stage (primary) does not move, so
+    _next_stage()'s default-promote target and stage_history's
+    "primary" line are unaffected. A workspace can't be partially
+    promoted into a stage it's already active in.
+    """
+    if mode not in ("complete", "partial"):
+        raise ValueError(f"unknown promote mode {mode!r} — must be 'complete' or 'partial'")
     _require_edit_access(ws_id, user_id)
     with db.cursor() as cur:
-        cur.execute("select stage, stage_history from workspaces where id = %s", (ws_id,))
+        cur.execute("select stage, stage_history, active_stages from workspaces where id = %s", (ws_id,))
         row = cur.fetchone()
         if not row:
             raise FileNotFoundError(ws_id)
         current_stage = row["stage"]
+        current_active = row.get("active_stages") or [current_stage]
         expected = _next_stage(current_stage)
         if expected is None:
             raise ValueError(f"workspace {ws_id} is already at its final stage ({current_stage!r})")
@@ -167,15 +182,26 @@ def promote(ws_id: str, user_id: str, to_stage: str | None = None) -> dict:
                 f"cannot promote workspace {ws_id} from {current_stage!r} to {to_stage!r} — "
                 f"the only valid target stages are: {', '.join(_STAGE_SEQUENCE[_STAGE_SEQUENCE.index(current_stage) + 1:])}"
             )
+        if to_stage in current_active:
+            raise ValueError(
+                f"workspace {ws_id} is already active in {to_stage!r} — "
+                f"it can't be promoted (complete or partial) into a tab it's already active in"
+            )
+        if mode == "complete":
+            new_active = [to_stage]
+            new_primary = to_stage
+        else:  # partial
+            new_active = current_active + [to_stage]
+            new_primary = current_stage
         history = (row["stage_history"] or []) + [
-            {"from": current_stage, "to": to_stage, "at": _iso(_now()), "by": user_id}
+            {"from": current_stage, "to": to_stage, "at": _iso(_now()), "by": user_id, "mode": mode}
         ]
         cur.execute(
-            "update workspaces set stage = %s, stage_history = %s, updated_at = %s where id = %s",
-            (to_stage, json.dumps(history), _now(), ws_id),
+            "update workspaces set stage = %s, active_stages = %s, stage_history = %s, updated_at = %s where id = %s",
+            (new_primary, json.dumps(new_active), json.dumps(history), _now(), ws_id),
         )
     write_audit(user_id, "workspace.promote", "workspace", ws_id,
-                {"from": current_stage, "to": to_stage})
+                {"from": current_stage, "to": to_stage, "mode": mode})
     return get_workspace(ws_id, user_id)
 
 _VALID_ROLES = ("viewer", "editor", "moderator", "partner")
@@ -198,6 +224,7 @@ def _row_to_workspace(row: dict) -> dict:
         "is_joint": row.get("owner_id") is None,
         "show_attribution": row.get("show_attribution", True),
         "stage": row.get("stage", "note"),
+        "active_stages": row.get("active_stages") or [row.get("stage", "note")],
         "stage_history": row.get("stage_history") or [],
         "chat_ids": row.get("chat_ids") or [],
         "created_at": _iso(row["created_at"]),
@@ -310,7 +337,7 @@ def list_workspaces(user_id: str) -> list:
     with db.cursor() as cur:
         cur.execute(
             f"""
-            select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.stage_history, w.created_at, w.updated_at,
+            select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.active_stages, w.stage_history, w.created_at, w.updated_at,
                    {_chat_ids_sql()}
             from workspaces w
             left join chats c on c.workspace_id = w.id
@@ -330,7 +357,7 @@ def get_workspace(ws_id: str, user_id: str) -> dict:
     with db.cursor() as cur:
         cur.execute(
             f"""
-            select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.stage_history, w.created_at, w.updated_at,
+            select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.active_stages, w.stage_history, w.created_at, w.updated_at,
                    {_chat_ids_sql()}
             from workspaces w
             left join chats c on c.workspace_id = w.id

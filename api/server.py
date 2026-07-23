@@ -321,6 +321,10 @@ class RenameWorkspaceRequest(BaseModel):
 
 class PromoteWorkspaceRequest(BaseModel):
     to_stage: Optional[str] = None
+    # NEW — §2.2: "complete" (default) is today's unchanged behavior —
+    # workspace leaves the old tab entirely. "partial" keeps it active
+    # in both the old and new tab (see chat_workspace.promote()).
+    mode: Optional[str] = "complete"
 
 
 class WorkspaceChatRequest(BaseModel):
@@ -657,7 +661,7 @@ def rename_workspace(ws_id: str, req: RenameWorkspaceRequest, owner_id: str = De
 @app.post("/api/workspaces/{ws_id}/promote")
 def promote_workspace(ws_id: str, req: PromoteWorkspaceRequest, owner_id: str = Depends(require_auth)):
     try:
-        return chat_workspace.promote(ws_id, owner_id, req.to_stage)
+        return chat_workspace.promote(ws_id, owner_id, req.to_stage, mode=req.mode or "complete")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
     except chat_workspace.WorkspaceAccessError as e:

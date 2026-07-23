@@ -5,6 +5,7 @@ import { useSession } from "../context/SessionContext";
 export default function CreateWorkspaceModal({ onClose, initialName = "", sourceChatIds = [] }) {
   const { createWorkspace, createWorkspaceWithChats } = useSession();
   const [name, setName] = useState(initialName);
+  const [submitting, setSubmitting] = useState(false);
 
   const wrappingChats = sourceChatIds.length > 0;
 
@@ -13,13 +14,18 @@ export default function CreateWorkspaceModal({ onClose, initialName = "", source
   }, [initialName]);
 
   async function save() {
-    if (!name.trim()) return;
-    if (wrappingChats) {
-      await createWorkspaceWithChats(name.trim(), sourceChatIds);
-    } else {
-      await createWorkspace(name.trim());
+    if (!name.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      if (wrappingChats) {
+        await createWorkspaceWithChats(name.trim(), sourceChatIds);
+      } else {
+        await createWorkspace(name.trim());
+      }
+      onClose();
+    } finally {
+      setSubmitting(false);
     }
-    onClose();
   }
 
   return (
@@ -39,12 +45,13 @@ export default function CreateWorkspaceModal({ onClose, initialName = "", source
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && save()}
           placeholder="Project name"
-          className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-2 py-1.5 text-xs outline-none mb-4"
+          disabled={submitting}
+          className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-2 py-1.5 text-xs outline-none mb-4 disabled:opacity-60"
         />
         <div className="flex justify-end gap-2">
-          <button onClick={onClose} className="text-xs text-[var(--neutral-400)] px-3 py-1.5">Cancel</button>
-          <button onClick={save} className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium">
-            {wrappingChats ? "Create project" : "Create"}
+          <button onClick={onClose} disabled={submitting} className="text-xs text-[var(--neutral-400)] px-3 py-1.5 disabled:opacity-60">Cancel</button>
+          <button onClick={save} disabled={submitting || !name.trim()} className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-60">
+            {submitting ? "Creating…" : wrappingChats ? "Create project" : "Create"}
           </button>
         </div>
       </div>
