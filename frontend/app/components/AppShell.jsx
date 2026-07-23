@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { SessionProvider, useSession } from "../context/SessionContext";
-import { WorkspaceDockProvider } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below
+import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
 import ChatSidebar from "./ChatSidebar";
 import ChatTab from "./tabs/ChatTab";
 import TokenUsageTab from "./tabs/TokenUsageTab";
@@ -81,7 +81,10 @@ function WorkspaceDockBridge() {
 // chat_id and actually land on it in the Chat tab, instead of only
 // ever printing a session_id with nowhere to go.
 function AppShellBody() {
-  const { switchChat } = useSession();
+  // NEW — step 3e: switchChat now resolves the correct per-workspace (or
+  // per-standalone-chat) dock itself from the chatId a notification hands
+  // it — it no longer writes into one shared SessionContext sessionId.
+  const { switchChat } = useWorkspaceDockActions();
   const [activeTab, setActiveTabState] = useState("chat");
   // NEW — §4 fix: tabs that have been visited at least once stay mounted
   // (hidden via CSS, not unmounted) so their in-memory state — sub-tab,

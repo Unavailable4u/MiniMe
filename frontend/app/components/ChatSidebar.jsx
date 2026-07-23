@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";   // CHANGED — add useEffect
 import { useSession } from "../context/SessionContext";
+import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext"; // NEW — step 3e
 import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
 import CreateWorkspaceModal from "./CreateWorkspaceModal";
@@ -30,7 +31,18 @@ function hashBatchColor(batchId) {
 }
 
 export default function ChatSidebar({ collapsed, onToggle }) {
-  const { chats, batches, workspaces, sessionId, switchChat, createNewChat, renameChat, deleteChat, linkChats } = useSession();
+  const { chats, batches, workspaces } = useSession();
+  // NEW — step 3e: these five used to come from useSession() and wrote
+  // into one shared global sessionId/messages. ChatSidebar is global
+  // (item #6, kept that way on purpose) and lists chats belonging to
+  // many different workspaces, so it needs the key-agnostic dock hook —
+  // each call resolves its own dock slot from the chatId involved.
+  const { switchChat, createNewChat, renameChat, deleteChat, linkChats } = useWorkspaceDockActions();
+  // NEW — step 3e: replaces the old `sessionId === chat.id` highlight.
+  // There's no longer one shared "the active chat" once different docks
+  // can each be showing a different chat at once — see this hook's own
+  // comment in WorkspaceDockContext.jsx.
+  const activeChatId = useLastActiveChatId();
   const [editingId, setEditingId] = useState(null);
   const [editTitle, setEditTitle] = useState("");
   const [linkingId, setLinkingId] = useState(null);
@@ -127,7 +139,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
       <div
         key={chat.id}
         className={`group px-3 py-2 border-b border-[var(--neutral-900)] cursor-pointer ${indent ? "pl-6" : ""} ${
-          chat.id === sessionId ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
+          chat.id === activeChatId ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
         }`}
         style={accentColor ? { borderLeft: `2px solid ${accentColor}` } : undefined}
         onClick={() => editingId !== chat.id && switchChat(chat.id)}

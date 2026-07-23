@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useSession } from "../../context/SessionContext";
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
+import { useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   FlaskConical, Users, ClipboardList, ShieldAlert, History,
@@ -140,9 +141,16 @@ function pushRunHistory(wsId, entry) {
 export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
   const {
     workspaces, fetchWorkspaces, promoteWorkspace,
-    openScopedSubChat, switchChat, fetchSimulationResults,
+    openScopedSubChat, fetchSimulationResults,
     fetchRoles, updateRolePrompt, setRolePinned,
   } = useSession();
+  // NEW — step 3e: switchChat now resolves the dock for whichever
+  // workspace `chatId` actually belongs to (here, always `activeWs`,
+  // since that's the only workspace WorkspaceChatPanel below is showing)
+  // instead of writing into one shared SessionContext sessionId that the
+  // embedded WorkspaceChatPanel (already dock-driven since step 3d) never
+  // read from anyway.
+  const { switchChat } = useWorkspaceDockActions();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("run");
   const [promoting, setPromoting] = useState(false);

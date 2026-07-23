@@ -5,6 +5,7 @@ import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
 import ConfirmDialog from "../ConfirmDialog";   // NEW — §2 fix: same delete affordance as Notebooks' Sources tab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2b: embedded chat + WorkingPanel dock, same as Notebooks
+import { useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
@@ -71,7 +72,13 @@ const PROMOTE_LABELS = {
 };
 
 export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
-  const { workspaces, fetchWorkspaces, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, switchChat, fetchPanelContent, savePanelContent } = useSession();
+  const { workspaces, fetchWorkspaces, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
+  // NEW — step 3e: switchChat now resolves the dock for whichever
+  // workspace `chatId` belongs to (here, always `activeWs`, the only
+  // workspace WorkspaceChatPanel below is showing) instead of writing
+  // into one shared SessionContext sessionId the embedded panel (already
+  // dock-driven since step 3d) never read from anyway.
+  const { switchChat } = useWorkspaceDockActions();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
   // NEW — §8 fix: promote-to-Plan busy/error state, same shape as
