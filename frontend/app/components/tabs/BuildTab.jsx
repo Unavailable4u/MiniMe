@@ -4,6 +4,7 @@ import { useSession, authHeaders } from "../../context/SessionContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
+import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
 import { Layers, Loader2, ArrowUpRight, ChevronRight, MessageSquare, Plus } from "lucide-react";
 // Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
@@ -508,7 +509,11 @@ export default function BuildTab({ onPromoted }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.
-  const { workspaces, fetchWorkspaces, promoteWorkspace, API_URL } = useSession();
+  const { workspaces, fetchWorkspaces, promoteWorkspace, API_URL, chats } = useSession();
+  // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
+  // pattern as ResearchTab/PlanTab's C1.
+  const { switchChat } = useWorkspaceDockActions();
+  const activeChatId = useLastActiveChatId();
 
   // Build-stage workspaces only -- the "picked" list for this tab, same
   // shape as NotebooksTab's `notebooks` / ResearchTab's `researchProjects`.
@@ -544,6 +549,12 @@ export default function BuildTab({ onPromoted }) {
       localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
       return !prev;
     });
+  }
+  // NEW — item #11 / C2: same "switch + expand, no tab jump" helper as
+  // ResearchTab/PlanTab's openInDock.
+  async function openInDock(chatId) {
+    await switchChat(chatId);
+    if (chatDockCollapsed) toggleChatDock();
   }
 
   // Restore last-selected build project on mount (same pattern as
@@ -653,18 +664,44 @@ export default function BuildTab({ onPromoted }) {
           </button>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {buildProjects.map((ws) => (
-            <button
-              key={ws.id}
-              onClick={() => setSelectedWsId(ws.id)}
-              className={`w-full flex items-center justify-between gap-1 px-3 py-2 text-left border-b border-[var(--neutral-900)] ${
-                ws.id === selectedWsId ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
-              }`}
-            >
-              <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
-              {ws.id === selectedWsId && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
-            </button>
-          ))}
+          {buildProjects.map((ws) => {
+            // NEW — item #11 / C2: nested chat list, same pattern as
+            // ResearchTab/PlanTab's C1 — "expand" just means "is the
+            // selected project", no separate toggle state needed since
+            // this tab already has a single-selection model.
+            const isSelected = ws.id === selectedWsId;
+            const memberChats = isSelected ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+            return (
+              <div key={ws.id} className="border-b border-[var(--neutral-900)]">
+                <button
+                  onClick={() => setSelectedWsId(ws.id)}
+                  className={`w-full flex items-center justify-between gap-1 px-3 py-2 text-left ${
+                    isSelected ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
+                  }`}
+                >
+                  <span className="text-xs text-[var(--neutral-200)] truncate">
+                    {ws.name}
+                    <span className="text-[var(--neutral-600)]"> · {ws.chat_ids.length}</span>
+                  </span>
+                  {isSelected && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+                </button>
+                {memberChats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    onClick={(e) => { e.stopPropagation(); openInDock(chat.id); }}
+                    className={`w-full flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] truncate ${
+                      chat.id === activeChatId
+                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                    }`}
+                  >
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
           {buildProjects.length === 0 && (
             <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
               No build-stage projects yet — create one above, or promote a project to Build from the Plan tab.

@@ -2,10 +2,10 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
-  Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus,
+  Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
 } from "lucide-react";
 import { useSession, authHeaders } from "../../context/SessionContext";
-import { useWorkspaceDock } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock
+import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock; useWorkspaceDockActions/useLastActiveChatId added for item #11 / C2
 import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
 import WorkspaceDataBubble from "../../components/WorkspaceDataBubble";
@@ -36,7 +36,11 @@ const SUB_TABS = [
 ];
 
 export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
-  const { workspaces, fetchWorkspaces } = useSession();
+  const { workspaces, fetchWorkspaces, chats } = useSession();
+  // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
+  // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.
+  const { switchChat } = useWorkspaceDockActions();
+  const activeChatId = useLastActiveChatId();
   const [selectedWsId, setSelectedWsId] = useState(null);
   const [activeSubTab, setActiveSubTab] = useState("voice"); // voice is the only fully-built sub-tab today
   const [dockCollapsed, setDockCollapsed] = useState(true); // §2.3: default collapsed, unlike Test
@@ -81,6 +85,14 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
       return !prev;
     });
   }
+  // NEW — item #11 / C2: same "switch + expand, no tab jump" helper as
+  // ResearchTab/PlanTab/BuildTab/TestTab's openInDock. Note GrowthTab's
+  // dock defaults collapsed (§2.3), unlike the others, so this still
+  // expands it on demand the same way.
+  async function openInDock(chatId) {
+    await switchChat(chatId);
+    if (dockCollapsed) toggleDock();
+  }
 
   return (
     <div className="flex h-full min-h-0">
@@ -106,19 +118,44 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
               promote one from Test to see it here.
             </div>
           )}
-          {growthWorkspaces.map((w) => (
-            <button
-              key={w.id}
-              onClick={() => selectWorkspace(w.id)}
-              className={`w-full text-left px-3 py-2 text-sm truncate transition-colors ${
-                selectedWsId === w.id
-                  ? "bg-[var(--accent)] text-[var(--accent-text)]"
-                  : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
-              }`}
-            >
-              {w.name}
-            </button>
-          ))}
+          {growthWorkspaces.map((w) => {
+            // NEW — item #11 / C2: nested chat list, same pattern as
+            // ResearchTab/PlanTab/BuildTab/TestTab's C1/C2 — "expand"
+            // just means "is the selected workspace", no separate
+            // toggle state needed since this tab already has a
+            // single-selection model.
+            const isSelected = w.id === selectedWsId;
+            const memberChats = isSelected ? chats.filter((c) => w.chat_ids.includes(c.id)) : [];
+            return (
+              <div key={w.id}>
+                <button
+                  onClick={() => selectWorkspace(w.id)}
+                  className={`w-full text-left px-3 py-2 text-sm truncate transition-colors ${
+                    isSelected
+                      ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                      : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+                  }`}
+                >
+                  {w.name}
+                  <span className={isSelected ? "text-[var(--accent-text)]/70" : "text-[var(--neutral-600)]"}> · {w.chat_ids.length}</span>
+                </button>
+                {memberChats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    onClick={(e) => { e.stopPropagation(); openInDock(chat.id); }}
+                    className={`w-full flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] truncate ${
+                      chat.id === activeChatId
+                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                    }`}
+                  >
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate">{chat.title}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </div>
       </aside>
 
