@@ -1458,38 +1458,6 @@ async function openScopedSubChat(wsId, taskText) {
     return chat.id;
   }
 
-  async function renameChat(chatId, title) {
-    await fetch(`${API_URL}/api/chats/${chatId}/rename`, {
-      method: "PATCH",
-      headers: await authHeaders({ json: true }),
-      body: JSON.stringify({ title }),
-    });
-    await refreshChatList();
-  }
-
-  async function deleteChat(chatId) {
-    await fetch(`${API_URL}/api/chats/${chatId}`, {
-      method: "DELETE",
-      headers: await authHeaders(),
-    });
-    if (chatId === sessionId) {
-      const remaining = chats.filter((c) => c.id !== chatId);
-      if (remaining.length > 0) await switchChat(remaining[0].id);
-      else await createNewChat();
-    } else {
-      await refreshChatList();
-    }
-  }
-
-  async function linkChats(chatId, linkedChatIds) {
-    await fetch(`${API_URL}/api/chats/${chatId}/links`, {
-      method: "PATCH",
-      headers: await authHeaders({ json: true }),
-      body: JSON.stringify({ linked_chat_ids: linkedChatIds }),
-    });
-    await refreshChatList();
-  }
-
   async function persistMessage(message) {
     // Fire-and-forget-ish: don't block the UI on this, but don't swallow
     // errors silently either — a failed save here is exactly the "lost
@@ -1812,7 +1780,7 @@ async function openScopedSubChat(wsId, taskText) {
   const value = {
   sessionId, API_URL,
   messages, loading,
-  chats, chatsLoading, switchChat, createNewChat, renameChat, deleteChat, linkChats,
+  chats, chatsLoading,
   refreshChatList, getWorkspaceIdForChat,   // NEW — step 3e prereq: threaded into WorkspaceDockProvider as props
   batches, fetchBatches,
   createBatch, estimateBatch,
