@@ -10,6 +10,7 @@ import MermaidDiagram from "../MermaidDiagram";
 import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: was already built, unused here
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
+import { useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   NotebookText, Plus, MessageSquareText, FileText, GitBranch, Network,
@@ -931,8 +932,16 @@ export default function NotebooksTab({ onPromoted }) {
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
      fetchPanelContent, savePanelContent,
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
-    openScopedSubChat, createNewChat, addWorkspaceChat, switchChat,
+    openScopedSubChat, addWorkspaceChat,
   } = useSession();
+  // NEW — step 3e: switchChat/createNewChat now resolve the dock for
+  // whichever workspace a chat belongs to, instead of writing into one
+  // shared SessionContext sessionId. This tab's own <WorkspaceChatPanel>
+  // calls below are also updated (in this same patch) to pass
+  // workspaceId={selected?.id} — previously they passed neither prop, so
+  // the embedded panel was still reading legacy SessionContext state;
+  // left as-is, this cutover would have made the panel go blank.
+  const { switchChat, createNewChat } = useWorkspaceDockActions();
 
   // NEW — §8: Notebooks only ever shows note-stage workspaces now — once
   // promoted, a workspace moves to the Research tab instead of appearing
@@ -1321,14 +1330,14 @@ export default function NotebooksTab({ onPromoted }) {
 
       {/* Desktop dock — side-by-side, lg+. */}
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} />
       </div>
 
       {/* Below lg — full-screen overlay instead of a side dock, so this
           tab never depends on the standalone Chat tab, at any width. */}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} />
         </div>
       )}
       {chatDockCollapsed && (

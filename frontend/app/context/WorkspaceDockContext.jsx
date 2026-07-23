@@ -15,6 +15,12 @@
 // why they needed refreshChatList/getWorkspaceIdForChat/getChats threaded
 // in as props rather than an import from SessionContext.
 //
+// ALSO in this pass: a small `lastActiveChatId` primitive (see its own
+// comment further down), added because ChatSidebar's row highlight has
+// no single dock to read a "the active chat" sessionId from once real
+// consumers start passing distinct workspaceIds into switchChat's per-
+// chat key resolution.
+//
 // Still NOT done: 3d (rewire WorkspaceChatPanel — landed separately,
 // dual-mode) and 3e (rewire the remaining 8 consumers, one at a time).
 // SessionContext.jsx is UNTOUCHED by this patch — it keeps its own,
@@ -162,6 +168,32 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // dock key -> { channel, channelName, handler } for the pusher
     // subscription currently bound for that key, if any.
     const channelBindings = new Map();
+
+    // NEW — step 3e: a tiny, dock-key-agnostic external store for "which
+    // chat did the user most recently switch to, anywhere in the app."
+    // Separate from the per-key `states` map above on purpose: once
+    // switchChat/createNewChat write into whichever per-workspace dock a
+    // chat belongs to (rather than one shared SessionContext sessionId),
+    // there's no longer a single dock that's "the" active one — two docks
+    // can each correctly be showing their own chat at once. ChatSidebar's
+    // row highlight still needs *some* single answer to "which row looks
+    // selected", though, and this is the least surprising one: whichever
+    // chat most recently was the target of switchChat/createNewChat, full
+    // stop, independent of which dock it landed in. Kept as its own
+    // useSyncExternalStore-compatible primitive rather than folding it
+    // into `states` under a magic key, so it can't collide with a real
+    // workspace/chat id.
+    let lastActiveChatId = null;
+    const lastActiveChatListeners = new Set();
+    const getLastActiveChatId = () => lastActiveChatId;
+    const setLastActiveChatId = (chatId) => {
+      lastActiveChatId = chatId;
+      lastActiveChatListeners.forEach((cb) => cb());
+    };
+    const subscribeLastActiveChatId = (callback) => {
+      lastActiveChatListeners.add(callback);
+      return () => lastActiveChatListeners.delete(callback);
+    };
 
     const ensure = (key) => {
       if (!states.has(key)) states.set(key, makeInitialDockState());
@@ -599,6 +631,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         resetLiveRunState(key);
       }
       localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
+      setLastActiveChatId(chatId);
       if (!skipListReload) await refreshChatList?.();
       return chat;
     };
@@ -616,6 +649,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       const key = normalizeDockKey(getWorkspaceIdForChat?.(chat.id) ?? null, chat.id);
       if (key) setState(key, { sessionId: chat.id, messages: [] });
       localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
+      setLastActiveChatId(chat.id);
       await refreshChatList?.();
       return chat.id;
     };
@@ -656,6 +690,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       getState, subscribe, setState, remove,
       persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
       switchChat, createNewChat, renameChat, deleteChat, linkChats,
+      getLastActiveChatId, setLastActiveChatId, subscribeLastActiveChatId,
     };
   }
 
@@ -757,4 +792,27 @@ export function useWorkspaceDockActions() {
   }
   const { switchChat, createNewChat, renameChat, deleteChat, linkChats } = store;
   return { switchChat, createNewChat, renameChat, deleteChat, linkChats };
+}
+
+/**
+ * useLastActiveChatId()
+ *
+ * Step 3e. Returns the id of whichever chat was most recently the target
+ * of switchChat/createNewChat, anywhere in the app — see the store-level
+ * comment next to `lastActiveChatId` for why this exists as its own
+ * single value instead of reading any one dock's sessionId. Used by
+ * ChatSidebar to decide which row looks selected, now that "the" active
+ * chat isn't a single per-dock concept once several docks can be showing
+ * different chats at once.
+ */
+export function useLastActiveChatId() {
+  const store = useContext(WorkspaceDockStoreContext);
+  if (!store) {
+    throw new Error("useLastActiveChatId must be used within a WorkspaceDockProvider");
+  }
+  return useSyncExternalStore(
+    store.subscribeLastActiveChatId,
+    store.getLastActiveChatId,
+    store.getLastActiveChatId
+  );
 }

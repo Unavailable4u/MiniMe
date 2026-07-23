@@ -6,6 +6,7 @@ import WireframePreview from "../WireframePreview";
 import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
+import { useWorkspaceDock, useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
 import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
 import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
@@ -149,9 +150,15 @@ function unfenceMermaid(text) {
 }
 
 export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
-  const { workspaces, fetchWorkspaces, chats, promoteWorkspace, sessionId, sendTask, openScopedSubChat, switchChat,
+  const { workspaces, fetchWorkspaces, chats, promoteWorkspace, openScopedSubChat,
     fetchPanelContent, savePanelContent,
     fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
+  // NEW — step 3e: switchChat now resolves the dock for whichever
+  // workspace `chatId` belongs to (here, always `activeWs`) instead of
+  // writing into one shared SessionContext sessionId that the embedded
+  // WorkspaceChatPanel (already dock-driven since step 3d) never read
+  // from anyway.
+  const { switchChat } = useWorkspaceDockActions();
 
   // PARITY FIX — Plan only shows plan-stage workspaces now, same as every
   // other stage tab; a research project promoted from Research lands
@@ -224,6 +231,13 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   }, [planProjects, activeWsId, restoredSelection]);
 
   const activeWs = planProjects.find((w) => w.id === activeWsId) || null;
+
+  // NEW — step 3e: WireframesPanel's "re-send edit into whichever chat is
+  // currently open" only makes sense scoped to activeWs's own dock now —
+  // WorkspaceChatPanel below is already reading/writing that same dock
+  // (step 3d), so this keeps both in sync instead of one reading the
+  // dock and the other reading a legacy sessionId nothing updates anymore.
+  const dock = useWorkspaceDock(activeWs?.id);
 
   // FIX — sub-tabs were a ternary chain (conditional render), which
   // unmounts whichever sub-tab you leave and destroys its local state
@@ -422,8 +436,8 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
                     workspaceId={activeWs.id}
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
-                    sessionId={sessionId}
-                    sendTask={sendTask}
+                    sessionId={dock.state.sessionId}
+                    sendTask={dock.sendTask}
                   />
                 )}
                 {t.id === "blueprint" && (
