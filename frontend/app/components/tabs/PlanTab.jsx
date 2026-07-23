@@ -153,11 +153,14 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, openScopedSubChat,
     fetchPanelContent, savePanelContent,
     fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
-  // NEW — step 3e: switchChat now resolves the dock for whichever
-  // workspace `chatId` belongs to (here, always `activeWs`) instead of
-  // writing into one shared SessionContext sessionId that the embedded
-  // WorkspaceChatPanel (already dock-driven since step 3d) never read
-  // from anyway.
+  // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
+  // NOT actually dock-driven despite the old comment here claiming so —
+  // it had no workspaceId prop, so it read messages/sessionId off
+  // useSession() (legacy/global) while switchChat here (dock-based) wrote
+  // into a dock slot the visible panel never read. Fixed below by passing
+  // workspaceId={activeWs?.id} to the panel (now the same key switchChat
+  // already resolves to, and the same key `dock` below already uses for
+  // WireframesPanel).
   const { switchChat } = useWorkspaceDockActions();
 
   // PARITY FIX — Plan only shows plan-stage workspaces now, same as every
@@ -462,13 +465,16 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
       </div>
 
       {/* PARITY FIX — desktop dock, side-by-side, lg+, same as
-          Notebooks/Research. */}
+          Notebooks/Research. Step 3e follow-up fix: workspaceId prop
+          added below so this actually resolves the ws:${activeWs.id}
+          dock slot (previously bare, silently left on the legacy global
+          sessionId — same gap Research/Build/Test all had). */}
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} />
       </div>
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} />
         </div>
       )}
       {chatDockCollapsed && (

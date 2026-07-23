@@ -73,11 +73,13 @@ const PROMOTE_LABELS = {
 
 export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
   const { workspaces, fetchWorkspaces, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
-  // NEW — step 3e: switchChat now resolves the dock for whichever
-  // workspace `chatId` belongs to (here, always `activeWs`, the only
-  // workspace WorkspaceChatPanel below is showing) instead of writing
-  // into one shared SessionContext sessionId the embedded panel (already
-  // dock-driven since step 3d) never read from anyway.
+  // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
+  // NOT actually dock-driven despite the old comment here claiming so —
+  // it had no workspaceId prop, so it read messages/sessionId off
+  // useSession() (legacy/global) while switchChat here (dock-based) wrote
+  // into a dock slot the visible panel never read. Fixed below by passing
+  // workspaceId={activeWs?.id} to the panel (now the same key switchChat
+  // already resolves to).
   const { switchChat } = useWorkspaceDockActions();
   const [activeWsId, setActiveWsId] = useState(null);
   const [subTab, setSubTab] = useState("sources");
@@ -286,17 +288,20 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
         </div>
       </div>
 
-      {/* NEW — §6.2b: embedded chat + WorkingPanel dock, scoped to whatever
-          chat is currently active in SessionContext — same dock Notebooks
-          uses, own independent collapse state/localStorage key so the two
-          tabs' dock visibility don't interfere with each other. Hidden
-          below lg, matching Notebooks' and WorkingPanel's own breakpoint. */}
+      {/* NEW — §6.2b: embedded chat + WorkingPanel dock, scoped to this
+          tab's own activeWs (step 3e follow-up fix: workspaceId prop
+          added below so this actually resolves the ws:${activeWs.id}
+          dock slot, matching Build/Notebooks/Growth — previously bare,
+          which silently left it on the legacy global sessionId). Own
+          independent collapse state/localStorage key so the two tabs'
+          dock visibility don't interfere with each other. Hidden below
+          lg, matching Notebooks' and WorkingPanel's own breakpoint. */}
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} />
       </div>
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} />
         </div>
       )}
       {chatDockCollapsed && (
