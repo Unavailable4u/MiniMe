@@ -554,7 +554,7 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
                 onClick={() => setSubTab(t.id)}
                 className={`flex items-center gap-1.5 text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap ${
                   subTab === t.id
-                    ? "bg-[var(--cyber-amber)] text-black font-medium"
+                    ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                     : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
                 }`}
               >
@@ -1033,7 +1033,7 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggle
             onClick={() => setView(v.id)}
             className={`text-xs rounded px-2.5 py-1 ${
               view === v.id
-                ? "bg-[var(--cyber-amber)] text-black font-medium"
+                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                 : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
             }`}
           >

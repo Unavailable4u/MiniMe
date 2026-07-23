@@ -438,7 +438,7 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
                 onClick={() => setSubTab(t.id)}
                 className={`flex items-center gap-1.5 text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap ${
                   subTab === t.id
-                    ? "bg-[var(--cyber-violet)] text-black font-medium"
+                    ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                     : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
                 }`}
               >
