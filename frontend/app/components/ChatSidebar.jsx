@@ -356,8 +356,17 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 // This only ever opens for unbatched chats — the Link2 button that opens
 // it is already hidden on batched rows (see renderChatRow above), so
 // there's no "chat already in a batch" case to special-case here.
+//
+// SessionContext dead-code prep: linkChats here now comes from
+// useWorkspaceDockActions() instead of useSession() — found this was the
+// one live caller still on the legacy version (createBatch/estimateBatch
+// stay on useSession(), they're genuinely app-wide, not chat-lifecycle).
+// The dock's linkChats is a functionally identical passthrough (same
+// PATCH /api/chats/:id/links call + refreshChatList()), so this is a
+// pure swap, not a behavior change.
 function LinkChatsModal({ chatId, allChats, onClose }) {
-  const { linkChats, createBatch, estimateBatch } = useSession();   // CHANGED
+  const { createBatch, estimateBatch } = useSession();
+  const { linkChats } = useWorkspaceDockActions();
   const current = allChats.find((c) => c.id === chatId);
   const [selected, setSelected] = useState(new Set(current?.linked_chat_ids || []));
   const [estimate, setEstimate] = useState(null);   // NEW — §9.2
