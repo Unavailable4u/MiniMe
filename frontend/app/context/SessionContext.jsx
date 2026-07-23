@@ -646,11 +646,18 @@ async function deleteWorkspace(wsId) {
 // rejected promote -- wrong stage order, no edit access -- is
 // something the calling button needs to surface, same reasoning already
 // used for the Part 8.9 membership functions below.
-async function promoteWorkspace(wsId, toStage = null) {
+//
+// NEW — §2.6 step 4: mode is "complete" (default, unchanged behavior —
+// workspace leaves the old tab) or "partial" (workspace becomes active
+// in to_stage's tab while staying active in every tab it already was).
+// Just threads the choice through to the backend, which already
+// supports both (see chat_workspace.promote()) — no other client-side
+// logic needed here.
+async function promoteWorkspace(wsId, toStage = null, mode = "complete") {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/promote`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
-    body: JSON.stringify({ to_stage: toStage }),
+    body: JSON.stringify({ to_stage: toStage, mode }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

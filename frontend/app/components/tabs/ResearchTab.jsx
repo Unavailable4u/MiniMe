@@ -91,6 +91,10 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [promoteTargetStage, setPromoteTargetStage] = useState("plan");
+  // NEW — §2.6 step 4: "complete" (default — leaves this tab) vs
+  // "partial" (stays active here too, per §2.1/§2.2). Same toggle as
+  // NotebooksTab's.
+  const [promoteMode, setPromoteMode] = useState("complete");
   // NEW — §6.2b: right-hand chat dock collapse state, restored from
   // localStorage on mount — same pattern as NotebooksTab's chatDockCollapsed.
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
@@ -148,13 +152,14 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
   // NotebooksTab and TasksTab already use — AppShell switches tabs and
   // pre-selects it there via PlanTab's own initialWorkspaceId prop
   // (added alongside this fix, same shape as ResearchTab's own).
-  async function handlePromote(wsId, toStage = promoteTargetStage) {
+  async function handlePromote(wsId, toStage = promoteTargetStage, mode = promoteMode) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      await promoteWorkspace(wsId, toStage);
+      await promoteWorkspace(wsId, toStage, mode);
       await fetchWorkspaces();
       onPromoted?.(toStage, wsId);
+      setPromoteMode("complete");
     } catch (err) {
       setPromoteError(err.message);
     } finally {
@@ -201,26 +206,77 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
           <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--neutral-800)]">
             <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
             <div className="flex items-center gap-2 shrink-0">
-              <label className="sr-only" htmlFor="research-promote-target">Promote to</label>
-              <select
-                id="research-promote-target"
-                value={promoteTargetStage}
-                onChange={(e) => setPromoteTargetStage(e.target.value)}
-                disabled={promoting}
-                className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
-              >
-                {PROMOTE_TARGETS.map((stage) => (
-                  <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
-                ))}
-              </select>
-              <button
-                onClick={() => handlePromote(activeWs.id)}
-                disabled={promoting}
-                className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
-              >
-                {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-                Promote to {PROMOTE_LABELS[promoteTargetStage]} →
-              </button>
+              {(() => {
+                // NEW — §2.2: exclude stages already active for this
+                // workspace — same rule as NotebooksTab.
+                const activeHere = activeWs.active_stages || [activeWs.stage];
+                const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
+                const targetStage = availableTargets.includes(promoteTargetStage)
+                  ? promoteTargetStage
+                  : availableTargets[0];
+                if (!availableTargets.length) return null;
+                return (
+                  <>
+                    <label className="sr-only" htmlFor="research-promote-target">Promote to</label>
+                    <select
+                      id="research-promote-target"
+                      value={targetStage}
+                      onChange={(e) => setPromoteTargetStage(e.target.value)}
+                      disabled={promoting}
+                      className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+                    >
+                      {availableTargets.map((stage) => (
+                        <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+                      ))}
+                    </select>
+                    {/* NEW — §2.6 step 4: complete/partial toggle. */}
+                    <div
+                      role="radiogroup"
+                      aria-label="Promote mode"
+                      className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
+                    >
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={promoteMode === "complete"}
+                        onClick={() => setPromoteMode("complete")}
+                        disabled={promoting}
+                        title="Move the project fully into the target stage"
+                        className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+                          promoteMode === "complete"
+                            ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                            : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+                        }`}
+                      >
+                        Complete
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={promoteMode === "partial"}
+                        onClick={() => setPromoteMode("partial")}
+                        disabled={promoting}
+                        title="Keep the project active here too"
+                        className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+                          promoteMode === "partial"
+                            ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                            : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+                        }`}
+                      >
+                        Partial
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => handlePromote(activeWs.id, targetStage)}
+                      disabled={promoting}
+                      className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+                    >
+                      {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+                      {promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[targetStage]} →
+                    </button>
+                  </>
+                );
+              })()}
             </div>
           </div>
         )}
