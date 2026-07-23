@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useContext, useState, useRef, useEffect } from "react";
+import { createContext, useContext, useState, useRef, useEffect, useCallback } from "react";
 import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "./AuthContext";   // NEW — Part 8.9: notification bell's per-user Pusher channel
@@ -188,6 +188,66 @@ export function SessionProvider({ children }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // NEW — 3e usage-event ownership (architecture doc §2.3's three
+  // options; going with option 1): extracted out of the sessionId-keyed
+  // bind_global handler below so WorkspaceDockContext's per-dock
+  // handleDockEvent can invoke this exact same logic via a threaded-in
+  // callback (`onUsageEvent`, passed through WorkspaceDockBridge in
+  // AppShell.jsx same as refreshChatList/getWorkspaceIdForChat/
+  // fetchWorkspaces already are), rather than duplicating it or leaving
+  // usage_update/quota_alert permanently unhandled once this
+  // subscription is deleted (see WorkspaceDockContext.jsx's file-header
+  // comment on the open question this resolves). Pure extraction — the
+  // branch bodies are unchanged, only the call site moved.
+  const handleUsageEvent = useCallback((eventType, payload) => {
+    if (eventType === "usage_update") {
+      const statKey = `${payload?.provider}:${payload?.key_id}`;
+      setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
+
+      // Part 17: append to this key's own history (capped so a very
+      // long session doesn't grow this unbounded).
+      setUsageHistory((prev) => {
+        const series = prev[statKey] || [];
+        const next = [...series, { t: Date.now(), tokens: payload?.tokens_used_today ?? 0 }];
+        return { ...prev, [statKey]: next.length > 300 ? next.slice(-300) : next };
+      });
+
+      // Part 17: maintain a per-provider running total (summed across
+      // every key seen so far for that provider) and append one row to
+      // a combined, time-aligned series every update, forward-filling
+      // every OTHER provider's last known value so the combined chart
+      // has a real value for every provider at every timestamp, not
+      // just the one that happened to fire this particular event.
+      const provider = payload?.provider;
+      if (provider) {
+        // Recompute this provider's total from every key of theirs
+        // we've seen so far, rather than a running += — a += would
+        // double count if this same key's usage_update fires again
+        // with a lower number for any reason (shouldn't happen, but
+        // recomputing from source is one fewer thing to trust blindly).
+        setUsageStats((prevStats) => {
+          const total = Object.entries(prevStats)
+            .filter(([k]) => k.startsWith(`${provider}:`))
+            .reduce((sum, [, v]) => sum + (v.tokens_used_today || 0), 0)
+            + (payload?.tokens_used_today || 0); // this event's own key may not be in prevStats yet
+          latestByProviderRef.current = { ...latestByProviderRef.current, [provider]: total };
+          return prevStats; // this call is read-only against usageStats — the actual write already happened above
+        });
+        setCombinedUsageHistory((prev) => {
+          const row = { t: Date.now(), ...latestByProviderRef.current };
+          const next = [...prev, row];
+          return next.length > 300 ? next.slice(-300) : next;
+        });
+      }
+      return;
+    }
+    if (eventType === "quota_alert") {
+      console.warn("quota_alert:", payload);
+      return;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // --- Pusher subscription: identical to today's page.js effect, just
   // living up here instead of inside the page that used to render
   // everything. This is the fix described in §1 — this effect now only
@@ -212,44 +272,7 @@ export function SessionProvider({ children }) {
         return;
       }
       if (eventType === "usage_update") {
-        const statKey = `${payload?.provider}:${payload?.key_id}`;
-        setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
-
-        // NEW — Part 17: append to this key's own history (capped so a
-        // very long session doesn't grow this unbounded).
-        setUsageHistory((prev) => {
-          const series = prev[statKey] || [];
-          const next = [...series, { t: Date.now(), tokens: payload?.tokens_used_today ?? 0 }];
-          return { ...prev, [statKey]: next.length > 300 ? next.slice(-300) : next };
-        });
-
-        // NEW — Part 17: maintain a per-provider running total (summed
-        // across every key seen so far for that provider) and append one
-        // row to a combined, time-aligned series every update, forward-
-        // filling every OTHER provider's last known value so the combined
-        // chart has a real value for every provider at every timestamp,
-        // not just the one that happened to fire this particular event.
-        const provider = payload?.provider;
-        if (provider) {
-          // Recompute this provider's total from every key of theirs
-          // we've seen so far, rather than a running += — a += would
-          // double count if this same key's usage_update fires again
-          // with a lower number for any reason (shouldn't happen, but
-          // recomputing from source is one fewer thing to trust blindly).
-          setUsageStats((prevStats) => {
-            const total = Object.entries(prevStats)
-              .filter(([k]) => k.startsWith(`${provider}:`))
-              .reduce((sum, [, v]) => sum + (v.tokens_used_today || 0), 0)
-              + (payload?.tokens_used_today || 0); // this event's own key may not be in prevStats yet
-            latestByProviderRef.current = { ...latestByProviderRef.current, [provider]: total };
-            return prevStats; // this call is read-only against usageStats — the actual write already happened above
-          });
-          setCombinedUsageHistory((prev) => {
-            const row = { t: Date.now(), ...latestByProviderRef.current };
-            const next = [...prev, row];
-            return next.length > 300 ? next.slice(-300) : next;
-          });
-        }
+        handleUsageEvent(eventType, payload);
         return;
       }
       if (eventType === "dispatch_event") {
@@ -276,7 +299,7 @@ export function SessionProvider({ children }) {
         return;
       }
       if (eventType === "quota_alert") {
-        console.warn("quota_alert:", payload);
+        handleUsageEvent(eventType, payload);
         return;
       }
       if (eventType === "agent_requested_role") {
@@ -1795,6 +1818,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchWorkspaceVotes, castWorkspaceVote,
   setWorkspaceAttribution, setMemberAttributionGrant,
   liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
+  handleUsageEvent,   // NEW — 3e: threaded into WorkspaceDockProvider as onUsageEvent (option 1, usage-event ownership)
   macroLoopDecisions,
   roleRequests,
   mode, setMode,
