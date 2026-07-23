@@ -2,13 +2,14 @@
 import { useState, useEffect } from "react";   // CHANGED — add useEffect
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext"; // NEW — step 3e
-import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput, Notebook, Search, ClipboardList, Hammer, FlaskConical, TrendingUp } from "lucide-react";
+import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
 import CreateWorkspaceModal from "./CreateWorkspaceModal";
 import AttachChatToWorkspaceModal from "./AttachChatToWorkspaceModal";
 import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";
 import ManageWorkspaceModal from "./ManageWorkspaceModal";
 import ConfirmDialog from "./ConfirmDialog";
+import WorkspaceStageIcons from "./WorkspaceStageIcons"; // NEW — item #2: extracted so every stage tab can share this, not just ChatSidebar
 
 // NEW — §9.1: color-code batches so grouping is visible at a glance
 // without reading labels. Deterministic hash of the batch id → one of a
@@ -30,41 +31,10 @@ function hashBatchColor(batchId) {
   return BATCH_ACCENTS[Math.abs(hash) % BATCH_ACCENTS.length];
 }
 
-// NEW — §2.1: per-stage icon + label, so a workspace's row in the (global,
-// unfiltered — item #6/Option B) Chat sidebar shows at a glance which tabs
-// it's currently active in. Keys/order match AppShell.jsx's STAGE_TAB_MAP
-// exactly — same six promotable stages, "chat" excluded on purpose since a
-// workspace's chat-of-origin isn't a stage tracked in active_stages.
-const STAGE_ICON_MAP = {
-  note: { Icon: Notebook, label: "Notebooks" },
-  research: { Icon: Search, label: "Research" },
-  plan: { Icon: ClipboardList, label: "Plan" },
-  build: { Icon: Hammer, label: "Build" },
-  test: { Icon: FlaskConical, label: "Test" },
-  growth: { Icon: TrendingUp, label: "Growth" },
-};
-const STAGE_ORDER = ["note", "research", "plan", "build", "test", "growth"];
-
-// Small helper so both the workspace header row (below) and any future
-// caller (e.g. a promote-target list) render the same icon set the same
-// way — falls back to `[ws.stage]` for any workspace fetched before the
-// active_stages backfill lands on it client-side, same fallback pattern
-// already used in every stage tab's own filter.
-function WorkspaceStageIcons({ workspace }) {
-  const activeStages = workspace.active_stages || [workspace.stage];
-  const ordered = STAGE_ORDER.filter((s) => activeStages.includes(s));
-  if (ordered.length === 0) return null;
-  return (
-    <span className="flex items-center gap-1 mr-1.5">
-      {ordered.map((stage) => {
-        const entry = STAGE_ICON_MAP[stage];
-        if (!entry) return null;
-        const { Icon, label } = entry;
-        return <Icon key={stage} size={10} className="text-[var(--neutral-500)]" title={label} />;
-      })}
-    </span>
-  );
-}
+// item #2: STAGE_ICON_MAP/STAGE_ORDER/WorkspaceStageIcons moved to
+// ./WorkspaceStageIcons.jsx (as STAGE_THEME) so every stage tab's own
+// sidebar can reuse the exact same icon+color per stage, not just this
+// component.
 
 export default function ChatSidebar({ collapsed, onToggle }) {
   const { chats, batches, workspaces } = useSession();

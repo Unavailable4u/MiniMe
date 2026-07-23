@@ -8,9 +8,9 @@ import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock; useWorkspaceDockActions/useLastActiveChatId added for item #11 / C2
 import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
-import WorkspaceDataBubble from "../../components/WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import Markdown from "../Markdown";
+import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 
 // RESOLVED (was TODO(confirm)): design doc §2.2 "voice" — this sub-tab
 // directly reuses NotebooksTab.jsx's FactsView component instead of
@@ -35,7 +35,7 @@ const SUB_TABS = [
   { id: "analytics", label: "Analytics", icon: BarChart3 },
 ];
 
-export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
+export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { workspaces, fetchWorkspaces, chats } = useSession();
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
   // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.
@@ -52,6 +52,14 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   const growthWorkspaces = (workspaces || []).filter((w) => (w.active_stages || [w.stage]).includes("growth"));
+  const selectedGrowthWs = growthWorkspaces.find((w) => w.id === selectedWsId) || null;
+
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // workspace (if any) is selected instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(selectedGrowthWs?.id || null, selectedGrowthWs?.name);
+  }, [selectedGrowthWs?.id, selectedGrowthWs?.name, onActiveWorkspaceChange]);
 
   useEffect(() => {
     fetchWorkspaces();
@@ -100,7 +108,9 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
           (§0 of the design doc), just filtered to stage === "growth". */}
       <aside className="w-56 border-r border-[var(--neutral-800)] flex flex-col shrink-0">
         <div className="px-3 py-2 flex items-center justify-between text-xs font-medium text-[var(--neutral-500)] uppercase tracking-wide">
-          <span>Growth Workspaces</span>
+          <span className="flex items-center gap-1.5">
+            <STAGE_THEME.growth.Icon size={13} className={STAGE_THEME.growth.color} /> Growth Workspaces
+          </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
           <button
@@ -130,14 +140,17 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
               <div key={w.id}>
                 <button
                   onClick={() => selectWorkspace(w.id)}
-                  className={`w-full text-left px-3 py-2 text-sm truncate transition-colors ${
+                  className={`w-full flex items-center min-w-0 text-left px-3 py-2 text-sm transition-colors ${
                     isSelected
                       ? "bg-[var(--accent)] text-[var(--accent-text)]"
                       : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
                   }`}
                 >
-                  {w.name}
-                  <span className={isSelected ? "text-[var(--accent-text)]/70" : "text-[var(--neutral-600)]"}> · {w.chat_ids.length}</span>
+                  <WorkspaceStageIcons workspace={w} />
+                  <span className="truncate">
+                    {w.name}
+                    <span className={isSelected ? "text-[var(--accent-text)]/70" : "text-[var(--neutral-600)]"}> · {w.chat_ids.length}</span>
+                  </span>
                 </button>
                 {memberChats.map((chat) => (
                   <button
@@ -184,11 +197,6 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
         </nav>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          <WorkspaceDataBubble
-            workspaceId={selectedWsId}
-            workspaceName={(growthWorkspaces.find((w) => w.id === selectedWsId) || {}).name}
-            storageKey="minime_growth_data_bubble_collapsed"
-          />
           {!selectedWsId && (
             <div className="text-sm text-[var(--neutral-500)]">
               Select a Growth workspace on the left to get started.

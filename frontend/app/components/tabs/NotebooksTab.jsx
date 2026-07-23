@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import IngestionDropzone from "../notebooks/IngestionDropzone";
 import FlashcardFlipper from "../notebooks/FlashcardFlipper";
+import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import QuizRunner from "../notebooks/QuizRunner";
 import StudyGuideViewer from "../notebooks/StudyGuideViewer";
 import KnowledgeGraphView from "../KnowledgeGraphView";
@@ -11,7 +12,6 @@ import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: 
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
 import { useWorkspaceDockActions } from "../../context/WorkspaceDockContext"; // NEW — step 3e
-import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import {
   NotebookText, Plus, MessageSquareText, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
@@ -924,7 +924,7 @@ function NodePreviewModal({ node, onClose }) {
 
 // --- Main tab ------------------------------------------------------
 
-export default function NotebooksTab({ onPromoted }) {
+export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
    const {
      workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
      fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks,
@@ -1145,6 +1145,13 @@ export default function NotebooksTab({ onPromoted }) {
   const selected = notebooks.find((w) => w.id === selectedId);
   const ActiveIcon = SUB_TABS.find((t) => t.id === subTab)?.icon || FileText;
 
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // notebook (if any) is selected instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(selected?.id || null, selected?.name);
+  }, [selected?.id, selected?.name, onActiveWorkspaceChange]);
+
   return (
     <div className="flex h-full">
       {/* Notebook picker — this tab's own left column, distinct from the
@@ -1152,7 +1159,7 @@ export default function NotebooksTab({ onPromoted }) {
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
         <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
-            <NotebookText size={13} /> Notebooks
+            <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
           </span>
           <button onClick={() => setCreating((c) => !c)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
             <Plus size={15} />
@@ -1183,7 +1190,10 @@ export default function NotebooksTab({ onPromoted }) {
                 onClick={() => setSelectedId(ws.id)}
                 className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
               >
-                <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
+                <span className="flex items-center min-w-0">
+                  <WorkspaceStageIcons workspace={ws} />
+                  <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
+                </span>
                 {ws.id === selectedId && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
               </button>
               <button
@@ -1209,11 +1219,6 @@ export default function NotebooksTab({ onPromoted }) {
           </div>
         ) : (
           <div className="relative p-5 space-y-4 max-w-3xl">
-            <WorkspaceDataBubble
-              workspaceId={selected.id}
-              workspaceName={selected.name}
-              storageKey="minime_notebooks_data_bubble_collapsed"
-            />
             <div className="flex items-center justify-between">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
               <div className="flex items-center gap-2">

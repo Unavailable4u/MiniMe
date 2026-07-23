@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "../context/SessionContext";
-import { Database, PanelRightClose, ChevronDown, Loader2 } from "lucide-react";
+import { Database, PanelRightClose, Loader2 } from "lucide-react";
 
 function formatValue(value) {
   if (value == null || value === "") return "";
@@ -124,25 +124,27 @@ export default function WorkspaceDataBubble({
   // so the outer node just needs to anchor its own dropdown panel, not
   // the whole page. AppShell positions the trigger itself; this wrapper
   // only needs `relative` so the panel below can hang off it.
+  // CHANGED — item #1: trigger is now icon-only (no label pill) and the
+  // opened panel uses the same solid dark panel background as
+  // NotificationBell's dropdown, instead of a transparent/blurred pill —
+  // matches the bell's collapsed/expanded interaction pattern exactly.
   return (
     <div ref={containerRef} className="relative">
       <button
         type="button"
         onClick={toggle}
-        className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs shadow-lg backdrop-blur-sm transition-colors ${
+        className={`relative rounded-lg p-1.5 transition-colors ${
           collapsed
-            ? "border-[var(--neutral-800)] bg-[var(--neutral-950-a90)] text-[var(--neutral-300)] hover:text-[var(--neutral-100)]"
-            : "border-[var(--accent)] bg-[var(--neutral-950-a95)] text-[var(--accent-text)]"
+            ? "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            : "text-[var(--accent-text)]"
         }`}
+        title={workspaceName ? `${title}: ${workspaceName}` : title}
       >
-        <Database size={13} />
-        <span>{title}</span>
-        {workspaceName && <span className="max-w-[8rem] truncate text-[10px] opacity-75">{workspaceName}</span>}
-        <ChevronDown size={12} className={`transition-transform ${collapsed ? "-rotate-90" : "rotate-0"}`} />
+        <Database size={16} />
       </button>
 
       {!collapsed && (
-        <div className="absolute right-0 top-full z-30 mt-2 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-[var(--neutral-800)] bg-[var(--neutral-950)]/96 shadow-2xl backdrop-blur-sm">
+        <div className="absolute right-0 top-full z-30 mt-1 w-[min(22rem,calc(100vw-1.5rem))] rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-lg">
           <div className="flex items-center justify-between gap-2 border-b border-[var(--neutral-800)] px-3 py-2">
             <div className="min-w-0">
               <p className="text-xs font-medium text-[var(--neutral-200)]">{title}</p>

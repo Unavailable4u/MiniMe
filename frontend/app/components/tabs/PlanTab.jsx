@@ -7,8 +7,8 @@ import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
-import WorkspaceDataBubble from "../WorkspaceDataBubble";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
+import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
 import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
 import MechView from "../MechView";                           // NEW — Blueprint sub-tab
@@ -150,7 +150,7 @@ function unfenceMermaid(text) {
   return (m ? m[1] : text || "").trim();
 }
 
-export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted }) {
+export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, openScopedSubChat,
     fetchPanelContent, savePanelContent,
     fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
@@ -250,6 +250,13 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
 
   const activeWs = planProjects.find((w) => w.id === activeWsId) || null;
 
+  // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
+  // floating over this tab's own content, so this just reports which
+  // project (if any) is active instead of rendering the bubble itself.
+  useEffect(() => {
+    onActiveWorkspaceChange?.(activeWs?.id || null, activeWs?.name);
+  }, [activeWs?.id, activeWs?.name, onActiveWorkspaceChange]);
+
   // NEW — step 3e: WireframesPanel's "re-send edit into whichever chat is
   // currently open" only makes sense scoped to activeWs's own dock now —
   // WorkspaceChatPanel below is already reading/writing that same dock
@@ -292,7 +299,9 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
           "notebook"/"research project" is. No new container concept. */}
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
-          <span className="text-xs font-medium text-[var(--neutral-400)]">Plan projects</span>
+          <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+            <STAGE_THEME.plan.Icon size={13} className={STAGE_THEME.plan.color} /> Plan projects
+          </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
           <button
@@ -334,7 +343,10 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
                     onClick={() => setActiveWsId(ws.id)}
                     className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
                   >
-                    <span className="truncate">{ws.name}</span>
+                    <span className="flex items-center min-w-0">
+                      <WorkspaceStageIcons workspace={ws} />
+                      <span className="truncate">{ws.name}</span>
+                    </span>
                     {isActive && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
                   </button>
                   <button
@@ -472,11 +484,6 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          <WorkspaceDataBubble
-            workspaceId={activeWs?.id}
-            workspaceName={activeWs?.name}
-            storageKey="minime_plan_data_bubble_collapsed"
-          />
           {!activeWs ? (
             <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
           ) : (
