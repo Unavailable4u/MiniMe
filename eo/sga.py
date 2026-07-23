@@ -44,15 +44,28 @@ SGA_CHAINS = {
 
 SYSTEM_PROMPT = """You are a fast, general-purpose first responder. Try to answer the task \
 directly and quickly. If you cannot answer confidently and quickly — because it needs real \
-research, multi-step planning, or writing/editing code across files — respond with exactly \
-the single word ESCALATE and nothing else. Do not attempt a partial or guessed answer in \
-that case.
+research, multi-step planning, or writing/editing code across files — set "answer" to \
+exactly the single word ESCALATE and nothing else. Do not attempt a partial or guessed \
+answer in that case.
 Also ESCALATE — regardless of how easy the underlying content is — if the task explicitly \
 asks for something you cannot actually provide alone as a single one-shot answer: a second \
 agent's review or approval, iteration until some external party signs off, running/testing \
 the result, or any other multi-step verification process. Answering the content without \
 honoring that part of the request would be silently dropping a real requirement, which is \
-worse than escalating a task you could otherwise answer easily."""
+worse than escalating a task you could otherwise answer easily.
+
+Respond with ONLY a single JSON object, no markdown fences, no commentary before or after \
+it, in exactly this shape:
+{"answer": <string — your answer, or exactly "ESCALATE">, \
+"memorable": <true or false>, \
+"category": <one of "preference", "decision", "idea", "context", or null>}
+
+"memorable" is true only if the task or your answer establishes a durable fact worth \
+recalling later for this workspace — a stated preference, a decision that was made, an \
+idea worth keeping, or standing context (e.g. "use TypeScript for this", "the login bug is \
+in session refresh", "target this for students"). It is false for ordinary lookups, \
+one-off questions, and anything you're escalating. When "memorable" is false, set \
+"category" to null. Never set "memorable" to true when "answer" is ESCALATE."""
 
 # Deterministic pre-check, tried before any SGA call is made at all.
 # Catches the common ways someone asks for a multi-agent review/iteration
@@ -98,12 +111,64 @@ def _rotate_start():
     idx = order.index(first)
     return order[idx:] + order[:idx]
 
-def _call_one(agent_key: str, task_text: str, session_id: str = None) -> str:
+_VALID_CATEGORIES = {"preference", "decision", "idea", "context"}
+
+
+def _parse_structured_response(raw: str) -> dict:
+    """Part 5 — SGA now asks each model for a JSON object shaped like
+    {"answer", "memorable", "category"} instead of plain text (see
+    SYSTEM_PROMPT above). Models don't reliably honor "no markdown
+    fences" instructions, and a cheap/fast chain like this one won't
+    always emit valid JSON at all, so this parses defensively and
+    fails open to the old plain-text behavior rather than ever raising
+    — same discipline as _invalidate_facts_cache() and
+    fact_summarizer.extract_fact(): a malformed response degrades to
+    "not memorable," it never blocks the actual SGA answer.
+
+    Fail-open shape on any parse problem: {"answer": <raw text as-is>,
+    "memorable": False, "category": None}. This also transparently
+    covers a bare "ESCALATE" reply with no JSON wrapper at all, since
+    that raw text becomes the "answer" and the ESCALATE check downstream
+    still works unchanged.
+    """
+    text = (raw or "").strip()
+    # Strip a ```json ... ``` or ``` ... ``` fence if the model added one
+    # despite being told not to.
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {"answer": raw.strip() if raw else "", "memorable": False, "category": None}
+
+    if not isinstance(parsed, dict) or "answer" not in parsed:
+        return {"answer": raw.strip() if raw else "", "memorable": False, "category": None}
+
+    answer = parsed.get("answer")
+    if not isinstance(answer, str):
+        return {"answer": raw.strip() if raw else "", "memorable": False, "category": None}
+
+    memorable = bool(parsed.get("memorable")) and "ESCALATE" not in answer.upper()
+    category = parsed.get("category")
+    if category not in _VALID_CATEGORIES:
+        category = None
+    if not memorable:
+        category = None
+
+    return {"answer": answer.strip(), "memorable": memorable, "category": category}
+
+
+def _call_one(agent_key: str, task_text: str, session_id: str = None) -> dict:
     # Migration Part 26 §5 fix: this took session_id as a parameter but
     # never passed it into generate_text() below -- every SGA call's
     # usage/events went out unscoped (session_id=None) even mid-session,
     # same class of gap §5 found in six other agents at the eo/executor.py
     # boundary, just isolated here to the three Starter General Agents.
+    #
+    # Part 5 fix: returns {"answer", "memorable", "category"} now,
+    # not a bare string — see _parse_structured_response() above.
     #
     # Part 23 fix: SGA is the FIRST thing every task hits (before the
     # Inspector, before responder.py) and, until now, it never looked at
@@ -121,22 +186,32 @@ def _call_one(agent_key: str, task_text: str, session_id: str = None) -> str:
     if conv_context:
         user_content = f"Recent conversation:\n{conv_context}\n\nTask: {task_text}"   # NEW — Part 23 fix
 
-    return generate_text(
+    raw = generate_text(
         system_prompt=SYSTEM_PROMPT,
         user_content=user_content,   # CHANGED — Part 23 fix, was task_text
         chain=SGA_CHAINS[agent_key],
         agent_name=f"SGA ({agent_key})",
         session_id=session_id,
-    ).strip()
+    )
+    return _parse_structured_response(raw)   # CHANGED — Part 5, was a bare .strip() string
 
 def attempt(task_text: str, session_id: str = None) -> dict:
     """
-    Returns {"resolved": True, "answer": str} on a successful SGA answer,
-    or {"resolved": False} if all three stages escalate/time out, OR the
+    Returns {"resolved": True, "answer": str, "memorable": bool,
+    "category": str|None} on a successful SGA answer, or
+    {"resolved": False} if all three stages escalate/time out, OR the
     task explicitly asked for review/approval/verification/iteration that
     SGA cannot itself provide (see _requests_verification() above) — the
     caller (eo/loop_v4.py) then falls through to eo/inspector.classify()
     exactly as it does today for every task.
+
+    Part 5: "memorable"/"category" come straight from whichever SGA
+    stage resolved the task (see SYSTEM_PROMPT / _parse_structured_response()
+    above) — always present and always safe to read on a resolved result,
+    since _call_one() fails open to {"memorable": False, "category": None}
+    on any parse problem rather than raising or omitting the keys.
+    Callers that only care about "answer" (the only key this function
+    returned before Part 5) are unaffected.
     """
     if _requests_verification(task_text):
         emit_event("agent_start", session_id, agent="sga_relay",
@@ -161,10 +236,17 @@ def attempt(task_text: str, session_id: str = None) -> dict:
                 results[agent_key] = _call_one(agent_key, task_text, session_id)
             except Exception:
                 continue
-            if "ESCALATE" not in results[agent_key].upper():
+            # CHANGED — Part 5: results[agent_key] is now
+            # {"answer", "memorable", "category"}, not a bare string.
+            if "ESCALATE" not in results[agent_key]["answer"].upper():
                 emit_event("agent_done", session_id, agent="sga_relay",
                            payload={"summary": f"resolved at stage {stage} ({agent_key})"})
-                return {"resolved": True, "answer": results[agent_key]}
+                return {
+                    "resolved": True,
+                    "answer": results[agent_key]["answer"],
+                    "memorable": results[agent_key]["memorable"],
+                    "category": results[agent_key]["category"],
+                }
         elapsed = time.monotonic() - started
         if elapsed > deadline or stage == 3:
             break
@@ -182,6 +264,9 @@ if __name__ == "__main__":
     test_task = "What is 2+2?"
     result = attempt(test_task, session_id="sga_smoke_test")
     print(json.dumps(result, indent=2))
+    assert "memorable" in result and "category" in result, (
+        "Part 5: resolved SGA result should carry memorable/category"
+    )
 
     # Verification-request smoke test — should escalate with zero SGA
     # calls, regardless of how trivial the underlying content is.
