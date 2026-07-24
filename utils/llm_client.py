@@ -263,10 +263,18 @@ def _get_cloudflare_creds(account_id_env: str, token_env: str):
 
 def _call_step(client, model: str, system_prompt: str, user_content: str):
     """OpenAI-SDK-shaped call, used for groq/cerebras/github. Returns
-    (text, usage) — usage is the provider SDK's usage object (has
-    .total_tokens on all three, since they're all OpenAI-compatible
-    chat.completions responses) or None if the response didn't include
-    one for some reason."""
+    (text, usage, finish_reason) — usage is the provider SDK's usage
+    object (has .total_tokens on all three, since they're all
+    OpenAI-compatible chat.completions responses) or None if the
+    response didn't include one for some reason.
+
+    Fix C (reliability guide, §3 "Fix C", truncation handoff):
+    finish_reason is the third element of the tuple now — it's
+    "length" when the provider stopped because it hit max_tokens
+    (real, partial output exists and is worth keeping) versus "stop"
+    for a normal completion. All three OpenAI-compatible providers
+    here expose this on response.choices[0].finish_reason. Callers
+    that don't care can just ignore the third value."""
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -274,9 +282,11 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
             {"role": "user", "content": user_content},
         ],
     )
-    text = (response.choices[0].message.content or "").strip()
+    choice = response.choices[0]
+    text = (choice.message.content or "").strip()
     usage = getattr(response, "usage", None)
-    return text, usage
+    finish_reason = getattr(choice, "finish_reason", None)
+    return text, usage, finish_reason
 
 
 def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: str,
@@ -326,9 +336,19 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
         # security_scanner.py's existing hand-rolled behavior for this).
         raise _CloudflareTransientError(f"Cloudflare error: {data['errors']}")
 
-    text = (data.get("result", {}) or {}).get("response", "") or ""
-    usage = (data.get("result", {}) or {}).get("usage")  # often absent -- see module docstring
-    return text.strip(), usage
+    result = data.get("result", {}) or {}
+    text = (result.get("response", "") or "")
+    usage = result.get("usage")  # often absent -- see module docstring
+    # Fix C: Cloudflare Workers AI's REST response doesn't expose a
+    # finish_reason field the way the OpenAI-compatible providers do, so
+    # this is almost always None. Kept as a real lookup (not a hardcoded
+    # None) in case a given model/account does surface it, but don't
+    # rely on Cloudflare ever reporting "length" -- truncation handoff
+    # (below) simply won't trigger for a Cloudflare step in practice,
+    # same honest-scoping caveat as the module docstring's usage-object
+    # caveat above.
+    finish_reason = result.get("finish_reason")
+    return text.strip(), usage, finish_reason
 
 
 def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
@@ -458,6 +478,34 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
               agent_name=agent_name, domain=domain)
 
 
+_MAX_CONTINUATIONS = 2  # Fix C: cap how many times one call will chase a
+# "length" cutoff before just returning what it has. Bounded independently
+# of chain length: a chain can be up to MAX_CHAIN_STEPS (3) long for
+# *account* fallback reasons alone, so without this cap a pathologically
+# short max_tokens setting could burn the whole chain on continuations
+# and leave nothing for a genuine 429/5xx to fall back to.
+
+
+def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
+    """Fix C (reliability guide, §3 "Fix C", item 1 -- truncation
+    handoff): builds the next step's prompt when the previous step's
+    response was cut off by hitting max_tokens (finish_reason ==
+    "length"), not by an error. The partial text is real, already-paid-
+    for output -- this hands it to the next provider in the chain and
+    asks it to continue exactly where generation stopped, instead of
+    discarding it and starting over from scratch."""
+    return (
+        f"{original_user_content}\n\n"
+        "--- Partial answer already generated (cut off mid-generation, "
+        "not by you) ---\n"
+        f"{partial_text}\n\n"
+        "Continue exactly from where the partial answer above left off. "
+        "Do not repeat, rephrase, or restart any part of it, and do not "
+        "add any preamble, header, or acknowledgement -- just continue "
+        "the text seamlessly as if it were never interrupted."
+    )
+
+
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
                    session_id: str = None, tier: int = None, path: str = None,
                    domain: str = None) -> str:
@@ -498,14 +546,40 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     any change to get workspace-level attribution; only call sites that
     want domain-level attribution too need to add `domain=...`.
 
+    Fix C (reliability guide, §3 "Fix C", item 1 -- truncation handoff):
+    if a step's response comes back with finish_reason == "length" (the
+    provider stopped because it hit max_tokens, not because it errored),
+    that partial text is real output, not a failure. Rather than either
+    returning a silently-truncated answer or discarding it and retrying
+    from scratch, this walks to the next step in the chain with a
+    continuation prompt (see _continuation_prompt() above) built from
+    the partial text, and stitches the pieces together. This is capped
+    at _MAX_CONTINUATIONS additional hops so a short max_tokens setting
+    can't eat the whole fallback chain that Fix A built for account/
+    provider failures. If the chain runs out (or the cap is hit) while
+    still truncated, the accumulated partial text is returned as-is --
+    still strictly better than the pre-Fix-C behavior, which threw it
+    away on any subsequent failure.
+
     Raises RuntimeError if every step in the chain is exhausted or unusable
-    (e.g. missing API key/credentials).
+    (e.g. missing API key/credentials) AND no partial output was ever
+    produced. If at least one step produced partial (truncated) output
+    before the chain ran out, that partial text is returned instead of
+    raising -- see Fix C note above.
     """
     last_exc = None
+    accumulated_text = ""   # Fix C: partial output carried across a
+    # "length" truncation handoff. Empty string means "nothing generated
+    # yet" -- distinct from a step that legitimately returns "".
+    continuations_used = 0
 
     for i, step in enumerate(chain):
         provider = step["provider"]
         model = step["model"]
+        prompt_for_step = (
+            _continuation_prompt(user_content, accumulated_text)
+            if accumulated_text else user_content
+        )
 
         if provider == "cloudflare":
             account_id_env = step["account_id_env"]
@@ -519,10 +593,20 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             label = f"cloudflare:{model}"
             json_mode = step.get("json_mode", False)
             try:
-                text, usage = _call_cloudflare_step(creds, model, system_prompt, user_content,
-                                                      json_mode=json_mode)
+                text, usage, finish_reason = _call_cloudflare_step(
+                    creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
                 _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain)
-                return text
+                full_text = accumulated_text + text
+                is_last = i == len(chain) - 1
+                if (finish_reason == "length" and continuations_used < _MAX_CONTINUATIONS
+                        and not is_last):
+                    # Fix C: real partial output, hand it to the next step.
+                    accumulated_text = full_text
+                    continuations_used += 1
+                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                          f"continuing on next chain step...")
+                    continue
+                return full_text
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
                 _set_cooldown(provider, key_id, exc)   # Fix B
@@ -549,9 +633,21 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
 
         label = f"{provider}:{model}"
         try:
-            text, usage = _call_step(client, model, system_prompt, user_content)
+            text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
             _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain)
-            return text
+            full_text = accumulated_text + text
+            is_last = i == len(chain) - 1
+            if (finish_reason == "length" and continuations_used < _MAX_CONTINUATIONS
+                    and not is_last):
+                # Fix C: real partial output, hand it to the next step
+                # instead of returning a silently-truncated answer or
+                # discarding it on a later failure.
+                accumulated_text = full_text
+                continuations_used += 1
+                print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                      f"continuing on next chain step...")
+                continue
+            return full_text
         except _TRANSIENT_ERRORS as exc:
             last_exc = exc
             _set_cooldown(provider, key_env, exc)   # Fix B
@@ -560,6 +656,18 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 break
             print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}), "
                   f"falling back to next in chain...")
+
+    if accumulated_text:
+        # Fix C: the chain ran out (or hit _MAX_CONTINUATIONS) while a
+        # prior step's output was still truncated -- that text was
+        # genuinely generated and paid for, so hand it back instead of
+        # raising and losing it. It may still be an incomplete answer;
+        # callers that care can inspect for an unnatural cutoff the same
+        # way they'd notice any other truncated response.
+        print(f"  [{agent_name}] chain exhausted while still truncated -- "
+              f"returning {len(accumulated_text)} chars of partial output "
+              f"instead of discarding it.")
+        return accumulated_text
 
     raise RuntimeError(
         f"[{agent_name}] All providers in fallback chain exhausted or unavailable. "
