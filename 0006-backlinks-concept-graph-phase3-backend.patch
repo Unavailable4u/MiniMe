@@ -1,0 +1,422 @@
+diff --git a/agents/concept_linker.py b/agents/concept_linker.py
+new file mode 100644
+index 0000000..7c3a171
+--- /dev/null
++++ b/agents/concept_linker.py
+@@ -0,0 +1,242 @@
++"""
++agents/concept_linker.py — Notebooks integration guide §6.6 (Phase 3):
++Backlinks' new concept-graph pass.
++
++agents/backlink_detector.py is a plain case-insensitive substring match
++on node titles -- zero LLM calls, zero concept reasoning (guide §1's
++corrected finding). This module is the genuinely new agent guide §6.6
++calls for: single-hire generic_worker call, same shape as
++agents/fact_detector.py / agents/mind_mapper.py (reads context, produces
++structured output, no role handoffs -- guide §2's exception for
++one-shot reasoning jobs), that reads concepts across the corpus, judges
++pairwise relatedness, and writes:
++
++  - real edges via eo/graph_edges.py's create_edge(), using the
++    `relation` string itself as the human-readable rationale ("both
++    cover federated learning," not just "related") -- no schema change
++    needed there, per guide §6.6's own finding that create_edge()'s
++    free-form `relation` field already supports this.
++  - short per-node summaries via the new eo/node_summaries.py store,
++    for the graph view's node-click display.
++
++Regeneration rule (guide §6.6, "per your answer"): only recompute on
++explicit command, and even then, skip the actual (expensive) pairwise
++LLM pass if nothing's changed since the last run. Implemented here by
++comparing the workspace's highest node `created_at` against a
++high-water mark stashed in eo/workspace_facts.py's free-form `custom`
++bucket (guide §7: "could live in workspace_facts's existing custom
++bucket rather than a new store at all") -- "up to date, nothing to do"
++is a valid, fast result of link_concepts(), not just "always recompute."
++
++Place this file at: agents/concept_linker.py
++"""
++import os
++import sys
++import json
++import re
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from eo.knowledge_graph import list_nodes
++from eo.graph_edges import create_edge, edges_between
++from eo import node_summaries
++from eo import workspace_facts
++from eo.registry import get_role_prompt, add_role_prompt
++
++_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
++
++# Per-source cap, same reasoning as agents/fact_detector.py and
++# agents/mind_mapper.py: with guide §3's PDF fix a single source is now
++# the whole document, so this keeps one long source from crowding out
++# every other source in scope within one context window.
++MAX_CONTENT_CHARS_PER_SOURCE = 6000
++
++# workspace_facts.py `custom` keys -- see that module's docstring for
++# why a free-form custom bucket is the right home for this instead of a
++# new store: "any domain can stash a fact it cares about under `custom`
++# without this module needing a schema change."
++LAST_RUN_AT_KEY = "last_backlinks_run_at"
++SOURCE_HIGH_WATER_KEY = "last_backlinks_source_high_water"
++
++# Registered defensively here the same way agents/fact_detector.py
++# registers "fact_detector" -- see that module's comment on why
++# eo/registry.py's ROLE_PROMPTS_SEED bootstrap alone isn't enough for
++# an already-running deployment.
++CONCEPT_LINKER_BRIEF = (
++    "You read multiple source excerpts, each labeled with a bracketed "
++    "id like [a1b2c3d4e5f6]. First, write one short 1-2 sentence "
++    "summary of each source's core concept(s) -- what it's actually "
++    "about, not a restatement of its title. Then judge which PAIRS of "
++    "sources are meaningfully related in substance (share a concept, "
++    "one extends or contradicts the other, one provides context the "
++    "other assumes) and describe the specific relationship in a short "
++    "phrase (e.g. \"both cover federated learning\", \"extends the "
++    "first source's proposed method\") -- skip any pair with no real "
++    "conceptual connection; do not force every source to connect to "
++    "something. Output a single fenced ```json code block containing "
++    "an object with exactly two keys: \"summaries\" (a JSON array of "
++    "objects with \"node_id\" and \"summary\") and \"edges\" (a JSON "
++    "array of objects with \"from\", \"to\", and \"relation\", where "
++    "\"from\"/\"to\" are the bracketed ids and \"relation\" is the "
++    "short relationship phrase) -- nothing else outside that code "
++    "block. Never invent a relationship the excerpts don't actually "
++    "support, and prefer fewer, real connections over connecting "
++    "everything."
++)
++
++
++def _ensure_role_registered() -> None:
++    if not get_role_prompt("concept_linker"):
++        add_role_prompt("concept_linker", CONCEPT_LINKER_BRIEF, source="concept_linker_seed")
++
++
++def _context_for(nodes: list[dict]) -> tuple[str, dict]:
++    """One section per source, tagged with its bracketed node_id so the
++    role's output edges/summaries can be mapped straight back to real
++    nodes. Returns (context_text, {node_id: node}) -- the map only
++    contains nodes that actually made it into the context (had a
++    node_id and non-empty content), same as the parts list itself.
++    """
++    parts = []
++    id_map = {}
++    for n in nodes:
++        node_id = n.get("node_id")
++        content = (n.get("content") or "").strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
++        if not node_id or not content:
++            continue
++        title = n.get("title") or node_id
++        id_map[node_id] = n
++        parts.append(f"--- [{node_id}] {title} ---\n{content}")
++    return "\n\n".join(parts), id_map
++
++
++def _highest_created_at(nodes: list[dict]) -> str:
++    return max((n.get("created_at") or "" for n in nodes), default="")
++
++
++def _needs_regeneration(workspace_id: str, nodes: list[dict]) -> bool:
++    """True when there's at least one node newer than the last run's
++    high-water mark -- or when there's never been a run at all. Always
++    compares against every node in the workspace, not just the
++    requested scope: "did anything change since last time" is a
++    workspace-wide question even if this particular run is scoped to a
++    subset of sources.
++    """
++    if not nodes:
++        return False
++    high_water = (workspace_facts.get_facts(workspace_id)
++                  .get("custom", {}).get(SOURCE_HIGH_WATER_KEY))
++    if not high_water:
++        return True
++    return _highest_created_at(nodes) > high_water
++
++
++def link_concepts(workspace_id: str, source_node_ids: list[str] | None = None,
++                   force: bool = False) -> dict:
++    """Runs the concept-linking pass for `workspace_id`, scoped to
++    `source_node_ids` (or the whole notebook when falsy -- same "blank
++    scope = whole notebook" convention every other Notebooks target
++    uses). Unless `force`, first checks whether anything's changed
++    since the last run and returns a `status: "up_to_date"` result
++    without spending an LLM call when nothing has.
++
++    Returns {"status", "edges_created", "summaries"} -- status is one
++    of "up_to_date", "empty" (nothing readable in scope), or "done".
++    """
++    all_nodes = list_nodes(workspace_id)
++    if source_node_ids:
++        wanted = set(source_node_ids)
++        scoped = [n for n in all_nodes
++                  if n.get("node_id") in wanted or n.get("vector_id") in wanted]
++    else:
++        scoped = all_nodes
++
++    if not scoped:
++        return {"status": "empty", "edges_created": [], "summaries": {}}
++
++    if not force and not _needs_regeneration(workspace_id, all_nodes):
++        return {"status": "up_to_date", "edges_created": [], "summaries": {}}
++
++    context, id_map = _context_for(scoped)
++    if not context:
++        return {"status": "empty", "edges_created": [], "summaries": {}}
++
++    _ensure_role_registered()
++    from agents.generic_worker import run as run_role   # deferred, same
++                                                          # circular-import
++                                                          # reason as
++                                                          # agents/fact_detector.py,
++                                                          # agents/mind_mapper.py
++
++    task_text = (
++        "Read the source excerpts below, summarize each, and identify "
++        "meaningfully related pairs.\n\n" + context
++    )
++    result = run_role(
++        role="concept_linker",
++        task_text=task_text,
++        input_keys=[],
++        session_id=None,
++        include_conversation_context=False,
++        domain="notes",
++    )
++    raw = (result.get("text") or "").strip()
++    match = _JSON_BLOCK_RE.search(raw)
++    parsed = {}
++    if match:
++        try:
++            parsed = json.loads(match.group(1))
++        except (json.JSONDecodeError, TypeError):
++            parsed = {}
++    if not isinstance(parsed, dict):
++        parsed = {}
++
++    summaries_to_write = {}
++    for item in parsed.get("summaries") or []:
++        if not isinstance(item, dict):
++            continue
++        node_id = (item.get("node_id") or "").strip()
++        summary = (item.get("summary") or "").strip()
++        if node_id in id_map and summary:
++            summaries_to_write[node_id] = summary
++    written_summaries = node_summaries.set_summaries(workspace_id, summaries_to_write)
++
++    created = []
++    for item in parsed.get("edges") or []:
++        if not isinstance(item, dict):
++            continue
++        from_id = (item.get("from") or "").strip()
++        to_id = (item.get("to") or "").strip()
++        relation = (item.get("relation") or "").strip()
++        from_node = id_map.get(from_id)
++        to_node = id_map.get(to_id)
++        if not from_node or not to_node or from_id == to_id or not relation:
++            continue
++        from_vec, to_vec = from_node["vector_id"], to_node["vector_id"]
++        if edges_between(from_vec, to_vec):
++            continue   # already linked (either direction, any relation) -- don't duplicate
++        try:
++            edge = create_edge(
++                from_node_id=from_vec, to_node_id=to_vec,
++                relation=relation, created_by="concept_linker",
++            )
++        except ValueError:
++            continue   # e.g. a hallucinated self-edge that slipped past the from_id == to_id check
++        created.append(edge)
++
++    latest = _highest_created_at(all_nodes)
++    if latest:
++        workspace_facts.update_custom_fact(workspace_id, SOURCE_HIGH_WATER_KEY, latest)
++    from datetime import datetime, timezone
++    workspace_facts.update_custom_fact(
++        workspace_id, LAST_RUN_AT_KEY, datetime.now(timezone.utc).isoformat()
++    )
++
++    return {"status": "done", "edges_created": created, "summaries": written_summaries}
++
++
++if __name__ == "__main__":
++    import sys as _sys
++    for ws in _sys.argv[1:]:
++        out = link_concepts(ws, force=True)
++        print(f"--- {ws}: {out['status']}, {len(out['edges_created'])} new edge(s) ---")
++        print(json.dumps(out, indent=2)[:1000])
+diff --git a/api/server.py b/api/server.py
+index 89702ca..f674deb 100644
+--- a/api/server.py
++++ b/api/server.py
+@@ -109,6 +109,8 @@ from agents.note_clusterer import propose_clusters, list_candidates as list_clus
+ from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
+ from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
+ from agents.mind_mapper import generate_mindmap   # NEW — Notebooks integration guide §6.5 (Phase 2)
++from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
++from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
+ from agents.note_table_builder import build_table
+ from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
+ from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
+@@ -1400,6 +1402,16 @@ def delete_graph_edge(edge_id: str):
+     return {"status": "deleted", "id": edge_id}
+ 
+ 
++# NEW -- Notebooks integration guide section 6.6/7 (Phase 3): short
++# agent-written blurbs written by agents/concept_linker.py, read by
++# KnowledgeGraphView.jsx's node-click panel. Read-only by design, same
++# "agent-only writes" posture as the Backlinks concept graph itself --
++# there's no corresponding POST/PUT here on purpose.
++@app.get("/api/workspaces/{ws_id}/graph/node_summaries", dependencies=[Depends(require_auth)])
++def get_node_summaries(ws_id: str):
++    return node_summaries.get_summaries(ws_id)
++
++
+ # --- knowledge-graph nodes (see eo/knowledge_graph.py, §0.1) -------------
+ # §4.7: the Notebooks tab's one read for "everything in this notebook" —
+ # the source list, the mind map's underlying content, and
+@@ -1552,17 +1564,20 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
+ # fails still reports whichever targets succeeded instead of failing the
+ # whole request.
+ #
+-# All six of Phase 1's targets plus Phase 2's Mind Map are wired now:
+-# Clusters, Facts, Suggested Notes, Flashcards, Quiz, Study Guide, and
+-# Mind Map. `scope` is accepted and shape-checked here so the request
+-# contract didn't have to change as targets were added one patch at a
+-# time -- Facts, the three Study targets, and Mind Map are the ones that
+-# actually read it (an optional `source_node_ids` list; blank/omitted
+-# means "whole notebook," same convention guide §4.2 uses for scope
+-# elsewhere). Backlinks' new concept-graph pass (Phase 3) is the one
+-# remaining target -- it needs a genuinely new agent plus a node-summary
+-# store and a regeneration-check (guide §6.6), not just a caller, so it's
+-# a bigger unit of work than everything wired so far.
++# All six of Phase 1's targets plus Phase 2's Mind Map and Phase 3's
++# Backlinks concept graph are wired now: Clusters, Facts, Suggested
++# Notes, Flashcards, Quiz, Study Guide, Mind Map, and Backlinks.
++# `scope` is accepted and shape-checked here so the request contract
++# didn't have to change as targets were added one patch at a time --
++# Facts, the three Study targets, Mind Map, and Backlinks are the ones
++# that actually read it (an optional `source_node_ids` list;
++# blank/omitted means "whole notebook," same convention guide §4.2 uses
++# for scope elsewhere). Backlinks additionally supports a `force` scope
++# flag (see _generate_backlinks below) to bypass its regeneration-check
++# skip, for testing/debugging -- not exposed in the picker UI; guide
++# §6.6's skip-if-nothing-new behavior is meant to be the default,
++# silent path. That's every Phase 1-3 backend target from the guide;
++# nothing left unwired on this endpoint.
+ #
+ # Each target function takes (ws_id, scope, owner_id). Clusters and Facts
+ # ignore owner_id -- they're workspace-scoped, same as
+@@ -1644,6 +1659,25 @@ def _generate_mindmap(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+     return panel_content.set_content(ws_id, "mindmap", content, owner_id)
+ 
+ 
++def _generate_backlinks(ws_id: str, scope: dict | None, owner_id: str) -> dict:
++    """Phase 3 (guide section 6.6). Unlike every other target here,
++    "done" isn't the only successful outcome: link_concepts() returns
++    status "up_to_date" when nothing's changed since the last run and
++    skips the LLM pass entirely (guide's regeneration rule) -- that's
++    still a "done" branch from the Working Panel's point of view (guide
++    section 5), not an error, so this passes the whole result straight
++    through rather than collapsing it to a bool.
++
++    scope["force"] = true bypasses the skip check (see comment above
++    NOTEBOOKS_GENERATE_TARGETS) -- not reachable from the picker, only
++    useful for manually re-running the pass while testing.
++    """
++    scope = scope or {}
++    source_node_ids = scope.get("source_node_ids")
++    force = bool(scope.get("force"))
++    return link_concepts(ws_id, source_node_ids, force=force)
++
++
+ NOTEBOOKS_GENERATE_TARGETS = {
+     "clusters": _generate_clusters,
+     "facts": _generate_facts,
+@@ -1652,6 +1686,7 @@ NOTEBOOKS_GENERATE_TARGETS = {
+     "study_quiz": _make_study_generate("study_quiz"),
+     "study_guide": _make_study_generate("study_guide"),
+     "mindmap": _generate_mindmap,
++    "backlinks": _generate_backlinks,
+ }
+ 
+ 
+diff --git a/eo/node_summaries.py b/eo/node_summaries.py
+new file mode 100644
+index 0000000..5118588
+--- /dev/null
++++ b/eo/node_summaries.py
+@@ -0,0 +1,72 @@
++"""
++eo/node_summaries.py — Notebooks integration guide §6.6 (Phase 3) / §7:
++a short agent-written blurb per node, for the Backlinks concept graph's
++node-click display.
++
++Guide §7 is explicit this shouldn't be a new database table: "reuse the
++same per-workspace small-JSON-store pattern eo/graph_edges.py /
++agents/note_clusterer.py's candidate store already use." Same shape as
++those two -- a single JSON file, a lock around read/modify/write --
++just keyed workspace_id -> {node_id: summary} instead of workspace_id
++-> [edges]/[candidates].
++
++Written by agents/concept_linker.py's role pass; read by
++KnowledgeGraphView.jsx on node click, via
++GET /api/workspaces/{ws_id}/graph/node_summaries (api/server.py).
++
++Place this file at: eo/node_summaries.py
++"""
++import os
++import json
++import threading
++
++BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SUMMARIES_PATH = os.path.join(BASE_DIR, "data", "graph", "_node_summaries.json")
++_lock = threading.Lock()
++
++
++def _read() -> dict:
++    if not os.path.exists(SUMMARIES_PATH):
++        return {}
++    with open(SUMMARIES_PATH) as f:
++        return json.load(f)
++
++
++def _write(data: dict) -> None:
++    os.makedirs(os.path.dirname(SUMMARIES_PATH), exist_ok=True)
++    with open(SUMMARIES_PATH, "w") as f:
++        json.dump(data, f, indent=2)
++
++
++def set_summaries(workspace_id: str, summaries: dict) -> dict:
++    """Merges into whatever's already stored for this workspace rather
++    than replacing it outright. A concept_linker run scoped to a few
++    sources (guide §4.2's scope picker) only has fresh summaries for
++    the nodes it actually read this time -- it shouldn't blank out
++    summaries for every other node in the workspace just because they
++    weren't in scope for *this* run. Empty/falsy summary values are
++    skipped rather than written, so a node keeps its last real summary
++    if a later run has nothing useful to say about it.
++
++    Returns the workspace's full merged summary map.
++    """
++    if not workspace_id:
++        raise ValueError("workspace_id is required")
++    with _lock:
++        data = _read()
++        existing = dict(data.get(workspace_id, {}))
++        for node_id, summary in (summaries or {}).items():
++            if node_id and summary:
++                existing[node_id] = summary
++        data[workspace_id] = existing
++        _write(data)
++    return data[workspace_id]
++
++
++def get_summaries(workspace_id: str) -> dict:
++    """All node_id -> summary pairs stored for this workspace."""
++    return _read().get(workspace_id, {})
++
++
++def get_summary(workspace_id: str, node_id: str) -> str | None:
++    return get_summaries(workspace_id).get(node_id)

@@ -1168,6 +1168,25 @@ async function savePanelContent(wsId, panelKey, content) {
   });
   return res.json();
 }
+
+// Notebooks "Generate" command (Notebooks integration guide §4, §6) —
+// the picker/chip-confirmation flow's single dispatch call. `targets` is
+// a list of panel_key strings (see api/server.py's
+// NOTEBOOKS_GENERATE_TARGETS); `scope` is optional — omitted/empty means
+// "whole notebook," same convention as everywhere else this guide
+// touches. Returns { branches: [{panel_key, status, result|error}] } —
+// a per-target result list, not one shared payload, so a partial
+// failure (e.g. Backlinks' concept pass erroring) doesn't take down
+// Flashcards' result in the same response.
+async function generateNotebooks(wsId, targets, scope) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/generate`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ targets, scope: scope || null }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
 // Device spec (Blueprint sub-tab: Parts/Wiring/Mech/Instructions) --
 // agents/hardware_speccer.py's output, persisted as four keys under
 // eo/workspace_facts.py's per-workspace `custom` dict rather than through
@@ -1823,6 +1842,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
   fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
   fetchPanelContent, savePanelContent,   // NEW — generic paste-panel persistence (eo/panel_content.py)
+  generateNotebooks,   // NEW — Notebooks integration guide §4/§6: the picker/chip-confirmation "Generate" command
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,
