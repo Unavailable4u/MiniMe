@@ -109,6 +109,8 @@ from agents.note_clusterer import propose_clusters, list_candidates as list_clus
 from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
 from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
 from agents.mind_mapper import generate_mindmap   # NEW — Notebooks integration guide §6.5 (Phase 2)
+from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
+from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
 from agents.note_table_builder import build_table
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
 from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
@@ -1400,6 +1402,16 @@ def delete_graph_edge(edge_id: str):
     return {"status": "deleted", "id": edge_id}
 
 
+# NEW -- Notebooks integration guide section 6.6/7 (Phase 3): short
+# agent-written blurbs written by agents/concept_linker.py, read by
+# KnowledgeGraphView.jsx's node-click panel. Read-only by design, same
+# "agent-only writes" posture as the Backlinks concept graph itself --
+# there's no corresponding POST/PUT here on purpose.
+@app.get("/api/workspaces/{ws_id}/graph/node_summaries", dependencies=[Depends(require_auth)])
+def get_node_summaries(ws_id: str):
+    return node_summaries.get_summaries(ws_id)
+
+
 # --- knowledge-graph nodes (see eo/knowledge_graph.py, §0.1) -------------
 # §4.7: the Notebooks tab's one read for "everything in this notebook" —
 # the source list, the mind map's underlying content, and
@@ -1552,17 +1564,20 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
 # fails still reports whichever targets succeeded instead of failing the
 # whole request.
 #
-# All six of Phase 1's targets plus Phase 2's Mind Map are wired now:
-# Clusters, Facts, Suggested Notes, Flashcards, Quiz, Study Guide, and
-# Mind Map. `scope` is accepted and shape-checked here so the request
-# contract didn't have to change as targets were added one patch at a
-# time -- Facts, the three Study targets, and Mind Map are the ones that
-# actually read it (an optional `source_node_ids` list; blank/omitted
-# means "whole notebook," same convention guide §4.2 uses for scope
-# elsewhere). Backlinks' new concept-graph pass (Phase 3) is the one
-# remaining target -- it needs a genuinely new agent plus a node-summary
-# store and a regeneration-check (guide §6.6), not just a caller, so it's
-# a bigger unit of work than everything wired so far.
+# All six of Phase 1's targets plus Phase 2's Mind Map and Phase 3's
+# Backlinks concept graph are wired now: Clusters, Facts, Suggested
+# Notes, Flashcards, Quiz, Study Guide, Mind Map, and Backlinks.
+# `scope` is accepted and shape-checked here so the request contract
+# didn't have to change as targets were added one patch at a time --
+# Facts, the three Study targets, Mind Map, and Backlinks are the ones
+# that actually read it (an optional `source_node_ids` list;
+# blank/omitted means "whole notebook," same convention guide §4.2 uses
+# for scope elsewhere). Backlinks additionally supports a `force` scope
+# flag (see _generate_backlinks below) to bypass its regeneration-check
+# skip, for testing/debugging -- not exposed in the picker UI; guide
+# §6.6's skip-if-nothing-new behavior is meant to be the default,
+# silent path. That's every Phase 1-3 backend target from the guide;
+# nothing left unwired on this endpoint.
 #
 # Each target function takes (ws_id, scope, owner_id). Clusters and Facts
 # ignore owner_id -- they're workspace-scoped, same as
@@ -1644,6 +1659,25 @@ def _generate_mindmap(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     return panel_content.set_content(ws_id, "mindmap", content, owner_id)
 
 
+def _generate_backlinks(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Phase 3 (guide section 6.6). Unlike every other target here,
+    "done" isn't the only successful outcome: link_concepts() returns
+    status "up_to_date" when nothing's changed since the last run and
+    skips the LLM pass entirely (guide's regeneration rule) -- that's
+    still a "done" branch from the Working Panel's point of view (guide
+    section 5), not an error, so this passes the whole result straight
+    through rather than collapsing it to a bool.
+
+    scope["force"] = true bypasses the skip check (see comment above
+    NOTEBOOKS_GENERATE_TARGETS) -- not reachable from the picker, only
+    useful for manually re-running the pass while testing.
+    """
+    scope = scope or {}
+    source_node_ids = scope.get("source_node_ids")
+    force = bool(scope.get("force"))
+    return link_concepts(ws_id, source_node_ids, force=force)
+
+
 NOTEBOOKS_GENERATE_TARGETS = {
     "clusters": _generate_clusters,
     "facts": _generate_facts,
@@ -1652,6 +1686,7 @@ NOTEBOOKS_GENERATE_TARGETS = {
     "study_quiz": _make_study_generate("study_quiz"),
     "study_guide": _make_study_generate("study_guide"),
     "mindmap": _generate_mindmap,
+    "backlinks": _generate_backlinks,
 }
 
 

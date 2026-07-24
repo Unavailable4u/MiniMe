@@ -8,6 +8,7 @@ import QuizRunner from "../notebooks/QuizRunner";
 import StudyGuideViewer from "../notebooks/StudyGuideViewer";
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import MermaidDiagram from "../MermaidDiagram";
+import NotebooksGeneratePicker from "../notebooks/NotebooksGeneratePicker"; // NEW — Notebooks integration guide §4.1: picker/chip-confirmation "Generate" flow
 import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: was already built, unused here
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
@@ -931,6 +932,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
      fetchPanelContent, savePanelContent,
+     generateNotebooks,
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
     openScopedSubChat,
   } = useSession();
@@ -1396,25 +1398,40 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             </div>
             {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
 
-            <nav className="flex gap-1 border-b border-[var(--neutral-800)] pb-2">
-              {SUB_TABS.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => setSubTab(t.id)}
-                  className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 ${
-                    subTab === t.id ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-                  }`}
-                >
-                  <t.icon size={13} /> {t.label}
-                  {t.id === "candidates" && candidates.length > 0 && (
-                    <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{candidates.length}</span>
-                  )}
-                  {t.id === "clusters" && clusterCandidates.length > 0 && (
-                    <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{clusterCandidates.length}</span>
-                  )}
-                </button>
-              ))}
-            </nav>
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--neutral-800)] pb-2">
+              <nav className="flex gap-1">
+                {SUB_TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setSubTab(t.id)}
+                    className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 ${
+                      subTab === t.id ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                    }`}
+                  >
+                    <t.icon size={13} /> {t.label}
+                    {t.id === "candidates" && candidates.length > 0 && (
+                      <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{candidates.length}</span>
+                    )}
+                    {t.id === "clusters" && clusterCandidates.length > 0 && (
+                      <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{clusterCandidates.length}</span>
+                    )}
+                  </button>
+                ))}
+              </nav>
+              {/* NEW — Notebooks integration guide §4.1: the picker +
+                  free-text chip-confirmation "Generate" command, wired
+                  straight to POST .../notebooks/generate. Refreshes
+                  nodes/edges/candidates on completion since Clusters,
+                  Facts, and Suggested Notes all land in lists this tab
+                  already renders from loadNotebookData's state. */}
+              <NotebooksGeneratePicker
+                workspaceId={selected.id}
+                nodes={nodes}
+                generateNotebooks={generateNotebooks}
+                onComplete={() => loadNotebookData(selected.id)}
+                onNavigateSubTab={setSubTab}
+              />
+            </div>
 
             {subTab === "sources" && (
               <SourcesView
