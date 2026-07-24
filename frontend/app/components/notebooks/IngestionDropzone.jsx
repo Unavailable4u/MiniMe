@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useSession } from "../../context/SessionContext";
-import { UploadCloud, Link2, CheckCircle2, XCircle, Loader2, Mic } from "lucide-react";
+import { UploadCloud, Link2, CheckCircle2, XCircle, Loader2, Mic, AlertTriangle } from "lucide-react";
 
 const OFFICE_EXTS = ["docx", "pptx", "xlsx", "xls", "csv", "md", "json"];
 const PDF_EXT = "pdf";
@@ -12,8 +12,41 @@ const YOUTUBE_RE = /(youtube\.com\/watch|youtu\.be\/)/i;
 // progress list.
 const DONE_AUTOCLEAR_MS = 3000;
 
+// NEW — bug audit §3 ("stuck Ingesting…"), theory 1: a plain `await
+// fetch(...)` with no timeout of its own means a slow server-side
+// pipeline (OCR/parse -> chunk -> embed -> summarize) and a genuinely
+// dropped connection look identical to this component -- both just
+// never resolve. Bounding the wait client-side turns "spins forever,
+// no way to know if it's still working or dead" into "surfaces
+// something actionable after a while." Generous on purpose: PDF OCR
+// and local Whisper transcription on a big file can legitimately take
+// a couple of minutes.
+const INGEST_TIMEOUT_MS = 120_000;
+
 function extOf(filename) {
   return (filename.split(".").pop() || "").toLowerCase();
+}
+
+// Runs `fn(signal)` with an AbortSignal that fires after
+// INGEST_TIMEOUT_MS. Throws a distinguishable TimeoutError instead of
+// whatever generic abort error the fetch layer would otherwise throw,
+// so callers can tell "we gave up waiting" apart from "the server said
+// no."
+async function withTimeout(fn) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), INGEST_TIMEOUT_MS);
+  try {
+    return await fn(controller.signal);
+  } catch (err) {
+    if (controller.signal.aborted) {
+      const timeoutErr = new Error("Taking longer than expected");
+      timeoutErr.isTimeout = true;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // One row per in-flight or completed ingestion — the "progress list"
@@ -25,8 +58,13 @@ function ProgressRow({ item }) {
       {item.status === "pending" && <Loader2 size={13} className="animate-spin text-[var(--neutral-500)] shrink-0" />}
       {item.status === "done" && <CheckCircle2 size={13} className="text-green-400 shrink-0" />}
       {item.status === "error" && <XCircle size={13} className="text-red-400 shrink-0" />}
+      {item.status === "timeout" && <AlertTriangle size={13} className="text-amber-400 shrink-0" />}
       <span className="truncate text-[var(--neutral-300)] flex-1">{item.name}</span>
-      <span className={`shrink-0 ${item.status === "error" ? "text-red-400" : "text-[var(--neutral-500)]"}`}>
+      <span
+        className={`shrink-0 ${
+          item.status === "error" ? "text-red-400" : item.status === "timeout" ? "text-amber-400" : "text-[var(--neutral-500)]"
+        }`}
+      >
         {item.status === "pending" ? "Ingesting…" : item.message}
       </span>
     </div>
@@ -76,7 +114,7 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, status, message } : it)));
     // Auto-clear completed rows after a few seconds so the progress
     // list doesn't just accumulate every past upload for the session —
-    // errors stay put so they're not missed.
+    // errors (and timeouts) stay put so they're not missed.
     if (status === "done") {
       setTimeout(() => {
         if (!mountedRef.current) return;
@@ -85,28 +123,49 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
     }
   }
 
+  // CHANGED — bug audit §3, theory 2: this used to be a `for...of` loop
+  // that `await`ed each file in turn, so file #2 didn't even get its
+  // pending row pushed until file #1 fully resolved. One slow/stuck
+  // file made an entire batch look frozen even though only one of them
+  // actually was. Each file now runs independently (own pushItem, own
+  // try/catch, own settle) and they all kick off together — a hang in
+  // one no longer blocks the others from starting or finishing.
   async function handleFiles(fileList) {
-    for (const file of Array.from(fileList)) {
-      const ext = extOf(file.name);
-      const id = pushItem(file.name);
-      try {
-        let result;
-        if (AUDIO_EXTS.includes(ext)) {
-          result = await ingestVoiceFile(workspaceId, file);
-        } else if (ext === PDF_EXT) {
-          result = await ingestPdfFile(workspaceId, file);
-        } else if (OFFICE_EXTS.includes(ext)) {
-          result = await ingestFile(workspaceId, file);
-        } else {
-          settleItem(id, "error", `Unsupported file type .${ext}`);
-          continue;
+    await Promise.allSettled(
+      Array.from(fileList).map(async (file) => {
+        const ext = extOf(file.name);
+        const id = pushItem(file.name);
+        try {
+          let result;
+          if (AUDIO_EXTS.includes(ext)) {
+            result = await withTimeout((signal) => ingestVoiceFile(workspaceId, file, signal));
+          } else if (ext === PDF_EXT) {
+            result = await withTimeout((signal) => ingestPdfFile(workspaceId, file, signal));
+          } else if (OFFICE_EXTS.includes(ext)) {
+            result = await withTimeout((signal) => ingestFile(workspaceId, file, signal));
+          } else {
+            settleItem(id, "error", `Unsupported file type .${ext}`);
+            return;
+          }
+          settleItem(id, "done", `${result.node_ids?.length || 0} node(s)`);
+          onIngested?.(result);
+        } catch (err) {
+          if (err?.isTimeout) {
+            // Per the audit guide: a client-side timeout doesn't mean
+            // ingestion failed -- the server may well have finished
+            // writing the node right after we gave up waiting on it.
+            // Refresh the sources list so a successful-but-slow
+            // ingestion still shows up even though this row can't
+            // truthfully claim "done." No auto-clear on this one — the
+            // person should notice and check for themselves.
+            settleItem(id, "timeout", "Still working — check Sources in a bit");
+            onIngested?.();
+          } else {
+            settleItem(id, "error", String(err.message || err));
+          }
         }
-        settleItem(id, "done", `${result.node_ids?.length || 0} node(s)`);
-        onIngested?.(result);
-      } catch (err) {
-        settleItem(id, "error", String(err.message || err));
-      }
-    }
+      })
+    );
   }
 
   async function handleUrlSubmit(e) {
@@ -117,12 +176,17 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
     const id = pushItem(url);
     try {
       const result = YOUTUBE_RE.test(url)
-        ? await ingestVideoUrl(workspaceId, url)
-        : await ingestClip(workspaceId, url);
+        ? await withTimeout((signal) => ingestVideoUrl(workspaceId, url, signal))
+        : await withTimeout((signal) => ingestClip(workspaceId, url, signal));
       settleItem(id, "done", `${result.node_ids?.length || 0} node(s)`);
       onIngested?.(result);
     } catch (err) {
-      settleItem(id, "error", String(err.message || err));
+      if (err?.isTimeout) {
+        settleItem(id, "timeout", "Still working — check Sources in a bit");
+        onIngested?.();
+      } else {
+        settleItem(id, "error", String(err.message || err));
+      }
     }
   }
 

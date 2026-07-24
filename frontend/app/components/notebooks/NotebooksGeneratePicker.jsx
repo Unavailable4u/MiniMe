@@ -2,7 +2,7 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
   Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight,
-  Layers, BookMarked, GraduationCap, Network, GitBranch,
+  Layers, BookMarked, GraduationCap, Network, GitBranch, ListChecks,
 } from "lucide-react";
 import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
 
@@ -39,6 +39,7 @@ const TARGETS = [
   { key: "study_guide", label: "Study guide", icon: GraduationCap, subTab: "study", keywords: ["study guide"] },
   { key: "mindmap", label: "Mind map", icon: Network, subTab: "mindmap", keywords: ["mind map", "mindmap", "concept map"] },
   { key: "backlinks", label: "Backlinks", icon: GitBranch, subTab: "backlinks", keywords: ["backlink", "backlinks", "concept graph", "concept links"] },
+  { key: "workflows", label: "Workflows", icon: ListChecks, subTab: "workflows", keywords: ["workflow", "workflows", "process diagram", "process diagrams", "steps", "procedure", "how to"] },
 ];
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));

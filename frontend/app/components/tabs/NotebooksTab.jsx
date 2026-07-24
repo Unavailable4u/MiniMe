@@ -16,13 +16,14 @@ import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/Work
 import {
   NotebookText, Plus, MessageSquareText, MessageSquare, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
-  Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw,
+  Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw, ListChecks,
 } from "lucide-react";
 
 const SUB_TABS = [
   { id: "sources", label: "Sources", icon: FileText },
   { id: "mindmap", label: "Mind Map", icon: Network },
   { id: "backlinks", label: "Backlinks", icon: GitBranch },
+  { id: "workflows", label: "Workflows", icon: ListChecks },
   { id: "study", label: "Study", icon: GraduationCap },
   { id: "facts", label: "Facts", icon: BookMarked },
   { id: "clusters", label: "Clusters", icon: Layers },
@@ -204,7 +205,7 @@ function SourceGroup({ group, onSelectNode, onRequestDelete, onRename }) {
           {timeAgo(group.root.created_at)}
         </button>
         <button
-          onClick={() => onRequestDelete(group.root)}
+          onClick={() => onRequestDelete({ ...group.root, _siblingCount: group.children.length })}
           title="Delete source"
           className="shrink-0 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
         >
@@ -259,7 +260,13 @@ function SourcesView({ workspaceId, nodes, edges, loading, onIngested, onSelectN
       <ConfirmDialog
         open={!!pendingDelete}
         title="Delete source"
-        message={`Delete "${pendingDelete?.title || pendingDelete?.node_id}"? This also removes any links to it in Backlinks and Clusters.`}
+        message={
+          `Delete "${pendingDelete?.title || pendingDelete?.node_id}"` +
+          (pendingDelete?._siblingCount
+            ? ` and its ${pendingDelete._siblingCount} other page${pendingDelete._siblingCount === 1 ? "" : "s"}?`
+            : "?") +
+          ` This also removes any links to it in Backlinks and Clusters, and clears generated Mind Map/Study/Facts/Clusters so they can be regenerated from what's left.`
+        }
         confirmLabel={deleting ? "Deleting…" : "Delete"}
         onConfirm={confirmDelete}
         onCancel={() => setPendingDelete(null)}
@@ -403,12 +410,17 @@ function BacklinksView({ workspaceId, nodes, edges, nodeSummaries, loading, onDe
           Concept links between sources in this notebook — click a node to see why it's connected.
         </p>
         <div className="flex items-center gap-3 shrink-0">
-          <button onClick={onDetect} className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]">
-            Detect backlinks
+          <button
+            onClick={onDetect}
+            title="Cheap sanity check: case-insensitive substring match — does one source's text literally contain another source's title? No LLM call."
+            className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
+          >
+            Quick title-match scan
           </button>
           <button
             onClick={handleRegenerate}
             disabled={regenerating}
+            title="LLM pass: judges conceptual relatedness between sources and writes a relation phrase + summary for each link — powers the click-to-see-rationale panel below."
             className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
           >
             {regenerating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
@@ -434,6 +446,130 @@ function BacklinksView({ workspaceId, nodes, edges, nodeSummaries, loading, onDe
           <KnowledgeGraphView nodes={nodes} edges={edges} nodeSummaries={nodeSummaries} onSelectNode={onSelectNode} />
         )}
       </div>
+    </div>
+  );
+}
+
+// --- Workflows sub-view ------------------------------------------------------
+// Bug audit §7 (new feature): agents/workflow_suggester.py finds 0-4
+// step-by-step procedures described in the notebook's sources and
+// diagrams each one — a genuinely different job from Mind Map (one
+// whole-notebook overview) and Backlinks (relationships BETWEEN
+// sources). Static v1: renders each returned workflow as its own card
+// (title, description, flowchart, plain steps list). Per the audit
+// guide's own build order, click-to-check-off steps are a deliberate
+// follow-up on top of this, not bundled in — get the content right
+// first.
+// Same loading/Regenerate/empty-state shape as MindMapView, but the
+// saved content here is a JSON blob (api/server.py's _generate_workflows
+// json.dumps()s agents/workflow_suggester.py's {"workflows": [...]}
+// result into panel_content, same as every other structured-not-Markdown
+// panel would), so this view parses on load instead of treating it as
+// plain text.
+function WorkflowCard({ workflow }) {
+  return (
+    <div className="rounded-lg border border-[var(--neutral-800)] p-3 space-y-2">
+      <div>
+        <h4 className="text-sm font-medium text-[var(--neutral-200)]">{workflow.title}</h4>
+        {workflow.description && (
+          <p className="text-xs text-[var(--neutral-500)] mt-0.5">{workflow.description}</p>
+        )}
+      </div>
+      <div className="rounded-md border border-[var(--neutral-800)] bg-black/20 p-2 overflow-x-auto">
+        <MermaidDiagram mermaidText={workflow.mermaid} hideSourceOnFail />
+      </div>
+      {workflow.steps?.length > 0 && (
+        <ol className="space-y-1 text-xs text-[var(--neutral-400)] list-decimal list-inside">
+          {workflow.steps.map((step) => (
+            <li key={step.id} className={step.type === "decision" ? "italic" : ""}>
+              {step.label}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function WorkflowsView({ workspaceId, fetchPanelContent, generateNotebooks }) {
+  const [workflows, setWorkflows] = useState(null); // null = not loaded yet
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [regenerating, setRegenerating] = useState(false);
+  const [error, setError] = useState(null);
+
+  function parseWorkflows(raw) {
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed?.workflows) ? parsed.workflows : [];
+    } catch {
+      return []; // malformed/legacy content shouldn't crash the tab — treat as "nothing generated"
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchPanelContent(workspaceId, "suggested_workflows").then((saved) => {
+      if (cancelled) return;
+      setWorkflows(parseWorkflows(saved?.content));
+      setUpdatedAt(saved?.updated_at || null);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchPanelContent]);
+
+  async function handleRegenerate() {
+    setRegenerating(true);
+    setError(null);
+    try {
+      const { branches } = await generateNotebooks(workspaceId, ["workflows"], null);
+      const branch = branches.find((b) => b.panel_key === "workflows");
+      if (branch?.status === "error") throw new Error(branch.error || "Workflow generation failed");
+      setWorkflows(parseWorkflows(branch?.result?.content));
+      setUpdatedAt(branch?.result?.updated_at || null);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-[var(--neutral-500)]">
+          {workflows?.length
+            ? "Step-by-step procedures found in this notebook's sources."
+            : "No clear step-by-step processes found in this notebook — that's a normal result for purely conceptual material."}
+        </p>
+        <div className="flex items-center gap-2 shrink-0">
+          {updatedAt && !regenerating && (
+            <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(updatedAt)}</span>
+          )}
+          <button
+            onClick={handleRegenerate}
+            disabled={regenerating}
+            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
+          >
+            {regenerating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            Generate
+          </button>
+        </div>
+      </div>
+      {error && <p className="text-[11px] text-red-400">{error}</p>}
+      {workflows?.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {workflows.map((wf, i) => (
+            <WorkflowCard key={`${wf.title}-${i}`} workflow={wf} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -730,7 +866,7 @@ function CandidatesView({ workspaceId, candidates, onAccept, onReject }) {
 // candidates — never auto-applied. Accepting a candidate links every member
 // node to the cluster's first node with a "clustered_with" edge, same graph
 // primitive the Backlinks tab's edges already use. Scan is explicit (like
-// Backlinks' "Detect backlinks" button) rather than automatic, since it's
+// Backlinks' "Quick title-match scan" button) rather than automatic, since it's
 // a real recompute over every node in the notebook, not a passive fetch.
 
 function ClustersView({ candidates, loading, scanning, onScan, onAccept, onReject }) {
@@ -1543,6 +1679,13 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 onSelectNode={setPreviewNode}
                 generateNotebooks={generateNotebooks}
                 onRegenerated={() => loadNotebookData(selected.id)}
+              />
+            )}
+            {subTab === "workflows" && (
+              <WorkflowsView
+                workspaceId={selected.id}
+                fetchPanelContent={fetchPanelContent}
+                generateNotebooks={generateNotebooks}
               />
             )}
             {subTab === "study" && <StudyView workspaceId={selected.id} />}

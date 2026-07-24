@@ -1002,28 +1002,38 @@ async function setRolePinned(roleName, pinned) {
 // write_ingested_source() server-side into the exact same node shape, so
 // IngestionDropzone.jsx can treat every one of these identically: call,
 // await {node_ids, title}, done.
+//
+// CHANGED — bug audit §3 ("stuck Ingesting…"): each ingestor now takes an
+// optional AbortSignal so a caller can bound how long it's willing to
+// wait on a single request (see IngestionDropzone.jsx's withTimeout()).
+// A plain `await fetch(...)` has no timeout of its own -- if the backend
+// pipeline (OCR/parse -> chunk -> embed -> summarize) runs long, the
+// request just sits open indefinitely from the browser's point of view,
+// which is what reads as a progress row stuck on "Ingesting…" forever.
 
-async function ingestClip(wsId, url) {
+async function ingestClip(wsId, url, signal) {
   const res = await fetch(`${API_URL}/api/notes/clip`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ url, workspace_id: wsId }),
+    signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function ingestVideoUrl(wsId, url) {
+async function ingestVideoUrl(wsId, url, signal) {
   const res = await fetch(`${API_URL}/api/notes/video`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ url, workspace_id: wsId }),
+    signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function ingestFile(wsId, file) {
+async function ingestFile(wsId, file, signal) {
   const form = new FormData();
   form.append("workspace_id", wsId);
   form.append("file", file);
@@ -1031,12 +1041,13 @@ async function ingestFile(wsId, file) {
     method: "POST",
     headers: await authHeaders(),
     body: form,
+    signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function ingestPdfFile(wsId, file) {
+async function ingestPdfFile(wsId, file, signal) {
   const form = new FormData();
   form.append("workspace_id", wsId);
   form.append("file", file);
@@ -1044,12 +1055,13 @@ async function ingestPdfFile(wsId, file) {
     method: "POST",
     headers: await authHeaders(),
     body: form,
+    signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function ingestVoiceFile(wsId, file) {
+async function ingestVoiceFile(wsId, file, signal) {
   const form = new FormData();
   form.append("workspace_id", wsId);
   form.append("file", file);
@@ -1057,6 +1069,7 @@ async function ingestVoiceFile(wsId, file) {
     method: "POST",
     headers: await authHeaders(),
     body: form,
+    signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
