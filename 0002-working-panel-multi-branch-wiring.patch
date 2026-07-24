@@ -1,0 +1,208 @@
+diff --git a/frontend/app/components/WorkingPanel.jsx b/frontend/app/components/WorkingPanel.jsx
+index df3f5b9..b513c16 100644
+--- a/frontend/app/components/WorkingPanel.jsx
++++ b/frontend/app/components/WorkingPanel.jsx
+@@ -29,7 +29,13 @@ import SaveRunAsTemplate from "./SaveRunAsTemplate";
+ // through below) behaves byte-for-byte as before. `batches` and
+ // `API_URL` stay off `useSession()` unconditionally either way — they're
+ // app-wide (§2.4 "mother" state), not per-dock.
+-export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null }) {
++// `onNavigateSubTab` — NEW, guide §5. Optional; only NotebooksTab.jsx
++// passes it (through WorkspaceChatPanel.jsx), same as
++// NotebooksGeneratePicker.jsx's own prop of the same name/shape
++// (subTab key -> void). Every other caller of WorkingPanel leaves it
++// undefined, which is a safe no-op below — a branch node click just
++// does nothing for a dock that isn't inside Notebooks.
++export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
+   const legacy = useSession();
+   const dock = useWorkspaceDock(workspaceId, chatId);
+   const usingDock = dock.key != null;
+@@ -50,6 +56,11 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId
+   const structurePlan = usingDock ? dock.state.structurePlan : legacy.structurePlan;
+   const sessionId = usingDock ? dock.state.sessionId : legacy.sessionId; // NEW — §4
+   const resumeRun = usingDock ? dock.resumeRun : legacy.resumeRun; // NEW — Part 2 §2.4/§2.7
++  // NEW — guide §5. Legacy (non-dock) mode has no equivalent — a
++  // Notebooks Generate command can only originate from a workspace-keyed
++  // dock (NotebooksGeneratePicker.jsx always has a workspaceId), so this
++  // is simply null for any WorkingPanel not embedded in a workspace tab.
++  const notebooksGenerateRun = usingDock ? dock.state.notebooksGenerateRun : null;
+ 
+   // NEW — §4: answers "which chats is *this* chat currently pulling
+   // context from" right where the user is already looking, without
+@@ -126,12 +137,34 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId
+         onScroll={handleScroll}
+         className="flex-1 overflow-y-auto p-3 space-y-6"
+       >
+-      {snapshotMessages.length === 0 && !loading && (
++      {snapshotMessages.length === 0 && !loading && !notebooksGenerateRun && (
+         <p className="text-[var(--neutral-600)] text-xs p-4">
+           Routing and structure info will appear here once a task runs.
+         </p>
+       )}
+ 
++      {/* NEW — guide §5: a Notebooks "Generate" command isn't a chat
++          turn, so it has no snapshotMessages entry to hang a section
++          off — this reads NotebooksGeneratePicker.jsx's mirrored run
++          state straight off the dock instead (same key, see
++          WorkspaceDockContext.jsx's notebooksGenerateRun note) and
++          renders it as its own always-current section, above the chat
++          history, since a Generate run isn't tied to any one message's
++          position in that history the way a chat task's routing trace
++          is. */}
++      {notebooksGenerateRun && (
++        <div className="space-y-2 border-b border-[var(--neutral-800)] pb-4">
++          <p className="text-xs text-[var(--neutral-500)]">Generate</p>
++          <RoutingTraceGraph
++            branches={notebooksGenerateRun.branches}
++            onBranchClick={(panelKey) => {
++              const subTab = notebooksGenerateRun.branches.find((b) => b.panel_key === panelKey)?.subTab;
++              if (subTab) onNavigateSubTab?.(subTab);
++            }}
++          />
++        </div>
++      )}
++
+       {snapshotMessages.map((m) => (
+         <div
+           key={m.index}
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index 2c65d69..fd8360a 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -67,7 +67,7 @@ function clampWorkingPanelWidth(w) {
+   return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
+ }
+ 
+-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null }) {
++export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
+   const legacy = useSession();
+   const dock = useWorkspaceDock(workspaceId, chatId);
+   const usingDock = dock.key != null;
+@@ -408,7 +408,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+                 </button>
+               </div>
+               <div className="flex-1 min-h-0">
+-                <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} />
++                <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
+               </div>
+             </div>
+           </div>
+diff --git a/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx b/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx
+index 34e1911..b1112a6 100644
+--- a/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx
++++ b/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx
+@@ -4,6 +4,7 @@ import {
+   Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight,
+   Layers, BookMarked, GraduationCap, Network, GitBranch,
+ } from "lucide-react";
++import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
+ 
+ // Notebooks integration guide §4.1: "picker and free-text aren't really
+ // two separate systems — free text is just an alternate way to pre-fill
+@@ -135,6 +136,14 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
+   const [runError, setRunError] = useState(null);
+   const popoverRef = useRef(null);
+ 
++  // NEW — guide §5: same dock key WorkingPanel.jsx resolves to for this
++  // workspace (both key off `ws:${workspaceId}`, see
++  // WorkspaceDockContext.jsx's normalizeDockKey) — writing
++  // notebooksGenerateRun here is how the Working Panel's multi-branch
++  // graph learns about a run this popover kicked off, with no other
++  // plumbing between the two components.
++  const dock = useWorkspaceDock(workspaceId, null);
++
+   useEffect(() => {
+     if (!open) return;
+     function onClickOutside(e) {
+@@ -182,6 +191,15 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
+     }
+   }
+ 
++  // NEW — guide §5: attach each target's human label and subTab before
++  // mirroring into the dock, since RoutingTraceGraph's branch nodes
++  // display `label` (falling back to the raw panel_key) and
++  // WorkingPanel.jsx's click handler needs `subTab` to navigate — the
++  // dock has no other access to the TARGETS table above.
++  function withLabels(list) {
++    return list.map((b) => ({ ...b, label: TARGETS_BY_KEY[b.panel_key]?.label, subTab: TARGETS_BY_KEY[b.panel_key]?.subTab }));
++  }
++
+   async function runGenerate(targetsOverride, scopeOverride) {
+     const targets = targetsOverride || selectedTargets;
+     if (targets.length === 0) return;
+@@ -191,14 +209,23 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
+ 
+     setRunning(true);
+     setRunError(null);
+-    setBranches(targets.map((key) => ({ panel_key: key, status: "running" })));
++    const runningBranches = targets.map((key) => ({ panel_key: key, status: "running" }));
++    setBranches(runningBranches);
++    dock.setDockState({ notebooksGenerateRun: { targets, branches: withLabels(runningBranches) } });
+     try {
+       const { branches: result } = await generateNotebooks(workspaceId, targets, scope);
+       setBranches(result);
++      dock.setDockState({ notebooksGenerateRun: { targets, branches: withLabels(result) } });
+       onComplete?.();
+     } catch (err) {
+       setRunError(String(err.message || err));
+       setBranches(null);
++      // The whole request failed (e.g. network error) before any
++      // per-target result came back -- nothing branch-shaped to show on
++      // the graph, so clear rather than leave a stale "running" run
++      // sitting there forever. The picker's own runError text above
++      // still surfaces the failure.
++      dock.setDockState({ notebooksGenerateRun: null });
+     } finally {
+       setRunning(false);
+     }
+diff --git a/frontend/app/components/tabs/NotebooksTab.jsx b/frontend/app/components/tabs/NotebooksTab.jsx
+index fb1fbef..fae7ab2 100644
+--- a/frontend/app/components/tabs/NotebooksTab.jsx
++++ b/frontend/app/components/tabs/NotebooksTab.jsx
+@@ -1503,14 +1503,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+ 
+       {/* Desktop dock — side-by-side, lg+. */}
+       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} />
++        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} />
+       </div>
+ 
+       {/* Below lg — full-screen overlay instead of a side dock, so this
+           tab never depends on the standalone Chat tab, at any width. */}
+       {!chatDockCollapsed && (
+         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} />
++          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} />
+         </div>
+       )}
+       {chatDockCollapsed && (
+diff --git a/frontend/app/context/WorkspaceDockContext.jsx b/frontend/app/context/WorkspaceDockContext.jsx
+index fd1d7e4..d0f5029 100644
+--- a/frontend/app/context/WorkspaceDockContext.jsx
++++ b/frontend/app/context/WorkspaceDockContext.jsx
+@@ -109,6 +109,17 @@ async function authHeaders(opts = {}) {
+ // agent_requested_role branch of the very same session-channel handler
+ // this step is moving. Treating its absence from the doc's list as an
+ // omission rather than leaving agent_requested_role with nowhere to go.
++// `notebooksGenerateRun` -- NEW, Notebooks integration guide §5. Mirrors
++// NotebooksGeneratePicker.jsx's own local run state (targets/branches)
++// into the dock so WorkingPanel.jsx -- which has no other connection to
++// the picker, and no `messages` entry to hang a snapshot off since a
++// Generate command isn't a chat turn -- can render the same run as its
++// own multi-branch RoutingTraceGraph section. Shape: `{ targets:
++// string[], branches: [{panel_key, label, status, error?, result?}] }`,
++// or `null` when no Generate command has run yet this session. Picker
++// and WorkingPanel resolve to the SAME dock key off the same
++// workspaceId (see normalizeDockKey below), so writing here from one
++// and reading in the other needs no extra plumbing.
+ function makeInitialDockState() {
+   return {
+     messages: [],
+@@ -125,6 +136,7 @@ function makeInitialDockState() {
+     pausedApproval: null,
+     pausedRun: null,
+     roleRequests: [], // ADDED in 3b — see note above
++    notebooksGenerateRun: null, // NEW — see note above
+   };
+ }
+ 

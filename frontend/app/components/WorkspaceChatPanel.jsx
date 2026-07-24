@@ -67,7 +67,7 @@ function clampWorkingPanelWidth(w) {
   return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
 }
 
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null }) {
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
   const legacy = useSession();
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
@@ -408,7 +408,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
                 </button>
               </div>
               <div className="flex-1 min-h-0">
-                <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} />
+                <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
               </div>
             </div>
           </div>

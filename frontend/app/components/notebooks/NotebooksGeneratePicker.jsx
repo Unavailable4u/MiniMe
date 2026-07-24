@@ -4,6 +4,7 @@ import {
   Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight,
   Layers, BookMarked, GraduationCap, Network, GitBranch,
 } from "lucide-react";
+import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
 
 // Notebooks integration guide §4.1: "picker and free-text aren't really
 // two separate systems — free text is just an alternate way to pre-fill
@@ -135,6 +136,14 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
   const [runError, setRunError] = useState(null);
   const popoverRef = useRef(null);
 
+  // NEW — guide §5: same dock key WorkingPanel.jsx resolves to for this
+  // workspace (both key off `ws:${workspaceId}`, see
+  // WorkspaceDockContext.jsx's normalizeDockKey) — writing
+  // notebooksGenerateRun here is how the Working Panel's multi-branch
+  // graph learns about a run this popover kicked off, with no other
+  // plumbing between the two components.
+  const dock = useWorkspaceDock(workspaceId, null);
+
   useEffect(() => {
     if (!open) return;
     function onClickOutside(e) {
@@ -182,6 +191,15 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
     }
   }
 
+  // NEW — guide §5: attach each target's human label and subTab before
+  // mirroring into the dock, since RoutingTraceGraph's branch nodes
+  // display `label` (falling back to the raw panel_key) and
+  // WorkingPanel.jsx's click handler needs `subTab` to navigate — the
+  // dock has no other access to the TARGETS table above.
+  function withLabels(list) {
+    return list.map((b) => ({ ...b, label: TARGETS_BY_KEY[b.panel_key]?.label, subTab: TARGETS_BY_KEY[b.panel_key]?.subTab }));
+  }
+
   async function runGenerate(targetsOverride, scopeOverride) {
     const targets = targetsOverride || selectedTargets;
     if (targets.length === 0) return;
@@ -191,14 +209,23 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
 
     setRunning(true);
     setRunError(null);
-    setBranches(targets.map((key) => ({ panel_key: key, status: "running" })));
+    const runningBranches = targets.map((key) => ({ panel_key: key, status: "running" }));
+    setBranches(runningBranches);
+    dock.setDockState({ notebooksGenerateRun: { targets, branches: withLabels(runningBranches) } });
     try {
       const { branches: result } = await generateNotebooks(workspaceId, targets, scope);
       setBranches(result);
+      dock.setDockState({ notebooksGenerateRun: { targets, branches: withLabels(result) } });
       onComplete?.();
     } catch (err) {
       setRunError(String(err.message || err));
       setBranches(null);
+      // The whole request failed (e.g. network error) before any
+      // per-target result came back -- nothing branch-shaped to show on
+      // the graph, so clear rather than leave a stale "running" run
+      // sitting there forever. The picker's own runError text above
+      // still surfaces the failure.
+      dock.setDockState({ notebooksGenerateRun: null });
     } finally {
       setRunning(false);
     }

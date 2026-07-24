@@ -29,7 +29,13 @@ import SaveRunAsTemplate from "./SaveRunAsTemplate";
 // through below) behaves byte-for-byte as before. `batches` and
 // `API_URL` stay off `useSession()` unconditionally either way — they're
 // app-wide (§2.4 "mother" state), not per-dock.
-export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null }) {
+// `onNavigateSubTab` — NEW, guide §5. Optional; only NotebooksTab.jsx
+// passes it (through WorkspaceChatPanel.jsx), same as
+// NotebooksGeneratePicker.jsx's own prop of the same name/shape
+// (subTab key -> void). Every other caller of WorkingPanel leaves it
+// undefined, which is a safe no-op below — a branch node click just
+// does nothing for a dock that isn't inside Notebooks.
+export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
   const legacy = useSession();
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
@@ -50,6 +56,11 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
   const structurePlan = usingDock ? dock.state.structurePlan : legacy.structurePlan;
   const sessionId = usingDock ? dock.state.sessionId : legacy.sessionId; // NEW — §4
   const resumeRun = usingDock ? dock.resumeRun : legacy.resumeRun; // NEW — Part 2 §2.4/§2.7
+  // NEW — guide §5. Legacy (non-dock) mode has no equivalent — a
+  // Notebooks Generate command can only originate from a workspace-keyed
+  // dock (NotebooksGeneratePicker.jsx always has a workspaceId), so this
+  // is simply null for any WorkingPanel not embedded in a workspace tab.
+  const notebooksGenerateRun = usingDock ? dock.state.notebooksGenerateRun : null;
 
   // NEW — §4: answers "which chats is *this* chat currently pulling
   // context from" right where the user is already looking, without
@@ -126,10 +137,32 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto p-3 space-y-6"
       >
-      {snapshotMessages.length === 0 && !loading && (
+      {snapshotMessages.length === 0 && !loading && !notebooksGenerateRun && (
         <p className="text-[var(--neutral-600)] text-xs p-4">
           Routing and structure info will appear here once a task runs.
         </p>
+      )}
+
+      {/* NEW — guide §5: a Notebooks "Generate" command isn't a chat
+          turn, so it has no snapshotMessages entry to hang a section
+          off — this reads NotebooksGeneratePicker.jsx's mirrored run
+          state straight off the dock instead (same key, see
+          WorkspaceDockContext.jsx's notebooksGenerateRun note) and
+          renders it as its own always-current section, above the chat
+          history, since a Generate run isn't tied to any one message's
+          position in that history the way a chat task's routing trace
+          is. */}
+      {notebooksGenerateRun && (
+        <div className="space-y-2 border-b border-[var(--neutral-800)] pb-4">
+          <p className="text-xs text-[var(--neutral-500)]">Generate</p>
+          <RoutingTraceGraph
+            branches={notebooksGenerateRun.branches}
+            onBranchClick={(panelKey) => {
+              const subTab = notebooksGenerateRun.branches.find((b) => b.panel_key === panelKey)?.subTab;
+              if (subTab) onNavigateSubTab?.(subTab);
+            }}
+          />
+        </div>
       )}
 
       {snapshotMessages.map((m) => (
