@@ -385,7 +385,7 @@ def create_workspace(owner_id: str, name: str, stage: str = "note") -> dict:
         cur.execute(
             "insert into workspaces (id, name, owner_id, stage, active_stages) values (%s, %s, %s, %s, %s) "
             "returning id, name, owner_id, show_attribution, stage, active_stages, created_at, updated_at",
-            (ws_id, clean_name, owner_id, clean_stage, [clean_stage]),
+            (ws_id, clean_name, owner_id, clean_stage, json.dumps([clean_stage])),
         )
         row = cur.fetchone()
     row = dict(row)
