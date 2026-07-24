@@ -248,6 +248,24 @@ def _usage_fraction(key_env: str, quota_status: dict) -> float:
     return quota_status.get(key_env, {}).get("pct") or 0.0
 
 
+def _is_cooling_down(key_env: str, quota_status: dict) -> bool:
+    """Fix B (reliability guide, §3 "Fix B"): quota_status now carries a
+    per-account "cooling_down" bool (see
+    eo.quota_sentinel.get_quota_snapshot()'s docstring) — True only when
+    that account's own cooldown_until timestamp is still in the future.
+    This is checked SEPARATELY from _usage_fraction()'s 80%-cutoff
+    logic below: an account can be well under its daily token quota and
+    still be mid-cooldown from a 429 a moment ago (the exact case this
+    fix addresses — Groq's "try again in 8m5.568s" being treated as
+    "out of tokens until midnight"). Missing quota_status, an unknown
+    key, or no recorded cooldown all read as False — fail toward
+    "treat it as available," same posture _usage_fraction() already
+    takes for missing data."""
+    if not quota_status:
+        return False
+    return bool(quota_status.get(key_env, {}).get("cooling_down"))
+
+
 def _sorted_by_quota(candidates: list, quota_status: dict) -> list:
     return sorted(candidates, key=lambda k: _usage_fraction(k, quota_status))
 
@@ -320,9 +338,15 @@ def _best_match(role_name: str, quota_status: dict = None, exclude: set = None) 
     (staff_task(), which never passes this) is completely unaffected.
     """
     exclude = exclude or set()
+    # Fix B: cooling-down accounts are filtered out up front, alongside
+    # `exclude` — a 429'd account is unusable for the same practical
+    # reason an explicitly-excluded one is (this call would just fail
+    # again), it just recovers on its own once cooldown_until passes
+    # instead of needing a new caller decision each time.
     natural_candidates = [
         key for key, info in AGENT_CAPABILITIES.items()
         if role_name in info.get("natural_roles", []) and key not in exclude
+        and not _is_cooling_down(key, quota_status)
     ]
 
     if natural_candidates:
@@ -339,16 +363,28 @@ def _best_match(role_name: str, quota_status: dict = None, exclude: set = None) 
         # an over-quota account.
 
     # No natural match at all, OR every natural match is maxed out:
-    # choose from every provisioned account (minus exclude), ranked
-    # purely by quota.
-    all_candidates = [k for k in AGENT_CAPABILITIES.keys() if k not in exclude]
+    # choose from every provisioned account (minus exclude and any
+    # currently cooling down), ranked purely by quota.
+    all_candidates = [
+        k for k in AGENT_CAPABILITIES.keys()
+        if k not in exclude and not _is_cooling_down(k, quota_status)
+    ]
     if not all_candidates:
-        # Every account is either excluded or AGENT_CAPABILITIES is
-        # itself empty. If it's the former (exclude ate the whole pool
-        # — e.g. only one account is provisioned at all), fall back to
-        # considering it anyway: a repeated account is still better than
-        # failing the retry outright. If AGENT_CAPABILITIES is genuinely
-        # empty, that's a real configuration problem.
+        # Fix B: every non-excluded account is currently cooling down —
+        # a temporary state, unlike being excluded or the pool being
+        # genuinely empty. Prefer falling back to "excluded accounts
+        # allowed, cooldown still respected" over ignoring cooldown
+        # outright, since a cooldown account excluded here is still
+        # about to become usable again on its own.
+        all_candidates = [k for k in AGENT_CAPABILITIES.keys() if not _is_cooling_down(k, quota_status)]
+    if not all_candidates:
+        # Every account is either excluded, cooling down, or
+        # AGENT_CAPABILITIES is itself empty. If it's one of the first
+        # two (e.g. only one account is provisioned at all, and it just
+        # 429'd), fall back to considering it anyway: a repeated,
+        # still-cooling account is still better than failing the retry
+        # outright. If AGENT_CAPABILITIES is genuinely empty, that's a
+        # real configuration problem.
         all_candidates = list(AGENT_CAPABILITIES.keys())
         if not all_candidates:
             return None

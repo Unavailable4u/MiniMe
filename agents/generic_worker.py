@@ -144,6 +144,62 @@ def _chain_step_for(agent_key: str) -> dict:
     return step
 
 
+# Fix A (reliability guide, §3 "Fix A"): how many accounts deep a single
+# run() call's fallback chain goes. 3 is enough to survive one exhausted
+# account plus one full provider-wide outage/quota event without needing a
+# fourth hop; raise it later if that ever isn't enough in practice.
+MAX_CHAIN_STEPS = 3
+
+
+def _build_fallback_chain(role: str, quota_status: dict, max_steps: int = MAX_CHAIN_STEPS) -> list:
+    """
+    Fix A: replaces the old "pick exactly one account" behavior with a real
+    multi-step fallback chain. Previously run() called _best_match() once
+    and wrapped that single account in a length-1 chain, so the very first
+    429/exhausted account was also the last -- generate_text()'s own
+    fallback-chain walk (utils/llm_client.py) never got anything to fall
+    through to.
+
+    This calls eo.panel._best_match() up to `max_steps` times, growing an
+    `exclude` set each round so no account is picked twice. It also prefers
+    spreading the chain across DIFFERENT providers: each round first tries
+    _best_match() with every account from an already-used provider excluded
+    too, and only allows a repeat provider if that leaves no candidate at
+    all. This means a provider-wide event (e.g. every Groq key hitting its
+    daily TPD cap at once, as in the RuntimeError this fix addresses) can't
+    take out the whole chain -- Cerebras/GitHub/Mistral/Cloudflare accounts
+    are still tried.
+
+    Returns a list of agent_key strings (0 to max_steps of them), in the
+    order they should be attempted. An empty list means no account is
+    available at all, same meaning as _best_match() returning None today.
+    """
+    from eo.panel import _best_match   # deferred — see module-level note above
+
+    chain_keys = []
+    used_providers = set()
+    exclude = set()
+
+    for _ in range(max_steps):
+        provider_exclude = exclude | {
+            key for key, info in AGENT_CAPABILITIES.items()
+            if info.get("provider") in used_providers
+        }
+        candidate = _best_match(role, quota_status, exclude=provider_exclude)
+        if candidate is None:
+            # No fresh-provider candidate left this round -- allow a repeat
+            # provider rather than leaving this chain slot empty, as long as
+            # it's not an account already earlier in the chain.
+            candidate = _best_match(role, quota_status, exclude=exclude)
+        if candidate is None:
+            break  # genuinely nothing left in the whole account pool
+        chain_keys.append(candidate)
+        exclude.add(candidate)
+        used_providers.add(AGENT_CAPABILITIES[candidate].get("provider"))
+
+    return chain_keys
+
+
 def parse_next_tag(raw_text: str) -> tuple:
     """
     Migration Part 12 §5: renamed from _parse_next -- made public since
@@ -208,12 +264,16 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     context = "\n\n".join(context_parts)
 
     if key_override:
+        # Explicit override — the caller picked this exact account on
+        # purpose (e.g. a targeted retry), so it stays a single-step chain
+        # rather than being expanded automatically.
         agent_key = key_override if isinstance(key_override, str) else key_override[0]
+        chain = [_chain_step_for(agent_key)] if agent_key else []
     else:
-        from eo.panel import _best_match   # deferred — see module-level note above
-        agent_key = _best_match(role, get_quota_snapshot())
-
-    chain = [_chain_step_for(agent_key)] if agent_key else []
+        # Fix A: real multi-step, multi-provider fallback chain instead of
+        # a single _best_match() pick wrapped in a length-1 chain.
+        chain_keys = _build_fallback_chain(role, get_quota_snapshot())
+        chain = [_chain_step_for(k) for k in chain_keys]
     raw = generate_text(
         system_prompt=(brief or "") + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION,
         user_content=context,

@@ -45,7 +45,8 @@ for now, not token counts.
 """
 
 import os
-from datetime import date
+import re
+from datetime import date, datetime, timezone
 
 import requests
 from groq import Groq, RateLimitError as GroqRateLimitError, APIStatusError as GroqAPIStatusError
@@ -103,6 +104,95 @@ class _CloudflareTransientError(Exception):
 
 
 _TRANSIENT_ERRORS = _TRANSIENT_SDK_ERRORS + (_CloudflareTransientError,)
+
+# Fix B (reliability guide, §3 "Fix B"): quota tracking (QUOTA_CONFIG /
+# eo/quota_sentinel.py) only ever answered "how many tokens has this
+# account used TODAY" -- it had no concept of a provider's own
+# retry-after signal (e.g. Groq's 429 body: "Please try again in
+# 8m5.568s"), so a short-lived per-minute/per-hour cooldown looked
+# identical to "out of tokens until midnight" and benched the account
+# for the rest of the day instead of ~8 minutes. The functions below
+# extract that signal and write it to the bus as
+# cooldown_until:{provider}:{key_id} -- eo/panel.py's _best_match()
+# reads it back to skip an account only until its OWN stated window
+# clears, not until end of day.
+_RETRY_AFTER_TEXT_PATTERN = re.compile(
+    r"try again in (?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?P<seconds>[\d.]+)s",
+    re.IGNORECASE,
+)
+
+# Conservative guess used only when a transient error carries NEITHER a
+# Retry-After header NOR Groq-style "try again in ...s" text -- e.g. a
+# bare 5xx or a connection timeout with no timing signal at all. Better
+# than not recording a cooldown at all (which would let the very next
+# call immediately retry the same still-failing account), but this is a
+# guess, not a provider-stated number -- keep it short.
+_DEFAULT_COOLDOWN_SECONDS = 60.0
+
+
+def _seconds_from_retry_after_text(message: str):
+    """Parses a Groq-style "Please try again in 8m5.568s." (or "5.568s",
+    or "1h2m3s") out of an error message's own text. Returns None if the
+    pattern isn't present. This is the fallback path -- Groq's API
+    doesn't send a Retry-After header, only this phrasing inside the
+    message, so string-parsing is the only way to recover the real
+    number for this specific provider."""
+    if not message:
+        return None
+    match = _RETRY_AFTER_TEXT_PATTERN.search(message)
+    if not match:
+        return None
+    seconds = float(match.group("seconds"))
+    if match.group("minutes"):
+        seconds += int(match.group("minutes")) * 60
+    if match.group("hours"):
+        seconds += int(match.group("hours")) * 3600
+    return seconds
+
+
+def _retry_after_seconds(exc) -> float:
+    """Best-effort: how many seconds until it's worth retrying THIS
+    account, from whichever signal the failed call actually gave us.
+    Tries, in order:
+      1. A real `Retry-After` response header -- standard for 429s, and
+         what the Groq/OpenAI SDKs expose via exc.response.headers when
+         the provider sends one.
+      2. Groq's own "try again in 8m5.568s" phrasing inside the
+         exception's message text (see module note above).
+      3. _DEFAULT_COOLDOWN_SECONDS, if neither signal is present.
+    """
+    response = getattr(exc, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", None)
+        if headers:
+            header_value = headers.get("retry-after") or headers.get("Retry-After")
+            if header_value:
+                try:
+                    return float(header_value)
+                except (TypeError, ValueError):
+                    pass  # some providers send an HTTP-date instead of seconds -- fall through
+    parsed = _seconds_from_retry_after_text(str(exc))
+    if parsed is not None:
+        return parsed
+    return _DEFAULT_COOLDOWN_SECONDS
+
+
+def _set_cooldown(provider: str, key_id: str, exc) -> None:
+    """Writes cooldown_until:{provider}:{key_id} = a UTC unix timestamp
+    to the bus after a transient failure, so eo/panel.py's _best_match()
+    can skip this specific account until that timestamp passes instead
+    of only checking daily token usage (Fix B). Deliberately mirrors
+    log_usage()'s own "never raises" contract below -- a cooldown-write
+    failure should never take down the actual generate_text() call that
+    triggered it, it just means this account isn't skipped early next
+    time, same as if quota tracking itself had failed to log.
+    """
+    try:
+        cooldown_until = datetime.now(timezone.utc).timestamp() + _retry_after_seconds(exc)
+        bus_write(f"cooldown_until:{provider}:{key_id}", cooldown_until)
+    except Exception as write_exc:
+        print(f"  [llm_client] cooldown write failed (non-fatal): {write_exc}")
+
 
 _client_cache = {}
 
@@ -435,6 +525,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 return text
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
+                _set_cooldown(provider, key_id, exc)   # Fix B
                 is_last = i == len(chain) - 1
                 if is_last:
                     break
@@ -463,6 +554,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             return text
         except _TRANSIENT_ERRORS as exc:
             last_exc = exc
+            _set_cooldown(provider, key_env, exc)   # Fix B
             is_last = i == len(chain) - 1
             if is_last:
                 break

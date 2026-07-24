@@ -352,6 +352,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           </div>
 
           <textarea
+            id="chat-message-draft"
+            name="chat-message-draft"
             ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

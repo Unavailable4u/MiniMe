@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { SessionProvider, useSession } from "../context/SessionContext";
 import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
 import ChatSidebar from "./ChatSidebar";
@@ -121,8 +121,23 @@ function AppShellBody() {
   // the way item #8 did for the bubble's own fetch effect.
   const [workspaceContextByTab, setWorkspaceContextByTab] = useState({});
 
-  function setTabWorkspaceContext(tabId, ctx) {
+  const setTabWorkspaceContext = useCallback((tabId, ctx) => {
     setWorkspaceContextByTab((prev) => ({ ...prev, [tabId]: ctx }));
+  }, []);
+
+  // Stable per-tab callback cache so the function identity passed down as
+  // onActiveWorkspaceChange never changes across renders (it used to be a
+  // fresh inline arrow function every render, which fed straight into
+  // ChatTab's useEffect dependency array and caused an infinite render
+  // loop: effect fires -> setTabWorkspaceContext -> AppShell re-renders ->
+  // new inline function -> effect deps change -> effect fires again).
+  const workspaceChangeHandlersRef = useRef({});
+  function getWorkspaceChangeHandler(tabId) {
+    if (!workspaceChangeHandlersRef.current[tabId]) {
+      workspaceChangeHandlersRef.current[tabId] = (workspaceId, workspaceName) =>
+        setTabWorkspaceContext(tabId, workspaceId ? { id: workspaceId, name: workspaceName } : null);
+    }
+    return workspaceChangeHandlersRef.current[tabId];
   }
 
   const activeWorkspaceContext = workspaceContextByTab[activeTab] || null;
@@ -255,7 +270,7 @@ function AppShellBody() {
                   onPromoted={handlePromoted}
                   onActiveWorkspaceChange={
                     WORKSPACE_TAB_IDS.has(t.id)
-                      ? (workspaceId, workspaceName) => setTabWorkspaceContext(t.id, workspaceId ? { id: workspaceId, name: workspaceName } : null)
+                      ? getWorkspaceChangeHandler(t.id)
                       : undefined
                   }
                 />
