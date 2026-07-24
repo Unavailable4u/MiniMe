@@ -1073,6 +1073,19 @@ async function detectBacklinks(wsId) {
   return res.json();
 }
 
+// NEW — Notebooks integration guide §6.6/§7 (Phase 3): short
+// agent-written blurbs written by agents/concept_linker.py, read by
+// KnowledgeGraphView.jsx's node-click rationale panel. Read-only on
+// the frontend by design -- there's no corresponding save function
+// here on purpose, matching api/server.py's GET-only route.
+async function fetchNodeSummaries(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/graph/node_summaries`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return {};
+  return res.json();
+}
+
 // Silent note-taking agent candidates (§4.6) — never auto-committed;
 // accept/reject here is the review step Definition-of-Done #6 requires.
 
@@ -1839,6 +1852,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchRoles, updateRolePrompt, setRolePinned,   // NEW — Test tab `personas`: thin client over the Role Library store
   ingestClip, ingestVideoUrl, ingestFile, ingestPdfFile, ingestVoiceFile,
   detectBacklinks,
+  fetchNodeSummaries,   // NEW — Notebooks integration guide §6.6: Backlinks concept-graph node-click rationale
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
   fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
   fetchPanelContent, savePanelContent,   // NEW — generic paste-panel persistence (eo/panel_content.py)
