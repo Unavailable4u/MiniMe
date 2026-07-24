@@ -21,7 +21,18 @@ mermaid.initialize({ startOnLoad: false, theme: "dark", suppressErrorRendering: 
 // every OTHER caller of this component (structure-plan views, ordinary
 // chat-rendered diagrams) keeps today's static, non-interactive look
 // with zero behavior change.
-export default function MermaidDiagram({ mermaidText, onNodeClick }) {
+//
+// hideSourceOnFail (NEW — bug #6a fix): defaults to false, so every
+// existing caller keeps today's "fall back to showing the raw source"
+// behavior unchanged (genuinely useful for a structure-plan diagram, or
+// a ```mermaid block inside a normal chat message, where seeing the
+// source is real context). MindMapView passes hideSourceOnFail={true}
+// -- per the "Mind Map is a pure visualization surface, never show raw
+// source/code" steer, this is the last-resort case where the model's
+// fenced block matched (so agents/mind_mapper.py already accepted it as
+// "mermaid") but mermaid.render() still rejects it, e.g. a syntax typo
+// inside otherwise-valid-looking flowchart syntax.
+export default function MermaidDiagram({ mermaidText, onNodeClick, hideSourceOnFail = false }) {
   const ref = useRef(null);
   const [failed, setFailed] = useState(false);
 
@@ -71,6 +82,17 @@ export default function MermaidDiagram({ mermaidText, onNodeClick }) {
   }, [mermaidText, onNodeClick]);
 
   if (failed) {
+    if (hideSourceOnFail) {
+      // NEW — bug #6a fix: no code dump, just a short line — this is a
+      // last-resort case (see the prop comment above), rare enough now
+      // that mind_mapper.py retries once server-side before ever
+      // handing back something that reaches this component at all.
+      return (
+        <div className="text-[11px] text-[var(--neutral-500)]">
+          Couldn't render this as a diagram — try Regenerate.
+        </div>
+      );
+    }
     // Fall back to the raw diagram source instead of a blank/broken box,
     // so the content isn't lost -- just not rendered as a graphic. Styled
     // to match the plain fenced-code-block look Markdown.jsx already uses

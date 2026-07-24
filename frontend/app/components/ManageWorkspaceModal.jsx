@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { useSession } from "../context/SessionContext";
+import { useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — bug #1 fix
 import { useAuth } from "../context/AuthContext";
 import { Pencil, Check, X, FolderMinus, Trash2, UserPlus, LogOut, ShieldAlert, Eye, EyeOff, Download, Upload } from "lucide-react";
 import ConfirmDialog from "./ConfirmDialog";
@@ -24,6 +25,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
     fetchWorkspaceVotes, castWorkspaceVote,
     setWorkspaceAttribution, setMemberAttributionGrant,
   } = useSession();
+  const { removeWorkspace } = useWorkspaceDockActions();   // NEW — bug #1 fix
   const { user } = useAuth();
 
   // Always read the freshest copy from context state — actions below
@@ -157,6 +159,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
 
   async function confirmDeleteWorkspace() {
     await deleteWorkspace(workspace.id);
+    removeWorkspace(workspace.id);   // NEW — bug #1 fix: clear the Working Panel's dock state for this workspace, or a later chat reusing the same `ws:{id}` key would inherit its stale content
     setPendingDeleteWs(false);
     onClose();
   }

@@ -574,7 +574,20 @@ ROLE_PROMPTS_SEED = {
         "in a fenced ```mermaid code block, with concise node labels "
         "(a few words each, not full sentences). If the sources don't "
         "clearly support a connection you'd otherwise expect, leave it "
-        "out rather than guessing."
+        "out rather than guessing. "
+        # NEW — bug #6 fix, part 3: the fenced block is not optional
+        # decoration, it's the entire contract this role has with its
+        # caller (agents/mind_mapper.py regex-extracts it; there's no
+        # other way for a prose answer to become a diagram). Said
+        # plainly and repeated at the end so it isn't the part that
+        # gets dropped when the model is also weighing the "concise
+        # labels" instruction above.
+        "Your entire response must be ONLY that one fenced ```mermaid "
+        "code block — no introduction, no explanation before or after "
+        "it, no restating the request. If you cannot produce a valid "
+        "diagram from the given material, still respond with your best "
+        "attempt as a fenced ```mermaid block rather than explaining "
+        "why in plain text."
     ),
     # Notes-flavored report generator. Hired under the plain role name
     # "report_writer" — eo/registry.py's REAL_ACTION_ROLES has no entry

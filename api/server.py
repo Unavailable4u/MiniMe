@@ -1653,10 +1653,25 @@ def _generate_mindmap(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     write, so no extra confirmation step belongs here; the guide's own
     §9 open question about warning-before-overwrite is a frontend
     concern for whenever the "Regenerate" button is built, not this
-    endpoint's job."""
+    endpoint's job.
+
+    CHANGED — bug #6 fix: generate_mindmap() now returns a typed
+    {"kind", "text"} result instead of always handing back something
+    string-shaped. Only a "mermaid" result gets saved -- a "markdown"
+    result (the model answered without a valid fence, even after
+    mind_mapper.py's internal retry) raises instead of being written to
+    panel_content, so a bad Regenerate attempt can't clobber a
+    previously-good diagram with prose, and so this becomes a normal
+    "error" branch that notebooks_generate already knows how to report
+    (see that endpoint below) -- MindMapView's existing error handling
+    (a plain message, no code dump) covers it with no frontend change
+    needed here.
+    """
     source_node_ids = (scope or {}).get("source_node_ids")
-    content = generate_mindmap(ws_id, source_node_ids)
-    return panel_content.set_content(ws_id, "mindmap", content, owner_id)
+    result = generate_mindmap(ws_id, source_node_ids)
+    if result["kind"] != "mermaid":
+        raise RuntimeError("Couldn't generate a valid diagram from this notebook's sources — try Regenerate.")
+    return panel_content.set_content(ws_id, "mindmap", result["text"], owner_id)
 
 
 def _generate_backlinks(ws_id: str, scope: dict | None, owner_id: str) -> dict:
