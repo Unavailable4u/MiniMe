@@ -350,6 +350,7 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
           <MermaidDiagram
             mermaidText={content}
             onNodeClick={(label) => onOpenSubChat(workspaceId, `Tell me more about "${label}" using this notebook's sources.`)}
+            hideSourceOnFail /* NEW — bug #6a fix */
           />
         </div>
       ) : (

@@ -433,17 +433,33 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       };
     };
 
-    // Drops a dock entirely, including any bound channel. Nothing calls
-    // this yet — not needed until there's an actual "retract" action
-    // (flagged as future/out-of-scope in doc §2.2) or cleanup-on-unmount
-    // logic in 3d/3e. Defined now since the store is the natural place
-    // for it to live.
+    // Drops a dock entirely, including any bound channel. CHANGED — bug
+    // #1 fix: this used to have no callers at all, which is exactly why
+    // deleting a chat/project left stale Working Panel content behind —
+    // deleteChat() below now calls this for the chat's own key, and
+    // removeWorkspace() (below) uses it for every key under a deleted
+    // workspace.
     const remove = (key) => {
       unbindChannel(key);
       states.delete(key);
       listeners.delete(key);
       stepSeqs.delete(key);
       openStepStacks.delete(key);
+    };
+
+    // NEW — bug #1 fix: "delete project" has no equivalent of deleteChat's
+    // single-key cleanup, because a workspace can own more than one dock
+    // key (today just `ws:{workspaceId}`, but this stays prefix-based
+    // rather than a single delete so it keeps working if that ever
+    // becomes `ws:{workspaceId}:{chatId}`-style per-chat keys, per the
+    // normalizeDockKey comment above). Removes every matching key's
+    // state/listeners/channel so nothing under the deleted workspace can
+    // bleed into whatever dock key gets reused next.
+    const removeWorkspace = (workspaceId) => {
+      const prefix = `ws:${workspaceId}`;
+      for (const key of states.keys()) {
+        if (key === prefix || key.startsWith(`${prefix}:`)) remove(key);
+      }
     };
 
     // ---- 3c: run functions, ported from SessionContext.jsx --------
@@ -706,6 +722,14 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       const { getWorkspaceIdForChat, getChats, refreshChatList } = callbacksRef.current;
       const key = normalizeDockKey(getWorkspaceIdForChat?.(chatId) ?? null, chatId);
       const wasActive = key ? states.get(key)?.sessionId === chatId : false;
+      // CHANGED — bug #1 fix: must happen BEFORE switchChat/createNewChat
+      // below, not after — setState() shallow-merges into whatever's
+      // already at `key`, so if this deleted chat's key gets reused
+      // (e.g. a workspace-level key another chat in the same project
+      // switches into), the old routing trace / dependency map / plan
+      // would otherwise merge into the "new" dock state instead of being
+      // replaced by it.
+      if (key) remove(key);
       if (wasActive) {
         const remaining = (getChats?.() || []).filter((c) => c.id !== chatId);
         if (remaining.length > 0) await switchChat(remaining[0].id);
@@ -789,7 +813,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     };
 
     storeRef.current = {
-      getState, subscribe, setState, remove,
+      getState, subscribe, setState, remove, removeWorkspace,   // CHANGED — bug #1 fix, added removeWorkspace
       persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
       switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat, createWorkspaceChat,
       getLastActiveChatId, setLastActiveChatId, subscribeLastActiveChatId,
@@ -906,8 +930,8 @@ export function useWorkspaceDockActions() {
   if (!store) {
     throw new Error("useWorkspaceDockActions must be used within a WorkspaceDockProvider");
   }
-  const { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat } = store;
-  return { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat };
+  const { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat, removeWorkspace } = store;   // CHANGED — bug #1 fix, added removeWorkspace
+  return { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat, removeWorkspace };
 }
 
 /**

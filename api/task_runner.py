@@ -62,6 +62,58 @@ from eo import conversation_memory
 from eo import chat_workspace
 from eo import workspace_facts
 from eo import fact_summarizer   # NEW — Part 3
+from eo.knowledge_graph import search_nodes   # NEW — bug #4 fix, notebook grounding
+
+# NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
+# ingested sources into the prompt (task_text had a workspace_id for
+# bookkeeping only — routing facts, cache keys, fact extraction — but the
+# model answering the question never saw the actual source content, which
+# is why it would say things like "I don't have access to files"). Same
+# per-source truncation budget agents/mind_mapper.py's _context_for() uses,
+# scaled down since this runs on every chat turn rather than a one-shot
+# generation and only pulls the top_k most relevant sources, not the whole
+# corpus.
+MAX_NOTEBOOK_CONTEXT_CHARS_PER_SOURCE = 4000
+NOTEBOOK_CONTEXT_TOP_K = 6
+
+
+def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = None) -> str:
+    """Retrieval-scoped notebook grounding for chat. Returns task_text
+    unchanged when there's no workspace, no matching sources, or the
+    search itself fails — fail-open, same posture eo/knowledge_graph.py's
+    own functions already take, so a Vector hiccup degrades to "chat
+    behaves like it used to" rather than breaking the turn.
+    """
+    if not workspace_id:
+        return task_text
+    try:
+        nodes = search_nodes(workspace_id, query_text=task_text,
+                              top_k=NOTEBOOK_CONTEXT_TOP_K, session_id=session_id)
+    except Exception as exc:
+        print(f"  [task_runner] notebook grounding search failed, skipped (fail-open): {exc}")
+        return task_text
+    if not nodes:
+        return task_text
+
+    parts = []
+    for n in nodes:
+        title = n.get("title") or n.get("node_id")
+        content = (n.get("content") or "").strip()[:MAX_NOTEBOOK_CONTEXT_CHARS_PER_SOURCE]
+        if not content:
+            continue
+        parts.append(f"--- {title} ---\n{content}")
+    if not parts:
+        return task_text
+
+    context = "\n\n".join(parts)
+    return (
+        "You have access to the following excerpts from this notebook's sources. "
+        "Use them to answer the user's message when relevant. These excerpts ARE "
+        "the notebook's content — don't claim you can't access files or external "
+        "content when the answer is right here.\n\n"
+        f"{context}\n\n---\n\n{task_text}"
+    )
+
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
     graph = build_execution_graph(tier=0)
@@ -626,6 +678,14 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
     workspace_id = workspace["id"] if workspace else None
 
+    # NEW — bug #4 fix: build once, reuse for every model-facing call below
+    # (SGA fast path here, and the tier 0/1/2/3 dispatch further down via
+    # the "task_text" key on the returned dict). Cache lookups/writes and
+    # routing/staffing decisions deliberately keep using the *original*
+    # task_text — grounding is for what the model sees when it actually
+    # answers, not for cache keys or the Inspector's classification.
+    grounded_task_text = _grounded_task_text(workspace_id, task_text, session_id=session_id)
+
     if tier_override is None and mode != "beast":
         cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
         if cached:
@@ -639,7 +699,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
                 "message": None,
             }}
 
-    sga_result = sga_attempt(task_text, session_id=session_id)
+    sga_result = sga_attempt(grounded_task_text, session_id=session_id)   # CHANGED — bug #4 fix, was task_text
     if sga_result["resolved"]:
         write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
         _record_routing_fact(workspace_id, "sga", task_text, session_id)   # NEW — D1
@@ -683,7 +743,8 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
         }}
 
     return {"resolved": True, "decision": decision, "tier": tier, "hires": mode_result["hires"],
-            "workspace_id": workspace_id}   # NEW — Part 2, so _run_task_inner can gate content-fact extraction
+            "workspace_id": workspace_id,   # NEW — Part 2, so _run_task_inner can gate content-fact extraction
+            "task_text": grounded_task_text}   # NEW — bug #4 fix, so _run_task_inner dispatches the grounded text
 
 
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
@@ -748,9 +809,12 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                                             app_slug, session_id, mode, owner_id=owner_id)   # FIXED
     if not resolved["resolved"]:
         return resolved["response"]
-    response = _dispatch_resolved(task_text, resolved["decision"], resolved["tier"], resolved["hires"],
-                                   app_slug, run_tests, session_id, mode, project_unique_name, approval_roles,
-                                   no_conversation_context_roles=no_conversation_context_roles)
+    # CHANGED — bug #4 fix: dispatch the grounded text (falls back to the
+    # original task_text if the key's ever missing) so tier 0/1/2/3
+    # generation actually sees notebook source content, not just task_text.
+    response = _dispatch_resolved(resolved.get("task_text", task_text), resolved["decision"], resolved["tier"],
+                                   resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
+                                   approval_roles, no_conversation_context_roles=no_conversation_context_roles)
     _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response)   # NEW — Part 2
     return response
 
