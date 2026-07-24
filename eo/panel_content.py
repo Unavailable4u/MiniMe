@@ -52,6 +52,10 @@ VALID_PANEL_KEYS = {
     "contradictions",
     "extraction_manual",
     "audit",
+    "suggested_workflows",  # NEW — bug audit §7: agents/workflow_suggester.py's
+                             # {"workflows": [...]} result, JSON-encoded into
+                             # this column same as every other panel here —
+                             # see api/server.py's _generate_workflows.
 }
 
 
@@ -136,3 +140,39 @@ def delete_content(ws_id: str, panel_key: str, user_id: str) -> None:
             (ws_id, panel_key),
         )
     write_audit(user_id, "panel_content.delete", "workspace", ws_id, {"panel_key": panel_key})
+
+
+# NEW — bug audit §2 ("delete cascade"): every panel in this module is a
+# whole-notebook artifact (one row per (workspace_id, panel_key)), built
+# by summarizing every source node in the workspace at generation time —
+# see agents/mind_mapper.py, agents/study_generator.py, etc. None of them
+# record *which* source nodes went into a given generation, so once a
+# source is deleted there's no precise way to know which saved panels it
+# tainted.
+#
+# The audit guide flags two options: a precise `source_node_ids` column
+# (needs each generator to start recording its inputs) or the "immediate,
+# cheap fix" of clearing every saved panel for the workspace so nothing
+# stale is left on screen. Going with the cheap fix here — it needs no
+# schema change (this table already exists; a new column would need a
+# manual migration against part8_schema.sql, which isn't tracked in this
+# repo), and every panel view already renders its own "nothing generated
+# yet" empty state when no row is saved (see NotebooksTab.jsx's
+# MindMapView etc.), so clearing rows here is indistinguishable from
+# "never generated" rather than an error state. The precise
+# source_node_ids version is a reasonable follow-up if wiping the whole
+# notebook's panels on every single source delete turns out to be too
+# aggressive in practice.
+def clear_workspace(ws_id: str, user_id: str) -> int:
+    """Deletes every saved panel for a workspace. Called by the
+    delete-source cascade (api/server.py's delete_workspace_node) so a
+    Mind Map / Study Guide / etc. built from a now-deleted source doesn't
+    keep showing as if it still reflects the notebook's current sources.
+    Returns the number of rows removed (0 is normal — most notebooks
+    won't have every panel generated)."""
+    with db.cursor() as cur:
+        cur.execute("delete from workspace_panel_content where workspace_id = %s", (ws_id,))
+        count = cur.rowcount
+    if count:
+        write_audit(user_id, "panel_content.clear_workspace", "workspace", ws_id, {"rows_deleted": count})
+    return count

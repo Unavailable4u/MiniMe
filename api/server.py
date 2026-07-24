@@ -110,6 +110,7 @@ from agents.fact_detector import detect_facts   # NEW — Notebooks integration 
 from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
 from agents.mind_mapper import generate_mindmap   # NEW — Notebooks integration guide §6.5 (Phase 2)
 from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
+from agents.workflow_suggester import suggest_workflows   # NEW — bug audit §7: suggested workflow diagrams
 from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
 from agents.note_table_builder import build_table
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
@@ -1447,6 +1448,26 @@ def rename_node_endpoint(ws_id: str, node_id: str, req: RenameNodeRequest):
 # pointing at a node that no longer exists. Note-candidates aren't
 # node-linked (see their {title, content} shape in CandidatesView.jsx),
 # so there's nothing to cascade there.
+#
+# CHANGED — bug audit §2 (delete cascade), part B: a file that got split
+# into multiple nodes at ingestion time (agents/source_ingestor.py's
+# write_ingested_source()) links every section after the first back to
+# the first with a same_source edge (child --same_source--> root). The
+# frontend's "Delete source" button on a grouped source only ever passed
+# the group's root node_id, so every sibling section survived as an
+# orphaned node -- still searchable, still surfaced in chat grounding
+# (api/task_runner.py's _grounded_task_text()) and future Mind
+# Map/Study/Facts generations, even though the user believed the whole
+# file was gone. Resolve the target node to its full same_source batch
+# (itself plus every child pointing at it) and delete all of them, same
+# as if each had been deleted individually.
+#
+# CHANGED — bug audit §2, part A: also clears every saved panel
+# (eo/panel_content.py) for the workspace, since Mind Map/Study Guide/
+# Facts/Clusters are whole-notebook artifacts with no record of which
+# source nodes fed into them -- see clear_workspace()'s docstring for
+# why "clear everything" is the deliberate choice here over a partial
+# invalidation.
 @app.delete("/api/workspaces/{ws_id}/nodes/{node_id}", dependencies=[Depends(require_auth)])
 def delete_workspace_node(ws_id: str, node_id: str, owner_id: str = Depends(require_auth)):
     try:
@@ -1454,27 +1475,37 @@ def delete_workspace_node(ws_id: str, node_id: str, owner_id: str = Depends(requ
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
 
-    delete_node(ws_id, node_id)
-
-    # eo/graph_edges.py's own edges_for_node() docstring: "what a 'delete
-    # this node' flow needs to know what it would orphan" -- built for
-    # exactly this, confirmed against that module's source rather than
-    # guessed.
     full_node_id = f"node:{ws_id}:{node_id}"
-    for edge in graph_edges.edges_for_node(full_node_id):
-        try:
-            graph_edges.delete_edge(edge["edge_id"])
-        except FileNotFoundError:
-            pass
+    sibling_ids = [
+        edge["from_node_id"].split(":", 2)[-1]
+        for edge in graph_edges.edges_for_node(full_node_id)
+        if edge.get("relation") == "same_source" and edge["to_node_id"] == full_node_id
+    ]
+    batch_ids = [node_id, *sibling_ids]
 
-    for candidate in list_cluster_candidates(ws_id):
-        if node_id in (candidate.get("node_ids") or []):
+    for nid in batch_ids:
+        delete_node(ws_id, nid)
+
+        # eo/graph_edges.py's own edges_for_node() docstring: "what a
+        # 'delete this node' flow needs to know what it would orphan" --
+        # built for exactly this, confirmed against that module's source
+        # rather than guessed.
+        for edge in graph_edges.edges_for_node(f"node:{ws_id}:{nid}"):
             try:
-                reject_cluster_candidate(ws_id, candidate["candidate_id"])
+                graph_edges.delete_edge(edge["edge_id"])
             except FileNotFoundError:
                 pass
 
-    return {"status": "deleted", "id": node_id}
+        for candidate in list_cluster_candidates(ws_id):
+            if nid in (candidate.get("node_ids") or []):
+                try:
+                    reject_cluster_candidate(ws_id, candidate["candidate_id"])
+                except FileNotFoundError:
+                    pass
+
+    panel_content.clear_workspace(ws_id, owner_id)
+
+    return {"status": "deleted", "id": node_id, "deleted_ids": batch_ids}
 
 
 # --- silent note-taking agent candidates (see eo/note_candidates.py, §4.6)
@@ -1564,20 +1595,20 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
 # fails still reports whichever targets succeeded instead of failing the
 # whole request.
 #
-# All six of Phase 1's targets plus Phase 2's Mind Map and Phase 3's
-# Backlinks concept graph are wired now: Clusters, Facts, Suggested
-# Notes, Flashcards, Quiz, Study Guide, Mind Map, and Backlinks.
+# All six of Phase 1's targets plus Phase 2's Mind Map, Phase 3's
+# Backlinks concept graph, and bug audit §7's suggested Workflows are
+# wired now: Clusters, Facts, Suggested Notes, Flashcards, Quiz, Study
+# Guide, Mind Map, Backlinks, and Workflows.
 # `scope` is accepted and shape-checked here so the request contract
 # didn't have to change as targets were added one patch at a time --
-# Facts, the three Study targets, Mind Map, and Backlinks are the ones
-# that actually read it (an optional `source_node_ids` list;
+# Facts, the three Study targets, Mind Map, Backlinks, and Workflows are
+# the ones that actually read it (an optional `source_node_ids` list;
 # blank/omitted means "whole notebook," same convention guide §4.2 uses
 # for scope elsewhere). Backlinks additionally supports a `force` scope
 # flag (see _generate_backlinks below) to bypass its regeneration-check
 # skip, for testing/debugging -- not exposed in the picker UI; guide
 # §6.6's skip-if-nothing-new behavior is meant to be the default,
-# silent path. That's every Phase 1-3 backend target from the guide;
-# nothing left unwired on this endpoint.
+# silent path.
 #
 # Each target function takes (ws_id, scope, owner_id). Clusters and Facts
 # ignore owner_id -- they're workspace-scoped, same as
@@ -1693,6 +1724,22 @@ def _generate_backlinks(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     return link_concepts(ws_id, source_node_ids, force=force)
 
 
+def _generate_workflows(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Bug audit §7 (new feature): agents/workflow_suggester.py finds
+    0-4 procedures described in the notebook's sources and diagrams
+    each one. An empty `workflows` list is a normal "done" result, not
+    an error -- purely conceptual/descriptive source material
+    genuinely has no procedure to show, same as Backlinks' "up to
+    date" branch above being a non-error outcome. Stored as a JSON
+    string under panel_content's "suggested_workflows" key, same
+    encode-on-write/decode-on-read shape the frontend already handles
+    for every other structured (non-plain-Markdown) panel.
+    """
+    source_node_ids = (scope or {}).get("source_node_ids")
+    result = suggest_workflows(ws_id, source_node_ids)
+    return panel_content.set_content(ws_id, "suggested_workflows", json.dumps(result), owner_id)
+
+
 NOTEBOOKS_GENERATE_TARGETS = {
     "clusters": _generate_clusters,
     "facts": _generate_facts,
@@ -1702,6 +1749,7 @@ NOTEBOOKS_GENERATE_TARGETS = {
     "study_guide": _make_study_generate("study_guide"),
     "mindmap": _generate_mindmap,
     "backlinks": _generate_backlinks,
+    "workflows": _generate_workflows,
 }
 
 
