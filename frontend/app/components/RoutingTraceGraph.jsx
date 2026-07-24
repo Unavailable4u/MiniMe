@@ -96,12 +96,36 @@ function escapeHtml(s) {
 // `runStatus`: "running" | "done" | "error" -- drives the Output node's
 // status ring so it visibly flips from pending -> done/error.
 //
+// `branches` -- NEW, Notebooks integration guide §5. When passed, this
+// component draws a completely different shape from everything above:
+// a Notebooks "Generate" command (api/server.py's notebooks_generate)
+// fires N independent, one-shot targets with no dispatcher chain
+// between them at all (§2: "known, fixed, single-purpose job," not a
+// multi-role handoff), so there's no `steps`/`trace` to build a
+// backbone from in the first place. Shape is `[{panel_key, label,
+// status: "running"|"done"|"error", error?, result?}]` -- the same
+// branch objects api/server.py's response and
+// NotebooksGeneratePicker.jsx's local state already use, so callers can
+// hand this prop the exact array they already have. Each branch becomes
+// its own terminal node linked directly off `__input__` -- guide §5:
+// "just N independent short chains hanging off the same __input__ node
+// ... simpler than the coding-pipeline graph, not harder." When
+// `branches` is present it takes over the whole graph; the
+// steps/trace/suggestedAgents single-chain logic below is skipped
+// entirely for that render.
+//
+// `onBranchClick` -- NEW, alongside `branches`. Fired with a branch's
+// `panel_key` when its node is clicked, so a caller can jump to that
+// target's subtab (guide §5: "Each terminal node is clickable... opens/
+// switches to that subtab" -- same idea NotebooksGeneratePicker.jsx's
+// BranchRow chevron already does, now on the graph node itself).
+//
 // NOTE: this component now only computes `{nodes, links}` from routing-
 // specific inputs and how to DRAW a routing node/link -- the actual
 // ForceGraph2D wiring (sizing, dynamic import, zoom-to-fit) lives in the
 // generic ForceGraphBase, shared with KnowledgeGraphView.jsx (Part 0
 // Section 0.2). Nothing about the graph SHAPE below changed.
-export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus }) {
+export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus, branches, onBranchClick }) {
   const [hoveredNode, setHoveredNode] = useState(null);
 
   // FIX (graph reflows/jumps on every single event instead of growing
@@ -141,6 +165,37 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       seenPairs[key] = (seenPairs[key] || 0) + 1;
       links.push({ source, target, reason, curvature: seenPairs[key] === 1 ? 0 : 0.3 * seenPairs[key] });
     };
+
+    // NEW — guide §5 multi-branch mode. Short-circuits everything below:
+    // a Generate command's targets are independent one-shot calls, not a
+    // dispatcher chain, so none of the steps/trace/suggestedAgents
+    // backbone-building logic applies here.
+    if (branches) {
+      const usedIds = new Set(["__input__"]);
+      upsert("__input__", {
+        category: INPUT_CATEGORY, status: "done", display: "Generate", fullName: "Generate command",
+        isEndpoint: true,
+        summary: `${branches.length} target${branches.length === 1 ? "" : "s"}`, durationMs: null,
+      });
+      for (const b of branches) {
+        usedIds.add(b.panel_key);
+        const status = b.status === "running" ? "running" : b.status === "error" ? "error" : "done";
+        const label = b.label || b.panel_key;
+        upsert(b.panel_key, {
+          category: OUTPUT_CATEGORY, status,
+          display: shortLabel(label), fullName: label,
+          isEndpoint: true, isBranch: true,
+          summary:
+            status === "error" ? (b.error || "Run failed") :
+            status === "running" ? "Generating…" :
+            b.result?.status === "up_to_date" ? "Up to date" : "Done",
+          durationMs: null,
+        });
+        addLink("__input__", b.panel_key, "plan");
+      }
+      const nodes = Array.from(usedIds).map((id) => nodeObjectsRef.current.get(id)).filter(Boolean);
+      return { nodes, links };
+    }
 
     const orderedSteps = steps || [];
     const usedIds = new Set(["__input__", "__output__"]);
@@ -254,7 +309,7 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
     const nodes = Array.from(usedIds).map((id) => nodeObjectsRef.current.get(id)).filter(Boolean);
 
     return { nodes, links };
-  }, [trace, suggestedAgents, roleRequests, steps, stepByRole, runStatus]);
+  }, [trace, suggestedAgents, roleRequests, steps, stepByRole, runStatus, branches]);
 
   const legend = (
     <>
@@ -274,6 +329,12 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       linkColor={(link) => REASON_COLORS[link.reason] || "#6b7280"}
       linkWidth={(link) => (link.reason === "requested" ? 2 : 1)}
       linkLabel={(link) => link.reason}
+      onNodeClick={(node) => {
+        // Only branch nodes (guide §5's per-target terminal nodes) are
+        // navigable -- the single-chain graph's Input/Output/role nodes
+        // have never had a click action and shouldn't gain one here.
+        if (node.isBranch) onBranchClick?.(node.id);
+      }}
       onNodeHover={setHoveredNode}
       nodeLabel={(node) => {
         // FIX (long agent names get cut off on hover too): this used to

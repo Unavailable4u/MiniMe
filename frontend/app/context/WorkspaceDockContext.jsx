@@ -109,6 +109,17 @@ async function authHeaders(opts = {}) {
 // agent_requested_role branch of the very same session-channel handler
 // this step is moving. Treating its absence from the doc's list as an
 // omission rather than leaving agent_requested_role with nowhere to go.
+// `notebooksGenerateRun` -- NEW, Notebooks integration guide §5. Mirrors
+// NotebooksGeneratePicker.jsx's own local run state (targets/branches)
+// into the dock so WorkingPanel.jsx -- which has no other connection to
+// the picker, and no `messages` entry to hang a snapshot off since a
+// Generate command isn't a chat turn -- can render the same run as its
+// own multi-branch RoutingTraceGraph section. Shape: `{ targets:
+// string[], branches: [{panel_key, label, status, error?, result?}] }`,
+// or `null` when no Generate command has run yet this session. Picker
+// and WorkingPanel resolve to the SAME dock key off the same
+// workspaceId (see normalizeDockKey below), so writing here from one
+// and reading in the other needs no extra plumbing.
 function makeInitialDockState() {
   return {
     messages: [],
@@ -125,6 +136,7 @@ function makeInitialDockState() {
     pausedApproval: null,
     pausedRun: null,
     roleRequests: [], // ADDED in 3b — see note above
+    notebooksGenerateRun: null, // NEW — see note above
   };
 }
 
