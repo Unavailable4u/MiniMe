@@ -106,6 +106,9 @@ from eo.knowledge_graph import list_nodes, delete_node   # NEW — §2 fix: dele
 from agents.backlink_detector import detect_backlinks
 from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
+from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
+from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
+from agents.mind_mapper import generate_mindmap   # NEW — Notebooks integration guide §6.5 (Phase 2)
 from agents.note_table_builder import build_table
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
 from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
@@ -1537,6 +1540,159 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown candidate_id")
     return {"status": "rejected", "id": candidate_id}
+
+
+# --- Notebooks "Generate" command (Notebooks integration guide §4, §6) ----
+# Chat's free-text/picker flow parses down to one structured intent --
+# {targets: [...], scope: {...}} -- and hits this single endpoint rather
+# than each target having its own bespoke chat-trigger route. The response
+# is a per-target result list, not one shared payload: guide §5 has the
+# Working Panel show one branch per target, each with its own
+# Generating/Done/Error state, so a multi-target command that partially
+# fails still reports whichever targets succeeded instead of failing the
+# whole request.
+#
+# All six of Phase 1's targets plus Phase 2's Mind Map are wired now:
+# Clusters, Facts, Suggested Notes, Flashcards, Quiz, Study Guide, and
+# Mind Map. `scope` is accepted and shape-checked here so the request
+# contract didn't have to change as targets were added one patch at a
+# time -- Facts, the three Study targets, and Mind Map are the ones that
+# actually read it (an optional `source_node_ids` list; blank/omitted
+# means "whole notebook," same convention guide §4.2 uses for scope
+# elsewhere). Backlinks' new concept-graph pass (Phase 3) is the one
+# remaining target -- it needs a genuinely new agent plus a node-summary
+# store and a regeneration-check (guide §6.6), not just a caller, so it's
+# a bigger unit of work than everything wired so far.
+#
+# Each target function takes (ws_id, scope, owner_id). Clusters and Facts
+# ignore owner_id -- they're workspace-scoped, same as
+# detect_backlinks() above. Suggested Notes needs it: its underlying
+# call, agents/note_taker.py's scan_conversation(), is scoped to one
+# CHAT (session_id), not a workspace, so _most_recently_active_chat(ws_id,
+# owner_id) below picks the workspace's most recently updated chat as
+# "the" conversation a workspace-level Generate command means -- same as
+# opening the notebook and continuing wherever you left off. A workspace
+# with no chats yet returns a "done" branch with a null candidate rather
+# than an error -- "nothing to scan" is a valid, unsurprising result of
+# pressing Generate on a brand new notebook, not a failure. The three
+# Study targets need owner_id too, but only to pass through to
+# panel_content.set_content()'s updated_by field -- same "just the
+# caller changes, not the store" reasoning as guide §6.5's Mind Map note.
+
+def _most_recently_active_chat_id(ws_id: str, owner_id: str) -> str | None:
+    ws = chat_workspace.get_workspace(ws_id, owner_id)
+    chats = []
+    for chat_id in ws.get("chat_ids") or []:
+        try:
+            chats.append(chat_store.get_chat(chat_id, owner_id))
+        except Exception:
+            continue   # a chat this user can no longer access -- skip it, don't fail the whole scan
+    if not chats:
+        return None
+    chats.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
+    return chats[0]["id"]
+
+
+def _generate_clusters(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    return {"candidates": propose_clusters(ws_id)}
+
+
+def _generate_facts(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    source_node_ids = (scope or {}).get("source_node_ids")
+    return {"candidates": detect_facts(ws_id, source_node_ids)}
+
+
+def _generate_suggested_notes(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    chat_id = _most_recently_active_chat_id(ws_id, owner_id)
+    if not chat_id:
+        return {"candidate": None, "note": "no chats in this workspace yet"}
+    from agents.note_taker import scan_conversation   # deferred, same
+                                                        # circular-import
+                                                        # reason
+                                                        # eo/conversation_memory.py's
+                                                        # own note_taker
+                                                        # import defers this
+    return {"candidate": scan_conversation(chat_id, owner_id)}
+
+
+def _make_study_generate(panel_key: str):
+    """Flashcards/Quiz/Study Guide are the one truly zero-new-storage
+    case (guide §6.1): generate_study_content() returns raw Markdown,
+    panel_content.set_content() saves it under a panel_key that's
+    already allow-listed and already read by the Study subtab today --
+    the exact same store a manual paste-and-Load writes to, just with
+    the agent as the caller instead of the user's clipboard. One
+    closure per panel_key rather than three near-identical functions.
+    """
+    def _run(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+        source_node_ids = (scope or {}).get("source_node_ids")
+        content = generate_study_content(panel_key, ws_id, source_node_ids)
+        return panel_content.set_content(ws_id, panel_key, content, owner_id)
+    return _run
+
+
+def _generate_mindmap(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Phase 2 (guide §6.5). Same save target Mind Map's manual-paste
+    path already wrote to (panel_key "mindmap") -- Regenerate is meant
+    to be a last-write-wins overwrite, same as every other panel_content
+    write, so no extra confirmation step belongs here; the guide's own
+    §9 open question about warning-before-overwrite is a frontend
+    concern for whenever the "Regenerate" button is built, not this
+    endpoint's job."""
+    source_node_ids = (scope or {}).get("source_node_ids")
+    content = generate_mindmap(ws_id, source_node_ids)
+    return panel_content.set_content(ws_id, "mindmap", content, owner_id)
+
+
+NOTEBOOKS_GENERATE_TARGETS = {
+    "clusters": _generate_clusters,
+    "facts": _generate_facts,
+    "suggested_notes": _generate_suggested_notes,
+    "study_flashcards": _make_study_generate("study_flashcards"),
+    "study_quiz": _make_study_generate("study_quiz"),
+    "study_guide": _make_study_generate("study_guide"),
+    "mindmap": _generate_mindmap,
+}
+
+
+class NotebooksGenerateRequest(BaseModel):
+    targets: list[str]
+    scope: Optional[dict[str, Any]] = None
+
+
+@app.post("/api/workspaces/{ws_id}/notebooks/generate")
+def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    if not req.targets:
+        raise HTTPException(status_code=422, detail="targets must be a non-empty list")
+
+    branches = []
+    for target in req.targets:
+        run_target = NOTEBOOKS_GENERATE_TARGETS.get(target)
+        if run_target is None:
+            # Not an unknown-route 404 -- the endpoint itself is valid,
+            # this particular target just isn't wired yet (see comment
+            # above). Reported as a failed branch, same as a target that
+            # raises during its run, so a mixed request like
+            # {"targets": ["clusters", "flashcards"]} still returns
+            # Clusters' result instead of rejecting the whole call.
+            branches.append({
+                "panel_key": target,
+                "status": "error",
+                "error": f"'{target}' isn't wired to Generate yet",
+            })
+            continue
+        try:
+            result = run_target(ws_id, req.scope, owner_id)
+            branches.append({"panel_key": target, "status": "done", "result": result})
+        except Exception as exc:
+            branches.append({"panel_key": target, "status": "error", "error": str(exc)})
+
+    return {"branches": branches}
 
 
 # --- data tables from scattered facts (see agents/note_table_builder.py,

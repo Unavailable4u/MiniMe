@@ -1,0 +1,199 @@
+diff --git a/agents/study_generator.py b/agents/study_generator.py
+new file mode 100644
+index 0000000..c4e9979
+--- /dev/null
++++ b/agents/study_generator.py
+@@ -0,0 +1,114 @@
++"""
++agents/study_generator.py — Notebooks integration guide §6.1: Flashcards /
++Quiz / Study Guide wired to Generate.
++
++eo/registry.py already has working, hand-written briefs for all three
++roles this file drives (flashcard_writer, quiz_writer, study_guide_writer)
++-- guide §0 confirmed they were already runnable, just only ever reached
++through a manual role chat the user ran and pasted the answer back from.
++This file is the missing direct call: read the scoped source material,
++run the appropriate role through generic_worker (single-hire, same shape
++as agents/note_taker.py and agents/fact_detector.py -- no Panel staffing,
++no role handoffs, per guide §2's "known, fixed, single-purpose job"
++reasoning), and hand the raw Markdown back to the caller.
++
++Deliberately does NOT call eo/panel_content.py's set_content() itself --
++saving needs the actual requesting user's id (for the audit-log/
++updated_by field), which this module has no business knowing about.
++api/server.py's Generate dispatch already has owner_id in hand and saves
++the result after this returns.
++
++Place this file at: agents/study_generator.py
++"""
++import os
++import sys
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from eo.knowledge_graph import list_nodes
++
++# Same per-source truncation reasoning as agents/fact_detector.py: with
++# §3's PDF fix a single source is now the whole document, so without a
++# cap one long source could crowd out every other source in scope. A
++# bit more headroom than fact_detector's 6000 -- flashcards/quizzes/
++# study guides want to draw from the source's actual detail, not just
++# enough to spot a fact worth a one-line note.
++MAX_CONTENT_CHARS_PER_SOURCE = 8000
++
++# panel_key -> the registry role that already knows how to write that
++# format. eo/panel_content.py's VALID_PANEL_KEYS is the source of truth
++# for which keys are real; this dict only needs the three Study ones.
++ROLES_BY_PANEL_KEY = {
++    "study_flashcards": "flashcard_writer",
++    "study_quiz": "quiz_writer",
++    "study_guide": "study_guide_writer",
++}
++
++
++def _context_for(nodes: list[dict]) -> str:
++    """One section per source, each truncated independently -- same
++    shape as agents/fact_detector.py's helper of the same name."""
++    parts = []
++    for n in nodes:
++        title = n.get("title") or n.get("node_id")
++        content = (n.get("content") or "").strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
++        if not content:
++            continue
++        parts.append(f"--- {title} ---\n{content}")
++    return "\n\n".join(parts)
++
++
++def generate_study_content(panel_key: str, workspace_id: str, source_node_ids: list[str] | None = None) -> str:
++    """Returns the raw Markdown a flashcard_writer/quiz_writer/
++    study_guide_writer role produces over the given sources (or every
++    source in the workspace when `source_node_ids` is falsy -- "blank
++    scope = whole notebook," same convention as agents/fact_detector.py
++    and Notebooks integration guide §4.2).
++
++    Raises ValueError for an unrecognized panel_key and LookupError if
++    the resolved scope has zero readable source content, so the caller
++    (api/server.py's Generate dispatch) can turn either into a clear
++    per-branch error instead of silently saving an empty deck.
++    """
++    role = ROLES_BY_PANEL_KEY.get(panel_key)
++    if role is None:
++        raise ValueError(f"unrecognized study panel_key {panel_key!r}")
++
++    nodes = list_nodes(workspace_id)
++    if source_node_ids:
++        wanted = set(source_node_ids)
++        nodes = [n for n in nodes if n.get("node_id") in wanted or n.get("vector_id") in wanted]
++
++    context = _context_for(nodes)
++    if not context:
++        raise LookupError("no readable source content in scope")
++
++    from agents.generic_worker import run as run_role   # deferred, same
++                                                          # circular-import
++                                                          # reason as
++                                                          # agents/note_taker.py
++                                                          # and
++                                                          # agents/fact_detector.py
++
++    task_text = "Source material:\n\n" + context
++    result = run_role(
++        role=role,
++        task_text=task_text,
++        input_keys=[],
++        session_id=None,
++        # The source excerpts above already ARE this call's context --
++        # no chat history belongs in a flashcard deck built from
++        # notebook sources. Same reasoning as fact_detector's own
++        # include_conversation_context=False.
++        include_conversation_context=False,
++        domain="notes",
++    )
++    return (result.get("text") or "").strip()
++
++
++if __name__ == "__main__":
++    import sys as _sys
++    if len(_sys.argv) < 3:
++        print("usage: python -m agents.study_generator <panel_key> <workspace_id>")
++    else:
++        text = generate_study_content(_sys.argv[1], _sys.argv[2])
++        print(text[:1000])
+diff --git a/api/server.py b/api/server.py
+index 53be9f3..bbb6dde 100644
+--- a/api/server.py
++++ b/api/server.py
+@@ -107,6 +107,7 @@ from agents.backlink_detector import detect_backlinks
+ from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
+     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
+ from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
++from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
+ from agents.note_table_builder import build_table
+ from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
+ from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
+@@ -1550,15 +1551,16 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
+ # fails still reports whichever targets succeeded instead of failing the
+ # whole request.
+ #
+-# Three of Phase 1's six targets are wired today: Clusters, Facts, and
+-# Suggested Notes. `scope` is accepted and shape-checked here so the
+-# request contract doesn't have to change again as more targets are
+-# added -- Facts is the first to actually read it (an optional
++# All six of Phase 1's targets are wired now: Clusters, Facts, Suggested
++# Notes, Flashcards, Quiz, and Study Guide. `scope` is accepted and
++# shape-checked here so the request contract didn't have to change as
++# targets were added one patch at a time -- Facts and the three Study
++# targets are the ones that actually read it (an optional
+ # `source_node_ids` list; blank/omitted means "whole notebook," same
+-# convention guide §4.2 uses for scope elsewhere). Flashcards/Quiz/Study
+-# Guide are the same shape as these three and slot into
+-# NOTEBOOKS_GENERATE_TARGETS the same way in a follow-up patch; this
+-# endpoint doesn't change shape when they're added, only this dict grows.
++# convention guide §4.2 uses for scope elsewhere). Mind Map (Phase 2) and
++# Backlinks' new concept-graph pass (Phase 3) are a different shape --
++# they need new generation logic, not just a caller -- so they don't slot
++# into this dict the same trivial way; see the guide's phasing.
+ #
+ # Each target function takes (ws_id, scope, owner_id). Clusters and Facts
+ # ignore owner_id -- they're workspace-scoped, same as
+@@ -1570,7 +1572,10 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
+ # opening the notebook and continuing wherever you left off. A workspace
+ # with no chats yet returns a "done" branch with a null candidate rather
+ # than an error -- "nothing to scan" is a valid, unsurprising result of
+-# pressing Generate on a brand new notebook, not a failure.
++# pressing Generate on a brand new notebook, not a failure. The three
++# Study targets need owner_id too, but only to pass through to
++# panel_content.set_content()'s updated_by field -- same "just the
++# caller changes, not the store" reasoning as guide §6.5's Mind Map note.
+ 
+ def _most_recently_active_chat_id(ws_id: str, owner_id: str) -> str | None:
+     ws = chat_workspace.get_workspace(ws_id, owner_id)
+@@ -1608,10 +1613,29 @@ def _generate_suggested_notes(ws_id: str, scope: dict | None, owner_id: str) ->
+     return {"candidate": scan_conversation(chat_id, owner_id)}
+ 
+ 
++def _make_study_generate(panel_key: str):
++    """Flashcards/Quiz/Study Guide are the one truly zero-new-storage
++    case (guide §6.1): generate_study_content() returns raw Markdown,
++    panel_content.set_content() saves it under a panel_key that's
++    already allow-listed and already read by the Study subtab today --
++    the exact same store a manual paste-and-Load writes to, just with
++    the agent as the caller instead of the user's clipboard. One
++    closure per panel_key rather than three near-identical functions.
++    """
++    def _run(ws_id: str, scope: dict | None, owner_id: str) -> dict:
++        source_node_ids = (scope or {}).get("source_node_ids")
++        content = generate_study_content(panel_key, ws_id, source_node_ids)
++        return panel_content.set_content(ws_id, panel_key, content, owner_id)
++    return _run
++
++
+ NOTEBOOKS_GENERATE_TARGETS = {
+     "clusters": _generate_clusters,
+     "facts": _generate_facts,
+     "suggested_notes": _generate_suggested_notes,
++    "study_flashcards": _make_study_generate("study_flashcards"),
++    "study_quiz": _make_study_generate("study_quiz"),
++    "study_guide": _make_study_generate("study_guide"),
+ }
+ 
+ 

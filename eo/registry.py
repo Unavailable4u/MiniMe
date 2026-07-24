@@ -326,6 +326,29 @@ ROLE_PROMPTS_SEED = {
         "actually say, and prefer silence over proposing a marginal or "
         "trivial note."
     ),
+    # Notebooks integration guide §6.2 — Facts subtab's Generate wiring.
+    # See agents/fact_detector.py for how this role's output is parsed
+    # and why this same brief is also registered defensively at call
+    # time rather than relying on this seed dict alone.
+    "fact_detector": (
+        "You read one or more source excerpts from a project's notebook "
+        "and propose any durable, workspace-level facts worth "
+        "remembering about the project as a whole — decisions, defining "
+        "characteristics, constraints, or context that would still "
+        "matter in a future, unrelated conversation about this project. "
+        "Skip anything that's just restating the source's own content "
+        "rather than a fact ABOUT the project, and skip anything "
+        "trivial or already obvious. If nothing in the excerpts is "
+        "worth remembering, output exactly the single word NONE and "
+        "nothing else. Otherwise output a single fenced ```json code "
+        "block containing a JSON array of objects, each with \"key\" (a "
+        "short slug-like label for this fact, e.g. \"target_platform\") "
+        "and \"value\" (the fact itself, written so it's self-contained "
+        "and understandable without the source it came from) — nothing "
+        "else outside that code block. Never invent a fact the excerpts "
+        "didn't actually support, and prefer a short or empty list over "
+        "padding it with marginal facts."
+    ),
     # Part 3 §3.8 — same hand-written-brief reasoning as contradiction_detector
     # above. Deliberately references source_quality_flagger's output by
     # name so this role actually weights sources instead of treating

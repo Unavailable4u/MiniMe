@@ -1,0 +1,78 @@
+diff --git a/api/server.py b/api/server.py
+index a2b795e..23b1af5 100644
+--- a/api/server.py
++++ b/api/server.py
+@@ -1539,6 +1539,73 @@ def reject_cluster_candidate_endpoint(ws_id: str, candidate_id: str):
+     return {"status": "rejected", "id": candidate_id}
+ 
+ 
++# --- Notebooks "Generate" command (Notebooks integration guide §4, §6) ----
++# Chat's free-text/picker flow parses down to one structured intent --
++# {targets: [...], scope: {...}} -- and hits this single endpoint rather
++# than each target having its own bespoke chat-trigger route. The response
++# is a per-target result list, not one shared payload: guide §5 has the
++# Working Panel show one branch per target, each with its own
++# Generating/Done/Error state, so a multi-target command that partially
++# fails still reports whichever targets succeeded instead of failing the
++# whole request.
++#
++# Only "clusters" is wired today -- of Phase 1's six targets it's the one
++# with genuinely zero generation-side changes needed (propose_clusters()
++# above already exists, is already idempotent, and already replaces the
++# pending candidate list on each call -- exactly the on-demand shape a
++# Generate command wants). `scope` is accepted and shape-checked here so
++# the request contract doesn't have to change again once a scope-aware
++# target (Facts, Mind Map) is wired, but propose_clusters() itself ignores
++# it today, same as detect_backlinks() above -- both already run over the
++# whole workspace. Flashcards/Quiz/Study Guide/Facts/Suggested Notes are
++# the same shape as Clusters and slot into NOTEBOOKS_GENERATE_TARGETS the
++# same way in follow-up patches; this endpoint doesn't change shape when
++# they're added, only this dict grows.
++NOTEBOOKS_GENERATE_TARGETS = {
++    "clusters": lambda ws_id, scope: {"candidates": propose_clusters(ws_id)},
++}
++
++
++class NotebooksGenerateRequest(BaseModel):
++    targets: list[str]
++    scope: Optional[dict[str, Any]] = None
++
++
++@app.post("/api/workspaces/{ws_id}/notebooks/generate")
++def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str = Depends(require_auth)):
++    try:
++        chat_workspace.get_workspace(ws_id, owner_id)
++    except FileNotFoundError:
++        raise HTTPException(status_code=404, detail="Unknown workspace_id")
++
++    if not req.targets:
++        raise HTTPException(status_code=422, detail="targets must be a non-empty list")
++
++    branches = []
++    for target in req.targets:
++        run_target = NOTEBOOKS_GENERATE_TARGETS.get(target)
++        if run_target is None:
++            # Not an unknown-route 404 -- the endpoint itself is valid,
++            # this particular target just isn't wired yet (see comment
++            # above). Reported as a failed branch, same as a target that
++            # raises during its run, so a mixed request like
++            # {"targets": ["clusters", "flashcards"]} still returns
++            # Clusters' result instead of rejecting the whole call.
++            branches.append({
++                "panel_key": target,
++                "status": "error",
++                "error": f"'{target}' isn't wired to Generate yet",
++            })
++            continue
++        try:
++            result = run_target(ws_id, req.scope)
++            branches.append({"panel_key": target, "status": "done", "result": result})
++        except Exception as exc:
++            branches.append({"panel_key": target, "status": "error", "error": str(exc)})
++
++    return {"branches": branches}
++
++
+ # --- data tables from scattered facts (see agents/note_table_builder.py,
+ # Part 4 §4.4) --------------------------------------------------------------
+ # Same directly-called, own-endpoint shape as backlinks/clustering above,
