@@ -1,11 +1,19 @@
 "use client";
 import { useRef, useEffect, useState, useMemo } from "react";
-import dynamic from "next/dynamic";
 
 // react-force-graph-2d touches the canvas/window at import time, so it
-// has to load client-side only -- same reasoning as any other
-// canvas/WebGL library under Next.js's app router.
-const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
+// has to load client-side only. This used to go through next/dynamic()
+// with { ssr: false }, but next/dynamic wraps the loaded module in an
+// internal LoadableComponent that is NOT built with React.forwardRef --
+// any ref attached to the component next/dynamic() returns (fgRef
+// below) gets attached to that wrapper instead of the real
+// react-force-graph-2d instance. That silently broke
+// fgRef.current?.zoomToFit(...) in onEngineStop (zoom-to-fit never
+// actually ran) and produced a "Function components cannot be given
+// refs" console warning pointing at this component. Importing the
+// module manually in an effect (see the ForceGraph2D state inside the
+// component below) gets the same client-only loading behavior without
+// losing the ref.
 
 /**
  * ForceGraphBase — the part of RoutingTraceGraph.jsx that had nothing to
@@ -63,6 +71,22 @@ export default function ForceGraphBase({
   const containerRef = useRef(null);
   const [dims, setDims] = useState({ width: 600, height });
   const lastZoomRef = useRef(0);
+
+  // Manually load the real component client-side instead of via
+  // next/dynamic() -- see the note above the imports for why. Once
+  // loaded, ForceGraph2D below is the actual library export, so
+  // ref={fgRef} attaches to the real instance and zoomToFit works.
+  const [ForceGraph2D, setForceGraph2D] = useState(null);
+  useEffect(() => {
+    let mounted = true;
+    import("react-force-graph-2d").then((mod) => {
+      if (mounted) setForceGraph2D(() => mod.default);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   // Canvas fillStyle can't resolve "var(--neutral-950)" itself the way a
   // CSS property can, so when no literal backgroundColor override is
   // passed, resolve the current --neutral-950 value from the DOM once on
@@ -92,35 +116,37 @@ export default function ForceGraphBase({
 
   return (
     <div ref={containerRef} className="relative rounded-lg border border-[var(--neutral-800)] overflow-hidden">
-      <ForceGraph2D
-        ref={fgRef}
-        graphData={graphData}
-        width={dims.width}
-        height={dims.height}
-        backgroundColor={backgroundColor || resolvedBg}
-        linkColor={linkColor}
-        linkCurvature={linkCurvature}
-        linkDirectionalArrowLength={linkDirectionalArrowLength}
-        linkDirectionalArrowRelPos={linkDirectionalArrowRelPos}
-        linkWidth={linkWidth}
-        linkLabel={linkLabel}
-        cooldownTicks={cooldownTicks}
-        onEngineStop={() => {
-          // Debounced re-frame: only nudge the view outward as new nodes
-          // arrive rather than fully re-centering on every single event,
-          // so the camera doesn't jump around mid-run/mid-edit.
-          const now = Date.now();
-          if (now - lastZoomRef.current > 250) {
-            lastZoomRef.current = now;
-            fgRef.current?.zoomToFit(400, 60);
-          }
-        }}
-        onNodeClick={onNodeClick}
-        onNodeHover={onNodeHover}
-        nodeLabel={nodeLabel}
-        nodeCanvasObject={nodeCanvasObject}
-        nodePointerAreaPaint={nodePointerAreaPaint}
-      />
+      {ForceGraph2D && (
+        <ForceGraph2D
+          ref={fgRef}
+          graphData={graphData}
+          width={dims.width}
+          height={dims.height}
+          backgroundColor={backgroundColor || resolvedBg}
+          linkColor={linkColor}
+          linkCurvature={linkCurvature}
+          linkDirectionalArrowLength={linkDirectionalArrowLength}
+          linkDirectionalArrowRelPos={linkDirectionalArrowRelPos}
+          linkWidth={linkWidth}
+          linkLabel={linkLabel}
+          cooldownTicks={cooldownTicks}
+          onEngineStop={() => {
+            // Debounced re-frame: only nudge the view outward as new nodes
+            // arrive rather than fully re-centering on every single event,
+            // so the camera doesn't jump around mid-run/mid-edit.
+            const now = Date.now();
+            if (now - lastZoomRef.current > 250) {
+              lastZoomRef.current = now;
+              fgRef.current?.zoomToFit(400, 60);
+            }
+          }}
+          onNodeClick={onNodeClick}
+          onNodeHover={onNodeHover}
+          nodeLabel={nodeLabel}
+          nodeCanvasObject={nodeCanvasObject}
+          nodePointerAreaPaint={nodePointerAreaPaint}
+        />
+      )}
       {legend && (
         <div className="absolute bottom-1 right-1 flex flex-wrap items-center gap-2 rounded bg-black/60 px-2 py-1 text-[10px] text-[var(--neutral-400)] max-w-[90%]">
           {legend}
