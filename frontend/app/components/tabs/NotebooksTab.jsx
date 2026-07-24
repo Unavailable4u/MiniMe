@@ -367,22 +367,70 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
 // §4.7: reuses KnowledgeGraphView.jsx (Part 0/3) — third domain to use it,
 // no new graph renderer.
 
-function BacklinksView({ nodes, edges, loading, onDetect, onSelectNode }) {
+function BacklinksView({ workspaceId, nodes, edges, nodeSummaries, loading, onDetect, onSelectNode, generateNotebooks, onRegenerated }) {
+  // NEW — Notebooks integration guide §6.6: "Backlinks subtab likely
+  // needs its own Regenerate-equivalent trigger too... worth deciding
+  // whether Generate's backlinks target should also be reachable from
+  // a button on this subtab itself, not just the picker." Same
+  // handleRegenerate shape as MindMapView above -- calls the picker's
+  // own generateNotebooks(..., ["backlinks"], null) endpoint rather
+  // than a separate one-off route, so this button and a chat/picker
+  // "Generate backlinks" command are the exact same call.
+  const [regenerating, setRegenerating] = useState(false);
+  const [status, setStatus] = useState(null); // last run's {status, edges_created} or {error}
+
+  async function handleRegenerate() {
+    setRegenerating(true);
+    setStatus(null);
+    try {
+      const { branches } = await generateNotebooks(workspaceId, ["backlinks"], null);
+      const branch = branches.find((b) => b.panel_key === "backlinks");
+      if (branch?.status === "error") throw new Error(branch.error || "Concept graph generation failed");
+      setStatus(branch?.result || { status: "done" });
+      await onRegenerated?.();
+    } catch (err) {
+      setStatus({ error: String(err.message || err) });
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-[var(--neutral-500)]">Bi-directional links between sources and notes in this notebook.</p>
-        <button onClick={onDetect} className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]">
-          Detect backlinks
-        </button>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-[var(--neutral-500)]">
+          Concept links between sources in this notebook — click a node to see why it's connected.
+        </p>
+        <div className="flex items-center gap-3 shrink-0">
+          <button onClick={onDetect} className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]">
+            Detect backlinks
+          </button>
+          <button
+            onClick={handleRegenerate}
+            disabled={regenerating}
+            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
+          >
+            {regenerating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            Regenerate concept graph
+          </button>
+        </div>
       </div>
+      {status?.error && <p className="text-[11px] text-red-400">{status.error}</p>}
+      {status && !status.error && status.status === "up_to_date" && (
+        <p className="text-[11px] text-[var(--neutral-600)]">Already up to date — no new sources since the last run.</p>
+      )}
+      {status && !status.error && status.status === "done" && (
+        <p className="text-[11px] text-[var(--neutral-600)]">
+          {(status.edges_created || []).length} new concept link{(status.edges_created || []).length === 1 ? "" : "s"} found.
+        </p>
+      )}
       <div className="h-[420px] rounded-lg border border-[var(--neutral-800)] overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-600)]">Loading…</div>
         ) : nodes.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-600)]">Nothing to graph yet.</div>
         ) : (
-          <KnowledgeGraphView nodes={nodes} edges={edges} onSelectNode={onSelectNode} />
+          <KnowledgeGraphView nodes={nodes} edges={edges} nodeSummaries={nodeSummaries} onSelectNode={onSelectNode} />
         )}
       </div>
     </div>
@@ -946,7 +994,7 @@ function NodePreviewModal({ node, onClose }) {
 export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
    const {
      workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
-     fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks,
+     fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks, fetchNodeSummaries,
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
      fetchPanelContent, savePanelContent,
@@ -977,6 +1025,10 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   const [subTab, setSubTab] = useState("sources");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
+  // NEW — Notebooks integration guide §6.6 (Phase 3): agent-written
+  // per-node blurbs (eo/node_summaries.py), keyed by node_id, fed to
+  // KnowledgeGraphView's rationale panel in concept-graph mode.
+  const [nodeSummaries, setNodeSummaries] = useState({});
   const [candidates, setCandidates] = useState([]);
   const [clusterCandidates, setClusterCandidates] = useState([]);
   const [loadingClusters, setLoadingClusters] = useState(false);
@@ -1060,11 +1112,12 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   async function loadNotebookData(wsId) {
     setLoadingNodes(true);
     setLoadingClusters(true);
-    const [nodeList, edgeList, candidateList, clusterCandidateList] = await Promise.all([
+    const [nodeList, edgeList, candidateList, clusterCandidateList, summaries] = await Promise.all([
       fetchWorkspaceNodes(wsId),
       fetchGraphEdges(wsId),
       fetchNoteCandidates(wsId),
       fetchClusterCandidates(wsId),
+      fetchNodeSummaries(wsId),
     ]);
     // FIX — if the user has since selected a different notebook while
     // this fetch was in flight, this result is stale: drop it instead of
@@ -1075,6 +1128,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     setEdges(edgeList);
     setCandidates(candidateList);
     setClusterCandidates(clusterCandidateList);
+    setNodeSummaries(summaries || {});
     setLoadingNodes(false);
     setLoadingClusters(false);
   }
@@ -1092,7 +1146,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
 
   useEffect(() => {
     if (selectedId) loadNotebookData(selectedId);
-    else { setNodes([]); setEdges([]); setCandidates([]); setClusterCandidates([]); }
+    else { setNodes([]); setEdges([]); setCandidates([]); setClusterCandidates([]); setNodeSummaries({}); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
@@ -1479,11 +1533,15 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             )}
             {subTab === "backlinks" && (
               <BacklinksView
+                workspaceId={selected.id}
                 nodes={nodes}
                 edges={edges}
+                nodeSummaries={nodeSummaries}
                 loading={loadingNodes}
                 onDetect={async () => { await detectBacklinks(selected.id); await loadNotebookData(selected.id); }}
                 onSelectNode={setPreviewNode}
+                generateNotebooks={generateNotebooks}
+                onRegenerated={() => loadNotebookData(selected.id)}
               />
             )}
             {subTab === "study" && <StudyView workspaceId={selected.id} />}
