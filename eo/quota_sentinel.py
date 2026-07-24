@@ -17,7 +17,7 @@ same fix; see llm_client.py's own comment at that call site.
 """
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -75,22 +75,51 @@ def _key_id_for(agent_key: str, provider: str) -> str:
 
 
 def get_quota_snapshot() -> dict:
-    """Returns {agent_key: {"used": int, "quota": int|None, "pct": float|None}}
-    for every account in AGENT_CAPABILITIES, reading TODAY's real usage
-    from the exact keys generate_text() already writes. quota/pct are
-    None for providers QUOTA_CONFIG deliberately omits (cloudflare,
-    mistral) — an honest "no verified number" rather than a guess."""
+    """Returns {agent_key: {"used": int, "quota": int|None, "pct": float|None,
+    "cooldown_until": float|None, "cooling_down": bool}} for every account
+    in AGENT_CAPABILITIES, reading TODAY's real usage from the exact keys
+    generate_text() already writes. quota/pct are None for providers
+    QUOTA_CONFIG deliberately omits (cloudflare, mistral) — an honest "no
+    verified number" rather than a guess.
+
+    Fix B (reliability guide, §3 "Fix B"): also reads back
+    cooldown_until:{provider}:{key_id} — the UTC timestamp
+    utils/llm_client.py's generate_text() writes whenever a call to that
+    account fails with a transient (429/5xx/timeout) error, parsed from
+    the provider's own retry-after signal where one is available. This
+    is a SEPARATE constraint from daily token usage (`pct` above): an
+    account can be well under its 80% daily-token cutoff and still be
+    mid-cooldown from a recent rate-limit response, or vice versa. Both
+    are surfaced here so eo/panel.py's _best_match() can check them
+    independently instead of conflating "out of tokens for the day"
+    with "briefly rate-limited a moment ago." Read in the SAME MGET
+    round trip as the usage keys below — same "don't turn N accounts
+    into N network calls" discipline get_usage_history() already uses.
+    """
     from eo.registry import AGENT_CAPABILITIES
     today = date.today().isoformat()
+    agent_infos = [
+        (agent_key, info.get("provider"), _key_id_for(agent_key, info.get("provider")))
+        for agent_key, info in AGENT_CAPABILITIES.items()
+    ]
+    usage_keys = [f"usage:{provider}:{key_id}:{today}" for _, provider, key_id in agent_infos]
+    cooldown_keys = [f"cooldown_until:{provider}:{key_id}" for _, provider, key_id in agent_infos]
+    usage_records = bus_read_many(usage_keys, default={"requests": 0, "tokens": 0})
+    cooldown_records = bus_read_many(cooldown_keys, default=None)
+    now = datetime.now(timezone.utc).timestamp()
+
     snapshot = {}
-    for agent_key, info in AGENT_CAPABILITIES.items():
-        provider = info.get("provider")
-        key_id = _key_id_for(agent_key, provider)
-        record = bus_read(f"usage:{provider}:{key_id}:{today}", default={"requests": 0, "tokens": 0})
+    for agent_key, provider, key_id in agent_infos:
+        record = usage_records[f"usage:{provider}:{key_id}:{today}"]
         used = record.get("tokens", 0)
         quota = QUOTA_CONFIG.get(provider)
         pct = (used / quota) if quota else None
-        snapshot[agent_key] = {"used": used, "quota": quota, "pct": pct}
+        cooldown_until = cooldown_records.get(f"cooldown_until:{provider}:{key_id}")
+        cooling_down = bool(cooldown_until and cooldown_until > now)
+        snapshot[agent_key] = {
+            "used": used, "quota": quota, "pct": pct,
+            "cooldown_until": cooldown_until, "cooling_down": cooling_down,
+        }
     return snapshot
 
 

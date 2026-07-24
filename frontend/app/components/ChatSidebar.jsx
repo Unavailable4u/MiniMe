@@ -224,6 +224,8 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 
       <div className="px-3 py-2 border-b border-[var(--neutral-900)]">
         <input
+          id="chat-sidebar-search"
+          name="chat-sidebar-search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search chats, batches, projects…"

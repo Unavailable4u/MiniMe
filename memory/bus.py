@@ -84,6 +84,12 @@ def _namespaced(key: str) -> str:
     if (key == "app_slug" or key == "project_registry"
             or key.startswith("usage:") or key.startswith("registry:")
             or key.startswith("conversation:")   # NEW — Part 23
+            or key.startswith("cooldown_until:")   # Fix B (reliability guide):
+            # same reasoning as usage: above -- a provider account's
+            # rate-limit cooldown is a property of the ACCOUNT, not
+            # whatever app_slug happens to be active. eo/panel.py's
+            # _best_match() needs to see the same cooldown regardless of
+            # which project/app triggered the 429 that set it.
             or key.startswith("paused_execution:")):   # NEW — Part 2 §2.4:
         # a paused run's snapshot is a property of the SESSION, exactly the
         # same reasoning as conversation: above -- and it HAS to be exempt,
