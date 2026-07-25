@@ -1300,21 +1300,28 @@ def get_workspace_fact_candidates(ws_id: str):
     return workspace_facts.list_candidates(ws_id)
 
 
-@app.post("/api/workspaces/{ws_id}/facts/candidates/{index}/accept", dependencies=[Depends(require_auth)])
-def accept_workspace_fact_candidate(ws_id: str, index: int):
+@app.post("/api/workspaces/{ws_id}/facts/candidates/{candidate_id}/accept", dependencies=[Depends(require_auth)])
+def accept_workspace_fact_candidate(ws_id: str, candidate_id: str):
+    # FIX — bug audit §9 (candidates accept/reject write path): was
+    # `{index}: int`, addressed by list position. Two reviewers can be
+    # looking at the same pending list at once (Part 8.4's notification
+    # fan-out), so an index can silently point at a different candidate
+    # than the one the user actually clicked accept/reject on by the
+    # time the request lands. Same fix as the notes candidates route
+    # below and eo/workspace_facts.py's accept_candidate/reject_candidate.
     try:
-        return workspace_facts.accept_candidate(ws_id, index)
-    except IndexError:
-        raise HTTPException(status_code=404, detail="Unknown candidate index")
+        return workspace_facts.accept_candidate(ws_id, candidate_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
 
 
-@app.delete("/api/workspaces/{ws_id}/facts/candidates/{index}", dependencies=[Depends(require_auth)])
-def reject_workspace_fact_candidate(ws_id: str, index: int):
+@app.delete("/api/workspaces/{ws_id}/facts/candidates/{candidate_id}", dependencies=[Depends(require_auth)])
+def reject_workspace_fact_candidate(ws_id: str, candidate_id: str):
     try:
-        workspace_facts.reject_candidate(ws_id, index)
-    except IndexError:
-        raise HTTPException(status_code=404, detail="Unknown candidate index")
-    return {"status": "rejected", "index": index}
+        workspace_facts.reject_candidate(ws_id, candidate_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
+    return {"status": "rejected", "candidate_id": candidate_id}
 
 # --- generic paste-panel content (see eo/panel_content.py) ---------------
 # Same "gone on reload" fix as workspace facts, generalized to every
@@ -1503,9 +1510,17 @@ def delete_workspace_node(ws_id: str, node_id: str, owner_id: str = Depends(requ
                 except FileNotFoundError:
                     pass
 
-    panel_content.clear_workspace(ws_id, owner_id)
+    # CHANGED — bug audit §2 real fix (migration 0001): used to be
+    # panel_content.clear_workspace(ws_id, owner_id) here, wiping every
+    # saved panel in the notebook -- Mind Map, Study Guide, Workflows,
+    # *and* the unrelated manual-paste panels (PRD, Architecture, etc.)
+    # -- on every single source delete. Now that generated panels record
+    # which source nodes they were built from, only clear the ones this
+    # deleted batch actually touched (or that were built from "the whole
+    # notebook" with no recorded scope).
+    cleared_panels = panel_content.invalidate_for_nodes(ws_id, batch_ids, owner_id)
 
-    return {"status": "deleted", "id": node_id, "deleted_ids": batch_ids}
+    return {"status": "deleted", "id": node_id, "deleted_ids": batch_ids, "cleared_panels": cleared_panels}
 
 
 # --- silent note-taking agent candidates (see eo/note_candidates.py, §4.6)
@@ -1518,21 +1533,24 @@ def get_note_candidates(ws_id: str):
     return note_candidates.list_candidates(ws_id)
 
 
-@app.post("/api/workspaces/{ws_id}/notes/candidates/{index}/accept", dependencies=[Depends(require_auth)])
-def accept_note_candidate(ws_id: str, index: int):
+@app.post("/api/workspaces/{ws_id}/notes/candidates/{candidate_id}/accept", dependencies=[Depends(require_auth)])
+def accept_note_candidate(ws_id: str, candidate_id: str):
+    # FIX — bug audit §9: was `{index}: int`, see eo/note_candidates.py's
+    # module docstring for why list-position addressing is unsafe now
+    # that Part 8.4 lets two users watch/review the same pending list.
     try:
-        return {"node_id": note_candidates.accept_candidate(ws_id, index)}
-    except IndexError:
-        raise HTTPException(status_code=404, detail="Unknown candidate index")
+        return {"node_id": note_candidates.accept_candidate(ws_id, candidate_id)}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
 
 
-@app.delete("/api/workspaces/{ws_id}/notes/candidates/{index}", dependencies=[Depends(require_auth)])
-def reject_note_candidate(ws_id: str, index: int):
+@app.delete("/api/workspaces/{ws_id}/notes/candidates/{candidate_id}", dependencies=[Depends(require_auth)])
+def reject_note_candidate(ws_id: str, candidate_id: str):
     try:
-        note_candidates.reject_candidate(ws_id, index)
-    except IndexError:
-        raise HTTPException(status_code=404, detail="Unknown candidate index")
-    return {"status": "rejected", "index": index}
+        note_candidates.reject_candidate(ws_id, candidate_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
+    return {"status": "rejected", "candidate_id": candidate_id}
 
 
 @app.post("/api/workspaces/{ws_id}/backlinks/detect")
@@ -1673,7 +1691,13 @@ def _make_study_generate(panel_key: str):
     def _run(ws_id: str, scope: dict | None, owner_id: str) -> dict:
         source_node_ids = (scope or {}).get("source_node_ids")
         content = generate_study_content(panel_key, ws_id, source_node_ids)
-        return panel_content.set_content(ws_id, panel_key, content, owner_id)
+        # CHANGED — bug audit §2 real fix: record the scope this
+        # generation actually used, so a later source delete can
+        # invalidate just this panel instead of every panel in the
+        # workspace. source_node_ids is already None for a whole-notebook
+        # run, which is exactly the value GENERATED_PANEL_KEYS wants for
+        # "invalidate on any delete" — no extra translation needed here.
+        return panel_content.set_content(ws_id, panel_key, content, owner_id, source_node_ids=source_node_ids)
     return _run
 
 
@@ -1702,7 +1726,8 @@ def _generate_mindmap(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     result = generate_mindmap(ws_id, source_node_ids)
     if result["kind"] != "mermaid":
         raise RuntimeError("Couldn't generate a valid diagram from this notebook's sources — try Regenerate.")
-    return panel_content.set_content(ws_id, "mindmap", result["text"], owner_id)
+    # CHANGED — bug audit §2 real fix: record scope, see _make_study_generate's comment above.
+    return panel_content.set_content(ws_id, "mindmap", result["text"], owner_id, source_node_ids=source_node_ids)
 
 
 def _generate_backlinks(ws_id: str, scope: dict | None, owner_id: str) -> dict:
@@ -1737,7 +1762,9 @@ def _generate_workflows(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     """
     source_node_ids = (scope or {}).get("source_node_ids")
     result = suggest_workflows(ws_id, source_node_ids)
-    return panel_content.set_content(ws_id, "suggested_workflows", json.dumps(result), owner_id)
+    # CHANGED — bug audit §2 real fix: record scope, see _make_study_generate's comment above.
+    return panel_content.set_content(ws_id, "suggested_workflows", json.dumps(result), owner_id,
+                                      source_node_ids=source_node_ids)
 
 
 NOTEBOOKS_GENERATE_TARGETS = {

@@ -16,16 +16,28 @@ workspace_facts.update_custom_fact().
 
 Storage: same memory-bus JSON-list-per-workspace pattern as
 workspace_facts.py's `workspace_facts_candidates:{workspace_id}` —
-"candidate_notes:{workspace_id}" here. No stored index field on each
-candidate (same reasoning workspace_facts.py's candidates already
-follow): a candidate's position in the list IS its address for accept/
-reject, and caching an index inside the record would go stale the moment
-an earlier candidate is accepted or rejected out from under it.
+"candidate_notes:{workspace_id}" here.
+
+FIX — bug audit §9 (candidates accept/reject write path): this used to
+address a candidate by its position in the list, same as
+workspace_facts.py's store. That was fine single-player, but Part 8.4
+added multi-user notification fan-out to this exact store (see
+propose_note()'s emit_user_event call below) — two people can now be
+looking at the same pending list at once. If user A accepts index 0
+while user B is mid-review and clicks reject on what they saw at index
+1, that index is still "valid" but now points at a different candidate
+than the one B looked at: a silent misfire, not an error. Every
+candidate now carries a real `candidate_id` (same
+`f"{prefix}_{uuid.uuid4().hex[:10]}"` shape agents/note_clusterer.py's
+cluster candidates already use) and accept/reject address by that id
+instead — an id can't be shifted out from under a concurrent caller the
+way a list index can.
 
 Place this file at: eo/note_candidates.py
 """
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
@@ -55,7 +67,10 @@ def propose_note(workspace_id: str, title: str, content: str,
     # was just the one that got missed. Purely additive field; existing
     # readers that don't know about it (accept_candidate/reject_candidate
     # below still pop by index) are unaffected.
-    candidate = {"title": title, "content": content, "tags": tags or [],
+    # FIX — bug audit §9: stable id instead of relying on list position,
+    # see module docstring above for why.
+    candidate = {"candidate_id": f"note_{uuid.uuid4().hex[:10]}",
+                 "title": title, "content": content, "tags": tags or [],
                  "proposed_by": proposed_by, "proposed_at": _now()}
     candidates.append(candidate)
     write(_key(workspace_id), candidates)
@@ -92,7 +107,7 @@ def list_candidates(workspace_id: str) -> list:
     return read(_key(workspace_id), default=[])
 
 
-def accept_candidate(workspace_id: str, index: int, section: str = "notes",
+def accept_candidate(workspace_id: str, candidate_id: str, section: str = "notes",
                       created_by: str = "user") -> str | None:
     """User accepts a proposed note into the real knowledge graph — the
     only place this module ever calls write_node(). Removed from the
@@ -102,11 +117,16 @@ def accept_candidate(workspace_id: str, index: int, section: str = "notes",
     failed (see write_node()'s own docstring) — the candidate is still
     removed from the pending list in that case, matching write_node()'s
     "degrade, don't hard-fail" posture rather than leaving a permanently
-    -stuck candidate the user can never clear."""
+    -stuck candidate the user can never clear.
+
+    FIX — bug audit §9: addressed by `candidate_id`, not list position —
+    see module docstring for why a plain index is unsafe once two people
+    can be reviewing the same pending list at once."""
     candidates = read(_key(workspace_id), default=[])
-    if index < 0 or index >= len(candidates):
-        raise IndexError(f"no candidate at index {index}")
-    accepted = candidates.pop(index)
+    match_index = next((i for i, c in enumerate(candidates) if c.get("candidate_id") == candidate_id), None)
+    if match_index is None:
+        raise FileNotFoundError(candidate_id)
+    accepted = candidates.pop(match_index)
     write(_key(workspace_id), candidates)
 
     from eo.knowledge_graph import write_node   # deferred — same reasoning
@@ -140,9 +160,10 @@ def accept_candidate(workspace_id: str, index: int, section: str = "notes",
     return node_id
 
 
-def reject_candidate(workspace_id: str, index: int) -> None:
+def reject_candidate(workspace_id: str, candidate_id: str) -> None:
     candidates = read(_key(workspace_id), default=[])
-    if index < 0 or index >= len(candidates):
-        raise IndexError(f"no candidate at index {index}")
-    candidates.pop(index)
+    match_index = next((i for i, c in enumerate(candidates) if c.get("candidate_id") == candidate_id), None)
+    if match_index is None:
+        raise FileNotFoundError(candidate_id)
+    candidates.pop(match_index)
     write(_key(workspace_id), candidates)

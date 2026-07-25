@@ -19,13 +19,22 @@ that's a bigger feature (how many past versions, how conflicts resolve)
 and deliberately out of scope for this pass — flagged here rather than
 silently decided.
 
-Schema (see migrations/xxxx_add_workspace_panel_content.sql):
+Schema (see migrations/0001_add_panel_content_source_node_ids.sql, the
+first tracked migration in this repo — earlier columns on this table
+predate migration tracking and were applied by hand):
     workspace_panel_content(
-        workspace_id  text references workspaces(id) on delete cascade,
-        panel_key     text,
-        content       text,
-        updated_at    timestamptz,
-        updated_by    text,
+        workspace_id     text references workspaces(id) on delete cascade,
+        panel_key        text,
+        content          text,
+        updated_at       timestamptz,
+        updated_by       text,
+        source_node_ids  text[],  -- NEW, migration 0001 — see that file's
+                                   -- comment for the full NULL-vs-array
+                                   -- semantics; short version: NULL on a
+                                   -- GENERATED_PANEL_KEYS row means "used
+                                   -- the whole notebook," a non-null array
+                                   -- means "scoped to exactly these nodes,"
+                                   -- and manual-paste panels never set it.
         primary key (workspace_id, panel_key)
     )
 """
@@ -58,6 +67,26 @@ VALID_PANEL_KEYS = {
                              # see api/server.py's _generate_workflows.
 }
 
+# NEW — bug audit §2 real fix (migration 0001). The subset of
+# VALID_PANEL_KEYS that are ever written *from a notebook's sources* via
+# the Generate picker, as opposed to pasted in by hand from an external
+# chat. Only these panels ever get a source_node_ids value, and only
+# these are eligible for the delete-cascade's selective invalidation in
+# invalidate_for_nodes() below — the manual-paste panels (prd,
+# architecture, schema, api_contract, devils_advocate, feasibility,
+# wireframes, contradictions, extraction_manual, audit) were never tied
+# to any specific source in the first place, so a source being deleted
+# has no bearing on them and they're deliberately left alone. (The old
+# clear_workspace() cheap fix used to wipe these too, as a side effect
+# of "clear everything" — that was never actually correct, just cheap.)
+GENERATED_PANEL_KEYS = {
+    "mindmap",
+    "study_flashcards",
+    "study_quiz",
+    "study_guide",
+    "suggested_workflows",
+}
+
 
 def _now():
     return datetime.now(timezone.utc)
@@ -74,11 +103,19 @@ def _row_to_content(row: dict) -> dict:
         "content": row["content"],
         "updated_at": _iso(row["updated_at"]),
         "updated_by": row.get("updated_by"),
+        "source_node_ids": row.get("source_node_ids"),
     }
 
 
 def _empty_content(ws_id: str, panel_key: str) -> dict:
-    return {"workspace_id": ws_id, "panel_key": panel_key, "content": "", "updated_at": None, "updated_by": None}
+    return {
+        "workspace_id": ws_id,
+        "panel_key": panel_key,
+        "content": "",
+        "updated_at": None,
+        "updated_by": None,
+        "source_node_ids": None,
+    }
 
 
 def get_content(ws_id: str, panel_key: str) -> dict:
@@ -88,7 +125,7 @@ def get_content(ws_id: str, panel_key: str) -> dict:
         raise ValueError(f"unknown panel_key {panel_key!r}")
     with db.cursor() as cur:
         cur.execute(
-            "select workspace_id, panel_key, content, updated_at, updated_by "
+            "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids "
             "from workspace_panel_content where workspace_id = %s and panel_key = %s",
             (ws_id, panel_key),
         )
@@ -102,7 +139,7 @@ def list_content(ws_id: str) -> dict:
     dict — callers fall back to empty-string same as get_content."""
     with db.cursor() as cur:
         cur.execute(
-            "select workspace_id, panel_key, content, updated_at, updated_by "
+            "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids "
             "from workspace_panel_content where workspace_id = %s",
             (ws_id,),
         )
@@ -110,19 +147,30 @@ def list_content(ws_id: str) -> dict:
     return {r["panel_key"]: _row_to_content(r) for r in rows}
 
 
-def set_content(ws_id: str, panel_key: str, content: str, user_id: str) -> dict:
+def set_content(ws_id: str, panel_key: str, content: str, user_id: str, source_node_ids=None) -> dict:
+    """source_node_ids: pass the scope's source_node_ids list when this
+    write comes from a Generate/Regenerate run (see api/server.py's
+    _generate_mindmap, _make_study_generate, _generate_workflows), so
+    the delete cascade below can tell what fed this panel. Leave it
+    unset (None) for manual paste-and-Load writes (put_workspace_panel_content)
+    — None is also what a whole-notebook Regenerate run (no scope) should
+    pass, since "no source_node_ids" and "used everything" happen to
+    need the same invalidate-on-any-delete behavior; see
+    GENERATED_PANEL_KEYS / invalidate_for_nodes() for how the two cases
+    are actually told apart (by panel_key, not by this value)."""
     if panel_key not in VALID_PANEL_KEYS:
         raise ValueError(f"unknown panel_key {panel_key!r}")
     with db.cursor() as cur:
         cur.execute(
             """
-            insert into workspace_panel_content (workspace_id, panel_key, content, updated_at, updated_by)
-            values (%s, %s, %s, %s, %s)
+            insert into workspace_panel_content (workspace_id, panel_key, content, updated_at, updated_by, source_node_ids)
+            values (%s, %s, %s, %s, %s, %s)
             on conflict (workspace_id, panel_key)
-            do update set content = excluded.content, updated_at = excluded.updated_at, updated_by = excluded.updated_by
-            returning workspace_id, panel_key, content, updated_at, updated_by
+            do update set content = excluded.content, updated_at = excluded.updated_at,
+                          updated_by = excluded.updated_by, source_node_ids = excluded.source_node_ids
+            returning workspace_id, panel_key, content, updated_at, updated_by, source_node_ids
             """,
-            (ws_id, panel_key, content, _now(), user_id),
+            (ws_id, panel_key, content, _now(), user_id, source_node_ids),
         )
         row = cur.fetchone()
     write_audit(user_id, "panel_content.save", "workspace", ws_id, {"panel_key": panel_key})
@@ -142,34 +190,67 @@ def delete_content(ws_id: str, panel_key: str, user_id: str) -> None:
     write_audit(user_id, "panel_content.delete", "workspace", ws_id, {"panel_key": panel_key})
 
 
-# NEW — bug audit §2 ("delete cascade"): every panel in this module is a
-# whole-notebook artifact (one row per (workspace_id, panel_key)), built
-# by summarizing every source node in the workspace at generation time —
-# see agents/mind_mapper.py, agents/study_generator.py, etc. None of them
-# record *which* source nodes went into a given generation, so once a
-# source is deleted there's no precise way to know which saved panels it
-# tainted.
-#
-# The audit guide flags two options: a precise `source_node_ids` column
-# (needs each generator to start recording its inputs) or the "immediate,
-# cheap fix" of clearing every saved panel for the workspace so nothing
-# stale is left on screen. Going with the cheap fix here — it needs no
-# schema change (this table already exists; a new column would need a
-# manual migration against part8_schema.sql, which isn't tracked in this
-# repo), and every panel view already renders its own "nothing generated
-# yet" empty state when no row is saved (see NotebooksTab.jsx's
-# MindMapView etc.), so clearing rows here is indistinguishable from
-# "never generated" rather than an error state. The precise
-# source_node_ids version is a reasonable follow-up if wiping the whole
-# notebook's panels on every single source delete turns out to be too
-# aggressive in practice.
+# CHANGED — bug audit §2 real fix (migration 0001). This used to be the
+# "clear every panel in the workspace" cheap fix, called unconditionally
+# from the delete-source cascade. Now that generated panels record their
+# own source_node_ids (see set_content()), the cascade can invalidate
+# only the panels a given deleted source actually fed, and can leave the
+# manual-paste panels (never source-scoped to begin with) alone
+# entirely. clear_workspace() below is kept as-is for anything that
+# still wants a genuine "wipe every panel" action (e.g. a future
+# "reset this notebook" button) — it's just no longer what the delete
+# cascade calls.
+def invalidate_for_nodes(ws_id: str, node_ids: list[str], user_id: str) -> list[str]:
+    """Deletes the saved row for every GENERATED_PANEL_KEYS panel whose
+    recorded source_node_ids overlaps `node_ids` (the batch of node ids
+    just deleted), or whose source_node_ids is NULL — a generated panel
+    with no recorded scope means it was built from "the whole notebook"
+    at generation time (a plain Regenerate with no picker scope), which
+    by definition included whatever's being deleted now. Manual-paste
+    panels (prd, architecture, etc.) are never touched — they're outside
+    GENERATED_PANEL_KEYS and were never tied to any source. Returns the
+    list of panel_keys actually cleared, so callers/tests can assert on
+    exactly what got invalidated instead of just a row count.
+
+    Deliberately a hard delete (same as the old clear_workspace()), not
+    a "mark stale" flag — every panel view already renders its own
+    "nothing generated yet" empty state for a missing row, so a cleared
+    panel and a never-generated one are indistinguishable, which is
+    the correct user-facing result here (no separate "stale" UI needed).
+    """
+    if not node_ids:
+        return []
+    node_id_set = set(node_ids)
+    cleared = []
+    with db.cursor() as cur:
+        cur.execute(
+            "select panel_key, source_node_ids from workspace_panel_content "
+            "where workspace_id = %s and panel_key = any(%s)",
+            (ws_id, list(GENERATED_PANEL_KEYS)),
+        )
+        rows = cur.fetchall()
+        for row in rows:
+            scope = row.get("source_node_ids")
+            stale = scope is None or bool(node_id_set.intersection(scope))
+            if not stale:
+                continue
+            cur.execute(
+                "delete from workspace_panel_content where workspace_id = %s and panel_key = %s",
+                (ws_id, row["panel_key"]),
+            )
+            cleared.append(row["panel_key"])
+    if cleared:
+        write_audit(user_id, "panel_content.invalidate_for_nodes", "workspace", ws_id,
+                    {"panel_keys": cleared, "node_ids": node_ids})
+    return cleared
+
+
 def clear_workspace(ws_id: str, user_id: str) -> int:
-    """Deletes every saved panel for a workspace. Called by the
-    delete-source cascade (api/server.py's delete_workspace_node) so a
-    Mind Map / Study Guide / etc. built from a now-deleted source doesn't
-    keep showing as if it still reflects the notebook's current sources.
-    Returns the number of rows removed (0 is normal — most notebooks
-    won't have every panel generated)."""
+    """Deletes every saved panel for a workspace, generated or manual —
+    a genuine "wipe everything" action. No longer called by the
+    delete-source cascade (see invalidate_for_nodes() above); kept for
+    any future "reset this notebook" affordance that actually wants the
+    blunt version. Returns the number of rows removed."""
     with db.cursor() as cur:
         cur.execute("delete from workspace_panel_content where workspace_id = %s", (ws_id,))
         count = cur.rowcount
