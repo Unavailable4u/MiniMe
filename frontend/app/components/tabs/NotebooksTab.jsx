@@ -16,7 +16,7 @@ import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/Work
 import {
   NotebookText, Plus, MessageSquareText, MessageSquare, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
-  Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw, ListChecks,
+  Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw, ListChecks, RotateCcw,
 } from "lucide-react";
 
 const SUB_TABS = [
@@ -42,6 +42,15 @@ const SUB_TAB_KEY = "minime_notebooks_subtab";
 // progress in §7), not notebook content that needs to sync across
 // devices/users. One JSON blob per workspace: { [subTabId]: isoString }.
 const LAST_VIEWED_PREFIX = "minime_notebooks_lastviewed";
+// NEW — bug audit §7 follow-up ("click a step to check it off"): per the
+// guide's own suggested simplest-durable option, checklist progress is
+// genuinely personal/ephemeral (like the dot-viewed state above), not
+// notebook content that needs to sync across devices/users, so it's
+// localStorage rather than a panel_content/backend write. Keyed by
+// workflow title rather than an index since Regenerate can reorder or
+// drop workflows — a title match is more likely to still mean "the same
+// procedure" than a positional one.
+const WORKFLOW_PROGRESS_PREFIX = "minime_notebooks_workflow_progress";
 // Only these four sub-tabs get a dot. "Suggested notes" and "Clusters"
 // already carry a pending-count badge (see the SUB_TABS.map below) which
 // serves the same "there's something to look at" purpose — stacking a
@@ -378,11 +387,14 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
       </div>
       {error && <p className="text-[11px] text-red-400">{error}</p>}
       {content ? (
-        <div className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-4 overflow-auto">
+        <div className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-4">
           <MermaidDiagram
             mermaidText={content}
             onNodeClick={(label) => onOpenSubChat(workspaceId, `Tell me more about "${label}" using this notebook's sources.`)}
             hideSourceOnFail /* NEW — bug #6a fix */
+            showControls /* NEW — §7 refinements #5/#6: zoom/pan + export as image */
+            maxHeight={520}
+            exportFilename="mind-map"
           />
         </div>
       ) : (
@@ -491,23 +503,113 @@ function BacklinksView({ workspaceId, nodes, edges, nodeSummaries, loading, onDe
 // result into panel_content, same as every other structured-not-Markdown
 // panel would), so this view parses on load instead of treating it as
 // plain text.
-function WorkflowCard({ workflow }) {
+// NEW — bug audit §7 follow-up: click-to-check-off. `completedSteps` is a
+// Set<string> of step ids, state lives here (not in MermaidDiagram) so it
+// can be persisted per workflow and reset independently of the diagram
+// re-rendering. Loaded from/saved to localStorage keyed by workspace +
+// workflow title (see WORKFLOW_PROGRESS_PREFIX comment above) — a single
+// study session's progress that's fine to lose in private browsing, not
+// notebook content that needs a backend round trip.
+function WorkflowCard({ workflow, workspaceId, onOpenSubChat }) {
+  const storageKey = `${WORKFLOW_PROGRESS_PREFIX}:${workspaceId}:${workflow.title}`;
+  const [completedSteps, setCompletedSteps] = useState(() => new Set());
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      setCompletedSteps(new Set(raw ? JSON.parse(raw) : []));
+    } catch {
+      setCompletedSteps(new Set());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-read on identity change (workspace/title), not every render
+  }, [storageKey]);
+
+  function persist(next) {
+    setCompletedSteps(next);
+    try {
+      localStorage.setItem(storageKey, JSON.stringify([...next]));
+    } catch {
+      // localStorage can throw (private browsing quota, etc.) — progress
+      // just won't survive a reload in that case, not worth surfacing.
+    }
+  }
+
+  function toggleStep(id) {
+    const next = new Set(completedSteps);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    persist(next);
+  }
+
+  function resetProgress() {
+    persist(new Set());
+  }
+
+  const stepTypes = Object.fromEntries((workflow.steps || []).map((s) => [s.id, s.type]));
+  // Only "step" entries count toward the checklist — a decision node
+  // isn't something you complete, it's a branch point (guide refinement
+  // #2), so it's excluded from both the denominator and "current step".
+  const checkableSteps = (workflow.steps || []).filter((s) => s.type !== "decision");
+  const doneCount = checkableSteps.filter((s) => completedSteps.has(s.id)).length;
+  const currentStep = checkableSteps.find((s) => !completedSteps.has(s.id));
+
   return (
     <div className="rounded-lg border border-[var(--neutral-800)] p-3 space-y-2">
-      <div>
-        <h4 className="text-sm font-medium text-[var(--neutral-200)]">{workflow.title}</h4>
-        {workflow.description && (
-          <p className="text-xs text-[var(--neutral-500)] mt-0.5">{workflow.description}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h4 className="text-sm font-medium text-[var(--neutral-200)]">{workflow.title}</h4>
+          {workflow.description && (
+            <p className="text-xs text-[var(--neutral-500)] mt-0.5">{workflow.description}</p>
+          )}
+        </div>
+        {checkableSteps.length > 0 && (
+          <div className="flex items-center gap-1.5 shrink-0 text-[10px] text-[var(--neutral-500)]">
+            <span>{doneCount} of {checkableSteps.length} done</span>
+            {doneCount > 0 && (
+              <button
+                onClick={resetProgress}
+                title="Reset progress"
+                className="text-[var(--neutral-600)] hover:text-[var(--neutral-300)]"
+              >
+                <RotateCcw size={11} />
+              </button>
+            )}
+          </div>
         )}
       </div>
-      <div className="rounded-md border border-[var(--neutral-800)] bg-black/20 p-2 overflow-x-auto">
-        <MermaidDiagram mermaidText={workflow.mermaid} hideSourceOnFail />
+      <div className="rounded-md border border-[var(--neutral-800)] bg-black/20 p-2">
+        <MermaidDiagram
+          mermaidText={workflow.mermaid}
+          hideSourceOnFail
+          completedSteps={completedSteps}
+          onToggleStep={toggleStep}
+          stepTypes={stepTypes}
+          currentStepId={currentStep?.id || null}
+          showControls /* NEW — §7 refinements #5/#6: zoom/pan + export as image */
+          maxHeight={340}
+          exportFilename={workflow.title}
+        />
       </div>
       {workflow.steps?.length > 0 && (
         <ol className="space-y-1 text-xs text-[var(--neutral-400)] list-decimal list-inside">
           {workflow.steps.map((step) => (
-            <li key={step.id} className={step.type === "decision" ? "italic" : ""}>
-              {step.label}
+            <li
+              key={step.id}
+              className={`flex items-center gap-1.5 ${step.type === "decision" ? "italic" : ""} ${
+                completedSteps.has(step.id) ? "line-through opacity-50" : ""
+              } ${step.id === currentStep?.id ? "text-[var(--cyber-cyan)]" : ""}`}
+            >
+              <span className="flex-1">{step.label}</span>
+              {step.type !== "decision" && (
+                <button
+                  onClick={() =>
+                    onOpenSubChat?.(workspaceId, `Explain this step in more detail: "${step.label}" (part of the "${workflow.title}" procedure), using this notebook's sources.`)
+                  }
+                  title="Ask about this step"
+                  className="shrink-0 text-[var(--neutral-600)] hover:text-[var(--cyber-cyan)]"
+                >
+                  <MessageSquareText size={11} />
+                </button>
+              )}
             </li>
           ))}
         </ol>
@@ -516,7 +618,7 @@ function WorkflowCard({ workflow }) {
   );
 }
 
-function WorkflowsView({ workspaceId, fetchPanelContent, generateNotebooks }) {
+function WorkflowsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks }) {
   const [workflows, setWorkflows] = useState(null); // null = not loaded yet
   const [updatedAt, setUpdatedAt] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -591,7 +693,7 @@ function WorkflowsView({ workspaceId, fetchPanelContent, generateNotebooks }) {
       {workflows?.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {workflows.map((wf, i) => (
-            <WorkflowCard key={`${wf.title}-${i}`} workflow={wf} />
+            <WorkflowCard key={`${wf.title}-${i}`} workflow={wf} workspaceId={workspaceId} onOpenSubChat={onOpenSubChat} />
           ))}
         </div>
       )}
@@ -959,7 +1061,7 @@ function ClustersView({ candidates, loading, scanning, onScan, onAccept, onRejec
 // NotebooksTab already uses gets brand voice for free." No behavior
 // change here — same component, same props contract, just no longer
 // module-private.
-export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate }) {
+export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate, factsRefreshSignal }) {
   const [facts, setFacts] = useState({ brand_voice: "", target_user: "", tech_stack: [], custom: {} });
   const [techStackText, setTechStackText] = useState("");
   const [customEntries, setCustomEntries] = useState([]); // [{key, value}]
@@ -985,6 +1087,24 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // NEW — bug audit §9: candidates-only refresh, separate from the full
+  // load() above and deliberately NOT re-fetching `facts` itself. This
+  // fires on every parent loadNotebookData (e.g. right after the
+  // Generate picker finishes a Facts scan) so a freshly-proposed
+  // candidate actually shows up while sitting on this tab -- but it must
+  // not touch `facts`/`techStackText`/`customEntries`, or a scan
+  // finishing while the user has an unsaved edit in the brand-voice/
+  // target-user/custom-facts fields would silently blow that edit away
+  // mid-typing. The skip-on-first-run guard avoids a redundant fetch
+  // immediately after load() already fetched the same thing on mount.
+  const skipFirst = useRef(true);
+  useEffect(() => {
+    if (skipFirst.current) { skipFirst.current = false; return; }
+    if (!workspaceId) return;
+    fetchFactCandidates(workspaceId).then(setCandidates);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [factsRefreshSignal]);
 
   async function handleSave() {
     setSaving(true);
@@ -1193,6 +1313,21 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   const [nodeSummaries, setNodeSummaries] = useState({});
   const [candidates, setCandidates] = useState([]);
   const [clusterCandidates, setClusterCandidates] = useState([]);
+  // NEW — bug audit §9 (round-trip audit): FactsView keeps its own
+  // fact-candidates fetch separate from this component's nodes/edges/
+  // candidates/clusterCandidates state (see the comment on the effect
+  // below for why: it also owns an editable facts draft that shouldn't
+  // get silently overwritten on every unrelated refresh). But that meant
+  // NOTHING told FactsView "the Generate picker just ran a Facts scan" if
+  // the user was already sitting on the Facts sub-tab when they ran it
+  // from the picker popover -- picker's onComplete only calls
+  // loadNotebookData, which never touched FactsView's local state, so
+  // the new candidates silently sat in the backend store until the user
+  // happened to navigate away and back (remounting FactsView triggers
+  // its own load). Bumped once per loadNotebookData call; FactsView
+  // re-fetches just its candidates list (not the editable draft) when it
+  // changes.
+  const [factsRefreshSignal, setFactsRefreshSignal] = useState(0);
   // NEW — §8: { [panel_key]: { updated_at, ... } } from eo/panel_content.py's
   // list_content, and { [subTabId]: isoString } read/written from
   // localStorage — see latestTabTimestamp/hasUnseenUpdate below.
@@ -1358,6 +1493,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     setClusterCandidates(clusterCandidateList);
     setNodeSummaries(summaries || {});
     setPanelContent(panels || {});
+    setFactsRefreshSignal((s) => s + 1);
     setLoadingNodes(false);
     setLoadingClusters(false);
   }
@@ -1787,6 +1923,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             {subTab === "workflows" && (
               <WorkflowsView
                 workspaceId={selected.id}
+                onOpenSubChat={handleOpenSubChat}
                 fetchPanelContent={fetchPanelContent}
                 generateNotebooks={generateNotebooks}
               />
@@ -1800,6 +1937,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 fetchFactCandidates={fetchFactCandidates}
                 acceptFactCandidate={acceptFactCandidate}
                 rejectFactCandidate={rejectFactCandidate}
+                factsRefreshSignal={factsRefreshSignal}
               />
             )}
             {subTab === "clusters" && (
