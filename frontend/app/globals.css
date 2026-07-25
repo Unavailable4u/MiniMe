@@ -231,3 +231,30 @@ code, pre, .font-mono {
   color: var(--cyber-cyan);
   text-shadow: 0 0 8px rgba(34, 211, 238, 0.6), 0 0 20px rgba(34, 211, 238, 0.3);
 }
+
+/* Bug audit #7 follow-up — workflow checklist diagrams (MermaidDiagram.jsx's
+   completedSteps/currentStepId props). Strikethrough + dimming for done
+   steps, paired with the checkmark-prefixed label MermaidDiagram.jsx
+   already injects into the text node itself (don't rely on color/opacity
+   alone as the only "done" signal — guide refinement #4). SVG <text>
+   supports text-decoration directly in all current browsers, no custom
+   line-drawing needed. */
+.step-done text,
+.step-done .nodeLabel {
+  text-decoration: line-through;
+}
+.step-done {
+  opacity: 0.45;
+}
+/* "Next thing to do" highlight (guide refinement #3) — covers the common
+   flowchart node shapes mermaid emits (rect for steps, polygon for
+   decision diamonds, circle/ellipse for start/end nodes) so the outline
+   shows up regardless of which shape a given step happens to render as. */
+.step-current rect,
+.step-current polygon,
+.step-current circle,
+.step-current ellipse {
+  stroke: var(--cyber-cyan);
+  stroke-width: 3px;
+  filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.6));
+}
