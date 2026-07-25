@@ -713,22 +713,37 @@ function StudyView({ workspaceId }) {
   const [rendered, setRendered] = useState("");
   const [quizNodeId, setQuizNodeId] = useState("");
   // NEW — persistence for the three paste-and-Load kinds (flashcards,
-  // quiz, study_guide) via eo/panel_content.py, panel_key
-  // "study_<kind>". Podcast script / video slide text stay ephemeral —
-  // those round-trip through the synthesis/build endpoints and produce
-  // a durable audio/video file of their own, so the pasted source text
-  // isn't the thing worth persisting there.
-  const PERSISTED_KINDS = ["flashcards", "quiz", "study_guide"];
+  // quiz, study_guide) via eo/panel_content.py.
+  //
+  // CHANGED — bug audit §9 trace: this used to build the panel_key by
+  // templating `study_${kind}` directly. That's correct for two of the
+  // three kinds (flashcards -> study_flashcards, quiz -> study_quiz) but
+  // wrong for the third: kind "study_guide" already has the prefix, so
+  // the template produced "study_study_guide" -- not a real panel_key
+  // (eo/panel_content.py's VALID_PANEL_KEYS only has "study_guide"), so
+  // every fetchPanelContent call for this tab hit a 400, which
+  // fetchPanelContent's own !res.ok branch silently swallows into an
+  // empty-content result -- indistinguishable from "nothing generated
+  // yet." Worse, savePanelContent doesn't check res.ok at all, so
+  // clicking Load still called setSavedAt(Date.now()) and showed
+  // "Saved" even though the PUT itself 400'd and nothing was persisted.
+  // Net effect: a Study Guide built via Regenerate (which correctly
+  // saves under plain "study_guide") was invisible on this tab, and
+  // anything pasted+Loaded here appeared to save but silently didn't.
+  // Explicit map instead of a template removes the ambiguity for good.
+  const PANEL_KEY_BY_KIND = { flashcards: "study_flashcards", quiz: "study_quiz", study_guide: "study_guide" };
+  const PERSISTED_KINDS = Object.keys(PANEL_KEY_BY_KIND);
   const [loadingText, setLoadingText] = useState(true);
   const [savingText, setSavingText] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     if (!PERSISTED_KINDS.includes(kind)) { setLoadingText(false); return; }
     let cancelled = false;
     setLoadingText(true);
     setSavedAt(null);
-    fetchPanelContent(workspaceId, `study_${kind}`).then((saved) => {
+    fetchPanelContent(workspaceId, PANEL_KEY_BY_KIND[kind]).then((saved) => {
       if (cancelled) return;
       const content = saved?.content || "";
       setText(content);
@@ -743,9 +758,12 @@ function StudyView({ workspaceId }) {
     setRendered(text);
     if (!PERSISTED_KINDS.includes(kind)) return;
     setSavingText(true);
+    setSaveError("");
     try {
-      await savePanelContent(workspaceId, `study_${kind}`, text);
+      await savePanelContent(workspaceId, PANEL_KEY_BY_KIND[kind], text);
       setSavedAt(Date.now());
+    } catch (err) {
+      setSaveError(String(err.message || err));
     } finally {
       setSavingText(false);
     }
@@ -945,6 +963,7 @@ function StudyView({ workspaceId }) {
               {savingText ? "Saving…" : "Load & Save"}
             </button>
             {savedAt && !savingText && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+            {saveError && !savingText && <span className="text-[11px] text-red-400">{saveError}</span>}
           </div>
 
           {rendered && (
@@ -969,15 +988,20 @@ function CandidatesView({ workspaceId, candidates, onAccept, onReject }) {
   }
   return (
     <div className="space-y-2">
+      {/* FIX — bug audit §9: accept/reject now address a candidate by its
+          stable candidate_id instead of its list index i (kept as the
+          React `key` only, never sent to the server) — see
+          eo/note_candidates.py's module docstring for why an index isn't
+          safe once two users can be reviewing this same pending list. */}
       {candidates.map((c, i) => (
-        <div key={i} className="rounded-lg border border-[var(--neutral-800)] p-3">
+        <div key={c.candidate_id ?? i} className="rounded-lg border border-[var(--neutral-800)] p-3">
           <div className="text-xs font-medium text-[var(--neutral-200)]">{c.title}</div>
           <p className="text-xs text-[var(--neutral-400)] mt-1 whitespace-pre-wrap">{c.content}</p>
           <div className="flex items-center gap-2 mt-2">
-            <button onClick={() => onAccept(i)} className="flex items-center gap-1 text-[11px] text-green-400 hover:text-green-300">
+            <button onClick={() => onAccept(c.candidate_id)} className="flex items-center gap-1 text-[11px] text-green-400 hover:text-green-300">
               <Check size={12} /> Accept
             </button>
-            <button onClick={() => onReject(i)} className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300">
+            <button onClick={() => onReject(c.candidate_id)} className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300">
               <X size={12} /> Discard
             </button>
           </div>
@@ -1222,20 +1246,24 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
           <p className="text-xs text-[var(--neutral-600)]">Nothing pending — agents propose a fact here when they spot something durable worth remembering, without overwriting what's above.</p>
         ) : (
           <div className="space-y-2">
+            {/* FIX — bug audit §9: accept/reject address by the stable
+                candidate_id now, not the list index i (kept only as the
+                React `key`) — see eo/workspace_facts.py's
+                accept_candidate/reject_candidate for why. */}
             {candidates.map((c, i) => (
-              <div key={i} className="rounded-lg border border-[var(--neutral-800)] p-3">
+              <div key={c.candidate_id ?? i} className="rounded-lg border border-[var(--neutral-800)] p-3">
                 <div className="text-xs font-medium text-[var(--neutral-200)]">{c.key}</div>
                 <p className="text-xs text-[var(--neutral-400)] mt-1 whitespace-pre-wrap">{String(c.value)}</p>
                 {c.proposed_by && <p className="text-[10px] text-[var(--neutral-700)] mt-1">proposed by {c.proposed_by}</p>}
                 <div className="flex items-center gap-2 mt-2">
                   <button
-                    onClick={async () => { await acceptFactCandidate(workspaceId, i); await load(); }}
+                    onClick={async () => { await acceptFactCandidate(workspaceId, c.candidate_id); await load(); }}
                     className="flex items-center gap-1 text-[11px] text-green-400 hover:text-green-300"
                   >
                     <Check size={12} /> Accept
                   </button>
                   <button
-                    onClick={async () => { await rejectFactCandidate(workspaceId, i); await load(); }}
+                    onClick={async () => { await rejectFactCandidate(workspaceId, c.candidate_id); await load(); }}
                     className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300"
                   >
                     <X size={12} /> Discard
@@ -1954,8 +1982,8 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               <CandidatesView
                 workspaceId={selected.id}
                 candidates={candidates}
-                onAccept={async (i) => { await acceptNoteCandidate(selected.id, i); await loadNotebookData(selected.id); }}
-                onReject={async (i) => { await rejectNoteCandidate(selected.id, i); await loadNotebookData(selected.id); }}
+                onAccept={async (candidateId) => { await acceptNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
+                onReject={async (candidateId) => { await rejectNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
               />
             )}
           </div>

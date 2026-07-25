@@ -1110,16 +1110,21 @@ async function fetchNoteCandidates(wsId) {
   return res.json();
 }
 
-async function acceptNoteCandidate(wsId, index) {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${index}/accept`, {
+// FIX — bug audit §9 (candidates accept/reject write path): both of
+// these used to take a plain list `index`. Switched to `candidate_id`
+// to match eo/note_candidates.py's accept_candidate/reject_candidate —
+// see that module's docstring for why an index isn't safe once two
+// users can be reviewing the same pending list at once.
+async function acceptNoteCandidate(wsId, candidateId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
   return res.json();
 }
 
-async function rejectNoteCandidate(wsId, index) {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${index}`, {
+async function rejectNoteCandidate(wsId, candidateId) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1129,7 +1134,8 @@ async function rejectNoteCandidate(wsId, index) {
 // brand_voice/target_user/tech_stack/custom facts for a workspace, plus
 // the agent-proposed candidates queue. Same accept/reject shape as the
 // note candidates just above (workspace_facts.py's accept_candidate/
-// reject_candidate take a plain list index, not an id).
+// reject_candidate now take a stable candidate_id, not a list index —
+// see bug audit §9).
 
 async function fetchWorkspaceFacts(wsId) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
@@ -1156,16 +1162,16 @@ async function fetchFactCandidates(wsId) {
   return res.json();
 }
 
-async function acceptFactCandidate(wsId, index) {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${index}/accept`, {
+async function acceptFactCandidate(wsId, candidateId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
   return res.json();
 }
 
-async function rejectFactCandidate(wsId, index) {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${index}`, {
+async function rejectFactCandidate(wsId, candidateId) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1206,12 +1212,22 @@ async function fetchPanelContentList(wsId) {
 }
 
 async function savePanelContent(wsId, panelKey, content) {
+  // CHANGED — bug audit §9 trace: this used to call res.json() straight
+  // through with no res.ok check, so a failed save (e.g. an unknown
+  // panel_key -- see StudyView's study_guide fix, the same class of bug
+  // this would have hidden) still resolved normally and let the caller
+  // show "Saved." Throwing here means StudyView's handleLoad() (and any
+  // other caller) needs a try/catch around this call the same way it
+  // already has one around synthesizePodcast/buildVideoOverview -- not
+  // silently succeeding is the point.
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
     method: "PUT",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ content }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.detail || `Failed to save panel "${panelKey}"`);
+  return data;
 }
 
 // Notebooks "Generate" command (Notebooks integration guide §4, §6) —

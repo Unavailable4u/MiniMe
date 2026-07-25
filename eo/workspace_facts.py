@@ -443,7 +443,17 @@ def propose_fact(workspace_id: str, key: str, value, proposed_by: str) -> dict:
         raise ValueError("workspace_id and key are required")
     candidates_key = f"workspace_facts_candidates:{workspace_id}"
     candidates = read(candidates_key, default=[])
-    candidates.append({"key": key, "value": value, "proposed_by": proposed_by})
+    # FIX — bug audit §9 (candidates accept/reject write path): this
+    # store used to be addressed by list position only. Notes'
+    # eo/note_candidates.py sibling store hit the same issue once
+    # Part 8.4's multi-user notification fan-out meant two people could
+    # be reviewing the same pending list at once — an index can point at
+    # a different candidate than the one a reviewer actually looked at
+    # by the time they click. Same fix here: a stable id, same shape
+    # agents/note_clusterer.py's cluster candidates and
+    # eo/note_candidates.py's note candidates now both use.
+    candidates.append({"candidate_id": f"fact_{uuid.uuid4().hex[:10]}",
+                        "key": key, "value": value, "proposed_by": proposed_by})
     write(candidates_key, candidates)
     return candidates
 
@@ -452,26 +462,32 @@ def list_candidates(workspace_id: str) -> list:
     return read(f"workspace_facts_candidates:{workspace_id}", default=[])
 
 
-def accept_candidate(workspace_id: str, index: int) -> dict:
+def accept_candidate(workspace_id: str, candidate_id: str) -> dict:
     """User accepts a proposed fact into `custom`, and it's removed from
     the pending list either way (accepted or not — a rejected proposal
     shouldn't linger for future acceptance either; propose again if
-    still relevant)."""
+    still relevant).
+
+    FIX — bug audit §9: addressed by `candidate_id`, not list position —
+    see propose_fact()'s comment above for why a plain index is unsafe
+    once two people can be reviewing the same pending list at once."""
     candidates_key = f"workspace_facts_candidates:{workspace_id}"
     candidates = read(candidates_key, default=[])
-    if index < 0 or index >= len(candidates):
-        raise IndexError(f"no candidate at index {index}")
-    accepted = candidates.pop(index)
+    match_index = next((i for i, c in enumerate(candidates) if c.get("candidate_id") == candidate_id), None)
+    if match_index is None:
+        raise FileNotFoundError(candidate_id)
+    accepted = candidates.pop(match_index)
     write(candidates_key, candidates)
     return update_custom_fact(workspace_id, accepted["key"], accepted["value"])
 
 
-def reject_candidate(workspace_id: str, index: int) -> None:
+def reject_candidate(workspace_id: str, candidate_id: str) -> None:
     candidates_key = f"workspace_facts_candidates:{workspace_id}"
     candidates = read(candidates_key, default=[])
-    if index < 0 or index >= len(candidates):
-        raise IndexError(f"no candidate at index {index}")
-    candidates.pop(index)
+    match_index = next((i for i, c in enumerate(candidates) if c.get("candidate_id") == candidate_id), None)
+    if match_index is None:
+        raise FileNotFoundError(candidate_id)
+    candidates.pop(match_index)
     write(candidates_key, candidates)
 
 
