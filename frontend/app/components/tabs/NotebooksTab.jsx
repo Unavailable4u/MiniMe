@@ -35,6 +35,31 @@ const SUB_TABS = [
 // refresh doesn't drop you back to "no notebook selected."
 const SELECTED_NOTEBOOK_KEY = "minime_notebooks_selected_id";
 const SUB_TAB_KEY = "minime_notebooks_subtab";
+// NEW — bug audit §8 ("unread/new content" dots). Per-workspace,
+// client-side "when did I last look at this sub-tab" store — the
+// cheap/no-backend-change option the audit guide flags, since this is
+// genuinely personal/ephemeral state (like the workflow-checklist
+// progress in §7), not notebook content that needs to sync across
+// devices/users. One JSON blob per workspace: { [subTabId]: isoString }.
+const LAST_VIEWED_PREFIX = "minime_notebooks_lastviewed";
+// Only these four sub-tabs get a dot. "Suggested notes" and "Clusters"
+// already carry a pending-count badge (see the SUB_TABS.map below) which
+// serves the same "there's something to look at" purpose — stacking a
+// dot on top would just be visual noise for those two. "Sources" has no
+// generated-content concept to go stale, and "Facts" candidates
+// (eo/workspace_facts.py's propose_fact) are flagged dormant in that
+// module's own comments — no agent calls it yet, so there's nothing to
+// diff there today. Revisit if that changes.
+const UNREAD_DOT_TABS = ["mindmap", "backlinks", "workflows", "study"];
+// Which eo/panel_content.py panel_key(s) back each dot-eligible sub-tab
+// that's driven by panel_content specifically (backlinks/clusters/
+// candidates aren't — they compare against graph_edges/candidate
+// timestamps directly instead, see latestTabTimestamp below).
+const TAB_PANEL_KEYS = {
+  mindmap: ["mindmap"],
+  workflows: ["suggested_workflows"],
+  study: ["study_flashcards", "study_quiz", "study_guide"],
+};
 // NEW — §6.2: separate collapse key from WorkspaceChatPanel's own internal
 // WORKING_PANEL_KEY — this one folds away the *whole* dock (chat +
 // WorkingPanel together), same "own toggle, own storage key" pattern the
@@ -1134,7 +1159,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
      fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks, fetchNodeSummaries,
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
-     fetchPanelContent, savePanelContent,
+     fetchPanelContent, savePanelContent, fetchPanelContentList,
      generateNotebooks,
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
     openScopedSubChat,
@@ -1168,6 +1193,11 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   const [nodeSummaries, setNodeSummaries] = useState({});
   const [candidates, setCandidates] = useState([]);
   const [clusterCandidates, setClusterCandidates] = useState([]);
+  // NEW — §8: { [panel_key]: { updated_at, ... } } from eo/panel_content.py's
+  // list_content, and { [subTabId]: isoString } read/written from
+  // localStorage — see latestTabTimestamp/hasUnseenUpdate below.
+  const [panelContent, setPanelContent] = useState({});
+  const [lastViewed, setLastViewed] = useState({});
   const [loadingClusters, setLoadingClusters] = useState(false);
   const [scanningClusters, setScanningClusters] = useState(false);
   const [loadingNodes, setLoadingNodes] = useState(false);
@@ -1236,6 +1266,66 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     localStorage.setItem(SUB_TAB_KEY, subTab);
   }, [subTab, restoredSelection]);
 
+  // NEW — §8: load this notebook's last-viewed map whenever the selected
+  // notebook changes (each workspace has its own key, so switching
+  // notebooks doesn't carry stale viewed-state over from the last one).
+  useEffect(() => {
+    if (!selectedId) { setLastViewed({}); return; }
+    try {
+      const raw = localStorage.getItem(`${LAST_VIEWED_PREFIX}:${selectedId}`);
+      setLastViewed(raw ? JSON.parse(raw) : {});
+    } catch {
+      setLastViewed({});
+    }
+  }, [selectedId]);
+
+  // NEW — §8: whatever sub-tab is currently open counts as "viewed" —
+  // stamp it every time the open tab (or the notebook itself) changes.
+  // This is deliberately a plain "now" stamp rather than something tied
+  // to panelContent having finished loading: a dot only ever renders for
+  // a sub-tab that ISN'T the active one (see the SUB_TABS.map render
+  // below), so it doesn't matter that this fires before this tab's own
+  // data has arrived — nothing reads this tab's own viewed timestamp
+  // against itself.
+  useEffect(() => {
+    if (!restoredSelection || !selectedId) return;
+    setLastViewed((prev) => {
+      const next = { ...prev, [subTab]: new Date().toISOString() };
+      try {
+        localStorage.setItem(`${LAST_VIEWED_PREFIX}:${selectedId}`, JSON.stringify(next));
+      } catch {
+        // localStorage can throw (private browsing quota, etc.) — the
+        // dot just won't persist across reloads in that case, not worth
+        // surfacing an error for.
+      }
+      return next;
+    });
+  }, [subTab, selectedId, restoredSelection]);
+
+  // NEW — §8: latest relevant timestamp for a dot-eligible sub-tab, or
+  // null if there's nothing generated yet (no dot in that case either
+  // way — an empty panel isn't "unread," it's just empty).
+  function latestTabTimestamp(tabId) {
+    if (tabId === "backlinks") {
+      return edges.reduce((max, e) => (e.created_at && (!max || e.created_at > max) ? e.created_at : max), null);
+    }
+    const panelKeys = TAB_PANEL_KEYS[tabId];
+    if (!panelKeys) return null;
+    return panelKeys.reduce((max, key) => {
+      const ts = panelContent[key]?.updated_at;
+      return ts && (!max || ts > max) ? ts : max;
+    }, null);
+  }
+
+  // ISO 8601 strings from datetime.now(timezone.utc).isoformat() sort
+  // correctly with plain string comparison, so no Date parsing needed.
+  function hasUnseenUpdate(tabId) {
+    const latest = latestTabTimestamp(tabId);
+    if (!latest) return false;
+    const viewed = lastViewed[tabId];
+    return !viewed || latest > viewed;
+  }
+
   useEffect(() => {
     // Falls back to the first workspace once workspaces have loaded, but
     // only after the restore effect above has had a chance to set
@@ -1249,12 +1339,13 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   async function loadNotebookData(wsId) {
     setLoadingNodes(true);
     setLoadingClusters(true);
-    const [nodeList, edgeList, candidateList, clusterCandidateList, summaries] = await Promise.all([
+    const [nodeList, edgeList, candidateList, clusterCandidateList, summaries, panels] = await Promise.all([
       fetchWorkspaceNodes(wsId),
       fetchGraphEdges(wsId),
       fetchNoteCandidates(wsId),
       fetchClusterCandidates(wsId),
       fetchNodeSummaries(wsId),
+      fetchPanelContentList(wsId), // NEW — §8: powers the unread-dot indicator
     ]);
     // FIX — if the user has since selected a different notebook while
     // this fetch was in flight, this result is stale: drop it instead of
@@ -1266,6 +1357,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     setCandidates(candidateList);
     setClusterCandidates(clusterCandidateList);
     setNodeSummaries(summaries || {});
+    setPanelContent(panels || {});
     setLoadingNodes(false);
     setLoadingClusters(false);
   }
@@ -1283,7 +1375,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
 
   useEffect(() => {
     if (selectedId) loadNotebookData(selectedId);
-    else { setNodes([]); setEdges([]); setCandidates([]); setClusterCandidates([]); setNodeSummaries({}); }
+    else { setNodes([]); setEdges([]); setCandidates([]); setClusterCandidates([]); setNodeSummaries({}); setPanelContent({}); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
@@ -1623,6 +1715,17 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                     )}
                     {t.id === "clusters" && clusterCandidates.length > 0 && (
                       <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{clusterCandidates.length}</span>
+                    )}
+                    {/* NEW — §8: unread dot for panel-generated sub-tabs
+                        (Mind Map / Backlinks / Workflows / Study) — see
+                        UNREAD_DOT_TABS/hasUnseenUpdate above for why
+                        Suggested notes/Clusters use their existing count
+                        badge instead. */}
+                    {UNREAD_DOT_TABS.includes(t.id) && subTab !== t.id && hasUnseenUpdate(t.id) && (
+                      <span
+                        className="ml-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
+                        title="New content since you last viewed this tab"
+                      />
                     )}
                   </button>
                 ))}

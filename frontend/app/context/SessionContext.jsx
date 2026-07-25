@@ -1186,6 +1186,25 @@ async function fetchPanelContent(wsId, panelKey) {
   return res.json();
 }
 
+// NEW — bug audit §8 ("unread/new content" dots): backs the GET
+// /api/workspaces/{ws_id}/panels route (api/server.py's
+// list_workspace_panel_content → eo/panel_content.py's list_content),
+// which already existed and already returns { panel_key: {..., updated_at} }
+// for every saved panel in one round trip — it just had no frontend
+// caller yet. Deliberately not merged into fetchPanelContent itself:
+// that one's callers (MindMapView, WorkflowsView, StudyView) want a
+// single panel's `content` to render; this one's caller
+// (NotebooksTab's loadNotebookData) only wants the updated_at map to
+// diff against a last-viewed mark, and fetching all of them via N
+// single-panel calls just to read a timestamp would be wasteful.
+async function fetchPanelContentList(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return {};
+  return res.json();
+}
+
 async function savePanelContent(wsId, panelKey, content) {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
     method: "PUT",
@@ -1868,7 +1887,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchNodeSummaries,   // NEW — Notebooks integration guide §6.6: Backlinks concept-graph node-click rationale
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
   fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
-  fetchPanelContent, savePanelContent,   // NEW — generic paste-panel persistence (eo/panel_content.py)
+  fetchPanelContent, savePanelContent, fetchPanelContentList,   // NEW — generic paste-panel persistence (eo/panel_content.py); fetchPanelContentList added for §8 unread dots
   generateNotebooks,   // NEW — Notebooks integration guide §4/§6: the picker/chip-confirmation "Generate" command
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,

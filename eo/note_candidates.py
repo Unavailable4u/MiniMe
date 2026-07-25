@@ -26,12 +26,17 @@ Place this file at: eo/note_candidates.py
 """
 import os
 import sys
+from datetime import datetime, timezone
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 
 
 def _key(workspace_id: str) -> str:
     return f"candidate_notes:{workspace_id}"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def propose_note(workspace_id: str, title: str, content: str,
@@ -41,8 +46,17 @@ def propose_note(workspace_id: str, title: str, content: str,
     if not workspace_id or not title or not content:
         raise ValueError("workspace_id, title, and content are required")
     candidates = read(_key(workspace_id), default=[])
+    # NEW — bug audit §8 ("unread/new content" dots): this store had no
+    # timestamp at all, so the frontend had nothing to diff against a
+    # "last viewed" mark for the Suggested Notes sub-tab. Every other
+    # candidate/edge store in this repo already stamps a timestamp for
+    # exactly this reason (eo/graph_edges.py's create_edge → created_at,
+    # agents/note_clusterer.py's propose_clusters → created_at) — this
+    # was just the one that got missed. Purely additive field; existing
+    # readers that don't know about it (accept_candidate/reject_candidate
+    # below still pop by index) are unaffected.
     candidate = {"title": title, "content": content, "tags": tags or [],
-                 "proposed_by": proposed_by}
+                 "proposed_by": proposed_by, "proposed_at": _now()}
     candidates.append(candidate)
     write(_key(workspace_id), candidates)
 
