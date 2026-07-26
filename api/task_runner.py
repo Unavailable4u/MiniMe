@@ -55,6 +55,9 @@ from eo.sga import attempt as sga_attempt
 from eo.semantic_cache import check_cache, write_cache
 from eo.panel import staff_task
 from eo.registry import update_role_prompt   # NEW — Part 2 §2.5
+from agents.source_manager import process_upload   # NEW — Data Layer §4a: the deterministic
+# "attachment present" short-circuit below hires Source Manager directly,
+# same entry point every upload endpoint already funnels through (§2b).
 from eo.structure import get_workflow_template, classification_from_template, record_template_run   # NEW — Part 2 §2.3/§2.6; record_template_run NEW — recent templates
 from eo import code_loader
 from eo import routing_memory
@@ -283,7 +286,8 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None,
              approval_roles: set = None,
-             no_conversation_context_roles: set = None, owner_id: str = None) -> dict:
+             no_conversation_context_roles: set = None, owner_id: str = None,
+             attachment: dict = None) -> dict:
     """
     ...docstring unchanged, plus:
 
@@ -293,6 +297,10 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     context without violating ownership. Optional so non-HTTP callers
     (tests, scripts) keep working with linked-chat context simply
     skipped.
+
+    attachment: NEW — Data Layer §4a, forwarded unchanged to
+    _resolve_decision_and_hires() via _run_task_inner(). See that
+    function's docstring for the shape and the reasoning.
     """
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)
@@ -303,6 +311,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         approval_roles=approval_roles,
         no_conversation_context_roles=no_conversation_context_roles,
         owner_id=owner_id,   # FIXED
+        attachment=attachment,   # NEW — Data Layer §4a
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
@@ -663,7 +672,8 @@ def _maybe_record_sga_fact(workspace_id: str, task_text: str, session_id: str, s
 
 
 def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
-                                 app_slug: str, session_id: str, mode: str, owner_id: str = None) -> dict:
+                                 app_slug: str, session_id: str, mode: str, owner_id: str = None,
+                                 attachment: dict = None) -> dict:
     """Part 2 §2.5: the shared first half of dispatch — semantic cache,
     SGA, Inspector/Panel classification, staff_task()'s hiring, and mode
     adjustment — factored out of _run_task_inner() so preview_task() can
@@ -672,11 +682,57 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     ...
     owner_id: NEW — passed straight through to loop_v4._get_decision()
     so conversation_memory's linked-chat lookup can be owner-scoped.
+
+    attachment: NEW — Data Layer §4a. When set, `{"kind": ..., "payload":
+    ...}` (plus any of process_upload()'s optional ingest_kwargs, e.g.
+    "fmt"/"default_title" for kind="import") describing a file/url that
+    arrived attached to THIS turn. Its mere presence is the routing
+    signal — deterministic, no LLM involved, checked before cache/SGA/
+    the Inspector even run (same "resolved before you ever see a task"
+    priority those two already have, per eo/inspector.py's own
+    docstring). An attached file is never a question for the Inspector
+    to guess a domain/agent-set for; it always means "hire Source
+    Manager", which (via agents/source_manager.py's own §3a wiring)
+    hires the Backlink Detector right after itself, unconditionally.
     """
     conv_context = conversation_memory.get_full_context(session_id)
 
     workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
     workspace_id = workspace["id"] if workspace else None
+
+    if attachment:
+        kind = attachment.get("kind")
+        payload = attachment.get("payload")
+        ingest_kwargs = {k: v for k, v in attachment.items() if k not in ("kind", "payload")}
+        decision = {
+            "tier": "source", "path": "source", "directed_task_type": None,
+            "confidence": 1.0, "suggested_agents": ["source_manager"],
+            "execution_order": ["source_manager"], "domain": None,
+            "reasoning": ("attachment present on this turn — routed straight to Source "
+                          "Manager, bypassing Inspector classification (§4a: deterministic, "
+                          "no LLM needed to know a file means ingestion)."),
+        }
+        try:
+            result = process_upload(kind, payload, workspace_id, session_id=session_id,
+                                     created_by=owner_id or "user", **ingest_kwargs)
+            status, message = "ok", None
+        except Exception as exc:
+            # Same "let the caller translate this into an error" posture
+            # every direct upload endpoint already uses for a bad kind/
+            # payload (agents/source_manager.py's own process_upload()
+            # docstring) — surfaced here rather than silently falling
+            # through to cache/SGA/Inspector, since a broken attachment
+            # is never actually a plain-text task in disguise.
+            result, status, message = None, "error", f"{exc.__class__.__name__}: {exc}"
+        _record_routing_fact(workspace_id, "source", task_text, session_id, decision=decision)
+        return {"resolved": False, "response": {
+            "decision": decision,
+            "tier": "source",
+            "session_id": session_id,
+            "status": status,
+            "result": result,
+            "message": message,
+        }}
 
     # NEW — bug #4 fix: build once, reuse for every model-facing call below
     # (SGA fast path here, and the tier 0/1/2/3 dispatch further down via
@@ -798,15 +854,18 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                      app_slug: str = None, run_tests: bool = False, session_id: str = None,
                      mode: str = "auto", project_unique_name: str = None,
                      approval_roles: set = None,
-                     no_conversation_context_roles: set = None, owner_id: str = None) -> dict:
+                     no_conversation_context_roles: set = None, owner_id: str = None,
+                     attachment: dict = None) -> dict:
     """The actual routing/execution body — split out of run_task() so
     that wrapper can do turn-recording on either side without every
     early-return point needing to do it individually. session_id is
     always already resolved to a real value by the time this is called.
 
-    owner_id: NEW — passed through to _resolve_decision_and_hires()."""
+    owner_id: NEW — passed through to _resolve_decision_and_hires().
+    attachment: NEW — Data Layer §4a, passed through unchanged."""
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
-                                            app_slug, session_id, mode, owner_id=owner_id)   # FIXED
+                                            app_slug, session_id, mode, owner_id=owner_id,
+                                            attachment=attachment)   # FIXED
     if not resolved["resolved"]:
         return resolved["response"]
     # CHANGED — bug #4 fix: dispatch the grounded text (falls back to the

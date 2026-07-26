@@ -72,7 +72,10 @@ than guessing low.
 Note: "sga" and "cache" are also valid path values elsewhere in this \
 system, but they're resolved BEFORE you ever see a task (Part 2/4's \
 short-circuit overrides) — you will never need to and must never output \
-either of them yourself; your choice is always one of the four above.
+either of them yourself; your choice is always one of the four above. \
+Same for "source" (Data Layer §4a): a task with a file/url attached to \
+it never reaches you at all — it's routed straight to Source Manager, \
+deterministically, before classification.
 
 For "suggested_agents", describe the KINDS OF EXPERTISE this task needs — \
 not just names of agents you've seen before. Use short, general role \
