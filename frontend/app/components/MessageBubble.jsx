@@ -1,6 +1,8 @@
 "use client";
 import { useState } from "react";
 import Markdown from "./Markdown";
+import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
+import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — Data Layer §9d
 
 // Per-tier accent color — gives each response a quick at-a-glance
 // identity in the chat instead of every bubble looking identical. Kept
@@ -46,7 +48,129 @@ export default function MessageBubble({ message }) {
           <span className="text-[var(--neutral-600)] font-normal">· {data.status}</span>
         </div>
         <ResultBody data={data} />
+        {/* NEW — Data Layer §9d: api/task_runner.py only ever sets this
+            for a status="ok" tier-0/1 chat answer (see
+            _maybe_attach_prerequisite_suggestions()'s own docstring for
+            the gating) — every other tier/status is simply undefined
+            here, so this check alone is enough, no separate tier check
+            needed on the frontend side. */}
+        {data.result?.prerequisite_suggestions?.length > 0 && (
+          <PrerequisiteSuggestions suggestions={data.result.prerequisite_suggestions} />
+        )}
       </div>
+    </div>
+  );
+}
+
+// NEW — Data Layer §9d: chat proactive suggestions, rendered directly
+// under a tier 0/1 chat answer whenever eo/prerequisite_suggestions.py's
+// Mode C pass (via api/task_runner.py's
+// _maybe_attach_prerequisite_suggestions()) found real "prerequisite-of"
+// connections (agents/backlink_detector.py) into whatever this turn's
+// notebook grounding pulled in.
+//
+// This is the actual "explicit-agreement gate" §8's Chat integration
+// bullet asks for ("offer — never silently start... Generation only
+// starts after explicit agreement"): nothing calls generateNotebooks()
+// until a person clicks Generate on ONE specific card, and even then
+// only that one suggestion is dispatched — accepting one never
+// auto-runs the others still sitting in the list.
+//
+// Scoped to a single Generate target (study_guide) rather than opening
+// the full NotebooksGeneratePicker chip flow (NotebooksGeneratePicker.jsx)
+// — that picker lives inside Notebooks' own popover and isn't wired as
+// a cross-component "open me with this prefilled scope" control today
+// (see that file's own SCOPE NOTE on the chat-compose-box entry point
+// being deliberately out of scope for this same reason). study_guide is
+// the one target every topic can produce regardless of how much raw
+// material got pulled in for it — flashcards/quiz genuinely need enough
+// scoped content to be worth generating, a study guide degrades
+// gracefully to a short summary even off a thin topic. Reaching the
+// picker for anything else (flashcards, a mind map, etc.) is still one
+// click away in Notebooks — this card isn't meant to replace it, just to
+// surface the offer where the conversation already is.
+function PrerequisiteSuggestions({ suggestions }) {
+  const { generateNotebooks } = useSession();
+  const [dismissed, setDismissed] = useState(() => new Set());
+  const [runningId, setRunningId] = useState(null);
+  const [doneIds, setDoneIds] = useState(() => new Set());
+  const [errorById, setErrorById] = useState({});
+
+  const visible = suggestions.filter((s) => !dismissed.has(s.topic_id));
+  if (visible.length === 0) return null;
+
+  async function accept(s) {
+    setRunningId(s.topic_id);
+    setErrorById((prev) => ({ ...prev, [s.topic_id]: null }));
+    try {
+      // Scoped to just this ONE topic's own source_section_ids
+      // (eo/prerequisite_suggestions.py's "source_node_ids", straight
+      // off get_packet()'s covers-edge walk) — accepting one suggestion
+      // never regenerates material for the whole notebook.
+      const { branches } = await generateNotebooks(
+        s.workspace_id, ["study_guide"], { source_node_ids: s.source_node_ids }
+      );
+      const failed = branches?.find((b) => b.status === "error");
+      if (failed) throw new Error(failed.error || "Generation failed");
+      setDoneIds((prev) => new Set(prev).add(s.topic_id));
+    } catch (err) {
+      setErrorById((prev) => ({ ...prev, [s.topic_id]: String(err.message || err) }));
+    } finally {
+      setRunningId(null);
+    }
+  }
+
+  function dismiss(topicId) {
+    setDismissed((prev) => new Set(prev).add(topicId));
+  }
+
+  return (
+    <div className="space-y-1.5 pt-1">
+      {visible.map((s) => {
+        const isRunning = runningId === s.topic_id;
+        const isDone = doneIds.has(s.topic_id);
+        const error = errorById[s.topic_id];
+        return (
+          <div
+            key={s.topic_id}
+            className="rounded-lg border border-[var(--neutral-800)] bg-black/20 px-2.5 py-2 text-xs space-y-1.5"
+          >
+            <div className="flex items-start gap-1.5 text-[var(--neutral-300)]">
+              <Sparkles size={12} className="mt-0.5 shrink-0 text-amber-400" />
+              <span>
+                <strong>{s.name}</strong> is a prerequisite of {s.for_topic_name}, which you're
+                asking about — want a study guide for it too?
+              </span>
+            </div>
+            {error && <div className="text-red-400 pl-[18px]">{error}</div>}
+            {isDone ? (
+              <div className="flex items-center gap-1 pl-[18px] text-emerald-400">
+                <CheckCircle2 size={12} /> Added — check the Notebooks tab.
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 pl-[18px]">
+                <button
+                  type="button"
+                  onClick={() => accept(s)}
+                  disabled={isRunning}
+                  className="flex items-center gap-1 rounded px-2 py-1 bg-[var(--accent)] text-[var(--accent-text)] font-medium disabled:opacity-50"
+                >
+                  {isRunning ? <Loader2 size={11} className="animate-spin" /> : null}
+                  Generate study guide
+                </button>
+                <button
+                  type="button"
+                  onClick={() => dismiss(s.topic_id)}
+                  disabled={isRunning}
+                  className="flex items-center gap-1 text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                >
+                  <X size={11} /> No thanks
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

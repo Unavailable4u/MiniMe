@@ -5,6 +5,7 @@ import {
   Layers, BookMarked, GraduationCap, Network, GitBranch, ListChecks,
 } from "lucide-react";
 import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
+import { useSession } from "../../context/SessionContext";   // NEW — Data Layer §9c: processingWorkspaces
 
 // Notebooks integration guide §4.1: "picker and free-text aren't really
 // two separate systems — free text is just an alternate way to pre-fill
@@ -145,6 +146,17 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
   // plumbing between the two components.
   const dock = useWorkspaceDock(workspaceId, null);
 
+  // NEW — Data Layer §9c: true while this workspace has an upload whose
+  // Source Manager + Backlink Detector pass hasn't finished yet (per
+  // SessionContext's processingWorkspaces, kept current by its
+  // /ws/{session_id} listener). Generating against
+  // eo/source_index.py:get_packet() while that's still mid-write would
+  // hand back a packet missing the topics/connections the upload that
+  // just landed was supposed to contribute — canRun below blocks Run
+  // on it the same way it already blocks on `running`.
+  const { processingWorkspaces } = useSession();
+  const sourcesProcessing = !!(workspaceId && processingWorkspaces?.has(workspaceId));
+
   useEffect(() => {
     if (!open) return;
     function onClickOutside(e) {
@@ -232,7 +244,7 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
     }
   }
 
-  const canRun = selectedTargets.length > 0 && !running;
+  const canRun = selectedTargets.length > 0 && !running && !sourcesProcessing;
 
   return (
     <div className="relative" ref={popoverRef}>
@@ -321,10 +333,13 @@ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNo
             type="button"
             onClick={() => runGenerate()}
             disabled={!canRun}
+            title={sourcesProcessing ? "A recent upload is still being processed — hang tight" : undefined}
             className="w-full flex items-center justify-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           >
-            {running ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-            Run {selectedTargets.length > 0 ? `(${selectedTargets.length})` : ""}
+            {(running || sourcesProcessing) ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+            {sourcesProcessing && !running
+              ? "Processing sources…"
+              : `Run ${selectedTargets.length > 0 ? `(${selectedTargets.length})` : ""}`}
           </button>
 
           {runError && (

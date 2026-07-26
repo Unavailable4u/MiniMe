@@ -390,6 +390,108 @@ export function SessionProvider({ children }) {
     };
   }, [sessionId]);
 
+  // NEW — Data Layer §9c: per-workspace "an upload's Source Manager +
+  // Backlink Detector pass is still running server-side" flag.
+  // NotebooksGeneratePicker's Generate button reads this (via
+  // processingWorkspaces below) so it doesn't dispatch a generate call
+  // against a packet (eo/source_index.py:get_packet()) that's mid-write
+  // right after a fresh upload.
+  //
+  // A Set of workspace ids, not a boolean, since more than one
+  // workspace's uploads can be in flight in the same tab (e.g. two
+  // Notebooks open in two WorkspaceDock panes), and a per-workspace
+  // count (processingCountsRef, the actual source of truth — the Set
+  // in state is just its rendered projection) since a single workspace
+  // can itself have more than one upload in flight at once (a
+  // multi-file drop in IngestionDropzone.jsx) — only clear a workspace
+  // out of the Set once every one of its in-flight uploads has
+  // settled.
+  //
+  // Entered in markSourceProcessingStarted() at ingest call-start —
+  // there's no separate "upload accepted" server event, just the
+  // eventual notify() completion, so call-start is the only "something
+  // is now in flight" signal the client has. Cleared two ways, both
+  // wired below: (1) this call's own settle, in *_wrapped's finally
+  // block just past this effect — a guarantee independent of whether
+  // any WebSocket message ever arrives; (2) this session's
+  // "upload_processed"/"backlinks_updated" push below, which is what
+  // lets §2d's future parallel-fan-out uploads (server processing that
+  // outlives this request) and cross-tab updates (the same workspace
+  // open in a second tab) clear the flag too, not just this exact
+  // call's own request/response. Both paths funnel through the same
+  // decrement-and-floor-at-zero helper, so whichever fires first wins
+  // and the other is a safe no-op.
+  const [processingWorkspaces, setProcessingWorkspaces] = useState(() => new Set());
+  const processingCountsRef = useRef({});   // wsId -> in-flight count
+
+  function _syncProcessingWorkspaces() {
+    setProcessingWorkspaces(
+      new Set(Object.keys(processingCountsRef.current).filter((k) => processingCountsRef.current[k] > 0))
+    );
+  }
+
+  function markSourceProcessingStarted(wsId) {
+    if (!wsId) return;
+    processingCountsRef.current[wsId] = (processingCountsRef.current[wsId] || 0) + 1;
+    _syncProcessingWorkspaces();
+  }
+
+  function markSourceProcessingSettled(wsId) {
+    if (!wsId || !processingCountsRef.current[wsId]) return;   // already at 0 (or never started) — the other clear path already handled it
+    processingCountsRef.current[wsId] = Math.max(0, processingCountsRef.current[wsId] - 1);
+    _syncProcessingWorkspaces();
+  }
+
+  // NEW — Data Layer §9c: the frontend's first consumer of §9b's real
+  // /ws/{session_id} push transport. Deliberately a plain WebSocket,
+  // not routed through getPusherClient() above — see eo/notify.py's
+  // own "ASSUMPTION FLAGGED" docstring note on why this channel is its
+  // own thing rather than a wrapper around the existing Pusher
+  // transport that effect already uses.
+  //
+  // Kept intentionally simpler than that Pusher effect: no
+  // reconnect-with-backoff here, since the one thing riding this
+  // socket today (clearing processingWorkspaces on
+  // upload_processed/backlinks_updated) already degrades safely if a
+  // message is missed — markSourceProcessingSettled() also fires from
+  // *_wrapped's own finally block below regardless of whether this
+  // socket ever delivers. A real reconnect strategy is the natural
+  // next piece once something riding this channel needs a delivery
+  // guarantee this tab's own request/response can't already provide
+  // (§9d's chat proactive suggestions will likely be the first).
+  useEffect(() => {
+    if (!sessionId) return;
+    let socket = null;
+    let cancelled = false;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;   // no token yet, or effect already torn down while we were awaiting getSession()
+      const wsUrl = `${API_URL.replace(/^http/, "ws")}/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
+      const ws = new WebSocket(wsUrl);
+      ws.onmessage = (evt) => {
+        let event;
+        try {
+          event = JSON.parse(evt.data);
+        } catch {
+          return;   // not JSON — not one of eo/notify.py's events, ignore rather than throw
+        }
+        if (event.kind === "upload_processed" || event.kind === "backlinks_updated") {
+          markSourceProcessingSettled(event.payload?.workspace_id);
+        }
+      };
+      if (cancelled) {
+        ws.close();   // getSession() resolved after unmount/sessionId-change beat us here
+        return;
+      }
+      socket = ws;
+    })();
+    return () => {
+      cancelled = true;
+      socket?.close();
+    };
+  }, [sessionId]);
+
   // NEW — §2.5: pusherConnected now reflects the shared client's actual
   // connection state (bound once, independent of sessionId/user), rather
   // than each channel effect optimistically flipping it on construction
@@ -1010,33 +1112,48 @@ async function setRolePinned(roleName, pinned) {
 // pipeline (OCR/parse -> chunk -> embed -> summarize) runs long, the
 // request just sits open indefinitely from the browser's point of view,
 // which is what reads as a progress row stuck on "Ingesting…" forever.
+//
+// CHANGED — Data Layer §9c: each ingestor now also takes an optional
+// trailing `sessionId`, threaded straight into the request as
+// `session_id` (api/server.py's five upload endpoints forward it to
+// process_upload(), which passes it to eo/notify.py's notify() —
+// without it, §9b's WebSocket push has no session_id to fire on and
+// silently no-ops for every upload). These five functions stay plain,
+// unbound module functions -- IngestionDropzone.jsx and
+// lib/ingestDispatch.js still call them directly by name with the same
+// (wsId, file/url, signal) shape they always have. It's the *_wrapped
+// versions below, built inside SessionProvider and exported under
+// these same five names in the context value, that supply sessionId —
+// see that section's comment for why binding it there instead of here
+// keeps every existing call site untouched.
 
-async function ingestClip(wsId, url, signal) {
+async function ingestClip(wsId, url, signal, sessionId) {
   const res = await fetch(`${API_URL}/api/notes/clip`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
-    body: JSON.stringify({ url, workspace_id: wsId }),
+    body: JSON.stringify({ url, workspace_id: wsId, session_id: sessionId || null }),
     signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function ingestVideoUrl(wsId, url, signal) {
+async function ingestVideoUrl(wsId, url, signal, sessionId) {
   const res = await fetch(`${API_URL}/api/notes/video`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
-    body: JSON.stringify({ url, workspace_id: wsId }),
+    body: JSON.stringify({ url, workspace_id: wsId, session_id: sessionId || null }),
     signal,
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function ingestFile(wsId, file, signal) {
+async function ingestFile(wsId, file, signal, sessionId) {
   const form = new FormData();
   form.append("workspace_id", wsId);
   form.append("file", file);
+  if (sessionId) form.append("session_id", sessionId);
   const res = await fetch(`${API_URL}/api/notes/import`, {
     method: "POST",
     headers: await authHeaders(),
@@ -1047,10 +1164,11 @@ async function ingestFile(wsId, file, signal) {
   return res.json();
 }
 
-async function ingestPdfFile(wsId, file, signal) {
+async function ingestPdfFile(wsId, file, signal, sessionId) {
   const form = new FormData();
   form.append("workspace_id", wsId);
   form.append("file", file);
+  if (sessionId) form.append("session_id", sessionId);
   const res = await fetch(`${API_URL}/api/notes/pdf`, {
     method: "POST",
     headers: await authHeaders(),
@@ -1061,10 +1179,11 @@ async function ingestPdfFile(wsId, file, signal) {
   return res.json();
 }
 
-async function ingestVoiceFile(wsId, file, signal) {
+async function ingestVoiceFile(wsId, file, signal, sessionId) {
   const form = new FormData();
   form.append("workspace_id", wsId);
   form.append("file", file);
+  if (sessionId) form.append("session_id", sessionId);
   const res = await fetch(`${API_URL}/api/notes/voice`, {
     method: "POST",
     headers: await authHeaders(),
@@ -1900,6 +2019,61 @@ async function openScopedSubChat(wsId, taskText) {
     }
   }
 
+  // NEW — Data Layer §9c: binds sessionId (this component's own state,
+  // not available to the plain module functions above) onto each of
+  // the five ingestors, plus the processingWorkspaces start/settle
+  // pair from the WS effect above — so IngestionDropzone.jsx and
+  // lib/ingestDispatch.js, which both call these by name with the
+  // existing (wsId, file/url, signal) shape, get both §9c behaviors
+  // "for free" the next time they run, with no call-site changes.
+  // Exported below under the SAME five names the module functions
+  // have, replacing them in the context value — nothing outside this
+  // file should ever import the raw module functions directly.
+  async function ingestClipWrapped(wsId, url, signal) {
+    markSourceProcessingStarted(wsId);
+    try {
+      return await ingestClip(wsId, url, signal, sessionId);
+    } finally {
+      markSourceProcessingSettled(wsId);
+    }
+  }
+
+  async function ingestVideoUrlWrapped(wsId, url, signal) {
+    markSourceProcessingStarted(wsId);
+    try {
+      return await ingestVideoUrl(wsId, url, signal, sessionId);
+    } finally {
+      markSourceProcessingSettled(wsId);
+    }
+  }
+
+  async function ingestFileWrapped(wsId, file, signal) {
+    markSourceProcessingStarted(wsId);
+    try {
+      return await ingestFile(wsId, file, signal, sessionId);
+    } finally {
+      markSourceProcessingSettled(wsId);
+    }
+  }
+
+  async function ingestPdfFileWrapped(wsId, file, signal) {
+    markSourceProcessingStarted(wsId);
+    try {
+      return await ingestPdfFile(wsId, file, signal, sessionId);
+    } finally {
+      markSourceProcessingSettled(wsId);
+    }
+  }
+
+  async function ingestVoiceFileWrapped(wsId, file, signal) {
+    markSourceProcessingStarted(wsId);
+    try {
+      return await ingestVoiceFile(wsId, file, signal, sessionId);
+    } finally {
+      markSourceProcessingSettled(wsId);
+    }
+  }
+
   const value = {
   sessionId, API_URL,
   messages, loading,
@@ -1937,7 +2111,9 @@ async function openScopedSubChat(wsId, taskText) {
   fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, buildExtractionTable,
   fetchSimulationResults,   // NEW — Test tab: reads simulate-domain stage_output back off the bus
   fetchRoles, updateRolePrompt, setRolePinned,   // NEW — Test tab `personas`: thin client over the Role Library store
-  ingestClip, ingestVideoUrl, ingestFile, ingestPdfFile, ingestVoiceFile,
+  ingestClip: ingestClipWrapped, ingestVideoUrl: ingestVideoUrlWrapped,
+  ingestFile: ingestFileWrapped, ingestPdfFile: ingestPdfFileWrapped, ingestVoiceFile: ingestVoiceFileWrapped,
+  processingWorkspaces,   // NEW — §9c: Set of workspace ids with an upload still processing server-side
   detectBacklinks,
   fetchNodeSummaries,   // NEW — Notebooks integration guide §6.6: Backlinks concept-graph node-click rationale
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
