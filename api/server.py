@@ -115,12 +115,10 @@ from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 
 from agents.note_table_builder import build_table
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
 from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
-from agents.web_clipper import clip_url
-from agents.video_ingestor import ingest_video
-from agents.voice_ingestor import ingest_voice
-from agents.importer import import_artifact, SUPPORTED_FORMATS as IMPORTABLE_FORMATS
-from agents.pdf_ingestor import ingest_pdf   # NEW — §1 fix: PDF ingestion, was never wired to an endpoint
-from agents.source_ingestor import write_ingested_source
+from agents.importer import SUPPORTED_FORMATS as IMPORTABLE_FORMATS
+from agents.source_manager import process_upload   # NEW — Data Layer §2b: every ingestion endpoint below now
+                                                     # funnels through Source Manager instead of calling its own
+                                                     # ingestor + write_ingested_source() by hand.
 from agents.tts_synthesizer import synthesize_podcast
 from agents.video_overview_builder import build_video_overview
 from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FORMATS
@@ -1938,11 +1936,10 @@ def get_simulation_results(ws_id: str, req: SimulateRequest, owner_id: str = Dep
 @app.post("/api/notes/clip", dependencies=[Depends(require_auth)])
 def clip_url_endpoint(req: ClipUrlRequest):
     try:
-        artifact = clip_url(req.url)
+        result = process_upload("web_clip", req.url, req.workspace_id, created_by="user")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    node_ids = write_ingested_source(artifact, req.workspace_id, created_by="user")
-    return {"node_ids": node_ids, "title": artifact["title"]}
+    return {"node_ids": result["node_ids"], "title": result["title"]}
 
 
 @app.post("/api/notes/video", dependencies=[Depends(require_auth)])
@@ -1950,11 +1947,10 @@ def ingest_video_endpoint(req: ClipUrlRequest):
     # Reuses ClipUrlRequest -- identical {url, workspace_id} shape, no
     # reason for a separate model.
     try:
-        artifact = ingest_video(req.url)
+        result = process_upload("video", req.url, req.workspace_id, created_by="user")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    node_ids = write_ingested_source(artifact, req.workspace_id, created_by="user")
-    return {"node_ids": node_ids, "title": artifact["title"]}
+    return {"node_ids": result["node_ids"], "title": result["title"]}
 
 
 @app.post("/api/notes/import", dependencies=[Depends(require_auth)])
@@ -1962,8 +1958,10 @@ async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile =
     """Office/docx/pptx/xlsx/csv/md/json ingestion. No new parsing code —
     agents/importer.py (Part 0 §0.5) already reads every one of these
     formats back into the common artifact shape; this endpoint is just
-    that plus write_ingested_source(), the same two-step shape
-    /api/notes/clip above already uses. PDF is deliberately absent from
+    that plus process_upload("import", ...) (§2b: Source Manager, the
+    one funnel every ingestion endpoint here now goes through instead
+    of calling its own ingestor + write_ingested_source() by hand).
+    PDF is deliberately absent from
     IMPORTABLE_FORMATS -- that's agents/pdf_ingestor.py's job, not
     agents/importer.py's (see that module's own docstring)."""
     ext = os.path.splitext(file.filename or "")[1].lstrip(".").lower()
@@ -1977,13 +1975,15 @@ async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile =
         tmp_path = tmp.name
     try:
         original_title = os.path.splitext(file.filename or "")[0] or None
-        artifact = import_artifact(tmp_path, fmt=ext, default_title=original_title)
+        result = process_upload(
+            "import", tmp_path, workspace_id, created_by="user",
+            fmt=ext, default_title=original_title,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         os.remove(tmp_path)
-    node_ids = write_ingested_source(artifact, workspace_id, created_by="user")
-    return {"node_ids": node_ids, "title": artifact["title"]}
+    return {"node_ids": result["node_ids"], "title": result["title"]}
 
 
 @app.post("/api/notes/pdf", dependencies=[Depends(require_auth)])
@@ -1992,19 +1992,18 @@ async def ingest_pdf_endpoint(workspace_id: str = Form(...), file: UploadFile = 
     extraction) already exists and was fully implemented, it just had no
     endpoint calling it. PDF is deliberately absent from IMPORTABLE_FORMATS
     (see /api/notes/import above) -- this is that "other job", same
-    temp-file-then-cleanup, two-step write_ingested_source() shape as
-    every other ingestor here."""
+    temp-file-then-cleanup shape, funneled through process_upload()
+    (§2b) like every other ingestion endpoint here."""
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        artifact = ingest_pdf(tmp_path)
+        result = process_upload("pdf", tmp_path, workspace_id, created_by="user")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         os.remove(tmp_path)
-    node_ids = write_ingested_source(artifact, workspace_id, created_by="user")
-    return {"node_ids": node_ids, "title": artifact["title"]}
+    return {"node_ids": result["node_ids"], "title": result["title"]}
 
 
 @app.post("/api/notes/voice", dependencies=[Depends(require_auth)])
@@ -2021,13 +2020,12 @@ async def ingest_voice_endpoint(workspace_id: str = Form(...), file: UploadFile 
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        artifact = ingest_voice(tmp_path)
+        result = process_upload("voice", tmp_path, workspace_id, created_by="user")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         os.remove(tmp_path)
-    node_ids = write_ingested_source(artifact, workspace_id, created_by="user")
-    return {"node_ids": node_ids, "title": artifact["title"]}
+    return {"node_ids": result["node_ids"], "title": result["title"]}
 
 
 # --- notes domain: generate (see agents/exporter.py, Part 0 §0.5 /
