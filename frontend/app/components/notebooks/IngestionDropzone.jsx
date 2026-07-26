@@ -2,52 +2,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import { UploadCloud, Link2, CheckCircle2, XCircle, Loader2, Mic, AlertTriangle } from "lucide-react";
-
-const OFFICE_EXTS = ["docx", "pptx", "xlsx", "xls", "csv", "md", "json"];
-const PDF_EXT = "pdf";
-const AUDIO_EXTS = ["mp3", "wav", "m4a", "ogg", "webm", "flac"];
-const YOUTUBE_RE = /(youtube\.com\/watch|youtu\.be\/)/i;
+import { OFFICE_EXTS, PDF_EXT, AUDIO_EXTS, YOUTUBE_RE, ingestFileByExtension, withTimeout } from "../../lib/ingestDispatch";
+// CHANGED — Data Layer §4b: the extension groups, YOUTUBE_RE, withTimeout,
+// and the per-file ingestor dispatch used to be defined locally in this
+// file. They now live in lib/ingestDispatch.js so the chat composer's new
+// attach button can reuse the exact same rules — no behavior change here.
 
 // How long a "done" row stays visible before it auto-clears from the
 // progress list.
 const DONE_AUTOCLEAR_MS = 3000;
-
-// NEW — bug audit §3 ("stuck Ingesting…"), theory 1: a plain `await
-// fetch(...)` with no timeout of its own means a slow server-side
-// pipeline (OCR/parse -> chunk -> embed -> summarize) and a genuinely
-// dropped connection look identical to this component -- both just
-// never resolve. Bounding the wait client-side turns "spins forever,
-// no way to know if it's still working or dead" into "surfaces
-// something actionable after a while." Generous on purpose: PDF OCR
-// and local Whisper transcription on a big file can legitimately take
-// a couple of minutes.
-const INGEST_TIMEOUT_MS = 120_000;
-
-function extOf(filename) {
-  return (filename.split(".").pop() || "").toLowerCase();
-}
-
-// Runs `fn(signal)` with an AbortSignal that fires after
-// INGEST_TIMEOUT_MS. Throws a distinguishable TimeoutError instead of
-// whatever generic abort error the fetch layer would otherwise throw,
-// so callers can tell "we gave up waiting" apart from "the server said
-// no."
-async function withTimeout(fn) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), INGEST_TIMEOUT_MS);
-  try {
-    return await fn(controller.signal);
-  } catch (err) {
-    if (controller.signal.aborted) {
-      const timeoutErr = new Error("Taking longer than expected");
-      timeoutErr.isTimeout = true;
-      throw timeoutErr;
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 // One row per in-flight or completed ingestion — the "progress list"
 // half of §4.7's "one drop-target and progress list shared across
@@ -133,20 +96,11 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
   async function handleFiles(fileList) {
     await Promise.allSettled(
       Array.from(fileList).map(async (file) => {
-        const ext = extOf(file.name);
         const id = pushItem(file.name);
         try {
-          let result;
-          if (AUDIO_EXTS.includes(ext)) {
-            result = await withTimeout((signal) => ingestVoiceFile(workspaceId, file, signal));
-          } else if (ext === PDF_EXT) {
-            result = await withTimeout((signal) => ingestPdfFile(workspaceId, file, signal));
-          } else if (OFFICE_EXTS.includes(ext)) {
-            result = await withTimeout((signal) => ingestFile(workspaceId, file, signal));
-          } else {
-            settleItem(id, "error", `Unsupported file type .${ext}`);
-            return;
-          }
+          const result = await ingestFileByExtension(
+            file, { ingestFile, ingestPdfFile, ingestVoiceFile }, workspaceId
+          );
           settleItem(id, "done", `${result.node_ids?.length || 0} node(s)`);
           onIngested?.(result);
         } catch (err) {

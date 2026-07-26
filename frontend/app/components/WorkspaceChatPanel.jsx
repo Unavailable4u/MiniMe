@@ -5,7 +5,8 @@ import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, MessageSquare } from "lucide-react";
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { ingestFileByExtension } from "../lib/ingestDispatch";
 
 // NEW — §6: this component is the composition that used to live directly
 // inside ChatTab.jsx (chat box + resizable/collapsible WorkingPanel dock).
@@ -63,12 +64,31 @@ const WORKING_PANEL_DEFAULT_WIDTH = 420;
 const WORKING_PANEL_MIN_WIDTH = 280;
 const WORKING_PANEL_MAX_WIDTH = 720;
 
+// NEW — Data Layer §4b: every chat-tab surface embeds this one component
+// (see the header comment above), so the attach affordance below —
+// paperclip button + hidden file input + a small inline progress pill
+// row, all pointed at agents/source_manager.py's process_upload() via
+// the exact same ingestFile/ingestPdfFile/ingestVoiceFile helpers
+// IngestionDropzone.jsx already uses (factored into lib/ingestDispatch.js
+// so both share one dispatch table) — lands on all 7 tabs
+// (Chat/Notebooks/Research/Plan/Build/Test/Growth) in this one patch.
+// Deliberately file-only, no URL field here: pasting a web/YouTube link
+// still belongs to Notebooks' own Sources panel (IngestionDropzone), which
+// is the dedicated place for that and already has one. This is purely
+// "I have a file open, let me drop it into the conversation" — the
+// chat-composer equivalent of a Slack/ChatGPT attach button, not a second
+// Sources UI. Ingestion here never turns into a chat turn/sendTask() call
+// — it's the same "hires Source Manager, which hires Backlink Detector"
+// path §4a describes, independent of whatever's typed in the textarea.
+const ATTACH_DONE_AUTOCLEAR_MS = 3000;
+
 function clampWorkingPanelWidth(w) {
   return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
 }
 
 export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
   const legacy = useSession();
+  const { ingestFile, ingestPdfFile, ingestVoiceFile } = legacy;   // NEW — Data Layer §4b
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
 
@@ -109,6 +129,60 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
   const [workingPanelWidth, setWorkingPanelWidth] = useState(WORKING_PANEL_DEFAULT_WIDTH);
   const resizeCleanupRef = useRef(null); // holds the active mousemove/mouseup remover, if a drag is in progress
+
+  // NEW — Data Layer §4b: attach button state. Same "own pushItem/
+  // settleItem, own mountedRef guard" shape as IngestionDropzone.jsx,
+  // scaled down to what a composer needs (no drag target, no url field).
+  const attachInputRef = useRef(null);
+  const [attachItems, setAttachItems] = useState([]);
+  const attachMountedRef = useRef(true);
+  useEffect(() => {
+    attachMountedRef.current = true;
+    return () => { attachMountedRef.current = false; };
+  }, []);
+
+  function pushAttachItem(name) {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setAttachItems((prev) => [{ id, name, status: "pending", message: "" }, ...prev]);
+    return id;
+  }
+
+  function settleAttachItem(id, status, message) {
+    if (!attachMountedRef.current) return;
+    setAttachItems((prev) => prev.map((it) => (it.id === id ? { ...it, status, message } : it)));
+    if (status === "done") {
+      setTimeout(() => {
+        if (!attachMountedRef.current) return;
+        setAttachItems((prev) => prev.filter((it) => it.id !== id));
+      }, ATTACH_DONE_AUTOCLEAR_MS);
+    }
+  }
+
+  // Same independent-per-file shape as IngestionDropzone.jsx's
+  // handleFiles() (a slow/stuck file shouldn't block the others), pointed
+  // at the identical process_upload()-backed endpoints via
+  // ingestFileByExtension() (lib/ingestDispatch.js) — §4b's whole point is
+  // "the same upload path, reachable from every chat tab now."
+  async function handleAttachFiles(fileList) {
+    if (!workspaceId) return;
+    await Promise.allSettled(
+      Array.from(fileList).map(async (file) => {
+        const id = pushAttachItem(file.name);
+        try {
+          const result = await ingestFileByExtension(
+            file, { ingestFile, ingestPdfFile, ingestVoiceFile }, workspaceId
+          );
+          settleAttachItem(id, "done", `${result.node_ids?.length || 0} node(s)`);
+        } catch (err) {
+          if (err?.isTimeout) {
+            settleAttachItem(id, "timeout", "Still working — check Sources in a bit");
+          } else {
+            settleAttachItem(id, "error", String(err.message || err));
+          }
+        }
+      })
+    );
+  }
 
   useEffect(() => {
     setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
@@ -309,7 +383,65 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             />
           </div>
         ) : (
+        <>
+        {/* NEW — Data Layer §4b: compact status pills for in-flight/just-
+            finished attachments, distinct from IngestionDropzone.jsx's
+            fuller progress list (this composer has no room for that, and
+            doesn't need drag-and-drop or a url field) — same status
+            vocabulary (pending/done/error/timeout) so it reads
+            consistently with Notebooks' Sources tab. */}
+        {attachItems.length > 0 && (
+          <div className="border-t border-[var(--neutral-800)] px-4 pt-3 flex flex-wrap gap-2">
+            {attachItems.map((it) => (
+              <span
+                key={it.id}
+                className={`flex items-center gap-1.5 text-[11px] rounded-full border px-2.5 py-1 ${
+                  it.status === "error"
+                    ? "border-red-900 text-red-400"
+                    : it.status === "timeout"
+                    ? "border-amber-900 text-amber-400"
+                    : it.status === "done"
+                    ? "border-green-900 text-green-400"
+                    : "border-[var(--neutral-800)] text-[var(--neutral-400)]"
+                }`}
+              >
+                {it.status === "pending" && <Loader2 size={11} className="animate-spin shrink-0" />}
+                {it.status === "done" && <CheckCircle2 size={11} className="shrink-0" />}
+                {it.status === "error" && <XCircle size={11} className="shrink-0" />}
+                {it.status === "timeout" && <AlertTriangle size={11} className="shrink-0" />}
+                <span className="truncate max-w-[10rem]">{it.name}</span>
+                <span className="text-[var(--neutral-600)]">
+                  {it.status === "pending" ? "ingesting…" : it.message}
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="border-t border-[var(--neutral-800)] p-4 flex gap-2 items-end">
+          {/* NEW — Data Layer §4b: attach a file straight into this
+              workspace's sources — no separate Sources tab trip needed.
+              Disabled without a resolved workspaceId (no active chat yet)
+              since process_upload() has nothing to attach the source to. */}
+          <input
+            ref={attachInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files?.length) handleAttachFiles(e.target.files);
+              e.target.value = "";   // allow re-selecting the same file twice in a row
+            }}
+          />
+          <button
+            type="button"
+            disabled={!workspaceId}
+            onClick={() => attachInputRef.current?.click()}
+            title={workspaceId ? "Attach a file (PDF, docs, slides, sheets, audio)" : "Open or start a chat to attach files"}
+            className="flex items-center justify-center bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg p-2 text-sm outline-none disabled:opacity-40 hover:border-[var(--neutral-600)] transition-colors shrink-0"
+          >
+            <Paperclip size={15} className="text-[var(--neutral-400)]" />
+          </button>
+
           {/* Mode picker — custom dropdown (not a native <select>) so each
               option can carry its own icon. */}
           <div className="relative">
@@ -371,6 +503,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             Send
           </button>
         </form>
+        </>
         )}
       </div>
 

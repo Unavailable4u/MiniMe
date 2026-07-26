@@ -2161,6 +2161,19 @@ def missed_quiz_questions_endpoint(workspace_id: str = Query(...),
                                     quiz_node_id: str = Query(...)):
     return quiz_progress.get_missed_questions(workspace_id, quiz_node_id)
 
+class AttachmentIn(BaseModel):
+    # NEW — Data Layer §4a. Mirrors process_upload()'s own required
+    # args (agents/source_manager.py) plus the two optional ingest_kwargs
+    # "import" can take; every other kind ignores fmt/default_title, same
+    # as process_upload() itself does.
+    kind: str            # one of source_manager._INGEST_DISPATCH's keys:
+                          # "pdf" | "import" | "voice" | "video" | "web_clip"
+    payload: str          # local file path (already saved to disk by this
+                          # request) or a url, depending on kind
+    fmt: Optional[str] = None
+    default_title: Optional[str] = None
+
+
 class TaskRequest(BaseModel):
     task_text: str
     tier_override: Optional[int] = None
@@ -2174,6 +2187,11 @@ class TaskRequest(BaseModel):
     # names that require a human approval pause after they finish
     # (tier-3 hires-driven path only). None/empty = full-auto, unchanged
     # default behavior.
+    attachment: Optional[AttachmentIn] = None   # NEW — Data Layer §4a: a
+    # file/url attached to THIS chat turn. Its mere presence bypasses
+    # Inspector classification entirely and hires Source Manager (which,
+    # per §3a, hires the Backlink Detector right after itself) — see
+    # api/task_runner.py's _resolve_decision_and_hires() docstring.
 
 
 class TaskResponse(BaseModel):
@@ -2211,6 +2229,7 @@ def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXE
             project_unique_name=req.project_unique_name,
             approval_roles=set(req.approval_roles) if req.approval_roles else None,
             owner_id=owner_id,   # FIXED — thread it down to run_task()
+            attachment=req.attachment.dict() if req.attachment else None,   # NEW — Data Layer §4a
         )
     except Exception as exc:
         traceback.print_exc()
