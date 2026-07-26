@@ -37,6 +37,24 @@ requesting user's id, which this module has no business knowing about),
 same separation agents/study_generator.py already keeps from its own
 caller.
 
+CHANGED — Data Layer architecture §6a: was reading every in-scope
+node's raw Primary Source content straight off eo/knowledge_graph.py's
+list_nodes(). Now reads eo/source_index.py:get_packet() instead --
+Mode C only, no Mode B (§5's own distinction): the mapper role gets the
+already-extracted topic skeleton (name/summary/content_hint) plus the
+connection graph Backlink Detector already built, never a raw-excerpt
+fetch. This is strictly less content per topic than the old full-text
+pass, but it's the same material Source Manager's Mode A extraction
+(§2c) and Backlink Detector (§3b) already did the work of distilling --
+asking the mapper role to re-read entire source documents a second
+time was duplicated effort the topic tree exists specifically to avoid.
+
+`source_node_ids` scoping used to mean "only these Primary Source
+nodes"; there's no raw node id in a Mode C packet to filter by
+directly, so it's now read as "only topics whose `covers` list touches
+one of these node ids" -- the closest equivalent once content lives at
+topic granularity instead of node granularity.
+
 Place this file at: agents/mind_mapper.py
 """
 import os
@@ -44,23 +62,48 @@ import sys
 import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
+from eo.source_index import get_packet
 
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*(.*?)\s*```", re.DOTALL)
 
-# Same per-source truncation reasoning as agents/fact_detector.py and
-# agents/study_generator.py.
-MAX_CONTENT_CHARS_PER_SOURCE = 8000
+# Topic summaries/hints are already short (Source Manager's own
+# extraction pass keeps them that way) -- this is just a defensive cap,
+# not the load-bearing truncation MAX_CONTENT_CHARS_PER_SOURCE used to
+# be against full source text.
+MAX_CONTENT_CHARS_PER_TOPIC = 2000
 
 
-def _context_for(nodes: list[dict]) -> str:
+def _context_for(topics: dict, connections: list[dict]) -> str:
+    """Builds the mapper role's context from a Mode C packet's topic
+    skeleton instead of raw source text: one section per topic (name +
+    summary, falling back to content_hint if a topic somehow has no
+    summary yet), followed by a plain-language dump of the known
+    topic-to-topic relationships so the model can route edges through
+    real connections Backlink Detector already found instead of
+    re-guessing them from prose alone.
+    """
     parts = []
-    for n in nodes:
-        title = n.get("title") or n.get("node_id")
-        content = (n.get("content") or "").strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
-        if not content:
+    for topic in topics.values():
+        name = topic.get("name") or "Untitled topic"
+        body = (topic.get("summary") or topic.get("content_hint") or "").strip()
+        body = body[:MAX_CONTENT_CHARS_PER_TOPIC]
+        if not body:
             continue
-        parts.append(f"--- {title} ---\n{content}")
+        parts.append(f"--- {name} ---\n{body}")
+
+    rel_lines = []
+    for c in connections:
+        from_topic = topics.get(c.get("from_topic"))
+        to_topic = topics.get(c.get("to_topic"))
+        if not from_topic or not to_topic:
+            continue
+        rel_lines.append(
+            f"{from_topic.get('name')} -> {to_topic.get('name')}: "
+            f"{c.get('relation') or 'related'}"
+        )
+    if rel_lines:
+        parts.append("--- Known relationships ---\n" + "\n".join(rel_lines))
+
     return "\n\n".join(parts)
 
 
@@ -99,20 +142,26 @@ def generate_mindmap(workspace_id: str, source_node_ids: list[str] | None = None
     kind="markdown" after both attempts should be treated by the caller
     as "couldn't produce a diagram," not a partial success to display.
 
-    Raises LookupError if the resolved scope has zero readable source
+    Raises LookupError if the resolved scope has zero readable topic
     content, so the caller can turn that into a clear per-branch error
     instead of silently saving an empty diagram.
     """
-    nodes = list_nodes(workspace_id)
+    packet = get_packet(workspace_id, scope="project")
+    topics = packet["topics"]
     if source_node_ids:
         wanted = set(source_node_ids)
-        nodes = [n for n in nodes if n.get("node_id") in wanted or n.get("vector_id") in wanted]
+        topics = {tid: t for tid, t in topics.items()
+                  if wanted & set(t.get("covers") or [])}
+    connections = [
+        c for c in packet["connections"]
+        if c.get("from_topic") in topics and c.get("to_topic") in topics
+    ]
 
-    context = _context_for(nodes)
+    context = _context_for(topics, connections)
     if not context:
-        raise LookupError("no readable source content in scope")
+        raise LookupError("no readable topic content in scope")
 
-    task_text = "Source material:\n\n" + context
+    task_text = "Topic material:\n\n" + context
 
     result = _attempt(task_text)
     if result["kind"] == "mermaid":

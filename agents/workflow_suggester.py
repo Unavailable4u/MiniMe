@@ -55,6 +55,15 @@ future checklist UI can key off the rendered SVG's node id
 guide's refinement #1 for why that's worth doing from the start rather
 than retrofitting later.
 
+CHANGED — Data Layer architecture §6c: was reading every in-scope
+node's raw content straight off eo/knowledge_graph.py's list_nodes().
+Now reads agents/source_planner_lean.py:plan() instead -- Mode B/C
+(§5's distinction): finding a real step-by-step procedure needs actual
+prose describing it, not a one-line summary, so most topics end up
+flagged here in practice -- but the lean role still makes that call
+per-topic rather than this module assuming it, same posture every
+other §6b/§6c retrofit takes.
+
 Place this file at: agents/workflow_suggester.py
 """
 import os
@@ -63,7 +72,7 @@ import json
 import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
+from agents.source_planner_lean import plan
 from eo.registry import get_role_prompt, add_role_prompt
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
@@ -110,14 +119,17 @@ def _ensure_role_registered() -> None:
         add_role_prompt("workflow_suggester", WORKFLOW_SUGGESTER_BRIEF, source="workflow_suggester_seed")
 
 
-def _context_for(nodes: list[dict]) -> str:
+def _context_for(topics: dict) -> str:
     parts = []
-    for n in nodes:
-        title = n.get("title") or n.get("node_id")
-        content = (n.get("content") or "").strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
-        if not content:
+    for topic in topics.values():
+        title = topic.get("name") or "Untitled topic"
+        body = topic.get("excerpts")
+        if not body:
+            body = topic.get("summary") or topic.get("content_hint") or ""
+        body = body.strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
+        if not body:
             continue
-        parts.append(f"--- {title} ---\n{content}")
+        parts.append(f"--- {title} ---\n{body}")
     return "\n\n".join(parts)
 
 
@@ -176,19 +188,36 @@ def suggest_workflows(workspace_id: str, source_node_ids: list[str] | None = Non
     other Notebooks target uses). An empty list is a normal result,
     not an error.
 
-    Raises LookupError if the resolved scope has zero readable source
+    CHANGED — Data Layer architecture §6c: `source_node_ids` scoping
+    used to mean "only these Primary Source nodes"; read the same way
+    every other §6 retrofit reads it -- "only topics whose `covers`
+    list touches one of these node ids."
+
+    Raises LookupError if the resolved scope has zero readable topic
     content, same contract agents/mind_mapper.py's generate_mindmap()
     uses, so the caller can turn that into a clear per-branch error
     instead of silently saving an empty result.
     """
-    nodes = list_nodes(workspace_id)
+    packet = plan(
+        workspace_id,
+        task_text=(
+            "Find 0-4 distinct step-by-step procedures described in the "
+            "source material -- concrete sequences a person would DO, "
+            "not just concepts explained. A topic's own summary usually "
+            "can't show a real procedure's actual steps, so pull in "
+            "excerpts for any topic that might describe one."
+        ),
+        scope="project",
+    )
+    topics = packet["topics"]
     if source_node_ids:
         wanted = set(source_node_ids)
-        nodes = [n for n in nodes if n.get("node_id") in wanted or n.get("vector_id") in wanted]
+        topics = {tid: t for tid, t in topics.items()
+                  if wanted & set(t.get("covers") or [])}
 
-    context = _context_for(nodes)
+    context = _context_for(topics)
     if not context:
-        raise LookupError("no readable source content in scope")
+        raise LookupError("no readable topic content in scope")
 
     _ensure_role_registered()
     from agents.generic_worker import run as run_role   # deferred, same

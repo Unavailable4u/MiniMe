@@ -31,6 +31,21 @@ instead, the same shape agents/backlink_detector.py and agents/
 note_clusterer.py already established for Notes-domain deterministic
 tool agents in Part 4 §4.3.
 
+CHANGED — Data Layer architecture §6b: was reading every node's raw
+content straight off eo/knowledge_graph.py's list_nodes() and running
+one extraction worker per NODE. Now reads
+agents/source_planner_lean.py:plan() instead -- Mode B/C (§5's
+distinction) -- and runs one worker per TOPIC: for exact-field
+extraction (the whole point of this module) source_planner_lean's own
+judgment usually flags most topics as needing their excerpts, but the
+decision is still made per-topic rather than assumed, so a topic whose
+summary already states a field plainly doesn't cost a wasted excerpt
+pull. `node_type` is accepted for call-site compatibility but no longer
+filters anything -- Secondary Data's topics are already derived
+exclusively from ingested sources, so the one production value this
+ever carried ("source") described a filter that's now the topic tree's
+default population, not an opt-in.
+
 Place this file at: agents/note_table_builder.py
 """
 import os
@@ -39,7 +54,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
+from agents.source_planner_lean import plan
 from eo.registry import AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
 from utils.llm_client import generate_text
@@ -97,15 +112,19 @@ def _system_prompt(field_names: list[str]) -> str:
     )
 
 
-def _extract_one_node(node: dict, key_env: str, field_names: list[str],
-                       session_id: str = None) -> tuple[str, dict]:
+def _extract_one_topic(tid: str, topic: dict, key_env: str, field_names: list[str],
+                        session_id: str = None) -> tuple[str, dict]:
     """Runs on one worker thread with one fixed Groq key -- mirrors
     agents/extraction_table_builder.py's _extract_one_paper() shape
-    exactly, just reading a node's title/content instead of a paper's
-    title/abstract."""
-    title = node.get("title") or "Untitled"
+    exactly, just reading a topic's name/excerpts instead of a paper's
+    title/abstract. `content` is the topic's Mode B excerpts if
+    source_planner_lean flagged it, otherwise its own summary -- same
+    fallback agents/fact_detector.py's retrofitted _context_for() uses.
+    """
+    title = topic.get("name") or "Untitled"
+    content = topic.get("excerpts") or topic.get("summary") or ""
     chain = [{"provider": "groq", "model": m, "key_env": key_env} for m in MODELS]
-    user_content = json.dumps({"title": title, "content": (node.get("content") or "")[:4000]})
+    user_content = json.dumps({"title": title, "content": content[:4000]})
 
     fallback = {name: None for name in field_names}
     try:
@@ -119,58 +138,69 @@ def _extract_one_node(node: dict, key_env: str, field_names: list[str],
         fields = dict(fallback)
         fields["extraction_error"] = True
 
-    return node["node_id"], fields
+    return tid, fields
 
 
 def build_table(workspace_id: str, field_names: list[str], node_type: str = None,
                  expanded: bool = False, session_id: str = None) -> dict:
-    """Reads every node in `workspace_id` (optionally filtered to
-    `node_type`, e.g. "source") and extracts `field_names` from each,
-    one worker per node, merged into one row per node in the
-    workspace's own node order — not as.completed() order, so the table
+    """Reads every topic in `workspace_id`'s Secondary Data (Mode B/C,
+    via source_planner_lean.plan()) and extracts `field_names` from
+    each, one worker per topic, merged into one row per topic in the
+    packet's own topic order -- not as_completed() order, so the table
     reads the same regardless of which worker happened to finish first,
     exactly agents/extraction_table_builder.py's own ordering choice.
+
+    `node_type` is accepted but unused -- see module docstring's
+    CHANGED note.
 
     Raises ValueError (not the paper module's MissingDependencyError --
     there's no upstream role for eo/executor.py to self-heal by
     inserting here, this is a plain "nothing to extract from yet")
-    if field_names is empty or the workspace has no ingested content.
+    if field_names is empty or the workspace has no topics yet.
     """
     if not field_names:
         raise ValueError("field_names is required — there's nothing to extract otherwise.")
 
-    nodes = [n for n in list_nodes(workspace_id, node_type=node_type) if (n.get("content") or "").strip()]
-    if not nodes:
-        raise ValueError(f"No ingested sources with content found in workspace {workspace_id!r}.")
+    packet = plan(
+        workspace_id,
+        task_text=(
+            "Extract these exact fields from each topic, using only what "
+            "is actually stated or clearly implied: " + ", ".join(field_names)
+        ),
+        scope="project",
+        session_id=session_id,
+    )
+    topics = packet["topics"]
+    if not topics:
+        raise ValueError(f"No topics found in workspace {workspace_id!r} yet.")
 
-    worker_count = min(len(nodes), 8 if expanded else 5)
+    worker_count = min(len(topics), 8 if expanded else 5)
     key_envs = _select_workers(worker_count)
 
     rows_by_id = {}
     with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
         futures = {
             executor.submit(
-                _extract_one_node, node, key_envs[i % len(key_envs)], field_names,
+                _extract_one_topic, tid, topic, key_envs[i % len(key_envs)], field_names,
                 session_id=session_id,
-            ): node
-            for i, node in enumerate(nodes)
+            ): tid
+            for i, (tid, topic) in enumerate(topics.items())
         }
         for future in as_completed(futures):
-            node = futures[future]
-            node_id, fields = future.result()
-            rows_by_id[node_id] = {
-                "node_id": node_id,
-                "title": node.get("title"),
-                "tags": node.get("tags", []),
+            tid = futures[future]
+            _, fields = future.result()
+            rows_by_id[tid] = {
+                "topic_id": tid,
+                "title": topics[tid].get("name"),
                 **fields,
             }
-            print(f"    [Note Table Builder] extracted: {node.get('title')}")
+            print(f"    [Note Table Builder] extracted: {topics[tid].get('name')}")
 
-    rows = [rows_by_id[n["node_id"]] for n in nodes]
+    rows = [rows_by_id[tid] for tid in topics]
     return {
         "rows": rows,
         "field_names": field_names,
-        "summary": f"Extracted {', '.join(field_names)} for {len(rows)} source(s).",
+        "summary": f"Extracted {', '.join(field_names)} for {len(rows)} topic(s).",
     }
 
 

@@ -23,6 +23,17 @@ integration guide §2's recommendation for exactly this kind of
 one-shot reasoning job — reads context, produces structured output, no
 role handoffs).
 
+CHANGED — Data Layer architecture §6b: was reading every in-scope
+node's raw content straight off eo/knowledge_graph.py's list_nodes().
+Now reads agents/source_planner_lean.py:plan() instead -- Mode B/C
+(§5's distinction): the lean role first judges, from the topic
+skeleton alone, which topics are thin enough that a fact worth
+"remembering" might be hiding in the raw text, and only THOSE topics'
+excerpts get pulled in; every other topic's name/summary stands on its
+own. This module's own fact_detector role never sees raw content for a
+topic Mode B didn't flag -- same "don't needlessly pull excerpts"
+posture plan()'s own docstring describes.
+
 Place this file at: agents/fact_detector.py
 """
 import os
@@ -31,7 +42,7 @@ import json
 import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
+from agents.source_planner_lean import plan
 from eo import workspace_facts
 from eo.registry import get_role_prompt, add_role_prompt
 
@@ -78,16 +89,23 @@ def _ensure_role_registered() -> None:
         add_role_prompt("fact_detector", FACT_DETECTOR_BRIEF, source="fact_detector_seed")
 
 
-def _context_for(nodes: list[dict]) -> str:
-    """One section per source, each truncated independently so a single
-    long source can't crowd out every other source in scope."""
+def _context_for(topics: dict) -> str:
+    """One section per topic: its Mode B excerpts if source_planner_lean
+    flagged it as needing them, otherwise its name/summary/content_hint
+    as-is. Same per-topic truncation reasoning as before -- plan()'s own
+    MAX_EXCERPT_CHARS_PER_NODE already caps any pulled excerpt, this
+    just guards the skeleton-only fallback the same way.
+    """
     parts = []
-    for n in nodes:
-        title = n.get("title") or n.get("node_id")
-        content = (n.get("content") or "").strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
-        if not content:
+    for topic in topics.values():
+        title = topic.get("name") or "Untitled topic"
+        body = topic.get("excerpts")
+        if not body:
+            body = topic.get("summary") or topic.get("content_hint") or ""
+        body = body.strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
+        if not body:
             continue
-        parts.append(f"--- {title} ---\n{content}")
+        parts.append(f"--- {title} ---\n{body}")
     return "\n\n".join(parts)
 
 
@@ -101,18 +119,34 @@ def detect_facts(workspace_id: str, source_node_ids: list[str] | None = None) ->
     the Facts subtab already reviews — this never writes directly into
     live facts.
 
+    CHANGED — Data Layer architecture §6b: `source_node_ids` scoping
+    used to mean "only these Primary Source nodes"; read the same way
+    §6a's retrofits read it -- "only topics whose `covers` list touches
+    one of these node ids."
+
     Returns just the candidates this call added. workspace_facts.
     propose_fact() only ever hands back the *whole* pending list (same
     as agents/note_clusterer.py's propose_clusters() replacing its own
     whole list), so this diffs against the list from before the call
     rather than assuming the tail is this call's.
     """
-    nodes = list_nodes(workspace_id)
+    packet = plan(
+        workspace_id,
+        task_text=(
+            "Identify any durable, workspace-level fact worth remembering "
+            "about this project as a whole -- a decision, defining "
+            "characteristic, constraint, or precise detail (not something "
+            "a 1-2 sentence summary would already capture)."
+        ),
+        scope="project",
+    )
+    topics = packet["topics"]
     if source_node_ids:
         wanted = set(source_node_ids)
-        nodes = [n for n in nodes if n.get("node_id") in wanted or n.get("vector_id") in wanted]
+        topics = {tid: t for tid, t in topics.items()
+                  if wanted & set(t.get("covers") or [])}
 
-    context = _context_for(nodes)
+    context = _context_for(topics)
     if not context:
         return []
 
