@@ -14,11 +14,15 @@ file, workspace_id as the top-level key, a threading.Lock around
 read/modify/write. The difference from those two is *why* the doc gets
 modified: per architecture §10, this document is never rewritten
 wholesale — every mutation goes through apply_patch()'s JSON-Patch
-(RFC 6902) subset (add/remove/replace only — the three ops Backlink
-Detector and accepted Corrections actually need; move/copy/test are
-out of scope here) coming only from Backlink Detector or an accepted
-Correction. Nothing in this codebase calls apply_patch() yet — that's
-Backlink Detector's job, a later step, not this one.
+(RFC 6902) subset (add/remove/replace only — the three ops Source
+Manager's Mode A pass, Backlink Detector, and an accepted Correction
+actually need; move/copy/test are out of scope here). Source Manager's
+Mode A pass (agents/source_manager.py, §3) is the first real caller —
+one batch of "add" ops per freshly-ingested source, scoped to that
+source's own new topics only. Fitting those topics into the rest of an
+existing workspace's tree (cross-source parents, prerequisite/
+elaborates-on/contradicts/restates connections) is Backlink Detector's
+incremental-patch job, a later step, not this one.
 
 Per-workspace document shape:
 
