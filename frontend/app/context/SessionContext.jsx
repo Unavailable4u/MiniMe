@@ -1177,6 +1177,45 @@ async function rejectFactCandidate(wsId, candidateId) {
   });
 }
 
+// Corrections + Patch Review (Data Layer architecture §8c) — §8a's
+// Corrections tab posts a plain-language correction here; the server
+// runs agents/correction_locator.py (§8b) and either queues a
+// candidate for Patch Review below or returns a reason there was
+// nothing to locate. Same accept/reject shape as every other
+// candidate store above — a candidate_id, never a list index.
+
+async function submitCorrection(wsId, { text, scopeNodeId }) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ text, scope_node_id: scopeNodeId ?? null }),
+  });
+  return res.json();
+}
+
+async function fetchPatchCandidates(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function acceptPatchCandidate(wsId, candidateId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}/accept`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return res.json();
+}
+
+async function rejectPatchCandidate(wsId, candidateId) {
+  await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+}
+
 // Generic paste-panel content (eo/panel_content.py) — backs Mind Map,
 // Study (flashcards/quiz/study guide), and the other "paste the chat's
 // output into a box" panels in NotebooksTab.jsx. Same fetch/save shape
@@ -1903,6 +1942,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchNodeSummaries,   // NEW — Notebooks integration guide §6.6: Backlinks concept-graph node-click rationale
   fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
   fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
+  submitCorrection, fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate,
   fetchPanelContent, savePanelContent, fetchPanelContentList,   // NEW — generic paste-panel persistence (eo/panel_content.py); fetchPanelContentList added for §8 unread dots
   generateNotebooks,   // NEW — Notebooks integration guide §4/§6: the picker/chip-confirmation "Generate" command
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)

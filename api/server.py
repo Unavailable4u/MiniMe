@@ -113,6 +113,8 @@ from agents.concept_linker import link_concepts   # NEW — Notebooks integratio
 from agents.workflow_suggester import suggest_workflows   # NEW — bug audit §7: suggested workflow diagrams
 from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
 from agents.note_table_builder import build_table
+from agents.correction_locator import locate_correction   # NEW — Data Layer architecture §8c
+from eo import correction_candidates   # NEW — Data Layer architecture §8c: Patch Review pending store
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — Part 7 §7.4
 from agents import deploy_agent as deploy_agent_module                  # NEW — Part 7 §7.4
 from agents.importer import SUPPORTED_FORMATS as IMPORTABLE_FORMATS
@@ -357,6 +359,11 @@ class LeaveWorkspaceRequest(BaseModel):
 
 class RenameNodeRequest(BaseModel):
     title: str
+
+class SubmitCorrectionRequest(BaseModel):  # NEW — Data Layer architecture §8c
+    text: str
+    scope_node_id: Optional[str] = None  # None == "All files", same convention
+                                          # get_packet()'s own scope arg uses
 
 class CastVoteRequest(BaseModel):
     vote_target: Optional[str] = None  # another partner's user_id, or None = "stay joint"
@@ -1317,6 +1324,56 @@ def accept_workspace_fact_candidate(ws_id: str, candidate_id: str):
 def reject_workspace_fact_candidate(ws_id: str, candidate_id: str):
     try:
         workspace_facts.reject_candidate(ws_id, candidate_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
+    return {"status": "rejected", "candidate_id": candidate_id}
+
+# --- Corrections + Patch Review (Data Layer architecture §8c) -----------
+# §8a's Corrections tab captures a plain-language correction (scope +
+# text) and posts it here. This is the wiring §8b's
+# agents/correction_locator.py never got on its own: locate a candidate
+# edit, and if one comes back, hand it to
+# eo/correction_candidates.py's pending store for the Patch Review tab
+# below to render as a before/after and let the person accept/reject.
+# A located-but-empty result (no matching topic, or the source didn't
+# support the correction) never reaches the pending store at all --
+# there's nothing to review, so the reason goes straight back to the
+# Corrections tab to show inline instead.
+
+@app.post("/api/workspaces/{ws_id}/corrections", dependencies=[Depends(require_auth)])
+def submit_correction(ws_id: str, body: SubmitCorrectionRequest):
+    scope_node_ids = {body.scope_node_id} if body.scope_node_id else None
+    scope_label = "All files" if body.scope_node_id is None else body.scope_node_id
+    result = locate_correction(ws_id, body.text, scope_node_ids=scope_node_ids)
+
+    if not result.get("op"):
+        return {"status": "no_match", "reason": result.get("reason") or "couldn't locate this correction"}
+
+    candidate = correction_candidates.propose_candidate(
+        ws_id, body.text, scope_label, result["topic_id"], result["op"],
+    )
+    return {"status": "queued", "candidate": candidate}
+
+
+@app.get("/api/workspaces/{ws_id}/corrections/candidates", dependencies=[Depends(require_auth)])
+def get_correction_candidates(ws_id: str):
+    return correction_candidates.list_candidates(ws_id)
+
+
+@app.post("/api/workspaces/{ws_id}/corrections/candidates/{candidate_id}/accept", dependencies=[Depends(require_auth)])
+def accept_correction_candidate(ws_id: str, candidate_id: str):
+    try:
+        return correction_candidates.accept_candidate(ws_id, candidate_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown candidate_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/workspaces/{ws_id}/corrections/candidates/{candidate_id}", dependencies=[Depends(require_auth)])
+def reject_correction_candidate(ws_id: str, candidate_id: str):
+    try:
+        correction_candidates.reject_candidate(ws_id, candidate_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown candidate_id")
     return {"status": "rejected", "candidate_id": candidate_id}

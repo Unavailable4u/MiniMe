@@ -18,6 +18,7 @@ import {
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
   Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw, ListChecks, RotateCcw,
   Wrench, Send, // NEW — Data Layer architecture §8a: Corrections tab
+  GitCompare, // NEW — Data Layer architecture §8c: Patch Review tab
 } from "lucide-react";
 
 const SUB_TABS = [
@@ -29,10 +30,12 @@ const SUB_TABS = [
   { id: "facts", label: "Facts", icon: BookMarked },
   { id: "clusters", label: "Clusters", icon: Layers },
   { id: "candidates", label: "Suggested notes", icon: Sparkles },
-  // NEW — Data Layer architecture §8a: capture-only for now (§8b/§8c
-  // add the lean role + Patch Review surface that actually turn a
-  // submitted correction into an edit).
+  // NEW — Data Layer architecture §8a: capture, wired to §8b's locator
+  // + §8c's Patch Review pending store as of this patch.
   { id: "corrections", label: "Corrections", icon: Wrench },
+  // NEW — Data Layer architecture §8c: before/after review + accept/
+  // reject for whatever the Corrections tab's submissions located.
+  { id: "patch-review", label: "Patch Review", icon: GitCompare },
 ];
 
 // NEW — §4 fix: persist which notebook and sub-tab were selected, same
@@ -1284,24 +1287,23 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
 }
 
 // --- Corrections sub-view ----------------------------------------------
-// Data Layer architecture §8a: capture, not editing. Two inputs -- a
-// file-scope picker (one source, or "All files") and a plain-language
-// box describing what's wrong -- and nothing that tries to locate or
-// apply an edit yet. Turning a submitted correction into a located
-// edit is §8b's lean role (reads Secondary Data, falls back to Mode B
-// on Primary Source when it isn't there); rendering a before/after
-// diff for review is §8c's Patch Review tab. Neither exists yet, so a
-// submitted correction here just queues in local component state --
-// same "build the surface first, wire the backend in behind it" order
-// MindMapView's own guide §6.5 Phase 1/Phase 2 split already used.
-function CorrectionsView({ workspaceId, nodes, edges }) {
+// Data Layer architecture §8a: capture -- a file-scope picker (one
+// source, or "All files") and a plain-language box describing what's
+// wrong. As of §8c, submitting actually runs the pipeline: the server
+// hands the text to §8b's agents/correction_locator.py, and either
+// queues a located candidate in eo/correction_candidates.py's pending
+// store for the Patch Review tab to render as a before/after, or comes
+// back with a plain reason there was nothing to locate -- shown here
+// inline, since a dead end never reaches Patch Review at all.
+function CorrectionsView({ workspaceId, nodes, edges, submitCorrection, onQueued }) {
   const [scopeId, setScopeId] = useState("all");
   const [text, setText] = useState("");
-  // Ephemeral, this session only -- §8b/§8c give corrections a real
-  // store (and a review surface); there's nothing durable to persist
-  // to yet, so holding it here would just be a fake promise of
-  // durability this component can't keep.
-  const [queued, setQueued] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  // Ephemeral, this session only -- the durable record of a submission
+  // is whatever candidate it produced (Patch Review tab) or nothing at
+  // all (no_match); this list is just per-submission feedback so a
+  // "no match" result doesn't vanish the moment it's shown.
+  const [history, setHistory] = useState([]);
 
   // Same grouping SourcesView already uses for its own file list --
   // scoping a correction to "this file" means one row per root source,
@@ -1312,23 +1314,34 @@ function CorrectionsView({ workspaceId, nodes, edges }) {
     label: groupDisplayTitle(g.root, g.children.length > 0),
   }));
 
-  function handleSubmit() {
+  async function handleSubmit() {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed || submitting) return;
     const scopeLabel = scopeId === "all"
       ? "All files"
       : (fileOptions.find((f) => f.id === scopeId)?.label || scopeId);
-    setQueued((prev) => [
-      {
-        id: `${Date.now()}-${prev.length}`,
-        scope: scopeId === "all" ? null : scopeId,
-        scopeLabel,
+    setSubmitting(true);
+    try {
+      const result = await submitCorrection(workspaceId, {
         text: trimmed,
-        submittedAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-    setText("");
+        scopeNodeId: scopeId === "all" ? null : scopeId,
+      });
+      setHistory((prev) => [
+        {
+          id: result?.candidate?.candidate_id || `${Date.now()}-${prev.length}`,
+          scopeLabel,
+          text: trimmed,
+          submittedAt: new Date().toISOString(),
+          status: result?.status || "no_match",
+          reason: result?.reason || null,
+        },
+        ...prev,
+      ]);
+      setText("");
+      if (result?.status === "queued") onQueued?.();
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -1359,25 +1372,30 @@ function CorrectionsView({ workspaceId, nodes, edges }) {
         <div className="flex justify-end">
           <button
             onClick={handleSubmit}
-            disabled={!text.trim()}
+            disabled={!text.trim() || submitting}
             className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
           >
-            <Send size={12} />
-            Submit correction
+            {submitting ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+            {submitting ? "Locating…" : "Submit correction"}
           </button>
         </div>
       </div>
 
-      {queued.length > 0 ? (
+      {history.length > 0 ? (
         <div className="space-y-1.5">
           <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Submitted this session</p>
-          {queued.map((c) => (
+          {history.map((c) => (
             <div key={c.id} className="px-3 py-2 rounded-lg border border-[var(--neutral-800)] space-y-1">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] text-[var(--neutral-500)]">{c.scopeLabel}</span>
                 <span className="text-[10px] text-[var(--neutral-600)]">{timeAgo(c.submittedAt)}</span>
               </div>
               <p className="text-xs text-[var(--neutral-200)]">{c.text}</p>
+              {c.status === "queued" ? (
+                <p className="text-[10px] text-green-400">Located a match — check Patch Review to accept or discard it.</p>
+              ) : (
+                <p className="text-[10px] text-[var(--neutral-500)]">Couldn't locate a match: {c.reason}</p>
+              )}
             </div>
           ))}
         </div>
@@ -1386,6 +1404,111 @@ function CorrectionsView({ workspaceId, nodes, edges }) {
           No corrections submitted yet.
         </div>
       )}
+    </div>
+  );
+}
+
+// --- Patch Review sub-view ----------------------------------------------
+// Data Layer architecture §8c: renders each pending correction
+// candidate (eo/correction_candidates.py) as a before/after over the
+// same three fields agents/correction_locator.py is ever allowed to
+// touch -- name, summary, content_hint -- and lets the person accept
+// (applies the op via eo/secondary_data.py:apply_patch()) or discard
+// it. Same accept/reject visual language as CandidatesView/
+// ClustersView above, just with a diff instead of a single content
+// block, since what's being reviewed here is a change, not a proposal
+// from nothing.
+function FieldDiff({ label, before, after }) {
+  if (before === after) return null;
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">{label}</p>
+      {before ? (
+        <p className="text-xs text-red-400/80 line-through whitespace-pre-wrap">{before}</p>
+      ) : null}
+      <p className="text-xs text-green-400 whitespace-pre-wrap">{after}</p>
+    </div>
+  );
+}
+
+function PatchReviewView({ workspaceId, fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate, refreshSignal }) {
+  const [candidates, setCandidates] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setCandidates(await fetchPatchCandidates(workspaceId));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (workspaceId) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, refreshSignal]);
+
+  async function handleAccept(candidateId) {
+    setBusyId(candidateId);
+    try {
+      await acceptPatchCandidate(workspaceId, candidateId);
+      await load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleReject(candidateId) {
+    setBusyId(candidateId);
+    try {
+      await rejectPatchCandidate(workspaceId, candidateId);
+      await load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+  }
+  if (candidates.length === 0) {
+    return <p className="text-xs text-[var(--neutral-600)]">Nothing waiting for review — corrections that find a match on the Corrections tab show up here.</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {candidates.map((c) => {
+        const before = c.before || {};
+        const after = c.op?.value || {};
+        return (
+          <div key={c.candidate_id} className="rounded-lg border border-[var(--neutral-800)] p-3 space-y-2">
+            <p className="text-xs text-[var(--neutral-400)] italic">"{c.correction_text}"</p>
+            <p className="text-[10px] text-[var(--neutral-600)]">{c.scope_label}</p>
+            <div className="space-y-1.5">
+              <FieldDiff label="Name" before={before.name} after={after.name} />
+              <FieldDiff label="Summary" before={before.summary} after={after.summary} />
+              <FieldDiff label="Content hint" before={before.content_hint} after={after.content_hint} />
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={() => handleAccept(c.candidate_id)}
+                disabled={busyId === c.candidate_id}
+                className="flex items-center gap-1 text-[11px] text-green-400 hover:text-green-300 disabled:opacity-50"
+              >
+                <Check size={12} /> Accept
+              </button>
+              <button
+                onClick={() => handleReject(c.candidate_id)}
+                disabled={busyId === c.candidate_id}
+                className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300 disabled:opacity-50"
+              >
+                <X size={12} /> Discard
+              </button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1419,6 +1542,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
      fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks, fetchNodeSummaries,
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
+     submitCorrection, fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate,
      fetchPanelContent, savePanelContent, fetchPanelContentList,
      generateNotebooks,
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
@@ -1468,6 +1592,11 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // re-fetches just its candidates list (not the editable draft) when it
   // changes.
   const [factsRefreshSignal, setFactsRefreshSignal] = useState(0);
+  // NEW — Data Layer architecture §8c: bumped when a correction on the
+  // Corrections tab locates a match, so the Patch Review tab picks up
+  // the new pending candidate even if it's already mounted (same
+  // "signal, don't re-derive" shape factsRefreshSignal above uses).
+  const [patchReviewRefreshSignal, setPatchReviewRefreshSignal] = useState(0);
   // NEW — §8: { [panel_key]: { updated_at, ... } } from eo/panel_content.py's
   // list_content, and { [subTabId]: isoString } read/written from
   // localStorage — see latestTabTimestamp/hasUnseenUpdate below.
@@ -2103,6 +2232,17 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 workspaceId={selected.id}
                 nodes={nodes}
                 edges={edges}
+                submitCorrection={submitCorrection}
+                onQueued={() => setPatchReviewRefreshSignal((n) => n + 1)}
+              />
+            )}
+            {subTab === "patch-review" && (
+              <PatchReviewView
+                workspaceId={selected.id}
+                fetchPatchCandidates={fetchPatchCandidates}
+                acceptPatchCandidate={acceptPatchCandidate}
+                rejectPatchCandidate={rejectPatchCandidate}
+                refreshSignal={patchReviewRefreshSignal}
               />
             )}
           </div>

@@ -327,6 +327,22 @@ def run_after_source_manager(workspace_id: str, topic_ids: list[str],
     finally:
         emit_event("agent_done", session_id=session_id, agent=agent_name,
                    payload={"summary": f"{len(applied)} connection(s)"})
+        # NEW — Data Layer architecture §9a: notify() boundary, in the
+        # same finally as agent_done above so it fires whether the
+        # pass succeeded, degraded to zero ops, or hit the caught
+        # exception -- "processing finished" is true in all three
+        # cases, even when there was nothing worth applying. §9d's
+        # chat proactive suggestions (prerequisite topics from
+        # Backlink data) reads this event's payload later; §9c's
+        # Generate-button loading state watches this same event too
+        # rather than needing its own.
+        from eo.notify import notify  # deferred, same reasoning as
+                                        # this function's own emit_event
+                                        # import just above
+        notify(session_id, "backlinks_updated", {
+            "workspace_id": workspace_id, "topic_ids": topic_ids,
+            "ops_applied": len(applied),
+        })
     return applied
 
 
