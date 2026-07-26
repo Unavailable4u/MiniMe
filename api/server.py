@@ -103,7 +103,7 @@ from eo import workspace_facts
 from eo import graph_edges
 from eo import note_candidates   # NEW — §4.7: silent note-taker's propose/accept/reject surface
 from eo.knowledge_graph import list_nodes, delete_node   # NEW — §2 fix: delete_node was added, list_nodes already here
-from agents.backlink_detector import detect_backlinks
+from agents.backlink_detector import detect_backlinks, cleanup_for_removed_source
 from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
 from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
@@ -1508,6 +1508,18 @@ def delete_workspace_node(ws_id: str, node_id: str, owner_id: str = Depends(requ
                 except FileNotFoundError:
                     pass
 
+    # Data Layer architecture §3c: same deleted batch_ids the cascade
+    # above just tore down at the graph/candidate level also needs
+    # Secondary Data (eo/secondary_data.py) cleaned up -- any topic
+    # Source Manager's Mode A pass (§3) derived from these nodes, and
+    # any connection Backlink Detector (§3b) built against one, or this
+    # workspace accumulates orphaned topic-tree entries every time a
+    # source is deleted. No-ops instantly if this workspace's Secondary
+    # Data has nothing referencing these node_ids (e.g. content ingested
+    # before this feature existed, or through a path that never ran
+    # Mode A at all).
+    cleanup_ops = cleanup_for_removed_source(ws_id, batch_ids)
+
     # CHANGED — bug audit §2 real fix (migration 0001): used to be
     # panel_content.clear_workspace(ws_id, owner_id) here, wiping every
     # saved panel in the notebook -- Mind Map, Study Guide, Workflows,
@@ -1518,7 +1530,11 @@ def delete_workspace_node(ws_id: str, node_id: str, owner_id: str = Depends(requ
     # notebook" with no recorded scope).
     cleared_panels = panel_content.invalidate_for_nodes(ws_id, batch_ids, owner_id)
 
-    return {"status": "deleted", "id": node_id, "deleted_ids": batch_ids, "cleared_panels": cleared_panels}
+    return {
+        "status": "deleted", "id": node_id, "deleted_ids": batch_ids,
+        "cleared_panels": cleared_panels,
+        "secondary_data_ops_cleared": len(cleanup_ops),
+    }
 
 
 # --- silent note-taking agent candidates (see eo/note_candidates.py, §4.6)

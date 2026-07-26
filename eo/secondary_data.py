@@ -142,6 +142,84 @@ def get_secondary_data(workspace_id: str) -> dict:
     return _drop_dangling_connections(data)
 
 
+# Data Layer architecture §3d: valid values for get_secondary_data_scoped()'s
+# `scope` argument. Kept as a module-level constant, same reasoning
+# CONTENT_HINTS gets one, so later callers (§5a's Mode C serving, §6/§7's
+# Mind Map walk, §9d's chat suggestions) import one shared source of
+# truth instead of re-typing the two literal strings.
+SCOPES = {"project", "chat"}
+
+
+def get_secondary_data_scoped(workspace_id: str, scope: str, session_id: str = None) -> dict:
+    """Data Layer architecture §3d: two read-time filters over
+    get_secondary_data()'s already-dangling-filtered document, by which
+    chat session originally ingested each topic's underlying source
+    material. The second read-time filter this store gets, after §1d's
+    dangling-connection one above -- this one is about WHO should see a
+    topic, not whether it still resolves.
+
+    scope="project" -- no filtering beyond what get_secondary_data()
+    already does. "Everything in this workspace's tree" -- Notebooks'
+    normal, default posture, and what every later Mode C serving pass
+    (§5a) reaches for unless a caller specifically asked to narrow to
+    one chat.
+
+    scope="chat" -- keeps only topics traceable back to THIS session's
+    own uploads: a topic survives if ANY of its source_section_ids
+    resolves to a Primary Source node (eo/knowledge_graph.py) whose own
+    session_id (§1a) matches `session_id`. Requires `session_id`
+    (raises ValueError without one -- "this chat" is meaningless
+    without knowing which chat). A topic with no source_section_ids at
+    all (shouldn't normally happen, but nothing enforces it) is treated
+    as NOT in scope for scope="chat" -- unattributable content doesn't
+    default to visible just because there's nothing to disqualify it.
+
+    Connections are filtered to only those whose BOTH endpoints survive
+    the topic filter -- same "every endpoint must resolve" contract
+    _drop_dangling_connections() already enforces against "does the id
+    exist at all," applied here against this call's smaller in-scope
+    topic set instead.
+
+    Costs one list_nodes() scan per call (eo/knowledge_graph.py) to
+    build the node_id -> session_id lookup this needs -- fine for
+    Notebooks' actual call volume (once per Mind Map render or Mode C
+    serve, not once per topic), same "correctness over micro-optimizing
+    an uncommon path" choice agents/backlink_detector.py's own
+    detect_backlinks() already makes calling list_nodes() itself.
+    Degrades to an all-topics-out-of-scope result (not a raise) if that
+    scan itself fails -- list_nodes() already degrades to a partial or
+    empty list on its own failure, so this just passes that same
+    degraded posture through.
+    """
+    doc = get_secondary_data(workspace_id)
+    if scope == "project":
+        return doc
+    if scope not in SCOPES:
+        raise ValueError(f"Unknown scope {scope!r}; expected one of {sorted(SCOPES)}")
+    if not session_id:
+        raise ValueError('session_id is required for scope="chat"')
+
+    from eo.knowledge_graph import list_nodes  # deferred: keeps this
+                                                 # module's own import
+                                                 # surface small for the
+                                                 # (more common) callers
+                                                 # that only ever pass
+                                                 # scope="project"
+    node_sessions = {n["node_id"]: n.get("session_id") for n in list_nodes(workspace_id)}
+
+    in_scope_ids = {
+        tid for tid, t in doc["topics"].items()
+        if any(node_sessions.get(sid) == session_id
+               for sid in (t.get("source_section_ids") or []))
+    }
+    topics = {tid: t for tid, t in doc["topics"].items() if tid in in_scope_ids}
+    connections = [
+        c for c in doc["connections"]
+        if c.get("from_topic") in in_scope_ids and c.get("to_topic") in in_scope_ids
+    ]
+    return {"topics": topics, "connections": connections}
+
+
 # Two path shapes only -- everything this document ever needs to
 # address, per the schema in this module's docstring. Deliberately not
 # a general JSON Pointer implementation (RFC 6901): the doc's shape

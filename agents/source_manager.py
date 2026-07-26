@@ -41,8 +41,16 @@ write stays atomic regardless of how many chunks it took.
 A source at or under MODE_A_CHUNK_SIZE sections is completely
 unaffected -- same single generic_worker call §2c already added.
 
+This patch (3a) wires process_upload() to call agents/backlink_detector.py's
+new run_after_source_manager() the moment Mode A's topic extraction pass
+finishes -- trigger boundary only. Backlink Detector's own incremental-
+patch logic (matching this source's new topic_ids against the rest of
+the workspace's Secondary Data tree and emitting the connection ops)
+is still a no-op stub pending §3b, a later, separate step.
+
 Still NOT yet doing (later patches):
-  - Backlink Detector wiring / cross-source reconciliation (§3)
+  - Backlink Detector's actual incremental-patch generation (§3b) and
+    deletion cleanup (§3c)
   - accounts' natural_roles tagging for "source_manager" in
     AGENT_CAPABILITIES (§4c). Unlike §2c's sequential path (which falls
     through to the full account pool via eo/panel.py's _best_match()
@@ -79,6 +87,7 @@ from agents.importer import import_artifact
 from agents.voice_ingestor import ingest_voice
 from agents.video_ingestor import ingest_video
 from agents.web_clipper import clip_url
+from agents.backlink_detector import run_after_source_manager
 from eo.registry import get_role_prompt, add_role_prompt
 from eo.secondary_data import apply_patch, CONTENT_HINTS
 from eo.worker_pool import _select_workers
@@ -533,6 +542,13 @@ def process_upload(kind: str, payload: str, workspace_id: str,
         artifact, node_ids, workspace_id, session_id=session_id,
         key_override=mode_a_key_override,
     )
+    # §3a: Backlink Detector's trigger boundary -- fires right after this
+    # source's own Mode A pass, whether or not it found anything (the
+    # empty-topic_ids no-op lives in run_after_source_manager() itself,
+    # not here, so process_upload() doesn't need its own duplicate
+    # guard). Never allowed to fail this call -- see
+    # run_after_source_manager()'s own "never raises" docstring note.
+    run_after_source_manager(workspace_id, topic_ids, session_id=session_id)
     return {
         "node_ids": node_ids, "title": artifact.get("title", "Untitled"),
         "kind": kind, "topic_ids": topic_ids,
