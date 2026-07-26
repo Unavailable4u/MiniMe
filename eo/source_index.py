@@ -55,6 +55,14 @@ def _topic_skeleton(topics: dict) -> dict:
     for tid, topic in topics.items():
         entry = {field: topic.get(field) for field in _SKELETON_FIELDS}
         entry["covers"] = list(topic.get("source_section_ids") or [])
+        # NEW — Data Layer architecture §8d: only set when true (same
+        # "no padding on the common case" posture
+        # agents/source_planner_lean.py:_attach_excerpts() already uses
+        # for its own "excerpts" key) -- pass-through only, this module
+        # never sets the flag itself, that's §8c's
+        # eo/correction_candidates.py:accept_candidate()'s job.
+        if topic.get("user_corrected"):
+            entry["user_corrected"] = True
         skeleton[tid] = entry
     return skeleton
 

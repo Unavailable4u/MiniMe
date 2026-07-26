@@ -142,6 +142,22 @@ def _attach_excerpts(workspace_id: str, topics: dict, flagged: list[str]) -> Non
     no "excerpts": None padding -- so a consumer can tell "skeleton is
     all you get" apart from "we looked and there was nothing" with a
     plain `"excerpts" in topic` check.
+
+    §8d: when a flagged topic is also `user_corrected` (§8c's
+    eo/correction_candidates.py:accept_candidate() sets that flag, and
+    eo/source_index.py's own topic skeleton passes it through), the
+    pulled excerpt text gets a short note prepended right here --
+    correction_locator never touches Primary Source (module invariant,
+    see agents/correction_locator.py's own docstring), so the raw
+    excerpt this function just pulled can still disagree with a
+    correction the user already approved. Every retrofitted §6b/§6c
+    consumer already reads a flagged topic's content straight off
+    `topic["excerpts"]` (e.g. agents/fact_detector.py:_context_for()),
+    so folding the note into that same string is what actually gets it
+    in front of them -- no second field for six call sites to learn
+    about. Skipped when there's no excerpt content to caveat in the
+    first place (an empty excerpt already falls back to the corrected
+    summary/content_hint at the consumer end, nothing to override).
     """
     for tid in flagged:
         topic = topics.get(tid)
@@ -155,7 +171,15 @@ def _attach_excerpts(workspace_id: str, topics: dict, flagged: list[str]) -> Non
             content = (node.get("content") or "").strip()[:MAX_EXCERPT_CHARS_PER_NODE]
             if content:
                 parts.append(content)
-        topic["excerpts"] = "\n\n".join(parts)
+        excerpt = "\n\n".join(parts)
+        if excerpt and topic.get("user_corrected"):
+            excerpt = (
+                "NOTE: this topic's name/summary/content_hint were "
+                "corrected by the user after this source was ingested. "
+                "If anything below conflicts with them, trust the "
+                "correction over the excerpt.\n\n" + excerpt
+            )
+        topic["excerpts"] = excerpt
 
 
 def plan(workspace_id: str, task_text: str, scope: str = "project",

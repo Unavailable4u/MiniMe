@@ -549,6 +549,21 @@ def process_upload(kind: str, payload: str, workspace_id: str,
     # guard). Never allowed to fail this call -- see
     # run_after_source_manager()'s own "never raises" docstring note.
     run_after_source_manager(workspace_id, topic_ids, session_id=session_id)
+
+    # NEW — Data Layer architecture §9a: notify() boundary, fired once
+    # this whole call (ingest + Mode A + the Backlink Detector trigger
+    # above) is actually done -- the point where a chat session's
+    # upload affordance (§4b) would have something new to show.
+    from eo.notify import notify  # deferred, same reasoning
+                                    # relay/emitter.py's own import
+                                    # gets elsewhere in this module --
+                                    # no hard dependency for callers
+                                    # that never pass a session_id
+    notify(session_id, "upload_processed", {
+        "workspace_id": workspace_id, "node_ids": node_ids,
+        "title": artifact.get("title", "Untitled"), "topic_ids": topic_ids,
+    })
+
     return {
         "node_ids": node_ids, "title": artifact.get("title", "Untitled"),
         "kind": kind, "topic_ids": topic_ids,
