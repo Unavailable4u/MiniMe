@@ -90,6 +90,7 @@ from agents.web_clipper import clip_url
 from agents.backlink_detector import run_after_source_manager
 from eo.registry import get_role_prompt, add_role_prompt
 from eo.secondary_data import apply_patch, CONTENT_HINTS
+from eo.chat_workspace import auto_partial_promote
 from eo.worker_pool import _select_workers
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
@@ -120,7 +121,21 @@ MODE_A_MAX_PARALLEL_WORKERS = 8
 # Falls back to "conceptual" for a missing/invalid content_hint rather
 # than dropping the topic -- an imperfect hint is still more useful
 # downstream (§6's retrieval agents) than silently losing the topic.
+# Falls back to "conceptual" for a missing/invalid content_hint rather
+# than dropping the topic -- an imperfect hint is still more useful
+# downstream (§6's retrieval agents) than silently losing the topic.
 _DEFAULT_CONTENT_HINT = "conceptual"
+
+# §10c: the stage a workspace gets auto-partial-promoted INTO once Mode A
+# has actually extracted topics for a freshly-ingested source. Fixed
+# rather than configurable for this first pass -- "this workspace now has
+# real, extracted material" is treated as the one signal that it's worth
+# also showing up under Research, regardless of which stage it started
+# in. A workspace that's already active in "research" (or already past
+# it) is left alone: active_stages_precheck() (§10b) reports that as
+# ineligible and auto_partial_promote() no-ops on it, same as any other
+# ineligible case.
+AUTO_PROMOTE_TARGET_STAGE = "research"
 
 SOURCE_MANAGER_TOPIC_BRIEF = (
     "You are extracting a topic tree from part of ONE freshly-ingested "
@@ -549,6 +564,25 @@ def process_upload(kind: str, payload: str, workspace_id: str,
     # guard). Never allowed to fail this call -- see
     # run_after_source_manager()'s own "never raises" docstring note.
     run_after_source_manager(workspace_id, topic_ids, session_id=session_id)
+
+    # NEW — §10c: auto-partial-promote hook. Only attempted when Mode A
+    # actually extracted topics for THIS source (an empty topic_ids means
+    # there's nothing new to justify the workspace also showing up under
+    # Research) -- doesn't wait on Backlink Detector's own reconciliation
+    # result, since even a source's FIRST pass into a workspace (nothing
+    # yet to reconcile against, run_after_source_manager()'s own early
+    # return) is still real extracted material worth surfacing there.
+    # auto_partial_promote() already never raises and no-ops silently
+    # when ineligible (already active in "research", unknown workspace,
+    # etc. -- see its own docstring), but this call is wrapped anyway,
+    # same defensive posture as every other post-ingest step in this
+    # function: a problem here must never fail the upload that triggered
+    # it.
+    if topic_ids:
+        try:
+            auto_partial_promote(workspace_id, AUTO_PROMOTE_TARGET_STAGE)
+        except Exception as exc:
+            print(f"  [Source Manager] auto-partial-promote skipped: {exc}")
 
     # NEW — Data Layer architecture §9a: notify() boundary, fired once
     # this whole call (ingest + Mode A + the Backlink Detector trigger

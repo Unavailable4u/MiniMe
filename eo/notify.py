@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 VALID_KINDS = {
     "upload_processed",    # agents/source_manager.py:process_upload() finished
     "backlinks_updated",   # agents/backlink_detector.py:run_after_source_manager() finished
+    "workspace_promoted",  # NEW — §10d: eo/chat_workspace.py:chat_triggered_partial_promote()
+                            # fired an actual promote
 }
 
 

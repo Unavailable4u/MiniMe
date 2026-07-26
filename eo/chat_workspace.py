@@ -150,6 +150,11 @@ def promote(ws_id: str, user_id: str, to_stage: str | None = None, mode: str = "
     _next_stage()'s default-promote target and stage_history's
     "primary" line are unaffected. A workspace can't be partially
     promoted into a stage it's already active in.
+
+    Forward-only ordering (target must be later than current_stage)
+    is enforced ONLY for mode="partial". mode="complete" may target
+    an earlier stage too — it leaves the old tab entirely either way,
+    so there's no "adding an earlier tab" ambiguity to guard against.
     """
     if mode not in ("complete", "partial"):
         raise ValueError(f"unknown promote mode {mode!r} — must be 'complete' or 'partial'")
@@ -172,10 +177,11 @@ def promote(ws_id: str, user_id: str, to_stage: str | None = None, mode: str = "
                 target_idx = _STAGE_SEQUENCE.index(to_stage)
             except ValueError:
                 raise ValueError(f"unknown workspace stage {to_stage!r}")
-            if target_idx <= current_idx:
+            if mode == "partial" and target_idx <= current_idx:
                 raise ValueError(
                     f"cannot promote workspace {ws_id} from {current_stage!r} to {to_stage!r} — "
-                    f"the target stage must be later in the sequence"
+                    f"the target stage must be later in the sequence (mode='partial' only "
+                    f"adds a tab, it can't add one that's already behind the primary stage)"
                 )
         if to_stage not in _STAGE_SEQUENCE:
             raise ValueError(
@@ -203,6 +209,193 @@ def promote(ws_id: str, user_id: str, to_stage: str | None = None, mode: str = "
     write_audit(user_id, "workspace.promote", "workspace", ws_id,
                 {"from": current_stage, "to": to_stage, "mode": mode})
     return get_workspace(ws_id, user_id)
+
+
+def active_stages_precheck(ws_id: str, to_stage: str) -> dict:
+    """Read-only eligibility check for a partial-promote, shared by both
+    kinds of caller in item #10: the automatic path (Source Manager /
+    Backlink Detector deciding whether to auto-partial-promote after a
+    run) and the chat-triggered path (a user explicitly asking to add a
+    tab). Mirrors the mode="partial" eligibility rules enforced inside
+    promote() itself, but:
+
+      - takes no user_id and does no access check — callers decide
+        separately whether/how access applies (the automatic caller
+        has no acting user; the chat-triggered caller still goes
+        through promote()'s own _require_edit_access when it actually
+        calls promote()).
+      - never mutates anything.
+      - never raises for an expected-ineligible case (unknown
+        workspace, unknown stage, already active, or not forward of
+        the current stage) — it reports that in the return value
+        instead, since the automatic caller in particular is a
+        background trigger that shouldn't blow up over a stale or
+        malformed ws_id; it should just skip the promote and move on.
+
+    Returns:
+        {
+            "eligible": bool,
+            "reason": str | None,   # populated iff eligible is False
+            "current_stage": str | None,
+            "active_stages": list[str],
+        }
+
+    Callers that get eligible=True still call promote(ws_id, user_id,
+    to_stage=to_stage, mode="partial") themselves to do the actual
+    move — this function only tells them whether that call is expected
+    to succeed, it doesn't perform it.
+    """
+    with db.cursor() as cur:
+        cur.execute("select stage, active_stages from workspaces where id = %s", (ws_id,))
+        row = cur.fetchone()
+    if not row:
+        return {"eligible": False, "reason": f"workspace {ws_id} not found",
+                "current_stage": None, "active_stages": []}
+    current_stage = row["stage"]
+    current_active = row.get("active_stages") or [current_stage]
+    if to_stage not in _STAGE_SEQUENCE:
+        return {"eligible": False, "reason": f"unknown workspace stage {to_stage!r}",
+                "current_stage": current_stage, "active_stages": current_active}
+    if to_stage in current_active:
+        return {"eligible": False,
+                "reason": f"workspace {ws_id} is already active in {to_stage!r}",
+                "current_stage": current_stage, "active_stages": current_active}
+    current_idx = _STAGE_SEQUENCE.index(current_stage)
+    target_idx = _STAGE_SEQUENCE.index(to_stage)
+    if target_idx <= current_idx:
+        return {"eligible": False,
+                "reason": (f"{to_stage!r} is not later than current stage {current_stage!r} "
+                            f"— partial-promote is forward-only"),
+                "current_stage": current_stage, "active_stages": current_active}
+    return {"eligible": True, "reason": None,
+            "current_stage": current_stage, "active_stages": current_active}
+
+
+# Fixed actor id automatic promotes are attributed to in stage_history and
+# the audit log — never a real user_id, so "why did this workspace show up
+# under a new tab" is always traceable to this path rather than looking
+# like an unexplained/unattributed user action.
+_AUTO_PROMOTE_ACTOR = "system:auto_promote"
+
+
+def auto_partial_promote(ws_id: str, to_stage: str) -> dict | None:
+    """Item #10c: the automatic-path counterpart to promote(mode="partial"),
+    for callers with no acting user at all — Source Manager / Backlink
+    Detector deciding, after their own run, that a workspace now has
+    enough real structure to also show up in `to_stage`'s tab.
+
+    Deliberately NOT just "call promote() with some placeholder
+    user_id": promote() gates on _require_edit_access(), which needs a
+    real workspace_members row (or ownership) to pass. An automatic
+    background trigger has no such row and shouldn't need one invented
+    for it — this function skips that gate entirely by design, since
+    the "actor" here is the pipeline itself, not a person whose access
+    level should matter.
+
+    Uses active_stages_precheck() (§10b) first and treats "not
+    eligible" as a silent no-op — returns None rather than raising.
+    That's the right behavior for an automatic caller: e.g. a workspace
+    that's already active in `to_stage`, or already past it, isn't a
+    bug, it's just nothing left to do here.
+
+    On success, applies the same active_stages/stage_history change
+    promote(mode="partial") would (to_stage appended, primary `stage`
+    left untouched), attributed to _AUTO_PROMOTE_ACTOR, and returns a
+    small dict: {"id", "stage", "active_stages", "stage_history"} — not
+    the full get_workspace() shape, since that requires an acting
+    user_id with real access, which this path deliberately has none of.
+
+    Never raises: a missing workspace between the precheck and this
+    function's own read (a genuine but vanishingly unlikely race) is
+    just another silent None, same posture as everything else this
+    plan's automatic paths take (see source_manager.py's /
+    backlink_detector.py's own "never raises" notes) — a problem here
+    shouldn't take down the upload or reconciliation pass that
+    triggered it.
+    """
+    check = active_stages_precheck(ws_id, to_stage)
+    if not check["eligible"]:
+        return None
+    with db.cursor() as cur:
+        cur.execute(
+            "select stage, stage_history, active_stages from workspaces where id = %s",
+            (ws_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        current_stage = row["stage"]
+        current_active = row.get("active_stages") or [current_stage]
+        if to_stage in current_active:
+            return None  # lost a race against another promote since the precheck above
+        new_active = current_active + [to_stage]
+        history = (row["stage_history"] or []) + [
+            {"from": current_stage, "to": to_stage, "at": _iso(_now()),
+             "by": _AUTO_PROMOTE_ACTOR, "mode": "partial"}
+        ]
+        cur.execute(
+            "update workspaces set active_stages = %s, stage_history = %s, updated_at = %s where id = %s",
+            (json.dumps(new_active), json.dumps(history), _now(), ws_id),
+        )
+    write_audit(_AUTO_PROMOTE_ACTOR, "workspace.promote", "workspace", ws_id,
+                {"from": current_stage, "to": to_stage, "mode": "partial", "trigger": "auto"})
+    return {"id": ws_id, "stage": current_stage, "active_stages": new_active, "stage_history": history}
+
+
+def chat_triggered_partial_promote(ws_id: str, user_id: str, to_stage: str,
+                                    session_id: str = None) -> dict | None:
+    """Item #10d: the chat-triggered counterpart to auto_partial_promote()
+    (§10c) — same active_stages_precheck() (§10b) gate, but for a REAL
+    acting user who explicitly agreed to add a tab during a chat turn
+    (the "offer — never silently start" convention
+    eo/prerequisite_suggestions.py's own docstring documents for §9d's
+    sibling suggestion feature; that module only ever suggests, and it's
+    the frontend's job to call something like this ONLY after the person
+    taps "agree" on the resulting card).
+
+    Unlike auto_partial_promote(), this path DOES go through promote()'s
+    own access control: there's a real user_id here whose access level
+    should matter, so this simply calls promote(ws_id, user_id,
+    to_stage=to_stage, mode="partial") for the actual mutation rather
+    than duplicating it — WorkspaceAccessError/FileNotFoundError/
+    ValueError all propagate exactly as promote() itself would raise
+    them for a genuine access or bad-input problem.
+
+    The one thing this adds on top of calling promote() directly:
+
+      1. Runs active_stages_precheck() FIRST and returns None (rather
+         than letting promote() raise its own ValueError) for the
+         EXPECTED-ineligible case — already active in to_stage, unknown
+         stage, not forward of the current stage. Lets the chat
+         endpoint render "nothing to do" distinctly from a real error.
+      2. On an actual promote, fires notify(session_id,
+         "workspace_promoted", ...) — a session-scoped push (§9b's
+         websocket transport) so the person's own open chat tab
+         reflects the new active tab immediately, same "processing
+         finished, here's the event" boundary §9a's other notify() call
+         sites (upload_processed, backlinks_updated) already use.
+         session_id=None is a no-op at the notify() layer itself (see
+         eo/notify.py), so a caller with no session context can still
+         call this safely.
+
+    Returns the promoted workspace (promote()'s own get_workspace()
+    shape) on success, or None if the precheck said not eligible.
+    """
+    check = active_stages_precheck(ws_id, to_stage)
+    if not check["eligible"]:
+        return None
+    result = promote(ws_id, user_id, to_stage=to_stage, mode="partial")
+    from eo.notify import notify  # deferred, same reasoning every other
+                                    # notify() call site in this codebase
+                                    # already gives: no hard dependency
+                                    # for callers that never pass a
+                                    # session_id
+    notify(session_id, "workspace_promoted", {
+        "workspace_id": ws_id, "to_stage": to_stage, "mode": "partial",
+        "active_stages": result.get("active_stages"),
+    })
+    return result
+
 
 _VALID_ROLES = ("viewer", "editor", "moderator", "partner")
 _ROLE_RANK = {"viewer": 0, "editor": 1, "moderator": 2, "partner": 3, "owner": 3}
