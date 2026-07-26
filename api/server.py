@@ -74,8 +74,16 @@ def _get_jwk_client() -> PyJWKClient:
         _jwk_client = PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json")
     return _jwk_client
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Query, UploadFile, File, Form
+import asyncio  # NEW — Data Layer architecture §9b: capturing the running
+                 # event loop at startup for eo/ws_registry.py's thread-safe push
+from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hook
+
+from fastapi import (
+    FastAPI, Request, HTTPException, Depends, Query, UploadFile, File, Form,
+    WebSocket, WebSocketDisconnect,  # NEW — §9b
+)
 from eo.project_registry import list_projects, generate_control_unit, register_project
+from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Union, Any
@@ -127,7 +135,20 @@ from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FOR
 from graph.adapters import markdown_text_to_artifact, chat_to_artifact   # chat_to_artifact NEW — Part 8.7
 from fastapi.responses import FileResponse
 
-app = FastAPI(title="MiniMe v6 — EO layer API")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # NEW — Data Layer architecture §9b: eo/notify.py's notify() runs
+    # synchronously, often from Starlette's sync-endpoint threadpool
+    # (every agent call site — see agents/source_manager.py,
+    # agents/backlink_detector.py — is a plain `def`, not `async def`),
+    # so it needs a thread-safe way to reach the event loop that the
+    # WebSocket connections below actually live on. Capturing it here,
+    # once, at startup, is that hand-off point.
+    ws_registry.set_event_loop(asyncio.get_running_loop())
+    yield
+
+
+app = FastAPI(title="MiniMe v6 — EO layer API", lifespan=_lifespan)
 
 # Part 4 §4.4 -- where generated reports/decks/scripts land before being
 # handed back as a download. Sibling to eo/graph_edges.py's data/graph/
@@ -137,12 +158,17 @@ NOTES_EXPORTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "exports",
 )
 
-def require_auth(request: Request) -> str:
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    token = auth_header[len("Bearer "):].strip()
-
+def _verify_supabase_jwt(token: str) -> str:
+    """The actual decode-and-verify logic behind require_auth() below.
+    Pulled out to a bare token->user_id function (NEW — §9b) so the
+    WebSocket handshake can share it: a browser's WebSocket API has no
+    way to set an Authorization header on the handshake request, so
+    the §9b route below takes the token as a query param instead of
+    going through require_auth()'s Request-shaped dependency. Raises
+    HTTPException on any failure, same as before this split — the
+    WebSocket route catches that itself and translates it into a
+    close code, since a socket has no response body to attach an HTTP
+    error detail to."""
     try:
         header = jwt.get_unverified_header(token)
     except jwt.InvalidTokenError:
@@ -179,6 +205,16 @@ def require_auth(request: Request) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="Token missing subject")
 
+    return user_id
+
+
+def require_auth(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = auth_header[len("Bearer "):].strip()
+
+    user_id = _verify_supabase_jwt(token)
     request.state.user_id = user_id  # kept for any code that reads it off the request directly
     return user_id
 
@@ -282,6 +318,49 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# NEW — Data Layer architecture §9b: the real transport behind
+# eo/notify.py's notify() calls. A browser opens one of these per
+# session_id it cares about (the same id agents/source_manager.py and
+# agents/backlink_detector.py already pass to notify() — a chat/task
+# session, not a user) and eo/ws_registry.py fans events out to
+# whichever sockets are open for that session_id at the moment
+# notify() fires. §9c (Generate-button loading state) and §9d (chat
+# proactive suggestions) both consume this same socket — neither
+# needs a route of its own, just a new "kind" in eo/notify.py.
+@app.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str = Query(None)):
+    # Auth token travels as a query param rather than a header: the
+    # browser WebSocket API has no way to set Authorization on the
+    # handshake request the way require_auth()'s HTTP dependency
+    # expects. 4401 (a custom code in the reserved-for-app-use 4000-4999
+    # range) mirrors HTTP 401 as closely as a WS close code allows.
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        _verify_supabase_jwt(token)
+    except HTTPException:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    ws_registry.register(session_id, websocket)
+    try:
+        while True:
+            # Nothing meaningful is expected from the client on this
+            # socket — it exists to receive push events, not send
+            # them. Reading (and discarding) keeps the connection
+            # alive and is how Starlette surfaces a client-initiated
+            # disconnect (WebSocketDisconnect) instead of this loop
+            # spinning against an already-closed socket.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_registry.unregister(session_id, websocket)
+
 
 class RegisterProjectRequest(BaseModel):
     path: str
@@ -413,6 +492,18 @@ class CreateEdgeRequest(BaseModel):
 class ClipUrlRequest(BaseModel):
     url: str
     workspace_id: str
+    # NEW — Data Layer architecture §9c: optional so this model's shape
+    # doesn't break for any caller that predates this (there weren't
+    # any -- both endpoints below are this model's only two users --
+    # but Optional is also just correct: a clip/video ingest kicked off
+    # from a context with no chat session open has nothing real to pass
+    # here, and process_upload()'s own session_id already defaults to
+    # None for exactly that case). Threaded straight through to
+    # process_upload() below so eo/notify.py's "upload_processed" push
+    # (§9a/§9b) actually has a session_id to fire on -- until this
+    # patch, none of the six ingestion endpoints passed one, so §9b's
+    # new /ws/{session_id} transport had nothing to deliver for uploads.
+    session_id: Optional[str] = None
 
 
 class ExportArtifactRequest(BaseModel):
@@ -2009,7 +2100,11 @@ def get_simulation_results(ws_id: str, req: SimulateRequest, owner_id: str = Dep
 @app.post("/api/notes/clip", dependencies=[Depends(require_auth)])
 def clip_url_endpoint(req: ClipUrlRequest):
     try:
-        result = process_upload("web_clip", req.url, req.workspace_id, created_by="user")
+        # session_id NEW — §9c, see ClipUrlRequest's own field comment
+        result = process_upload(
+            "web_clip", req.url, req.workspace_id,
+            session_id=req.session_id, created_by="user",
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"node_ids": result["node_ids"], "title": result["title"]}
@@ -2017,17 +2112,24 @@ def clip_url_endpoint(req: ClipUrlRequest):
 
 @app.post("/api/notes/video", dependencies=[Depends(require_auth)])
 def ingest_video_endpoint(req: ClipUrlRequest):
-    # Reuses ClipUrlRequest -- identical {url, workspace_id} shape, no
-    # reason for a separate model.
+    # Reuses ClipUrlRequest -- identical {url, workspace_id, session_id}
+    # shape, no reason for a separate model.
     try:
-        result = process_upload("video", req.url, req.workspace_id, created_by="user")
+        # session_id NEW — §9c, see ClipUrlRequest's own field comment
+        result = process_upload(
+            "video", req.url, req.workspace_id,
+            session_id=req.session_id, created_by="user",
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"node_ids": result["node_ids"], "title": result["title"]}
 
 
 @app.post("/api/notes/import", dependencies=[Depends(require_auth)])
-async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile = File(...)):
+async def import_file_endpoint(
+    workspace_id: str = Form(...), file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),   # NEW — §9c, see ClipUrlRequest's field comment; Form(...) can't reuse a Pydantic model the way JSON endpoints do, so this is the multipart-endpoint version of the same optional field
+):
     """Office/docx/pptx/xlsx/csv/md/json ingestion. No new parsing code —
     agents/importer.py (Part 0 §0.5) already reads every one of these
     formats back into the common artifact shape; this endpoint is just
@@ -2049,8 +2151,8 @@ async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile =
     try:
         original_title = os.path.splitext(file.filename or "")[0] or None
         result = process_upload(
-            "import", tmp_path, workspace_id, created_by="user",
-            fmt=ext, default_title=original_title,
+            "import", tmp_path, workspace_id, session_id=session_id,
+            created_by="user", fmt=ext, default_title=original_title,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2060,7 +2162,10 @@ async def import_file_endpoint(workspace_id: str = Form(...), file: UploadFile =
 
 
 @app.post("/api/notes/pdf", dependencies=[Depends(require_auth)])
-async def ingest_pdf_endpoint(workspace_id: str = Form(...), file: UploadFile = File(...)):
+async def ingest_pdf_endpoint(
+    workspace_id: str = Form(...), file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),   # NEW — §9c, see /api/notes/import's copy of this same field for why it's Form(...) here rather than a Pydantic field
+):
     """PDF ingestion -- agents/pdf_ingestor.py (pdfplumber, page-by-page
     extraction) already exists and was fully implemented, it just had no
     endpoint calling it. PDF is deliberately absent from IMPORTABLE_FORMATS
@@ -2071,7 +2176,7 @@ async def ingest_pdf_endpoint(workspace_id: str = Form(...), file: UploadFile = 
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        result = process_upload("pdf", tmp_path, workspace_id, created_by="user")
+        result = process_upload("pdf", tmp_path, workspace_id, session_id=session_id, created_by="user")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -2080,7 +2185,10 @@ async def ingest_pdf_endpoint(workspace_id: str = Form(...), file: UploadFile = 
 
 
 @app.post("/api/notes/voice", dependencies=[Depends(require_auth)])
-async def ingest_voice_endpoint(workspace_id: str = Form(...), file: UploadFile = File(...)):
+async def ingest_voice_endpoint(
+    workspace_id: str = Form(...), file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),   # NEW — §9c, see /api/notes/import's copy of this same field for why it's Form(...) here rather than a Pydantic field
+):
     """Voice notes / meeting recordings -- agents/voice_ingestor.py
     transcribes locally (faster-whisper, no API key), same temp-file-
     then-cleanup shape as /api/notes/import above. No format allowlist
@@ -2093,7 +2201,7 @@ async def ingest_voice_endpoint(workspace_id: str = Form(...), file: UploadFile 
         tmp.write(await file.read())
         tmp_path = tmp.name
     try:
-        result = process_upload("voice", tmp_path, workspace_id, created_by="user")
+        result = process_upload("voice", tmp_path, workspace_id, session_id=session_id, created_by="user")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:

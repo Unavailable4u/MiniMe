@@ -66,6 +66,7 @@ from eo import chat_workspace
 from eo import workspace_facts
 from eo import fact_summarizer   # NEW — Part 3
 from eo.knowledge_graph import search_nodes   # NEW — bug #4 fix, notebook grounding
+from eo.prerequisite_suggestions import find_prerequisite_suggestions   # NEW — Data Layer §9d
 
 # NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
 # ingested sources into the prompt (task_text had a workspace_id for
@@ -80,23 +81,35 @@ MAX_NOTEBOOK_CONTEXT_CHARS_PER_SOURCE = 4000
 NOTEBOOK_CONTEXT_TOP_K = 6
 
 
-def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = None) -> str:
+def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = None) -> tuple:
     """Retrieval-scoped notebook grounding for chat. Returns task_text
     unchanged when there's no workspace, no matching sources, or the
     search itself fails — fail-open, same posture eo/knowledge_graph.py's
     own functions already take, so a Vector hiccup degrades to "chat
     behaves like it used to" rather than breaking the turn.
+
+    CHANGED — Data Layer §9d: now returns (grounded_text, node_ids)
+    instead of just grounded_text. node_ids is the exact set of Primary
+    Source node ids search_nodes() judged relevant to this turn — the
+    same set _resolve_decision_and_hires() below now threads through to
+    eo/prerequisite_suggestions.py's find_prerequisite_suggestions(), so
+    a chat turn's proactive-suggestion pass looks at what THIS turn
+    actually grounded on rather than issuing a second, separate
+    retrieval call. Always a list (possibly empty), never None, on
+    every return path — callers don't need to guard for that.
     """
     if not workspace_id:
-        return task_text
+        return task_text, []
     try:
         nodes = search_nodes(workspace_id, query_text=task_text,
                               top_k=NOTEBOOK_CONTEXT_TOP_K, session_id=session_id)
     except Exception as exc:
         print(f"  [task_runner] notebook grounding search failed, skipped (fail-open): {exc}")
-        return task_text
+        return task_text, []
     if not nodes:
-        return task_text
+        return task_text, []
+
+    node_ids = [n.get("node_id") for n in nodes if n.get("node_id")]
 
     parts = []
     for n in nodes:
@@ -106,16 +119,17 @@ def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = Non
             continue
         parts.append(f"--- {title} ---\n{content}")
     if not parts:
-        return task_text
+        return task_text, node_ids
 
     context = "\n\n".join(parts)
-    return (
+    grounded_text = (
         "You have access to the following excerpts from this notebook's sources. "
         "Use them to answer the user's message when relevant. These excerpts ARE "
         "the notebook's content — don't claim you can't access files or external "
         "content when the answer is right here.\n\n"
         f"{context}\n\n---\n\n{task_text}"
     )
+    return grounded_text, node_ids
 
 
 def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
@@ -740,7 +754,12 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     # routing/staffing decisions deliberately keep using the *original*
     # task_text — grounding is for what the model sees when it actually
     # answers, not for cache keys or the Inspector's classification.
-    grounded_task_text = _grounded_task_text(workspace_id, task_text, session_id=session_id)
+    # CHANGED — Data Layer §9d: _grounded_task_text() now returns the
+    # grounded node ids alongside the text (see its own updated
+    # docstring) so the "resolved" dict below can carry them through to
+    # _run_task_inner()'s new prerequisite-suggestion pass without a
+    # second retrieval call.
+    grounded_task_text, grounded_node_ids = _grounded_task_text(workspace_id, task_text, session_id=session_id)
 
     if tier_override is None and mode != "beast":
         cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
@@ -800,7 +819,9 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
 
     return {"resolved": True, "decision": decision, "tier": tier, "hires": mode_result["hires"],
             "workspace_id": workspace_id,   # NEW — Part 2, so _run_task_inner can gate content-fact extraction
-            "task_text": grounded_task_text}   # NEW — bug #4 fix, so _run_task_inner dispatches the grounded text
+            "task_text": grounded_task_text,   # NEW — bug #4 fix, so _run_task_inner dispatches the grounded text
+            "grounded_node_ids": grounded_node_ids}   # NEW — Data Layer §9d, so _run_task_inner's
+            # prerequisite-suggestion pass knows what this turn actually grounded on
 
 
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
@@ -875,7 +896,63 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                                    resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
                                    approval_roles, no_conversation_context_roles=no_conversation_context_roles)
     _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response)   # NEW — Part 2
+    _maybe_attach_prerequisite_suggestions(resolved, response, session_id)   # NEW — Data Layer §9d
     return response
+
+
+def _maybe_attach_prerequisite_suggestions(resolved: dict, response: dict, session_id: str) -> None:
+    """Data Layer architecture §9d: chat proactive suggestions. Mutates
+    `response` in place — same "attach onto the already-built response"
+    shape _maybe_extract_content_fact() (Part 2) already uses just above,
+    rather than threading a new return value through every one of
+    _dispatch_resolved()'s four tier branches.
+
+    Reactive to what THIS turn actually asked about — workspace_id and
+    grounded_node_ids are exactly what _resolve_decision_and_hires()
+    already resolved for the turn's own notebook grounding (see
+    _grounded_task_text()'s updated docstring), not a second, separate
+    lookup. Gated to:
+      - tier in (0, 1) — the plain chat-answer tiers. Tiers 2/3 are
+        already a "do/build something" dispatch; layering a second,
+        unrelated "want more?" offer onto an already-heavy multi-agent
+        result would be noise, not help. The cache/SGA/attachment/
+        needs_* short-circuit paths never reach here at all —
+        `resolved["resolved"]` is False for every one of those, so
+        _run_task_inner() returns before this function is ever called.
+      - status == "ok" — an error/needs_*/paused response has nothing
+        for a person to read a suggestion alongside.
+
+    Never raises past this point — a broken suggestion pass (Secondary
+    Data unreadable, workspace mid-write, whatever) must not take an
+    otherwise-fine chat answer down with it, same fail-open posture
+    _grounded_task_text() itself already takes for its own read.
+    """
+    workspace_id = resolved.get("workspace_id")
+    grounded_node_ids = resolved.get("grounded_node_ids")
+    if not workspace_id or not grounded_node_ids:
+        return
+    if response.get("status") != "ok" or response.get("tier") not in (0, 1):
+        return
+    try:
+        suggestions = find_prerequisite_suggestions(
+            workspace_id, grounded_node_ids, session_id=session_id,
+        )
+    except Exception as exc:
+        print(f"  [task_runner] prerequisite suggestion pass failed, skipped (fail-open): {exc}")
+        return
+    if not suggestions:
+        return
+    for s in suggestions:
+        # NEW — §9d: MessageBubble.jsx's Generate button needs a
+        # workspace_id to call generateNotebooks(wsId, ...) with —
+        # nothing else on the chat response carries one today (the
+        # response's own top-level session_id is a chat/task session,
+        # not a workspace).
+        s["workspace_id"] = workspace_id
+    # tier 0/1 always return a real dict under "result" (never None,
+    # see _run_tier0()/_run_tier1() above), so this is safe unguarded.
+    response["result"]["prerequisite_suggestions"] = suggestions
+
 
 def _run_tier2(task_text: str, decision: dict, app_slug: str, session_id: str, hires: list = None,
                project_unique_name: str = None, mode: str = "auto") -> dict:
