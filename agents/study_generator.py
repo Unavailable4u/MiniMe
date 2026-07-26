@@ -18,13 +18,22 @@ updated_by field), which this module has no business knowing about.
 api/server.py's Generate dispatch already has owner_id in hand and saves
 the result after this returns.
 
+CHANGED — Data Layer architecture §6c: was reading every in-scope
+node's raw content straight off eo/knowledge_graph.py's list_nodes().
+Now reads agents/source_planner_lean.py:plan() instead -- Mode B/C
+(§5's distinction), same retrofit shape as agents/fact_detector.py's
+§6b change: the lean role judges from the topic skeleton alone which
+topics need their real excerpts pulled in for a flashcard/quiz/study
+guide to draw real detail from, and which are already covered well
+enough by their own summary.
+
 Place this file at: agents/study_generator.py
 """
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
+from agents.source_planner_lean import plan
 
 # Same per-source truncation reasoning as agents/fact_detector.py: with
 # §3's PDF fix a single source is now the whole document, so without a
@@ -44,16 +53,21 @@ ROLES_BY_PANEL_KEY = {
 }
 
 
-def _context_for(nodes: list[dict]) -> str:
-    """One section per source, each truncated independently -- same
-    shape as agents/fact_detector.py's helper of the same name."""
+def _context_for(topics: dict) -> str:
+    """One section per topic: its Mode B excerpts if source_planner_lean
+    flagged it as needing them, otherwise its name/summary/content_hint
+    as-is -- same shape as agents/fact_detector.py's helper of the same
+    name."""
     parts = []
-    for n in nodes:
-        title = n.get("title") or n.get("node_id")
-        content = (n.get("content") or "").strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
-        if not content:
+    for topic in topics.values():
+        title = topic.get("name") or "Untitled topic"
+        body = topic.get("excerpts")
+        if not body:
+            body = topic.get("summary") or topic.get("content_hint") or ""
+        body = body.strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
+        if not body:
             continue
-        parts.append(f"--- {title} ---\n{content}")
+        parts.append(f"--- {title} ---\n{body}")
     return "\n\n".join(parts)
 
 
@@ -64,8 +78,13 @@ def generate_study_content(panel_key: str, workspace_id: str, source_node_ids: l
     scope = whole notebook," same convention as agents/fact_detector.py
     and Notebooks integration guide §4.2).
 
+    CHANGED — Data Layer architecture §6c: `source_node_ids` scoping
+    used to mean "only these Primary Source nodes"; read the same way
+    §6a/§6b's retrofits read it -- "only topics whose `covers` list
+    touches one of these node ids."
+
     Raises ValueError for an unrecognized panel_key and LookupError if
-    the resolved scope has zero readable source content, so the caller
+    the resolved scope has zero readable topic content, so the caller
     (api/server.py's Generate dispatch) can turn either into a clear
     per-branch error instead of silently saving an empty deck.
     """
@@ -73,14 +92,24 @@ def generate_study_content(panel_key: str, workspace_id: str, source_node_ids: l
     if role is None:
         raise ValueError(f"unrecognized study panel_key {panel_key!r}")
 
-    nodes = list_nodes(workspace_id)
+    packet = plan(
+        workspace_id,
+        task_text=(
+            f"Write a {panel_key.replace('_', ' ')} that draws on real "
+            "detail from the source material -- specific facts, figures, "
+            "and explanations a one-line summary wouldn't capture."
+        ),
+        scope="project",
+    )
+    topics = packet["topics"]
     if source_node_ids:
         wanted = set(source_node_ids)
-        nodes = [n for n in nodes if n.get("node_id") in wanted or n.get("vector_id") in wanted]
+        topics = {tid: t for tid, t in topics.items()
+                  if wanted & set(t.get("covers") or [])}
 
-    context = _context_for(nodes)
+    context = _context_for(topics)
     if not context:
-        raise LookupError("no readable source content in scope")
+        raise LookupError("no readable topic content in scope")
 
     from agents.generic_worker import run as run_role   # deferred, same
                                                           # circular-import
