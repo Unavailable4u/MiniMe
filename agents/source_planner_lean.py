@@ -49,7 +49,7 @@ import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import get_role_prompt, add_role_prompt
-from eo.source_index import get_packet
+from eo.source_index import get_packet, get_packet_depth
 from eo.knowledge_graph import get_node
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
@@ -206,3 +206,79 @@ def plan(workspace_id: str, task_text: str, scope: str = "project",
     _attach_excerpts(workspace_id, packet["topics"], flagged)
     packet["needs_excerpts"] = flagged
     return packet
+
+
+def plan_depth(workspace_id: str, starting_topic_id: str, requested_depth: int,
+                task_text: str, scope: str = "project", session_id: str = None,
+                domain: str = None) -> dict:
+    """Data Layer architecture §7b: fall back to this module's Mode B
+    judgment when eo/source_index.py:get_packet_depth()'s §7a walk runs
+    out of `parent`-tree before reaching `requested_depth`.
+
+    "Requested depth exceeds accepted tree" means the topic tree itself
+    doesn't have that many explicit subtopic levels below
+    starting_topic_id -- more structure isn't there to walk into, full
+    stop. That doesn't mean there's no more content, though: the leaf
+    topics the walk DID reach may each still cover source sections with
+    plenty of detail their own one-line summary doesn't surface. Mode B
+    (this module's plan(), §5b) is exactly the tool for that -- so when
+    the tree runs out, this pulls in real excerpts for whichever of the
+    walk's OWN topics the lean role judges too thin, using content depth
+    to make up for the structural depth the tree couldn't provide.
+
+    Deliberately re-judges only the walked branch's topics (whatever
+    get_packet_depth() collected), never the whole workspace scope --
+    the caller asked about this branch; widening the judgment call back
+    out to every topic in scope would defeat the point of asking for a
+    scoped walk in the first place, same reasoning plan() itself never
+    silently widens its own `scope` argument.
+
+    When the walk is NOT exhausted (the tree already had enough levels
+    to satisfy requested_depth), this is a pure passthrough to
+    get_packet_depth() -- no LLM call, no excerpts, same "don't spend a
+    call on a judgment nobody needs" posture plan()'s own empty-topics
+    short-circuit takes.
+
+    Returns get_packet_depth()'s own shape plus one added top-level key:
+
+        {
+          "workspace_id": str, "scope": str,
+          "starting_topic_id": str, "requested_depth": int,
+          "reached_depth": int, "exhausted": bool,
+          "topics": {"<topic_id>": {..._SKELETON_FIELDS, "covers": [...],
+                                     "excerpts": str}, ...},  # excerpts
+                                                               # present
+                                                               # only on
+                                                               # flagged
+                                                               # topics,
+                                                               # only
+                                                               # when
+                                                               # exhausted
+          "connections": [...],
+          "needs_excerpts": ["<topic_id>", ...],  # always present,
+                                                    # empty when not
+                                                    # exhausted
+        }
+    """
+    walk = get_packet_depth(workspace_id, starting_topic_id, requested_depth,
+                             scope=scope, session_id=session_id)
+    walk["needs_excerpts"] = []
+    if not walk["exhausted"]:
+        return walk
+
+    _ensure_role_registered()
+    from agents.generic_worker import run as run_role   # deferred, same
+                                                          # circular-import
+                                                          # reason as
+                                                          # plan() above
+
+    result = run_role(
+        role="source_planner_lean",
+        task_text=_skeleton_context(walk["topics"], task_text),
+        input_keys=[], session_id=session_id,
+        include_conversation_context=False, domain=domain or "notes",
+    )
+    flagged = _parse_decision(result.get("text") or "", walk["topics"].keys())
+    _attach_excerpts(workspace_id, walk["topics"], flagged)
+    walk["needs_excerpts"] = flagged
+    return walk

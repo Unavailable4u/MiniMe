@@ -169,6 +169,90 @@ def generate_mindmap(workspace_id: str, source_node_ids: list[str] | None = None
     return _attempt(task_text)   # NEW — bug #6 fix, part 2: one silent retry before giving up
 
 
+_ROUTE_RELATION = "prerequisite-of"
+
+
+def _sanitize_label(name: str) -> str:
+    """Mermaid node labels here are wrapped in double quotes
+    (`id["label"]`) -- strip any embedded double quotes rather than
+    trying to escape them, since a topic name is short, human-written
+    text where dropping a stray quote character costs nothing, and a
+    bad escape sequence is exactly the kind of "syntax error in text"
+    MermaidDiagram.jsx's own header comment already flags as a real,
+    expected failure mode for LLM-authored Mermaid -- no reason to
+    reintroduce that risk in a deterministic path that doesn't need it.
+    """
+    return (name or "Untitled topic").replace('"', "").strip() or "Untitled topic"
+
+
+def generate_suggested_route(workspace_id: str, scope: str = "project",
+                              session_id: str = None) -> dict:
+    """Data Layer architecture §7c: a suggested-route flowchart built
+    straight off Backlink Detector's own "prerequisite-of" connections
+    (agents/backlink_detector.py's BACKLINK_DETECTOR_BRIEF, one of its
+    four relation labels) -- no LLM call here at all, unlike
+    generate_mindmap() above. Backlink Detector already did the one
+    judgment call this needs (which topics are real prerequisites of
+    which); this function's only job is reshaping that graph into
+    Mermaid syntax, the same deterministic "no re-guessing what's
+    already been decided" posture eo/source_index.py:get_packet() takes
+    for the topic skeleton.
+
+    Returns the same typed {"kind": "mermaid", "text": str} shape
+    generate_mindmap() returns, so a caller (MindMapView's own
+    <MermaidDiagram>, §4.7's click-to-sub-chat handling) needs no
+    branching to tell the two apart -- "kind" is always "mermaid" here
+    since there's no model output to come back unfenced; a caller
+    checking `result["kind"] == "mermaid"` before rendering still holds
+    for both.
+
+    Raises LookupError if scope has zero real prerequisite-of edges
+    between resolvable topics (same "don't silently save an empty
+    diagram" contract generate_mindmap() already keeps for its own
+    empty-context case) -- a caller should turn this into a clear
+    per-branch error/empty-state, not a blank flowchart.
+    """
+    packet = get_packet(workspace_id, scope=scope, session_id=session_id)
+    topics = packet["topics"]
+
+    edges = []
+    seen_pairs = set()
+    for c in packet["connections"]:
+        if (c.get("relation") or "").strip() != _ROUTE_RELATION:
+            continue
+        from_id, to_id = c.get("from_topic"), c.get("to_topic")
+        if from_id not in topics or to_id not in topics:
+            continue
+        pair = (from_id, to_id)
+        if pair in seen_pairs:
+            continue  # same de-dup posture backlink_detector.py's own
+                      # _build_ops() already applies before storing
+        seen_pairs.add(pair)
+        edges.append(pair)
+
+    if not edges:
+        raise LookupError("no prerequisite-of connections in scope")
+
+    # Stable node ids in first-appearance order -- Mermaid node ids
+    # can't be a raw topic id safely (format isn't guaranteed
+    # identifier-safe), so map each referenced topic to a short t<N>
+    # id, same "sanitize, don't trust the source string" approach
+    # _sanitize_label() takes for the visible label right below.
+    node_ids = {}
+    for from_id, to_id in edges:
+        for tid in (from_id, to_id):
+            if tid not in node_ids:
+                node_ids[tid] = f"t{len(node_ids)}"
+
+    lines = ["flowchart TD"]
+    for tid, sid in node_ids.items():
+        lines.append(f'    {sid}["{_sanitize_label(topics[tid].get("name"))}"]')
+    for from_id, to_id in edges:
+        lines.append(f"    {node_ids[from_id]} --> {node_ids[to_id]}")
+
+    return {"kind": "mermaid", "text": "\n".join(lines)}
+
+
 if __name__ == "__main__":
     import sys as _sys
     if len(_sys.argv) < 2:
