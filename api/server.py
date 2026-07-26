@@ -413,6 +413,12 @@ class PromoteWorkspaceRequest(BaseModel):
     # workspace leaves the old tab entirely. "partial" keeps it active
     # in both the old and new tab (see chat_workspace.promote()).
     mode: Optional[str] = "complete"
+    # NEW — §10d: when set, this request is understood to be the
+    # chat-triggered path (a person explicitly agreeing, mid chat-turn,
+    # to add a tab) rather than a plain settings-panel promote. Only
+    # meaningful together with mode="partial" — see promote_workspace()
+    # below for the branch this drives.
+    session_id: Optional[str] = None
 
 
 class WorkspaceChatRequest(BaseModel):
@@ -766,6 +772,26 @@ def rename_workspace(ws_id: str, req: RenameWorkspaceRequest, owner_id: str = De
 @app.post("/api/workspaces/{ws_id}/promote")
 def promote_workspace(ws_id: str, req: PromoteWorkspaceRequest, owner_id: str = Depends(require_auth)):
     try:
+        # §10d: session_id present + mode="partial" is the chat-triggered
+        # path — adds the shared active_stages_precheck() (§10b)
+        # short-circuit ahead of the mutation, and fires notify() on an
+        # actual promote so the person's own open chat tab reflects the
+        # new tab immediately. Every other combination (no session_id, or
+        # mode="complete") is today's unchanged settings-panel behavior.
+        if req.session_id and (req.mode or "complete") == "partial":
+            if not req.to_stage:
+                raise HTTPException(
+                    status_code=400,
+                    detail="to_stage is required for a chat-triggered partial promote",
+                )
+            result = chat_workspace.chat_triggered_partial_promote(
+                ws_id, owner_id, req.to_stage, session_id=req.session_id,
+            )
+            if result is None:
+                # Precheck said not eligible (already active in to_stage,
+                # unknown stage, etc.) — an expected no-op, not an error.
+                return {"promoted": False, "workspace_id": ws_id, "to_stage": req.to_stage}
+            return {"promoted": True, **result}
         return chat_workspace.promote(ws_id, owner_id, req.to_stage, mode=req.mode or "complete")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
@@ -773,6 +799,7 @@ def promote_workspace(ws_id: str, req: PromoteWorkspaceRequest, owner_id: str = 
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.post("/api/workspaces/{ws_id}/chats")
 def add_workspace_chat(ws_id: str, req: WorkspaceChatRequest, owner_id: str = Depends(require_auth)):
