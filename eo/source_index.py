@@ -59,6 +59,114 @@ def _topic_skeleton(topics: dict) -> dict:
     return skeleton
 
 
+def _children_index(topics: dict) -> dict:
+    """One pass building parent_id -> [child_id, ...] off each topic's
+    own `parent` field -- the hierarchy Mind Map walks per
+    eo/secondary_data.py's own docstring ("`parent` is how the
+    hierarchy Mind Map later walks (§6) is represented here"). There is
+    no separate stored `subtopic_of` graph edge to walk (same kind of
+    gap §5a's module docstring already flagged for "covers"): a real
+    `subtopic_of` edge only exists once a topic is promoted into a node
+    (§10), which most topics in an active tree never are yet. Reading
+    "walk down subtopic_of edges" as "walk down the `parent` field's
+    implied tree" is the one thing to revise if that's not what was
+    meant -- the depth-adaptive walk itself below should still hold.
+    """
+    children = {}
+    for tid, topic in topics.items():
+        parent = topic.get("parent")
+        if parent is None:
+            continue
+        children.setdefault(parent, []).append(tid)
+    return children
+
+
+def get_packet_depth(
+    workspace_id: str,
+    starting_topic_id: str,
+    requested_depth: int,
+    scope: str = "project",
+    session_id: str = None,
+) -> dict:
+    """§7a: depth-adaptive walk down the `parent`-tree from a single
+    starting topic, still Mode C -- no LLM call, no Primary Source
+    fetch, just a narrower slice of the same skeleton get_packet()
+    already builds.
+
+    "Depth-adaptive" means the walk expands one tree level at a time
+    and stops the moment a level comes back empty, rather than forcing
+    exactly `requested_depth` levels regardless of whether the tree
+    actually has that many. `requested_depth=0` returns just the
+    starting topic itself; each level above that adds its direct
+    children. The walk never goes beyond `requested_depth` even if the
+    tree keeps going deeper -- that's the caller's ask, not a floor.
+
+    Returns:
+        {
+          "workspace_id": str,
+          "scope": "project" | "chat",
+          "starting_topic_id": str,
+          "requested_depth": int,
+          "reached_depth": int,   # deepest level actually populated;
+                                   # < requested_depth iff the tree ran
+                                   # dry before satisfying the request
+          "exhausted": bool,      # reached_depth < requested_depth --
+                                   # §7b's own signal for when a Mode C
+                                   # walk alone can't satisfy the ask
+          "topics": {...},        # starting topic + every descendant
+                                   # collected, same skeleton shape as
+                                   # get_packet()
+          "connections": [...],   # get_packet()'s connections, filtered
+                                   # to endpoints both inside `topics`
+        }
+
+    Raises ValueError for a bad workspace_id/scope (same checks
+    get_packet() makes) or a negative requested_depth, and KeyError if
+    starting_topic_id doesn't resolve in the resolved scope -- a
+    caller asking to root a walk at a topic that isn't there is a
+    caller bug, not a "just return empty" situation.
+    """
+    if requested_depth < 0:
+        raise ValueError("requested_depth must be >= 0")
+
+    packet = get_packet(workspace_id, scope=scope, session_id=session_id)
+    all_topics = packet["topics"]
+    if starting_topic_id not in all_topics:
+        raise KeyError(f"starting_topic_id {starting_topic_id!r} not found in scope {scope!r}")
+
+    children = _children_index(all_topics)
+
+    collected = {starting_topic_id}
+    frontier = [starting_topic_id]
+    reached_depth = 0
+    for level in range(1, requested_depth + 1):
+        next_frontier = []
+        for tid in frontier:
+            next_frontier.extend(children.get(tid, []))
+        if not next_frontier:
+            break
+        collected.update(next_frontier)
+        frontier = next_frontier
+        reached_depth = level
+
+    topics = {tid: all_topics[tid] for tid in collected}
+    connections = [
+        c for c in packet["connections"]
+        if c.get("from_topic") in topics and c.get("to_topic") in topics
+    ]
+
+    return {
+        "workspace_id": workspace_id,
+        "scope": scope,
+        "starting_topic_id": starting_topic_id,
+        "requested_depth": requested_depth,
+        "reached_depth": reached_depth,
+        "exhausted": reached_depth < requested_depth,
+        "topics": topics,
+        "connections": connections,
+    }
+
+
 def get_packet(workspace_id: str, scope: str = "project", session_id: str = None) -> dict:
     """The one Mode C entry point: everything a Mode-C-only generation
     agent (§6a: Mind Mapper, Concept Linker) needs, and nothing it

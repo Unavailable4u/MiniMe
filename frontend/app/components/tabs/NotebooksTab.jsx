@@ -17,6 +17,7 @@ import {
   NotebookText, Plus, MessageSquareText, MessageSquare, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
   Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw, ListChecks, RotateCcw,
+  Wrench, Send, // NEW — Data Layer architecture §8a: Corrections tab
 } from "lucide-react";
 
 const SUB_TABS = [
@@ -28,6 +29,10 @@ const SUB_TABS = [
   { id: "facts", label: "Facts", icon: BookMarked },
   { id: "clusters", label: "Clusters", icon: Layers },
   { id: "candidates", label: "Suggested notes", icon: Sparkles },
+  // NEW — Data Layer architecture §8a: capture-only for now (§8b/§8c
+  // add the lean role + Patch Review surface that actually turn a
+  // submitted correction into an edit).
+  { id: "corrections", label: "Corrections", icon: Wrench },
 ];
 
 // NEW — §4 fix: persist which notebook and sub-tab were selected, same
@@ -1278,6 +1283,113 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
   );
 }
 
+// --- Corrections sub-view ----------------------------------------------
+// Data Layer architecture §8a: capture, not editing. Two inputs -- a
+// file-scope picker (one source, or "All files") and a plain-language
+// box describing what's wrong -- and nothing that tries to locate or
+// apply an edit yet. Turning a submitted correction into a located
+// edit is §8b's lean role (reads Secondary Data, falls back to Mode B
+// on Primary Source when it isn't there); rendering a before/after
+// diff for review is §8c's Patch Review tab. Neither exists yet, so a
+// submitted correction here just queues in local component state --
+// same "build the surface first, wire the backend in behind it" order
+// MindMapView's own guide §6.5 Phase 1/Phase 2 split already used.
+function CorrectionsView({ workspaceId, nodes, edges }) {
+  const [scopeId, setScopeId] = useState("all");
+  const [text, setText] = useState("");
+  // Ephemeral, this session only -- §8b/§8c give corrections a real
+  // store (and a review surface); there's nothing durable to persist
+  // to yet, so holding it here would just be a fake promise of
+  // durability this component can't keep.
+  const [queued, setQueued] = useState([]);
+
+  // Same grouping SourcesView already uses for its own file list --
+  // scoping a correction to "this file" means one row per root source,
+  // not one per child page, same granularity a person actually thinks
+  // in when they say "the PDF I uploaded" rather than "page 4 of it."
+  const fileOptions = groupSourceNodes(nodes || [], edges || []).map((g) => ({
+    id: g.root.node_id,
+    label: groupDisplayTitle(g.root, g.children.length > 0),
+  }));
+
+  function handleSubmit() {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const scopeLabel = scopeId === "all"
+      ? "All files"
+      : (fileOptions.find((f) => f.id === scopeId)?.label || scopeId);
+    setQueued((prev) => [
+      {
+        id: `${Date.now()}-${prev.length}`,
+        scope: scopeId === "all" ? null : scopeId,
+        scopeLabel,
+        text: trimmed,
+        submittedAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+    setText("");
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <p className="text-xs text-[var(--neutral-500)]">
+          Tell us what's wrong — a wrong fact, a missing connection, anything
+          that doesn't match the source. Scope it to one file, or leave it as
+          "All files" if it's about the notebook as a whole.
+        </p>
+        <select
+          value={scopeId}
+          onChange={(e) => setScopeId(e.target.value)}
+          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+        >
+          <option value="all">All files</option>
+          {fileOptions.map((f) => (
+            <option key={f.id} value={f.id}>{f.label}</option>
+          ))}
+        </select>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder='e.g. "The mind map says the deadline is March 3rd, but the source says March 13th."'
+          rows={3}
+          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)] resize-none"
+        />
+        <div className="flex justify-end">
+          <button
+            onClick={handleSubmit}
+            disabled={!text.trim()}
+            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
+          >
+            <Send size={12} />
+            Submit correction
+          </button>
+        </div>
+      </div>
+
+      {queued.length > 0 ? (
+        <div className="space-y-1.5">
+          <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Submitted this session</p>
+          {queued.map((c) => (
+            <div key={c.id} className="px-3 py-2 rounded-lg border border-[var(--neutral-800)] space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-[var(--neutral-500)]">{c.scopeLabel}</span>
+                <span className="text-[10px] text-[var(--neutral-600)]">{timeAgo(c.submittedAt)}</span>
+              </div>
+              <p className="text-xs text-[var(--neutral-200)]">{c.text}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-8 text-center text-xs text-[var(--neutral-600)]">
+          No corrections submitted yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Node preview modal ------------------------------------------------------
 
 function NodePreviewModal({ node, onClose }) {
@@ -1984,6 +2096,13 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 candidates={candidates}
                 onAccept={async (candidateId) => { await acceptNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
                 onReject={async (candidateId) => { await rejectNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
+              />
+            )}
+            {subTab === "corrections" && (
+              <CorrectionsView
+                workspaceId={selected.id}
+                nodes={nodes}
+                edges={edges}
               />
             )}
           </div>
