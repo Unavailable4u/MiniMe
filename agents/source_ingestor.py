@@ -37,12 +37,18 @@ NODE_TYPE = "source"
 
 
 def write_ingested_source(artifact: dict, workspace_id: str, created_by: str,
-                           section: str = "notes") -> list[str]:
+                           section: str = "notes", session_id: str = None) -> list[str]:
     """Writes an ingested artifact (any Capture ingestor's output) as one
     or more real knowledge-graph nodes. Returns the list of new node_ids
     (may be shorter than the section count if an embed/upsert failed for
     one — write_node() degrades to None on failure rather than raising,
     same posture this function keeps).
+
+    session_id is new (Data Layer §0/§10): the chat session an upload
+    came from, if any. Optional and forwarded as-is to write_node() —
+    None for callers that don't have a session in scope yet (e.g. no
+    endpoint passes this through as of this patch), same "plumbing
+    first, wiring later" sequencing as the rest of this step.
     """
     sections = [s for s in artifact.get("sections", []) if (s.get("content") or "").strip()]
     title = artifact.get("title", "Untitled")
@@ -53,6 +59,7 @@ def write_ingested_source(artifact: dict, workspace_id: str, created_by: str,
         node_id = write_node(
             workspace_id=workspace_id, section=section, node_type=NODE_TYPE,
             title=title, content=content, created_by=created_by, tags=tags,
+            session_id=session_id,
         )
         return [node_id] if node_id else []
 
@@ -62,7 +69,7 @@ def write_ingested_source(artifact: dict, workspace_id: str, created_by: str,
         node_id = write_node(
             workspace_id=workspace_id, section=section, node_type=NODE_TYPE,
             title=f"{title} — {heading}", content=s["content"],
-            created_by=created_by, tags=tags,
+            created_by=created_by, tags=tags, session_id=session_id,
         )
         if node_id:
             node_ids.append(node_id)
@@ -88,7 +95,7 @@ def write_ingested_source(artifact: dict, workspace_id: str, created_by: str,
 
 
 def ingest_pdf_to_graph(path: str, workspace_id: str, created_by: str,
-                         section: str = "notes") -> list[str]:
+                         section: str = "notes", session_id: str = None) -> list[str]:
     """End-to-end convenience wrapper (parse + write) for callers that
     don't need the intermediate artifact shape, e.g. an upload endpoint.
     A caller that wants to show a preview before committing should call
@@ -97,4 +104,4 @@ def ingest_pdf_to_graph(path: str, workspace_id: str, created_by: str,
     """
     from agents.pdf_ingestor import ingest_pdf
     artifact = ingest_pdf(path)
-    return write_ingested_source(artifact, workspace_id, created_by, section)
+    return write_ingested_source(artifact, workspace_id, created_by, section, session_id=session_id)

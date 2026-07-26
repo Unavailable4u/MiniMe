@@ -110,6 +110,16 @@ def write_node(
         # docstring keeps this bounded.
         "content": content,
     }
+    # session_id was already an accepted param (used above only for
+    # log_usage's per-session usage tracking) but was never actually
+    # persisted onto the node itself. Data Layer §0/§10 needs this on
+    # source nodes so per-chat backlink filtering ("this chat only" vs
+    # "whole project") has something to key off at read time. Optional
+    # and omitted when absent, rather than written as null, so existing
+    # non-source node types that never pass it don't pick up a stray
+    # always-empty field.
+    if session_id:
+        metadata["session_id"] = session_id
 
     try:
         vector_index().upsert(vectors=[(vector_id, vector, metadata)])
