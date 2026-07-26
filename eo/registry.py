@@ -49,11 +49,35 @@ AGENT_CAPABILITIES = {
     # Part 4 §4.4: "note_table_builder" added the same way -- the
     # Notes-domain sibling of extraction_table_builder, same shape,
     # same pool, no new accounts.
-    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
-    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
-    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
-    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
-    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder"]},
+    # Data Layer §4c: "source_manager" and "backlink_detector" added the
+    # same way again, same pool, no new accounts. Both are notes-domain
+    # (agents/source_manager.py and agents/backlink_detector.py both
+    # pass domain="notes" on their generic_worker.run() calls) structured
+    # JSON-out reasoning jobs, the same shape as this pool's existing
+    # extraction_table_builder/note_table_builder work.
+    # "source_manager" specifically is REQUIRED here, not just a nice
+    # expertise-match: eo/worker_pool.py:_select_workers("source_manager",
+    # ...) -- the §2d parallel-chunk fan-out path -- raises RuntimeError
+    # if no account carries this tag, unlike eo/panel.py:_best_match()'s
+    # graceful whole-pool fallback that the plain sequential §2c path and
+    # backlink_detector's single §3b call both get either way. This pool
+    # is also a size-5 match for MODE_A_MAX_PARALLEL_WORKERS.
+    # §5b: "source_planner_lean" added the same way too. Despite its
+    # name, this role is NOT part of Part 2.4's tier-1 lean pipeline
+    # (prompt_writer_lean/code_writer_lean/reviewer_fixer_lean), which
+    # bypasses AGENT_CAPABILITIES entirely via its own hardcoded CHAIN --
+    # it hires through the ordinary generic_worker.run(role=...) path,
+    # same as source_manager/backlink_detector right above, so it
+    # belongs on the same notes-domain pool as those two. (§4c's own
+    # note deferred this exact tag with the reasoning "that's a design
+    # decision §5b's to make" -- §5b's module confirms generic_worker.run()
+    # is in fact its hiring path, so the tag lands here rather than
+    # staying deferred a second time.)
+    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean"]},
+    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean"]},
+    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean"]},
+    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean"]},
+    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean"]},
 
     # --- Groq: Structure Architect (isolated single account) ---
     "GROQ_API_KEY_9": {
