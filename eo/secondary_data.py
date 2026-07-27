@@ -33,7 +33,10 @@ Per-workspace document shape:
           "summary": str,
           "parent": "<topic_id>" | None,
           "source_section_ids": [str, ...],
-          "content_hint": "procedural" | "conceptual" | "data-heavy" | "narrative"
+          "content_hint": "procedural" | "conceptual" | "data-heavy" | "narrative",
+          "instances": [                       # optional, defaults to []
+            {"source_section_ids": [...], "verbatim": str, "confidence": float}
+          ]
         },
         ...
       },
@@ -52,10 +55,20 @@ prerequisite-of/elaborates-on/contradicts/restates graph (§4) — a
 free-form `relation` string, same "don't over-specify" choice
 eo/graph_edges.py already made for its own edges.
 
+`instances` (added for agents/overlapping_checker.py's "duplicate"
+fold-in) is additive and optional — an old topic dict written before
+this field existed has no key for it at all, so every read site that
+consumes it must use `.get("instances", [])` rather than assume the
+key is present; nothing here backfills it onto existing topics. It's
+only ever appended to (via the `/topics/<id>/instances/-` patch path
+below), never replaced or read-modified-written wholesale, so a
+topic's own provenance history only grows.
+
 Place this file at: eo/secondary_data.py
 """
 import os
 import json
+import re
 import threading
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -220,29 +233,61 @@ def get_secondary_data_scoped(workspace_id: str, scope: str, session_id: str = N
     return {"topics": topics, "connections": connections}
 
 
-# Two path shapes only -- everything this document ever needs to
+# Three path shapes -- everything this document ever needs to
 # address, per the schema in this module's docstring. Deliberately not
 # a general JSON Pointer implementation (RFC 6901): the doc's shape
 # never nests deeper than this, so a tiny hand-rolled matcher is
-# clearer than pulling in a pointer-resolution dependency for two
+# clearer than pulling in a pointer-resolution dependency for three
 # cases.
 #
-#   /topics/<topic_id>   -- one topic entry, keyed by id (a dict, not
-#                            a list, so add/replace/remove are all the
-#                            same "set/delete this key" operation)
-#   /connections/-       -- RFC 6902's own "append" convention (add
-#                            only -- remove/replace need a real index)
-#   /connections/<index> -- one connection entry by position
+#   /topics/<topic_id>              -- one topic entry, keyed by id (a
+#                                       dict, not a list, so add/replace/
+#                                       remove are all the same "set/
+#                                       delete this key" operation)
+#   /topics/<topic_id>/instances/-  -- append one instance entry onto an
+#                                       EXISTING topic's `instances` list
+#                                       (add only -- an instance is never
+#                                       removed or replaced in place;
+#                                       raises if the topic id doesn't
+#                                       already exist, same "endpoints
+#                                       must resolve" posture
+#                                       _drop_dangling_connections()
+#                                       enforces for connections)
+#   /connections/-                  -- RFC 6902's own "append" convention
+#                                       (add only -- remove/replace need
+#                                       a real index)
+#   /connections/<index>            -- one connection entry by position
+
+_INSTANCE_APPEND_RE = re.compile(r"^topics/([^/]+)/instances/-$")
 
 
 def _split_path(path: str) -> tuple[str, str]:
     parts = path.strip("/").split("/", 1)
     if len(parts) != 2 or parts[0] not in ("topics", "connections"):
         raise ValueError(
-            f"Unsupported path {path!r}; expected /topics/<topic_id> "
-            f"or /connections/<index|->"
+            f"Unsupported path {path!r}; expected /topics/<topic_id>, "
+            f"/topics/<topic_id>/instances/-, or /connections/<index|->"
         )
     return parts[0], parts[1]
+
+
+def _apply_instance_append(doc: dict, action: str, topic_id: str, op: dict) -> None:
+    if action != "add":
+        raise ValueError(
+            f"Unsupported op {action!r} on /topics/<id>/instances/-; "
+            f"only 'add' (append) is supported -- an instance entry is "
+            f"never removed or replaced in place"
+        )
+    if "value" not in op:
+        raise ValueError(
+            "Patch op 'add' on /topics/<id>/instances/- missing 'value'"
+        )
+    topic = doc["topics"].get(topic_id)
+    if topic is None:
+        raise ValueError(
+            f"Cannot append instance: topic {topic_id!r} does not exist"
+        )
+    topic.setdefault("instances", []).append(op["value"])
 
 
 def _apply_one(doc: dict, op: dict) -> None:
@@ -255,6 +300,14 @@ def _apply_one(doc: dict, op: dict) -> None:
     path = op.get("path")
     if not path:
         raise ValueError("Patch op missing 'path'")
+
+    # Checked before the generic two-part split below, since this is a
+    # three-part path (/topics/<id>/instances/-) that _split_path()'s
+    # collection/key shape doesn't cover.
+    instance_match = _INSTANCE_APPEND_RE.match(path.strip("/"))
+    if instance_match:
+        _apply_instance_append(doc, action, instance_match.group(1), op)
+        return
 
     collection, key = _split_path(path)
 
