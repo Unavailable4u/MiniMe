@@ -24,6 +24,24 @@ drift two independently-tuned thresholds at once.
 import re
 from difflib import SequenceMatcher
 
+# A THIRD, generic stopword set — deliberately separate from
+# review_aggregator.py's and security_aggregator.py's own hand-tuned
+# _STOPWORDS (which stay exactly as they are, per this module's own
+# docstring above on why those two were never collapsed into one
+# list). Those two sets actually differ from each other, so there is no
+# single "the shared stopword set" to reuse; this is a reasonable
+# generic default (the union of both, still small and cheap to filter)
+# for any NEW caller that wants "good enough" filtering without hand-
+# tuning its own list from scratch — e.g. agents/overlapping_checker.py.
+DEFAULT_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "this", "that", "these", "those", "it", "its", "it's", "and", "or",
+    "to", "of", "in", "on", "for", "with", "without", "which", "as",
+    "by", "at", "from", "not", "no", "if", "there", "can", "could",
+    "may", "should", "would", "when", "instead", "leading", "before",
+    "calling", "uses", "use",
+}
+
 
 def tokenize(text: str, stopwords: set, stem: bool = False, min_len: int = 2) -> set:
     """Word-level tokenization with stopword filtering, and optional light
