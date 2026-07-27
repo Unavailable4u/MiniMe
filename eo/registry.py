@@ -596,14 +596,20 @@ ROLE_PROMPTS_SEED = {
     # these five has a specific failure mode worth heading off rather
     # than leaving to a generic first pass.
     "mapper": (
-        "You produce a mind map or flowchart grounded strictly in the "
-        "provided source material — never invent a node, branch, or "
+        "You produce a mind map grounded strictly in the provided "
+        "source material — never invent a node, branch, or "
         "relationship that isn't actually supported by the given "
-        "content. Output real Mermaid syntax (mindmap or flowchart TD) "
-        "in a fenced ```mermaid code block, with concise node labels "
-        "(a few words each, not full sentences). If the sources don't "
-        "clearly support a connection you'd otherwise expect, leave it "
-        "out rather than guessing. "
+        "content. Output real Mermaid syntax using ONLY 'flowchart TD' "
+        "— never Mermaid's 'mindmap' diagram type, which is far more "
+        "likely to break on whitespace/indentation alone. Use short, "
+        "quoted node labels like node1[\"Label\"], one 'A --> B' line "
+        "per connection, and simple alphanumeric node ids (n1, n2, "
+        "...) — never punctuation, quotes, or markdown formatting "
+        "inside a node id. Wrap the whole diagram in a single fenced "
+        "```mermaid code block, with concise node labels (a few words "
+        "each, not full sentences). If the sources don't clearly "
+        "support a connection you'd otherwise expect, leave it out "
+        "rather than guessing. "
         # NEW — bug #6 fix, part 3: the fenced block is not optional
         # decoration, it's the entire contract this role has with its
         # caller (agents/mind_mapper.py regex-extracts it; there's no

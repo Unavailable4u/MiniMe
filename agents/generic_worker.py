@@ -68,7 +68,18 @@ from agents.handoff_packager import PLAN_HANDOFF_PACKAGE_KEY
 
 PROVIDER_DEFAULT_MODEL = {
     "groq": "llama-3.3-70b-versatile",
-    "cerebras": "llama-3.3-70b",
+    # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras'
+    # catalog (confirmed via GET /v1/models against a live account:
+    # only gpt-oss-120b/gemma-4-31b/zai-glm-4.7 are served now). Every
+    # generic_worker role with no natural_roles match (fact_detector,
+    # flashcard_writer, quiz_writer, study_guide_writer, workflow_suggester)
+    # falls through to the full account pool ranked by quota, so landing
+    # on ANY Cerebras account 404'd with the exact "model_not_found"
+    # error seen in Notebooks' Facts/Quiz/Flashcards/Study guide/Workflows
+    # generation. gpt-oss-120b is already the proven-working Cerebras
+    # model used directly by idea_planner.py/dataset_analyst.py/
+    # deploy_config_writer.py/reviewer_fixer_lean.py's own CHAINs.
+    "cerebras": "gpt-oss-120b",
     "mistral": "mistral-large-latest",
     "github": "openai/gpt-4.1-mini",
 }

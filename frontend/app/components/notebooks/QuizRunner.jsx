@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, RotateCcw } from "lucide-react";
+import Markdown from "../Markdown";
 
 // quiz_writer (a generic_worker role, per §4.5) emits the same
 // '# Title' / '## heading' Markdown grammar as flashcard_writer.
@@ -16,8 +17,23 @@ import { ChevronLeft, ChevronRight, CheckCircle2, XCircle, RotateCcw } from "luc
 // truth. If a question has no '- [ ]' options at all, it's treated as
 // a free-text question whose answer is only shown after everything is
 // submitted (the server always counts these as correct).
+// BUGFIX (chat audit bug #6): quiz_writer sometimes wraps its whole
+// answer in a ```markdown fence even though the role brief (eo/
+// registry.py) doesn't ask for one — an unstripped fence's opening
+// ``` line isn't a '# '/'## ' match, but it also isn't blank, so the
+// preceding question's option-collection loop never terminates
+// cleanly and the real '## Q1: ...' heading right after it can end up
+// parsed as part of the fence "noise" depending on exact spacing,
+// leaving that question with zero options. Same fix pattern as
+// FlashcardFlipper.jsx's stripOuterFence.
+function stripOuterFence(markdown) {
+  const text = (markdown || "").trim();
+  const m = /^```[a-zA-Z]*\n([\s\S]*?)\n```$/.exec(text);
+  return m ? m[1] : text;
+}
+
 function parseQuizForDisplay(markdown) {
-  const lines = (markdown || "").split("\n");
+  const lines = stripOuterFence(markdown).split("\n");
   let title = "Quiz";
   const questions = [];
   let current = null;
@@ -30,7 +46,10 @@ function parseQuizForDisplay(markdown) {
     const line = raw.trimEnd();
     const h1 = /^#\s+(.*)$/.exec(line);
     const h2 = /^##\s*(.*)$/.exec(line);
-    const option = /^\s*[-*]\s*\[( |x|X)\]\s*(.*)$/.exec(line);
+    // Tolerant of "- [ ]", "* [x]", and models that drop the space
+    // inside the brackets or after it — the important signal is a
+    // bullet immediately followed by a checkbox-shaped bracket pair.
+    const option = /^\s*[-*]\s*\[\s*([xX]?)\s*\]\s*(.*)$/.exec(line);
 
     if (h1) {
       title = h1[1].trim();
@@ -205,7 +224,7 @@ export default function QuizRunner({ quizText, workspaceId, quizNodeId }) {
       )}
 
       <div className="rounded-lg border border-[var(--neutral-800)] bg-black/20 px-4 py-4 space-y-3">
-        <div className="text-sm text-[var(--neutral-200)] whitespace-pre-wrap">{q.question}</div>
+        <div className="text-sm text-[var(--neutral-200)] [&_.markdown-body]:space-y-0 [&_p]:m-0"><Markdown>{q.question}</Markdown></div>
 
         {hasOptions ? (
           <div className="space-y-1.5">

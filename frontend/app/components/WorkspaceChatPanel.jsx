@@ -7,6 +7,7 @@ import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
 import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import { ingestFileByExtension } from "../lib/ingestDispatch";
+import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 
 // NEW — §6: this component is the composition that used to live directly
 // inside ChatTab.jsx (chat box + resizable/collapsible WorkingPanel dock).
@@ -88,7 +89,7 @@ function clampWorkingPanelWidth(w) {
 
 export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
   const legacy = useSession();
-  const { ingestFile, ingestPdfFile, ingestVoiceFile } = legacy;   // NEW — Data Layer §4b
+  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
 
@@ -244,12 +245,70 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [draft]);
 
+  const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
+
+  // NEW — chat audit bug #1 fix. Per NotebooksGeneratePicker.jsx's own
+  // long-standing SCOPE NOTE: "typing 'make flashcards' into
+  // WorkspaceChatPanel should short-circuit the normal staffed-dispatcher
+  // send and land here instead." This reuses that component's exact
+  // free-text parser/keyword table (now exported) rather than a second
+  // copy, and only auto-runs on the SAME single-unambiguous-target case
+  // the picker's own free-text field already treats as safe to dispatch
+  // without a human reviewing chips first (guide §4.1's "accepting the
+  // misparse risk" is explicitly scoped to that one case, not to
+  // multi-target or scope-language sentences — those still deserve a
+  // chip row to look at, so they fall through to the picker/normal chat
+  // instead of silently running here).
+  //
+  // Only wired when this panel is embedded with a real workspaceId (i.e.
+  // docked inside Notebooks/Research/etc, per the constructor comment
+  // above) — a standalone Chat tab with no workspace has nothing for
+  // "generate a mind map" to mean, so it's left to fall through to the
+  // ordinary staffed dispatcher there, same as free text that doesn't
+  // match a target at all.
+  async function tryHandleGenerateIntent(text) {
+    if (!workspaceId || !generateNotebooks) return false;
+    const { targetKeys, sourceNodeIds } = parseFreeText(text, []);
+    if (targetKeys.length !== 1 || sourceNodeIds.length > 0) return false;
+
+    const key = targetKeys[0];
+    const label = TARGETS_BY_KEY[key]?.label || key;
+    const runningBranch = { panel_key: key, status: "running", label, subTab: TARGETS_BY_KEY[key]?.subTab };
+    if (usingDock) {
+      dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: [runningBranch] } });
+    }
+    try {
+      const { branches } = await generateNotebooks(workspaceId, [key], null);
+      const withMeta = branches.map((b) => ({ ...b, label: TARGETS_BY_KEY[b.panel_key]?.label, subTab: TARGETS_BY_KEY[b.panel_key]?.subTab }));
+      if (usingDock) {
+        dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: withMeta } });
+      }
+      // Jump straight to the tab that just got new content so the run
+      // doesn't feel like it vanished into the Working Panel — same
+      // "open the result" affordance BranchRow's own chevron gives in
+      // the picker popover.
+      const branch = branches.find((b) => b.panel_key === key);
+      if (branch?.status === "done" && TARGETS_BY_KEY[key]?.subTab) {
+        onNavigateSubTab?.(TARGETS_BY_KEY[key].subTab);
+      }
+    } catch (err) {
+      if (usingDock) {
+        dock.setDockState({
+          notebooksGenerateRun: { targets: [key], branches: [{ panel_key: key, status: "error", error: String(err.message || err), label, subTab: TARGETS_BY_KEY[key]?.subTab }] },
+        });
+      }
+    }
+    return true;
+  }
+
   function handleSubmit(e) {
     e?.preventDefault();
     const text = draft.trim();
     if (!text || loading) return;
     setDraft("");
-    sendTask(text);
+    tryHandleGenerateIntent(text).then((handled) => {
+      if (!handled) sendTask(text);
+    });
   }
 
   // Enter sends; Shift+Enter (or Alt/Ctrl+Enter) inserts a real newline —

@@ -41,7 +41,11 @@ BD_VENDOR_DOMAINS = [
 # than enough — no need to reach for anything bigger here.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "llama-3.3-70b", "key_env": "CEREBRAS_API_KEY_9"},
+    # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
+    # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
+    # zai-glm-4.7 served now). See agents/generic_worker.py's
+    # PROVIDER_DEFAULT_MODEL comment for the full trace.
+    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
     {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 

@@ -1,6 +1,20 @@
 "use client";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, RotateCw } from "lucide-react";
+import Markdown from "../Markdown";
+
+// BUGFIX (chat audit bug #5): flashcard_writer's output legitimately
+// contains inline Markdown (**bold**, `code`, etc. — see the role brief
+// in eo/registry.py) and the model sometimes wraps its whole answer in
+// a ```markdown fence even though the brief doesn't ask for one. This
+// strips a single leading/trailing fence before parsing so that fence
+// doesn't get swallowed into the first/last card's content or, worse,
+// suppress the '# '/'## ' heading match entirely.
+function stripOuterFence(markdown) {
+  const text = (markdown || "").trim();
+  const m = /^```[a-zA-Z]*\n([\s\S]*?)\n```$/.exec(text);
+  return m ? m[1] : text;
+}
 
 // flashcard_writer (a generic_worker role, per §4.5) is asked for the
 // same '# Title' / '## heading' Markdown grammar every other notes-
@@ -8,7 +22,7 @@ import { ChevronLeft, ChevronRight, RotateCw } from "lucide-react";
 // artifact() shape) — each '## ' heading is a card front, its section
 // content is the back.
 function parseFlashcards(markdown) {
-  const lines = (markdown || "").split("\n");
+  const lines = stripOuterFence(markdown).split("\n");
   let title = "Flashcards";
   const cards = [];
   let current = null;
@@ -69,8 +83,8 @@ export default function FlashcardFlipper({ markdownText }) {
           <div className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2">
             {flipped ? "Back" : "Front"}
           </div>
-          <div className="text-sm text-[var(--neutral-200)] whitespace-pre-wrap">
-            {flipped ? card.back : card.front}
+          <div className="text-sm text-[var(--neutral-200)] [&_.markdown-body]:space-y-1.5 [&_p]:m-0">
+            {flipped ? <Markdown>{card.back}</Markdown> : card.front}
           </div>
         </div>
       </div>
