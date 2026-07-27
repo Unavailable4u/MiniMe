@@ -12,7 +12,7 @@ Each agent defines its own chain as a list of steps. Three providers
 
     CHAIN = [
         {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-        {"provider": "cerebras", "model": "llama-3.3-70b", "key_env": "CEREBRAS_API_KEY_9"},
+        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
         {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
     ]
 

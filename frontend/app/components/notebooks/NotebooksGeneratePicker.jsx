@@ -31,7 +31,12 @@ import { useSession } from "../../context/SessionContext";   // NEW — Data Lay
 // being visible first (except the guide's own single-unambiguous-target
 // exception, see AUTO-RUN below).
 
-const TARGETS = [
+// Exported (chat audit bug #1 fix) — WorkspaceChatPanel's compose box
+// reuses this exact table + parser so "generate me a mind map" typed
+// straight into chat resolves to the same target/keyword matching the
+// picker's own free-text field already used, instead of a second,
+// possibly-drifting copy of the keyword list.
+export const TARGETS = [
   { key: "clusters", label: "Clusters", icon: Layers, subTab: "clusters", keywords: ["cluster", "clusters", "group notes", "organize notes"] },
   { key: "facts", label: "Facts", icon: BookMarked, subTab: "facts", keywords: ["fact", "facts"] },
   { key: "suggested_notes", label: "Suggested notes", icon: Sparkles, subTab: "candidates", keywords: ["suggested note", "suggest notes", "scan for notes", "note suggestions", "note candidates"] },
@@ -55,7 +60,7 @@ const MIN_TITLE_MATCH_LENGTH = 4;
 // Local, no-LLM parse of free text into {targetKeys, sourceNodeIds}.
 // Order-preserving against TARGETS so chips render in a stable order
 // regardless of the order words appear in the sentence.
-function parseFreeText(text, nodes) {
+export function parseFreeText(text, nodes) {
   const lower = (text || "").toLowerCase();
   const targetKeys = TARGETS.filter((t) => t.keywords.some((kw) => lower.includes(kw))).map((t) => t.key);
 
