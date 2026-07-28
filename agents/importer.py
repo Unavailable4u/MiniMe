@@ -181,6 +181,22 @@ def parse_markdown_text(text: str, default_title: str = "Untitled") -> dict:
     lines and re-joining multiple content blocks with '\\n\\n' exactly
     inverts that, including the case where a content block's own internal
     '\\n\\n' causes it to split into more than one block here.
+
+    BUGFIX: a '# '/'## ' heading is only ever the FIRST LINE of a block.
+    Previously this loop keyed off the whole block's stripped text, so a
+    heading with no blank line before its body (e.g. '## Q1: ...\\n- [ ]
+    ...\\n- [x] ...' all in one block, which is exactly how quiz_writer's
+    role brief in eo/registry.py asks for options to be written, and how
+    an LLM naturally writes it) matched neither the '# ' nor '## ' prefix
+    check as a whole, fell through to the `else` branch, and got appended
+    as this section's own *content* — leaving a brand-new empty section
+    with the heading+options text stuck in `content` and the real
+    section's `heading` field never set correctly. Splitting each block
+    into lines and only inspecting the first line for a heading marker
+    (while still preserving the remaining lines as that section's content,
+    newline-joined so multi-line bodies like option lists survive intact)
+    fixes this without changing behavior for the already-correct
+    blank-line-separated case.
     """
     blocks = [b for b in text.split("\n\n")]
     title = default_title
@@ -191,11 +207,22 @@ def parse_markdown_text(text: str, default_title: str = "Untitled") -> dict:
         stripped = block.strip()
         if not stripped:
             continue
-        if stripped.startswith("# "):
-            title = stripped[2:].strip()
-        elif stripped.startswith("## "):
-            current = _new_section(stripped[3:].strip())
+        lines = stripped.split("\n")
+        first_line = lines[0].strip()
+        rest = "\n".join(lines[1:]).strip("\n")
+
+        if first_line.startswith("# "):
+            title = first_line[2:].strip()
+            if rest:
+                if current is None:
+                    current = _new_section()
+                    sections.append(current)
+                _append_content(current, rest)
+        elif first_line.startswith("## "):
+            current = _new_section(first_line[3:].strip())
             sections.append(current)
+            if rest:
+                _append_content(current, rest)
         elif stripped.startswith("*Sources: ") and stripped.endswith("*") and current is not None:
             refs = stripped[len("*Sources: "):-1].split(", ")
             current["node_refs"] = [r for r in refs if r]
