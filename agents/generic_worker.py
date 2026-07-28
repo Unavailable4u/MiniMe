@@ -186,6 +186,43 @@ LEGACY_BUS_KEY_MAP = {
 }
 
 
+def _cloudflare_token_env_for(account_id_env: str) -> str:
+    """Base slots: CLOUDFLARE_ACCOUNT_ID_N -> CLOUDFLARE_API_KEY_N.
+    Reserve slots: CF_SCANNER_RESERVE_N_ACCOUNT_ID -> CF_SCANNER_RESERVE_N_API_TOKEN.
+    Same two-family naming pattern (and same reasoning for not being a
+    single blind substitution) as agents/security_scanner.py's own
+    _token_env_for() -- mirrored here rather than imported, since this
+    module is loaded very early (see the circular-import note at the
+    top of this file) and importing agents/security_scanner here would
+    risk reintroducing that same cycle.
+
+    BUGFIX: this used to be a single `agent_key.replace("ACCOUNT_ID",
+    "API_TOKEN")` call, which turns "CLOUDFLARE_ACCOUNT_ID_4" into
+    "CLOUDFLARE_API_TOKEN_4" -- a plausible-looking but WRONG env var
+    name. The actual configured name (env(example).txt,
+    security_scanner.py's own pool) is "CLOUDFLARE_API_KEY_4". Every
+    generic_worker role with no natural_roles match (fact_detector,
+    flashcard_writer, quiz_writer, study_guide_writer,
+    workflow_suggester) ranks the FULL account pool by quota, so it can
+    easily land on one of these Cloudflare security-scanner slots even
+    though it isn't tagged for them -- and with the old wrong name,
+    utils/llm_client.py's generate_text() would ALWAYS report that slot
+    as "not set" and skip it, no matter how it was actually configured,
+    silently burning one of the chain's few fallback steps every time
+    and pushing the real generation onto a worse-matched provider
+    (a very plausible cause of quiz_writer output that drifts from the
+    required '- [ ]' / '- [x]' checkbox format).
+    """
+    if account_id_env.startswith("CLOUDFLARE_ACCOUNT_ID_"):
+        n = account_id_env.rsplit("_", 1)[-1]
+        return f"CLOUDFLARE_API_KEY_{n}"
+    if account_id_env.startswith("CF_SCANNER_RESERVE_") and account_id_env.endswith("_ACCOUNT_ID"):
+        n = account_id_env[len("CF_SCANNER_RESERVE_"):-len("_ACCOUNT_ID")]
+        return f"CF_SCANNER_RESERVE_{n}_API_TOKEN"
+    raise ValueError(f"Don't know how to derive a token_env for account_id_env {account_id_env!r} "
+                     f"— add its naming pattern to _cloudflare_token_env_for().")
+
+
 def _chain_step_for(agent_key: str) -> dict:
     info = AGENT_CAPABILITIES[agent_key]
     provider = info["provider"]
@@ -200,9 +237,10 @@ def _chain_step_for(agent_key: str) -> dict:
         # Mind Map / Workflows / any other generic_worker-backed panel).
         # Keep "model" (same PROVIDER_DEFAULT_MODEL default computed above)
         # alongside the cloudflare-specific account_id_env/token_env fields.
+        account_id_env = info.get("key_id", agent_key)
         step = {"provider": provider, "model": PROVIDER_DEFAULT_MODEL.get(provider, ""),
-                 "account_id_env": info.get("key_id", agent_key),
-                 "token_env": agent_key.replace("ACCOUNT_ID", "API_TOKEN")}
+                 "account_id_env": account_id_env,
+                 "token_env": _cloudflare_token_env_for(account_id_env)}
     return step
 
 
