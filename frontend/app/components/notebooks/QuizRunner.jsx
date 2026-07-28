@@ -81,13 +81,21 @@ export default function QuizRunner({ quizText, workspaceId, quizNodeId }) {
   const [submitting, setSubmitting] = useState(false);
   const [missedOnly, setMissedOnly] = useState(null); // Set of question strings, or null = show all
 
-  const visibleIndices = questions
+  const missedIndices = questions
     .map((_, i) => i)
     .filter((i) => !missedOnly || missedOnly.has(questions[i].question));
 
   if (questions.length === 0) {
     return <p className="text-xs text-[var(--neutral-500)]">Couldn't parse any questions from this quiz.</p>;
   }
+
+  // BUGFIX (bug #2): missedIndices can legitimately be [] (e.g. a
+  // missed-only filter that no longer matches any question). Previously
+  // that empty array was used directly, so visibleIndices[0] was also
+  // undefined, qIndex ended up undefined, questions[undefined] was
+  // undefined, and `q.options` below threw. Fall back to showing every
+  // question rather than crashing to a blank error screen.
+  const visibleIndices = missedIndices.length > 0 ? missedIndices : questions.map((_, i) => i);
 
   const visPos = visibleIndices.indexOf(index);
   const qIndex = visibleIndices[visPos] ?? visibleIndices[0];
@@ -128,6 +136,12 @@ export default function QuizRunner({ quizText, workspaceId, quizNodeId }) {
   async function retakeMissedOnly() {
     if (!workspaceId || !quizNodeId) return;
     const missed = await fetchMissedQuestions(workspaceId, quizNodeId);
+    if (!missed || missed.length === 0) {
+      // Nothing missed (or nothing the current questions overlap with) —
+      // stay on the results view instead of switching to a filter that
+      // would match zero questions.
+      return;
+    }
     const missedSet = new Set(missed.map((m) => m.question));
     setMissedOnly(missedSet);
     setResult(null);

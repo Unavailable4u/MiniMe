@@ -39,7 +39,17 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROGRESS_PATH = os.path.join(BASE_DIR, "data", "study", "_quiz_progress.json")
 _lock = threading.Lock()
 
-_OPTION_RE = re.compile(r"^- \[( |x|X)\]\s+(.*)$")
+
+# BUGFIX (bug #3): must stay in lockstep with QuizRunner.jsx's DISPLAY
+# option regex (/^\s*[-*]\s*\[\s*([xX]?)\s*\]\s*(.*)$/). The previous
+# pattern here only accepted a literal '- [ ]'/'- [x]'/'- [X]' with
+# exactly one space before the bracket and at least one space after it
+# — stricter than the frontend, which also accepts '*' bullets and
+# missing/extra whitespace. Any option line the frontend happily
+# rendered but this regex didn't match was silently invisible to
+# grading (parse_quiz() would see zero options for that question and
+# drop it via `if not options: continue`), independent of bug #1.
+_OPTION_RE = re.compile(r"^\s*[-*]\s*\[\s*([xX]?)\s*\]\s*(.*)$")
 _EXPLANATION_RE = re.compile(r"^Explanation:\s*(.*)$", re.IGNORECASE)
 
 
