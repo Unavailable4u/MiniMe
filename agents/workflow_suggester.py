@@ -74,6 +74,7 @@ import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.source_planner_lean import plan
 from eo.registry import get_role_prompt, add_role_prompt
+from utils.mermaid_lint import looks_valid_mermaid
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*(.*?)\s*```", re.DOTALL)
@@ -177,6 +178,24 @@ def _parse_workflow(item: dict) -> dict | None:
     mermaid = match.group(1).strip() if match else mermaid_raw
     if not mermaid or not steps:
         return None
+
+    # BUGFIX (rendering audit): a real Mermaid syntax typo genuinely can't be
+    # caught by regex (see this function's own docstring above), but
+    # looks_valid_mermaid()'s cheaper heuristic checks -- empty content, no
+    # recognized diagram-type header, unbalanced brackets/quotes, a
+    # flowchart with zero edges -- catch a meaningful chunk of the common
+    # cases where the model's "mermaid" field was closer to prose than a
+    # diagram. There's no per-workflow retry loop here (one role call
+    # proposes 0-4 workflows together), so rather than dropping the whole
+    # workflow -- losing a perfectly good title/description/checklist over
+    # a diagram that was never going to render -- this keeps everything else
+    # and just omits the diagram. WorkflowCard/MermaidDiagram.jsx already
+    # render an empty diagram slot as nothing (mermaidText falsy -> no
+    # render attempted) rather than an error, so this fails silently
+    # instead of showing the "couldn't render" fallback for something that
+    # was never going to succeed anyway.
+    if not looks_valid_mermaid(mermaid):
+        mermaid = None
 
     return {"title": title, "description": description, "steps": steps, "mermaid": mermaid}
 

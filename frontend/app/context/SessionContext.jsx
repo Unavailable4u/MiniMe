@@ -424,6 +424,27 @@ export function SessionProvider({ children }) {
   const [processingWorkspaces, setProcessingWorkspaces] = useState(() => new Set());
   const processingCountsRef = useRef({});   // wsId -> in-flight count
 
+  // NEW — Overlap/Live-Viz guide §6/§8: gold-highlight for whichever
+  // topic-tree node a topic_added/topic_merged/connection_added event
+  // just touched. One flat Set shared across every open workspace --
+  // node ids already embed their own workspace_id (`node:{ws}:{id}`,
+  // same convention KnowledgeGraphView.jsx's graphNodes build), so
+  // there's no cross-workspace collision to worry about. Consumed by
+  // NotebooksTab.jsx's BacklinksView -> KnowledgeGraphView's
+  // `pulsingIds` prop.
+  const [topicPulsingIds, setTopicPulsingIds] = useState(() => new Set());
+  function pulseTopicNode(id) {
+    if (!id) return;
+    setTopicPulsingIds((prev) => new Set(prev).add(id));
+    setTimeout(() => {
+      setTopicPulsingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }, 1800);
+  }
+
   function _syncProcessingWorkspaces() {
     setProcessingWorkspaces(
       new Set(Object.keys(processingCountsRef.current).filter((k) => processingCountsRef.current[k] > 0))
@@ -478,6 +499,27 @@ export function SessionProvider({ children }) {
         }
         if (event.kind === "upload_processed" || event.kind === "backlinks_updated") {
           markSourceProcessingSettled(event.payload?.workspace_id);
+        }
+        // NEW — Overlap/Live-Viz guide §6/§8: same socket, same
+        // event.kind dispatch, three additional kinds. Node id built
+        // the same `node:{workspace_id}:{topic_id}` way the new
+        // /topics/graph endpoint (api/server.py) already builds edge
+        // endpoints, so it lines up with what KnowledgeGraphView's
+        // graphNodes map keys its own ids by.
+        const wsId = event.payload?.workspace_id;
+        if (wsId && event.kind === "topic_added") {
+          pulseTopicNode(`node:${wsId}:${event.payload.topic_id}`);
+        } else if (wsId && event.kind === "topic_merged") {
+          // The merged-away topic never gets its own node (see
+          // source_manager.py's comment: a "duplicate" fold is an
+          // instances-append on the TARGET, not a new /topics/<id>) --
+          // pulse target_topic_id, not topic_id.
+          pulseTopicNode(`node:${wsId}:${event.payload.target_topic_id}`);
+        } else if (wsId && event.kind === "connection_added") {
+          // Both endpoints of a new connection are worth calling out,
+          // not just one.
+          pulseTopicNode(`node:${wsId}:${event.payload.from_topic}`);
+          pulseTopicNode(`node:${wsId}:${event.payload.to_topic}`);
         }
       };
       if (cancelled) {
@@ -1215,6 +1257,22 @@ async function fetchNodeSummaries(wsId) {
     headers: await authHeaders(),
   });
   if (!res.ok) return {};
+  return res.json();
+}
+
+// NEW — Backlinks-as-topic-tree: eo/secondary_data.py's {topics,
+// connections} document, re-projected server-side into the same
+// {nodes, edges} shape fetchWorkspaceNodes()/fetchGraphEdges() already
+// return, so KnowledgeGraphView.jsx needs no new fetch-shape handling.
+// Read-only, same "no corresponding save function" posture as
+// fetchNodeSummaries above -- this store's only write path is
+// apply_patch() (source_manager.py / backlink_detector.py), never a
+// direct frontend call.
+async function fetchTopicsGraph(wsId) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/topics/graph`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return { nodes: [], edges: [] };
   return res.json();
 }
 
@@ -2095,6 +2153,7 @@ async function openScopedSubChat(wsId, taskText) {
   roleRequests,
   mode, setMode,
   pusherConnected,
+  fetchTopicsGraph, topicPulsingIds,   // NEW — Backlinks-as-topic-tree
   notifications, unreadCount, markNotificationsRead,   // NEW — Part 8.9
   exportWorkspace, importWorkspace,                       // NEW — Part 8.7
   activeMessageIndex, setActiveMessageIndex,

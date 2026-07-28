@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "../../context/SessionContext";
 import IngestionDropzone from "../notebooks/IngestionDropzone";
 import FlashcardFlipper from "../notebooks/FlashcardFlipper";
@@ -419,81 +419,56 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
 // --- Backlinks sub-view ------------------------------------------------------
 // §4.7: reuses KnowledgeGraphView.jsx (Part 0/3) — third domain to use it,
 // no new graph renderer.
-
-function BacklinksView({ workspaceId, nodes, edges, nodeSummaries, loading, onDetect, onSelectNode, generateNotebooks, onRegenerated }) {
-  // NEW — Notebooks integration guide §6.6: "Backlinks subtab likely
-  // needs its own Regenerate-equivalent trigger too... worth deciding
-  // whether Generate's backlinks target should also be reachable from
-  // a button on this subtab itself, not just the picker." Same
-  // handleRegenerate shape as MindMapView above -- calls the picker's
-  // own generateNotebooks(..., ["backlinks"], null) endpoint rather
-  // than a separate one-off route, so this button and a chat/picker
-  // "Generate backlinks" command are the exact same call.
-  const [regenerating, setRegenerating] = useState(false);
-  const [status, setStatus] = useState(null); // last run's {status, edges_created} or {error}
-
-  async function handleRegenerate() {
-    setRegenerating(true);
-    setStatus(null);
-    try {
-      const { branches } = await generateNotebooks(workspaceId, ["backlinks"], null);
-      const branch = branches.find((b) => b.panel_key === "backlinks");
-      if (branch?.status === "error") throw new Error(branch.error || "Concept graph generation failed");
-      setStatus(branch?.result || { status: "done" });
-      await onRegenerated?.();
-    } catch (err) {
-      setStatus({ error: String(err.message || err) });
-    } finally {
-      setRegenerating(false);
-    }
-  }
+//
+// CHANGED — Overlap/Live-Viz guide, "replace entirely" decision: this used
+// to show the primary structural node/edge graph (same_source/clustered_with/
+// references + concept_linker's free-form relations, driven by the two
+// buttons below). It now shows eo/secondary_data.py's topic tree instead
+// (GET /api/workspaces/{ws_id}/topics/graph) — the tree Source Manager/
+// Backlink Detector build automatically on every upload, no manual scan
+// needed. "Quick title-match scan" and "Regenerate concept graph" are
+// DROPPED from this view rather than kept as dead buttons: both write to
+// the structural graph this subtab no longer renders, so triggering them
+// here produced no visible change. If that structural graph still needs a
+// manual-trigger UI, its natural home is the Sources subtab now, not here
+// -- flagging rather than assuming, since that's a separate call.
+//
+// `nodeSummaries` here is topic summaries built client-side from `nodes`
+// below (each topic node already carries its own `summary`), not
+// eo/node_summaries.py's map — passing it still turns on
+// KnowledgeGraphView's "concept-graph mode" (rationale panel + brighter
+// non-structural edges), which is exactly the click-to-see-summary/
+// relation behavior this view wants for a topic node.
+function BacklinksView({ nodes, edges, pulsingIds, loading, onSelectNode }) {
+  const topicSummaries = useMemo(
+    () => Object.fromEntries((nodes || []).map((n) => [n.node_id, n.summary || ""])),
+    [nodes],
+  );
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-[var(--neutral-500)]">
-          Concept links between sources in this notebook — click a node to see why it's connected.
-        </p>
-        <div className="flex items-center gap-3 shrink-0">
-          <button
-            onClick={onDetect}
-            title="Cheap sanity check: case-insensitive substring match — does one source's text literally contain another source's title? No LLM call."
-            className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
-          >
-            Quick title-match scan
-          </button>
-          <button
-            onClick={handleRegenerate}
-            disabled={regenerating}
-            title="LLM pass: judges conceptual relatedness between sources and writes a relation phrase + summary for each link — powers the click-to-see-rationale panel below."
-            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
-          >
-            {regenerating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-            Regenerate concept graph
-          </button>
-        </div>
-      </div>
-      {status?.error && <p className="text-[11px] text-red-400">{status.error}</p>}
-      {status && !status.error && status.status === "up_to_date" && (
-        <p className="text-[11px] text-[var(--neutral-600)]">Already up to date — no new sources since the last run.</p>
-      )}
-      {status && !status.error && status.status === "done" && (
-        <p className="text-[11px] text-[var(--neutral-600)]">
-          {(status.edges_created || []).length} new concept link{(status.edges_created || []).length === 1 ? "" : "s"} found.
-        </p>
-      )}
+      <p className="text-xs text-[var(--neutral-500)]">
+        Topic tree for this notebook — hover a link to see its relation, click a node to see its summary and why it's connected.
+      </p>
       <div className="h-[420px] rounded-lg border border-[var(--neutral-800)] overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-600)]">Loading…</div>
         ) : nodes.length === 0 ? (
           <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-600)]">Nothing to graph yet.</div>
         ) : (
-          <KnowledgeGraphView nodes={nodes} edges={edges} nodeSummaries={nodeSummaries} onSelectNode={onSelectNode} />
+          <KnowledgeGraphView
+            nodes={nodes}
+            edges={edges}
+            nodeSummaries={topicSummaries}
+            pulsingIds={pulsingIds}
+            onSelectNode={onSelectNode}
+          />
         )}
       </div>
     </div>
   );
 }
+
 
 // --- Workflows sub-view ------------------------------------------------------
 // Bug audit §7 (new feature): agents/workflow_suggester.py finds 0-4
@@ -1528,7 +1503,28 @@ function NodePreviewModal({ node, onClose }) {
           <button onClick={onClose}><X size={14} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" /></button>
         </div>
         <p className="text-[10px] text-[var(--neutral-600)] mb-2">{node.node_type} · {timeAgo(node.created_at)}</p>
-        <p className="text-xs text-[var(--neutral-300)] whitespace-pre-wrap">{node.content}</p>
+        {/* NEW — Backlinks-as-topic-tree: a topic node (node_type ===
+            "topic") has no .content -- it's a derived tree entry, not a
+            Primary Source. Fall back to its summary, and list instance
+            provenance (overlapping_checker.py's "duplicate" folds) when
+            present. */}
+        {node.node_type === "topic" ? (
+          <>
+            <p className="text-xs text-[var(--neutral-300)] whitespace-pre-wrap">{node.summary || "No summary yet."}</p>
+            {node.instances?.length > 0 && (
+              <div className="mt-2 space-y-1 border-t border-[var(--neutral-800)] pt-2">
+                <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
+                  Folded-in instances ({node.instances.length})
+                </p>
+                {node.instances.map((inst, i) => (
+                  <p key={i} className="text-[11px] text-[var(--neutral-400)] whitespace-pre-wrap">{inst.verbatim}</p>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-[var(--neutral-300)] whitespace-pre-wrap">{node.content}</p>
+        )}
       </div>
     </div>
   );
@@ -1539,7 +1535,8 @@ function NodePreviewModal({ node, onClose }) {
 export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
    const {
      workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
-     fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, detectBacklinks, fetchNodeSummaries,
+     fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, fetchNodeSummaries,
+     fetchTopicsGraph, topicPulsingIds,   // NEW — Backlinks-as-topic-tree
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
      fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate,
      submitCorrection, fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate,
@@ -1571,6 +1568,13 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   const [subTab, setSubTab] = useState("sources");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
+  // NEW — Backlinks-as-topic-tree: eo/secondary_data.py's topic tree +
+  // connection graph, kept as its OWN state rather than repurposing
+  // nodes/edges above -- SourcesView and CorrectionsView still need
+  // the primary node/edge graph (source grouping via same_source
+  // edges) untouched, so BacklinksView is the only consumer of these.
+  const [topicNodes, setTopicNodes] = useState([]);
+  const [topicEdges, setTopicEdges] = useState([]);
   // NEW — Notebooks integration guide §6.6 (Phase 3): agent-written
   // per-node blurbs (eo/node_summaries.py), keyed by node_id, fed to
   // KnowledgeGraphView's rationale panel in concept-graph mode.
@@ -1711,7 +1715,20 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // way — an empty panel isn't "unread," it's just empty).
   function latestTabTimestamp(tabId) {
     if (tabId === "backlinks") {
-      return edges.reduce((max, e) => (e.created_at && (!max || e.created_at > max) ? e.created_at : max), null);
+      // CHANGED — Overlap/Live-Viz guide, "replace entirely" decision:
+      // this used to reduce over `edges` (the primary structural graph's
+      // created_at timestamps) to drive the unread-dot. BacklinksView no
+      // longer renders that graph -- it shows the topic tree instead --
+      // so that timestamp source is now decoupled from what's on screen.
+      // eo/secondary_data.py's topics/connections entries carry no
+      // created_at of their own (see that module's schema), so there's
+      // no equivalent real timestamp to substitute without a schema
+      // addition. Returning null (no dot) rather than silently keeping
+      // the stale `edges`-based signal, which would tell the user
+      // "something changed" pointing at a graph they can no longer see.
+      // Flagging rather than assuming a schema change belongs in this
+      // patch.
+      return null;
     }
     const panelKeys = TAB_PANEL_KEYS[tabId];
     if (!panelKeys) return null;
@@ -1743,13 +1760,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   async function loadNotebookData(wsId) {
     setLoadingNodes(true);
     setLoadingClusters(true);
-    const [nodeList, edgeList, candidateList, clusterCandidateList, summaries, panels] = await Promise.all([
+    const [nodeList, edgeList, candidateList, clusterCandidateList, summaries, panels, topicsGraph] = await Promise.all([
       fetchWorkspaceNodes(wsId),
       fetchGraphEdges(wsId),
       fetchNoteCandidates(wsId),
       fetchClusterCandidates(wsId),
       fetchNodeSummaries(wsId),
       fetchPanelContentList(wsId), // NEW — §8: powers the unread-dot indicator
+      fetchTopicsGraph(wsId),      // NEW — Backlinks-as-topic-tree
     ]);
     // FIX — if the user has since selected a different notebook while
     // this fetch was in flight, this result is stale: drop it instead of
@@ -1762,6 +1780,8 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     setClusterCandidates(clusterCandidateList);
     setNodeSummaries(summaries || {});
     setPanelContent(panels || {});
+    setTopicNodes(topicsGraph?.nodes || []);
+    setTopicEdges(topicsGraph?.edges || []);
     setFactsRefreshSignal((s) => s + 1);
     setLoadingNodes(false);
     setLoadingClusters(false);
@@ -1780,7 +1800,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
 
   useEffect(() => {
     if (selectedId) loadNotebookData(selectedId);
-    else { setNodes([]); setEdges([]); setCandidates([]); setClusterCandidates([]); setNodeSummaries({}); setPanelContent({}); }
+    else { setNodes([]); setEdges([]); setCandidates([]); setClusterCandidates([]); setNodeSummaries({}); setPanelContent({}); setTopicNodes([]); setTopicEdges([]); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
@@ -2178,15 +2198,11 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             )}
             {subTab === "backlinks" && (
               <BacklinksView
-                workspaceId={selected.id}
-                nodes={nodes}
-                edges={edges}
-                nodeSummaries={nodeSummaries}
+                nodes={topicNodes}
+                edges={topicEdges}
+                pulsingIds={topicPulsingIds}
                 loading={loadingNodes}
-                onDetect={async () => { await detectBacklinks(selected.id); await loadNotebookData(selected.id); }}
                 onSelectNode={setPreviewNode}
-                generateNotebooks={generateNotebooks}
-                onRegenerated={() => loadNotebookData(selected.id)}
               />
             )}
             {subTab === "workflows" && (

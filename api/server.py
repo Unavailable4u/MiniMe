@@ -120,6 +120,7 @@ from agents.mind_mapper import generate_mindmap   # NEW — Notebooks integratio
 from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
 from agents.workflow_suggester import suggest_workflows   # NEW — bug audit §7: suggested workflow diagrams
 from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
+from eo.secondary_data import get_secondary_data   # NEW — Backlinks-as-topic-tree: read-only Secondary Data -> graph shape
 from agents.note_table_builder import build_table
 from agents.correction_locator import locate_correction   # NEW — Data Layer architecture §8c
 from eo import correction_candidates   # NEW — Data Layer architecture §8c: Patch Review pending store
@@ -1591,6 +1592,77 @@ def delete_graph_edge(edge_id: str):
 @app.get("/api/workspaces/{ws_id}/graph/node_summaries", dependencies=[Depends(require_auth)])
 def get_node_summaries(ws_id: str):
     return node_summaries.get_summaries(ws_id)
+
+
+# NEW — Backlinks-as-topic-tree: turns eo/secondary_data.py's
+# {topics, connections} document into the same {node_id, workspace_id,
+# node_type, title, ...} / {from_node_id, to_node_id, relation} shape
+# get_workspace_nodes()/list_edges() already hand KnowledgeGraphView.jsx,
+# so that component needs zero new data-shape handling — only a new
+# relation string (parent_of) and same_fact_as's own color, both added
+# in KnowledgeGraphView.jsx itself.
+#
+# Read-only, same posture as get_node_summaries above: Secondary Data's
+# only write path stays apply_patch() (source_manager.py's Mode A pass,
+# backlink_detector.py's reconciliation) -- this just re-projects the
+# current document, it never mutates it.
+#
+# `summary`/`instances` are tucked directly onto each node dict (not
+# nested under a separate key) so KnowledgeGraphView's existing
+# `obj.raw = n` assignment carries them through untouched to the
+# rationale panel/hover tooltip.
+@app.get("/api/workspaces/{ws_id}/topics/graph", dependencies=[Depends(require_auth)])
+def get_topics_graph(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    doc = get_secondary_data(ws_id)
+    topics = doc["topics"]
+
+    nodes = [
+        {
+            "node_id": topic_id,
+            "workspace_id": ws_id,
+            "node_type": "topic",
+            "title": topic.get("name") or topic_id,
+            "summary": topic.get("summary", ""),
+            "instances": topic.get("instances", []),
+            "content_hint": topic.get("content_hint"),
+        }
+        for topic_id, topic in topics.items()
+    ]
+
+    edges = []
+    # Synthetic parent_of edges (from_node = parent, to_node = child) so
+    # the tree structure itself renders, not just the cross-links below.
+    # Skips a topic whose recorded parent no longer resolves -- same
+    # "endpoints must exist" posture _drop_dangling_connections() already
+    # enforces inside get_secondary_data() itself.
+    for topic_id, topic in topics.items():
+        parent_id = topic.get("parent")
+        if parent_id and parent_id in topics:
+            edges.append({
+                "edge_id": f"topic-parent:{parent_id}:{topic_id}",
+                "from_node_id": f"node:{ws_id}:{parent_id}",
+                "to_node_id": f"node:{ws_id}:{topic_id}",
+                "relation": "parent_of",
+            })
+
+    # doc["connections"] is already filtered to resolvable endpoints by
+    # get_secondary_data()'s own _drop_dangling_connections() pass, so no
+    # extra existence check is needed here -- includes the four original
+    # relations plus overlapping_checker.py's same_fact_as.
+    for i, conn in enumerate(doc["connections"]):
+        edges.append({
+            "edge_id": f"topic-conn:{i}:{conn['from_topic']}:{conn['to_topic']}",
+            "from_node_id": f"node:{ws_id}:{conn['from_topic']}",
+            "to_node_id": f"node:{ws_id}:{conn['to_topic']}",
+            "relation": conn.get("relation", ""),
+        })
+
+    return {"nodes": nodes, "edges": edges}
 
 
 # --- knowledge-graph nodes (see eo/knowledge_graph.py, §0.1) -------------

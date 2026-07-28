@@ -27,6 +27,17 @@ const RELATION_COLORS = {
   cites: "#38bdf8",
   contradicts: "#ef4444",
   promoted_from: "#f59e0b",
+  // NEW — topic-tree data source (GET /api/workspaces/{ws_id}/topics/graph):
+  // agents/backlink_detector.py's four connection relations render as
+  // free-form concept edges by default (not in this table -> falls back to
+  // CONCEPT_EDGE_COLOR below); same_fact_as gets its own distinct color so
+  // an overlapping_checker.py merge visually stands apart from both an
+  // ordinary concept link and parent_of's tree scaffolding.
+  same_fact_as: "#c026d3",
+  // parent_of: the topic tree's own hierarchy edges (synthetic, not a
+  // Backlink Detector relation) -- muted/structural, same treatment as
+  // STRUCTURAL_RELATIONS' entries below rather than a "real" link color.
+  parent_of: "#64748b",
 };
 
 // NEW — Notebooks integration guide §6.6 (Phase 3): the three relation
@@ -39,7 +50,7 @@ const RELATION_COLORS = {
 // an allowlist so a brand-new concept relation phrase is never
 // mistaken for a structural edge just because this table doesn't know
 // about it yet.
-const STRUCTURAL_RELATIONS = new Set(["same_source", "clustered_with", "references"]);
+const STRUCTURAL_RELATIONS = new Set(["same_source", "clustered_with", "references", "parent_of"]);
 // Distinct, brighter than DEFAULT_COLOR and every STRUCTURAL_RELATIONS
 // color, so a concept_linker edge visually pops out of the structural
 // clutter it's meant to sit alongside rather than blend into.
@@ -92,6 +103,13 @@ function escapeHtml(s) {
  *     the human-readable rationale") instead of immediately jumping to
  *     the full-content modal.
  *
+ * `pulsingIds`: optional `Set` of node ids (full `node:{workspace_id}:
+ * {node_id}` form, matching graphNodes' own `id` below) that should
+ * render gold-highlighted -- populated by a parent subscribed to this
+ * workspace's live events (topic_added/topic_merged/connection_added)
+ * so a just-changed topic is visually obvious without a manual refresh.
+ * Additive: omitting it renders exactly as before.
+ *
  * FIX (dangling-edge crash): eo/graph_edges.py's list_edges() scopes by
  * "node_id belongs to this workspace OR the other endpoint does" -- so
  * a cross-workspace edge, or an edge left behind by a node deletion
@@ -107,7 +125,7 @@ function escapeHtml(s) {
  * reaching ForceGraphBase, regardless of which upstream cause produced
  * it.
  */
-export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSummaries }) {
+export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSummaries, pulsingIds }) {
   const [hoveredNode, setHoveredNode] = useState(null);
   // NEW — Phase 3: which node's inline rationale panel is open, only
   // ever set when `nodeSummaries` is passed (see docstring above).
@@ -266,8 +284,33 @@ export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSum
         </span>
       );
     }
+    // NEW — Backlinks-as-topic-tree: parent_of/same_fact_as only ever
+    // appear in edges built by GET /api/workspaces/{ws_id}/topics/graph
+    // (api/server.py) -- ResearchTab's plain doc graph and the
+    // structural/concept-graph modes above never produce them. Gated on
+    // actually seeing the relation in THIS render's edges (not just "is
+    // nodeSummaries passed") so a caller that reuses this component for
+    // some other future edge vocabulary doesn't inherit a legend entry
+    // for a relation it never draws.
+    const seenRelations = new Set((edges || []).map((e) => e.relation));
+    if (seenRelations.has("parent_of")) {
+      items.push(
+        <span key="__parent_of_legend" className="flex items-center gap-1">
+          <span className="inline-block w-3 h-0.5 rounded-full" style={{ backgroundColor: RELATION_COLORS.parent_of }} />
+          parent link
+        </span>
+      );
+    }
+    if (seenRelations.has("same_fact_as")) {
+      items.push(
+        <span key="__same_fact_as_legend" className="flex items-center gap-1">
+          <span className="inline-block w-3 h-0.5 rounded-full" style={{ backgroundColor: RELATION_COLORS.same_fact_as }} />
+          same fact as
+        </span>
+      );
+    }
     return items;
-  }, [nodes, nodeSummaries]);
+  }, [nodes, edges, nodeSummaries]);
 
   const rationaleNeighbors = rationaleNode ? (graphData.neighbors.get(rationaleNode.id) || []) : [];
 
@@ -305,7 +348,14 @@ export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSum
           return `<div style="background:#171717;border:1px solid #404040;border-radius:6px;padding:6px 8px;font-size:11px;color:#e5e5e5;max-width:320px;white-space:normal;word-break:break-word">${parts.join("")}</div>`;
         }}
         nodeCanvasObject={(node, ctx, globalScale) => {
-          const color = SECTION_COLORS[node.section] || DEFAULT_COLOR;
+          // NEW — live-event highlight: gold overrides the normal
+          // section/default color for ~1.8s after a topic_added/
+          // topic_merged/connection_added event names this node id
+          // (see pulsingIds prop doc above). Checked before the normal
+          // color lookup so it wins regardless of section.
+          const color = pulsingIds?.has(node.id)
+            ? "#facc15"
+            : (SECTION_COLORS[node.section] || DEFAULT_COLOR);
           // NEW — Phase 3 root/child sizing cue (see graphData's
           // childIds comment above): only applied in concept-graph
           // mode so the plain structural graph's node sizing is
