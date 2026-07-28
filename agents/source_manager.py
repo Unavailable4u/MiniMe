@@ -447,7 +447,7 @@ def _run_parallel_passes(chunks: list[list[tuple[str, dict]]], title: str,
 
 def _run_mode_a_topic_extraction(artifact: dict, node_ids: list[str],
                                   workspace_id: str, session_id: str = None,
-                                  key_override=None) -> list[str]:
+                                  key_override=None) -> tuple[list[str], dict]:
     """§3's Mode A pass: proposes a topic tree for the source that was
     JUST written (`node_ids`, from write_ingested_source() a moment
     earlier in process_upload()), scoped to that source alone -- see
@@ -462,15 +462,23 @@ def _run_mode_a_topic_extraction(artifact: dict, node_ids: list[str],
 
     Never raises: any failure along the way (no usable context, a bad
     or missing LLM response, every account exhausted) is caught and
-    logged, and this returns [] -- an ingestion succeeding shouldn't
-    fail, or even error-log confusingly, just because the topic
-    extraction pass on top of it couldn't run. Returns the list of new
-    topic_ids actually written to Secondary Data (may be empty even on
-    a technical "success" if the source had no extractable topics).
+    logged, and this returns ([], {}) -- an ingestion succeeding
+    shouldn't fail, or even error-log confusingly, just because the
+    topic extraction pass on top of it couldn't run. Returns a
+    (topic_ids, overlap_tags) pair: the list of new topic_ids actually
+    written to Secondary Data (may be empty even on a technical
+    "success" if the source had no extractable topics), and this
+    batch's {topic_id: {"tag", "target_topic_id"}} overlap results from
+    §1's check_batch() (empty dict on any early-out above, or for a
+    topic_id that predates this call and was never itself checked).
+    §3b/§4: the caller (process_upload()) threads overlap_tags through
+    to Backlink Detector's reconciliation pass so "merge"-tagged topics
+    short-circuit into a same_fact_as connection instead of the normal
+    reparent/connect prompt.
     """
     pairs = _zipped_sections(artifact, node_ids)
     if not pairs:
-        return []
+        return [], {}
     title = artifact.get("title", "Untitled")
 
     try:
@@ -484,10 +492,10 @@ def _run_mode_a_topic_extraction(artifact: dict, node_ids: list[str],
             )
     except Exception as exc:
         print(f"  [Source Manager] Mode A topic extraction skipped: {exc}")
-        return []
+        return [], {}
 
     if not ops:
-        return []
+        return [], {}
 
     # Overlap check, before the write. topics_for_check is built straight
     # from the "add" ops _topics_to_ops() just produced (path's last
@@ -508,7 +516,17 @@ def _run_mode_a_topic_extraction(artifact: dict, node_ids: list[str],
     # still creates its own topic node; only Backlink Detector's
     # reconciliation pass (a later patch) reads the tag to also link it
     # back with a same_fact_as connection.
+    #
+    # §6a: also record, per original op, which live event it becomes
+    # once the write actually lands -- "topic_added" for a real new
+    # topic node (tag "new" or "merge", both still write /topics/<id>),
+    # "topic_merged" for a "duplicate" fold (no topic node of its own,
+    # just an instances-append on the target). Built alongside
+    # filtered_ops from the same loop/same tag_info rather than a
+    # second pass over `ops`, so the two can never disagree about which
+    # op became which event.
     filtered_ops = []
+    pending_events = []
     for op in ops:
         tid = op["path"].rsplit("/", 1)[-1]
         tag_info = overlap_tags.get(tid, {"tag": "new"})
@@ -522,16 +540,42 @@ def _run_mode_a_topic_extraction(artifact: dict, node_ids: list[str],
                     "confidence": 1.0,
                 },
             })
+            pending_events.append(("topic_merged", {
+                "topic_id": tid,
+                "target_topic_id": tag_info["target_topic_id"],
+                "tag": tag_info["tag"],
+            }))
         else:
             filtered_ops.append(op)
+            pending_events.append(("topic_added", {
+                "topic_id": tid,
+                "name": op["value"]["name"],
+                "parent": op["value"].get("parent"),
+            }))
     ops = filtered_ops
 
     try:
         apply_patch(workspace_id, ops)
     except ValueError as exc:
         print(f"  [Source Manager] Mode A Secondary Data write failed: {exc}")
-        return []
-    return topic_ids
+        return [], {}
+
+    # §6a: fire once the write actually succeeded -- an event for an op
+    # that never landed would be worse than no event at all. Never
+    # allowed to fail this pass -- same "a problem here shouldn't fail
+    # an otherwise-successful upload" posture every other post-write
+    # step in this module and process_upload() already takes.
+    if pending_events:
+        from eo.notify import notify  # deferred, same reasoning as
+                                        # process_upload()'s own notify
+                                        # import further down this file
+        try:
+            for kind, event_payload in pending_events:
+                notify(session_id, kind, {"workspace_id": workspace_id, **event_payload})
+        except Exception as exc:
+            print(f"  [Source Manager] topic_added/topic_merged notify skipped: {exc}")
+
+    return topic_ids, overlap_tags
 
 
 def process_upload(kind: str, payload: str, workspace_id: str,
@@ -590,7 +634,7 @@ def process_upload(kind: str, payload: str, workspace_id: str,
         artifact, workspace_id, created_by=created_by,
         section=section, session_id=session_id,
     )
-    topic_ids = _run_mode_a_topic_extraction(
+    topic_ids, overlap_tags = _run_mode_a_topic_extraction(
         artifact, node_ids, workspace_id, session_id=session_id,
         key_override=mode_a_key_override,
     )
@@ -600,7 +644,14 @@ def process_upload(kind: str, payload: str, workspace_id: str,
     # not here, so process_upload() doesn't need its own duplicate
     # guard). Never allowed to fail this call -- see
     # run_after_source_manager()'s own "never raises" docstring note.
-    run_after_source_manager(workspace_id, topic_ids, session_id=session_id)
+    #
+    # §4: overlap_tags now flows all the way through -- Backlink Detector
+    # uses it to short-circuit "merge"-tagged topics into a same_fact_as
+    # connection instead of running them through its normal LLM
+    # reparent/connect pass (see run_after_source_manager()'s own §4
+    # docstring section).
+    run_after_source_manager(workspace_id, topic_ids, session_id=session_id,
+                              overlap_tags=overlap_tags)
 
     # NEW — §10c: auto-partial-promote hook. Only attempted when Mode A
     # actually extracted topics for THIS source (an empty topic_ids means

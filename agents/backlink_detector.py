@@ -246,7 +246,8 @@ def _run_incremental_pass(new_topics: dict, existing_topics: dict, session_id: s
 
 def run_after_source_manager(workspace_id: str, topic_ids: list[str],
                               session_id: str = None,
-                              created_by: str = "system") -> list[dict]:
+                              created_by: str = "system",
+                              overlap_tags: dict = None) -> list[dict]:
     """Data Layer architecture §3a/§3b. Source Manager's
     process_upload() (agents/source_manager.py, §2c/§2d) calls this the
     moment its own Mode A topic-extraction pass finishes, so a fresh
@@ -263,6 +264,23 @@ def run_after_source_manager(workspace_id: str, topic_ids: list[str],
     topics yet (this is the first source in the workspace -- nothing
     exists yet to reconcile against). Both return [] immediately.
 
+    §4: `overlap_tags` is Source Manager's other new return value from
+    that same pass -- agents/overlapping_checker.py's per-topic
+    {"tag": "new"|"duplicate"|"merge", "target_topic_id"} results,
+    keyed by topic_id. "duplicate"-tagged topics never reach this
+    function at all (Source Manager already folded them into the
+    target topic's `instances` list and never wrote them as their own
+    Secondary Data topic, so they're never in `topic_ids` to begin
+    with). "merge"-tagged topics ARE still real topics here -- kept as
+    their own node -- but skip this function's usual reparent/connect
+    judgment call entirely: Overlapping Checker already decided they're
+    the same underlying fact as an existing topic, so this short-
+    circuits straight to a `same_fact_as` connection op instead of
+    spending an LLM call re-deciding something already decided. Every
+    other topic_id (tag "new", or no tag at all -- `overlap_tags`
+    defaults to `{}` for any caller that doesn't pass it) goes through
+    the unchanged reconciliation pass below.
+
     §3b's actual reconciliation (this function's body once past those
     guards): read the workspace's current Secondary Data
     (get_secondary_data()), split it into this call's new topics vs.
@@ -277,14 +295,20 @@ def run_after_source_manager(workspace_id: str, topic_ids: list[str],
     triggered it. A failure anywhere past the guards (a bad LLM
     response, every account exhausted, a malformed patch) is caught and
     logged, degrading to the ops found before the failure (possibly
-    none) rather than losing an otherwise-valid batch.
+    none) rather than losing an otherwise-valid batch. §4's merge-tag
+    write and the LLM reconciliation pass are now two independent write
+    phases for exactly this reason: a failure in the (LLM-backed, more
+    failure-prone) reconciliation pass shouldn't roll back a same_fact_as
+    connection that already landed.
 
     Returns the list of newly-applied ops (reparents as "replace",
-    connections as "add") -- empty if nothing needed reconciling, or if
-    the pass found nothing worth applying.
+    connections as "add", including any §4 same_fact_as ones) -- empty
+    if nothing needed reconciling, or if the pass found nothing worth
+    applying.
     """
     if not workspace_id or not topic_ids:
         return []
+    overlap_tags = overlap_tags or {}
 
     from relay.emitter import emit_event  # deferred: mirrors
                                             # source_manager.py's own
@@ -308,41 +332,128 @@ def run_after_source_manager(workspace_id: str, topic_ids: list[str],
         # scoping strategy
         existing_topics = dict(list(existing_topics.items())[:BACKLINK_MAX_EXISTING_TOPICS])
 
+    # §4: pull "merge"-tagged topics out of the normal reconciliation set.
+    # A topic only short-circuits here if its tagged target is actually
+    # one of THIS call's existing_topics (same "don't trust the id,
+    # check it against the real set" posture _parse_backlink_result()
+    # already takes with the LLM's own output below) -- anything else
+    # (no tag, tag "new", or a "merge" tag whose target didn't survive
+    # into existing_topics) falls through to the unchanged LLM pass.
+    merge_ops = []
+    reconcile_ids = []
+    for tid in new_topics:
+        tag_info = overlap_tags.get(tid)
+        target_id = tag_info.get("target_topic_id") if tag_info else None
+        if tag_info and tag_info.get("tag") == "merge" and target_id in existing_topics:
+            merge_ops.append({
+                "op": "add", "path": "/connections/-",
+                "value": {"from_topic": tid, "to_topic": target_id,
+                          "relation": "same_fact_as"},
+            })
+        else:
+            reconcile_ids.append(tid)
+
+    # Same "already linked, don't duplicate" de-dup _build_ops() applies
+    # to the LLM pass's own connections below, applied here too so a
+    # retried upload can't write a second same_fact_as edge for a pair
+    # that already has one (in either direction, any relation).
+    existing_pairs = {
+        frozenset((c.get("from_topic"), c.get("to_topic"))) for c in doc["connections"]
+    }
+    merge_ops = [
+        op for op in merge_ops
+        if frozenset((op["value"]["from_topic"], op["value"]["to_topic"])) not in existing_pairs
+    ]
+
     agent_name = "backlink_detector"
     emit_event("agent_start", session_id=session_id, agent=agent_name,
                payload={"label": "Backlink Detector — reconciling new topics"})
     applied: list[dict] = []
-    try:
-        raw = _run_incremental_pass(new_topics, existing_topics, session_id=session_id)
-        reparents, connections = _parse_backlink_result(
-            raw, set(new_topics), set(existing_topics),
-        )
-        ops = _build_ops(reparents, connections, doc)
-        if ops:
-            apply_patch(workspace_id, ops)
-            applied = ops
-    except Exception as exc:
-        print(f"  [Backlink Detector] skipped for {workspace_id}: {exc}")
-        applied = []
-    finally:
-        emit_event("agent_done", session_id=session_id, agent=agent_name,
-                   payload={"summary": f"{len(applied)} connection(s)"})
-        # NEW — Data Layer architecture §9a: notify() boundary, in the
-        # same finally as agent_done above so it fires whether the
-        # pass succeeded, degraded to zero ops, or hit the caught
-        # exception -- "processing finished" is true in all three
-        # cases, even when there was nothing worth applying. §9d's
-        # chat proactive suggestions (prerequisite topics from
-        # Backlink data) reads this event's payload later; §9c's
-        # Generate-button loading state watches this same event too
-        # rather than needing its own.
-        from eo.notify import notify  # deferred, same reasoning as
-                                        # this function's own emit_event
-                                        # import just above
-        notify(session_id, "backlinks_updated", {
-            "workspace_id": workspace_id, "topic_ids": topic_ids,
-            "ops_applied": len(applied),
-        })
+
+    # Phase 1 (§4): write the merge short-circuits on their own, before
+    # the LLM pass even runs -- see this function's docstring on why
+    # this is a separate try from phase 2 below.
+    if merge_ops:
+        try:
+            apply_patch(workspace_id, merge_ops)
+            applied.extend(merge_ops)
+        except Exception as exc:
+            print(f"  [Backlink Detector] same_fact_as write failed for {workspace_id}: {exc}")
+        else:
+            # §6b: fire once the write actually succeeded -- every
+            # merge_ops entry is itself a connection ("op": "add", path
+            # "/connections/-"), so all of them get an event here, not
+            # a filtered subset the way phase 2 below needs one. Own
+            # try/except so a notify hiccup is never mistaken for the
+            # write itself having failed.
+            try:
+                from eo.notify import notify  # deferred, same reasoning
+                                                # as this function's own
+                                                # emit_event import above
+                for op in merge_ops:
+                    notify(session_id, "connection_added", {
+                        "workspace_id": workspace_id, **op["value"],
+                    })
+            except Exception as exc:
+                print(f"  [Backlink Detector] connection_added notify skipped: {exc}")
+
+    # Phase 2: the original LLM reconciliation pass, now scoped to
+    # reconcile_ids -- topics §4 already handled are excluded so the
+    # LLM never re-decides something Overlapping Checker already
+    # settled with a real embedding comparison.
+    reconcile_topics = {tid: new_topics[tid] for tid in reconcile_ids}
+    if reconcile_topics:
+        try:
+            raw = _run_incremental_pass(reconcile_topics, existing_topics, session_id=session_id)
+            reparents, connections = _parse_backlink_result(
+                raw, set(reconcile_topics), set(existing_topics),
+            )
+            ops = _build_ops(reparents, connections, doc)
+            if ops:
+                apply_patch(workspace_id, ops)
+                applied.extend(ops)
+        except Exception as exc:
+            print(f"  [Backlink Detector] skipped for {workspace_id}: {exc}")
+        else:
+            # §6b: _build_ops() mixes reparents ("replace" on
+            # /topics/<id>) and connections ("add" on /connections/-)
+            # in one list -- only the latter is a connection_added
+            # event. Own try/except, same reasoning as phase 1's.
+            connection_ops = [op for op in ops if op["op"] == "add"] if ops else []
+            if connection_ops:
+                try:
+                    from eo.notify import notify  # deferred, same
+                                                    # reasoning as this
+                                                    # function's own
+                                                    # emit_event import
+                                                    # above
+                    for op in connection_ops:
+                        notify(session_id, "connection_added", {
+                            "workspace_id": workspace_id, **op["value"],
+                        })
+                except Exception as exc:
+                    print(f"  [Backlink Detector] connection_added notify skipped: {exc}")
+
+    # §4: no longer a single try/finally -- phase 1 and phase 2 above
+    # each catch their own exception, so this now always runs after
+    # both, the same "processing finished" guarantee the old single
+    # finally block gave when there was only ever one write phase.
+    emit_event("agent_done", session_id=session_id, agent=agent_name,
+               payload={"summary": f"{len(applied)} connection(s)"})
+    # NEW — Data Layer architecture §9a: notify() boundary, fires whether
+    # either phase succeeded, degraded to zero ops, or hit a caught
+    # exception -- "processing finished" is true in all cases, even when
+    # there was nothing worth applying. §9d's chat proactive suggestions
+    # (prerequisite topics from Backlink data) reads this event's payload
+    # later; §9c's Generate-button loading state watches this same event
+    # too rather than needing its own.
+    from eo.notify import notify  # deferred, same reasoning as this
+                                    # function's own emit_event import
+                                    # just above
+    notify(session_id, "backlinks_updated", {
+        "workspace_id": workspace_id, "topic_ids": topic_ids,
+        "ops_applied": len(applied),
+    })
     return applied
 
 
