@@ -88,13 +88,49 @@ MARKDOWN_INSTRUCTION = (
     "\n\nFormat your answer in Markdown: use fenced code blocks with a "
     "language tag for any code, use tables for tabular data, use headers/"
     "bullet lists to structure longer answers, and use bold/italic "
-    "sparingly for emphasis. If the task calls for a mind map, flowchart, "
-    "process diagram, or any other visual/structural diagram, output it as "
+    "sparingly for emphasis. "
+    # BUGFIX (rendering audit, round 2): this suffix is appended after
+    # EVERY role's own brief (see run() below), including roles like
+    # quiz_writer that already spell out an exact required structure
+    # (its brief: "- [ ] <wrong option>" / "- [x] <correct option>"
+    # task-list lines). Without this sentence, "use tables for tabular
+    # data" reads as an equally-valid alternative and the model would
+    # sometimes reach for a table instead of the checkbox format the
+    # frontend's QuizRunner.jsx parser actually needs -- silently
+    # producing a quiz with zero parseable options. This line makes the
+    # precedence explicit instead of leaving two competing instructions
+    # for the model to arbitrate itself.
+    "These are general defaults for free-form answers only -- if the "
+    "role instructions above already specify an exact output structure "
+    "(a particular heading pattern, required fields, checkbox-style "
+    "options, JSON, etc.), follow that exact structure instead; do not "
+    "substitute a table or any other format for it. "
+    "If the task calls for a mind map, flowchart, process diagram, or "
+    "any other visual/structural diagram, output it as "
     "a fenced code block tagged ```mermaid using real Mermaid syntax "
     "(e.g. flowchart TD, mindmap, or graph LR) — do NOT describe a diagram "
     "as an indented text outline; write actual Mermaid syntax that can be "
-    "rendered."
+    "rendered. "
+    # BUGFIX (rendering audit, round 2): this is the single biggest cause
+    # of "couldn't render this diagram" fallbacks across Mind Map,
+    # Workflows, and any Study content that happens to include a
+    # diagram -- Mermaid's flowchart grammar treats an unquoted "(" or
+    # ")" inside a `[...]` node label as the start of a *different* node
+    # shape, not literal text, so a totally reasonable label like
+    # `A[Mechanical Input (prime mover)]` fails to parse. The fix is
+    # simply always quoting node text that contains punctuation, which
+    # is valid Mermaid syntax the model already knows -- it just wasn't
+    # being told this particular gotcha exists.
+    "Mermaid gotcha: inside a node's square-bracket label (e.g. "
+    "A[label text]), an unquoted parenthesis, colon, or other "
+    "punctuation character breaks parsing because Mermaid reads it as "
+    "the start of a different node shape. Whenever a node's label "
+    "contains punctuation like ( ) : ; or /, wrap the whole label in "
+    "double quotes, e.g. A[\"Mechanical Input (prime mover)\"] instead of "
+    "A[Mechanical Input (prime mover)]. When in doubt, quoting a plain "
+    "label is always safe too."
 )
+
 
 NEXT_TAG_INSTRUCTION = (
     "\n\nAfter your answer, on its own final line, write exactly one of:\n"
