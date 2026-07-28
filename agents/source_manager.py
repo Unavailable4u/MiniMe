@@ -489,6 +489,43 @@ def _run_mode_a_topic_extraction(artifact: dict, node_ids: list[str],
     if not ops:
         return []
 
+    # Overlap check, before the write. topics_for_check is built straight
+    # from the "add" ops _topics_to_ops() just produced (path's last
+    # segment is the topic_id, value carries name/summary) rather than
+    # re-deriving them from `pairs`.
+    from agents.overlapping_checker import check_batch
+    topics_for_check = [
+        {"topic_id": op["path"].rsplit("/", 1)[-1], "name": op["value"]["name"],
+         "summary": op["value"]["summary"]}
+        for op in ops if op["op"] == "add"
+    ]
+    overlap_tags = check_batch(workspace_id, topics_for_check,
+                                session_id=session_id, domain="notes")
+
+    # Fold "duplicate" tags into an instances-append on the EXISTING
+    # target topic instead of writing a new topic node at all. "new" and
+    # "merge" both still get their own "add" op unchanged here -- "merge"
+    # still creates its own topic node; only Backlink Detector's
+    # reconciliation pass (a later patch) reads the tag to also link it
+    # back with a same_fact_as connection.
+    filtered_ops = []
+    for op in ops:
+        tid = op["path"].rsplit("/", 1)[-1]
+        tag_info = overlap_tags.get(tid, {"tag": "new"})
+        if tag_info["tag"] == "duplicate" and tag_info.get("target_topic_id"):
+            filtered_ops.append({
+                "op": "add",
+                "path": f"/topics/{tag_info['target_topic_id']}/instances/-",
+                "value": {
+                    "source_section_ids": op["value"]["source_section_ids"],
+                    "verbatim": op["value"]["summary"],
+                    "confidence": 1.0,
+                },
+            })
+        else:
+            filtered_ops.append(op)
+    ops = filtered_ops
+
     try:
         apply_patch(workspace_id, ops)
     except ValueError as exc:
