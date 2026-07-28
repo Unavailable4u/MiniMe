@@ -63,6 +63,7 @@ import re
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.source_index import get_packet
+from utils.mermaid_lint import looks_valid_mermaid
 
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*(.*?)\s*```", re.DOTALL)
 
@@ -164,9 +165,19 @@ def generate_mindmap(workspace_id: str, source_node_ids: list[str] | None = None
     task_text = "Topic material:\n\n" + context
 
     result = _attempt(task_text)
-    if result["kind"] == "mermaid":
+    # BUGFIX (rendering audit): this retry used to fire only when the fence
+    # itself was missing (kind == "markdown"). A properly-fenced block that
+    # was still syntactically broken Mermaid sailed through untouched and
+    # only ever surfaced as MindMapView's "Couldn't render this as a
+    # diagram — try Regenerate" fallback at render time, with no server-side
+    # retry ever having been attempted. looks_valid_mermaid() is a cheap
+    # heuristic (see utils/mermaid_lint.py's own header for exactly what it
+    # can and can't catch), not a real parser, so this doesn't guarantee the
+    # retried result renders either -- it just gives the common, cheaply
+    # detectable breakage a second chance before giving up.
+    if result["kind"] == "mermaid" and looks_valid_mermaid(result["text"]):
         return result
-    return _attempt(task_text)   # NEW — bug #6 fix, part 2: one silent retry before giving up
+    return _attempt(task_text)   # one silent retry before giving up
 
 
 _ROUTE_RELATION = "prerequisite-of"

@@ -1,0 +1,393 @@
+diff --git a/agents/generic_worker.py b/agents/generic_worker.py
+index 5e8d792..9cf9c07 100644
+--- a/agents/generic_worker.py
++++ b/agents/generic_worker.py
+@@ -88,14 +88,50 @@ MARKDOWN_INSTRUCTION = (
+     "\n\nFormat your answer in Markdown: use fenced code blocks with a "
+     "language tag for any code, use tables for tabular data, use headers/"
+     "bullet lists to structure longer answers, and use bold/italic "
+-    "sparingly for emphasis. If the task calls for a mind map, flowchart, "
+-    "process diagram, or any other visual/structural diagram, output it as "
++    "sparingly for emphasis. "
++    # BUGFIX (rendering audit, round 2): this suffix is appended after
++    # EVERY role's own brief (see run() below), including roles like
++    # quiz_writer that already spell out an exact required structure
++    # (its brief: "- [ ] <wrong option>" / "- [x] <correct option>"
++    # task-list lines). Without this sentence, "use tables for tabular
++    # data" reads as an equally-valid alternative and the model would
++    # sometimes reach for a table instead of the checkbox format the
++    # frontend's QuizRunner.jsx parser actually needs -- silently
++    # producing a quiz with zero parseable options. This line makes the
++    # precedence explicit instead of leaving two competing instructions
++    # for the model to arbitrate itself.
++    "These are general defaults for free-form answers only -- if the "
++    "role instructions above already specify an exact output structure "
++    "(a particular heading pattern, required fields, checkbox-style "
++    "options, JSON, etc.), follow that exact structure instead; do not "
++    "substitute a table or any other format for it. "
++    "If the task calls for a mind map, flowchart, process diagram, or "
++    "any other visual/structural diagram, output it as "
+     "a fenced code block tagged ```mermaid using real Mermaid syntax "
+     "(e.g. flowchart TD, mindmap, or graph LR) — do NOT describe a diagram "
+     "as an indented text outline; write actual Mermaid syntax that can be "
+-    "rendered."
++    "rendered. "
++    # BUGFIX (rendering audit, round 2): this is the single biggest cause
++    # of "couldn't render this diagram" fallbacks across Mind Map,
++    # Workflows, and any Study content that happens to include a
++    # diagram -- Mermaid's flowchart grammar treats an unquoted "(" or
++    # ")" inside a `[...]` node label as the start of a *different* node
++    # shape, not literal text, so a totally reasonable label like
++    # `A[Mechanical Input (prime mover)]` fails to parse. The fix is
++    # simply always quoting node text that contains punctuation, which
++    # is valid Mermaid syntax the model already knows -- it just wasn't
++    # being told this particular gotcha exists.
++    "Mermaid gotcha: inside a node's square-bracket label (e.g. "
++    "A[label text]), an unquoted parenthesis, colon, or other "
++    "punctuation character breaks parsing because Mermaid reads it as "
++    "the start of a different node shape. Whenever a node's label "
++    "contains punctuation like ( ) : ; or /, wrap the whole label in "
++    "double quotes, e.g. A[\"Mechanical Input (prime mover)\"] instead of "
++    "A[Mechanical Input (prime mover)]. When in doubt, quoting a plain "
++    "label is always safe too."
+ )
+ 
++
+ NEXT_TAG_INSTRUCTION = (
+     "\n\nAfter your answer, on its own final line, write exactly one of:\n"
+     "NEXT: DONE                 (your part is genuinely complete)\n"
+diff --git a/agents/mind_mapper.py b/agents/mind_mapper.py
+index 9d192f2..73a2d69 100644
+--- a/agents/mind_mapper.py
++++ b/agents/mind_mapper.py
+@@ -63,6 +63,7 @@ import re
+ 
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ from eo.source_index import get_packet
++from utils.mermaid_lint import looks_valid_mermaid
+ 
+ _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*(.*?)\s*```", re.DOTALL)
+ 
+@@ -164,9 +165,19 @@ def generate_mindmap(workspace_id: str, source_node_ids: list[str] | None = None
+     task_text = "Topic material:\n\n" + context
+ 
+     result = _attempt(task_text)
+-    if result["kind"] == "mermaid":
++    # BUGFIX (rendering audit): this retry used to fire only when the fence
++    # itself was missing (kind == "markdown"). A properly-fenced block that
++    # was still syntactically broken Mermaid sailed through untouched and
++    # only ever surfaced as MindMapView's "Couldn't render this as a
++    # diagram — try Regenerate" fallback at render time, with no server-side
++    # retry ever having been attempted. looks_valid_mermaid() is a cheap
++    # heuristic (see utils/mermaid_lint.py's own header for exactly what it
++    # can and can't catch), not a real parser, so this doesn't guarantee the
++    # retried result renders either -- it just gives the common, cheaply
++    # detectable breakage a second chance before giving up.
++    if result["kind"] == "mermaid" and looks_valid_mermaid(result["text"]):
+         return result
+-    return _attempt(task_text)   # NEW — bug #6 fix, part 2: one silent retry before giving up
++    return _attempt(task_text)   # one silent retry before giving up
+ 
+ 
+ _ROUTE_RELATION = "prerequisite-of"
+diff --git a/agents/workflow_suggester.py b/agents/workflow_suggester.py
+index 90e1e2f..9fff150 100644
+--- a/agents/workflow_suggester.py
++++ b/agents/workflow_suggester.py
+@@ -74,6 +74,7 @@ import re
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ from agents.source_planner_lean import plan
+ from eo.registry import get_role_prompt, add_role_prompt
++from utils.mermaid_lint import looks_valid_mermaid
+ 
+ _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+ _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*(.*?)\s*```", re.DOTALL)
+@@ -178,6 +179,24 @@ def _parse_workflow(item: dict) -> dict | None:
+     if not mermaid or not steps:
+         return None
+ 
++    # BUGFIX (rendering audit): a real Mermaid syntax typo genuinely can't be
++    # caught by regex (see this function's own docstring above), but
++    # looks_valid_mermaid()'s cheaper heuristic checks -- empty content, no
++    # recognized diagram-type header, unbalanced brackets/quotes, a
++    # flowchart with zero edges -- catch a meaningful chunk of the common
++    # cases where the model's "mermaid" field was closer to prose than a
++    # diagram. There's no per-workflow retry loop here (one role call
++    # proposes 0-4 workflows together), so rather than dropping the whole
++    # workflow -- losing a perfectly good title/description/checklist over
++    # a diagram that was never going to render -- this keeps everything else
++    # and just omits the diagram. WorkflowCard/MermaidDiagram.jsx already
++    # render an empty diagram slot as nothing (mermaidText falsy -> no
++    # render attempted) rather than an error, so this fails silently
++    # instead of showing the "couldn't render" fallback for something that
++    # was never going to succeed anyway.
++    if not looks_valid_mermaid(mermaid):
++        mermaid = None
++
+     return {"title": title, "description": description, "steps": steps, "mermaid": mermaid}
+ 
+ 
+diff --git a/frontend/app/components/Markdown.jsx b/frontend/app/components/Markdown.jsx
+index 9ee4bb8..2753169 100644
+--- a/frontend/app/components/Markdown.jsx
++++ b/frontend/app/components/Markdown.jsx
+@@ -85,8 +85,32 @@ export default function Markdown({ children, onCitationClick }) {
+           thead: (p) => <thead className="border-b border-[var(--neutral-700)]" {...p} />,
+           th: (p) => <th className="text-left px-2 py-1.5 font-medium text-[var(--neutral-300)]" {...p} />,
+           td: (p) => <td className="px-2 py-1.5 border-t border-[var(--neutral-800-a70)] text-[var(--neutral-400)]" {...p} />,
+-          code: ({ inline, className, children, ...rest }) => {
+-            if (inline) {
++          code: ({ className, children, ...rest }) => {
++            // BUGFIX (rendering audit): react-markdown v9+ stopped passing an
++            // `inline` prop to the `code` component entirely (see the
++            // project's changelog: "inline on code — create a plugin or use
++            // pre for the block"). This repo is on react-markdown ^10.1.0, so
++            // the old `if (inline)` check here was always false -- every
++            // single inline code span (e.g. a bare `variable_name` in the
++            // middle of a sentence) was falling through to the fenced-block
++            // branch below and rendering as its own full bordered box. That's
++            // exactly the kind of "sometimes breaks mid-paragraph" look
++            // reported for the Study section, since study_guide_writer's
++            // output is expected to contain inline code/terms.
++            //
++            // There's no prop-based signal anymore, so this falls back to
++            // the heuristic react-markdown's own maintainers point people
++            // to instead (see remarkjs/react-markdown#834): a fenced block
++            // gets a `language-xxx` className from remark when a language is
++            // given; a bare inline `code` span never does. This one known
++            // edge case -- a languageless fenced block (``` with no tag)
++            // gets misread as inline the same way it did upstream -- is the
++            // same tradeoff the library's own docs accept, and it's rare
++            // enough here that every fenced block this app actually cares
++            // about (```mermaid, ```json, ```python, etc.) always specifies
++            // a language and is unaffected.
++            const isInline = !/language-(\w+)/.test(className || "");
++            if (isInline) {
+               return (
+                 <code className="bg-[var(--neutral-800)] rounded px-1 py-0.5 text-[0.85em] text-amber-300" {...rest}>
+                   {children}
+diff --git a/frontend/app/components/MermaidDiagram.jsx b/frontend/app/components/MermaidDiagram.jsx
+index 6deb70e..51dcffc 100644
+--- a/frontend/app/components/MermaidDiagram.jsx
++++ b/frontend/app/components/MermaidDiagram.jsx
+@@ -17,6 +17,36 @@ import { ZoomIn, ZoomOut, Maximize2, Download } from "lucide-react";
+ // control of what the user sees.
+ mermaid.initialize({ startOnLoad: false, theme: "dark", suppressErrorRendering: true });
+ 
++// BUGFIX (rendering audit, round 2): the single most common way
++// LLM-authored Mermaid breaks in practice -- confirmed against real
++// "Couldn't render this diagram" cases from Mind Map, Workflows, and
++// Study content (flashcards/study guide) alike -- is an unquoted
++// parenthesis inside a node's square-bracket label, e.g.
++// `A[Mechanical Input (prime mover)]`. Mermaid's flowchart grammar
++// reads that `(` as the start of a *different* node shape, not literal
++// text, so parsing fails even though the diagram is otherwise
++// well-formed. generic_worker.py's MARKDOWN_INSTRUCTION now tells every
++// role to quote labels like this up front, but that's a prompt-level
++// fix that (a) can't help content already saved before this change and
++// (b) still depends on the model actually following it every time. This
++// sanitizer is the deterministic backstop: auto-quote any `id[label]`
++// whose label isn't already quoted and contains a character (parens,
++// colon, semicolon, slash) that Mermaid would otherwise misparse.
++// Deliberately narrow in scope -- only the square-bracket rectangle
++// shape, the one every real failure above actually used -- rather than
++// trying to cover every possible Mermaid node shape, since a
++// broader/guessier rewrite risks corrupting diagrams that were already
++// rendering fine.
++const _UNQUOTED_LABEL_RE = /(\w+)\[([^\[\]\n"]+)\]/g;
++function sanitizeMermaidLabels(text) {
++  if (!text) return text;
++  return text.replace(_UNQUOTED_LABEL_RE, (match, nodeId, label) => {
++    if (!/[():;/]/.test(label)) return match; // nothing risky in this label, leave as-is
++    const safeLabel = label.trim().replace(/"/g, "'"); // no embedded quotes inside a quoted label
++    return `${nodeId}["${safeLabel}"]`;
++  });
++}
++
+ // §4.7 — mind-map nodes only get the "click me" affordance when a
+ // handler is actually wired up (e.g. the Notebooks tab's mind map), so
+ // every OTHER caller of this component (structure-plan views, ordinary
+@@ -83,6 +113,18 @@ export default function MermaidDiagram({
+ }) {
+   const ref = useRef(null);
+   const [failed, setFailed] = useState(false);
++  // BUGFIX (rendering audit): callers like MindMapView pass onNodeClick as a
++  // brand-new inline arrow function on every render (`onNodeClick={(label) =>
++  // onOpenSubChat(...)}`). That used to sit directly in the main effect's
++  // dependency array below, so mermaid.render() re-ran on *every* re-render
++  // of the parent -- not just when mermaidText actually changed -- causing
++  // visible flicker and giving an already-known-flaky LLM-authored diagram
++  // extra, unnecessary chances to hit its transient render-failure path.
++  // Stashing the latest handler in a ref and reading `onNodeClickRef.current`
++  // inside the effect keeps the click handler always current without making
++  // it a re-render trigger.
++  const onNodeClickRef = useRef(onNodeClick);
++  useEffect(() => { onNodeClickRef.current = onNodeClick; }, [onNodeClick]);
+   const [zoom, setZoom] = useState(1);
+   const [baseSize, setBaseSize] = useState(null); // { w, h } natural (unzoomed) pixel size, read from the rendered SVG's viewBox
+   const checklistMode = !!completedSteps;
+@@ -104,7 +146,7 @@ export default function MermaidDiagram({
+     setFailed(false);
+     if (ref.current && mermaidText) {
+       const renderId = `mermaid-diagram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+-      mermaid.render(renderId, mermaidText)
++      mermaid.render(renderId, sanitizeMermaidLabels(mermaidText))
+         .then(({ svg }) => {
+           if (!cancelled && ref.current) {
+             ref.current.innerHTML = svg;
+@@ -142,7 +184,7 @@ export default function MermaidDiagram({
+                 el.style.cursor = "pointer";
+                 el.addEventListener("click", () => onToggleStep?.(id));
+               });
+-            } else if (onNodeClick) {
++            } else if (onNodeClickRef.current) {
+               // §4.7 — sub-chat mode: Mermaid gives every node group a
+               // `.node` class regardless of diagram type
+               // (mindmap/flowchart/graph), so this one delegated
+@@ -157,7 +199,7 @@ export default function MermaidDiagram({
+                 el.style.cursor = "pointer";
+                 el.addEventListener("click", () => {
+                   const label = el.querySelector("text, .nodeLabel")?.textContent?.trim() || el.textContent?.trim();
+-                  if (label) onNodeClick(label);
++                  if (label) onNodeClickRef.current?.(label);
+                 });
+               });
+             }
+@@ -174,8 +216,8 @@ export default function MermaidDiagram({
+         });
+     }
+     return () => { cancelled = true; };
+-    // eslint-disable-next-line react-hooks/exhaustive-deps -- checklistMode/stepTypes/onToggleStep intentionally excluded: they don't change the *rendered* SVG, only the second effect below (re-running mermaid.render() on every checkbox click would re-layout the whole diagram and flicker).
+-  }, [mermaidText, onNodeClick]);
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- checklistMode/stepTypes/onToggleStep intentionally excluded: they don't change the *rendered* SVG, only the second effect below (re-running mermaid.render() on every checkbox click would re-layout the whole diagram and flicker). onNodeClick is read via onNodeClickRef (see BUGFIX above) specifically so it does NOT belong here either -- a fresh inline-function identity from the caller shouldn't re-trigger mermaid.render().
++  }, [mermaidText]);
+ 
+   // §7 follow-up — a SECOND effect, keyed on completedSteps/currentStepId
+   // rather than mermaidText, so toggling one step's visual state never
+diff --git a/utils/mermaid_lint.py b/utils/mermaid_lint.py
+new file mode 100644
+index 0000000..1681f0b
+--- /dev/null
++++ b/utils/mermaid_lint.py
+@@ -0,0 +1,121 @@
++"""
++utils/mermaid_lint.py — rendering audit fix.
++
++agents/mind_mapper.py and agents/workflow_suggester.py both extract a
++```mermaid fenced block from an LLM's answer with nothing stronger than
++"does the fence exist" (see each file's own _MERMAID_BLOCK_RE). Neither
++module validates what's actually *inside* the fence, and both say so
++explicitly in their docstrings/comments -- a real Mermaid syntax error
++"isn't something regex validation can catch anyway." That's true for a
++full grammar-level check (this repo has no Mermaid parser available on
++the Python side, and standing one up via a Node subprocess for a
++best-effort lint is a lot of moving parts for what's ultimately a
++best-effort check), but it understates what a *heuristic* check can
++still catch cheaply: empty content, a missing/unrecognized diagram-type
++header, unbalanced brackets/quotes, and a flowchart/graph with no edges
++at all are all common, cheap-to-detect ways an LLM's Mermaid answer
++comes back broken -- and they're exactly the kind of thing that was
++previously sailing straight through to MermaidDiagram.jsx, which would
++then hit mermaid.render()'s reject path and show the user a "couldn't
++render this diagram" fallback with no server-side retry ever having been
++attempted.
++
++This is intentionally NOT a full parser. It can have false negatives
++(a diagram that passes here can still fail to render -- e.g. a typo'd
++node shape or an unknown arrow variant) and, much more rarely, false
++positives are avoided by keeping every check conservative (only reject
++things that are unambiguously wrong, never "looks unusual"). The goal is
++just to catch the common, cheap cases before they're saved, so a retry
++has a chance to produce something better instead of the fallback UI
++being the first time anyone finds out the diagram is broken.
++"""
++import re
++
++# Recognized top-of-diagram declarations. Mermaid is case-sensitive here
++# (e.g. "flowchart", not "Flowchart"), and a leading %%{init: ...}%%
++# directive or comment/blank lines are allowed before it.
++_DIAGRAM_TYPE_RE = re.compile(
++    r"^(flowchart|graph|mindmap|sequenceDiagram|classDiagram|stateDiagram(-v2)?|"
++    r"erDiagram|journey|gantt|pie|gitGraph|quadrantChart|timeline|requirementDiagram)\b"
++)
++
++# Diagram types whose whole point is connecting nodes with edges -- a
++# "flowchart" or "graph" with zero arrows is almost never a real answer,
++# just prose that happened to get wrapped in a fence.
++_EDGE_REQUIRED_TYPES = {"flowchart", "graph"}
++_EDGE_TOKEN_RE = re.compile(r"--[->.]|===|-\.-")
++
++_BRACKET_PAIRS = {"[": "]", "(": ")", "{": "}"}
++
++
++def _strip_leading_directives(text: str) -> str:
++    """Drops %%{init: ...}%% directives and %% comment lines, and blank
++    lines, so the diagram-type check looks at the first real content
++    line -- same allowance Mermaid itself makes."""
++    lines = text.splitlines()
++    i = 0
++    while i < len(lines):
++        line = lines[i].strip()
++        if not line or line.startswith("%%"):
++            i += 1
++            continue
++        break
++    return "\n".join(lines[i:])
++
++
++def _brackets_balanced(text: str) -> bool:
++    """Conservative bracket/quote balance check. Ignores brackets inside
++    quoted labels (a label like ']' or '(' inside "..." is legal Mermaid
++    and shouldn't trip this), and just checks each bracket type's count
++    matches outside of quotes -- not full nesting order, since Mermaid's
++    own grammar allows constructs (e.g. subgraph blocks) this module has
++    no need to fully model just to catch "the model dropped a closing
++    bracket."
++    """
++    in_quotes = False
++    counts = {ch: 0 for pair in _BRACKET_PAIRS.items() for ch in pair}
++    i = 0
++    while i < len(text):
++        ch = text[i]
++        if ch == '"':
++            in_quotes = not in_quotes
++        elif not in_quotes and ch in counts:
++            counts[ch] += 1
++        i += 1
++    if in_quotes:
++        return False  # odd number of quotes -- an unterminated label
++    for open_ch, close_ch in _BRACKET_PAIRS.items():
++        if counts[open_ch] != counts[close_ch]:
++            return False
++    return True
++
++
++def looks_valid_mermaid(text: str) -> bool:
++    """Best-effort, deliberately conservative check that `text` (the
++    bare Mermaid source, fence already stripped) is plausibly valid --
++    NOT a substitute for mermaid.render() actually succeeding client
++    side, just a cheap enough filter to make a server-side retry worth
++    attempting. Returns False for things that are unambiguously broken;
++    when in doubt, returns True (a diagram this function can't confidently
++    call broken is still handed to the frontend, same as before -- this
++    only tightens the obvious cases, it doesn't add new failure modes).
++    """
++    stripped = (text or "").strip()
++    if not stripped:
++        return False
++    if "```" in stripped:
++        return False  # a leftover fence means the extraction regex grabbed something malformed
++
++    body = _strip_leading_directives(stripped)
++    match = _DIAGRAM_TYPE_RE.match(body)
++    if not match:
++        return False
++
++    if not _brackets_balanced(stripped):
++        return False
++
++    diagram_type = match.group(1)
++    if diagram_type in _EDGE_REQUIRED_TYPES and not _EDGE_TOKEN_RE.search(stripped):
++        return False
++
++    return True

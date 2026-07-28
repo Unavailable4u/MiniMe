@@ -85,8 +85,32 @@ export default function Markdown({ children, onCitationClick }) {
           thead: (p) => <thead className="border-b border-[var(--neutral-700)]" {...p} />,
           th: (p) => <th className="text-left px-2 py-1.5 font-medium text-[var(--neutral-300)]" {...p} />,
           td: (p) => <td className="px-2 py-1.5 border-t border-[var(--neutral-800-a70)] text-[var(--neutral-400)]" {...p} />,
-          code: ({ inline, className, children, ...rest }) => {
-            if (inline) {
+          code: ({ className, children, ...rest }) => {
+            // BUGFIX (rendering audit): react-markdown v9+ stopped passing an
+            // `inline` prop to the `code` component entirely (see the
+            // project's changelog: "inline on code — create a plugin or use
+            // pre for the block"). This repo is on react-markdown ^10.1.0, so
+            // the old `if (inline)` check here was always false -- every
+            // single inline code span (e.g. a bare `variable_name` in the
+            // middle of a sentence) was falling through to the fenced-block
+            // branch below and rendering as its own full bordered box. That's
+            // exactly the kind of "sometimes breaks mid-paragraph" look
+            // reported for the Study section, since study_guide_writer's
+            // output is expected to contain inline code/terms.
+            //
+            // There's no prop-based signal anymore, so this falls back to
+            // the heuristic react-markdown's own maintainers point people
+            // to instead (see remarkjs/react-markdown#834): a fenced block
+            // gets a `language-xxx` className from remark when a language is
+            // given; a bare inline `code` span never does. This one known
+            // edge case -- a languageless fenced block (``` with no tag)
+            // gets misread as inline the same way it did upstream -- is the
+            // same tradeoff the library's own docs accept, and it's rare
+            // enough here that every fenced block this app actually cares
+            // about (```mermaid, ```json, ```python, etc.) always specifies
+            // a language and is unaffected.
+            const isInline = !/language-(\w+)/.test(className || "");
+            if (isInline) {
               return (
                 <code className="bg-[var(--neutral-800)] rounded px-1 py-0.5 text-[0.85em] text-amber-300" {...rest}>
                   {children}

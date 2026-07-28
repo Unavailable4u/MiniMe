@@ -83,6 +83,18 @@ export default function MermaidDiagram({
 }) {
   const ref = useRef(null);
   const [failed, setFailed] = useState(false);
+  // BUGFIX (rendering audit): callers like MindMapView pass onNodeClick as a
+  // brand-new inline arrow function on every render (`onNodeClick={(label) =>
+  // onOpenSubChat(...)}`). That used to sit directly in the main effect's
+  // dependency array below, so mermaid.render() re-ran on *every* re-render
+  // of the parent -- not just when mermaidText actually changed -- causing
+  // visible flicker and giving an already-known-flaky LLM-authored diagram
+  // extra, unnecessary chances to hit its transient render-failure path.
+  // Stashing the latest handler in a ref and reading `onNodeClickRef.current`
+  // inside the effect keeps the click handler always current without making
+  // it a re-render trigger.
+  const onNodeClickRef = useRef(onNodeClick);
+  useEffect(() => { onNodeClickRef.current = onNodeClick; }, [onNodeClick]);
   const [zoom, setZoom] = useState(1);
   const [baseSize, setBaseSize] = useState(null); // { w, h } natural (unzoomed) pixel size, read from the rendered SVG's viewBox
   const checklistMode = !!completedSteps;
@@ -142,7 +154,7 @@ export default function MermaidDiagram({
                 el.style.cursor = "pointer";
                 el.addEventListener("click", () => onToggleStep?.(id));
               });
-            } else if (onNodeClick) {
+            } else if (onNodeClickRef.current) {
               // §4.7 — sub-chat mode: Mermaid gives every node group a
               // `.node` class regardless of diagram type
               // (mindmap/flowchart/graph), so this one delegated
@@ -157,7 +169,7 @@ export default function MermaidDiagram({
                 el.style.cursor = "pointer";
                 el.addEventListener("click", () => {
                   const label = el.querySelector("text, .nodeLabel")?.textContent?.trim() || el.textContent?.trim();
-                  if (label) onNodeClick(label);
+                  if (label) onNodeClickRef.current?.(label);
                 });
               });
             }
@@ -174,8 +186,8 @@ export default function MermaidDiagram({
         });
     }
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- checklistMode/stepTypes/onToggleStep intentionally excluded: they don't change the *rendered* SVG, only the second effect below (re-running mermaid.render() on every checkbox click would re-layout the whole diagram and flicker).
-  }, [mermaidText, onNodeClick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- checklistMode/stepTypes/onToggleStep intentionally excluded: they don't change the *rendered* SVG, only the second effect below (re-running mermaid.render() on every checkbox click would re-layout the whole diagram and flicker). onNodeClick is read via onNodeClickRef (see BUGFIX above) specifically so it does NOT belong here either -- a fresh inline-function identity from the caller shouldn't re-trigger mermaid.render().
+  }, [mermaidText]);
 
   // §7 follow-up — a SECOND effect, keyed on completedSteps/currentStepId
   // rather than mermaidText, so toggling one step's visual state never
