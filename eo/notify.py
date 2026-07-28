@@ -49,6 +49,16 @@ VALID_KINDS = {
     "backlinks_updated",   # agents/backlink_detector.py:run_after_source_manager() finished
     "workspace_promoted",  # NEW — §10d: eo/chat_workspace.py:chat_triggered_partial_promote()
                             # fired an actual promote
+    "topic_added",         # NEW — Overlap/Live-Viz guide §5: agents/source_manager.py's
+                            # Mode A pass wrote a genuinely new topic node.
+                            # payload: {topic_id, name, parent}
+    "topic_merged",        # NEW — same guide, §5: a "duplicate"-tagged topic got folded
+                            # into an existing one's `instances` instead of its own node.
+                            # payload: {topic_id, target_topic_id, tag}
+    "connection_added",    # NEW — same guide, §5: a connection op landed (Backlink
+                            # Detector's normal reparent/connect pass, or its §4
+                            # same_fact_as merge short-circuit). payload:
+                            # {from_topic, to_topic, relation}
 }
 
 
