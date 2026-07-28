@@ -232,6 +232,17 @@ def active_stages_precheck(ws_id: str, to_stage: str) -> dict:
         background trigger that shouldn't blow up over a stale or
         malformed ws_id; it should just skip the promote and move on.
 
+      - to_stage="note" is exempt from the forward-only ordering rule
+        below. "note" (Notebooks) is index 0 of _STAGE_SEQUENCE, so a
+        strict forward-only reading would make it un-reachable by
+        partial-promote for any workspace already past it — but
+        Source Manager's auto-partial-promote hook (source_manager.py's
+        AUTO_PROMOTE_TARGET_STAGE) uses exactly this stage to surface
+        Sources/backlinks for an uploaded file regardless of which
+        stage the workspace is currently active in. Every other
+        ineligibility rule (unknown stage, already active in "note")
+        still applies to it.
+
     Returns:
         {
             "eligible": bool,
@@ -262,7 +273,7 @@ def active_stages_precheck(ws_id: str, to_stage: str) -> dict:
                 "current_stage": current_stage, "active_stages": current_active}
     current_idx = _STAGE_SEQUENCE.index(current_stage)
     target_idx = _STAGE_SEQUENCE.index(to_stage)
-    if target_idx <= current_idx:
+    if to_stage != "note" and target_idx <= current_idx:
         return {"eligible": False,
                 "reason": (f"{to_stage!r} is not later than current stage {current_stage!r} "
                             f"— partial-promote is forward-only"),

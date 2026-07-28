@@ -130,12 +130,21 @@ _DEFAULT_CONTENT_HINT = "conceptual"
 # has actually extracted topics for a freshly-ingested source. Fixed
 # rather than configurable for this first pass -- "this workspace now has
 # real, extracted material" is treated as the one signal that it's worth
-# also showing up under Research, regardless of which stage it started
-# in. A workspace that's already active in "research" (or already past
-# it) is left alone: active_stages_precheck() (§10b) reports that as
-# ineligible and auto_partial_promote() no-ops on it, same as any other
-# ineligible case.
-AUTO_PROMOTE_TARGET_STAGE = "research"
+# also showing up under Notebooks (Sources + backlinks live there),
+# regardless of which stage it started in or which tab the upload came
+# from. A workspace that's already active in "note" is left alone:
+# active_stages_precheck() (§10b) reports that as ineligible and
+# auto_partial_promote() no-ops on it, same as any other ineligible
+# case -- this is also what keeps an upload made *from* the Notebooks
+# tab itself from re-triggering a promote into the tab it's already in.
+#
+# NOTE: "note" is index 0 of _STAGE_SEQUENCE, so active_stages_precheck()
+# carries a matching special case that exempts to_stage="note" from its
+# forward-only ordering rule (see that function's own docstring) --
+# without it, a workspace already past "note" (research/plan/build/...)
+# could never be found "eligible" to gain the Notebooks tab, since 0 is
+# never later than any of those stages' indices.
+AUTO_PROMOTE_TARGET_STAGE = "note"
 
 SOURCE_MANAGER_TOPIC_BRIEF = (
     "You are extracting a topic tree from part of ONE freshly-ingested "
