@@ -690,65 +690,60 @@ function WorkflowsView({ workspaceId, onOpenSubChat, fetchPanelContent, generate
 // stage_output text" pattern the Mind Map view above already uses.
 
 function StudyView({ workspaceId }) {
-  const { synthesizePodcast, buildVideoOverview, fetchPanelContent, savePanelContent } = useSession();
+  const { synthesizePodcast, buildVideoOverview, fetchPanelContent, generateNotebooks } = useSession();
   const [kind, setKind] = useState("flashcards");
   const [text, setText] = useState("");
   const [rendered, setRendered] = useState("");
-  const [quizNodeId, setQuizNodeId] = useState("");
-  // NEW — persistence for the three paste-and-Load kinds (flashcards,
-  // quiz, study_guide) via eo/panel_content.py.
-  //
-  // CHANGED — bug audit §9 trace: this used to build the panel_key by
-  // templating `study_${kind}` directly. That's correct for two of the
-  // three kinds (flashcards -> study_flashcards, quiz -> study_quiz) but
-  // wrong for the third: kind "study_guide" already has the prefix, so
-  // the template produced "study_study_guide" -- not a real panel_key
-  // (eo/panel_content.py's VALID_PANEL_KEYS only has "study_guide"), so
-  // every fetchPanelContent call for this tab hit a 400, which
-  // fetchPanelContent's own !res.ok branch silently swallows into an
-  // empty-content result -- indistinguishable from "nothing generated
-  // yet." Worse, savePanelContent doesn't check res.ok at all, so
-  // clicking Load still called setSavedAt(Date.now()) and showed
-  // "Saved" even though the PUT itself 400'd and nothing was persisted.
-  // Net effect: a Study Guide built via Regenerate (which correctly
-  // saves under plain "study_guide") was invisible on this tab, and
-  // anything pasted+Loaded here appeared to save but silently didn't.
-  // Explicit map instead of a template removes the ambiguity for good.
+  // Flashcards/Quiz/Study Guide are fully auto-generated now: Generate
+  // calls agents/study_generator.py (via api/server.py's
+  // NOTEBOOKS_GENERATE_TARGETS "study_flashcards"/"study_quiz"/
+  // "study_guide" branches, the same generateNotebooks() dispatch
+  // WorkflowsView above already uses) instead of asking the user to run
+  // a separate chat and paste the Markdown back in here. The backend
+  // already saves the result under the matching panel_content key, so
+  // there's no separate "Load & Save" step -- Generate IS the save.
   const PANEL_KEY_BY_KIND = { flashcards: "study_flashcards", quiz: "study_quiz", study_guide: "study_guide" };
   const PERSISTED_KINDS = Object.keys(PANEL_KEY_BY_KIND);
-  const [loadingText, setLoadingText] = useState(true);
-  const [savingText, setSavingText] = useState(false);
-  const [savedAt, setSavedAt] = useState(null);
-  const [saveError, setSaveError] = useState("");
+  const LABEL_BY_KIND = { flashcards: "flashcard deck", quiz: "quiz", study_guide: "study guide" };
+  const [loadingRendered, setLoadingRendered] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState("");
+  // Stable per-workspace, per-kind id so quiz-attempt progress tracking
+  // (eo/quiz_progress.py) works automatically -- it's only ever used as
+  // a local lookup key for attempt history, never validated against the
+  // knowledge graph, so a synthetic id is fine and means the person
+  // never has to type one in.
+  const quizNodeId = `panel:${workspaceId}:study_quiz`;
 
   useEffect(() => {
-    if (!PERSISTED_KINDS.includes(kind)) { setLoadingText(false); return; }
+    if (!PERSISTED_KINDS.includes(kind)) { setLoadingRendered(false); return; }
     let cancelled = false;
-    setLoadingText(true);
-    setSavedAt(null);
+    setLoadingRendered(true);
+    setGenerateError("");
     fetchPanelContent(workspaceId, PANEL_KEY_BY_KIND[kind]).then((saved) => {
       if (cancelled) return;
-      const content = saved?.content || "";
-      setText(content);
-      setRendered(content);
-      setLoadingText(false);
+      setRendered(saved?.content || "");
+      setUpdatedAt(saved?.updated_at || null);
+      setLoadingRendered(false);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, kind]);
 
-  async function handleLoad() {
-    setRendered(text);
-    if (!PERSISTED_KINDS.includes(kind)) return;
-    setSavingText(true);
-    setSaveError("");
+  async function handleGenerate() {
+    setGenerating(true);
+    setGenerateError("");
     try {
-      await savePanelContent(workspaceId, PANEL_KEY_BY_KIND[kind], text);
-      setSavedAt(Date.now());
+      const { branches } = await generateNotebooks(workspaceId, [PANEL_KEY_BY_KIND[kind]], null);
+      const branch = branches.find((b) => b.panel_key === PANEL_KEY_BY_KIND[kind]);
+      if (branch?.status === "error") throw new Error(branch.error || `Couldn't generate this ${LABEL_BY_KIND[kind]}.`);
+      setRendered(branch?.result?.content || "");
+      setUpdatedAt(branch?.result?.updated_at || null);
     } catch (err) {
-      setSaveError(String(err.message || err));
+      setGenerateError(String(err.message || err));
     } finally {
-      setSavingText(false);
+      setGenerating(false);
     }
   }
 
@@ -820,26 +815,16 @@ function StudyView({ workspaceId }) {
           </button>
         ))}
       </div>
-      {kind === "video_overview" ? (
+      {kind === "video_overview" && (
         <p className="text-xs text-[var(--neutral-500)]">
           Paste the Markdown from a <code className="text-amber-300">slide_planner</code> chat run, then build a
           narrated slideshow using audio from a podcast you've already synthesized under the same title below.
         </p>
-      ) : (
-        <p className="text-xs text-[var(--neutral-500)]">
-          Paste the Markdown from a <code className="text-amber-300">{kind === "flashcards" ? "flashcard_writer" : kind === "quiz" ? "quiz_writer" : kind === "study_guide" ? "study_guide_writer" : "podcast_scriptwriter"}</code> chat run.
-        </p>
       )}
-      {kind !== "video_overview" && loadingText && PERSISTED_KINDS.includes(kind) ? (
-        <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading saved text…</div>
-      ) : kind !== "video_overview" && (
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={5}
-          placeholder={kind === "podcast" ? "HOST A: Welcome back to the show...\nHOST B: Today we're covering..." : undefined}
-          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
-        />
+      {kind === "podcast" && (
+        <p className="text-xs text-[var(--neutral-500)]">
+          Paste the Markdown from a <code className="text-amber-300">podcast_scriptwriter</code> chat run.
+        </p>
       )}
       {kind === "video_overview" && (
         <textarea
@@ -850,13 +835,52 @@ function StudyView({ workspaceId }) {
           className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
         />
       )}
-      {kind === "quiz" && (
-        <input
-          value={quizNodeId}
-          onChange={(e) => setQuizNodeId(e.target.value)}
-          placeholder="Quiz node_id (optional — enables progress tracking)"
-          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+      {kind === "podcast" && (
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={5}
+          placeholder={"HOST A: Welcome back to the show...\nHOST B: Today we're covering..."}
+          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
         />
+      )}
+
+      {PERSISTED_KINDS.includes(kind) && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-[var(--neutral-500)]">
+              {rendered
+                ? "Generated from this notebook's sources."
+                : `No ${LABEL_BY_KIND[kind]} yet — Generate reads this notebook's sources and writes one.`}
+            </p>
+            <div className="flex items-center gap-2 shrink-0">
+              {updatedAt && !generating && (
+                <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(updatedAt)}</span>
+              )}
+              <button
+                onClick={handleGenerate}
+                disabled={generating || loadingRendered}
+                className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+              >
+                {generating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                {generating ? "Generating…" : rendered ? "Regenerate" : "Generate"}
+              </button>
+            </div>
+          </div>
+          {generateError && <p className="text-xs text-red-400">{generateError}</p>}
+
+          {loadingRendered ? (
+            <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+              <Loader2 size={12} className="animate-spin" /> Loading…
+            </div>
+          ) : rendered && (
+            <div className="rounded-lg border border-[var(--neutral-800)] p-4">
+              {kind === "flashcards" && <FlashcardFlipper markdownText={rendered} />}
+              {kind === "quiz" && <QuizRunner quizText={rendered} workspaceId={workspaceId} quizNodeId={quizNodeId} />}
+              {kind === "study_guide" && <StudyGuideViewer markdownText={rendered} />}
+            </div>
+          )}
+        </div>
       )}
 
       {kind === "podcast" ? (
@@ -935,29 +959,7 @@ function StudyView({ workspaceId }) {
             </div>
           )}
         </div>
-      ) : (
-        <>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleLoad}
-              disabled={savingText}
-              className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
-            >
-              {savingText ? "Saving…" : "Load & Save"}
-            </button>
-            {savedAt && !savingText && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
-            {saveError && !savingText && <span className="text-[11px] text-red-400">{saveError}</span>}
-          </div>
-
-          {rendered && (
-            <div className="rounded-lg border border-[var(--neutral-800)] p-4">
-              {kind === "flashcards" && <FlashcardFlipper markdownText={rendered} />}
-              {kind === "quiz" && <QuizRunner quizText={rendered} workspaceId={workspaceId} quizNodeId={quizNodeId || undefined} />}
-              {kind === "study_guide" && <StudyGuideViewer markdownText={rendered} />}
-            </div>
-          )}
-        </>
-      )}
+      ) : null}
     </div>
   );
 }

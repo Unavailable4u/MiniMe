@@ -45,7 +45,13 @@ function parseQuizForDisplay(markdown) {
   for (const raw of lines) {
     const line = raw.trimEnd();
     const h1 = /^#\s+(.*)$/.exec(line);
-    const h2 = /^##\s*(.*)$/.exec(line);
+    // (?!#) keeps this from also matching '###', '####', etc. — without
+    // it, '\s*' happily matches zero spaces so a '### Sub-heading' line
+    // gets misread as a new '##' question (capturing a stray leading
+    // '#' into the question text), silently splitting one real question
+    // into extra bogus "questions" that have no '- [ ]' options under
+    // them and so fall back to the free-text UI.
+    const h2 = /^##(?!#)\s*(.*)$/.exec(line);
     // Tolerant of "- [ ]", "* [x]", and models that drop the space
     // inside the brackets or after it — the important signal is a
     // bullet immediately followed by a checkbox-shaped bracket pair.

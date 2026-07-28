@@ -82,6 +82,11 @@ PROVIDER_DEFAULT_MODEL = {
     "cerebras": "gpt-oss-120b",
     "mistral": "mistral-large-latest",
     "github": "openai/gpt-4.1-mini",
+    # BUGFIX: was missing entirely, so _chain_step_for()'s cloudflare
+    # branch had no default to fall back on. Same model string already
+    # used for cloudflare steps elsewhere (agents/dependency_mapper.py,
+    # utils/llm_client.py's own docstring example).
+    "cloudflare": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 }
 
 MARKDOWN_INSTRUCTION = (
@@ -186,7 +191,17 @@ def _chain_step_for(agent_key: str) -> dict:
     provider = info["provider"]
     step = {"provider": provider, "model": PROVIDER_DEFAULT_MODEL.get(provider, ""), "key_env": agent_key}
     if provider == "cloudflare":
-        step = {"provider": provider, "account_id_env": info.get("key_id", agent_key),
+        # BUGFIX: this used to replace `step` with a dict that had no
+        # "model" key at all. utils/llm_client.py's generate_text() reads
+        # step["model"] unconditionally at the top of its per-step loop,
+        # before it branches on provider == "cloudflare" -- so every chain
+        # step routed to a Cloudflare account raised a bare KeyError('model')
+        # (surfaced to the user as a red "model" error in Notebooks'
+        # Mind Map / Workflows / any other generic_worker-backed panel).
+        # Keep "model" (same PROVIDER_DEFAULT_MODEL default computed above)
+        # alongside the cloudflare-specific account_id_env/token_env fields.
+        step = {"provider": provider, "model": PROVIDER_DEFAULT_MODEL.get(provider, ""),
+                 "account_id_env": info.get("key_id", agent_key),
                  "token_env": agent_key.replace("ACCOUNT_ID", "API_TOKEN")}
     return step
 
