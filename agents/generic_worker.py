@@ -82,6 +82,21 @@ PROVIDER_DEFAULT_MODEL = {
     "cerebras": "gpt-oss-120b",
     "mistral": "mistral-large-latest",
     "github": "openai/gpt-4.1-mini",
+    # PATCH 1 (Gemini/Mistral/HF rollout): flash is the sane default for any
+    # Gemini-tagged AGENT_CAPABILITIES entry that doesn't specify its own
+    # model via a hardcoded CHAIN elsewhere -- cheaper/faster than pro,
+    # capable enough for generic_worker's reasoning-role traffic. Entries
+    # that specifically want flash-lite or pro get that model explicitly
+    # via their own CHAIN step (see structure_architect.py / inspector.py
+    # patches), not through this shared default.
+    "gemini": "gemini-2.5-flash",
+    # PATCH 2: HF's router needs an explicit ":provider"/":fastest"/etc.
+    # suffix on the model id (see utils/llm_client.py's HF_ROUTER_BASE_URL
+    # comment) -- this default uses ":fastest" so it always resolves to
+    # *some* live backend rather than pinning one that might get retired.
+    # Confirmed live against HF's own docs at wiring time; re-check
+    # GET https://router.huggingface.co/v1/models if this 404s later.
+    "huggingface": "openai/gpt-oss-120b:fastest",
     # BUGFIX: was missing entirely, so _chain_step_for()'s cloudflare
     # branch had no default to fall back on. Same model string already
     # used for cloudflare steps elsewhere (agents/dependency_mapper.py,

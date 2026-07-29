@@ -76,6 +76,17 @@ QUOTA_CONFIG = {
 # free/trial tier. page.js already handles a missing daily_limit
 # gracefully. Fill in once you've confirmed the real number against your
 # account rather than guessing.
+# "gemini" deliberately has no entry either, same reasoning -- Google AI
+# Studio's free-tier RPD varies by model (flash-lite/flash/pro all differ)
+# and changes without much notice. Fill in a real number here once you've
+# confirmed it against your actual key's tier, per model if you want it
+# precise -- a single flat number across gemini-2.5-flash-lite/flash/pro
+# would misrepresent whichever model isn't the one you checked.
+# "huggingface" (chat, via the router) also has no entry -- Inference
+# Providers' free-tier credits are metered in a monthly credit pool, not a
+# daily request count, so a "rpd" style number here would be a unit
+# mismatch, not just an unverified guess. See the HF dashboard for actual
+# remaining credit if you need to track this precisely.
 
 # GitHub Models' OpenAI-compatible inference endpoint.
 # Verify this is still current if calls start failing with 404 --
@@ -87,6 +98,27 @@ GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 # can route through generate_text() instead of hand-rolling their own
 # OpenAI client, which is the only way their calls get usage-logged.
 MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+
+# Gemini's OpenAI-compatibility layer -- same trick again. Confirmed
+# current against Google's own OpenAI-compatibility docs at wiring time;
+# Google has iterated on this path before, so re-verify against
+# https://ai.google.dev/gemini-api/docs/openai if calls start 404ing.
+# Trailing slash matters -- Google's own examples include it.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# Hugging Face's Inference Providers router -- also OpenAI-SDK-compatible,
+# but unlike Gemini/Mistral/GitHub its `model` string isn't just a bare
+# model id: HF fans one id out across multiple backend providers
+# (Cerebras, Together, Fireworks, etc.), so you address a specific one
+# with "<repo_id>:<provider>" (e.g. "openai/gpt-oss-120b:cerebras"), or
+# let HF pick for you with the "<repo_id>:fastest"/":cheapest"/":auto"
+# suffix. A bare repo id with no suffix works but is under-specified --
+# always use a suffix in this codebase's CHAINs so the choice is explicit
+# and reproducible, not whatever HF's default happened to be that day.
+# GET https://router.huggingface.co/v1/models (Bearer $HUGGINGFACE_API_KEY)
+# lists what's actually live right now -- re-check there if a model:provider
+# pair below starts 404ing, HF's provider roster shifts over time.
+HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 
 _TRANSIENT_SDK_ERRORS = (
     GroqRateLimitError, GroqAPIStatusError,
@@ -243,6 +275,43 @@ def _get_mistral(key_env: str, timeout: float = None) -> OpenAI:
     cache_key = ("mistral", key_env, timeout)
     if cache_key not in _client_cache:
         kwargs = {"base_url": MISTRAL_BASE_URL, "api_key": key}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        _client_cache[cache_key] = OpenAI(**kwargs)
+    return _client_cache[cache_key]
+
+
+def _get_gemini(key_env: str, timeout: float = None) -> OpenAI:
+    """Same OpenAI-SDK-via-base_url trick as _get_mistral()/_get_github()
+    above -- Gemini's OpenAI-compatibility layer takes a normal OpenAI
+    client pointed at GEMINI_BASE_URL, so no new SDK dependency and no new
+    branch in _call_step() (it's already provider-agnostic OpenAI-shaped)."""
+    key = os.getenv(key_env)
+    if not key:
+        return None
+    cache_key = ("gemini", key_env, timeout)
+    if cache_key not in _client_cache:
+        kwargs = {"base_url": GEMINI_BASE_URL, "api_key": key}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        _client_cache[cache_key] = OpenAI(**kwargs)
+    return _client_cache[cache_key]
+
+
+def _get_huggingface(key_env: str, timeout: float = None) -> OpenAI:
+    """Same trick again, pointed at HF's Inference Providers router. Note
+    this is a genuinely different HF product surface than
+    utils/embedding.py's embed_text() (which hits HF's older
+    hf-inference/feature-extraction endpoint directly, not this router) --
+    same HUGGINGFACE_API_KEY* token works for both, since it's just a
+    Bearer credential on the account, but don't conflate the two call
+    paths when debugging a failure in one vs. the other."""
+    key = os.getenv(key_env)
+    if not key:
+        return None
+    cache_key = ("huggingface", key_env, timeout)
+    if cache_key not in _client_cache:
+        kwargs = {"base_url": HF_ROUTER_BASE_URL, "api_key": key}
         if timeout is not None:
             kwargs["timeout"] = timeout
         _client_cache[cache_key] = OpenAI(**kwargs)
@@ -621,7 +690,8 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         timeout = step.get("timeout")
         getter = {
             "groq": _get_groq, "cerebras": _get_cerebras, "github": _get_github,
-            "mistral": _get_mistral,
+            "mistral": _get_mistral, "gemini": _get_gemini,
+            "huggingface": _get_huggingface,
         }.get(provider)
         if getter is None:
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
