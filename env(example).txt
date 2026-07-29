@@ -169,7 +169,83 @@ CF_SCANNER_RESERVE_3_API_TOKEN=******************
 GROQ_RESERVE_1=******************
 GROQ_RESERVE_2=******************
 
+# =============================================================================
+# MiniMe v6 migration — Part 2 additions (Gemini-only, NVIDIA dropped)
+# Priority order per §1: GROQ_API_KEY catch-all -> structure_architect ->
+# EO_PANEL_CEREBRAS_KEY -> MISTRAL/HUGGINGFACE -> inspector.
+# Comments note *intended* destination only — actual AGENT_CAPABILITIES
+# tagging happens separately (§4), not here.
+# =============================================================================
+
+# --- Gemini (13 keys) ---
+# Get from: https://aistudio.google.com/apikey
+
+# -> GROQ_API_KEY catch-all: split across fast_reply + complex_reasoning shapes
+GEMINI_API_KEY_1=
+GEMINI_API_KEY_2=
+GEMINI_API_KEY_3=
+
+# -> structure_architect: real fallback siblings, not one more isolated account
+GEMINI_API_KEY_4=
+GEMINI_API_KEY_5=
+GEMINI_API_KEY_6=
+
+# -> EO_PANEL_CEREBRAS_KEY (panel_member_b): distinct model lineage, Gemini Pro
+GEMINI_API_KEY_7=
+
+# -> MISTRAL_API_KEY sibling (docs/writing, Gemini Flash)
+GEMINI_API_KEY_8=
+
+# -> HUGGINGFACE_API_KEY sibling (verify Gemini embeddings endpoint before relying on this)
+GEMINI_API_KEY_9=
+
+# -> inspector pool pad (Gemini Flash-Lite, fast_reply)
+GEMINI_API_KEY_10=
+GEMINI_API_KEY_11=
+
+# -> RESERVE, untagged — hold for §3 (logic_architect / performance_reviewer)
+#    Only 2 this round (was 5+5 when NVIDIA was in the mix) — don't over-commit
+#    to standing up the split with this little capacity behind it.
+GEMINI_API_KEY_12=
+GEMINI_API_KEY_13=
+
+# --- Mistral (6 new keys, existing MISTRAL_API_KEY = account 1) ---
+# -> MISTRAL_API_KEY pool: documentation_writer, final_qa, writer, editor
+MISTRAL_API_KEY_2=
+MISTRAL_API_KEY_3=
+MISTRAL_API_KEY_4=
+MISTRAL_API_KEY_5=
+# -> panel sibling: researcher / fact_checker (distinct lineage, alongside Gemini)
+MISTRAL_API_KEY_6=
+MISTRAL_API_KEY_7=
+
+# --- Hugging Face (6 new keys, existing HUGGINGFACE_API_KEY = account 1) ---
+# -> HUGGINGFACE_API_KEY pool: memory_search, duplication_checker
+HUGGINGFACE_API_KEY_2=
+HUGGINGFACE_API_KEY_3=
+HUGGINGFACE_API_KEY_4=
+HUGGINGFACE_API_KEY_5=
+# -> extraction pool patch (source_manager-shaped roles) — small fast HF models
+HUGGINGFACE_API_KEY_6=
+HUGGINGFACE_API_KEY_7=
+
 # --- Reserved for Part 4 (API auth + frontend) ---
 # API_AUTH_MODE=api_key
 # API_AUTH_SECRET=
 # ALLOWED_ORIGINS=http://localhost:3000
+
+
+# --- Postgres connection (used by the new eo/db.py I'll write next) ---
+DATABASE_URL=
+
+# --- Supabase project ---
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+# --- JWT verification (used by require_auth() rewrite) ---
+SUPABASE_JWT_SECRET=
+
+# --- existing vars, keep whatever you already had here ---
+# API_AUTH_SECRET=...        <- this one gets RETIRED once 8.2 lands, don't delete yet, just don't rely on it going forward
+# ALLOWED_ORIGINS=http://localhost:3000
+
+TAVILY_API_KEY=
