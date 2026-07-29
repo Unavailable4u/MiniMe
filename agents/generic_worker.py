@@ -89,7 +89,24 @@ PROVIDER_DEFAULT_MODEL = {
     # that specifically want flash-lite or pro get that model explicitly
     # via their own CHAIN step (see structure_architect.py / inspector.py
     # patches), not through this shared default.
-    "gemini": "gemini-2.5-flash",
+    #
+    # UPDATED post-Patch-5 field test: gemini-2.5-flash started 404'ing
+    # ("This model ... is no longer available to new users") on
+    # GEMINI_API_KEY_8, a newly-created key -- confirmed against Google's
+    # own current docs that this is a real, general restriction (multiple
+    # 2.5-tier models are now blocked for new API keys/projects), not a
+    # problem with that one key. gemini-3.6-flash is the model Google's
+    # own OpenAI-compatibility docs use as the example as of this fix,
+    # confirmed GA. Deliberately NOT using the "gemini-flash-latest"
+    # rolling alias despite the -latest precedent elsewhere in this file
+    # (Mistral) -- Gemini's own "-latest" family aliases get hot-swapped
+    # with as little as 2 weeks' notice and have themselves been
+    # deprecated outright before, which is worse for an unattended
+    # pipeline than a pinned version that fails loudly and gets fixed
+    # deliberately. If this 404s later, re-check
+    # https://ai.google.dev/gemini-api/docs/models for the current
+    # generation's stable model ID rather than reaching for an alias.
+    "gemini": "gemini-3.6-flash",
     # PATCH 2: HF's router needs an explicit ":provider"/":fastest"/etc.
     # suffix on the model id (see utils/llm_client.py's HF_ROUTER_BASE_URL
     # comment) -- this default uses ":fastest" so it always resolves to
