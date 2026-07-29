@@ -74,24 +74,85 @@ def _key_id_for(agent_key: str, provider: str) -> str:
     return info.get("key_id", agent_key)
 
 
+# Quota-reality fix, §1: cloudflare's model isn't resolvable the same way
+# as the other providers (it's CHAIN-hardcoded per agent file, not a
+# PROVIDER_DEFAULT_MODEL entry) -- this is what every cloudflare CHAIN
+# step calls except reviewer.py's outlier ("@cf/meta/llama-3.1-8b-instruct",
+# which has no QUOTA_CONFIG entry yet -- see llm_client.py's QUOTA_CONFIG
+# note on this). Used by _model_for() only as the "no call logged yet
+# today" fallback; once a real call lands, the record's own "model" field
+# (log_usage()'s new model= param) takes over.
+_CLOUDFLARE_DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+
+def _model_for(agent_key: str, provider: str) -> str | None:
+    """Resolves which model an account/agent_key actually calls, for
+    accounts with no usage record yet today (get_quota_snapshot() prefers
+    the record's own "model" field -- the real, logged model from an
+    actual call -- and only falls back to this when that's absent).
+
+    AGENT_CAPABILITIES entries don't currently carry a "model" field
+    (checked directly against eo/registry.py) -- tag-driven roles get
+    their model from PROVIDER_DEFAULT_MODEL[provider]
+    (agents/generic_worker.py), CHAIN-based roles hardcode it per step
+    and aren't resolvable from AGENT_CAPABILITIES alone (e.g.
+    performance_reviewer.py uses two different Gemini models on the same
+    key -- there's no single "the" model for that key_env without also
+    knowing which CHAIN step matched). This returns the tag-driven
+    default as the best available guess; it's deliberately not meant to
+    be exact for CHAIN-based accounts before their first real call of
+    the day.
+
+    `agents.generic_worker` is imported inside this function, not at
+    module level: that module imports eo.quota_sentinel.get_quota_snapshot
+    at its own top level, so a module-level import here would be a
+    circular import (same reasoning as _key_id_for()'s deferred
+    eo.registry import above, and eo.panel's deferred eo.registry
+    import)."""
+    if provider == "cloudflare":
+        return _CLOUDFLARE_DEFAULT_MODEL
+    from agents.generic_worker import PROVIDER_DEFAULT_MODEL
+    return PROVIDER_DEFAULT_MODEL.get(provider)
+
+
 def get_quota_snapshot() -> dict:
     """Returns {agent_key: {"used": int, "quota": int|None, "pct": float|None,
-    "cooldown_until": float|None, "cooling_down": bool}} for every account
-    in AGENT_CAPABILITIES, reading TODAY's real usage from the exact keys
-    generate_text() already writes. quota/pct are None for providers
-    QUOTA_CONFIG deliberately omits (cloudflare, mistral) — an honest "no
-    verified number" rather than a guess.
+    "unit_mismatch": bool, "cooldown_until": float|None, "cooling_down": bool}}
+    for every account in AGENT_CAPABILITIES, reading TODAY's real usage
+    from the exact keys generate_text() already writes.
+
+    Quota-reality fix, §1 -- this used to compare TOKEN usage against a
+    number documented (and used) as a REQUEST-per-day ceiling (§1a), read
+    from a flat per-provider number that couldn't represent reality
+    anyway (§1b/§1c). Now: resolve the real model this account/key_id
+    actually used today (the usage record's own "model" field when a
+    call has landed today, else _model_for()'s best-guess default),
+    look up QUOTA_CONFIG[provider][model]["rpd"], and compare against
+    `requests` -- not `tokens`. quota/pct are None where QUOTA_CONFIG has
+    no verified daily figure for that provider/model (e.g. mistral,
+    which only publishes RPS) — an honest "no verified number" rather
+    than a guess.
+
+    Cloudflare gets its own branch (reliability guide §10): its real
+    ceiling is neurons/day, not requests, and `used` (a request count) is
+    NOT the same unit as `quota` (a neuron ceiling) -- `pct` is
+    deliberately left None rather than computed from mismatched units,
+    and `unit_mismatch: True` tells the frontend to label this row as
+    "requests so far today, real cap is neurons" instead of rendering a
+    fabricated percentage. Every other provider gets `unit_mismatch:
+    False` so the frontend has one consistent field to check rather than
+    needing a provider-name special case.
 
     Fix B (reliability guide, §3 "Fix B"): also reads back
     cooldown_until:{provider}:{key_id} — the UTC timestamp
     utils/llm_client.py's generate_text() writes whenever a call to that
     account fails with a transient (429/5xx/timeout) error, parsed from
     the provider's own retry-after signal where one is available. This
-    is a SEPARATE constraint from daily token usage (`pct` above): an
-    account can be well under its 80% daily-token cutoff and still be
+    is a SEPARATE constraint from daily quota usage (`pct` above): an
+    account can be well under its 80% daily cutoff and still be
     mid-cooldown from a recent rate-limit response, or vice versa. Both
     are surfaced here so eo/panel.py's _best_match() can check them
-    independently instead of conflating "out of tokens for the day"
+    independently instead of conflating "out of quota for the day"
     with "briefly rate-limited a moment ago." Read in the SAME MGET
     round trip as the usage keys below — same "don't turn N accounts
     into N network calls" discipline get_usage_history() already uses.
@@ -111,13 +172,27 @@ def get_quota_snapshot() -> dict:
     snapshot = {}
     for agent_key, provider, key_id in agent_infos:
         record = usage_records[f"usage:{provider}:{key_id}:{today}"]
-        used = record.get("tokens", 0)
-        quota = QUOTA_CONFIG.get(provider)
-        pct = (used / quota) if quota else None
+        model = record.get("model") or _model_for(agent_key, provider)
         cooldown_until = cooldown_records.get(f"cooldown_until:{provider}:{key_id}")
         cooling_down = bool(cooldown_until and cooldown_until > now)
+
+        if provider == "cloudflare":
+            limits = QUOTA_CONFIG.get("cloudflare", {}).get(model, {})
+            neuron_quota = limits.get("neurons_rpd")
+            used_requests = record.get("requests", 0)
+            snapshot[agent_key] = {
+                "used": used_requests, "quota": neuron_quota, "pct": None,
+                "unit_mismatch": True,  # frontend: label as "requests (cap is neurons)"
+                "cooldown_until": cooldown_until, "cooling_down": cooling_down,
+            }
+            continue
+
+        limits = QUOTA_CONFIG.get(provider, {}).get(model, {})
+        quota = limits.get("rpd")  # None where not published (e.g. mistral)
+        used = record.get("requests", 0)  # FIX (§1a): requests, not tokens
+        pct = (used / quota) if quota else None
         snapshot[agent_key] = {
-            "used": used, "quota": quota, "pct": pct,
+            "used": used, "quota": quota, "pct": pct, "unit_mismatch": False,
             "cooldown_until": cooldown_until, "cooling_down": cooling_down,
         }
     return snapshot

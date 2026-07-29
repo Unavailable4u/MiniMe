@@ -1,0 +1,72 @@
+diff --git a/agents/test_writer.py b/agents/test_writer.py
+index 99a4a8d..7b178f3 100644
+--- a/agents/test_writer.py
++++ b/agents/test_writer.py
+@@ -13,7 +13,7 @@ sandbox_tester.py appends this test code after a module's code when
+ present, so a module can "pass" the sandbox run only if it doesn't error
+ out AND its own generated tests don't raise AssertionError.
+ 
+-- Model: Groq `qwen/qwen3-32b`, fallback GitHub Models `o4-mini`.
++- Model: Groq `qwen/qwen3.6-27b`, fallback GitHub Models `o4-mini`.
+ - No dedicated key split -- this is a single sequential call per cycle,
+   same low-volume tier as Idea Planner / Prompt Writer / Report Writer,
+   so it shares the default GROQ_API_KEY / GITHUB_MODELS_PAT.
+@@ -34,9 +34,13 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
+ 
+ load_dotenv()
+ 
+-# Groq qwen/qwen3-32b -> GitHub Models o4-mini, per Part 4, agent #5.
++# Quota-reality fix, §3: Groq qwen/qwen3-32b -> qwen/qwen3.6-27b.
++# qwen/qwen3-32b doesn't appear anywhere in Groq's current live
++# free-tier model table (confirmed via GET /v1/models, 2026-07-30) --
++# qwen/qwen3.6-27b is the live model in that same family. Same GitHub
++# Models fallback as before, per Part 4, agent #5.
+ CHAIN = [
+-    {"provider": "groq", "model": "qwen/qwen3-32b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "github", "model": "openai/o4-mini", "key_env": "GITHUB_MODELS_PAT"},
+ ]
+ 
+@@ -91,8 +95,11 @@ def _has_unsafe_except(code: str) -> bool:
+ 
+ def _strip_fences(text: str) -> str:
+     text = text.strip()
+-    # qwen3-32b (a reasoning model) prepends a <think>...</think> block
+-    # before its actual answer -- strip it before fence-stripping.
++    # qwen3-32b (a reasoning model) used to prepend a <think>...</think>
++    # block before its actual answer -- strip it before fence-stripping.
++    # Kept after the §3 swap to qwen/qwen3.6-27b as a defensive no-op:
++    # harmless if that model doesn't emit the tag, still correct if it
++    # does (unconfirmed either way as of this fix).
+     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+     if text.startswith("```"):
+         text = text.split("```")[1]
+diff --git a/eo/inspector.py b/eo/inspector.py
+index b1208e5..ce523fe 100644
+--- a/eo/inspector.py
++++ b/eo/inspector.py
+@@ -4,7 +4,7 @@ Runs on every incoming task. Classifies it into a path + (optionally) a
+ directed_task_type, without doing any of the actual work itself.
+ Provider choice (Gemini/Mistral/HF rollout, Patch 6 — §4b/§6 of the
+ rollout guide, revisiting the original exclusion below):
+-  - Primary:   Groq, `qwen/qwen3-32b`, via EO_INSPECTOR_GROQ_KEY_1 — a key
++  - Primary:   Groq, `qwen/qwen3.6-27b`, via EO_INSPECTOR_GROQ_KEY_1 — a key
+                from a FRESH, DEDICATED Groq account (different signup
+                than production's GROQ_API_KEY). Isolation here is
+                account-level, not just key-level: a busy adaptive-path
+@@ -63,8 +63,13 @@ VALID_DIRECTED_TASK_TYPES = {
+     "security_scan", "write_docs", "explain_code", None,
+ }
+ CHAIN = [
+-    {"provider": "groq", "model": "qwen/qwen3-32b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
+-    {"provider": "groq", "model": "qwen/qwen3-32b", "key_env": "EO_INSPECTOR_GROQ_KEY_2"},
++    # Quota-reality fix, §3: qwen/qwen3-32b -> qwen/qwen3.6-27b (the old
++    # model isn't in Groq's current live free-tier model table, confirmed
++    # 2026-07-30 -- see agents/test_writer.py's matching fix for the same
++    # swap). This chain runs on EVERY incoming task, so this was the
++    # highest-traffic of the 3 call sites using the retired model.
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2"},
+     # Gemini/Mistral/HF rollout, Patch 6 (§4b/§6): dedicated fallback-only
+     # accounts, not shared with any other agent's chain -- see module
+     # docstring for why this doesn't reopen the isolation gap the original

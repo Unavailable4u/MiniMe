@@ -56,37 +56,79 @@ from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusErro
 from memory.bus import read as bus_read, write as bus_write
 from relay.emitter import emit_event
 
-# Part 6.7 — static known daily free-tier limits, since most providers
-# don't expose remaining-quota via API. Verify these against your actual
-# account tier; they're a display estimate, not an enforced ceiling.
-#
-# "cloudflare" deliberately has no entry: Workers AI's free tier is
-# measured in "neurons," not tokens, so a token-based daily_limit would
-# be a made-up number, not a real estimate. page.js already handles a
-# missing daily_limit gracefully (shows raw token count instead of a
-# percentage bar), so leaving this out is the honest choice over
-# guessing a wrong number.
+# Quota-reality fix, §1 — replaces the old flat per-provider dict. Three
+# separate bugs that one flat number hid:
+#   1a. get_quota_snapshot() was comparing TOKEN usage against a number
+#       documented (and used below) as a REQUEST-per-day ceiling.
+#   1b. One number per provider can't represent reality -- every model
+#       has its own RPM/RPD/TPM/TPD, and this repo mixes several models
+#       per provider.
+#   1c. The old numbers (14400 for groq/cerebras) were never right for
+#       the models actually in use -- llama-3.3-70b-versatile's real RPD
+#       is 1,000, not 14,400 (that figure belongs to
+#       llama-3.1-8b-instant, which nothing here calls).
+# Per-model, per-provider now. get_quota_snapshot() resolves which model
+# a given key_id actually used today (from the usage record itself, or a
+# fallback) and looks up QUOTA_CONFIG[provider][model] -- see
+# eo/quota_sentinel.py.
 QUOTA_CONFIG = {
-    "groq": 14400,
-    "cerebras": 14400,
-    "github": 150,  # GitHub Models free tier is much lower than the LLM providers -- verify current published RPD
+    "groq": {
+        # confirmed against the account's Free Plan Limits page, 2026-07-30
+        "llama-3.3-70b-versatile": {"rpm": 30, "rpd": 1000,  "tpm": 12000, "tpd": 100000},
+        "llama-3.1-8b-instant":    {"rpm": 30, "rpd": 14400, "tpm": 6000,  "tpd": 500000},
+        "qwen/qwen3.6-27b":        {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
+        "openai/gpt-oss-120b":     {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
+        # "qwen/qwen3-32b" deliberately absent -- not in the current live
+        # model list at all (see the reality guide §3). Don't add a number
+        # for a model that may already be 404ing.
+    },
+    "cerebras": {
+        # confirmed against cloud.cerebras.ai/.../models, 2026-07-30
+        "gpt-oss-120b": {"rpm": 5, "rpd": 2400, "tpm": 30000, "tpd": 1000000},
+        "gemma-4-31b":  {"rpm": 5, "rpd": 2400, "tpm": 30000, "tpd": 1000000},
+    },
+    "gemini": {
+        # confirmed against Google AI Studio > Rate Limit page, 2026-07-30.
+        # gemini-2.5-pro / gemini-3.1-pro deliberately absent -- 0/0 on the
+        # free tier (paid-only). Never wire either into a free-tier key's
+        # chain; it will fail every time, not just on exhaustion.
+        "gemini-3.6-flash":      {"rpm": 5,  "rpd": 20,    "tpm": 250000},
+        "gemini-3.1-flash-lite": {"rpm": 15, "rpd": 500,   "tpm": 250000},
+        "gemini-3.5-flash-lite": {"rpm": 15, "rpd": 500,   "tpm": 250000},
+        "gemma-4-31b":           {"rpm": 30, "rpd": 14400, "tpm": 16000},
+        # NOTE: same model family as Cerebras' gemma-4-31b, different
+        # provider/base_url -- verify the exact model id string Gemini's
+        # OpenAI-compat layer expects before wiring it into a CHAIN.
+    },
+    "mistral": {
+        # confirmed against admin.mistral.ai > Limits, 2026-07-30. Mistral
+        # publishes RPS/TPM, not RPD -- no daily figure to put here
+        # honestly, so "rpd" is deliberately absent for both entries
+        # below; get_quota_snapshot() treats a missing "rpd" as "no
+        # verified daily number" the same way a missing provider does.
+        "mistral-large-latest":  {"rps": 0.07, "tpm": 250000},   # ~ mistral-large-2512
+        "mistral-medium-latest": {"rps": 0.83, "tpm": 25000},
+    },
+    "cloudflare": {
+        # confirmed via dash.cloudflare.com > AI > Workers AI > Usage,
+        # 2026-07-30: "Daily usage (resets at 00:00 UTC) - Neurons used
+        # today: 0/10k". Ceiling only -- unit is neurons, not
+        # requests/tokens like every other entry above, so
+        # get_quota_snapshot() has a dedicated neurons-aware branch for
+        # this provider rather than reusing the requests-based math.
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {"neurons_rpd": 10000},
+        # NOTE: reviewer.py's cloudflare step actually calls
+        # "@cf/meta/llama-3.1-8b-instruct" -- a different model with no
+        # entry here yet. Flagging, not fixing as part of this patch.
+    },
+    # "github" -- retiring/retired, see the reality guide §4. Left out of
+    # this rewrite deliberately rather than given a fresh per-model
+    # number now.
+    # "huggingface" (chat, via the router) -- still not a request-count
+    # product. It's a monthly CREDIT pool ($0.10/month free tier), so a
+    # "rpd" style number here would be a unit fabrication no matter what
+    # went in it. See the reality guide §5.
 }
-# "mistral" deliberately has no entry, same reasoning as "cloudflare" above:
-# no verified published daily request limit at hand for La Plateforme's
-# free/trial tier. page.js already handles a missing daily_limit
-# gracefully. Fill in once you've confirmed the real number against your
-# account rather than guessing.
-# "gemini" deliberately has no entry either, same reasoning -- Google AI
-# Studio's free-tier RPD varies by model (flash-lite/flash/pro all differ)
-# and changes without much notice. Fill in a real number here once you've
-# confirmed it against your actual key's tier, per model if you want it
-# precise -- a single flat number across gemini-2.5-flash-lite/flash/pro
-# would misrepresent whichever model isn't the one you checked.
-# "huggingface" (chat, via the router) also has no entry -- Inference
-# Providers' free-tier credits are metered in a monthly credit pool, not a
-# daily request count, so a "rpd" style number here would be a unit
-# mismatch, not just an unverified guess. See the HF dashboard for actual
-# remaining credit if you need to track this precisely.
 
 # GitHub Models' OpenAI-compatible inference endpoint.
 # Verify this is still current if calls start failing with 404 --
@@ -421,9 +463,20 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
 
 
 def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
-              path: str = None, agent_name: str = "Agent", domain: str = None) -> None:
+              path: str = None, agent_name: str = "Agent", domain: str = None,
+              model: str = None) -> None:
     """Public usage logger -- increments today's usage:{provider}:{key_id}:{date}
     entry in Upstash and fires a usage_update event. Never raises.
+
+    Quota-reality fix, §1: `model` (optional) is stored on the daily
+    record as `record["model"]` -- the actual model string this call
+    used, so get_quota_snapshot() can look up QUOTA_CONFIG[provider][model]
+    instead of guessing which model an account is on. Overwrites the
+    previous value on each call (a key_id can call more than one model in
+    a day -- e.g. performance_reviewer.py's two-model chain on one
+    Gemini key -- so this reflects the most recent call, not a running
+    history; see eo/quota_sentinel.py's _model_for() for the fallback
+    used before any call has landed today).
 
     Unlike the old behavior (see _log_usage below), this ALWAYS logs the
     request when called, even if `tokens` is None -- only the token count
@@ -480,6 +533,8 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
         current["requests"] = current.get("requests", 0) + 1
         if tokens is not None:
             current["tokens"] = current.get("tokens", 0) + tokens
+        if model is not None:
+            current["model"] = model
         bus_write(db_key, current)
 
         workspace_id = None
@@ -515,7 +570,21 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
                 "provider": provider,
                 "key_id": key_id,
                 "tokens_used_today": current["tokens"],
-                "daily_limit": QUOTA_CONFIG.get(provider),
+                # FIX (quota-reality, §1): QUOTA_CONFIG is now per-model, not
+                # a flat per-provider number -- QUOTA_CONFIG.get(provider)
+                # alone would return a dict here, not an int, and silently
+                # break every consumer doing arithmetic on it (see
+                # TokenUsageTab.jsx's live-session panel). Resolve via the
+                # model this call actually used; None when it isn't known
+                # or that model has no verified daily figure (e.g. mistral).
+                # NOTE: this field is still compared against TOKEN usage in
+                # TokenUsageTab.jsx's live-session panel (SessionContext.jsx/
+                # the bottom "keys" section) -- the same tokens-vs-requests
+                # unit mismatch §1a fixed for get_quota_snapshot() exists
+                # here too, just not fixed as part of this patch. Flagging
+                # for a follow-up rather than expanding this one.
+                "daily_limit": QUOTA_CONFIG.get(provider, {}).get(model, {}).get("rpd") if model else None,
+                "requests_used_today": current["requests"],
                 "tier": tier,
                 "path": path,
                 "domain": domain,
@@ -527,7 +596,7 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
 
 
 def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, agent_name: str,
-               domain: str = None) -> None:
+               domain: str = None, model: str = None) -> None:
     """Internal adapter used by generate_text()'s chat-completion call
     sites: extracts a token count out of whatever usage shape the
     provider returned (SDK object with .total_tokens, or a plain dict
@@ -537,14 +606,18 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
     .total_tokens as an attribute) or a plain dict (cloudflare, when
     present at all -- has "total_tokens" as a key), or None entirely.
     Any of these still result in the request being logged now -- only the
-    token count is best-effort."""
+    token count is best-effort.
+
+    model (quota-reality fix, §1): the model string this specific chain
+    step called -- generate_text() already has it in scope as `model` at
+    both call sites, just forwarded through here and into log_usage()."""
     tokens = None
     if usage is not None:
         tokens = getattr(usage, "total_tokens", None)
         if tokens is None and isinstance(usage, dict):
             tokens = usage.get("total_tokens")
     log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path,
-              agent_name=agent_name, domain=domain)
+              agent_name=agent_name, domain=domain, model=model)
 
 
 _MAX_CONTINUATIONS = 2  # Fix C: cap how many times one call will chase a
@@ -664,7 +737,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             try:
                 text, usage, finish_reason = _call_cloudflare_step(
                     creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
-                _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain)
+                _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
                 full_text = accumulated_text + text
                 is_last = i == len(chain) - 1
                 if (finish_reason == "length" and continuations_used < _MAX_CONTINUATIONS
@@ -704,7 +777,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         label = f"{provider}:{model}"
         try:
             text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
-            _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain)
+            _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
             full_text = accumulated_text + text
             is_last = i == len(chain) - 1
             if (finish_reason == "length" and continuations_used < _MAX_CONTINUATIONS

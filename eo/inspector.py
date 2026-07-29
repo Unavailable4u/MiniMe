@@ -4,7 +4,7 @@ Runs on every incoming task. Classifies it into a path + (optionally) a
 directed_task_type, without doing any of the actual work itself.
 Provider choice (Gemini/Mistral/HF rollout, Patch 6 — §4b/§6 of the
 rollout guide, revisiting the original exclusion below):
-  - Primary:   Groq, `qwen/qwen3-32b`, via EO_INSPECTOR_GROQ_KEY_1 — a key
+  - Primary:   Groq, `qwen/qwen3.6-27b`, via EO_INSPECTOR_GROQ_KEY_1 — a key
                from a FRESH, DEDICATED Groq account (different signup
                than production's GROQ_API_KEY). Isolation here is
                account-level, not just key-level: a busy adaptive-path
@@ -63,8 +63,13 @@ VALID_DIRECTED_TASK_TYPES = {
     "security_scan", "write_docs", "explain_code", None,
 }
 CHAIN = [
-    {"provider": "groq", "model": "qwen/qwen3-32b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
-    {"provider": "groq", "model": "qwen/qwen3-32b", "key_env": "EO_INSPECTOR_GROQ_KEY_2"},
+    # Quota-reality fix, §3: qwen/qwen3-32b -> qwen/qwen3.6-27b (the old
+    # model isn't in Groq's current live free-tier model table, confirmed
+    # 2026-07-30 -- see agents/test_writer.py's matching fix for the same
+    # swap). This chain runs on EVERY incoming task, so this was the
+    # highest-traffic of the 3 call sites using the retired model.
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2"},
     # Gemini/Mistral/HF rollout, Patch 6 (§4b/§6): dedicated fallback-only
     # accounts, not shared with any other agent's chain -- see module
     # docstring for why this doesn't reopen the isolation gap the original

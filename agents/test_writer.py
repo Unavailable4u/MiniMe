@@ -13,7 +13,7 @@ sandbox_tester.py appends this test code after a module's code when
 present, so a module can "pass" the sandbox run only if it doesn't error
 out AND its own generated tests don't raise AssertionError.
 
-- Model: Groq `qwen/qwen3-32b`, fallback GitHub Models `o4-mini`.
+- Model: Groq `qwen/qwen3.6-27b`, fallback GitHub Models `o4-mini`.
 - No dedicated key split -- this is a single sequential call per cycle,
   same low-volume tier as Idea Planner / Prompt Writer / Report Writer,
   so it shares the default GROQ_API_KEY / GITHUB_MODELS_PAT.
@@ -34,9 +34,13 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
-# Groq qwen/qwen3-32b -> GitHub Models o4-mini, per Part 4, agent #5.
+# Quota-reality fix, §3: Groq qwen/qwen3-32b -> qwen/qwen3.6-27b.
+# qwen/qwen3-32b doesn't appear anywhere in Groq's current live
+# free-tier model table (confirmed via GET /v1/models, 2026-07-30) --
+# qwen/qwen3.6-27b is the live model in that same family. Same GitHub
+# Models fallback as before, per Part 4, agent #5.
 CHAIN = [
-    {"provider": "groq", "model": "qwen/qwen3-32b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "github", "model": "openai/o4-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
@@ -91,8 +95,11 @@ def _has_unsafe_except(code: str) -> bool:
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
-    # qwen3-32b (a reasoning model) prepends a <think>...</think> block
-    # before its actual answer -- strip it before fence-stripping.
+    # qwen3-32b (a reasoning model) used to prepend a <think>...</think>
+    # block before its actual answer -- strip it before fence-stripping.
+    # Kept after the §3 swap to qwen/qwen3.6-27b as a defensive no-op:
+    # harmless if that model doesn't emit the tag, still correct if it
+    # does (unconfirmed either way as of this fix).
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = text.split("```")[1]
