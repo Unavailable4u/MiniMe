@@ -510,6 +510,17 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # as academic_search above. No key_override/expanded —
                 # single-pass generation + sandbox execution, not a pool.
                 result = fn(task_text=task_text, session_id=session_id, path=path, domain=domain)
+            elif current_name == "performance_reviewer":
+                # Patch 8 (rollout guide §3) — no task_text needed, unlike
+                # dataset_analyst/academic_search just above: this role's
+                # real input is fixed_code/submitted_code + test_results,
+                # read straight off the bus (same convention
+                # sandbox_tester.py's own run_sandbox_tester() uses), not
+                # anything seeded from the task description itself. No
+                # key_override/expanded either — single-pass generation +
+                # sandbox execution on ONE selected module, not a worker
+                # pool.
+                result = fn(session_id=session_id, path=path, domain=domain)
             elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
                 # Kept as a three-name case rather than a single
                 # "file_manager" case — dropping back to one name would

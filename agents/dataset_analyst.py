@@ -104,12 +104,26 @@ def _strip_fences(code: str) -> str:
     return code
 
 
-def _extract_json_result(stdout: str) -> dict | None:
+def _extract_json_result(stdout) -> dict | None:
     """Pulls the LAST valid JSON object out of stdout -- the system
     prompt asks for exactly one, on the last line, but takes the last
     PARSEABLE one rather than blindly trusting position, in case the
     analysis code printed anything else first despite the instruction
-    not to."""
+    not to.
+
+    Patch 8 bugfix: stdout can come back from _run_one_module() as
+    either a single string or a list of strings -- confirmed live
+    against a real E2B run (agents/performance_reviewer.py hit the exact
+    same AttributeError this normalization fixes: execution.logs.
+    stdout's actual type varies by SDK version/build, and
+    sandbox_tester.py's own _run_one_module() passes it through
+    unmodified either way). Previously this function assumed a bare
+    str and crashed with AttributeError: 'list' object has no attribute
+    'strip' the first time a real sandbox run returned the list shape."""
+    if isinstance(stdout, list):
+        stdout = "\n".join(str(line) for line in stdout)
+    if not stdout:
+        return None
     for line in reversed(stdout.strip().splitlines()):
         line = line.strip()
         if not line:

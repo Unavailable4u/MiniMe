@@ -258,6 +258,30 @@ AGENT_CAPABILITIES = {
         "provider": "huggingface", "strengths": ["structured extraction"],
         "natural_roles": ["source_planner_lean", "correction_locator", "note_table_builder"],
     },
+
+    # --- Patch 8 (rollout guide §3/§10) — implementer split, first of the
+    # 2 reserve keys env(example).txt held back untagged
+    # ("-> RESERVE, untagged — hold for §3 (logic_architect /
+    # performance_reviewer)"). logic_architect is pure reasoning (designs
+    # the approach before any code is written) with no real filesystem/
+    # sandbox action of its own, so — unlike performance_reviewer below —
+    # it belongs here as a tag, not a dedicated module: it hires through
+    # the ordinary generic_worker.run(role="logic_architect", ...) path,
+    # same as idea_planner/analyst/every other AGENT_CAPABILITIES-tagged
+    # reasoning role. No per-entry "model" override (see the Patch 3 note
+    # above this dict) -- runs as PROVIDER_DEFAULT_MODEL["gemini"]
+    # (gemini-3.6-flash), the same pinned, confirmed-GA model every other
+    # tag-driven Gemini entry in this dict already runs as post-Patch-5b.
+    # GEMINI_API_KEY_13 (the second reserve key) is deliberately NOT
+    # tagged here or anywhere else in this dict -- it's performance_
+    # reviewer's own dedicated CHAIN in agents/performance_reviewer.py,
+    # not a tag-driven account, so it must stay out of AGENT_CAPABILITIES
+    # or it would also become eligible for the whole-pool quota-ranked
+    # fallback any OTHER untagged role could land on.
+    "GEMINI_API_KEY_12": {
+        "provider": "gemini", "strengths": ["algorithm/approach design before implementation"],
+        "natural_roles": ["logic_architect"],
+    },
 }
 
 
@@ -1015,7 +1039,31 @@ ROLE_PROMPTS_SEED = {
         "the spec implies any of these, output a fenced ```json block "
         "containing {\"integrations\": []}."
     ),
-
+    # Patch 8 (rollout guide §3) — Coding domain, implementer split.
+    # Hand-written up front, same reasoning as every other seed brief in
+    # this dict. Deliberately scoped to APPROACH, not code: this role's
+    # whole reason for existing is to separate "what should this module
+    # do and how" from "write the actual code" (agents/code_writers.py),
+    # so a brief that let it drift into writing snippets would collapse
+    # the distinction Part §3 wanted.
+    "logic_architect": (
+        "You read the module spec(s) for a coding task (given as prior "
+        "context) and design the APPROACH before any code is written: "
+        "the algorithm or strategy, the key data structures, how the "
+        "pieces fit together, and the main edge cases an implementer "
+        "needs to watch for. Do NOT write actual code — no function "
+        "bodies, no syntax-specific snippets. Think in terms an "
+        "implementer in any language could follow: 'use a hash map "
+        "keyed on X for O(1) lookups', 'process the list in a single "
+        "pass, tracking a running total', 'validate the input shape "
+        "before touching the main logic', not 'def foo(x): ...'. If a "
+        "module's spec already fully implies a trivial, obvious "
+        "approach with no real design decision to make, say so briefly "
+        "rather than inventing complexity to sound thorough. Flag "
+        "clearly if two modules' specs seem to require an approach that "
+        "conflicts (e.g. one assumes data shaped a way the other "
+        "produces it differently)."
+    ),
 }
 
 
@@ -1268,6 +1316,14 @@ REAL_ACTION_ROLES = {
     # directly from a UI-button API endpoint instead of through the
     # Panel-hire/executor.py path this map feeds.
     "deploy_config_writer": "deploy_config_writer",
+    # Patch 8 (rollout guide §3) — implementer split's other new role.
+    # Unlike logic_architect above, this one needs REAL execution to do
+    # its job at all (time/memory measurements, not an LLM's guess at
+    # them) — same category as dataset_analyst: wraps
+    # agents/sandbox_tester.py's _run_one_module() for a genuinely
+    # computed result. See agents/performance_reviewer.py's own
+    # docstring.
+    "performance_reviewer": "performance_reviewer",
 }
 
 
@@ -1314,6 +1370,7 @@ from agents import (
     citation_graph_builder,  # Part 3
     content_adapter_pool,  # Part 6 §6.2
     deploy_config_writer,  # Part 7 §7.4
+    performance_reviewer,  # Patch 8 (rollout guide §3)
 )
 
 # name -> {"callable": fn, "needs_cycle_num": bool}
@@ -1406,6 +1463,9 @@ REGISTRY = {
     # Part 7 §7.4 — see REAL_ACTION_ROLES above for why this is a
     # dedicated module rather than a generic_worker role.
     "deploy_config_writer": {"callable": deploy_config_writer.run_deploy_config_writer, "needs_cycle_num": False},
+    # Patch 8 (rollout guide §3) — see REAL_ACTION_ROLES above for why
+    # this is a dedicated module rather than a generic_worker role.
+    "performance_reviewer": {"callable": performance_reviewer.run, "needs_cycle_num": False},
 }
 def resolve(agent_name: str):
     """Return the callable for `agent_name`, or raise KeyError with a

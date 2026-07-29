@@ -41,8 +41,22 @@ STRUCTURE_TEMPLATES = {
         # fenced ```json brief, same convention as "note_taker" below)
         # instead of a REAL_ACTION_ROLES module like extraction_table_builder.
         "integration_flagger",
+        # Patch 8 (rollout guide §3) — implementer split. logic_architect
+        # designs the approach BEFORE implementer writes to it (see
+        # agents/code_writers.py's own docstring for how its output
+        # actually reaches the code, not just the registry/order here).
+        "logic_architect",
         "implementer", "test_writer",
-        "sandbox_tester", "verifier", "fixer", "security_reviewer",
+        "sandbox_tester", "verifier",
+        # performance_reviewer deliberately AFTER verifier, BEFORE fixer:
+        # fixer should see both verifier's correctness flags and
+        # performance_reviewer's timing/memory flags in the same pass,
+        # not patch once and then find out about a hot loop afterward.
+        # Advisory only (see agents/performance_reviewer.py's own
+        # docstring) — fixer/verifier still catch real bugs even on a
+        # cycle where this step is skipped or its account is exhausted.
+        "performance_reviewer",
+        "fixer", "security_reviewer",
         "file_manager",
         # Part 7 §7.4 — deliberately after file_manager: it needs a real
         # on-disk file tree to inspect (see agents/deploy_config_writer.py's
