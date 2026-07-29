@@ -109,7 +109,7 @@ def _strip_fences(code: str) -> str:
 
 def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
                        session_id: str = None, path: str = None,
-                       domain: str = None) -> tuple[str, str]:
+                       domain: str = None, design_approach: str = None) -> tuple[str, str]:
     """
     Runs on one worker thread with one fixed Cerebras key. Tries each model
     in MODELS, in order, staying on this same key throughout, via
@@ -119,6 +119,12 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
     it's not unique per module when there are more than 5 modules and keys
     get reused round-robin, which is intentional: it's the same worker/key
     doing a second module, not a 6th worker appearing.
+
+    design_approach: Patch 8 (rollout guide §3) — logic_architect's own
+    stage_output, if that role ran earlier in this plan (see run()'s own
+    read of it below). Optional so every existing caller that hires
+    "implementer" WITHOUT "logic_architect" ahead of it keeps working
+    exactly as before with no design_approach field in the spec at all.
     """
     name = module_spec.get("name", "?")
     agent_name = f"code_writer_{worker_id}"
@@ -134,7 +140,18 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
         return name, code
 
     chain = [{"provider": "cerebras", "model": m, "key_env": key_env} for m in MODELS]
-    user_content = json.dumps(module_spec)
+    spec_for_prompt = dict(module_spec)
+    if design_approach:
+        # Patch 8 — folded into the SAME per-module JSON prompt payload
+        # implementer already gets (not a separate message, not the whole
+        # conversation-context prepend generic_worker roles get), so the
+        # design decision actually reaches the code being written instead
+        # of just sitting in the registry/execution-order metadata. Every
+        # module in this spec's list gets the SAME design_approach text —
+        # logic_architect designs at the task/plan level (see its own
+        # ROLE_PROMPTS_SEED brief), not a separate approach per module.
+        spec_for_prompt["design_approach"] = design_approach
+    user_content = json.dumps(spec_for_prompt)
 
     # Tier 2 == a directed refactor against a small existing app (router.py's
     # DIRECTED_TASK_MAP), same spirit as tier-1/tier-0 -- gets the simplicity
@@ -264,6 +281,17 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
     modules = specs["modules"]
     results = {}
 
+    # Patch 8 (rollout guide §3) — logic_architect is a tag-driven
+    # generic_worker role (eo/registry.py's AGENT_CAPABILITIES), so its
+    # output lands at stage_output:{session_id}:logic_architect
+    # (agents/generic_worker.py's own convention), NOT one of the legacy
+    # v5 bus keys this module's other reads use. None (default) if
+    # logic_architect wasn't hired ahead of "implementer" in this plan,
+    # or session_id itself is unset (e.g. the __main__ block below) —
+    # either way _write_one_module() below treats a missing
+    # design_approach exactly like today's behavior, unchanged.
+    design_approach = read(f"stage_output:{session_id}:logic_architect", default=None) if session_id else None
+
     worker_count = 8 if expanded else 5
     key_envs = _select_workers(worker_count, key_override)
 
@@ -272,7 +300,7 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
             executor.submit(
                 _write_one_module, module, key_envs[i % len(key_envs)],
                 (i % len(key_envs)) + 1, session_id=session_id, path=path,
-                domain=domain,
+                domain=domain, design_approach=design_approach,
             ): module
             for i, module in enumerate(modules)
         }

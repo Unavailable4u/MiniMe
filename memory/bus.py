@@ -232,4 +232,15 @@ KEYS = {
     # reads it and writes platform_content back.
     "content_targets": "content_targets",
     "platform_content": "platform_content",
+    # Patch 8 (rollout guide §3) — performance_reviewer's real-execution
+    # profiling result. Same shape family as "dataset_analysis" above:
+    # {"passed", "stdout", "stderr", "error"} straight from
+    # sandbox_tester.py's _run_one_module(), plus this module's own
+    # "parsed_result" (the JSON summary the profiling harness was told to
+    # print as its last stdout line) and "module" (which fixed_code/
+    # submitted_code entry this result is about, since -- unlike
+    # dataset_analyst, which analyzes one dataset -- this role picks ONE
+    # module per run from a dict of several; see agents/
+    # performance_reviewer.py's own docstring for the selection rule).
+    "performance_review": "performance_review",
 }
