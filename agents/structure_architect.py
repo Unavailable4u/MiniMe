@@ -70,6 +70,19 @@ load_dotenv()
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY_9", "timeout": 30},
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+    # Gemini/Mistral/HF rollout, Patch 4 (§4b): this role had exactly one
+    # real account (GROQ_API_KEY_9) plus one shared-pool fallback
+    # (GROQ_API_KEY) before this -- AGENT_CAPABILITIES tags do nothing
+    # for structure_architect (it's in REAL_ACTION_ROLES and never
+    # touches _best_match()/_select_workers(), see the rollout guide's
+    # §1 table), so the only real fix is appending steps to this CHAIN
+    # directly. gemini-3.6-flash matches PROVIDER_DEFAULT_MODEL["gemini"]
+    # -- no reason for this JSON-planning role to need pro-tier reasoning
+    # a fast/cheap model can't already do. Same timeout=30 as the two
+    # Groq steps above, same reasoning: fail fast, fall through.
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_4", "timeout": 30},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_5", "timeout": 30},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_6", "timeout": 30},
 ]
 
 FILE_MAP_KEY = KEYS.get("file_map", "file_map")

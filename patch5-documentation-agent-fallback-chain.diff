@@ -1,0 +1,26 @@
+diff --git a/agents/documentation_agent.py b/agents/documentation_agent.py
+index 999d01e..4ac9f4e 100644
+--- a/agents/documentation_agent.py
++++ b/agents/documentation_agent.py
+@@ -38,6 +38,21 @@ load_dotenv()
+ # other agent -- previously it logged nothing at all.
+ CHAIN = [
+     {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY"},
++    # Gemini/Mistral/HF rollout, Patch 5 (§4b): this agent had a single
++    # account and zero fallback -- like structure_architect.py, it's
++    # called directly with its own CHAIN and never goes through
++    # AGENT_CAPABILITIES (see the rollout guide's §1 table), so the tag
++    # in eo/registry.py's "documentation_writer" role is decorative and
++    # the only real fix is appending steps here. Gemini first (distinct
++    # provider lineage, so a Mistral-wide outage doesn't take out both
++    # the primary and first fallback at once), then a second Mistral
++    # account as the last resort. mistral-medium-latest kept for
++    # MISTRAL_API_KEY_5 to match this agent's existing model pin (see
++    # module docstring) rather than switching to the mistral-large
++    # default other roles use -- no reason to change model choice for a
++    # fallback account on the same provider doing the identical job.
++    {"provider": "gemini", "model": "gemini-2.5-flash", "key_env": "GEMINI_API_KEY_8"},
++    {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY_5"},
+ ]
+ APPS_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apps")
+ 
