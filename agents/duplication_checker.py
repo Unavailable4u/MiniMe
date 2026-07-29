@@ -36,13 +36,17 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, vector_index
-from utils.llm_client import log_usage, embed_text
+from utils.llm_client import log_usage, embed_text_with_fallback
 
 load_dotenv()
 
 ID_PREFIX = "codechunk"
 SIMILARITY_THRESHOLD = 0.90
-HF_KEY_ENV = "HUGGINGFACE_API_KEY"
+# Patch 7: was a single hardcoded HF_KEY_ENV = "HUGGINGFACE_API_KEY" here.
+# Removed in favor of embed_text_with_fallback()'s real chain
+# (utils/embedding.py's HF_EMBEDDING_KEY_ENVS) -- log_usage() below now
+# logs whichever account actually answered per module, not always the
+# same hardcoded string regardless of which one got hit.
 
 # Migration Part 26 §4a: this module used to hand-roll its own _embed(),
 # POSTing to the HF inference URL directly -- the same pattern
@@ -91,16 +95,18 @@ def run(session_id: str = None, tier=None, domain: str = None) -> dict:
             # eo/semantic_cache.py, only ever embed short text), but code
             # snippets can be much longer, so this file still truncates
             # at its own call site to preserve the old _embed()'s behavior.
-            vector = embed_text(code[:4000])
+            vector, hf_key_env = embed_text_with_fallback(code[:4000])
         except Exception as exc:
             print(f"  [Duplication Checker] embed failed for {module_name}: {exc}")
             continue
-        # embed_text() has no logging side effect of its own (same as
-        # memory_search.py's two embed_text() call sites) -- log right
-        # after the embed call succeeds, same reasoning as
-        # memory_search.py's own comment: a downstream Vector query
-        # failure shouldn't hide that the billable HF call already happened.
-        log_usage("huggingface", HF_KEY_ENV, None, session_id=session_id,
+        # embed_text_with_fallback() has no logging side effect of its own
+        # (same as embed_text() before it) -- log right after the embed
+        # call succeeds, same reasoning as memory_search.py's own comment:
+        # a downstream Vector query failure shouldn't hide that the
+        # billable HF call already happened. Logged against hf_key_env
+        # (Patch 7), not a hardcoded constant, so _6/_7 taking real
+        # fallback traffic actually shows up in the usage dashboard.
+        log_usage("huggingface", hf_key_env, None, session_id=session_id,
                    tier=tier, agent_name="Duplication Checker", domain=domain)
 
         try:

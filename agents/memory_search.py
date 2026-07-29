@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, vector_index
-from utils.llm_client import log_usage, embed_text
+from utils.llm_client import log_usage, embed_text_with_fallback
 
 load_dotenv()
 
@@ -64,14 +64,21 @@ def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None,
         f"summary: {report.get('summary', '')}"
     )
     try:
-        vector = embed_text(summary_text)
+        # Patch 7: real fallback across HUGGINGFACE_API_KEY / _6 / _7,
+        # not a single hardcoded account -- "no fallback listed in the
+        # blueprint" (this file's own module docstring) was true when
+        # there was only ever one HF account to fall back TO.
+        vector, hf_key_env = embed_text_with_fallback(summary_text)
     except Exception as exc:
         print(f"  [Memory Search] embed failed, skipping store: {exc}")
         return
     # HF feature-extraction has no chat-completion "usage" object to pull a
     # token count from, so this logs a request-only entry (tokens=None) --
     # same pattern duplication_checker.py should use for its HF calls.
-    log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
+    # Logged against hf_key_env (whichever account actually answered), not
+    # a hardcoded "HUGGINGFACE_API_KEY" -- otherwise the usage dashboard
+    # can never show the fallback accounts taking real traffic.
+    log_usage("huggingface", hf_key_env, None,
               session_id=session_id, tier=tier, agent_name="Memory Search", domain=domain)
     try:
         vector_index().upsert(
@@ -89,15 +96,16 @@ def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, ti
                       domain: str = None) -> str:
     slug = _app_slug()
     try:
-        vector = embed_text(query_text)
+        vector, hf_key_env = embed_text_with_fallback(query_text)
     except Exception as exc:
         print(f"  [Memory Search] retrieval failed, continuing with no context: {exc}")
         write(KEYS["retrieved_context"], "")
         return ""
     # Log right after the embed call itself succeeds -- a downstream
     # Vector query failure shouldn't hide the fact that the billable HF
-    # call already happened.
-    log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
+    # call already happened. Logged against hf_key_env, same reasoning as
+    # store_cycle_memory() above.
+    log_usage("huggingface", hf_key_env, None,
               session_id=session_id, tier=tier, agent_name="Memory Search", domain=domain)
     try:
         result = vector_index().query(

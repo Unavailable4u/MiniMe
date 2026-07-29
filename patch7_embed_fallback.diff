@@ -1,0 +1,220 @@
+diff --git a/agents/duplication_checker.py b/agents/duplication_checker.py
+index 89848e0..532588d 100644
+--- a/agents/duplication_checker.py
++++ b/agents/duplication_checker.py
+@@ -36,13 +36,17 @@ from dotenv import load_dotenv
+ 
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ from memory.bus import read, write, KEYS, vector_index
+-from utils.llm_client import log_usage, embed_text
++from utils.llm_client import log_usage, embed_text_with_fallback
+ 
+ load_dotenv()
+ 
+ ID_PREFIX = "codechunk"
+ SIMILARITY_THRESHOLD = 0.90
+-HF_KEY_ENV = "HUGGINGFACE_API_KEY"
++# Patch 7: was a single hardcoded HF_KEY_ENV = "HUGGINGFACE_API_KEY" here.
++# Removed in favor of embed_text_with_fallback()'s real chain
++# (utils/embedding.py's HF_EMBEDDING_KEY_ENVS) -- log_usage() below now
++# logs whichever account actually answered per module, not always the
++# same hardcoded string regardless of which one got hit.
+ 
+ # Migration Part 26 §4a: this module used to hand-roll its own _embed(),
+ # POSTing to the HF inference URL directly -- the same pattern
+@@ -91,16 +95,18 @@ def run(session_id: str = None, tier=None, domain: str = None) -> dict:
+             # eo/semantic_cache.py, only ever embed short text), but code
+             # snippets can be much longer, so this file still truncates
+             # at its own call site to preserve the old _embed()'s behavior.
+-            vector = embed_text(code[:4000])
++            vector, hf_key_env = embed_text_with_fallback(code[:4000])
+         except Exception as exc:
+             print(f"  [Duplication Checker] embed failed for {module_name}: {exc}")
+             continue
+-        # embed_text() has no logging side effect of its own (same as
+-        # memory_search.py's two embed_text() call sites) -- log right
+-        # after the embed call succeeds, same reasoning as
+-        # memory_search.py's own comment: a downstream Vector query
+-        # failure shouldn't hide that the billable HF call already happened.
+-        log_usage("huggingface", HF_KEY_ENV, None, session_id=session_id,
++        # embed_text_with_fallback() has no logging side effect of its own
++        # (same as embed_text() before it) -- log right after the embed
++        # call succeeds, same reasoning as memory_search.py's own comment:
++        # a downstream Vector query failure shouldn't hide that the
++        # billable HF call already happened. Logged against hf_key_env
++        # (Patch 7), not a hardcoded constant, so _6/_7 taking real
++        # fallback traffic actually shows up in the usage dashboard.
++        log_usage("huggingface", hf_key_env, None, session_id=session_id,
+                    tier=tier, agent_name="Duplication Checker", domain=domain)
+ 
+         try:
+diff --git a/agents/memory_search.py b/agents/memory_search.py
+index 46e39cb..9c9ccaa 100644
+--- a/agents/memory_search.py
++++ b/agents/memory_search.py
+@@ -30,7 +30,7 @@ from dotenv import load_dotenv
+ 
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ from memory.bus import read, write, KEYS, vector_index
+-from utils.llm_client import log_usage, embed_text
++from utils.llm_client import log_usage, embed_text_with_fallback
+ 
+ load_dotenv()
+ 
+@@ -64,14 +64,21 @@ def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None,
+         f"summary: {report.get('summary', '')}"
+     )
+     try:
+-        vector = embed_text(summary_text)
++        # Patch 7: real fallback across HUGGINGFACE_API_KEY / _6 / _7,
++        # not a single hardcoded account -- "no fallback listed in the
++        # blueprint" (this file's own module docstring) was true when
++        # there was only ever one HF account to fall back TO.
++        vector, hf_key_env = embed_text_with_fallback(summary_text)
+     except Exception as exc:
+         print(f"  [Memory Search] embed failed, skipping store: {exc}")
+         return
+     # HF feature-extraction has no chat-completion "usage" object to pull a
+     # token count from, so this logs a request-only entry (tokens=None) --
+     # same pattern duplication_checker.py should use for its HF calls.
+-    log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
++    # Logged against hf_key_env (whichever account actually answered), not
++    # a hardcoded "HUGGINGFACE_API_KEY" -- otherwise the usage dashboard
++    # can never show the fallback accounts taking real traffic.
++    log_usage("huggingface", hf_key_env, None,
+               session_id=session_id, tier=tier, agent_name="Memory Search", domain=domain)
+     try:
+         vector_index().upsert(
+@@ -89,15 +96,16 @@ def retrieve_context(query_text: str, top_k: int = 3, session_id: str = None, ti
+                       domain: str = None) -> str:
+     slug = _app_slug()
+     try:
+-        vector = embed_text(query_text)
++        vector, hf_key_env = embed_text_with_fallback(query_text)
+     except Exception as exc:
+         print(f"  [Memory Search] retrieval failed, continuing with no context: {exc}")
+         write(KEYS["retrieved_context"], "")
+         return ""
+     # Log right after the embed call itself succeeds -- a downstream
+     # Vector query failure shouldn't hide the fact that the billable HF
+-    # call already happened.
+-    log_usage("huggingface", "HUGGINGFACE_API_KEY", None,
++    # call already happened. Logged against hf_key_env, same reasoning as
++    # store_cycle_memory() above.
++    log_usage("huggingface", hf_key_env, None,
+               session_id=session_id, tier=tier, agent_name="Memory Search", domain=domain)
+     try:
+         result = vector_index().query(
+diff --git a/utils/embedding.py b/utils/embedding.py
+index e5766ff..6ca4b2a 100644
+--- a/utils/embedding.py
++++ b/utils/embedding.py
+@@ -26,19 +26,41 @@ import requests
+ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+ HF_FEATURE_EXTRACTION_URL = "https://router.huggingface.co/hf-inference/models"
+ 
++# Gemini/Mistral/HF rollout, Patch 7 (§4b/§5 of the rollout guide): the
++# reserve accounts held back specifically for this -- embed_text() itself
++# stays a single-account, single-attempt call (see key_env param below),
++# so its 6 OTHER callers (agents/overlapping_checker.py,
++# agents/source_quality_flagger.py, eo/knowledge_graph.py,
++# eo/semantic_cache.py, eo/routing_memory.py's own hand-rolled _embed(),
++# diagnose_mode_a.py) are completely unaffected by this patch and keep
++# today's single-account behavior. Only embed_text_with_fallback() below
++# walks this list -- and only agents/memory_search.py and
++# agents/duplication_checker.py were repointed at it (Patch 7's actual
++# scope per the guide's §4b table). Order matters: HUGGINGFACE_API_KEY
++# first since it's the existing account with prior quota history: _6/_7
++# only get hit once that one's exhausted or down.
++HF_EMBEDDING_KEY_ENVS = ["HUGGINGFACE_API_KEY", "HUGGINGFACE_API_KEY_6", "HUGGINGFACE_API_KEY_7"]
+ 
+-def embed_text(text: str) -> list:
++
++def embed_text(text: str, key_env: str = "HUGGINGFACE_API_KEY") -> list:
+     """Embeds `text` via HuggingFace Inference API, returns a 384-dim
+     vector (list[float]) ready for Upstash Vector's upsert()/query().
+ 
+-    Raises RuntimeError if HUGGINGFACE_API_KEY is missing, or the HF
+-    request fails outright (caller decides how to degrade -- e.g.
++    Raises RuntimeError if `key_env` is missing from the environment, or
++    the HF request fails outright (caller decides how to degrade -- e.g.
+     agents/memory_search.py already wraps its embed_text() calls in
+     try/except and treats a failure as "no prior context," not a hard
+-    error)."""
+-    api_key = os.getenv("HUGGINGFACE_API_KEY")
++    error).
++
++    `key_env` (Patch 7) defaults to "HUGGINGFACE_API_KEY" so every
++    existing caller that doesn't pass it keeps today's exact behavior --
++    this parameter is additive, not a breaking change to embed_text()'s
++    contract. It exists so embed_text_with_fallback() below can point a
++    single attempt at a specific account without embed_text() needing to
++    know anything about fallback chains itself."""
++    api_key = os.getenv(key_env)
+     if not api_key:
+-        raise RuntimeError("HUGGINGFACE_API_KEY not set — required for embed_text().")
++        raise RuntimeError(f"{key_env} not set — required for embed_text().")
+ 
+     url = f"{HF_FEATURE_EXTRACTION_URL}/{EMBEDDING_MODEL}/pipeline/feature-extraction"
+     response = requests.post(
+@@ -60,4 +82,35 @@ def embed_text(text: str) -> list:
+         dim = len(embedding[0])
+         embedding = [sum(tok[i] for tok in embedding) / seq_len for i in range(dim)]
+ 
+-    return embedding
+\ No newline at end of file
++    return embedding
++
++
++def embed_text_with_fallback(text: str, key_envs: list = None) -> tuple:
++    """Patch 7: the real fallback chain the rollout guide calls for.
++    Walks `key_envs` (default HF_EMBEDDING_KEY_ENVS) in order via
++    embed_text(), moving to the next account on ANY failure -- missing
++    key or a failed HF request alike, same "just try the next one"
++    contract generate_text() already uses for its provider chains in
++    utils/llm_client.py. Returns (vector, key_env_that_answered) so the
++    caller can log usage against the account that actually got billed,
++    not always the first one in the list.
++
++    Raises RuntimeError only once every step in the chain is exhausted --
++    same as embed_text() raising today, just delayed until there's
++    genuinely nowhere left to fall back to. Callers that already wrap
++    embed_text() in a broad try/except (memory_search.py,
++    duplication_checker.py) don't need to change that handling at all,
++    only what they call and what they log."""
++    keys = key_envs or HF_EMBEDDING_KEY_ENVS
++    last_exc = None
++    for key_env in keys:
++        try:
++            vector = embed_text(text, key_env=key_env)
++            return vector, key_env
++        except Exception as exc:
++            last_exc = exc
++            continue
++    raise RuntimeError(
++        f"embed_text_with_fallback() exhausted all {len(keys)} HF account(s) "
++        f"({', '.join(keys)}). Last error: {last_exc}"
++    )
+\ No newline at end of file
+diff --git a/utils/llm_client.py b/utils/llm_client.py
+index 8fc6b23..fc25d4b 100644
+--- a/utils/llm_client.py
++++ b/utils/llm_client.py
+@@ -757,4 +757,14 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+ # that SDK weight, so the function now lives in utils/embedding.py (zero
+ # heavy imports) and this is just a re-export for existing callers that
+ # already do `from utils.llm_client import embed_text`.
+-from utils.embedding import embed_text, EMBEDDING_MODEL, HF_FEATURE_EXTRACTION_URL
+\ No newline at end of file
++#
++# Patch 7 adds embed_text_with_fallback()/HF_EMBEDDING_KEY_ENVS to that
++# same re-export -- agents/memory_search.py and
++# agents/duplication_checker.py already import their HF helpers from
++# here rather than utils.embedding directly, so this is what makes
++# `from utils.llm_client import embed_text_with_fallback` work for them
++# without changing their existing import style.
++from utils.embedding import (
++    embed_text, embed_text_with_fallback, HF_EMBEDDING_KEY_ENVS,
++    EMBEDDING_MODEL, HF_FEATURE_EXTRACTION_URL,
++)
+\ No newline at end of file

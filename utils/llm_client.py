@@ -757,4 +757,14 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
 # that SDK weight, so the function now lives in utils/embedding.py (zero
 # heavy imports) and this is just a re-export for existing callers that
 # already do `from utils.llm_client import embed_text`.
-from utils.embedding import embed_text, EMBEDDING_MODEL, HF_FEATURE_EXTRACTION_URL
+#
+# Patch 7 adds embed_text_with_fallback()/HF_EMBEDDING_KEY_ENVS to that
+# same re-export -- agents/memory_search.py and
+# agents/duplication_checker.py already import their HF helpers from
+# here rather than utils.embedding directly, so this is what makes
+# `from utils.llm_client import embed_text_with_fallback` work for them
+# without changing their existing import style.
+from utils.embedding import (
+    embed_text, embed_text_with_fallback, HF_EMBEDDING_KEY_ENVS,
+    EMBEDDING_MODEL, HF_FEATURE_EXTRACTION_URL,
+)
