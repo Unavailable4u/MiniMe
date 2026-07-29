@@ -130,10 +130,14 @@ function QuotaPanel({ apiUrl }) {
                     </span>
                     <span className={`shrink-0 ${near ? "text-amber-500" : "text-cyber-dim"}`}>
                       {r.used.toLocaleString()}
-                      {r.quota ? ` / ${r.quota.toLocaleString()} (${pctDisplay}%)` : " tokens — no verified limit"}
+                      {r.unit_mismatch
+                        ? ` requests — cap is ${r.quota ? r.quota.toLocaleString() : "?"} neurons/day`
+                        : r.quota
+                        ? ` / ${r.quota.toLocaleString()} requests (${pctDisplay}%)`
+                        : " requests — no verified limit"}
                     </span>
                   </div>
-                  {r.quota && (
+                  {r.quota && pctDisplay !== null && (
                     <div className="h-1 rounded-full bg-black/50 border border-cyber-border overflow-hidden mt-0.5">
                       <div
                         className={`h-full rounded-full transition-all ${near ? "bg-amber-500" : "bg-cyber-cyan"}`}
