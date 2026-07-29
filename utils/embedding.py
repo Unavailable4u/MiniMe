@@ -26,19 +26,41 @@ import requests
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 HF_FEATURE_EXTRACTION_URL = "https://router.huggingface.co/hf-inference/models"
 
+# Gemini/Mistral/HF rollout, Patch 7 (§4b/§5 of the rollout guide): the
+# reserve accounts held back specifically for this -- embed_text() itself
+# stays a single-account, single-attempt call (see key_env param below),
+# so its 6 OTHER callers (agents/overlapping_checker.py,
+# agents/source_quality_flagger.py, eo/knowledge_graph.py,
+# eo/semantic_cache.py, eo/routing_memory.py's own hand-rolled _embed(),
+# diagnose_mode_a.py) are completely unaffected by this patch and keep
+# today's single-account behavior. Only embed_text_with_fallback() below
+# walks this list -- and only agents/memory_search.py and
+# agents/duplication_checker.py were repointed at it (Patch 7's actual
+# scope per the guide's §4b table). Order matters: HUGGINGFACE_API_KEY
+# first since it's the existing account with prior quota history: _6/_7
+# only get hit once that one's exhausted or down.
+HF_EMBEDDING_KEY_ENVS = ["HUGGINGFACE_API_KEY", "HUGGINGFACE_API_KEY_6", "HUGGINGFACE_API_KEY_7"]
 
-def embed_text(text: str) -> list:
+
+def embed_text(text: str, key_env: str = "HUGGINGFACE_API_KEY") -> list:
     """Embeds `text` via HuggingFace Inference API, returns a 384-dim
     vector (list[float]) ready for Upstash Vector's upsert()/query().
 
-    Raises RuntimeError if HUGGINGFACE_API_KEY is missing, or the HF
-    request fails outright (caller decides how to degrade -- e.g.
+    Raises RuntimeError if `key_env` is missing from the environment, or
+    the HF request fails outright (caller decides how to degrade -- e.g.
     agents/memory_search.py already wraps its embed_text() calls in
     try/except and treats a failure as "no prior context," not a hard
-    error)."""
-    api_key = os.getenv("HUGGINGFACE_API_KEY")
+    error).
+
+    `key_env` (Patch 7) defaults to "HUGGINGFACE_API_KEY" so every
+    existing caller that doesn't pass it keeps today's exact behavior --
+    this parameter is additive, not a breaking change to embed_text()'s
+    contract. It exists so embed_text_with_fallback() below can point a
+    single attempt at a specific account without embed_text() needing to
+    know anything about fallback chains itself."""
+    api_key = os.getenv(key_env)
     if not api_key:
-        raise RuntimeError("HUGGINGFACE_API_KEY not set — required for embed_text().")
+        raise RuntimeError(f"{key_env} not set — required for embed_text().")
 
     url = f"{HF_FEATURE_EXTRACTION_URL}/{EMBEDDING_MODEL}/pipeline/feature-extraction"
     response = requests.post(
@@ -61,3 +83,34 @@ def embed_text(text: str) -> list:
         embedding = [sum(tok[i] for tok in embedding) / seq_len for i in range(dim)]
 
     return embedding
+
+
+def embed_text_with_fallback(text: str, key_envs: list = None) -> tuple:
+    """Patch 7: the real fallback chain the rollout guide calls for.
+    Walks `key_envs` (default HF_EMBEDDING_KEY_ENVS) in order via
+    embed_text(), moving to the next account on ANY failure -- missing
+    key or a failed HF request alike, same "just try the next one"
+    contract generate_text() already uses for its provider chains in
+    utils/llm_client.py. Returns (vector, key_env_that_answered) so the
+    caller can log usage against the account that actually got billed,
+    not always the first one in the list.
+
+    Raises RuntimeError only once every step in the chain is exhausted --
+    same as embed_text() raising today, just delayed until there's
+    genuinely nowhere left to fall back to. Callers that already wrap
+    embed_text() in a broad try/except (memory_search.py,
+    duplication_checker.py) don't need to change that handling at all,
+    only what they call and what they log."""
+    keys = key_envs or HF_EMBEDDING_KEY_ENVS
+    last_exc = None
+    for key_env in keys:
+        try:
+            vector = embed_text(text, key_env=key_env)
+            return vector, key_env
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(
+        f"embed_text_with_fallback() exhausted all {len(keys)} HF account(s) "
+        f"({', '.join(keys)}). Last error: {last_exc}"
+    )
