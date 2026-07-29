@@ -143,7 +143,12 @@ PUSHER_CLUSTER=***
 # line should be renamed or removed yet — that happens in Part 2/3 alongside
 # the code changes that read these new names)
 # =============================================================================
-
+#groq new keys
+GROQ_API_KEY_10=
+GROQ_API_KEY_11=
+GROQ_API_KEY_12=
+GROQ_API_KEY_13=
+GROQ_API_KEY_14=
 # --- Starter General Agents (new Layer 0 — built in Part 2) ---
 SGA_GROQ_1=***************
 SGA_GROQ_2=**********
@@ -208,7 +213,12 @@ GEMINI_API_KEY_11=
 #    to standing up the split with this little capacity behind it.
 GEMINI_API_KEY_12=
 GEMINI_API_KEY_13=
-
+#more
+GEMINI_API_KEY_14=
+GEMINI_API_KEY_15=
+GEMINI_API_KEY_16=
+GEMINI_API_KEY_17=
+GEMINI_API_KEY_18=
 # --- Mistral (6 new keys, existing MISTRAL_API_KEY = account 1) ---
 # -> MISTRAL_API_KEY pool: documentation_writer, final_qa, writer, editor
 MISTRAL_API_KEY_2=
@@ -218,7 +228,9 @@ MISTRAL_API_KEY_5=
 # -> panel sibling: researcher / fact_checker (distinct lineage, alongside Gemini)
 MISTRAL_API_KEY_6=
 MISTRAL_API_KEY_7=
-
+MISTRAL_API_KEY_8=
+MISTRAL_API_KEY_9=
+MISTRAL_API_KEY_10=
 # --- Hugging Face (6 new keys, existing HUGGINGFACE_API_KEY = account 1) ---
 # -> HUGGINGFACE_API_KEY pool: memory_search, duplication_checker
 HUGGINGFACE_API_KEY_2=
@@ -228,6 +240,9 @@ HUGGINGFACE_API_KEY_5=
 # -> extraction pool patch (source_manager-shaped roles) — small fast HF models
 HUGGINGFACE_API_KEY_6=
 HUGGINGFACE_API_KEY_7=
+HUGGINGFACE_API_KEY_8=
+HUGGINGFACE_API_KEY_9=
+HUGGINGFACE_API_KEY_10=
 
 # --- Reserved for Part 4 (API auth + frontend) ---
 # API_AUTH_MODE=api_key
