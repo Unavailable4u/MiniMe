@@ -2235,11 +2235,23 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str 
 # panel_content (see _generate_workflows above -- step 3 unregistered
 # it from this dict, defined-but-unreachable, same as "backlinks"),
 # each keyed by a fixed panel_key.
-# A topic click is a one-off, addressed by whatever label the user
-# clicked, and the result is thrown away the moment they click a
-# different node -- there's no stable key to persist it under and no
-# reason to, so this calls build_topic_workflow() directly and returns
-# its dict as-is, same un-persisted shape build_table_endpoint uses below.
+#
+# CHANGED — step 7 persistence fix: a topic click used to be a genuine
+# one-off (result held only in DiagramsView's React state, gone on tab
+# switch/refresh -- the exact bug this step fixes). It's still addressed
+# by whatever label the user clicked, but the result is now also
+# persisted under panel_content's single "topic_workflows" key, a JSON
+# dict of {topic_key: workflow} merged across every topic this
+# workspace has ever generated a workflow for -- see
+# eo/panel_content.py's VALID_PANEL_KEYS entry for why one merged blob
+# was chosen over a dynamic workflow:<topic_id> key per topic.
+#
+# Read-modify-write race: two topics generated in quick succession
+# (e.g. two rapid Mind Map clicks) both do get_content -> merge ->
+# set_content, and the second write can clobber the first's if they
+# interleave. Not worth a locking mechanism for what's a single-user,
+# one-click-at-a-time interaction in practice -- flagged here rather
+# than silently accepted.
 
 class TopicWorkflowRequest(BaseModel):
     topic_label: str
@@ -2263,9 +2275,37 @@ def topic_workflow_endpoint(ws_id: str, req: TopicWorkflowRequest, owner_id: str
     # click still shouldn't 500 the request if something unforeseen
     # slips through.
     try:
-        return build_topic_workflow(ws_id, req.topic_label, source_node_ids=req.source_node_ids)
+        workflow = build_topic_workflow(ws_id, req.topic_label, source_node_ids=req.source_node_ids)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+    # NEW — step 7: get-merge-set into the single "topic_workflows" blob.
+    # Always written with source_node_ids=None (see GENERATED_PANEL_KEYS'
+    # comment) -- this row's scope isn't "the sources for this one
+    # topic," it's "every topic ever generated," so there's no single
+    # source_node_ids value that would be correct to record per write.
+    try:
+        existing = panel_content.get_content(ws_id, "topic_workflows")
+        merged = json.loads(existing["content"]) if existing.get("content") else {}
+        if not isinstance(merged, dict):
+            merged = {}
+        # NEW — store the exact clicked label alongside the workflow (not
+        # just its LLM-generated `title`, which can read differently, e.g.
+        # "DC Motor" clicked vs. a "DC Motor — Mastery Path" title) so the
+        # frontend can hydrate WorkflowsView entries keyed the same way a
+        # live click keys them -- see NotebooksTab.jsx's DiagramsView.
+        merged[workflow["topic_key"]] = {**workflow, "topic_label": req.topic_label}
+        panel_content.set_content(ws_id, "topic_workflows", json.dumps(merged), owner_id,
+                                   source_node_ids=None)
+    except Exception:
+        # Persistence failing shouldn't fail the click itself -- the
+        # user still gets their workflow rendered this session, it just
+        # won't survive a refresh this one time. Same "never let this
+        # be the reason a topic click errors" posture build_topic_workflow()
+        # already takes internally.
+        pass
+
+    return workflow
 
 
 # --- data tables from scattered facts (see agents/note_table_builder.py,
