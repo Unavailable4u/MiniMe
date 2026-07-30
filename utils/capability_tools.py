@@ -32,8 +32,23 @@ from typing import Any, Dict, List
 # Manifest entries that aren't real yet (Phase 1.5's disabled/hidden
 # stubs for podcast/video_overview/workflow, ahead of Phase 5's backend
 # work). Never offer the model a tool with no working endpoint behind it.
+#
+# Step 2.5 fix: the FIXTURE_MANIFEST used by scripts/test_tool_calling.py
+# marks stubs with `disabled: True`, but the *real* manifest
+# (api/server.py's CAPABILITIES_MANIFEST) instead uses `enabled: False`
+# (with `endpoint: None`) for the same podcast/video_overview/workflow
+# stubs. This function only ever checked the fixture's convention, so
+# wiring the real manifest into manifest_to_tools() (step 2.5) would have
+# silently offered the model all three disabled stubs as callable tools —
+# exactly what the Phase 2.4 findings say must never happen. Checking
+# `enabled` too (defaulting missing/absent to True, so the fixture keeps
+# behaving exactly as before) covers both conventions.
 def _is_enabled(capability: Dict[str, Any]) -> bool:
-    return not capability.get("disabled") and not capability.get("hidden")
+    return (
+        capability.get("enabled", True)
+        and not capability.get("disabled")
+        and not capability.get("hidden")
+    )
 
 
 def _parameters_for_scope(capability: Dict[str, Any]) -> Dict[str, Any]:

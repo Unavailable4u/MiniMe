@@ -1465,6 +1465,34 @@ async function generateNotebooks(wsId, targets, scope) {
   return res.json();
 }
 
+// Notebooks Chat-First refinement, Phase 2 step 2.5 — thin client over
+// POST /api/workspaces/{ws_id}/notebooks/classify-intent. Log-only for
+// now: WorkspaceChatPanel.jsx's send path calls this alongside sendTask()
+// but doesn't branch on the result yet (that's step 2.6). Returns the
+// backend's normalized shape straight through:
+//   { tool_calls: [{name, arguments}], ambiguous, content, error }
+// The endpoint itself never 500s on a classification failure (see
+// utils/llm_client.py's classify_tool_intent() docstring) -- it always
+// comes back 200 with an `error` string set instead -- but this wrapper
+// still guards the fetch itself (network failure, auth failure, etc.)
+// the same way, so a broken classification call can never throw into
+// the caller's await and interrupt the real send path.
+async function classifyIntent(wsId, message) {
+  try {
+    const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/classify-intent`, {
+      method: "POST",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify({ message }),
+    });
+    if (!res.ok) {
+      return { tool_calls: [], ambiguous: false, content: null, error: `${res.status} ${res.statusText}` };
+    }
+    return res.json();
+  } catch (err) {
+    return { tool_calls: [], ambiguous: false, content: null, error: String(err.message || err) };
+  }
+}
+
 // Per-topic workflow, triggered by a Mind Map node click (step 4) — thin
 // client over POST /api/workspaces/{ws_id}/topics/workflow (step 2).
 // Deliberately separate from generateNotebooks() above: that one dispatches
@@ -2202,6 +2230,7 @@ async function openScopedSubChat(wsId, taskText) {
   fetchPanelContent, savePanelContent, fetchPanelContentList,   // NEW — generic paste-panel persistence (eo/panel_content.py); fetchPanelContentList added for §8 unread dots
   generateNotebooks,   // NEW — Notebooks integration guide §4/§6: the picker/chip-confirmation "Generate" command
   generateTopicWorkflow,   // NEW — step 4: Mind Map node click -> single per-topic workflow (see step 2's endpoint)
+  classifyIntent,   // NEW — Notebooks Chat-First refinement Phase 2 step 2.5: log-only tool-calling classification
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,

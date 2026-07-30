@@ -21,6 +21,8 @@ import requests  # NEW — Part 8.3: Admin API lookup for workspace-invite-by-em
 import secrets   # NEW — Part 8.5: OAuth state tokens
 import urllib.parse  # NEW — Part 8.5: building the Google consent URL
 from eo import panel_content
+from utils.capability_tools import manifest_to_tools   # NEW — Phase 2 step 2.5: real classify-intent endpoint
+from utils.llm_client import classify_tool_intent   # NEW — Phase 2 step 2.5
 from agents import pagespeed_agent   # NEW — Step 2: PageSpeed Insights connector for GrowthTab's Content Audit
 from agents.part_price_finder import find_price
 from eo.knowledge_graph import list_nodes, delete_node, rename_node   # rename_node added
@@ -2187,6 +2189,43 @@ def get_capabilities():
     user-scoped data, same as any other static config the frontend reads.
     """
     return {"capabilities": CAPABILITIES_MANIFEST}
+
+
+class ClassifyIntentRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/workspaces/{ws_id}/notebooks/classify-intent")
+def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depends(require_auth)):
+    """Phase 2 step 2.5.
+
+    Runs one chat message through the real tool-calling classification
+    pass (utils.llm_client.classify_tool_intent(), validated against
+    Groq in steps 2.3/2.4) and returns the raw result. Deliberately does
+    NOT call generateNotebooks(...) or any other side-effecting target,
+    and does not persist or act on anything -- WorkspaceChatPanel.jsx's
+    send path (step 2.5) only logs this response, it doesn't branch on
+    it yet. That branching is step 2.6.
+
+    ws_id is accepted (and the workspace existence is confirmed, same as
+    every other workspace-scoped route) for auth/scoping consistency and
+    so a later step can pass workspace-specific context (e.g. which
+    topics exist, for a workflow topic_id hint) without changing this
+    route's shape -- nothing here uses ws_id yet beyond that check.
+
+    classify_tool_intent() is written to never raise (see its own
+    docstring) -- any Groq-side failure comes back as a normal
+    {"error": "..."} field in the 200 response, not a 500, since a
+    log-only classification pass failing should never look like a real
+    error to the frontend or block the fallback to sendTask().
+    """
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    tools = manifest_to_tools(CAPABILITIES_MANIFEST)
+    return classify_tool_intent(req.message, tools)
 
 
 class NotebooksGenerateRequest(BaseModel):
