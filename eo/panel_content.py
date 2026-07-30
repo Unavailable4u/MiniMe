@@ -65,6 +65,11 @@ VALID_PANEL_KEYS = {
                              # {"workflows": [...]} result, JSON-encoded into
                              # this column same as every other panel here —
                              # see api/server.py's _generate_workflows.
+    "suggested_route",  # NEW — chat audit fix: agents/mind_mapper.py's
+                         # generate_suggested_route() wired up — the
+                         # prerequisite-ordered "study path" flowchart,
+                         # distinct from "mindmap"'s topic-overview one.
+                         # See api/server.py's _generate_suggested_route.
 }
 
 # NEW — bug audit §2 real fix (migration 0001). The subset of
@@ -85,6 +90,7 @@ GENERATED_PANEL_KEYS = {
     "study_quiz",
     "study_guide",
     "suggested_workflows",
+    "suggested_route",
 }
 
 

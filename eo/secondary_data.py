@@ -86,13 +86,21 @@ _EMPTY_WORKSPACE_DOC = {"topics": {}, "connections": []}
 def _read() -> dict:
     if not os.path.exists(SECONDARY_DATA_PATH):
         return {}
-    with open(SECONDARY_DATA_PATH) as f:
+    # BUGFIX (chat audit): a bare open() falls back to
+    # locale.getpreferredencoding(), which on Windows isn't guaranteed to
+    # be the same encoding a previous process used to write this file —
+    # confirmed in the field as the source of mojibake (e.g. a non-
+    # breaking hyphen or "≥" turning into "ΓÇæ"/"ΓëÑ") baked permanently
+    # into a topic's stored summary. Pinning UTF-8 explicitly on both
+    # sides makes this file's encoding independent of whatever console/
+    # locale the process happens to be launched under.
+    with open(SECONDARY_DATA_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 
 def _write(data: dict) -> None:
     os.makedirs(os.path.dirname(SECONDARY_DATA_PATH), exist_ok=True)
-    with open(SECONDARY_DATA_PATH, "w") as f:
+    with open(SECONDARY_DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
