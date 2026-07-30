@@ -1,11 +1,11 @@
 "use client";
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
-  Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight,
-  Layers, BookMarked, GraduationCap, Network, GitBranch,
+  Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight, GitBranch,
 } from "lucide-react";
 import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
 import { useSession } from "../../context/SessionContext";   // NEW — Data Layer §9c: processingWorkspaces
+import { TARGETS } from "../../lib/notebookCapabilities";    // NEW — Phase 1 step 1.1: promoted out of this file
 
 // Notebooks integration guide §4.1: "picker and free-text aren't really
 // two separate systems — free text is just an alternate way to pre-fill
@@ -31,38 +31,13 @@ import { useSession } from "../../context/SessionContext";   // NEW — Data Lay
 // being visible first (except the guide's own single-unambiguous-target
 // exception, see AUTO-RUN below).
 
-// Exported (chat audit bug #1 fix) — WorkspaceChatPanel's compose box
-// reuses this exact table + parser so "generate me a mind map" typed
-// straight into chat resolves to the same target/keyword matching the
-// picker's own free-text field already used, instead of a second,
-// possibly-drifting copy of the keyword list.
-export const TARGETS = [
-  { key: "clusters", label: "Clusters", icon: Layers, subTab: "insights", keywords: ["cluster", "clusters", "group notes", "organize notes"] },
-  { key: "facts", label: "Facts", icon: BookMarked, subTab: "insights", keywords: ["fact", "facts"] },
-  { key: "suggested_notes", label: "Suggested notes", icon: Sparkles, subTab: "insights", keywords: ["suggested note", "suggest notes", "scan for notes", "note suggestions", "note candidates"] },
-  { key: "study_flashcards", label: "Flashcards", icon: GraduationCap, subTab: "study", keywords: ["flashcard", "flash card"] },
-  { key: "study_quiz", label: "Quiz", icon: GraduationCap, subTab: "study", keywords: ["quiz"] },
-  { key: "study_guide", label: "Study guide", icon: GraduationCap, subTab: "study", keywords: ["study guide"] },
-  { key: "mindmap", label: "Mind map", icon: Network, subTab: "diagrams", keywords: ["mind map", "mindmap", "concept map"] },
-  // REMOVED — chat audit: "Backlinks" used to trigger agents/concept_linker.py's
-  // link_concepts() by hand here, but the Library tab's BacklinksView no
-  // longer even renders that graph (it shows eo/secondary_data.py's
-  // auto-built topic tree instead — see NotebooksTab.jsx's own comment on
-  // that view). Real topic-to-topic connection detection
-  // (agents/backlink_detector.py's run_after_source_manager()) already
-  // runs automatically on every upload, no button needed — this entry
-  // was a dead end pointing at a graph nothing displays. Per explicit
-  // request: no manual "generate backlinks" affordance anywhere.
-  // REMOVED (step 3/5) — "Workflows" used to be a batch Generate target
-  // hitting agents/workflow_suggester.py's suggest_workflows() over the
-  // whole notebook/scope. That's now dead server-side (NOTEBOOKS_GENERATE_TARGETS
-  // no longer includes "workflows" — api/server.py step 3) in favor of
-  // per-topic generation: clicking a MindMapView node now calls
-  // build_topic_workflow() through SessionContext's generateTopicWorkflow()
-  // (step 4) and lands in WorkflowsView as a per-topic result, not a
-  // picker chip. See NotebooksTab.jsx's DiagramsView (step 8) for the
-  // new wiring.
-];
+// Phase 1 step 1.1: this table used to live here (see the now-moved
+// history of REMOVED "Backlinks"/"Workflows" entries in
+// frontend/app/lib/notebookCapabilities.js). It's re-exported from this
+// file so WorkspaceChatPanel's existing `import { parseFreeText, TARGETS }
+// from "./notebooks/NotebooksGeneratePicker"` keeps working unchanged —
+// that import site gets cleaned up in a later step, not this one.
+export { TARGETS };
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
 
