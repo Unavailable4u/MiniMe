@@ -47,12 +47,12 @@ const SUB_TABS = [
   // Clusters below — when it's open, same interactive layout Library
   // uses for Sources/Backlinks.
   { id: "insights", label: "Insights", icon: Lightbulb },
-  // NEW — Data Layer architecture §8a: capture, wired to §8b's locator
-  // + §8c's Patch Review pending store as of this patch.
+  // CHANGED — Corrections + Patch Review merged into one "Corrections"
+  // sub-tab (same grouping move as Library/Diagrams/Insights above).
+  // CorrectionsView below renders both the capture form (§8a, wired to
+  // §8b's locator) and the before/after review queue (§8c) unchanged,
+  // just nested under one tab instead of two.
   { id: "corrections", label: "Corrections", icon: Wrench },
-  // NEW — Data Layer architecture §8c: before/after review + accept/
-  // reject for whatever the Corrections tab's submissions located.
-  { id: "patch-review", label: "Patch Review", icon: GitCompare },
 ];
 
 // NEW — §4 fix: persist which notebook and sub-tab were selected, same
@@ -1509,16 +1509,22 @@ function InsightsView({
   );
 }
 
-// --- Corrections sub-view ----------------------------------------------
+// --- Correction capture sub-view ----------------------------------------
 // Data Layer architecture §8a: capture -- a file-scope picker (one
 // source, or "All files") and a plain-language box describing what's
 // wrong. As of §8c, submitting actually runs the pipeline: the server
 // hands the text to §8b's agents/correction_locator.py, and either
 // queues a located candidate in eo/correction_candidates.py's pending
-// store for the Patch Review tab to render as a before/after, or comes
-// back with a plain reason there was nothing to locate -- shown here
-// inline, since a dead end never reaches Patch Review at all.
-function CorrectionsView({ workspaceId, nodes, edges, submitCorrection, onQueued }) {
+// store for the Patch Review section below to render as a before/after,
+// or comes back with a plain reason there was nothing to locate -- shown
+// here inline, since a dead end never reaches Patch Review at all.
+//
+// RENAMED (was CorrectionsView) — Corrections + Patch Review merged into
+// one "Corrections" sub-tab (same grouping move as Sources/Backlinks ->
+// Library). This is now the "capture" half nested inside the merged
+// CorrectionsView below, same relationship SourcesView/BacklinksView
+// have to LibraryView.
+function CorrectionCaptureView({ workspaceId, nodes, edges, submitCorrection, onQueued }) {
   const [scopeId, setScopeId] = useState("all");
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1615,7 +1621,7 @@ function CorrectionsView({ workspaceId, nodes, edges, submitCorrection, onQueued
               </div>
               <p className="text-xs text-[var(--neutral-200)]">{c.text}</p>
               {c.status === "queued" ? (
-                <p className="text-[10px] text-green-400">Located a match — check Patch Review to accept or discard it.</p>
+                <p className="text-[10px] text-green-400">Located a match — see Patch Review below to accept or discard it.</p>
               ) : (
                 <p className="text-[10px] text-[var(--neutral-500)]">Couldn't locate a match: {c.reason}</p>
               )}
@@ -1641,6 +1647,12 @@ function CorrectionsView({ workspaceId, nodes, edges, submitCorrection, onQueued
 // ClustersView above, just with a diff instead of a single content
 // block, since what's being reviewed here is a change, not a proposal
 // from nothing.
+//
+// Unchanged by the Corrections/Patch Review merge below — still its own
+// component with its own fetch/refreshSignal contract (same "self-
+// contained, signal-based refresh" shape FactsView uses inside
+// InsightsView), just nested under the Corrections tab instead of
+// living on its own tab.
 function FieldDiff({ label, before, after }) {
   if (before === after) return null;
   return (
@@ -1697,7 +1709,7 @@ function PatchReviewView({ workspaceId, fetchPatchCandidates, acceptPatchCandida
     return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
   }
   if (candidates.length === 0) {
-    return <p className="text-xs text-[var(--neutral-600)]">Nothing waiting for review — corrections that find a match on the Corrections tab show up here.</p>;
+    return <p className="text-xs text-[var(--neutral-600)]">Nothing waiting for review — corrections that find a match above show up here.</p>;
   }
   return (
     <div className="space-y-2">
@@ -1732,6 +1744,119 @@ function PatchReviewView({ workspaceId, fetchPatchCandidates, acceptPatchCandida
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// --- Corrections (capture + Patch Review) --------------------------------
+// NEW — Corrections and Patch Review merged into one "Corrections"
+// sub-tab (same grouping move as Sources/Backlinks -> Library and
+// Facts/Clusters/Suggested notes -> Insights), rendering
+// CorrectionCaptureView and PatchReviewView unchanged rather than
+// rebuilding either.
+//
+// Capture and Patch Review are a producer/consumer pair, not two
+// independent things to browse side by side the way Sources/Backlinks
+// or Facts/Clusters are — a correction has to be submitted before
+// there's anything to review — so unlike LibraryView/InsightsView this
+// doesn't flip to a side-by-side layout when the chat dock is closed.
+// It stays stacked at every width, same "always stacked" call
+// DiagramsView makes for Mind Map/Workflows above, just for the
+// opposite reason (there it's about one view needing all the room;
+// here it's about reading order). Capture stays on top since that's
+// the order the workflow actually happens in — submit, then review —
+// and `onQueued` bumping `refreshSignal` (passed through from
+// NotebooksTab) means an accepted match shows up in the Patch Review
+// list below without needing to navigate anywhere.
+function CorrectionsView({
+  workspaceId, nodes, edges, submitCorrection, onQueued,
+  fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate, refreshSignal,
+}) {
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="min-w-0">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <Wrench size={11} /> Submit a correction
+        </h3>
+        <CorrectionCaptureView
+          workspaceId={workspaceId}
+          nodes={nodes}
+          edges={edges}
+          submitCorrection={submitCorrection}
+          onQueued={onQueued}
+        />
+      </div>
+      <div className="min-w-0 border-t border-[var(--neutral-800)] pt-6">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <GitCompare size={11} /> Patch Review
+        </h3>
+        <PatchReviewView
+          workspaceId={workspaceId}
+          fetchPatchCandidates={fetchPatchCandidates}
+          acceptPatchCandidate={acceptPatchCandidate}
+          rejectPatchCandidate={rejectPatchCandidate}
+          refreshSignal={refreshSignal}
+        />
+      </div>
+    </div>
+  );
+}
+
+// --- Chat-selection gate -------------------------------------------------
+// NEW — a notebook's own content (Library/Diagrams/Study/Insights/
+// Corrections, plus everything the docked WorkspaceChatPanel's composer
+// can do — attach a file, run Generate) only ever meant anything in the
+// context of one specific chat under this workspace; every one of those
+// eventually calls something keyed off a session_id. Selecting a project
+// with no chat active — whether because it has none yet, or because it
+// has some but none of them is the one currently open — used to still
+// show all of that, with nothing on screen answering "which chat is this
+// about?" This is the pair of empty states that replaces the whole tab
+// nav + content area (see the `hasActiveChat` branch in the main render
+// below) until that's unambiguous: create the first chat when there
+// isn't one, or pick one of the existing ones when there is.
+function CreateFirstChatPrompt({ workspace, creating, onCreateChat }) {
+  return (
+    <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-10 text-center space-y-3 max-w-md mx-auto mt-6">
+      <MessageSquare size={22} className="mx-auto text-[var(--neutral-600)]" />
+      <p className="text-sm text-[var(--neutral-300)]">
+        "{workspace?.name}" doesn't have a chat yet.
+      </p>
+      <p className="text-xs text-[var(--neutral-500)]">
+        Sources, Diagrams, Study, Insights, and Corrections all live inside a
+        chat's context here — create one first so anything you upload or
+        submit lands in the right place, instead of nowhere in particular.
+      </p>
+      <button
+        onClick={onCreateChat}
+        disabled={creating}
+        className="inline-flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+      >
+        {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+        {creating ? "Creating…" : "Create first chat"}
+      </button>
+    </div>
+  );
+}
+
+// NEW — the "has chats, none selected" half of the same gate. No button
+// of its own on purpose: the actual affordance is the chat list already
+// sitting in the sidebar one column over (or the "+" beside the project
+// name for a new one) — this just points at it rather than duplicating
+// a chat-picker inline, so there's exactly one place chats get chosen
+// from, not two that could drift out of sync.
+function SelectChatPrompt({ workspace }) {
+  return (
+    <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-10 text-center space-y-3 max-w-md mx-auto mt-6">
+      <MessageSquare size={22} className="mx-auto text-[var(--neutral-600)]" />
+      <p className="text-sm text-[var(--neutral-300)]">
+        No chat selected in "{workspace?.name}".
+      </p>
+      <p className="text-xs text-[var(--neutral-500)]">
+        Sources, Diagrams, Study, Insights, and Corrections are all scoped to
+        one chat at a time — pick one from the list on the left (or start a
+        new one with the "+" beside the project name) to see them.
+      </p>
     </div>
   );
 }
@@ -2190,6 +2315,22 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   }
 
   const selected = notebooks.find((w) => w.id === selectedId);
+  // CHANGED — chat-gating, take 2. The first pass gated on "this
+  // workspace has at least one chat" (chat_ids.length > 0), but that's
+  // not the same thing as "a chat is actually open right now" — a
+  // project can have chats and still have none of them selected (e.g.
+  // you switch to this project from the sidebar without clicking any of
+  // its chat rows, or your last-active chat belongs to a DIFFERENT
+  // workspace entirely). In that state the content below was still
+  // showing, with no visible answer to "which chat is this about?" —
+  // exactly the ambiguity being fixed. `hasChatIds` only decides which
+  // empty-state prompt to show (create vs. select); `hasActiveChat` —
+  // whether `activeChatId` (the same "last active chat" the sidebar's
+  // own `chat.id === activeChatId` highlight below already uses) is one
+  // of THIS workspace's chats — is what actually gates the content.
+  const workspaceChatIds = selected?.chat_ids || [];
+  const hasChatIds = workspaceChatIds.length > 0;
+  const hasActiveChat = hasChatIds && !!activeChatId && workspaceChatIds.includes(activeChatId);
   const ActiveIcon = SUB_TABS.find((t) => t.id === subTab)?.icon || FileText;
 
   // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
@@ -2431,6 +2572,24 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             </div>
             {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
 
+            {/* CHANGED — chat-gating, take 2: gates on hasActiveChat now
+                (a specific chat selected, not just any chat existing —
+                see the comment on hasActiveChat above), and picks
+                between two empty states: CreateFirstChatPrompt when the
+                notebook has no chats at all, SelectChatPrompt when it
+                has chats but none of them is the active one. */}
+            {!hasActiveChat ? (
+              hasChatIds ? (
+                <SelectChatPrompt workspace={selected} />
+              ) : (
+                <CreateFirstChatPrompt
+                  workspace={selected}
+                  creating={creatingChatForWs === selected.id}
+                  onCreateChat={() => handleCreateChatInProject(selected)}
+                />
+              )
+            ) : (
+              <>
             <div className="flex items-center justify-between gap-2 border-b border-[var(--neutral-800)] pb-2">
               <nav className="flex gap-1">
                 {SUB_TABS.map((t) => (
@@ -2544,6 +2703,12 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 dockOpen={!chatDockCollapsed}
               />
             )}
+            {/* CHANGED — Corrections + Patch Review merged into
+                "Corrections". Always stacked (capture on top, Patch
+                Review below — see CorrectionsView above for why this
+                one doesn't flip to side-by-side like Library/Insights
+                do). onQueued still bumps patchReviewRefreshSignal so an
+                accepted match shows up below without navigating away. */}
             {subTab === "corrections" && (
               <CorrectionsView
                 workspaceId={selected.id}
@@ -2551,16 +2716,13 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 edges={edges}
                 submitCorrection={submitCorrection}
                 onQueued={() => setPatchReviewRefreshSignal((n) => n + 1)}
-              />
-            )}
-            {subTab === "patch-review" && (
-              <PatchReviewView
-                workspaceId={selected.id}
                 fetchPatchCandidates={fetchPatchCandidates}
                 acceptPatchCandidate={acceptPatchCandidate}
                 rejectPatchCandidate={rejectPatchCandidate}
                 refreshSignal={patchReviewRefreshSignal}
               />
+            )}
+              </>
             )}
           </div>
         )}

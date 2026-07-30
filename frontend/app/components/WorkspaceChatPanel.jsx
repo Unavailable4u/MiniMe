@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useEffect, useState } from "react";
 import { useSession } from "../context/SessionContext";
-import { useWorkspaceDock } from "../context/WorkspaceDockContext";
+import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
@@ -106,6 +106,38 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
+  const { createWorkspaceChat } = useWorkspaceDockActions();
+  const globalActiveChatId = useLastActiveChatId();
+
+  // CHANGED — chat-gating, take 2. Was `!dock.state.sessionId` — but a
+  // dock's sessionId is whatever this workspace's chat last resolved to
+  // in THIS in-memory store, which can go stale: switch to another
+  // project's chat, then come back to this one by clicking the project
+  // row alone (not one of its chat rows), and this dock's sessionId is
+  // still sitting on the old value even though nothing about it is
+  // "open" anymore — no visible cue anywhere would say which chat this
+  // panel is about. `globalActiveChatId` is the single "last active
+  // chat" NotebooksTab's own sidebar already highlights a chat row
+  // against (`chat.id === activeChatId`) — comparing this dock's
+  // sessionId to THAT, not just checking it's non-null, means the gate
+  // agrees with the exact same "selected" the sidebar shows.
+  const needsChatFirst = usingDock && !!workspaceId && (!dock.state.sessionId || dock.state.sessionId !== globalActiveChatId);
+  // Distinguishes the two reasons needsChatFirst can be true, purely for
+  // copy/button-label purposes below — both still gate the same way.
+  // `!dock.state.sessionId` (this dock has never resolved to a chat at
+  // all, in this store) is the "genuinely no chat yet" case; a present-
+  // but-mismatched sessionId means a chat exists, it's just not the one
+  // currently active — "Create first chat" would be misleading there.
+  const needsBrandNewChat = needsChatFirst && !dock.state.sessionId;
+  const [creatingChat, setCreatingChat] = useState(false);
+  async function handleCreateFirstChat() {
+    setCreatingChat(true);
+    try {
+      await createWorkspaceChat(workspaceId);
+    } finally {
+      setCreatingChat(false);
+    }
+  }
 
   // Local to this component instance — only meaningful in dock mode. See
   // header comment for why these can't come from SessionContext OR the
@@ -468,7 +500,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           onScroll={handleChatScroll}
           className="flex-1 overflow-y-auto px-4 py-6 space-y-4"
         >
-          {messages.length === 0 && (
+          {needsChatFirst ? (
+            <p className="text-[var(--neutral-500)] text-sm">
+              {needsBrandNewChat
+                ? "This project doesn't have a chat yet — create one below to start."
+                : "No chat selected — pick one from the sidebar, or start a new one below."}
+            </p>
+          ) : messages.length === 0 && (
             <p className="text-[var(--neutral-500)] text-sm">
               Send a task — the EO layer will classify it and route it through
               the appropriate tier.
@@ -493,7 +531,23 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             compose bar while a preview is awaiting a decision — nothing
             has dispatched yet, so there's nothing for the compose bar to
             usefully do until Confirm/Cancel resolves it. */}
-        {pendingHireReview ? (
+        {needsChatFirst ? (
+          <div className="border-t border-[var(--neutral-800)] p-4 flex items-center justify-between gap-3">
+            <p className="text-xs text-[var(--neutral-500)]">
+              {needsBrandNewChat
+                ? "Create a chat to start sending tasks, attaching files, or running Generate."
+                : "Select a chat from the sidebar to continue — or start a new one."}
+            </p>
+            <button
+              onClick={handleCreateFirstChat}
+              disabled={creatingChat}
+              className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+            >
+              {creatingChat ? <Loader2 size={13} className="animate-spin" /> : <MessageSquare size={13} />}
+              {creatingChat ? "Creating…" : needsBrandNewChat ? "Create first chat" : "Start new chat"}
+            </button>
+          </div>
+        ) : pendingHireReview ? (
           <div className="border-t border-[var(--neutral-800)] p-4">
             <HireReviewScreen
               hires={pendingHireReview.hires}
