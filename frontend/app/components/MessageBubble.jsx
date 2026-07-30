@@ -3,6 +3,7 @@ import { useState } from "react";
 import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
 import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — Data Layer §9d
+import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 
 // Per-tier accent color — gives each response a quick at-a-glance
 // identity in the chat instead of every bubble looking identical. Kept
@@ -23,7 +24,32 @@ function tierStyle(data) {
   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
 }
 
-export default function MessageBubble({ message }) {
+export default function MessageBubble({ message, onNavigateSubTab }) {
+  // NEW — Notebooks Chat-First refinement, Phase 2 step 2.10. A
+  // chat-triggered generation's own inline status card — pushed and
+  // then live-updated in place (by runId) as the run progresses, by
+  // WorkspaceChatPanel.jsx's runGenerateTarget(). Previously a
+  // chat-triggered "make me flashcards" left literally no trace in the
+  // thread: tryHandleGenerateIntent()/tryHandleClassifiedToolCall() both
+  // short-circuit BEFORE sendTask() (the only thing that normally adds a
+  // message), and the ONLY feedback was the Working Panel's
+  // notebooksGenerateRun key -- itself a single slot a second run fully
+  // overwrites (see WorkspaceChatPanel.jsx's own step-2.10 comment).
+  // Rendered as stacked BranchRow pills, same as
+  // NotebooksGeneratePicker.jsx's popover -- no bubble background here
+  // since this isn't prose, it's a status readout.
+  if (message.role === "generation") {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[80%] w-full space-y-1.5">
+          {message.branches.map((b) => (
+            <BranchRow key={b.panel_key} branch={b} onNavigate={(subTab) => onNavigateSubTab?.(subTab)} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
