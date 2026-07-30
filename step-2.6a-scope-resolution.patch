@@ -1,0 +1,126 @@
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index f127d42..a31a854 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -101,7 +101,15 @@ function clampWorkingPanelHeight(h) {
+   return Math.min(WORKING_PANEL_MAX_HEIGHT, Math.max(WORKING_PANEL_MIN_HEIGHT, h));
+ }
+ 
+-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false }) {
++// NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
++// resolution). `activeContext` is the caller's best guess at "what the
++// person is currently looking at" -- { type: "topic", id, label } or
++// { type: "source", id, label } -- fed from whichever sub-tab/view last
++// had something clicked (see NotebooksTab.jsx). Optional and null by
++// default: a standalone Chat tab, or a Notebooks session where nothing's
++// been clicked yet, simply has no default to fall back to, same as
++// today (see tryHandleClassifiedToolCall's scope resolution below).
++export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null }) {
+   const legacy = useSession();
+   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5
+   const dock = useWorkspaceDock(workspaceId, chatId);
+@@ -481,8 +489,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+       return false;
+     }
+ 
++    // NEW — step 2.6a: the model only returns source_ids when the
++    // message itself named/implied a specific source ("summarize the
++    // Chen paper"), so that branch is untouched and still wins outright.
++    // When it comes back empty -- the message didn't name anything --
++    // fall back to activeContext instead of going straight to null
++    // (whole-workspace). Only a source-typed activeContext can resolve
++    // to source_node_ids today, since NOTEBOOKS_GENERATE_TARGETS has no
++    // topic-scoped capability live yet (see the comment above); a
++    // topic-typed activeContext with nothing live to consume it still
++    // falls through to null rather than sending an argument no backend
++    // route reads.
+     const scope = call.arguments?.source_ids?.length
+       ? { source_node_ids: call.arguments.source_ids }
++      : activeContext?.type === "source" && activeContext.id
++      ? { source_node_ids: [activeContext.id] }
+       : null;
+     return runGenerateTarget(key, scope);
+   }
+diff --git a/frontend/app/components/tabs/NotebooksTab.jsx b/frontend/app/components/tabs/NotebooksTab.jsx
+index 846e411..0450405 100644
+--- a/frontend/app/components/tabs/NotebooksTab.jsx
++++ b/frontend/app/components/tabs/NotebooksTab.jsx
+@@ -846,7 +846,7 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat, onDismiss }) {
+ //      in-flight request can still finish without erroring, but its result
+ //      is simply dropped when it lands (see the `done`/`error` setters
+ //      below, which check `dismissedLabelsRef` before re-inserting).
+-function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow }) {
++function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow, onActiveContext }) {
+   const [topicWorkflows, setTopicWorkflows] = useState([]);
+   const pendingLabelsRef = useRef(new Set());
+   const dismissedLabelsRef = useRef(new Set());
+@@ -889,6 +889,10 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
+     // Edge case #1: ignore a click on a topic that's already in flight.
+     if (pendingLabelsRef.current.has(label)) return;
+     pendingLabelsRef.current.add(label);
++    // NEW — step 2.6a: topics here are identified by label (there's no
++    // separate node_id -- see build_topic_workflow's own docstring), so
++    // id and label are the same string.
++    onActiveContext?.({ type: "topic", id: label, label });
+     dismissedLabelsRef.current.delete(label); // a fresh click un-dismisses it
+     setTopicWorkflows((prev) => [{ label, status: "loading" }, ...prev.filter((r) => r.label !== label)]);
+     try {
+@@ -2094,6 +2098,19 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+   const [scanningClusters, setScanningClusters] = useState(false);
+   const [loadingNodes, setLoadingNodes] = useState(false);
+   const [previewNode, setPreviewNode] = useState(null);
++  // NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a. Single
++  // "what's currently in view" signal shared across every sub-tab,
++  // rather than reusing any one view's own local state (previewNode
++  // above is transient -- cleared on modal close -- and DiagramsView's
++  // topicWorkflows never leaves that component). Shape:
++  // { type: "topic" | "source", id, label } | null. Fed by whichever
++  // view the person last clicked something in (Library's source rows,
++  // Diagrams' Mind Map topic nodes); read by WorkspaceChatPanel as a
++  // scope default when a chat message names a capability but no
++  // specific topic/source. Deliberately never cleared on sub-tab switch
++  // -- "the source I was just looking at" is still a reasonable default
++  // a moment later even after navigating away from Library.
++  const [activeContext, setActiveContext] = useState(null);
+   const [creating, setCreating] = useState(false);
+   const [newName, setNewName] = useState("");
+   const [submittingNotebook, setSubmittingNotebook] = useState(false);
+@@ -2758,7 +2775,12 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+                 edges={edges}
+                 loading={loadingNodes}
+                 onIngested={() => loadNotebookData(selected.id)}
+-                onSelectNode={setPreviewNode}
++                onSelectNode={(node) => {
++                  setPreviewNode(node);
++                  // NEW — step 2.6a: opening a source is a strong signal
++                  // it's what the person means by "this"/"here" in chat.
++                  setActiveContext({ type: "source", id: node.node_id, label: node.title || node.node_id });
++                }}
+                 onDeleteNode={async (nodeId) => {
+                   await deleteWorkspaceNode(selected.id, nodeId);
+                   await loadNotebookData(selected.id);
+@@ -2783,6 +2805,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+                 fetchPanelContent={fetchPanelContent}
+                 generateNotebooks={generateNotebooks}
+                 generateTopicWorkflow={generateTopicWorkflow}
++                onActiveContext={setActiveContext}
+               />
+             )}
+             {subTab === "study" && <StudyView workspaceId={selected.id} />}
+@@ -2842,14 +2865,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+ 
+       {/* Desktop dock — side-by-side, lg+. */}
+       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach />
++        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach activeContext={activeContext} />
+       </div>
+ 
+       {/* Below lg — full-screen overlay instead of a side dock, so this
+           tab never depends on the standalone Chat tab, at any width. */}
+       {!chatDockCollapsed && (
+         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach />
++          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach activeContext={activeContext} />
+         </div>
+       )}
+       {chatDockCollapsed && (

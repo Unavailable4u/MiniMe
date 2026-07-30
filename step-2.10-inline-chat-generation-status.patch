@@ -1,0 +1,301 @@
+diff --git a/frontend/app/components/MessageBubble.jsx b/frontend/app/components/MessageBubble.jsx
+index ed8fd86..c438f45 100644
+--- a/frontend/app/components/MessageBubble.jsx
++++ b/frontend/app/components/MessageBubble.jsx
+@@ -3,6 +3,7 @@ import { useState } from "react";
+ import Markdown from "./Markdown";
+ import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
+ import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — Data Layer §9d
++import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
+ 
+ // Per-tier accent color — gives each response a quick at-a-glance
+ // identity in the chat instead of every bubble looking identical. Kept
+@@ -23,7 +24,32 @@ function tierStyle(data) {
+   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
+ }
+ 
+-export default function MessageBubble({ message }) {
++export default function MessageBubble({ message, onNavigateSubTab }) {
++  // NEW — Notebooks Chat-First refinement, Phase 2 step 2.10. A
++  // chat-triggered generation's own inline status card — pushed and
++  // then live-updated in place (by runId) as the run progresses, by
++  // WorkspaceChatPanel.jsx's runGenerateTarget(). Previously a
++  // chat-triggered "make me flashcards" left literally no trace in the
++  // thread: tryHandleGenerateIntent()/tryHandleClassifiedToolCall() both
++  // short-circuit BEFORE sendTask() (the only thing that normally adds a
++  // message), and the ONLY feedback was the Working Panel's
++  // notebooksGenerateRun key -- itself a single slot a second run fully
++  // overwrites (see WorkspaceChatPanel.jsx's own step-2.10 comment).
++  // Rendered as stacked BranchRow pills, same as
++  // NotebooksGeneratePicker.jsx's popover -- no bubble background here
++  // since this isn't prose, it's a status readout.
++  if (message.role === "generation") {
++    return (
++      <div className="flex justify-start">
++        <div className="max-w-[80%] w-full space-y-1.5">
++          {message.branches.map((b) => (
++            <BranchRow key={b.panel_key} branch={b} onNavigate={(subTab) => onNavigateSubTab?.(subTab)} />
++          ))}
++        </div>
++      </div>
++    );
++  }
++
+   if (message.role === "user") {
+     return (
+       <div className="flex justify-end">
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index f127d42..6728221 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -101,7 +101,15 @@ function clampWorkingPanelHeight(h) {
+   return Math.min(WORKING_PANEL_MAX_HEIGHT, Math.max(WORKING_PANEL_MIN_HEIGHT, h));
+ }
+ 
+-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false }) {
++// NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
++// resolution). `activeContext` is the caller's best guess at "what the
++// person is currently looking at" -- { type: "topic", id, label } or
++// { type: "source", id, label } -- fed from whichever sub-tab/view last
++// had something clicked (see NotebooksTab.jsx). Optional and null by
++// default: a standalone Chat tab, or a Notebooks session where nothing's
++// been clicked yet, simply has no default to fall back to, same as
++// today (see tryHandleClassifiedToolCall's scope resolution below).
++export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null }) {
+   const legacy = useSession();
+   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5
+   const dock = useWorkspaceDock(workspaceId, chatId);
+@@ -335,17 +343,48 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+   // call, Working Panel branch bookkeeping, and "jump to the tab that
+   // just got new content" behavior — one dispatch path, two different
+   // ways of deciding to take it.
+-  async function runGenerateTarget(key, scope) {
++  //
++  // CHANGED — step 2.10. `sourceText` is the raw text that triggered
++  // this run (only ever passed by the two chat-intent callers below,
++  // never by NotebooksGeneratePicker's manual Generate button, which
++  // still only has the Working Panel above to watch). When present, this
++  // now ALSO pushes into the message thread: the user's own text
++  // (previously silently swallowed — see MessageBubble.jsx's own
++  // step-2.10 comment for why) plus a live "generation" message this
++  // function updates in place, by runId, as the run resolves. The
++  // existing notebooksGenerateRun dock-state write is untouched — that's
++  // what the Working Panel graph reads, and this is additive to it, not
++  // a replacement for it.
++  async function runGenerateTarget(key, scope, sourceText = null) {
+     const label = TARGETS_BY_KEY[key]?.label || key;
+     const runningBranch = { panel_key: key, status: "running", label, subTab: TARGETS_BY_KEY[key]?.subTab };
++    // Unique per call, not per key — re-running the same capability
++    // twice in one chat must update its OWN card, not the previous run's.
++    const runId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+     if (usingDock) {
+       dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: [runningBranch] } });
++      if (sourceText) {
++        dock.setDockState((prev) => ({
++          messages: [
++            ...prev.messages,
++            { role: "user", text: sourceText },
++            { role: "generation", runId, branches: [runningBranch] },
++          ],
++        }));
++      }
+     }
+     try {
+       const { branches } = await generateNotebooks(workspaceId, [key], scope);
+       const withMeta = branches.map((b) => ({ ...b, label: TARGETS_BY_KEY[b.panel_key]?.label, subTab: TARGETS_BY_KEY[b.panel_key]?.subTab }));
+       if (usingDock) {
+         dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: withMeta } });
++        if (sourceText) {
++          dock.setDockState((prev) => ({
++            messages: prev.messages.map((m) =>
++              m.role === "generation" && m.runId === runId ? { ...m, branches: withMeta } : m
++            ),
++          }));
++        }
+       }
+       // Jump straight to the tab that just got new content so the run
+       // doesn't feel like it vanished into the Working Panel — same
+@@ -356,10 +395,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+         onNavigateSubTab?.(TARGETS_BY_KEY[key].subTab);
+       }
+     } catch (err) {
++      const errorBranch = { panel_key: key, status: "error", error: String(err.message || err), label, subTab: TARGETS_BY_KEY[key]?.subTab };
+       if (usingDock) {
+-        dock.setDockState({
+-          notebooksGenerateRun: { targets: [key], branches: [{ panel_key: key, status: "error", error: String(err.message || err), label, subTab: TARGETS_BY_KEY[key]?.subTab }] },
+-        });
++        dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: [errorBranch] } });
++        if (sourceText) {
++          dock.setDockState((prev) => ({
++            messages: prev.messages.map((m) =>
++              m.role === "generation" && m.runId === runId ? { ...m, branches: [errorBranch] } : m
++            ),
++          }));
++        }
+       }
+     }
+     return true;
+@@ -395,7 +440,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+     if (!workspaceId || !generateNotebooks) return false;
+     const { targetKeys, sourceNodeIds } = parseFreeText(text, []);
+     if (targetKeys.length !== 1 || sourceNodeIds.length > 0) return false;
+-    return runGenerateTarget(targetKeys[0], null);
++    return runGenerateTarget(targetKeys[0], null, text);
+   }
+ 
+   // NEW — Notebooks Chat-First refinement, Phase 2 step 2.5. Fires the
+@@ -481,10 +526,23 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+       return false;
+     }
+ 
++    // NEW — step 2.6a: the model only returns source_ids when the
++    // message itself named/implied a specific source ("summarize the
++    // Chen paper"), so that branch is untouched and still wins outright.
++    // When it comes back empty -- the message didn't name anything --
++    // fall back to activeContext instead of going straight to null
++    // (whole-workspace). Only a source-typed activeContext can resolve
++    // to source_node_ids today, since NOTEBOOKS_GENERATE_TARGETS has no
++    // topic-scoped capability live yet (see the comment above); a
++    // topic-typed activeContext with nothing live to consume it still
++    // falls through to null rather than sending an argument no backend
++    // route reads.
+     const scope = call.arguments?.source_ids?.length
+       ? { source_node_ids: call.arguments.source_ids }
++      : activeContext?.type === "source" && activeContext.id
++      ? { source_node_ids: [activeContext.id] }
+       : null;
+-    return runGenerateTarget(key, scope);
++    return runGenerateTarget(key, scope, text);
+   }
+ 
+   // NEW — step 2.6 feature flag. Default OFF: classifyIntent() keeps
+@@ -641,7 +699,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+               ref={(el) => (messageRefs.current[i] = el)}
+               onClick={() => setActiveMessageIndex(i)}
+             >
+-              <MessageBubble message={m} />
++              <MessageBubble message={m} onNavigateSubTab={onNavigateSubTab} />
+             </div>
+           ))}
+           {loading && (
+diff --git a/frontend/app/components/notebooks/BranchRow.jsx b/frontend/app/components/notebooks/BranchRow.jsx
+new file mode 100644
+index 0000000..6933575
+--- /dev/null
++++ b/frontend/app/components/notebooks/BranchRow.jsx
+@@ -0,0 +1,52 @@
++"use client";
++import { Sparkles, Loader2, Check, AlertCircle, ChevronRight } from "lucide-react";
++import { TARGETS } from "../../lib/notebookCapabilities";
++
++// NEW — Notebooks Chat-First refinement, Phase 2 step 2.10. Pulled out
++// of NotebooksGeneratePicker.jsx -- byte-for-byte the same body it used
++// to have inline -- so MessageBubble.jsx can render the exact same
++// running/done/error pill for a chat-triggered generation as the
++// picker's own popover already renders for a manually-triggered one.
++// One row component now backs both places instead of a second copy that
++// could silently drift from this one. NotebooksGeneratePicker.jsx
++// imports this instead of defining its own copy (see that file); that
++// import site goes away entirely once step 2.9 removes the popover.
++const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
++
++export default function BranchRow({ branch, onNavigate }) {
++  const target = TARGETS_BY_KEY[branch.panel_key];
++  const label = target?.label || branch.panel_key;
++  const Icon = target?.icon || Sparkles;
++  return (
++    <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-[var(--neutral-800)]">
++      <div className="flex items-center gap-2 min-w-0">
++        <Icon size={13} className="shrink-0 text-[var(--neutral-500)]" />
++        <span className="text-xs text-[var(--neutral-200)] truncate">{label}</span>
++      </div>
++      <div className="flex items-center gap-2 shrink-0">
++        {branch.status === "running" && <Loader2 size={13} className="animate-spin text-[var(--neutral-500)]" />}
++        {branch.status === "done" && branch.result?.status === "up_to_date" && (
++          <span className="text-[10px] text-[var(--neutral-500)]">up to date</span>
++        )}
++        {branch.status === "done" && branch.result?.status !== "up_to_date" && (
++          <Check size={13} className="text-green-400" />
++        )}
++        {branch.status === "error" && (
++          <span className="flex items-center gap-1 text-[10px] text-red-400" title={branch.error}>
++            <AlertCircle size={12} /> Error
++          </span>
++        )}
++        {branch.status === "done" && target?.subTab && (
++          <button
++            type="button"
++            onClick={() => onNavigate(target.subTab)}
++            title={`Open ${label}`}
++            className="text-[var(--neutral-500)] hover:text-[var(--cyber-cyan)]"
++          >
++            <ChevronRight size={13} />
++          </button>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx b/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx
+index 6866d54..251c936 100644
+--- a/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx
++++ b/frontend/app/components/notebooks/NotebooksGeneratePicker.jsx
+@@ -1,11 +1,12 @@
+ "use client";
+ import { useState, useMemo, useRef, useEffect } from "react";
+ import {
+-  Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight, GitBranch,
++  Sparkles, X, Play, Loader2, AlertCircle, GitBranch,
+ } from "lucide-react";
+ import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
+ import { useSession } from "../../context/SessionContext";   // NEW — Data Layer §9c: processingWorkspaces
+ import { TARGETS } from "../../lib/notebookCapabilities";    // NEW — Phase 1 step 1.1: promoted out of this file
++import BranchRow from "./BranchRow";   // NEW — Phase 2 step 2.10: promoted out of this file, see BranchRow.jsx
+ 
+ // Notebooks integration guide §4.1: "picker and free-text aren't really
+ // two separate systems — free text is just an alternate way to pre-fill
+@@ -85,44 +86,6 @@ function TargetChip({ target, selected, onToggle }) {
+   );
+ }
+ 
+-function BranchRow({ branch, onNavigate }) {
+-  const target = TARGETS_BY_KEY[branch.panel_key];
+-  const label = target?.label || branch.panel_key;
+-  const Icon = target?.icon || Sparkles;
+-  return (
+-    <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-[var(--neutral-800)]">
+-      <div className="flex items-center gap-2 min-w-0">
+-        <Icon size={13} className="shrink-0 text-[var(--neutral-500)]" />
+-        <span className="text-xs text-[var(--neutral-200)] truncate">{label}</span>
+-      </div>
+-      <div className="flex items-center gap-2 shrink-0">
+-        {branch.status === "running" && <Loader2 size={13} className="animate-spin text-[var(--neutral-500)]" />}
+-        {branch.status === "done" && branch.result?.status === "up_to_date" && (
+-          <span className="text-[10px] text-[var(--neutral-500)]">up to date</span>
+-        )}
+-        {branch.status === "done" && branch.result?.status !== "up_to_date" && (
+-          <Check size={13} className="text-green-400" />
+-        )}
+-        {branch.status === "error" && (
+-          <span className="flex items-center gap-1 text-[10px] text-red-400" title={branch.error}>
+-            <AlertCircle size={12} /> Error
+-          </span>
+-        )}
+-        {branch.status === "done" && target?.subTab && (
+-          <button
+-            type="button"
+-            onClick={() => onNavigate(target.subTab)}
+-            title={`Open ${label}`}
+-            className="text-[var(--neutral-500)] hover:text-[var(--cyber-cyan)]"
+-          >
+-            <ChevronRight size={13} />
+-          </button>
+-        )}
+-      </div>
+-    </div>
+-  );
+-}
+-
+ export default function NotebooksGeneratePicker({ workspaceId, nodes, generateNotebooks, onComplete, onNavigateSubTab }) {
+   const [open, setOpen] = useState(false);
+   const [freeText, setFreeText] = useState("");

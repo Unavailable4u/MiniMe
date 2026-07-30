@@ -846,7 +846,7 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat, onDismiss }) {
 //      in-flight request can still finish without erroring, but its result
 //      is simply dropped when it lands (see the `done`/`error` setters
 //      below, which check `dismissedLabelsRef` before re-inserting).
-function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow }) {
+function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow, onActiveContext }) {
   const [topicWorkflows, setTopicWorkflows] = useState([]);
   const pendingLabelsRef = useRef(new Set());
   const dismissedLabelsRef = useRef(new Set());
@@ -889,6 +889,10 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
     // Edge case #1: ignore a click on a topic that's already in flight.
     if (pendingLabelsRef.current.has(label)) return;
     pendingLabelsRef.current.add(label);
+    // NEW — step 2.6a: topics here are identified by label (there's no
+    // separate node_id -- see build_topic_workflow's own docstring), so
+    // id and label are the same string.
+    onActiveContext?.({ type: "topic", id: label, label });
     dismissedLabelsRef.current.delete(label); // a fresh click un-dismisses it
     setTopicWorkflows((prev) => [{ label, status: "loading" }, ...prev.filter((r) => r.label !== label)]);
     try {
@@ -2094,6 +2098,19 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   const [scanningClusters, setScanningClusters] = useState(false);
   const [loadingNodes, setLoadingNodes] = useState(false);
   const [previewNode, setPreviewNode] = useState(null);
+  // NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a. Single
+  // "what's currently in view" signal shared across every sub-tab,
+  // rather than reusing any one view's own local state (previewNode
+  // above is transient -- cleared on modal close -- and DiagramsView's
+  // topicWorkflows never leaves that component). Shape:
+  // { type: "topic" | "source", id, label } | null. Fed by whichever
+  // view the person last clicked something in (Library's source rows,
+  // Diagrams' Mind Map topic nodes); read by WorkspaceChatPanel as a
+  // scope default when a chat message names a capability but no
+  // specific topic/source. Deliberately never cleared on sub-tab switch
+  // -- "the source I was just looking at" is still a reasonable default
+  // a moment later even after navigating away from Library.
+  const [activeContext, setActiveContext] = useState(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [submittingNotebook, setSubmittingNotebook] = useState(false);
@@ -2758,7 +2775,12 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 edges={edges}
                 loading={loadingNodes}
                 onIngested={() => loadNotebookData(selected.id)}
-                onSelectNode={setPreviewNode}
+                onSelectNode={(node) => {
+                  setPreviewNode(node);
+                  // NEW — step 2.6a: opening a source is a strong signal
+                  // it's what the person means by "this"/"here" in chat.
+                  setActiveContext({ type: "source", id: node.node_id, label: node.title || node.node_id });
+                }}
                 onDeleteNode={async (nodeId) => {
                   await deleteWorkspaceNode(selected.id, nodeId);
                   await loadNotebookData(selected.id);
@@ -2783,6 +2805,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 fetchPanelContent={fetchPanelContent}
                 generateNotebooks={generateNotebooks}
                 generateTopicWorkflow={generateTopicWorkflow}
+                onActiveContext={setActiveContext}
               />
             )}
             {subTab === "study" && <StudyView workspaceId={selected.id} />}
@@ -2842,14 +2865,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
 
       {/* Desktop dock — side-by-side, lg+. */}
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach activeContext={activeContext} />
       </div>
 
       {/* Below lg — full-screen overlay instead of a side dock, so this
           tab never depends on the standalone Chat tab, at any width. */}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach activeContext={activeContext} />
         </div>
       )}
       {chatDockCollapsed && (
