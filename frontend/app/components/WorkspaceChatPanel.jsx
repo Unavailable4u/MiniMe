@@ -101,7 +101,7 @@ function clampWorkingPanelHeight(h) {
   return Math.min(WORKING_PANEL_MAX_HEIGHT, Math.max(WORKING_PANEL_MIN_HEIGHT, h));
 }
 
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false }) {
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -595,25 +595,32 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               workspace's sources — no separate Sources tab trip needed.
               Disabled without a resolved workspaceId (no active chat yet)
               since process_upload() has nothing to attach the source to. */}
-          <input
-            ref={attachInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files?.length) handleAttachFiles(e.target.files);
-              e.target.value = "";   // allow re-selecting the same file twice in a row
-            }}
-          />
-          <button
-            type="button"
-            disabled={!workspaceId}
-            onClick={() => attachInputRef.current?.click()}
-            title={workspaceId ? "Attach a file (PDF, docs, slides, sheets, audio)" : "Open or start a chat to attach files"}
-            className="flex items-center justify-center bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg p-2 text-sm outline-none disabled:opacity-40 hover:border-[var(--neutral-600)] transition-colors shrink-0"
-          >
-            <Paperclip size={15} className="text-[var(--neutral-400)]" />
-          </button>
+          {/* NEW — §9.1: Notebooks passes hideAttach to drop this affordance
+              there (IngestionDropzone.jsx already covers uploads for that
+              tab). Every other tab leaves hideAttach unset and is unaffected. */}
+          {!hideAttach && (
+            <>
+              <input
+                ref={attachInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) handleAttachFiles(e.target.files);
+                  e.target.value = "";   // allow re-selecting the same file twice in a row
+                }}
+              />
+              <button
+                type="button"
+                disabled={!workspaceId}
+                onClick={() => attachInputRef.current?.click()}
+                title={workspaceId ? "Attach a file (PDF, docs, slides, sheets, audio)" : "Open or start a chat to attach files"}
+                className="flex items-center justify-center bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg p-2 text-sm outline-none disabled:opacity-40 hover:border-[var(--neutral-600)] transition-colors shrink-0"
+              >
+                <Paperclip size={15} className="text-[var(--neutral-400)]" />
+              </button>
+            </>
+          )}
 
           {/* Mode picker — custom dropdown (not a native <select>) so each
               option can carry its own icon. */}
