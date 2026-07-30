@@ -736,85 +736,55 @@ function WorkflowCard({ workflow, workspaceId, onOpenSubChat }) {
   );
 }
 
-function WorkflowsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks }) {
-  const [workflows, setWorkflows] = useState(null); // null = not loaded yet
-  const [updatedAt, setUpdatedAt] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [regenerating, setRegenerating] = useState(false);
-  const [error, setError] = useState(null);
-
-  function parseWorkflows(raw) {
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed?.workflows) ? parsed.workflows : [];
-    } catch {
-      return []; // malformed/legacy content shouldn't crash the tab — treat as "nothing generated"
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetchPanelContent(workspaceId, "suggested_workflows").then((saved) => {
-      if (cancelled) return;
-      setWorkflows(parseWorkflows(saved?.content));
-      setUpdatedAt(saved?.updated_at || null);
-      setLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [workspaceId, fetchPanelContent]);
-
-  async function handleRegenerate() {
-    setRegenerating(true);
-    setError(null);
-    try {
-      const { branches } = await generateNotebooks(workspaceId, ["workflows"], null);
-      const branch = branches.find((b) => b.panel_key === "workflows");
-      if (branch?.status === "error") throw new Error(branch.error || "Workflow generation failed");
-      setWorkflows(parseWorkflows(branch?.result?.content));
-      setUpdatedAt(branch?.result?.updated_at || null);
-    } catch (err) {
-      setError(String(err.message || err));
-    } finally {
-      setRegenerating(false);
-    }
-  }
-
-  if (loading) {
-    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+// CHANGED — step 7: WorkflowsView no longer fetches or generates anything
+// itself. Whole-notebook "workflows" generation is gone (step 3 dropped it
+// from NOTEBOOKS_GENERATE_TARGETS); workflows are now built one topic at a
+// time from a Mind Map node click (agents/workflow_suggester.py's
+// build_topic_workflow, step 1/2/4). DiagramsView (step 8) owns the actual
+// per-topic requests and state; this component is a pure renderer over
+// whatever it's handed.
+//
+// `results` is an ordered array of per-topic entries:
+//   { label: string, status: "loading" | "error" | "done", workflow?: {...}, error?: string }
+// — one entry per topic node clicked so far this session, most-recent
+// first (DiagramsView's call). Nothing here reads from or writes to
+// panel_content; these are ephemeral, same as the mind map click itself.
+function WorkflowsView({ workspaceId, results, onOpenSubChat }) {
+  if (!results?.length) {
+    return (
+      <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-8 text-center text-xs text-[var(--neutral-600)]">
+        Click any node in the Mind Map above to generate a step-by-step workflow for that topic.
+      </div>
+    );
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-[var(--neutral-500)]">
-          {workflows?.length
-            ? "Step-by-step procedures found in this notebook's sources."
-            : "No clear step-by-step processes found in this notebook — that's a normal result for purely conceptual material."}
-        </p>
-        <div className="flex items-center gap-2 shrink-0">
-          {updatedAt && !regenerating && (
-            <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(updatedAt)}</span>
-          )}
-          <button
-            onClick={handleRegenerate}
-            disabled={regenerating}
-            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
-          >
-            {regenerating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-            Generate
-          </button>
-        </div>
+      <p className="text-xs text-[var(--neutral-500)]">
+        Step-by-step workflows generated for the topics you've clicked in the Mind Map above.
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {results.map((r) => (
+          <div key={r.label} className="space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
+              <ListChecks size={11} /> {r.label}
+            </div>
+            {r.status === "loading" && (
+              <div className="rounded-lg border border-[var(--neutral-800)] p-3 text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+                <Loader2 size={12} className="animate-spin" /> Generating workflow…
+              </div>
+            )}
+            {r.status === "error" && (
+              <div className="rounded-lg border border-[var(--neutral-800)] p-3 text-xs text-red-400">
+                {r.error || "Couldn't generate a workflow for this topic."} Click the node again to retry.
+              </div>
+            )}
+            {r.status === "done" && r.workflow && (
+              <WorkflowCard workflow={r.workflow} workspaceId={workspaceId} onOpenSubChat={onOpenSubChat} />
+            )}
+          </div>
+        ))}
       </div>
-      {error && <p className="text-[11px] text-red-400">{error}</p>}
-      {workflows?.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {workflows.map((wf, i) => (
-            <WorkflowCard key={`${wf.title}-${i}`} workflow={wf} workspaceId={workspaceId} onOpenSubChat={onOpenSubChat} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -835,7 +805,29 @@ function WorkflowsView({ workspaceId, onOpenSubChat, fetchPanelContent, generate
 // branch of contentMaxWidthClass() below) — so a big mind map keeps
 // getting more room the same way Library's side-by-side layout does,
 // it just never needs a second column to do it.
-function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks }) {
+// CHANGED — step 8: DiagramsView now owns the per-topic workflow state
+// that WorkflowsView (step 7) just renders. A Mind Map node click no
+// longer opens a sub-chat -- it calls generateTopicWorkflow(wsId, label)
+// (SessionContext, step 4) and drops the result into `topicWorkflows`,
+// an ordered array of
+// { label, status: "loading" | "error" | "done", workflow?, error? },
+// most-recent click first. Kept intentionally simple for this step --
+// re-clicking a topic that's already loading/loaded, clearing state on
+// workspace switch, and dismissing a card are step 9 polish, not
+// handled here yet.
+function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow }) {
+  const [topicWorkflows, setTopicWorkflows] = useState([]);
+
+  async function handleTopicSelect(label) {
+    setTopicWorkflows((prev) => [{ label, status: "loading" }, ...prev.filter((r) => r.label !== label)]);
+    try {
+      const workflow = await generateTopicWorkflow(workspaceId, label);
+      setTopicWorkflows((prev) => prev.map((r) => (r.label === label ? { label, status: "done", workflow } : r)));
+    } catch (err) {
+      setTopicWorkflows((prev) => prev.map((r) => (r.label === label ? { label, status: "error", error: String(err.message || err) } : r)));
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="min-w-0">
@@ -844,7 +836,7 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
         </h3>
         <MindMapView
           workspaceId={workspaceId}
-          onOpenSubChat={onOpenSubChat}
+          onTopicSelect={handleTopicSelect}
           fetchPanelContent={fetchPanelContent}
           generateNotebooks={generateNotebooks}
         />
@@ -855,9 +847,8 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
         </h3>
         <WorkflowsView
           workspaceId={workspaceId}
+          results={topicWorkflows}
           onOpenSubChat={onOpenSubChat}
-          fetchPanelContent={fetchPanelContent}
-          generateNotebooks={generateNotebooks}
         />
       </div>
     </div>
@@ -1950,6 +1941,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
      submitCorrection, fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate,
      fetchPanelContent, savePanelContent, fetchPanelContentList,
      generateNotebooks,
+     generateTopicWorkflow,   // NEW — step 8: per-topic workflow, owned by DiagramsView
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
     openScopedSubChat,
   } = useSession();
@@ -2706,6 +2698,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 onOpenSubChat={handleOpenSubChat}
                 fetchPanelContent={fetchPanelContent}
                 generateNotebooks={generateNotebooks}
+                generateTopicWorkflow={generateTopicWorkflow}
               />
             )}
             {subTab === "study" && <StudyView workspaceId={selected.id} />}
