@@ -216,9 +216,10 @@ Output ONLY a JSON object with a "modules" key containing a list. Each module mu
 - "edge_cases": list of edge cases to handle
 
 Respond with ONLY valid JSON, no markdown, no explanation."""
+    # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+    # its fallback step is removed here, not replaced.
     chain = [
         {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-        {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
     ]
     try:
         raw_text = generate_text(

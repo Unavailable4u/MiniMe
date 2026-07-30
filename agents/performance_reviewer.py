@@ -72,7 +72,14 @@ load_dotenv()
 # advisory-only role (see module docstring), not an oversight.
 CHAIN = [
     {"provider": "gemini", "model": "gemini-3.1-flash-lite", "key_env": "GEMINI_API_KEY_13"},
-    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_13"},
+    # Quota-reality fix, §11b (2026-07-30): was GEMINI_API_KEY_13 on both
+    # steps (§6's single-account gap) -- different models, same key, so
+    # it was fine as a rate-limit fallback but zero protection against
+    # that one account being suspended/revoked/otherwise fully down.
+    # GEMINI_API_KEY_14 (one of the 5 newly-provisioned Gemini keys) gives
+    # this role genuine account-level redundancy: a suspended/revoked
+    # _13 no longer takes out both fallback rungs at once.
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_14"},
 ]
 
 SYSTEM_PROMPT = """You are a performance reviewer. Given a Python module's source code, \

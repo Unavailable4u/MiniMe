@@ -31,14 +31,12 @@ rollout guide, revisiting the original exclusion below):
                contention the original exclusion was protecting against.
                They only get used once BOTH dedicated Groq accounts are
                already rate-limited, so the primary isolation property
-               above is unchanged; this just gives the role somewhere to
-               go besides GitHub Models when that happens.
-  - Fallback 4: GitHub Models gpt-4.1-nano, via EO_PANEL_GITHUB_PAT — same
-               PAT the EO Panel (Part 2.2) and Responder (Part 2.3) use,
-               per Part 2's own "cheap, fast, last resort" framing. Kept
-               as the true last resort, after Gemini rather than before —
-               classification quality matters more than shaving one more
-               step off an already-rare full-chain exhaustion.
+               above is unchanged.
+  - Quota-reality fix, §4 (2026-07-30): the former Fallback 4 (GitHub
+               Models gpt-4.1-nano, via EO_PANEL_GITHUB_PAT) is removed —
+               GitHub Models retired in full today. Groq x2 -> Gemini x2
+               is the full chain now; this role keeps that redundancy,
+               just without a fifth rung.
 Output schema is exactly Part 3's contract, updated per Migration Part 12
 §8.2/§8.4 (tier int -> path string):
     {path, directed_task_type, confidence, suggested_agents, reasoning}
@@ -76,7 +74,9 @@ CHAIN = [
     # Gemini exclusion was protecting against.
     {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_10"},
     {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_11"},
-    {"provider": "github", "model": "openai/gpt-4.1-nano", "key_env": "EO_PANEL_GITHUB_PAT"},
+    # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+    # its last-resort step is removed here, not replaced. This role keeps
+    # the Groq x2 -> Gemini x2 redundancy above (still every task, tier 0).
 ]
 SYSTEM_PROMPT = """You are the Inspector for a multi-agent build system. \
 You classify one incoming task into a routing path — you do NOT do the \

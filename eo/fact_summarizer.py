@@ -33,10 +33,10 @@ from eo.workspace_facts import CATEGORY_TO_SECTION
 # it here would undo that isolation). GROQ_RESERVE_1 / CEREBRAS_RESERVE_1
 # are the unfilled "reserved for Part 3" slots already sitting in the
 # env file for exactly this situation: a new agent that shouldn't
-# borrow another agent's dedicated quota. GITHUB_MODELS_PAT is kept as
-# the third-tier fallback since it's already the documented shared
-# fallback for the whole 19-agent roster and this call is low-volume,
-# third-tier-only traffic.
+# borrow another agent's dedicated quota. The former third-tier fallback
+# (GITHUB_MODELS_PAT) is removed, not replaced, per quota-reality fix §4
+# (2026-07-30, full GitHub Models retirement) -- Groq -> Cerebras is the
+# full chain now.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_RESERVE_1"},
     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
@@ -44,7 +44,8 @@ CHAIN = [
     # zai-glm-4.7 served now). See agents/generic_worker.py's
     # PROVIDER_DEFAULT_MODEL comment for the full trace.
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_RESERVE_1"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
+    # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+    # its fallback step is removed here, not replaced.
 ]
 
 # No provider in this chain supports response_format/json_mode on the

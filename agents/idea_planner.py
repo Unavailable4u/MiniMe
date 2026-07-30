@@ -9,13 +9,14 @@ from utils.llm_client import generate_text
 load_dotenv()
 
 # Fallback chain per Part 4, agent #1 of the v5 blueprint:
-# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b -> GitHub Models
+# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b
 # (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s; gpt-oss-120b
 # is the one model guaranteed on Cerebras's public production tier.)
+# Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
+# removed here, not replaced -- GitHub Models retired in full today.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 SYSTEM_PROMPT = """You are the product planner for an autonomous build loop.

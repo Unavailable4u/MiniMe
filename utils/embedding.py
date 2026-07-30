@@ -39,7 +39,16 @@ HF_FEATURE_EXTRACTION_URL = "https://router.huggingface.co/hf-inference/models"
 # scope per the guide's §4b table). Order matters: HUGGINGFACE_API_KEY
 # first since it's the existing account with prior quota history: _6/_7
 # only get hit once that one's exhausted or down.
-HF_EMBEDDING_KEY_ENVS = ["HUGGINGFACE_API_KEY", "HUGGINGFACE_API_KEY_6", "HUGGINGFACE_API_KEY_7"]
+# Quota-reality fix, §11d (2026-07-30): added the 3 newly-provisioned
+# HuggingFace keys (_8/_9/_10) here, alongside _6/_7 -- this is where
+# $0.10/month/account actually stretches (embeddings are far cheaper per
+# call than chat completions). Deliberately NOT added to
+# eo/registry.py's AGENT_CAPABILITIES -- that's the chat/extraction pool
+# (_2/3/4/5), a different job with a much worse cost-per-call ratio (§5).
+HF_EMBEDDING_KEY_ENVS = [
+    "HUGGINGFACE_API_KEY", "HUGGINGFACE_API_KEY_6", "HUGGINGFACE_API_KEY_7",
+    "HUGGINGFACE_API_KEY_8", "HUGGINGFACE_API_KEY_9", "HUGGINGFACE_API_KEY_10",
+]
 
 
 def embed_text(text: str, key_env: str = "HUGGINGFACE_API_KEY") -> list:

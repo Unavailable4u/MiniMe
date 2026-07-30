@@ -40,9 +40,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
 from eo import conversation_memory   # NEW — Part 23 fix
 
+# Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+# its fallback step is removed here, not replaced.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "EO_PANEL_GITHUB_PAT"},
 ]
 
 SYSTEM_PROMPT = """You are a fast, direct assistant answering a single trivial \
@@ -116,9 +117,10 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     else:
         primary_key_env = key_override
 
+    # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+    # its fallback step is removed here, not replaced.
     chain = [
         {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": primary_key_env},
-        {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "EO_PANEL_GITHUB_PAT"},
     ]
 
     conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23 fix

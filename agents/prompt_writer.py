@@ -93,13 +93,14 @@ def _maybe_add_monitoring_module(specs: dict, session_id: str) -> dict:
         modules.append(dict(MONITORING_MODULE_SPEC))
     return specs
 
-# Part 4, agent #2 — Groq primary, GitHub Models fallback. Same chain
-# shape as the rest of the roster now that this goes through
-# generate_text() instead of a hand-rolled Groq client (this is what
-# makes usage logging work for this agent, per Stage 6 cleanup).
+# Part 4, agent #2 — Groq primary. Same chain shape as the rest of the
+# roster now that this goes through generate_text() instead of a
+# hand-rolled Groq client (this is what makes usage logging work for
+# this agent, per Stage 6 cleanup).
+# Quota-reality fix, §4 (2026-07-30): the GitHub Models fallback step is
+# removed here, not replaced -- GitHub Models retired in full today.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 SYSTEM_PROMPT = """You are a technical spec writer for an autonomous build loop.

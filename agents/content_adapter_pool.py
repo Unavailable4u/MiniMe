@@ -186,9 +186,11 @@ where they apply: "twitter", "linkedin", "instagram_caption", \
 identifier if none of those fit.
 
 Respond with ONLY valid JSON, no markdown, no explanation."""
+    # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+    # its fallback step is removed here, not replaced. This agent keeps
+    # whatever redundancy already sat in front of it (nothing else changes).
     chain = [
         {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-        {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
     ]
     try:
         raw_text = generate_text(

@@ -53,6 +53,13 @@ CHAIN = [
     # fallback account on the same provider doing the identical job.
     {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_8"},
     {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY_5"},
+    # Quota-reality fix, §11c (2026-07-30): was two fallback accounts
+    # (Gemini + one Mistral); MISTRAL_API_KEY_8 (one of the 3
+    # newly-provisioned Mistral keys) is the real third account §7 asked
+    # for -- Mistral publishes no daily cap, only RPS, so this is
+    # genuinely the lowest-leverage of the 16-key wiring work, but it's
+    # still real redundancy this agent didn't have before.
+    {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY_8"},
 ]
 APPS_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apps")
 

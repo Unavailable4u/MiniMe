@@ -13,10 +13,11 @@ sandbox_tester.py appends this test code after a module's code when
 present, so a module can "pass" the sandbox run only if it doesn't error
 out AND its own generated tests don't raise AssertionError.
 
-- Model: Groq `qwen/qwen3.6-27b`, fallback GitHub Models `o4-mini`.
+- Model: Groq `qwen/qwen3.6-27b`. GitHub Models fallback removed
+  2026-07-30 (quota-reality fix §4, full retirement) and not replaced.
 - No dedicated key split -- this is a single sequential call per cycle,
   same low-volume tier as Idea Planner / Prompt Writer / Report Writer,
-  so it shares the default GROQ_API_KEY / GITHUB_MODELS_PAT.
+  so it shares the default GROQ_API_KEY.
 """
 
 import os
@@ -37,11 +38,12 @@ load_dotenv()
 # Quota-reality fix, §3: Groq qwen/qwen3-32b -> qwen/qwen3.6-27b.
 # qwen/qwen3-32b doesn't appear anywhere in Groq's current live
 # free-tier model table (confirmed via GET /v1/models, 2026-07-30) --
-# qwen/qwen3.6-27b is the live model in that same family. Same GitHub
-# Models fallback as before, per Part 4, agent #5.
+# qwen/qwen3.6-27b is the live model in that same family.
+# Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+# its fallback step is removed here, not replaced. This agent keeps
+# whatever redundancy already sat in front of it (nothing else changes).
 CHAIN = [
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "github", "model": "openai/o4-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 SYSTEM_PROMPT = """You are a test writer for an autonomous build loop. You will be

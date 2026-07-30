@@ -28,10 +28,12 @@ from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
 from eo.errors import MissingDependencyError   # NEW — bug fix
 
+# Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+# its fallback step is removed here, not replaced. The Groq -> Cerebras
+# redundancy above is unchanged.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 SYSTEM_PROMPT = """You are reviewing and fixing ONE small, self-contained code \

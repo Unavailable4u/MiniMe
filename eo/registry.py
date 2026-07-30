@@ -39,6 +39,32 @@ AGENT_CAPABILITIES = {
                            "brainstormer", "outliner", "editor"],
     },
 
+    # Quota-reality fix, §11a: three of the five newly-provisioned Groq
+    # keys, reinforcing GROQ_API_KEY's 12-role catch-all pool above --
+    # previously zero sibling accounts, the single biggest real
+    # single-point-of-failure in the whole roster.
+    "GROQ_API_KEY_10": {
+        "provider": "groq",
+        "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
+        "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                           "researcher", "writer", "analyst", "formatter",
+                           "brainstormer", "outliner", "editor"],
+    },
+    "GROQ_API_KEY_11": {
+        "provider": "groq",
+        "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
+        "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                           "researcher", "writer", "analyst", "formatter",
+                           "brainstormer", "outliner", "editor"],
+    },
+    "GROQ_API_KEY_12": {
+        "provider": "groq",
+        "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
+        "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                           "researcher", "writer", "analyst", "formatter",
+                           "brainstormer", "outliner", "editor"],
+    },
+
     # --- Groq: Reviewer Pool — base 3, reserve 2 (Part 3 §4.2) ---
     # Part 3 §3.5: "extraction_table_builder" added to this same pool's
     # tags, not a new pool -- structured multi-paper extraction is a
@@ -82,6 +108,11 @@ AGENT_CAPABILITIES = {
     "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
     "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
     "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+    # Quota-reality fix, §11a: remaining 2 of the 5 newly-provisioned Groq
+    # keys, reinforcing this 9-role extraction pool -- the secondary
+    # pressure point behind GROQ_API_KEY's catch-all pool above.
+    "GROQ_API_KEY_13": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+    "GROQ_API_KEY_14": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
 
 
     # --- Groq: Structure Architect (isolated single account) ---
@@ -183,8 +214,11 @@ AGENT_CAPABILITIES = {
         # Migration Part 12 §4: added "writer", "editor".
         "natural_roles": ["documentation_writer", "final_qa", "writer", "editor"],
     },
-    "GITHUB_MODELS_PAT": {"provider": "github", "strengths": ["general fallback"], "natural_roles": ["fallback"]},
-    "EO_PANEL_GITHUB_PAT": {"provider": "github", "strengths": ["panel voting", "fallback"], "natural_roles": ["panel_member_c"]},
+    # Quota-reality fix, §4 (2026-07-30): GITHUB_MODELS_PAT / EO_PANEL_GITHUB_PAT
+    # entries removed -- GitHub Models retired in full today, and no CHAIN
+    # anywhere in the repo references either key_env anymore (test_writer.py,
+    # responder.py, eo/panel.py's MEMBER_C_CHAIN, eo/inspector.py, and the
+    # rest were all moved off or had the step removed as part of this pass).
     # "HUGGINGFACE_API_KEY" kept -- Part 9's literal guide table omits it
     # entirely, but it's the only registered candidate for "memory_search"
     # and "duplication_checker"; dropping it would silently break hiring
@@ -282,6 +316,50 @@ AGENT_CAPABILITIES = {
         "provider": "gemini", "strengths": ["algorithm/approach design before implementation"],
         "natural_roles": ["logic_architect"],
     },
+
+    # Quota-reality fix, §11b: four of the five newly-provisioned Gemini
+    # keys, padding the tag-driven catch-all pool (GEMINI_API_KEY_1/2/3
+    # above) -- genuinely useful now that §2's PROVIDER_DEFAULT_MODEL
+    # switch (agents/generic_worker.py) is in, since padding accounts
+    # still pinned to gemini-3.6-flash would just buy more 20/day
+    # ceilings. The fifth new key, GEMINI_API_KEY_14, is NOT tagged here
+    # -- it's performance_reviewer.py's own dedicated CHAIN account (§11b
+    # / §6), not a tag-driven one.
+    "GEMINI_API_KEY_15": {
+        "provider": "gemini", "strengths": ["fast, simple-shaped roles"],
+        "natural_roles": ["formatter", "outliner", "brainstormer"],
+    },
+    "GEMINI_API_KEY_16": {
+        "provider": "gemini", "strengths": ["mid-weight reasoning"],
+        "natural_roles": ["writer", "editor", "researcher"],
+    },
+    "GEMINI_API_KEY_17": {
+        "provider": "gemini", "strengths": ["heavier reasoning"],
+        "natural_roles": ["analyst", "fact_checker", "final_qa"],
+    },
+    "GEMINI_API_KEY_18": {
+        "provider": "gemini", "strengths": ["fast, simple-shaped roles"],
+        "natural_roles": ["formatter", "outliner", "brainstormer"],
+    },
+
+    # Quota-reality fix, §11c: 2 of the 3 newly-provisioned Mistral keys,
+    # padding the writer/editor/final_qa pool (MISTRAL_API_KEY_2/3/4
+    # above), same pattern. The third new key, MISTRAL_API_KEY_8, is NOT
+    # tagged here -- it's documentation_agent.py's own dedicated CHAIN
+    # account (§11c/§7), not a tag-driven one.
+    "MISTRAL_API_KEY_9": {
+        "provider": "mistral", "strengths": ["writing", "editing"],
+        "natural_roles": ["writer", "editor"],
+    },
+    "MISTRAL_API_KEY_10": {
+        "provider": "mistral", "strengths": ["final review pass"],
+        "natural_roles": ["final_qa"],
+    },
+    # Quota-reality fix, §11d: the 3 newly-provisioned HuggingFace keys
+    # (_8/_9/_10) are deliberately NOT added here -- they're embeddings
+    # accounts, wired into utils/embedding.py's HF_EMBEDDING_KEY_ENVS
+    # instead, a different job with a much worse $0.10/month-per-call
+    # ratio on the chat/extraction pool above (§5).
 }
 
 
