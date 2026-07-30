@@ -1,0 +1,132 @@
+diff --git a/scripts/test_tool_calling.py b/scripts/test_tool_calling.py
+new file mode 100644
+index 0000000..d99a364
+--- /dev/null
++++ b/scripts/test_tool_calling.py
+@@ -0,0 +1,126 @@
++"""
++Notebooks Chat-First refinement, Phase 2 step 2.3.
++
++Isolated test harness for tool-calling classification. Sends canned
++messages + the manifest-derived tools array (step 2.2) straight to the
++LLM and logs the raw response -- tool_calls, arguments, and any plain
++content the model returned instead.
++
++Deliberately NOT touched by this script:
++  - WorkspaceChatPanel.jsx's send path
++  - sendTask() / the staffed dispatcher
++  - utils/llm_client.py's _call_step()/_call_cloudflare_step() (per the
++    2.1 findings, neither passes "tools" today -- this script builds its
++    own client call rather than routing through them, so nothing in the
++    real send path is at risk while we're just eyeballing output quality)
++
++This is a scratch tool for a human to run and read, not a test suite
++wired into CI. Run it directly:
++
++    GROQ_API_KEY=... python scripts/test_tool_calling.py
++    GROQ_API_KEY=... python scripts/test_tool_calling.py --message "make me flashcards on this"
++    GROQ_API_KEY=... python scripts/test_tool_calling.py --api-base http://localhost:8000
++
++Step 2.4 (iterate against ~10 phrasings until classification looks
++reliable) is meant to happen by running this repeatedly with different
++CANNED_MESSAGES / tool descriptions -- not by adding more code here.
++"""
++
++import argparse
++import json
++import os
++import sys
++from datetime import datetime, timezone
++
++import requests
++from openai import OpenAI
++
++# Running this file directly (`python scripts/test_tool_calling.py`) only
++# puts scripts/ on sys.path, not the repo root -- so utils/, which lives
++# next to scripts/, isn't importable without this. Inserted before the
++# utils import on purpose. If you instead run it as `python -m
++# scripts.test_tool_calling` from the repo root, this is a harmless no-op.
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from utils.capability_tools import manifest_to_tools
++
++# The model most chains are pinned to today (per 2.1 findings), confirmed
++# to support tools/tool_choice/tool_calls on Groq, including parallel
++# tool calls.
++MODEL = "llama-3.3-70b-versatile"
++
++SYSTEM_PROMPT = (
++    "You are the intent classifier for MiniMe's Notebooks chat box. "
++    "If the user's message clearly maps to one of the available tools, "
++    "call it. If the message is ambiguous, conversational, or doesn't "
++    "match any tool, respond normally with no tool call -- do not guess."
++)
++
++# A first pass at phrasings spanning: clear matches, near-misses, and
++# messages that should NOT match anything. Step 2.4 is expected to grow
++# this list toward ~10+ entries per capability as misfires turn up.
++CANNED_MESSAGES = [
++    "make me some flashcards for this",
++    "quiz me on chapter 3",
++    "can you turn this into a study guide",
++    "what's the weather like",  # should never match a tool
++    "summarize what we just talked about",  # ambiguous on purpose
++]
++
++
++def fetch_manifest(api_base: str) -> list:
++    resp = requests.get(f"{api_base}/api/capabilities", timeout=10)
++    resp.raise_for_status()
++    return resp.json()
++
++
++def log_result(message: str, response) -> None:
++    choice = response.choices[0].message
++    record = {
++        "timestamp": datetime.now(timezone.utc).isoformat(),
++        "message": message,
++        "content": choice.content,
++        "tool_calls": [
++            {
++                "name": tc.function.name,
++                "arguments": tc.function.arguments,
++            }
++            for tc in (choice.tool_calls or [])
++        ],
++    }
++    print(json.dumps(record, indent=2))
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument(
++        "--api-base",
++        default="http://localhost:8000",
++        help="Base URL of the running backend, to fetch /api/capabilities from.",
++    )
++    parser.add_argument(
++        "--message",
++        action="append",
++        dest="messages",
++        help="Run one specific message instead of the CANNED_MESSAGES list "
++        "(repeatable).",
++    )
++    args = parser.parse_args()
++
++    manifest = fetch_manifest(args.api_base)
++    tools = manifest_to_tools(manifest)
++    print(f"# loaded {len(tools)} tools from {args.api_base}/api/capabilities\n")
++
++    client = OpenAI(base_url="https://api.groq.com/openai/v1")
++
++    for message in args.messages or CANNED_MESSAGES:
++        response = client.chat.completions.create(
++            model=MODEL,
++            messages=[
++                {"role": "system", "content": SYSTEM_PROMPT},
++                {"role": "user", "content": message},
++            ],
++            tools=tools,
++            tool_choice="auto",
++        )
++        log_result(message, response)
