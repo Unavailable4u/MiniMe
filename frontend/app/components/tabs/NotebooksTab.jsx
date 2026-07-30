@@ -364,7 +364,7 @@ const MINDMAP_MODES = [
   { id: "route", label: "Study Path", panelKey: "suggested_route", target: "suggested_route" },
 ];
 
-function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks }) {
+function MindMapView({ workspaceId, onTopicSelect, fetchPanelContent, generateNotebooks }) {
   const [mode, setMode] = useState("mindmap");
   const [content, setContent] = useState("");
   const [updatedAt, setUpdatedAt] = useState(null);
@@ -428,7 +428,7 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-[var(--neutral-500)]">
           {content
-            ? "Click any node to open a sub-chat scoped to this notebook."
+            ? "Click any node to generate a step-by-step workflow for that topic."
             : emptyHint}
         </p>
         <div className="flex items-center gap-2 shrink-0">
@@ -452,7 +452,7 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
         <div className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-4">
           <MermaidDiagram
             mermaidText={content}
-            onNodeClick={(label) => onOpenSubChat(workspaceId, `Tell me more about "${label}" using this notebook's sources.`)}
+            onNodeClick={(label) => onTopicSelect?.(label)}
             hideSourceOnFail /* NEW — bug #6a fix */
             showControls /* NEW — §7 refinements #5/#6: zoom/pan + export as image */
             maxHeight={520}

@@ -2,7 +2,7 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import {
   Sparkles, X, Play, Loader2, Check, AlertCircle, ChevronRight,
-  Layers, BookMarked, GraduationCap, Network, GitBranch, ListChecks,
+  Layers, BookMarked, GraduationCap, Network, GitBranch,
 } from "lucide-react";
 import { useWorkspaceDock } from "../../context/WorkspaceDockContext";
 import { useSession } from "../../context/SessionContext";   // NEW — Data Layer §9c: processingWorkspaces
@@ -53,7 +53,15 @@ export const TARGETS = [
   // runs automatically on every upload, no button needed — this entry
   // was a dead end pointing at a graph nothing displays. Per explicit
   // request: no manual "generate backlinks" affordance anywhere.
-  { key: "workflows", label: "Workflows", icon: ListChecks, subTab: "diagrams", keywords: ["workflow", "workflows", "process diagram", "process diagrams", "steps", "procedure", "how to"] },
+  // REMOVED (step 3/5) — "Workflows" used to be a batch Generate target
+  // hitting agents/workflow_suggester.py's suggest_workflows() over the
+  // whole notebook/scope. That's now dead server-side (NOTEBOOKS_GENERATE_TARGETS
+  // no longer includes "workflows" — api/server.py step 3) in favor of
+  // per-topic generation: clicking a MindMapView node now calls
+  // build_topic_workflow() through SessionContext's generateTopicWorkflow()
+  // (step 4) and lands in WorkflowsView as a per-topic result, not a
+  // picker chip. See NotebooksTab.jsx's DiagramsView (step 8) for the
+  // new wiring.
 ];
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
