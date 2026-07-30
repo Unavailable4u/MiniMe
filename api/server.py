@@ -2089,6 +2089,106 @@ NOTEBOOKS_GENERATE_TARGETS = {
 }
 
 
+# Notebooks — Chat-First Refinement, Phase 1 step 1.6.
+#
+# Server-side mirror of frontend/app/lib/notebookCapabilities.js's TARGETS
+# array (steps 1.1-1.5). Deliberately hand-kept in sync rather than
+# generated from the JS file — this is Python, that's JS, and there's no
+# shared build step between them yet. Guide's own framing (Phase 1 §3):
+# this manifest is "the single source of truth both the LLM system
+# prompt and any future UI ... read from, so the picker's keyword list
+# and the LLM's tool list can never drift apart" — the two files still
+# have to be edited together by hand for now; nothing here enforces that
+# automatically. Fields intentionally omit `icon` (frontend-only,
+# meaningless to the LLM or to this endpoint's callers) and `keywords`
+# (Phase 2 replaces keyword matching with real tool-calling, so this
+# manifest's `description` is what feeds the model — `keywords` stays a
+# frontend-only fallback/pre-fill concern in NotebooksGeneratePicker.jsx).
+#
+# "suggested_route" is deliberately left out, matching the JS TARGETS
+# array: it's a Diagrams sub-view (NotebooksTab.jsx), never a picker
+# chip or a Generate-target the user (or, later, the LLM) selects
+# directly, so it isn't a "capability" in this manifest's sense.
+CAPABILITIES_MANIFEST = [
+    {
+        "key": "clusters", "label": "Clusters", "subTab": "insights",
+        "description": "Group the workspace's notes and sources into topic clusters, so related material is organized together instead of a flat list.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "facts", "label": "Facts", "subTab": "insights",
+        "description": "Pull out standalone factual statements from the sources and list them as discrete, citable facts.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "suggested_notes", "label": "Suggested notes", "subTab": "insights",
+        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "study_flashcards", "label": "Flashcards", "subTab": "study",
+        "description": "Generate a set of question/answer flashcards for studying the selected scope.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "study_quiz", "label": "Quiz", "subTab": "study",
+        "description": "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "study_guide", "label": "Study guide", "subTab": "study",
+        "description": "Produce a structured written study guide summarizing and organizing the selected scope for review.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "mindmap", "label": "Mind map", "subTab": "diagrams",
+        "description": "Build a visual mind map of the concepts in the selected scope and how they relate to each other.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        "key": "podcast", "label": "Podcast", "subTab": "insights",
+        "description": "Generate a two-host audio podcast episode discussing the selected scope.",
+        "scopeAllowed": "whole", "endpoint": None,
+        "enabled": False,
+    },
+    {
+        "key": "video_overview", "label": "Video overview", "subTab": "insights",
+        "description": "Generate a narrated video overview summarizing the selected scope.",
+        "scopeAllowed": "whole", "endpoint": None,
+        "enabled": False,
+    },
+    {
+        "key": "workflow", "label": "Workflow", "subTab": "diagrams",
+        "description": "Build a step-by-step study workflow for a single topic.",
+        "scopeAllowed": "topic", "endpoint": None,
+        "enabled": False,
+    },
+]
+
+
+@app.get("/api/capabilities")
+def get_capabilities():
+    """Phase 1 step 1.6.
+
+    Returns the same manifest shape the frontend's TARGETS array carries,
+    so step 1.7 can point the frontend here instead of the static import.
+    No scope/auth filtering yet — every registered capability (including
+    disabled stubs, so a future help UI or debugging call can still see
+    what's coming) is returned as-is; that keeps this step a pure read
+    with zero behavioral change, matching the rest of Phase 1. Left
+    public (no Depends(require_auth)) since the manifest isn't
+    user-scoped data, same as any other static config the frontend reads.
+    """
+    return {"capabilities": CAPABILITIES_MANIFEST}
+
+
 class NotebooksGenerateRequest(BaseModel):
     targets: list[str]
     scope: Optional[dict[str, Any]] = None

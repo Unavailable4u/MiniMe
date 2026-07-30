@@ -2,6 +2,13 @@ import {
   Sparkles, Layers, BookMarked, GraduationCap, Network, Mic, Video, ListChecks,
 } from "lucide-react";
 
+// Phase 1 step 1.7: same NEXT_PUBLIC_API_URL convention SessionContext.jsx
+// uses for every other fetch() in the app — duplicated here rather than
+// imported from there because SessionContext.jsx pulls in AuthContext/
+// supabase/pusher, none of which this plain data module should depend
+// on just to read one env var.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 // Notebooks — Chat-First Refinement, Phase 1 step 1.1: promoted out of
 // NotebooksGeneratePicker.jsx, same shape as before (key/label/icon/
 // subTab/keywords). This is the single source of truth for every
@@ -41,6 +48,24 @@ import {
 // `endpoint` is `null` here rather than pointing at those. `workflow`
 // already has a real per-topic call (`generateTopicWorkflow()` →
 // `build_topic_workflow()`) but isn't registered as a capability yet.
+// Phase 1 step 1.7: this array below is no longer the source of truth for
+// label/subTab/description/scopeAllowed/endpoint/enabled — step 1.6's
+// `GET /api/capabilities` (api/server.py's CAPABILITIES_MANIFEST) is.
+// It stays as the *initial* values (and the sole source for `icon` and
+// `keywords`, which the manifest deliberately omits — see api/server.py's
+// step 1.6 comment) so every existing call site — NotebooksGeneratePicker's
+// chip row, parseFreeText's keyword scan, WorkspaceChatPanel's
+// TARGETS_BY_KEY — keeps working synchronously with zero shape change,
+// per step 1.8's "zero visible/behavioral change" requirement. Below,
+// syncCapabilitiesFromServer() fetches the manifest once and merges the
+// server's values onto these entries *in place*, so every module that
+// already did `import { TARGETS }` picks up the synced fields for free
+// through the same array/object references — no call-site changes
+// needed. A later step (past this plan's Phase 1) can migrate call
+// sites to a proper `useCapabilities()` hook if sync-in-place stops
+// being enough; for now it's the smallest change that makes
+// `/api/capabilities` the single source of truth without an async
+// rewrite of every consumer in one patch.
 export const TARGETS = [
   { key: "clusters", label: "Clusters", icon: Layers, subTab: "insights", keywords: ["cluster", "clusters", "group notes", "organize notes"], description: "Group the workspace's notes and sources into topic clusters, so related material is organized together instead of a flat list.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
   { key: "facts", label: "Facts", icon: BookMarked, subTab: "insights", keywords: ["fact", "facts"], description: "Pull out standalone factual statements from the sources and list them as discrete, citable facts.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
@@ -71,3 +96,69 @@ export const TARGETS = [
   // picker chip. See NotebooksTab.jsx's DiagramsView (step 8) for the
   // new wiring.
 ];
+
+// Phase 1 step 1.7 (cont'd): keyed lookup used both by the merge below
+// and re-exported for any call site that wants O(1) access instead of
+// re-deriving its own `TARGETS_BY_KEY` (NotebooksGeneratePicker.jsx and
+// WorkspaceChatPanel.jsx currently both build their own local copy of
+// this same reduction — left as-is here rather than refactored in this
+// step, to keep this patch to "one source of truth for the data," not
+// also a call-site cleanup).
+const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
+
+// Fields the server manifest (api/server.py's CAPABILITIES_MANIFEST) owns.
+// Deliberately excludes `icon` and `keywords` — see the step 1.6 comment
+// in api/server.py for why those stay frontend-only.
+const SERVER_OWNED_FIELDS = ["label", "subTab", "description", "scopeAllowed", "endpoint", "enabled"];
+
+let syncPromise = null;
+
+// Fetches GET /api/capabilities once and merges each entry's server-owned
+// fields onto the matching TARGETS[] object *in place*, keyed by `key`.
+// Mutating in place (rather than replacing `TARGETS` with a new array) is
+// what lets this stay a one-line addition at every existing import site:
+// NotebooksGeneratePicker.jsx's `export { TARGETS }` and
+// WorkspaceChatPanel.jsx's `import { ..., TARGETS }` both hold a
+// reference to this same array/these same objects, so they see the
+// synced values without re-importing or subscribing to anything.
+//
+// No visible effect yet (step 1.8's smoke test): nothing in the current
+// UI renders `description`/`scopeAllowed`/`endpoint`, and `label`/
+// `subTab`/`enabled` only ever change if the server manifest disagrees
+// with the local defaults above, which it doesn't as of this step —
+// step 1.6's CAPABILITIES_MANIFEST was hand-written to match. This
+// starts mattering once Phase 2 reads `description` to build the LLM's
+// tool list.
+//
+// Deliberately silent on failure (offline, server not up yet, CORS
+// during local dev, etc.) — this fetch augments already-correct local
+// defaults, it doesn't replace them, so a failed sync should never be
+// visible to the user or block rendering. Guarded by `typeof window`
+// so this module can still be imported during Next.js's server-side
+// render/build without attempting a network call there.
+export function syncCapabilitiesFromServer() {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (!syncPromise) {
+    syncPromise = fetch(`${API_URL}/api/capabilities`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`capabilities fetch ${res.status}`))))
+      .then((data) => {
+        for (const remote of data.capabilities || []) {
+          const local = TARGETS_BY_KEY[remote.key];
+          if (!local) continue;   // server knows a capability this build's TARGETS doesn't yet — ignore for now
+          for (const field of SERVER_OWNED_FIELDS) {
+            if (field in remote) local[field] = remote[field];
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn("notebookCapabilities: /api/capabilities sync failed, using local TARGETS defaults", err);
+      });
+  }
+  return syncPromise;
+}
+
+// Kick off the sync as soon as this module is first imported (i.e. as
+// soon as anything touches the Notebooks tab or chat panel), rather than
+// requiring every consumer to remember to call this — same "import runs
+// it" shape as e.g. pusherClient.js's client singleton.
+syncCapabilitiesFromServer();
