@@ -120,6 +120,204 @@ def _ensure_role_registered() -> None:
         add_role_prompt("workflow_suggester", WORKFLOW_SUGGESTER_BRIEF, source="workflow_suggester_seed")
 
 
+# --- Topic Workflow Builder -------------------------------------------------
+#
+# Distinct job from the detection-style role above: no "0-4, zero is
+# fine" judgment call here. A Mind Map node click always wants exactly
+# one mastery sequence back for the topic the user picked, synthesized
+# rather than merely detected -- the source material grounds it when
+# it's substantive, but thin/absent material is never a reason to come
+# back empty. Reuses the same {title, description, steps, mermaid}
+# shape (and this module's own _parse_workflow()/_parse_steps()
+# validation) so WorkflowCard needs no changes to render either kind
+# of result.
+
+TOPIC_WORKFLOW_BUILDER_BRIEF = (
+    "You are given one specific topic and whatever source material is "
+    "available about it. Unlike a detection task, you do not decide "
+    "whether a procedure exists in the material -- you always "
+    "synthesize exactly one mastery sequence: an ordered set of 4-8 "
+    "steps a learner should work through to actually understand this "
+    "topic. Ground it in the source material where that material is "
+    "substantive, and use your own general knowledge of the subject to "
+    "fill in a sensible sequence where the material is thin or absent. "
+    "Never refuse and never return zero steps -- there is always a "
+    "reasonable generic study sequence for any named topic. Write a "
+    "short title, a one-line description, the ordered steps, and the "
+    "same steps rendered as a Mermaid flowchart. Each step needs a "
+    "stable short id (S1, S2, S3, ...), a concise plain-text label (a "
+    "few words, not a full sentence), and a type of either \"step\" "
+    "(something done) or \"decision\" (a branch point / question). The "
+    "Mermaid flowchart must use those exact S1/S2/... strings as its "
+    "own node ids (e.g. S1[Skim the overview] --> S2[Identify key "
+    "terms] --> S3{Confident yet?}), written top-to-bottom as "
+    "'flowchart TD'. Output a single fenced ```json code block "
+    "containing an object with exactly one key, \"workflow\", whose "
+    "value is an object with \"title\", \"description\", \"steps\" "
+    "(array of {\"id\", \"label\", \"type\"}), and \"mermaid\" (the "
+    "flowchart source as a plain string, no nested code fence). "
+    "Nothing outside that one code block."
+)
+
+
+def _ensure_topic_role_registered() -> None:
+    if not get_role_prompt("topic_workflow_builder"):
+        add_role_prompt("topic_workflow_builder", TOPIC_WORKFLOW_BUILDER_BRIEF,
+                         source="topic_workflow_builder_seed")
+
+
+def _find_topic(topics: dict, topic_label: str, source_node_ids: list[str] | None):
+    """Case-insensitive exact match of `topic_label` against each
+    topic's own `name`, optionally restricted to topics whose `covers`
+    list touches `source_node_ids` -- same scoping convention
+    suggest_workflows() already reads that parameter with. Returns
+    (topic_id, topic) or (None, None); a miss is expected (the Mind
+    Map's topic tree can drift from a stale node label) and is handled
+    by the generic fallback below, not treated as an error.
+    """
+    wanted = set(source_node_ids) if source_node_ids else None
+    needle = (topic_label or "").strip().lower()
+    for tid, topic in topics.items():
+        if wanted and not (wanted & set(topic.get("covers") or [])):
+            continue
+        name = str(topic.get("name") or "").strip().lower()
+        if name == needle:
+            return tid, topic
+    return None, None
+
+
+def _context_for_topic(topic: dict | None, topic_label: str) -> str:
+    """Single-topic analog of _context_for() above -- that one grounds
+    a whole-notebook detection pass across every topic; this one only
+    ever needs the one topic the user actually clicked. Falls back to
+    the bare label itself when there's no topic match or no excerpt/
+    summary/content_hint content to show, so the caller always has
+    *something* to hand the model rather than an empty string.
+    """
+    if not topic:
+        return topic_label
+    body = topic.get("excerpts")
+    if not body:
+        body = topic.get("summary") or topic.get("content_hint") or ""
+    body = body.strip()[:MAX_CONTENT_CHARS_PER_SOURCE]
+    name = topic.get("name") or topic_label
+    return f"--- {name} ---\n{body}" if body else name
+
+
+def _generic_fallback_workflow(topic_label: str) -> dict:
+    """A topic click can never come back empty-handed. If plan() fails
+    outright, `topic_label` can't be matched against the workspace's
+    own topic tree, or the model's response doesn't parse into a valid
+    workflow, this hardcoded generic mastery sequence stands in --
+    grounded in nothing but the clicked label itself, so it's
+    intentionally generic rather than wrong. A vague-but-usable 6-step
+    study path beats an error or a blank card.
+    """
+    label = (topic_label or "this topic").strip() or "this topic"
+    safe_label = label.replace('"', "")
+    steps = [
+        {"id": "S1", "label": f"Skim {label} overview", "type": "step"},
+        {"id": "S2", "label": "Identify key terms", "type": "step"},
+        {"id": "S3", "label": "Work through a core example", "type": "step"},
+        {"id": "S4", "label": "Summarize in your own words", "type": "step"},
+        {"id": "S5", "label": "Confident yet?", "type": "decision"},
+        {"id": "S6", "label": "Test with practice questions", "type": "step"},
+    ]
+    mermaid = (
+        "flowchart TD\n"
+        f"  S1[Skim {safe_label} overview] --> S2[Identify key terms]\n"
+        "  S2 --> S3[Work through a core example]\n"
+        "  S3 --> S4[Summarize in your own words]\n"
+        "  S4 --> S5{Confident yet?}\n"
+        "  S5 --> S6[Test with practice questions]\n"
+        "  S5 --> S3"
+    )
+    return {
+        "title": f"{label} — Mastery Path",
+        "description": (
+            f"A generic study sequence for {label}; source material "
+            "was too thin to ground a more specific one."
+        ),
+        "steps": steps,
+        "mermaid": mermaid,
+    }
+
+
+def build_topic_workflow(workspace_id: str, topic_label: str,
+                          source_node_ids: list[str] | None = None) -> dict:
+    """Returns a single {"title", "description", "steps", "mermaid"}
+    dict -- same per-item shape suggest_workflows() already emits, so
+    WorkflowCard needs no changes -- synthesized for exactly the
+    clicked Mind Map topic.
+
+    Unlike suggest_workflows()'s whole-notebook detection pass (0-4
+    entries, empty is a valid result), a topic click can never come
+    back empty or raise: every failure mode below -- plan() itself
+    failing, `topic_label` not matching any topic in scope, the
+    model's own response not parsing into a valid workflow -- falls
+    through to _generic_fallback_workflow() instead of propagating.
+
+    `source_node_ids` scopes which topics are eligible to match
+    `topic_label` against, same "only topics whose `covers` touches
+    one of these ids" convention suggest_workflows() already reads it
+    as; falsy means "search the whole notebook's topics."
+    """
+    topic_label = (topic_label or "").strip() or "This topic"
+
+    topic = None
+    try:
+        packet = plan(
+            workspace_id,
+            task_text=(
+                f"Build a 4-8 step mastery sequence for the topic "
+                f"'{topic_label}' -- concrete things a learner should "
+                "do to understand it, grounded in whatever source "
+                "material actually describes it."
+            ),
+            scope="project",
+        )
+        _tid, topic = _find_topic(packet["topics"], topic_label, source_node_ids)
+    except Exception:
+        # plan() failing (e.g. an empty/unreadable workspace) is not
+        # this function's problem to surface -- fall through to the
+        # generic sequence below same as a label that just doesn't
+        # match anything.
+        topic = None
+
+    context = _context_for_topic(topic, topic_label)
+
+    _ensure_topic_role_registered()
+    workflow = None
+    try:
+        from agents.generic_worker import run as run_role   # deferred,
+                                                              # same
+                                                              # circular-
+                                                              # import
+                                                              # reason as
+                                                              # suggest_workflows()
+                                                              # above
+        result = run_role(
+            role="topic_workflow_builder",
+            task_text=f"Build a mastery sequence for this topic:\n\n{context}",
+            input_keys=[],
+            session_id=None,
+            include_conversation_context=False,
+            domain="notes",
+        )
+        raw = (result.get("text") or "").strip()
+        match = _JSON_BLOCK_RE.search(raw)
+        if match:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict):
+                workflow = _parse_workflow(parsed.get("workflow"))
+    except Exception:
+        # Never let a call/parse failure surface as an error to a
+        # topic click -- fall back to the generic sequence instead.
+        workflow = None
+
+    return workflow or _generic_fallback_workflow(topic_label)
+
+
 def _context_for(topics: dict) -> str:
     parts = []
     for topic in topics.values():

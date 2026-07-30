@@ -119,6 +119,7 @@ from agents.study_generator import generate_study_content   # NEW — Notebooks 
 from agents.mind_mapper import generate_mindmap, generate_suggested_route   # NEW — Notebooks integration guide §6.5 (Phase 2); generate_suggested_route wired up per chat audit (was dead code, no caller anywhere)
 from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
 from agents.workflow_suggester import suggest_workflows   # NEW — bug audit §7: suggested workflow diagrams
+from agents.workflow_suggester import build_topic_workflow   # NEW — step 2: per-topic Mind Map click workflow
 from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
 from eo.secondary_data import get_secondary_data   # NEW — Backlinks-as-topic-tree: read-only Secondary Data -> graph shape
 from agents.note_table_builder import build_table
@@ -2076,7 +2077,15 @@ NOTEBOOKS_GENERATE_TARGETS = {
     # (agents/backlink_detector.py's run_after_source_manager()) is
     # fully automatic on upload, per explicit request: no manual
     # "generate backlinks" path anywhere.
-    "workflows": _generate_workflows,
+    # REMOVED — step 3: "workflows" unregistered as a Generate target, same
+    # defined-but-unreachable treatment as "backlinks" right above.
+    # _generate_workflows()/suggest_workflows() are left in place (the
+    # "suggested_workflows" panel_content key and its whole-notebook,
+    # 0-4-procedures pass are still valid concepts, just not this
+    # feature's path anymore) but nothing calls them once step 5 also
+    # drops the picker's "workflows" chip. Per-topic workflows now go
+    # exclusively through POST /api/workspaces/{ws_id}/topics/workflow
+    # (step 2) and agents/workflow_suggester.py's build_topic_workflow().
 }
 
 
@@ -2118,6 +2127,45 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str 
             branches.append({"panel_key": target, "status": "error", "error": str(exc)})
 
     return {"branches": branches}
+
+
+# --- per-topic workflow, triggered by a Mind Map node click (step 2) -------
+# Deliberately its own endpoint rather than a NOTEBOOKS_GENERATE_TARGETS
+# entry: Generate targets are whole-notebook passes persisted to
+# panel_content (see _generate_workflows above -- step 3 unregistered
+# it from this dict, defined-but-unreachable, same as "backlinks"),
+# each keyed by a fixed panel_key.
+# A topic click is a one-off, addressed by whatever label the user
+# clicked, and the result is thrown away the moment they click a
+# different node -- there's no stable key to persist it under and no
+# reason to, so this calls build_topic_workflow() directly and returns
+# its dict as-is, same un-persisted shape build_table_endpoint uses below.
+
+class TopicWorkflowRequest(BaseModel):
+    topic_label: str
+    source_node_ids: Optional[list[str]] = None
+
+
+@app.post("/api/workspaces/{ws_id}/topics/workflow")
+def topic_workflow_endpoint(ws_id: str, req: TopicWorkflowRequest, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    if not (req.topic_label or "").strip():
+        raise HTTPException(status_code=422, detail="topic_label must be non-empty")
+
+    # build_topic_workflow() already swallows its own failures (plan()
+    # errors, no topic match, unparseable model output) and falls back
+    # to a generic sequence rather than raising -- see its docstring.
+    # Nothing here should ever need the except branch, but a topic
+    # click still shouldn't 500 the request if something unforeseen
+    # slips through.
+    try:
+        return build_topic_workflow(ws_id, req.topic_label, source_node_ids=req.source_node_ids)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # --- data tables from scattered facts (see agents/note_table_builder.py,

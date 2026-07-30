@@ -1464,6 +1464,27 @@ async function generateNotebooks(wsId, targets, scope) {
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
 }
+
+// Per-topic workflow, triggered by a Mind Map node click (step 4) — thin
+// client over POST /api/workspaces/{ws_id}/topics/workflow (step 2).
+// Deliberately separate from generateNotebooks() above: that one dispatches
+// against NOTEBOOKS_GENERATE_TARGETS panel_keys and returns a per-target
+// branch list persisted server-side; this always addresses exactly one
+// topic label, is never persisted, and returns the single
+// {title, description, steps, mermaid} dict straight through for the
+// caller (DiagramsView, step 8) to hold in its own per-topic state.
+// `sourceNodeIds` is optional — omitted/empty means "search the whole
+// notebook's topics," same convention generateNotebooks' `scope` uses.
+async function generateTopicWorkflow(wsId, topicLabel, sourceNodeIds) {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/topics/workflow`, {
+    method: "POST",
+    headers: await authHeaders({ json: true }),
+    body: JSON.stringify({ topic_label: topicLabel, source_node_ids: sourceNodeIds || null }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 // Device spec (Blueprint sub-tab: Parts/Wiring/Mech/Instructions) --
 // agents/hardware_speccer.py's output, persisted as four keys under
 // eo/workspace_facts.py's per-workspace `custom` dict rather than through
@@ -2180,6 +2201,7 @@ async function openScopedSubChat(wsId, taskText) {
   submitCorrection, fetchPatchCandidates, acceptPatchCandidate, rejectPatchCandidate,
   fetchPanelContent, savePanelContent, fetchPanelContentList,   // NEW — generic paste-panel persistence (eo/panel_content.py); fetchPanelContentList added for §8 unread dots
   generateNotebooks,   // NEW — Notebooks integration guide §4/§6: the picker/chip-confirmation "Generate" command
+  generateTopicWorkflow,   // NEW — step 4: Mind Map node click -> single per-topic workflow (see step 2's endpoint)
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,
