@@ -45,6 +45,52 @@ dashboard even though real calls succeeded. Verify against your actual
 account/model before assuming Cloudflare rows in the dashboard are
 complete -- request counts may be the more reliable Cloudflare signal
 for now, not token counts.
+
+Notebooks Chat-First refinement, Phase 2 step 2.1 findings -- which
+provider(s) support OpenAI-style tool calling ("tools"/"tool_choice" in
+the request, "tool_calls" in the response), checked against the actual
+models each chain is pinned to today, not just the provider in the
+abstract:
+
+  - Groq: yes, full tools/tool_choice/tool_calls, including parallel
+    tool calls. llama-3.3-70b-versatile (the model most chains use)
+    supports it.
+  - Cerebras: yes. gpt-oss-120b (the model most chains use) supports
+    tools, but REJECTS a request that sets both "tools" and
+    "response_format" in the same call -- a step that wants both will
+    have to drop one. (Unrelated to tool calling, but noted while
+    checking this model: qwen-3-32b and llama-3.3-70b are being
+    deprecated on Cerebras -- not a concern today since no chain here
+    uses either, just don't reach for them later without checking.)
+  - Mistral: yes. mistral-medium-latest (the model most chains use) is
+    on Mistral's own confirmed tool-calling model list.
+  - Gemini: yes, natively documented on the OpenAI-compat endpoint
+    _get_gemini() already points at. gemini-3.6-flash/
+    gemini-3.1-flash-lite (the chain models) are current-gen.
+  - HuggingFace router: yes, but support is per-model/per-backend, not
+    router-wide -- openai/gpt-oss-120b:fastest (the model
+    generic_worker.py actually uses) is HF's own documented example
+    model for tool calling, so it's a safe bet; don't assume it holds
+    for every other router model without checking.
+  - Cloudflare Workers AI: yes -- llama-3.3-70b-instruct-fp8-fast (the
+    chain model) is tagged "Function calling" in Cloudflare's own model
+    docs, with a "tools" field in the same
+    {type: "function", function: {name, description, parameters}}
+    shape the other five use.
+
+Two gaps this leaves for Phase 2 step 2.2 (converting the capability
+manifest into a tools array) and beyond, not yet addressed by anything
+in this module:
+  1. _call_step() (groq/cerebras/mistral/gemini/huggingface) doesn't
+     pass "tools" into client.chat.completions.create(...) today, and
+     only ever reads choice.message.content -- it has no path back for
+     choice.message.tool_calls.
+  2. _call_cloudflare_step() is a bigger gap: it's a raw REST call, so
+     it needs an actual "tools" key built into its `payload` dict (not
+     just threaded through, like the SDK-shaped path above), and a
+     return path for a tool-call response -- right now it only ever
+     reads result.get("response", "") as plain text and has no
+     tool_calls handling at all.
 """
 
 import os
