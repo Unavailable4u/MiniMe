@@ -94,3 +94,27 @@ def manifest_to_tools(
     Each enabled manifest entry becomes one callable tool named
     f"{name_prefix}{key}" (e.g. "generate_flashcards", "generate_mindmap",
     "generate_workflow"), using the entry's `description` verbatim as the
+    tool description -- this is exactly why Phase 1 step 1.2 required a
+    human-readable description on every entry, not just a label.
+    """
+    tools = []
+    for capability in manifest:
+        if not _is_enabled(capability):
+            continue
+        if "key" not in capability or "description" not in capability:
+            raise ValueError(
+                "manifest entry missing required 'key' or 'description' "
+                f"field: {capability!r}"
+            )
+
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": f"{name_prefix}{capability['key']}",
+                    "description": capability["description"],
+                    "parameters": _parameters_for_scope(capability),
+                },
+            }
+        )
+    return tools
