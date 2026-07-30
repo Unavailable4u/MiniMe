@@ -137,6 +137,19 @@ function makeInitialDockState() {
     pausedRun: null,
     roleRequests: [], // ADDED in 3b — see note above
     notebooksGenerateRun: null, // NEW — see note above
+    // NEW — Phase 4 step 4.5: one entry per (workspace, panel_key) live
+    // generation, transitioning "started" -> "done"/"error" in place as
+    // the matching Pusher events arrive (see handleDockEvent's new
+    // generation_started/generation_done/generation_error branch below).
+    // Deliberately separate from notebooksGenerateRun above rather than
+    // reusing its `branches` shape: that field is the Picker's own local
+    // echo of ITS OWN run (targets/branches, written straight from
+    // runGenerate's fetch response, no Pusher involved) and step 2.9
+    // removes the Picker UI that owns it. This one is the session-wide,
+    // chat-native notification feed Phase 4 is building instead — it has
+    // to keep working for a chat-triggered generation that never went
+    // through the Picker at all.
+    generationNotifications: [],
   };
 }
 
@@ -373,6 +386,50 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
             ? prev.liveSteps.map((s, i) => (i === idx ? { ...s, status: "awaiting_approval" } : s))
             : prev.liveSteps;
           return { liveSteps, pausedApproval: { role: roleName } };
+        });
+        return;
+      }
+      // NEW — Phase 4 step 4.5: eo/notify.py's generation_started/
+      // generation_done/generation_error (step 4.3's VALID_KINDS,
+      // step 4.4's notebooks_generate() call sites) all land here, on
+      // the same session-${session_id} Pusher channel every other
+      // branch above already reads — no new subscription needed (see
+      // decisions/step-4.1-notification-transport.md). One entry per
+      // (workspace_id, panel_key), updated in place across its
+      // started -> done/error lifecycle rather than appended as three
+      // separate rows, so step 4.6's notification component renders one
+      // pill per generation that transitions state, the same way a
+      // BranchRow does. Order in the array is otherwise preserved on
+      // update — the row shouldn't jump position just because it
+      // finished.
+      if (
+        eventType === "generation_started" ||
+        eventType === "generation_done" ||
+        eventType === "generation_error"
+      ) {
+        const status =
+          eventType === "generation_started" ? "started"
+          : eventType === "generation_done" ? "done"
+          : "error";
+        const panelKey = payload?.panel_key;
+        const workspaceId = payload?.workspace_id;
+        const entry = {
+          panelKey,
+          workspaceId,
+          label: payload?.label,
+          status,
+          timestamp: data.timestamp || new Date().toISOString(),
+        };
+        setState(key, (prev) => {
+          const idx = prev.generationNotifications.findIndex(
+            (n) => n.panelKey === panelKey && n.workspaceId === workspaceId
+          );
+          if (idx === -1) {
+            return { generationNotifications: [...prev.generationNotifications, entry] };
+          }
+          const next = [...prev.generationNotifications];
+          next[idx] = entry;
+          return { generationNotifications: next };
         });
         return;
       }

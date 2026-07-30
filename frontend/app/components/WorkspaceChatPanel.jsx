@@ -3,6 +3,7 @@ import { useRef, useEffect, useState } from "react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
+import GenerationNotificationRow from "./notebooks/GenerationNotificationRow";   // NEW — Phase 4 step 4.6
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
 import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
@@ -166,6 +167,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const pendingHireReview = usingDock ? dock.state.pendingHireReview : legacy.pendingHireReview;   // Part 2 §2.5
   const confirmHireReview = usingDock ? dock.confirmHireReview : legacy.confirmHireReview;   // Part 2 §2.5
   const cancelHireReview = usingDock ? dock.cancelHireReview : legacy.cancelHireReview;   // Part 2 §2.5
+  // NEW — Phase 4 step 4.5: no legacy-mode equivalent (SessionContext.jsx
+  // never grows this field — it's Notebooks Chat-First-only), so this is
+  // simply empty outside dock mode rather than reading from `legacy`.
+  // Step 4.6 renders these; this step only wires the subscription (dock
+  // state is already live off the Pusher channel via
+  // WorkspaceDockContext.jsx's handleDockEvent — see that file).
+  const generationNotifications = usingDock ? dock.state.generationNotifications : [];
 
   function sendTask(taskText) {
     if (usingDock) {
@@ -704,6 +712,34 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           ))}
           {loading && (
             <div className="text-[var(--neutral-500)] text-sm animate-pulse">Working…</div>
+          )}
+          {/* NEW — Phase 4 step 4.6: live feed of generationNotifications
+              (step 4.5's dock-state field, fed straight off the
+              session-${session_id} Pusher channel — no polling, updates
+              land here the moment eo/notify.py's _deliver() fires). Mounted
+              here rather than as its own "generation" message-role entry
+              like BranchRow's picker/chat-triggered runs (Phase 2 step
+              2.10): these events aren't tied to any one chat turn (a
+              proactive Phase-3 suggestion's generation has no preceding
+              user message), so they get their own small standalone area
+              instead of being spliced into the messages array.
+              onNavigate — step 4.7 — reuses the exact same
+              `onNavigateSubTab?.(subTab)` pass-through MessageBubble.jsx
+              already gives BranchRow above, so a "done" notification's
+              chevron opens the same sub-tab a BranchRow chevron would for
+              the same panel_key; only rendered once a "done" row's target
+              actually has a subTab (see GenerationNotificationRow's own
+              guard). */}
+          {generationNotifications.length > 0 && (
+            <div className="space-y-1.5">
+              {generationNotifications.map((n) => (
+                <GenerationNotificationRow
+                  key={`${n.workspaceId}:${n.panelKey}`}
+                  notification={n}
+                  onNavigate={(subTab) => onNavigateSubTab?.(subTab)}
+                />
+              ))}
+            </div>
           )}
           <div ref={bottomRef} />
         </div>

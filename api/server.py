@@ -2174,6 +2174,23 @@ CAPABILITIES_MANIFEST = [
     },
 ]
 
+# NEW — Phase 4 step 4.4: capability key -> human-readable label, for the
+# generation_started/generation_done/generation_error payloads' `label`
+# field (see eo/notify.py's VALID_KINDS comment, step 4.3). Built off
+# CAPABILITIES_MANIFEST rather than hand-duplicated, so the two can't
+# drift. "suggested_route" is deliberately absent from the manifest (see
+# comment above CAPABILITIES_MANIFEST) but IS still a real, reachable
+# NOTEBOOKS_GENERATE_TARGETS entry -- _capability_label() below falls back
+# to a title-cased version of the key for it (and for anything else that
+# might reach notebooks_generate() without a manifest entry) rather than
+# raising, since a slightly-rough fallback label is fine for a
+# notification and this must never be what breaks a real generation.
+_CAPABILITY_LABELS = {c["key"]: c["label"] for c in CAPABILITIES_MANIFEST}
+
+
+def _capability_label(target: str) -> str:
+    return _CAPABILITY_LABELS.get(target) or target.replace("_", " ").title()
+
 
 @app.get("/api/capabilities")
 def get_capabilities():
@@ -2231,6 +2248,18 @@ def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depe
 class NotebooksGenerateRequest(BaseModel):
     targets: list[str]
     scope: Optional[dict[str, Any]] = None
+    # NEW — Phase 4 step 4.4. Flagged as a gap in the step 4.1 transport
+    # decision (decisions/step-4.1-notification-transport.md): this route
+    # is keyed on ws_id + owner_id only, but emit_event() needs a
+    # session_id to know which Pusher channel to publish on, and a
+    # workspace can have more than one chat/session attached to it, so
+    # the backend can't safely infer "the" session server-side. The
+    # frontend passes its active chat's session_id (WorkspaceChatPanel.jsx
+    # already has it as dock.state.sessionId) through here. Optional and
+    # defaulting to None so existing callers that don't pass it yet keep
+    # working exactly as before -- notify()/emit_event() both already
+    # no-op cleanly on session_id=None (see eo/notify.py).
+    session_id: Optional[str] = None
 
 
 @app.post("/api/workspaces/{ws_id}/notebooks/generate")
@@ -2243,8 +2272,20 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str 
     if not req.targets:
         raise HTTPException(status_code=422, detail="targets must be a non-empty list")
 
+    # NEW — Phase 4 step 4.4: chat-native notifications for this generate
+    # flow, on top of the branches list this endpoint already returns.
+    # Deferred import, same reasoning every other notify() call site in
+    # this codebase already gives (eo/chat_workspace.py's
+    # chat_triggered_partial_promote(), agents/source_manager.py, etc.):
+    # no hard dependency for callers that never pass a session_id.
+    # req.session_id=None makes every notify() below a documented no-op
+    # (see eo/notify.py), so this is safe to land even before any
+    # frontend call site is updated to actually send one.
+    from eo.notify import notify
+
     branches = []
     for target in req.targets:
+        label = _capability_label(target)
         run_target = NOTEBOOKS_GENERATE_TARGETS.get(target)
         if run_target is None:
             # Not an unknown-route 404 -- the endpoint itself is valid,
@@ -2253,17 +2294,30 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str 
             # raises during its run, so a mixed request like
             # {"targets": ["clusters", "flashcards"]} still returns
             # Clusters' result instead of rejecting the whole call.
-            branches.append({
-                "panel_key": target,
-                "status": "error",
-                "error": f"'{target}' isn't wired to Generate yet",
-            })
+            error = f"'{target}' isn't wired to Generate yet"
+            branches.append({"panel_key": target, "status": "error", "error": error})
+            # Still worth a chat-native notification -- from the chat
+            # thread's point of view this is exactly as much a "your
+            # generation failed" moment as a run_target() raising below,
+            # even though it never actually started.
+            notify(req.session_id, "generation_error",
+                   {"panel_key": target, "workspace_id": ws_id, "label": error})
             continue
+        notify(req.session_id, "generation_started",
+               {"panel_key": target, "workspace_id": ws_id, "label": label})
         try:
             result = run_target(ws_id, req.scope, owner_id)
             branches.append({"panel_key": target, "status": "done", "result": result})
+            notify(req.session_id, "generation_done",
+                   {"panel_key": target, "workspace_id": ws_id, "label": label})
         except Exception as exc:
             branches.append({"panel_key": target, "status": "error", "error": str(exc)})
+            # label carries the user-facing message here, per
+            # eo/notify.py's VALID_KINDS comment for generation_error --
+            # more useful in a chat notification than the capability's
+            # static display name would be.
+            notify(req.session_id, "generation_error",
+                   {"panel_key": target, "workspace_id": ws_id, "label": str(exc)})
 
     return {"branches": branches}
 

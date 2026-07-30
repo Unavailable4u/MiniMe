@@ -73,6 +73,17 @@ VALID_KINDS = {
                             # Detector's normal reparent/connect pass, or its §4
                             # same_fact_as merge short-circuit). payload:
                             # {from_topic, to_topic, relation}
+
+    # NEW — Notebooks Chat-First refinement, Phase 4 step 4.3: chat-native
+    # generation notifications (step 4.4 wires the actual call sites in the
+    # generate flow; this step only registers the kinds). All three share
+    # the same payload shape: {panel_key, workspace_id, label}.
+    "generation_started",  # a chat-triggered (or picker-triggered) generation
+                            # kicked off for panel_key in workspace_id
+    "generation_done",     # that generation finished and panel content is
+                            # ready to render/hydrate
+    "generation_error",    # that generation failed; label carries a
+                            # user-facing message
 }
 
 
