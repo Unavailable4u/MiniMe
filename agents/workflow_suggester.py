@@ -243,12 +243,31 @@ def _generic_fallback_workflow(topic_label: str) -> dict:
     }
 
 
+def _slugify_topic_label(topic_label: str) -> str:
+    """Fallback key for persist-by-topic (step 7) when a real topic_id
+    isn't available -- lowercased, non-alphanumerics collapsed to a
+    single underscore, so the same clicked label always maps to the
+    same dict key across repeat clicks/sessions even though it's not a
+    database id. Never returns an empty string (falls back to
+    "topic") so it's always a usable dict key."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (topic_label or "").strip().lower()).strip("_")
+    return slug or "topic"
+
+
 def build_topic_workflow(workspace_id: str, topic_label: str,
                           source_node_ids: list[str] | None = None) -> dict:
-    """Returns a single {"title", "description", "steps", "mermaid"}
-    dict -- same per-item shape suggest_workflows() already emits, so
-    WorkflowCard needs no changes -- synthesized for exactly the
-    clicked Mind Map topic.
+    """Returns {"topic_id", "topic_key", "title", "description", "steps",
+    "mermaid"} -- the same per-item {"title", "description", "steps",
+    "mermaid"} shape suggest_workflows() already emits (so WorkflowCard
+    needs no changes), plus two new NEW — step 7 fields so callers can
+    persist the result keyed by topic instead of only holding it in
+    memory:
+      - `topic_id`: the matched topic's real id from the workspace's
+        topic tree, or None when no topic matched (generic fallback).
+      - `topic_key`: always populated -- `topic_id` when there is one,
+        otherwise a slug of `topic_label` (see _slugify_topic_label) --
+        this is the field callers should actually key persisted storage
+        by, since it's never None.
 
     Unlike suggest_workflows()'s whole-notebook detection pass (0-4
     entries, empty is a valid result), a topic click can never come
@@ -265,6 +284,7 @@ def build_topic_workflow(workspace_id: str, topic_label: str,
     topic_label = (topic_label or "").strip() or "This topic"
 
     topic = None
+    topic_id = None
     try:
         packet = plan(
             workspace_id,
@@ -276,13 +296,14 @@ def build_topic_workflow(workspace_id: str, topic_label: str,
             ),
             scope="project",
         )
-        _tid, topic = _find_topic(packet["topics"], topic_label, source_node_ids)
+        topic_id, topic = _find_topic(packet["topics"], topic_label, source_node_ids)
     except Exception:
         # plan() failing (e.g. an empty/unreadable workspace) is not
         # this function's problem to surface -- fall through to the
         # generic sequence below same as a label that just doesn't
         # match anything.
         topic = None
+        topic_id = None
 
     context = _context_for_topic(topic, topic_label)
 
@@ -315,7 +336,13 @@ def build_topic_workflow(workspace_id: str, topic_label: str,
         # topic click -- fall back to the generic sequence instead.
         workflow = None
 
-    return workflow or _generic_fallback_workflow(topic_label)
+    workflow = workflow or _generic_fallback_workflow(topic_label)
+    # NEW — step 7: attach the persistence keys described in this
+    # function's docstring. Done here rather than inside
+    # _generic_fallback_workflow()/_parse_workflow() so those two stay
+    # pure "build the {title, description, steps, mermaid} shape"
+    # helpers with no knowledge of topic ids.
+    return {**workflow, "topic_id": topic_id, "topic_key": topic_id or _slugify_topic_label(topic_label)}
 
 
 def _context_for(topics: dict) -> str:

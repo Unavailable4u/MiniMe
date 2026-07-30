@@ -852,11 +852,38 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
   const dismissedLabelsRef = useRef(new Set());
 
   // Edge case #3: notebook-scoped scratch state, reset on workspace switch.
+  // CHANGED — step 7 persistence fix: these results used to live only in
+  // this state, so a tab switch or refresh silently discarded them. Now
+  // that topic_workflow_endpoint (step 7.2) merge-persists every result
+  // under panel_content's "topic_workflows" key, re-hydrate from it here
+  // instead of always starting from an empty list. `topic_key` (see
+  // agents/workflow_suggester.py's build_topic_workflow docstring) isn't
+  // rendered anywhere -- WorkflowsView keys/dedupes by `label`, same as
+  // a fresh click -- so hydrated entries slot in exactly like live ones.
   useEffect(() => {
+    let cancelled = false;
     setTopicWorkflows([]);
     pendingLabelsRef.current = new Set();
     dismissedLabelsRef.current = new Set();
-  }, [workspaceId]);
+    (async () => {
+      let saved = {};
+      try {
+        const panel = await fetchPanelContent(workspaceId, "topic_workflows");
+        saved = panel?.content ? JSON.parse(panel.content) : {};
+        if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
+      } catch {
+        saved = {}; // missing/unparseable row -> same as "nothing generated yet"
+      }
+      if (cancelled) return;
+      const hydrated = Object.values(saved)
+        .filter((w) => w && w.title && w.topic_label)
+        .map((w) => ({ label: w.topic_label, status: "done", workflow: w }));
+      if (hydrated.length) setTopicWorkflows(hydrated);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, fetchPanelContent]);
 
   async function handleTopicSelect(label) {
     // Edge case #1: ignore a click on a topic that's already in flight.

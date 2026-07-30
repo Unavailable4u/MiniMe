@@ -70,6 +70,20 @@ VALID_PANEL_KEYS = {
                          # prerequisite-ordered "study path" flowchart,
                          # distinct from "mindmap"'s topic-overview one.
                          # See api/server.py's _generate_suggested_route.
+    "topic_workflows",  # NEW — step 7 persistence fix: a single JSON
+                         # dict of {topic_key: workflow} for every
+                         # per-topic Mind Map click this workspace has
+                         # ever made, keyed by agents/workflow_suggester.py's
+                         # build_topic_workflow() topic_id when it found a
+                         # real topic match, or a slugified topic_label
+                         # when it fell back to the generic sequence (no
+                         # stable id to key by in that case). One row per
+                         # workspace, same "single blob, keyed inside"
+                         # shape as suggested_workflows above, rather than
+                         # a dynamic workflow:<topic_id> key per topic --
+                         # keeps this allowlist and invalidate_for_nodes()'s
+                         # fixed-list query untouched. See api/server.py's
+                         # topic_workflow_endpoint for the get-merge-set.
 }
 
 # NEW — bug audit §2 real fix (migration 0001). The subset of
@@ -91,6 +105,16 @@ GENERATED_PANEL_KEYS = {
     "study_guide",
     "suggested_workflows",
     "suggested_route",
+    "topic_workflows",  # NEW — step 7. Always written with
+                         # source_node_ids=None (see topic_workflow_endpoint),
+                         # so any source delete invalidates the whole blob
+                         # rather than just the topics that source actually
+                         # fed. Deliberately coarse: these are cheap,
+                         # click-triggered regenerations, and the row
+                         # already can't record per-topic scope without a
+                         # second column — same tradeoff the NULL-scope
+                         # case for mindmap/suggested_workflows already
+                         # accepts for a whole-notebook Regenerate.
 }
 
 
