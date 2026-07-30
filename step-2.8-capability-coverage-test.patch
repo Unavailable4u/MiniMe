@@ -1,0 +1,313 @@
+diff --git a/scripts/test_capability_coverage.py b/scripts/test_capability_coverage.py
+new file mode 100644
+index 0000000..e8e1d54
+--- /dev/null
++++ b/scripts/test_capability_coverage.py
+@@ -0,0 +1,307 @@
++"""
++Notebooks Chat-First refinement, Phase 2 step 2.8.
++
++"Test 5-10 phrasings per capability; log misfires."
++
++Two things distinguish this from scripts/test_tool_calling.py (steps
++2.3/2.4):
++
++  1. REAL_MANIFEST below is a hand-kept-in-sync copy of api/server.py's
++     CAPABILITIES_MANIFEST -- not the 2.3/2.4 FIXTURE_MANIFEST. The two
++     have drifted apart: the fixture used "flashcards"/"quiz" as keys and
++     included "workflow" as a live (enabled) tool, but the real manifest
++     uses "study_flashcards"/"study_quiz", adds "facts" and
++     "suggested_notes" (never covered by the original ~10 test messages),
++     and "workflow" is disabled (endpoint: None) -- not a real tool at
++     all right now. Testing against the fixture would validate a tool
++     list that doesn't match what actually ships.
++
++  2. This calls utils.llm_client.classify_tool_intent() directly -- the
++     exact function api/server.py's POST .../notebooks/classify-intent
++     (step 2.5) and WorkspaceChatPanel.jsx's tryHandleClassifiedToolCall()
++     (step 2.6) run in production -- rather than a separate hand-rolled
++     OpenAI client call. 2.3/2.4 deliberately bypassed the real code (see
++     that script's own header comment, "isolate classification behavior
++     from chain-switching behavior"); by step 2.8 that real code exists
++     and is what needs coverage, not a stand-in for it.
++
++Does NOT import api/server.py directly to get CAPABILITIES_MANIFEST --
++that module pulls in FastAPI, Supabase, Pusher, and starts wiring up
++lifespan/CORS/etc. at import time, none of which this script needs or
++wants side effects from. REAL_MANIFEST is hand-copied instead, same
++"deliberately hand-kept in sync, nothing enforces it automatically"
++tradeoff api/server.py's own CAPABILITIES_MANIFEST comment already
++accepts for its relationship to notebookCapabilities.js.
++
++Usage (bash):
++    export GROQ_API_KEY=your_key_here
++    python scripts/test_capability_coverage.py
++
++Usage (PowerShell):
++    $env:GROQ_API_KEY = "your_key_here"
++    python scripts/test_capability_coverage.py
++"""
++
++import sys
++import time
++from pathlib import Path
++from typing import Any, Dict, List, Optional
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++
++from utils.capability_tools import manifest_to_tools
++from utils.llm_client import classify_tool_intent
++
++
++# --------------------------------------------------------------------------
++# Hand-copied from api/server.py's CAPABILITIES_MANIFEST as of Phase 2 step
++# 2.6. Keep in sync by hand if that manifest changes -- see module
++# docstring above for why this isn't imported directly.
++# --------------------------------------------------------------------------
++REAL_MANIFEST = [
++    {
++        "key": "clusters", "label": "Clusters", "subTab": "insights",
++        "description": "Group the workspace's notes and sources into topic clusters, so related material is organized together instead of a flat list.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "facts", "label": "Facts", "subTab": "insights",
++        "description": "Pull out standalone factual statements from the sources and list them as discrete, citable facts.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "suggested_notes", "label": "Suggested notes", "subTab": "insights",
++        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "study_flashcards", "label": "Flashcards", "subTab": "study",
++        "description": "Generate a set of question/answer flashcards for studying the selected scope.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "study_quiz", "label": "Quiz", "subTab": "study",
++        "description": "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "study_guide", "label": "Study guide", "subTab": "study",
++        "description": "Produce a structured written study guide summarizing and organizing the selected scope for review.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "mindmap", "label": "Mind map", "subTab": "diagrams",
++        "description": "Build a visual mind map of the concepts in the selected scope and how they relate to each other.",
++        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
++        "enabled": True,
++    },
++    {
++        "key": "podcast", "label": "Podcast", "subTab": "insights",
++        "description": "Generate a two-host audio podcast episode discussing the selected scope.",
++        "scopeAllowed": "whole", "endpoint": None,
++        "enabled": False,
++    },
++    {
++        "key": "video_overview", "label": "Video overview", "subTab": "insights",
++        "description": "Generate a narrated video overview summarizing the selected scope.",
++        "scopeAllowed": "whole", "endpoint": None,
++        "enabled": False,
++    },
++    {
++        "key": "workflow", "label": "Workflow", "subTab": "diagrams",
++        "description": "Build a step-by-step study workflow for a single topic.",
++        "scopeAllowed": "topic", "endpoint": None,
++        "enabled": False,
++    },
++]
++
++# --------------------------------------------------------------------------
++# 5-10 phrasings per ENABLED capability (the guide's step 2.8 ask), plus a
++# no-match/edge-case block at the end. `expected` is the tool name we WANT
++# ("generate_<key>") or None for "no tool call is correct" -- not fed to
++# the model, only used to flag mismatches below.
++# --------------------------------------------------------------------------
++TEST_CASES: List[tuple] = [
++    # --- clusters ---
++    ("Can you group my sources into related topic clusters?", "generate_clusters"),
++    ("Sort these sources into buckets by topic.", "generate_clusters"),
++    ("Organize my notes by theme.", "generate_clusters"),
++    ("Cluster everything I've uploaded by subject.", "generate_clusters"),
++    ("Group similar sources together.", "generate_clusters"),
++
++    # --- facts ---
++    ("Pull out the key facts from these sources.", "generate_facts"),
++    ("Give me a list of standalone facts I can cite.", "generate_facts"),
++    ("What are the citable facts in my sources?", "generate_facts"),
++    ("Extract factual statements from this material.", "generate_facts"),
++    ("List out concrete facts from what I've uploaded.", "generate_facts"),
++
++    # --- suggested_notes ---
++    ("Scan my sources for anything worth taking notes on.", "generate_suggested_notes"),
++    ("Suggest some notes based on what's in my sources.", "generate_suggested_notes"),
++    ("Find passages that are worth noting down.", "generate_suggested_notes"),
++    ("Propose some draft notes from my sources.", "generate_suggested_notes"),
++    ("What should I be taking notes on here?", "generate_suggested_notes"),
++
++    # --- study_flashcards ---
++    ("Can you make me some flashcards for this chapter?", "generate_study_flashcards"),
++    ("I need flashcards to study from.", "generate_study_flashcards"),
++    ("Turn my notes into flashcards.", "generate_study_flashcards"),
++    ("Make Q&A cards out of this material.", "generate_study_flashcards"),
++    ("Give me flashcards covering these sources.", "generate_study_flashcards"),
++
++    # --- study_quiz ---
++    ("Quiz me on what I just read.", "generate_study_quiz"),
++    ("Give me a quiz to test my understanding.", "generate_study_quiz"),
++    ("Can you test me on this material?", "generate_study_quiz"),
++    ("Make a graded quiz from my sources.", "generate_study_quiz"),
++    ("I want to quiz myself on this chapter.", "generate_study_quiz"),
++
++    # --- study_guide ---
++    ("Give me a summary I can study from.", "generate_study_guide"),
++    ("Write me a study guide for this material.", "generate_study_guide"),
++    ("Summarize everything into something I can review.", "generate_study_guide"),
++    ("Can you put together a study guide?", "generate_study_guide"),
++    ("I need a written summary to study from.", "generate_study_guide"),
++
++    # --- mindmap ---
++    ("Show me how all these topics connect.", "generate_mindmap"),
++    ("Build a mind map of these concepts.", "generate_mindmap"),
++    ("Visualize how these ideas relate to each other.", "generate_mindmap"),
++    ("Map out the connections between these topics.", "generate_mindmap"),
++    ("Give me a concept map of this material.", "generate_mindmap"),
++
++    # --- no-match / edge cases ---
++    ("What should I do next?", None),                         # ambiguous -- should clarify, not guess
++    ("Can you make me a podcast about this?", None),           # disabled, must NOT match
++    ("What's the weather like today?", None),                  # unrelated to the app
++    # REGRESSION CHECK, step 2.6 fallout: these two phrasings were
++    # generate_workflow's coverage cases back in the 2.3/2.4 fixture,
++    # where workflow was a live tool. In the REAL manifest workflow is
++    # disabled (endpoint: None) -- there is currently no "study plan"
++    # capability at all. The risk isn't "does it call generate_workflow"
++    # (that tool isn't even offered), it's whether the model instead
++    # misfires onto study_guide or mindmap for a "study plan" request
++    # that doesn't actually match either one's description.
++    ("Build me a step-by-step study workflow for photosynthesis.", None),
++    ("What's a good study plan for the chapter on cellular respiration?", None),
++]
++
++MAX_RETRIES = 3
++BACKOFF_BASE_SECONDS = 2
++REPEATS = int(__import__("os").environ.get("TOOL_TEST_REPEATS", "3"))
++
++
++def _classify_with_retries(message: str, tools: list) -> Dict[str, Any]:
++    """
++    classify_tool_intent() itself is deliberately single-shot / fail-open
++    (see its docstring in utils/llm_client.py) -- a real chat send should
++    never retry-and-block on this. A coverage *test* run, on the other
++    hand, wants to tell "the model is genuinely unreliable here" apart
++    from "one request had a transient hiccup" -- so retry HERE, at the
++    harness level, on a returned `error`, without changing the production
++    function's own no-retry behavior at all.
++    """
++    last_result = None
++    for attempt in range(1, MAX_RETRIES + 1):
++        result = classify_tool_intent(message, tools)
++        if not result.get("error"):
++            return result
++        last_result = result
++        if attempt == MAX_RETRIES:
++            break
++        wait = BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
++        print(f"    (retry {attempt}/{MAX_RETRIES} after error {result['error']!r}, waiting {wait}s...)")
++        time.sleep(wait)
++    return last_result
++
++
++def main() -> None:
++    tools = manifest_to_tools(REAL_MANIFEST)
++    enabled_names = [t["function"]["name"] for t in tools]
++    print(f"Built {len(tools)} tools from REAL_MANIFEST: {enabled_names}")
++    if "generate_workflow" in enabled_names or "generate_podcast" in enabled_names:
++        print("!! disabled capability leaked into the tools array -- see "
++              "utils/capability_tools.py's _is_enabled() fix (step 2.5)")
++    print(f"Repeats per message: {REPEATS} (set TOOL_TEST_REPEATS to change)\n")
++
++    results: Dict[str, List[Dict[str, Any]]] = {}
++
++    for message, expected in TEST_CASES:
++        results[message] = []
++        print("=" * 70)
++        print(f"USER: {message}  (expected: {expected or 'no tool call'})")
++
++        for run in range(1, REPEATS + 1):
++            result = _classify_with_retries(message, tools)
++
++            if result.get("error"):
++                print(f"  [run {run}] -> ERROR (unretried): {result['error']}")
++                results[message].append({"name": None, "ambiguous": False, "error": True})
++                continue
++
++            if result["ambiguous"]:
++                print(f"  [run {run}] -> AMBIGUOUS: multiple simultaneous calls "
++                      "(treated as no-match, falls through to sendTask())")
++                results[message].append({"name": None, "ambiguous": True, "error": False})
++                continue
++
++            if not result["tool_calls"]:
++                print(f"  [run {run}] -> NO TOOL CALL. Model said: {result['content']!r}")
++                results[message].append({"name": None, "ambiguous": False, "error": False})
++                continue
++
++            call = result["tool_calls"][0]
++            print(f"  [run {run}] -> TOOL CALL: {call['name']}  args: {call['arguments']}")
++            results[message].append({"name": call["name"], "ambiguous": False, "error": False})
++
++    # ----------------------------------------------------------------
++    print("\n" + "=" * 70)
++    print("SUMMARY")
++    print("=" * 70)
++    any_issue = False
++    for message, expected in TEST_CASES:
++        runs = results[message]
++        clean_runs = [r for r in runs if not r["error"]]
++        outcomes = [r["name"] for r in clean_runs]
++        consistent = len(set(outcomes)) <= 1
++        got = outcomes[0] if outcomes else None
++        matches_expected = (got == expected) if clean_runs else True
++        error_count = sum(1 for r in runs if r["error"])
++        ambiguous_count = sum(1 for r in runs if r["ambiguous"])
++
++        flags = []
++        if not consistent:
++            flags.append("INCONSISTENT ACROSS RUNS")
++        if not matches_expected:
++            flags.append(f"MISFIRE (expected {expected or 'no tool call'}, got {got or 'no tool call'})")
++        if ambiguous_count:
++            flags.append(f"ambiguous x{ambiguous_count}/{REPEATS}")
++        if error_count:
++            flags.append(f"ERROR x{error_count}/{REPEATS} (after retries)")
++
++        status = "OK" if not flags else " / ".join(flags)
++        if any(k in status for k in ("INCONSISTENT", "MISFIRE", "ERROR")):
++            any_issue = True
++
++        print(f"- {message!r}")
++        print(f"    runs: {outcomes}")
++        print(f"    status: {status}")
++
++    print("=" * 70)
++    if any_issue:
++        print("Misfire(s) or instability found above -- do not consider "
++              "step 2.8 coverage clean yet.")
++    else:
++        print(f"All {len(TEST_CASES)} phrasings consistent and matched "
++              f"expectations across {REPEATS} runs each.")
++
++
++if __name__ == "__main__":
++    main()

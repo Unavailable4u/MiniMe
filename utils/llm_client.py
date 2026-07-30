@@ -93,6 +93,7 @@ in this module:
      tool_calls handling at all.
 """
 
+import json
 import os
 import re
 from datetime import date, datetime, timezone
@@ -434,6 +435,127 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
     usage = getattr(response, "usage", None)
     finish_reason = getattr(choice, "finish_reason", None)
     return text, usage, finish_reason
+
+
+# --------------------------------------------------------------------------
+# Phase 2 step 2.5 — real (non-test-harness) tool-calling classification.
+#
+# scripts/test_tool_calling.py (steps 2.3/2.4) proved out a system prompt +
+# tools array against Groq's llama-3.3-70b-versatile specifically, and
+# talks to Groq directly via the `openai` SDK, deliberately bypassing this
+# module's whole fallback chain (see that script's own header comment).
+#
+# generate_text()/_call_step()/_call_cloudflare_step() above still don't
+# accept a `tools` kwarg at all -- that's the two gaps flagged in this
+# module's own docstring (step 2.1 findings), and wiring `tools` through
+# the *entire* multi-provider chain (including Cloudflare's raw REST
+# shape) is real, separate work, not required by step 2.5's actual scope:
+# "add the classification call before sendTask() -- but only log the
+# result for now, don't branch." So this function deliberately mirrors
+# the test harness's choice rather than solving those two gaps: single
+# provider (Groq, the one step 2.1/2.4 actually validated), no fallback
+# chain, no retries beyond what's needed to not crash on a flaky call.
+#
+# This function is written to NEVER raise. A classification-only,
+# log-only feature must not be able to break (or even slow down) the
+# real send path if GROQ_API_KEY is unset, Groq is down, or the model
+# emits something unparseable -- any of those just means "no
+# classification this turn," not a failed message send. Callers get back
+# a dict with an "error" key instead of an exception.
+# --------------------------------------------------------------------------
+
+CLASSIFY_INTENT_MODEL = "llama-3.3-70b-versatile"
+CLASSIFY_INTENT_KEY_ENV = "GROQ_API_KEY"  # shared default key, same as most chains above
+
+CLASSIFY_INTENT_SYSTEM_PROMPT = (
+    "You are the assistant for a study workspace app. You have tools "
+    "that generate study materials from the sources currently in the "
+    "user's workspace.\n\n"
+    "Only call a tool when the user is clearly asking for one of these "
+    "specific study materials to be generated. If the request doesn't "
+    "match any tool -- including requests for things that sound similar "
+    "but aren't offered, small talk, or anything unrelated to the "
+    "workspace -- do NOT call a tool. Just reply normally in plain "
+    "text: say what you can help with instead, or ask a clarifying "
+    "question.\n\n"
+    "Call at most one tool per turn. If a request could reasonably map "
+    "to more than one tool, don't call any of them -- ask the user "
+    "which one they want instead."
+)
+
+
+def classify_tool_intent(message: str, tools: list) -> dict:
+    """
+    Sends `message` (a single chat turn) plus `tools` (built by
+    utils.capability_tools.manifest_to_tools() from the Phase 1
+    capability manifest) to Groq with tool_choice="auto", and returns a
+    normalized classification result:
+
+        {"tool_calls": [{"name": str, "arguments": dict}, ...],
+         "ambiguous": bool,   # >1 simultaneous tool call -- ignore names, treat as no match
+         "content": str | None,   # the model's plain-text reply, if it didn't call a tool
+         "error": str | None}     # set (and the other fields empty/None) on any failure
+
+    Nothing here calls generateNotebooks(...) or any other side-effecting
+    endpoint -- step 2.5 is log-only by design. Branching on this result
+    (the "high-confidence tool call" dispatch) is step 2.6.
+
+    If `tools` is empty (e.g. every capability happens to be disabled),
+    returns immediately without making a call -- there's nothing for the
+    model to classify against.
+    """
+    if not tools:
+        return {"tool_calls": [], "ambiguous": False, "content": None, "error": "no tools available"}
+
+    client = _get_groq(CLASSIFY_INTENT_KEY_ENV)
+    if client is None:
+        return {"tool_calls": [], "ambiguous": False, "content": None,
+                 "error": f"{CLASSIFY_INTENT_KEY_ENV} not set"}
+
+    try:
+        response = client.chat.completions.create(
+            model=CLASSIFY_INTENT_MODEL,
+            messages=[
+                {"role": "system", "content": CLASSIFY_INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": message},
+            ],
+            tools=tools,
+            tool_choice="auto",
+        )
+    except Exception as exc:  # fail open, see header comment -- any failure just means "no classification this turn"
+        return {"tool_calls": [], "ambiguous": False, "content": None, "error": str(exc)}
+
+    choice = response.choices[0].message
+    raw_tool_calls = choice.tool_calls or []
+
+    if not raw_tool_calls:
+        return {"tool_calls": [], "ambiguous": False, "content": (choice.content or None), "error": None}
+
+    if len(raw_tool_calls) > 1:
+        # Multiple simultaneous calls = low-confidence classification.
+        # Step 2.6's dispatch should treat this the same as "no tool
+        # call" and fall through to sendTask(), not execute all of them.
+        return {"tool_calls": [], "ambiguous": True, "content": None, "error": None}
+
+    call = raw_tool_calls[0]
+    raw_args = call.function.arguments
+    try:
+        # Empty-properties schemas ("whole" scope) can come back as the
+        # literal string "null" rather than "{}" (the known null-args
+        # quirk from step 2.4's findings) -- normalize so callers get a
+        # plain dict either way.
+        args = json.loads(raw_args) if raw_args and raw_args != "null" else {}
+        if args is None:
+            args = {}
+    except json.JSONDecodeError:
+        args = {"_unparsed": raw_args}
+
+    return {
+        "tool_calls": [{"name": call.function.name, "arguments": args}],
+        "ambiguous": False,
+        "content": None,
+        "error": None,
+    }
 
 
 def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: str,
