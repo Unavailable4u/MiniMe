@@ -71,6 +71,12 @@ VALID_EVENT_TYPES = {
     # same string here too.
     "upload_processed", "backlinks_updated", "workspace_promoted",
     "topic_added", "topic_merged", "connection_added",
+    # NEW — step 4.3 (see the comment block above): matching literals for
+    # eo/notify.py's own new VALID_KINDS entries of the same names. Payload
+    # shape: {panel_key, workspace_id, label}. Step 4.4 fires these from the
+    # generate flow itself; this step just makes _deliver()'s Pusher mirror
+    # stop raising on them.
+    "generation_started", "generation_done", "generation_error",
 }
 
 _pusher_client = None
