@@ -37,15 +37,15 @@ import { useSession } from "../../context/SessionContext";   // NEW — Data Lay
 // picker's own free-text field already used, instead of a second,
 // possibly-drifting copy of the keyword list.
 export const TARGETS = [
-  { key: "clusters", label: "Clusters", icon: Layers, subTab: "clusters", keywords: ["cluster", "clusters", "group notes", "organize notes"] },
-  { key: "facts", label: "Facts", icon: BookMarked, subTab: "facts", keywords: ["fact", "facts"] },
-  { key: "suggested_notes", label: "Suggested notes", icon: Sparkles, subTab: "candidates", keywords: ["suggested note", "suggest notes", "scan for notes", "note suggestions", "note candidates"] },
+  { key: "clusters", label: "Clusters", icon: Layers, subTab: "insights", keywords: ["cluster", "clusters", "group notes", "organize notes"] },
+  { key: "facts", label: "Facts", icon: BookMarked, subTab: "insights", keywords: ["fact", "facts"] },
+  { key: "suggested_notes", label: "Suggested notes", icon: Sparkles, subTab: "insights", keywords: ["suggested note", "suggest notes", "scan for notes", "note suggestions", "note candidates"] },
   { key: "study_flashcards", label: "Flashcards", icon: GraduationCap, subTab: "study", keywords: ["flashcard", "flash card"] },
   { key: "study_quiz", label: "Quiz", icon: GraduationCap, subTab: "study", keywords: ["quiz"] },
   { key: "study_guide", label: "Study guide", icon: GraduationCap, subTab: "study", keywords: ["study guide"] },
-  { key: "mindmap", label: "Mind map", icon: Network, subTab: "mindmap", keywords: ["mind map", "mindmap", "concept map"] },
-  { key: "backlinks", label: "Backlinks", icon: GitBranch, subTab: "backlinks", keywords: ["backlink", "backlinks", "concept graph", "concept links"] },
-  { key: "workflows", label: "Workflows", icon: ListChecks, subTab: "workflows", keywords: ["workflow", "workflows", "process diagram", "process diagrams", "steps", "procedure", "how to"] },
+  { key: "mindmap", label: "Mind map", icon: Network, subTab: "diagrams", keywords: ["mind map", "mindmap", "concept map"] },
+  { key: "backlinks", label: "Backlinks", icon: GitBranch, subTab: "library", keywords: ["backlink", "backlinks", "concept graph", "concept links"] },
+  { key: "workflows", label: "Workflows", icon: ListChecks, subTab: "diagrams", keywords: ["workflow", "workflows", "process diagram", "process diagrams", "steps", "procedure", "how to"] },
 ];
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));

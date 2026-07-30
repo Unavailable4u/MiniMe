@@ -17,7 +17,7 @@ import InstructionChecklist from "../InstructionChecklist";   // NEW — Bluepri
 import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
   LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
-  Loader2, ChevronRight, MessageSquare, Cpu, Plus, Pencil, Check, X,
+  Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Pencil, Check, X,
   Trash2,
 } from "lucide-react";
 
@@ -46,6 +46,9 @@ import {
 // (the fuller, paste-parsing version below was previously dead code).
 const SELECTED_PLAN_WS_KEY = "minime_plan_selected_ws_id";
 const CHAT_DOCK_KEY = "minime_plan_chatdock_collapsed";
+// NEW — collapsible project-picker sidebar, same pattern as the chat
+// dock's own collapse above.
+const PROJECTS_KEY = "minime_plan_projects_collapsed";
 const PROMOTE_TARGETS = ["build", "test", "growth"];
 const PROMOTE_LABELS = {
   build: "Build",
@@ -190,6 +193,7 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
   // PARITY FIX — right-hand chat dock collapse state, same pattern as
   // Notebooks/Research (own independent localStorage key).
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar
   // PARITY FIX — which plan project's kebab menu (rename/delete/members)
   // is open. ManageWorkspaceModal already exists fully built, just never
   // wired into this tab.
@@ -209,11 +213,22 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
 
   useEffect(() => {
     setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+    setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
   }, []);
 
   function toggleChatDock() {
     setChatDockCollapsed((prev) => {
       localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+
+  // NEW — collapsible project-picker sidebar, same toggle pattern as
+  // toggleChatDock above, its own localStorage key so the two collapse
+  // independently.
+  function toggleProjects() {
+    setProjectsCollapsed((prev) => {
+      localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
@@ -338,6 +353,13 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
     <div className="flex h-full">
       {/* Project picker — a "plan project" is just a workspace, same as a
           "notebook"/"research project" is. No new container concept. */}
+      {projectsCollapsed ? (
+        <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
+          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
@@ -345,13 +367,20 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
           </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
-          <button
-            onClick={() => setShowCreateModal(true)}
-            title="New plan project"
-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-          >
-            <Plus size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCreateModal(true)}
+              title="New plan project"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            >
+              <Plus size={14} />
+            </button>
+            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+                own ChevronLeft toggle. */}
+            <button onClick={toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+              <ChevronLeft size={14} />
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {planProjects.length === 0 && (
@@ -458,6 +487,7 @@ export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeIniti
           })}
         </div>
       </div>
+      )}
 
       <div className="flex-1 min-h-0 flex flex-col">
         {/* PARITY FIX — title + promote row, same shape as Notebooks/Tasks —

@@ -15,21 +15,38 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embed
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for issue #3 nested-chat row highlight
 import {
   NotebookText, Plus, MessageSquareText, MessageSquare, FileText, GitBranch, Network,
-  GraduationCap, Sparkles, X, Check, ChevronRight, BookMarked, Loader2, Layers,
+  GraduationCap, Sparkles, X, Check, ChevronRight, ChevronLeft, BookMarked, Loader2, Layers,
   Trash2, MoreVertical, ArrowUpRight, Pencil, RefreshCw, ListChecks, RotateCcw,
   Wrench, Send, // NEW — Data Layer architecture §8a: Corrections tab
   GitCompare, // NEW — Data Layer architecture §8c: Patch Review tab
+  Library, // NEW — Sources + Backlinks merged into one "Library" sub-tab
+  Waypoints, // NEW — Mind Map + Workflows merged into one "Diagrams" sub-tab
+  Lightbulb, // NEW — Facts + Clusters + Suggested notes merged into one "Insights" sub-tab
 } from "lucide-react";
 
 const SUB_TABS = [
-  { id: "sources", label: "Sources", icon: FileText },
-  { id: "mindmap", label: "Mind Map", icon: Network },
-  { id: "backlinks", label: "Backlinks", icon: GitBranch },
-  { id: "workflows", label: "Workflows", icon: ListChecks },
+  // CHANGED — Sources + Backlinks merged into one "Library" sub-tab
+  // (same grouping move as Quiz/Flashcards -> Study). LibraryView below
+  // renders both, side by side when the chat dock is collapsed (there's
+  // room) and stacked — Backlinks on top, Sources below — when it's
+  // open (there isn't).
+  { id: "library", label: "Library", icon: Library },
+  // CHANGED — Mind Map + Workflows merged into one "Diagrams" sub-tab
+  // (same grouping move as Sources/Backlinks -> Library). DiagramsView
+  // below always stacks them — Mind Map on top, Workflows below — never
+  // side by side, since Mind Map alone can already be as wide/tall as a
+  // whole notebook's worth of content and needs the room to itself.
+  { id: "diagrams", label: "Diagrams", icon: Waypoints },
   { id: "study", label: "Study", icon: GraduationCap },
-  { id: "facts", label: "Facts", icon: BookMarked },
-  { id: "clusters", label: "Clusters", icon: Layers },
-  { id: "candidates", label: "Suggested notes", icon: Sparkles },
+  // CHANGED — Facts + Clusters + Suggested notes merged into one
+  // "Insights" sub-tab (same grouping move as Library/Diagrams above).
+  // InsightsView below groups Facts and Clusters together on one side
+  // (they're both "structured things the system pulled out of your
+  // sources") and Suggested notes on the other, side by side when the
+  // dock is collapsed and stacked — Suggested notes on top, Facts &
+  // Clusters below — when it's open, same interactive layout Library
+  // uses for Sources/Backlinks.
+  { id: "insights", label: "Insights", icon: Lightbulb },
   // NEW — Data Layer architecture §8a: capture, wired to §8b's locator
   // + §8c's Patch Review pending store as of this patch.
   { id: "corrections", label: "Corrections", icon: Wrench },
@@ -67,14 +84,13 @@ const WORKFLOW_PROGRESS_PREFIX = "minime_notebooks_workflow_progress";
 // (eo/workspace_facts.py's propose_fact) are flagged dormant in that
 // module's own comments — no agent calls it yet, so there's nothing to
 // diff there today. Revisit if that changes.
-const UNREAD_DOT_TABS = ["mindmap", "backlinks", "workflows", "study"];
+const UNREAD_DOT_TABS = ["diagrams", "library", "study"];
 // Which eo/panel_content.py panel_key(s) back each dot-eligible sub-tab
 // that's driven by panel_content specifically (backlinks/clusters/
 // candidates aren't — they compare against graph_edges/candidate
 // timestamps directly instead, see latestTabTimestamp below).
 const TAB_PANEL_KEYS = {
-  mindmap: ["mindmap"],
-  workflows: ["suggested_workflows"],
+  diagrams: ["mindmap", "suggested_workflows"],
   study: ["study_flashcards", "study_quiz", "study_guide"],
 };
 // NEW — §6.2: separate collapse key from WorkspaceChatPanel's own internal
@@ -82,6 +98,9 @@ const TAB_PANEL_KEYS = {
 // WorkingPanel together), same "own toggle, own storage key" pattern the
 // left ChatSidebar already uses for itself.
 const CHAT_DOCK_KEY = "minime_notebooks_chatdock_collapsed";
+// NEW — collapsible project-picker sidebar, same pattern as the chat
+// dock's own collapse above.
+const PROJECTS_KEY = "minime_notebooks_projects_collapsed";
 const PROMOTE_TARGETS = ["research", "plan", "build", "test", "growth"];
 const PROMOTE_LABELS = {
   research: "Research",
@@ -470,6 +489,87 @@ function BacklinksView({ nodes, edges, pulsingIds, loading, onSelectNode }) {
 }
 
 
+// --- Library (Sources + Backlinks) --------------------------------------
+// NEW — Sources and Backlinks merged into one "Library" sub-tab (same
+// grouping move as Quiz/Flashcards -> Study), rendering both SourcesView
+// and BacklinksView unchanged rather than rebuilding either.
+//
+// Layout responds to `dockOpen` (NotebooksTab passes `!chatDockCollapsed`):
+// when the chat dock is collapsed there's real width to spare on the
+// right, so Sources/Backlinks sit side by side (Sources left — same side
+// it already lived on — Backlinks right); once the dock opens and eats
+// that width back, side-by-side would force the page to scroll
+// sideways (the exact problem the chat dock's own stacked layout was
+// built to avoid — see WorkspaceChatPanel's `stacked` prop), so this
+// switches to stacked instead, Backlinks on top since it's the shorter
+// of the two and Sources (with its drop-zone) reads better with the
+// full column beneath it.
+function LibraryView({
+  workspaceId, nodes, edges, loading, onIngested, onSelectNode, onDeleteNode, onRenameNode,
+  topicNodes, topicEdges, topicPulsingIds, dockOpen,
+}) {
+  const sources = (
+    <SourcesView
+      workspaceId={workspaceId}
+      nodes={nodes}
+      edges={edges}
+      loading={loading}
+      onIngested={onIngested}
+      onSelectNode={onSelectNode}
+      onDeleteNode={onDeleteNode}
+      onRenameNode={onRenameNode}
+    />
+  );
+  const backlinks = (
+    <BacklinksView
+      nodes={topicNodes}
+      edges={topicEdges}
+      pulsingIds={topicPulsingIds}
+      loading={loading}
+      onSelectNode={onSelectNode}
+    />
+  );
+
+  if (dockOpen) {
+    // Stacked — Backlinks on top, Sources below.
+    return (
+      <div className="flex flex-col gap-6">
+        <div className="min-w-0">
+          <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+            <GitBranch size={11} /> Backlinks
+          </h3>
+          {backlinks}
+        </div>
+        <div className="min-w-0 border-t border-[var(--neutral-800)] pt-6">
+          <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+            <FileText size={11} /> Sources
+          </h3>
+          {sources}
+        </div>
+      </div>
+    );
+  }
+
+  // Side by side — Sources left, Backlinks right.
+  return (
+    <div className="flex gap-6 items-start">
+      <div className="flex-1 min-w-0">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <FileText size={11} /> Sources
+        </h3>
+        {sources}
+      </div>
+      <div className="flex-1 min-w-0 border-l border-[var(--neutral-800)] pl-6">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <GitBranch size={11} /> Backlinks
+        </h3>
+        {backlinks}
+      </div>
+    </div>
+  );
+}
+
+
 // --- Workflows sub-view ------------------------------------------------------
 // Bug audit §7 (new feature): agents/workflow_suggester.py finds 0-4
 // step-by-step procedures described in the notebook's sources and
@@ -680,6 +780,51 @@ function WorkflowsView({ workspaceId, onOpenSubChat, fetchPanelContent, generate
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// --- Diagrams (Mind Map + Workflows) --------------------------------------
+// NEW — Mind Map and Workflows merged into one "Diagrams" sub-tab (same
+// grouping move as Sources/Backlinks -> Library), rendering MindMapView
+// and WorkflowsView unchanged rather than rebuilding either.
+//
+// Always stacked, Mind Map on top and Workflows below — never side by
+// side. A mind map covers a whole notebook's worth of content and can
+// end up wide or tall on its own; splitting the row with Workflows next
+// to it would only squeeze the one view that most needs the room.
+//
+// Mind Map's width still isn't fixed, though: it's rendered inside
+// NotebooksTab's own content pane, whose max-width already expands as
+// the chat dock and the project sidebar collapse (see the "diagrams"
+// branch of contentMaxWidthClass() below) — so a big mind map keeps
+// getting more room the same way Library's side-by-side layout does,
+// it just never needs a second column to do it.
+function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks }) {
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="min-w-0">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <Network size={11} /> Mind Map
+        </h3>
+        <MindMapView
+          workspaceId={workspaceId}
+          onOpenSubChat={onOpenSubChat}
+          fetchPanelContent={fetchPanelContent}
+          generateNotebooks={generateNotebooks}
+        />
+      </div>
+      <div className="min-w-0 border-t border-[var(--neutral-800)] pt-6">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <ListChecks size={11} /> Workflows
+        </h3>
+        <WorkflowsView
+          workspaceId={workspaceId}
+          onOpenSubChat={onOpenSubChat}
+          fetchPanelContent={fetchPanelContent}
+          generateNotebooks={generateNotebooks}
+        />
+      </div>
     </div>
   );
 }
@@ -1263,6 +1408,107 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
   );
 }
 
+// --- Insights (Facts + Clusters + Suggested notes) ------------------------
+// NEW — Facts, Clusters, and Suggested notes merged into one "Insights"
+// sub-tab (same grouping move as Sources/Backlinks -> Library and Mind
+// Map/Workflows -> Diagrams), rendering FactsView, ClustersView, and
+// CandidatesView unchanged rather than rebuilding any of them.
+//
+// Facts and Clusters share a column — both are structured things the
+// system pulled out of your sources for you to confirm, just at
+// different granularity (a handful of durable facts vs. groups of
+// related sources) — stacked vertically within that column, Facts on
+// top since it's usually the shorter of the two. Suggested notes (a
+// different kind of proposal — whole draft notes, not structured data)
+// gets its own column, same "one thing gets its own side" split Library
+// uses for Backlinks.
+//
+// Layout responds to `dockOpen` (NotebooksTab passes `!chatDockCollapsed`),
+// same contract as LibraryView: side by side when the dock is closed and
+// there's room (Facts & Clusters left — Facts already lived there —
+// Suggested notes right), stacked — Suggested notes on top, Facts &
+// Clusters below — once the dock reopens and takes the width back.
+function InsightsView({
+  workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates, acceptFactCandidate, rejectFactCandidate, factsRefreshSignal,
+  clusterCandidates, loadingClusters, scanningClusters, onScanClusters, onAcceptCluster, onRejectCluster,
+  candidates, onAcceptCandidate, onRejectCandidate,
+  dockOpen,
+}) {
+  const factsAndClusters = (
+    <div className="space-y-6">
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <BookMarked size={11} /> Facts
+        </h4>
+        <FactsView
+          workspaceId={workspaceId}
+          fetchWorkspaceFacts={fetchWorkspaceFacts}
+          saveWorkspaceFacts={saveWorkspaceFacts}
+          fetchFactCandidates={fetchFactCandidates}
+          acceptFactCandidate={acceptFactCandidate}
+          rejectFactCandidate={rejectFactCandidate}
+          factsRefreshSignal={factsRefreshSignal}
+        />
+      </div>
+      <div className="border-t border-[var(--neutral-800)] pt-6">
+        <h4 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <Layers size={11} /> Clusters
+        </h4>
+        <ClustersView
+          candidates={clusterCandidates}
+          loading={loadingClusters}
+          scanning={scanningClusters}
+          onScan={onScanClusters}
+          onAccept={onAcceptCluster}
+          onReject={onRejectCluster}
+        />
+      </div>
+    </div>
+  );
+  const suggestedNotes = (
+    <CandidatesView
+      workspaceId={workspaceId}
+      candidates={candidates}
+      onAccept={onAcceptCandidate}
+      onReject={onRejectCandidate}
+    />
+  );
+
+  if (dockOpen) {
+    // Stacked — Suggested notes on top, Facts & Clusters below.
+    return (
+      <div className="flex flex-col gap-6">
+        <div className="min-w-0">
+          <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+            <Sparkles size={11} /> Suggested notes
+          </h3>
+          {suggestedNotes}
+        </div>
+        <div className="min-w-0 border-t border-[var(--neutral-800)] pt-6">
+          <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2">Facts &amp; Clusters</h3>
+          {factsAndClusters}
+        </div>
+      </div>
+    );
+  }
+
+  // Side by side — Facts & Clusters left, Suggested notes right.
+  return (
+    <div className="flex gap-6 items-start">
+      <div className="flex-1 min-w-0">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2">Facts &amp; Clusters</h3>
+        {factsAndClusters}
+      </div>
+      <div className="flex-1 min-w-0 border-l border-[var(--neutral-800)] pl-6">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <Sparkles size={11} /> Suggested notes
+        </h3>
+        {suggestedNotes}
+      </div>
+    </div>
+  );
+}
+
 // --- Corrections sub-view ----------------------------------------------
 // Data Layer architecture §8a: capture -- a file-scope picker (one
 // source, or "All files") and a plain-language box describing what's
@@ -1567,7 +1813,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   const notebooks = workspaces.filter((w) => (w.active_stages || [w.stage]).includes("note"));
 
   const [selectedId, setSelectedId] = useState(null);
-  const [subTab, setSubTab] = useState("sources");
+  const [subTab, setSubTab] = useState("library");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   // NEW — Backlinks-as-topic-tree: eo/secondary_data.py's topic tree +
@@ -1630,6 +1876,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // NEW — §6.2: right-hand chat dock collapse state, restored from
   // localStorage on mount (same pattern as sidebarCollapsed elsewhere).
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar
   // NEW — issue #3: nested-chat create/rename/delete state, same shape as
   // ResearchTab's own (and ChatSidebar's editingId/editTitle/pendingDelete
   // before that) — scoped to this tab's notebook list.
@@ -1640,11 +1887,22 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
 
   useEffect(() => {
     setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+    setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
   }, []);
 
   function toggleChatDock() {
     setChatDockCollapsed((prev) => {
       localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+
+  // NEW — collapsible project-picker sidebar, same toggle pattern as
+  // toggleChatDock above, its own localStorage key so the two collapse
+  // independently.
+  function toggleProjects() {
+    setProjectsCollapsed((prev) => {
+      localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
@@ -1664,7 +1922,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   }, []);
 
   // NEW — §4 fix: persist selection changes. Guarded on restoredSelection
-  // so the initial (pre-restore) null/"sources" values don't overwrite
+  // so the initial (pre-restore) null/"library" values don't overwrite
   // what's already saved before the restore effect above has run.
   useEffect(() => {
     if (!restoredSelection || !selectedId) return;
@@ -1716,7 +1974,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // null if there's nothing generated yet (no dot in that case either
   // way — an empty panel isn't "unread," it's just empty).
   function latestTabTimestamp(tabId) {
-    if (tabId === "backlinks") {
+    if (tabId === "library") {
       // CHANGED — Overlap/Live-Viz guide, "replace entirely" decision:
       // this used to reduce over `edges` (the primary structural graph's
       // created_at timestamps) to drive the unread-dot. BacklinksView no
@@ -1885,6 +2143,31 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     await openInDock(chatId);
   }
 
+  // NEW — how wide the selected-notebook content pane gets to be, for
+  // sub-tabs that actually benefit from more than the default reading
+  // width (max-w-3xl, same as every other sub-tab keeps). Both the chat
+  // dock (chatDockCollapsed) and this tab's own project sidebar
+  // (projectsCollapsed) free up real horizontal space when they
+  // collapse, so this reacts to both rather than just one:
+  //  - "library"/"insights": widen only once the dock's closed, since
+  //    that's the difference between their two columns (Sources/
+  //    Backlinks, Facts&Clusters/Suggested notes) fitting side by side
+  //    or needing to stack (see LibraryView's/InsightsView's own
+  //    dockOpen prop).
+  //  - "diagrams": Mind Map can be large in either dimension on its
+  //    own (no second column involved, see DiagramsView above), so it
+  //    keeps expanding as either the dock or the sidebar collapses, and
+  //    drops the cap entirely once both have.
+  function contentMaxWidthClass() {
+    if (subTab === "library" || subTab === "insights") return chatDockCollapsed ? "max-w-6xl" : "max-w-3xl";
+    if (subTab === "diagrams") {
+      if (chatDockCollapsed && projectsCollapsed) return "max-w-none";
+      if (chatDockCollapsed || projectsCollapsed) return "max-w-5xl";
+      return "max-w-3xl";
+    }
+    return "max-w-3xl";
+  }
+
   // NEW — §8: promotes the notebook to Research and hands off navigation
   // to AppShell, which switches tabs and pre-selects it there.
   //
@@ -1920,14 +2203,28 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     <div className="flex h-full">
       {/* Notebook picker — this tab's own left column, distinct from the
           chat sidebar (which is hidden while this tab is active). */}
+      {projectsCollapsed ? (
+        <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
+          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show notebooks">
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
         <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
             <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
           </span>
-          <button onClick={() => setCreating((c) => !c)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
-            <Plus size={15} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setCreating((c) => !c)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
+              <Plus size={15} />
+            </button>
+            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+                own ChevronLeft toggle. */}
+            <button onClick={toggleProjects} title="Hide notebooks" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+              <ChevronLeft size={14} />
+            </button>
+          </div>
         </div>
         {creating && (
           <form onSubmit={handleCreateNotebook} className="px-3 py-2 border-b border-[var(--neutral-900)] flex gap-1">
@@ -2038,6 +2335,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
           )}
         </div>
       </div>
+      )}
 
       {/* Selected notebook */}
       <div className="flex-1 min-h-0 overflow-y-auto">
@@ -2046,7 +2344,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             Select or create a notebook to get started.
           </div>
         ) : (
-          <div className="relative p-5 space-y-4 max-w-3xl">
+          <div className={`relative p-5 space-y-4 ${contentMaxWidthClass()}`}>
+            {/* CHANGED — widened from a flat max-w-3xl: Library's
+                side-by-side Sources/Backlinks layout (see LibraryView
+                below) and Diagrams' Mind Map (see DiagramsView below)
+                need the extra room the chat dock's/sidebar's collapsed
+                state just freed up on either side; every other sub-tab
+                keeps the original narrower reading width — see
+                contentMaxWidthClass() above. */}
             <div className="flex items-center justify-between">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
               <div className="flex items-center gap-2">
@@ -2137,17 +2442,15 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                     }`}
                   >
                     <t.icon size={13} /> {t.label}
-                    {t.id === "candidates" && candidates.length > 0 && (
-                      <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{candidates.length}</span>
-                    )}
-                    {t.id === "clusters" && clusterCandidates.length > 0 && (
-                      <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">{clusterCandidates.length}</span>
+                    {t.id === "insights" && candidates.length + clusterCandidates.length > 0 && (
+                      <span className="ml-0.5 text-[10px] bg-amber-500/20 text-amber-300 rounded-full px-1.5">
+                        {candidates.length + clusterCandidates.length}
+                      </span>
                     )}
                     {/* NEW — §8: unread dot for panel-generated sub-tabs
-                        (Mind Map / Backlinks / Workflows / Study) — see
+                        (Diagrams / Library / Study) — see
                         UNREAD_DOT_TABS/hasUnseenUpdate above for why
-                        Suggested notes/Clusters use their existing count
-                        badge instead. */}
+                        Insights uses its own count badge above instead. */}
                     {UNREAD_DOT_TABS.includes(t.id) && subTab !== t.id && hasUnseenUpdate(t.id) && (
                       <span
                         className="ml-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
@@ -2172,8 +2475,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               />
             </div>
 
-            {subTab === "sources" && (
-              <SourcesView
+            {/* CHANGED — Sources + Backlinks merged into "Library".
+                dockOpen tells LibraryView whether the chat dock is
+                currently taking up the right-hand side of the screen:
+                side-by-side (Sources left, Backlinks right) when it's
+                collapsed and there's room, stacked (Backlinks on top,
+                Sources below) when it's open and there isn't. */}
+            {subTab === "library" && (
+              <LibraryView
                 workspaceId={selected.id}
                 nodes={nodes}
                 edges={edges}
@@ -2188,27 +2497,17 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                   await renameWorkspaceNode(selected.id, node.node_id, title);
                   await loadNotebookData(selected.id);
                 }}
+                topicNodes={topicNodes}
+                topicEdges={topicEdges}
+                topicPulsingIds={topicPulsingIds}
+                dockOpen={!chatDockCollapsed}
               />
             )}
-            {subTab === "mindmap" && (
-              <MindMapView
-                workspaceId={selected.id}
-                onOpenSubChat={handleOpenSubChat}
-                fetchPanelContent={fetchPanelContent}
-                generateNotebooks={generateNotebooks}
-              />
-            )}
-            {subTab === "backlinks" && (
-              <BacklinksView
-                nodes={topicNodes}
-                edges={topicEdges}
-                pulsingIds={topicPulsingIds}
-                loading={loadingNodes}
-                onSelectNode={setPreviewNode}
-              />
-            )}
-            {subTab === "workflows" && (
-              <WorkflowsView
+            {/* CHANGED — Mind Map + Workflows merged into "Diagrams",
+                always stacked (Mind Map on top, Workflows below — see
+                DiagramsView below for why it's never side by side). */}
+            {subTab === "diagrams" && (
+              <DiagramsView
                 workspaceId={selected.id}
                 onOpenSubChat={handleOpenSubChat}
                 fetchPanelContent={fetchPanelContent}
@@ -2216,8 +2515,16 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               />
             )}
             {subTab === "study" && <StudyView workspaceId={selected.id} />}
-            {subTab === "facts" && (
-              <FactsView
+            {/* CHANGED — Facts + Clusters + Suggested notes merged into
+                "Insights". dockOpen tells InsightsView whether the chat
+                dock is currently taking up the right-hand side of the
+                screen: side-by-side (Facts & Clusters left, Suggested
+                notes right) when it's collapsed and there's room,
+                stacked (Suggested notes on top, Facts & Clusters below)
+                when it's open and there isn't — same layout contract as
+                LibraryView above. */}
+            {subTab === "insights" && (
+              <InsightsView
                 workspaceId={selected.id}
                 fetchWorkspaceFacts={fetchWorkspaceFacts}
                 saveWorkspaceFacts={saveWorkspaceFacts}
@@ -2225,24 +2532,16 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 acceptFactCandidate={acceptFactCandidate}
                 rejectFactCandidate={rejectFactCandidate}
                 factsRefreshSignal={factsRefreshSignal}
-              />
-            )}
-            {subTab === "clusters" && (
-              <ClustersView
-                candidates={clusterCandidates}
-                loading={loadingClusters}
-                scanning={scanningClusters}
-                onScan={handleScanClusters}
-                onAccept={handleAcceptCluster}
-                onReject={handleRejectCluster}
-              />
-            )}
-            {subTab === "candidates" && (
-              <CandidatesView
-                workspaceId={selected.id}
+                clusterCandidates={clusterCandidates}
+                loadingClusters={loadingClusters}
+                scanningClusters={scanningClusters}
+                onScanClusters={handleScanClusters}
+                onAcceptCluster={handleAcceptCluster}
+                onRejectCluster={handleRejectCluster}
                 candidates={candidates}
-                onAccept={async (candidateId) => { await acceptNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
-                onReject={async (candidateId) => { await rejectNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
+                onAcceptCandidate={async (candidateId) => { await acceptNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
+                onRejectCandidate={async (candidateId) => { await rejectNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
+                dockOpen={!chatDockCollapsed}
               />
             )}
             {subTab === "corrections" && (

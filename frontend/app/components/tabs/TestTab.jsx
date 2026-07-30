@@ -9,7 +9,7 @@ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NE
 import {
   FlaskConical, Users, ClipboardList, ShieldAlert, History,
   Loader2, RefreshCw, MessageSquare, ArrowUpRight, Sparkles,
-  Pin, PinOff, Pencil, Check, X, Clock, AlertTriangle, Eye, Plus, Trash2,
+  Pin, PinOff, Pencil, Check, X, Clock, AlertTriangle, Eye, Plus, Trash2, ChevronRight, ChevronLeft,
 } from "lucide-react";
 
 // Test tab design spec §1 — "Simulate & Test", same shell shape as
@@ -105,6 +105,9 @@ const SIMULATE_DOMAIN_ROLES = [
 // just noting the intent here since every other tab's dock defaults the
 // opposite way.
 const CHAT_DOCK_KEY = "minime_test_chatdock_collapsed";
+// NEW — collapsible project-picker sidebar, same pattern as the chat
+// dock's own collapse above.
+const PROJECTS_KEY = "minime_test_projects_collapsed";
 
 // NEW — per-workspace "last dispatched run" pointer, localStorage-only.
 // There's no dedicated "past simulation runs" store yet (§1.2 `history`
@@ -173,6 +176,7 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
   // Notebooks/Research/Plan/Build.
   const [promoteMode, setPromoteMode] = useState("complete");
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar
   // NEW — lifted here (not into RunSimulationPanel/ReportsPanel
   // directly) so a run dispatched from `run` is immediately visible to
   // `reports` without needing a page reload, same "shared state at the
@@ -200,11 +204,22 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
 
   useEffect(() => {
     setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+    setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
   }, []);
 
   function toggleChatDock() {
     setChatDockCollapsed((prev) => {
       localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+
+  // NEW — collapsible project-picker sidebar, same toggle pattern as
+  // toggleChatDock above, its own localStorage key so the two collapse
+  // independently.
+  function toggleProjects() {
+    setProjectsCollapsed((prev) => {
+      localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
@@ -332,6 +347,13 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
 
   return (
     <div className="flex h-full">
+      {projectsCollapsed ? (
+        <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
+          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
@@ -339,13 +361,20 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
           </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
-          <button
-            onClick={() => setShowCreateModal(true)}
-            title="New test project"
-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-          >
-            <Plus size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCreateModal(true)}
+              title="New test project"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            >
+              <Plus size={14} />
+            </button>
+            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+                own ChevronLeft toggle. */}
+            <button onClick={toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+              <ChevronLeft size={14} />
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {testProjects.length === 0 && (
@@ -436,6 +465,7 @@ export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceI
           })}
         </div>
       </div>
+      )}
 
       <div className="flex-1 min-h-0 flex flex-col">
         {activeWs && (
