@@ -53,15 +53,16 @@ from agents.sandbox_tester import _run_one_module
 
 load_dotenv()
 
-# Same three-tier fallback chain as agents/idea_planner.py and
+# Same fallback chain shape as agents/idea_planner.py and
 # agents/reviewer_fixer_lean.py, reused for the same reason those two
 # give: this is a single-pass generation call, not a worker pool, so
 # there's no fairness rotation to do — just try each provider in order
 # until one answers.
+# Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
+# removed here, not replaced -- GitHub Models retired in full today.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 # 2MB raw (before base64's ~33% inflation) -- generous for a CSV/TSV/JSON

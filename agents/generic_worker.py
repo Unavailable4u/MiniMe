@@ -81,7 +81,9 @@ PROVIDER_DEFAULT_MODEL = {
     # deploy_config_writer.py/reviewer_fixer_lean.py's own CHAINs.
     "cerebras": "gpt-oss-120b",
     "mistral": "mistral-large-latest",
-    "github": "openai/gpt-4.1-mini",
+    # Quota-reality fix, §4 (2026-07-30): "github" entry removed --
+    # GitHub Models retired in full today and no CHAIN or tag-driven
+    # role anywhere in the repo still resolves to this provider.
     # PATCH 1 (Gemini/Mistral/HF rollout): flash is the sane default for any
     # Gemini-tagged AGENT_CAPABILITIES entry that doesn't specify its own
     # model via a hardcoded CHAIN elsewhere -- cheaper/faster than pro,

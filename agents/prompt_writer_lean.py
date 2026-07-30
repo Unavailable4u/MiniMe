@@ -33,9 +33,10 @@ from memory.bus import read, write, KEYS
 from eo import conversation_memory   # NEW — Part 23
 from utils.llm_client import generate_text
 
+# Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+# its fallback step is removed here, not replaced.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 SYSTEM_PROMPT = """You are a technical spec writer for a lean, single-file build \

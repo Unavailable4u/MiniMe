@@ -37,11 +37,12 @@ load_dotenv()
 # Same reasoning-role chain shape as agents/prompt_writer.py -- this is a
 # planning/reasoning call (propose a config), not the tight, latency-
 # sensitive structure_architect.py call that runs mid-cycle right before
-# a file write; a slightly longer fallback chain is fine here.
+# a file write.
+# Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
+# removed here, not replaced -- GitHub Models retired in full today.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
 ]
 
 APPS_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apps")

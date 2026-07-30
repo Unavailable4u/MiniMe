@@ -1,7 +1,9 @@
 # =============================================================================
 # AI Loop v5 -- Environment Variables / Secrets
 # Corrected version: NO Gemini, NO OpenRouter anywhere in the system.
-# EO layer models per the approved image (Groq/Qwen, Cloudflare/Llama, GitHub/GPT).
+# EO layer models per the approved image (Groq/Qwen, Cloudflare/Llama).
+# GitHub Models retired in full 2026-07-30 -- quota-reality fix §4 -- and
+# has been removed from every chain that used it.
 # Copy this file to .env and fill in real values. Never commit .env itself.
 # =============================================================================
 
@@ -17,7 +19,7 @@
 EO_INSPECTOR_GROQ_KEY_1=*****************
 
 # Optional: a SECOND fresh Groq account, used only if KEY_1 is rate-limited.
-# Skip for now -- the GitHub Models fallback (below) covers you.
+# Skip for now -- GEMINI_API_KEY_10/_11 (below) cover you as fallback.
 EO_INSPECTOR_GROQ_KEY_2=***********************
 
 # EO Panel Member B -- Cloudflare Workers AI, @cf/meta/llama-3.1-8b-instruct
@@ -29,13 +31,9 @@ EO_INSPECTOR_GROQ_KEY_2=***********************
 EO_PANEL_CLOUDFLARE_ACCOUNT_ID=**************
 EO_PANEL_CLOUDFLARE_API_TOKEN=*************************
 
-# EO Panel Member C + Inspector's fallback + Responder's fallback
-# GitHub Models, openai/gpt-4.1-mini (fallback gpt-4.1-nano)
-# A GitHub Personal Access Token (fine-grained, no special scopes beyond
-# "Models" access needed).
-# Get from: https://github.com/settings/personal-access-tokens
-# IMPORTANT: must be a SEPARATE PAT from GITHUB_MODELS_PAT below.
-EO_PANEL_GITHUB_PAT=**********************************************
+# EO Panel Member C (was GitHub Models, retired 2026-07-30 -- quota-reality
+# fix §4) now runs on MISTRAL_API_KEY_7 / GEMINI_API_KEY_9 below -- both
+# already-provisioned reserve keys, no new secret needed here.
 
 # -----------------------------------------------------------------------------
 # 2. PRODUCTION 19-AGENT ROSTER (unchanged from v3 design)
@@ -100,10 +98,9 @@ CLOUDFLARE_API_KEY_8=***************
 # Get from: https://console.mistral.ai/api-keys
 MISTRAL_API_KEY=****************
 
-# Various fallbacks across the 19 production agents.
-# IMPORTANT: must be SEPARATE from EO_PANEL_GITHUB_PAT above.
-# Get from: https://github.com/settings/personal-access-tokens
-GITHUB_MODELS_PAT=****************
+# GITHUB_MODELS_PAT removed (2026-07-30, quota-reality fix §4) -- was the
+# shared fallback across the 19 production agents; GitHub Models retired
+# in full and every chain that used it has been moved off or shortened.
 
 # Cross-Cycle Memory Search, Duplication Checker
 # Get from: https://huggingface.co/settings/tokens
@@ -237,7 +234,9 @@ HUGGINGFACE_API_KEY_2=
 HUGGINGFACE_API_KEY_3=
 HUGGINGFACE_API_KEY_4=
 HUGGINGFACE_API_KEY_5=
-# -> extraction pool patch (source_manager-shaped roles) — small fast HF models
+# -> embeddings fallback (Patch 7) — utils/embedding.py's HF_EMBEDDING_KEY_ENVS,
+#    NOT the chat/extraction pool above. Cheaper per call than chat completions,
+#    so the $0.10/month cap stretches further here (§5).
 HUGGINGFACE_API_KEY_6=
 HUGGINGFACE_API_KEY_7=
 HUGGINGFACE_API_KEY_8=

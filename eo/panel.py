@@ -14,10 +14,13 @@ Three members:
       Cerebras instead keeps the actual property Part 2.2 cares about --
       "deliberately different model lineages ... a panel of three calls
       to variants of the same base model isn't a panel" -- since the
-      Inspector runs on Groq and member C (below) runs on GitHub Models,
+      Inspector runs on Groq and member C (below) runs on Mistral/Gemini,
       Cerebras is the one remaining distinct lineage/account.
-  C — GitHub Models gpt-4.1-mini, fallback gpt-4.1-nano, via
-      EO_PANEL_GITHUB_PAT — exactly as specified.
+  C — Quota-reality fix, §4 (2026-07-30): was GitHub Models gpt-4.1-mini,
+      fallback gpt-4.1-nano, via EO_PANEL_GITHUB_PAT. GitHub Models
+      retired in full today; now Mistral mistral-medium-latest, fallback
+      Gemini gemini-3.1-flash-lite, via the reserve keys
+      MISTRAL_API_KEY_7 / GEMINI_API_KEY_9 (confirmed unused elsewhere).
 
 Synthesis rule (Part 2.2, restated exactly):
   - tier: the HIGHEST tier across all three opinions. Never under-route
@@ -41,9 +44,18 @@ from utils.llm_client import generate_text
 MEMBER_B_CHAIN = [
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
 ]
+# Quota-reality fix, §4: GitHub Models retired in full (2026-07-30) --
+# this chain was two GitHub steps on the SAME key (EO_PANEL_GITHUB_PAT),
+# so it was already single-point-of-failure even before retirement made
+# it a hard outage. MISTRAL_API_KEY_7 / GEMINI_API_KEY_9 were confirmed
+# (0 occurrences anywhere else in the repo) as the reserve keys
+# multi-provider-scaling-guide.md §3 held back for exactly this "distinct
+# model lineage" panel voice -- no new key needed. gemini-3.1-flash-lite's
+# real RPD is 500, comfortably enough for a once-per-task classification
+# vote.
 MEMBER_C_CHAIN = [
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "EO_PANEL_GITHUB_PAT"},
-    {"provider": "github", "model": "openai/gpt-4.1-nano", "key_env": "EO_PANEL_GITHUB_PAT"},
+    {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY_7"},
+    {"provider": "gemini", "model": "gemini-3.1-flash-lite", "key_env": "GEMINI_API_KEY_9"},
 ]
 # Migration Part 26 §4c: PATH_TO_TIER / TIER_TO_PATH now come from
 # eo/structure.py (one shared definition) instead of being redefined here.

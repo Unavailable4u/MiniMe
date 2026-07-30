@@ -46,7 +46,9 @@ CHAIN = [
     # zai-glm-4.7 served now). See agents/generic_worker.py's
     # PROVIDER_DEFAULT_MODEL comment for the full trace.
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
-    {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
+    # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+    # its fallback step is removed here, not replaced. The Groq -> Cerebras
+    # redundancy above is unchanged.
 ]
 
 EXTRACTION_PROMPT = """You are given raw search snippets about a hardware

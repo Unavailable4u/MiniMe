@@ -1,19 +1,22 @@
 """
 utils/llm_client.py — replaces utils/gemini_client.py entirely.
 
-Gemini and OpenRouter are not used anywhere in this system (per the v5
-Master Blueprint correction). This module provides one generic
-generate_text() function that any agent can call with its own ordered
-fallback chain, drawn from: Groq, Cerebras, GitHub Models, Cloudflare
-Workers AI.
+OpenRouter is not used anywhere in this system (per the v5 Master
+Blueprint correction). GitHub Models was used here too until its full
+retirement on 2026-07-30 (quota-reality fix, §4) -- every chain that
+stepped through it has since been moved onto a different provider or had
+that step removed outright; nothing in this module routes to it anymore.
+This module provides one generic generate_text() function that any agent
+can call with its own ordered fallback chain, drawn from: Groq, Cerebras,
+Mistral, Gemini, HuggingFace, Cloudflare Workers AI.
 
-Each agent defines its own chain as a list of steps. Three providers
-(groq, cerebras, github) are OpenAI-SDK-shaped and use "key_env":
+Each agent defines its own chain as a list of steps. Most providers
+(groq, cerebras, mistral, gemini, huggingface) are OpenAI-SDK-shaped and
+use "key_env":
 
     CHAIN = [
         {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
         {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
-        {"provider": "github", "model": "openai/gpt-4.1-mini", "key_env": "GITHUB_MODELS_PAT"},
     ]
 
 Cloudflare Workers AI is a plain REST call needing two credentials, so
@@ -130,10 +133,10 @@ QUOTA_CONFIG = {
     # went in it. See the reality guide §5.
 }
 
-# GitHub Models' OpenAI-compatible inference endpoint.
-# Verify this is still current if calls start failing with 404 --
-# GitHub has changed this endpoint before.
-GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+# Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+# GITHUB_MODELS_BASE_URL and _get_github() below are removed as part of
+# this same pass, now that no CHAIN anywhere in the repo still steps
+# through "github".
 
 # Mistral La Plateforme is also OpenAI-SDK-compatible (same trick as
 # GitHub Models above) -- added so documentation_agent.py / final_qa.py
@@ -297,19 +300,6 @@ def _get_cerebras(key_env: str, timeout: float = None) -> Cerebras:
     return _client_cache[cache_key]
 
 
-def _get_github(key_env: str, timeout: float = None) -> OpenAI:
-    key = os.getenv(key_env)
-    if not key:
-        return None
-    cache_key = ("github", key_env, timeout)
-    if cache_key not in _client_cache:
-        kwargs = {"base_url": GITHUB_MODELS_BASE_URL, "api_key": key}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        _client_cache[cache_key] = OpenAI(**kwargs)
-    return _client_cache[cache_key]
-
-
 def _get_mistral(key_env: str, timeout: float = None) -> OpenAI:
     key = os.getenv(key_env)
     if not key:
@@ -324,8 +314,8 @@ def _get_mistral(key_env: str, timeout: float = None) -> OpenAI:
 
 
 def _get_gemini(key_env: str, timeout: float = None) -> OpenAI:
-    """Same OpenAI-SDK-via-base_url trick as _get_mistral()/_get_github()
-    above -- Gemini's OpenAI-compatibility layer takes a normal OpenAI
+    """Same OpenAI-SDK-via-base_url trick as _get_mistral() above --
+    Gemini's OpenAI-compatibility layer takes a normal OpenAI
     client pointed at GEMINI_BASE_URL, so no new SDK dependency and no new
     branch in _call_step() (it's already provider-agnostic OpenAI-shaped)."""
     key = os.getenv(key_env)
@@ -373,7 +363,7 @@ def _get_cloudflare_creds(account_id_env: str, token_env: str):
 
 
 def _call_step(client, model: str, system_prompt: str, user_content: str):
-    """OpenAI-SDK-shaped call, used for groq/cerebras/github. Returns
+    """OpenAI-SDK-shaped call, used for groq/cerebras/mistral/gemini. Returns
     (text, usage, finish_reason) — usage is the provider SDK's usage
     object (has .total_tokens on all three, since they're all
     OpenAI-compatible chat.completions responses) or None if the
@@ -602,7 +592,7 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
     provider returned (SDK object with .total_tokens, or a plain dict
     with "total_tokens"), then delegates to the public log_usage() above.
 
-    usage may be an SDK object (groq/cerebras/github/mistral -- has
+    usage may be an SDK object (groq/cerebras/mistral -- has
     .total_tokens as an attribute) or a plain dict (cloudflare, when
     present at all -- has "total_tokens" as a key), or None entirely.
     Any of these still result in the request being logged now -- only the
@@ -652,8 +642,8 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                    session_id: str = None, tier: int = None, path: str = None,
                    domain: str = None) -> str:
     """
-    Walks `chain` in order. Each step is a dict. For groq/cerebras/github:
-        {"provider": "groq"|"cerebras"|"github", "model": "...", "key_env": "..."}
+    Walks `chain` in order. Each step is a dict. For groq/cerebras/mistral/gemini:
+        {"provider": "groq"|"cerebras"|"mistral"|"gemini", "model": "...", "key_env": "..."}
     For cloudflare:
         {"provider": "cloudflare", "model": "...", "account_id_env": "...", "token_env": "..."}
 
@@ -762,7 +752,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         key_env = step["key_env"]
         timeout = step.get("timeout")
         getter = {
-            "groq": _get_groq, "cerebras": _get_cerebras, "github": _get_github,
+            "groq": _get_groq, "cerebras": _get_cerebras,
             "mistral": _get_mistral, "gemini": _get_gemini,
             "huggingface": _get_huggingface,
         }.get(provider)
