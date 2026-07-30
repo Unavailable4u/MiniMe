@@ -5,10 +5,23 @@ through; §9b (this revision) is what makes it actually push, via a
 real per-session WebSocket connection registry (api/server.py's new
 /ws/{session_id} route + eo/ws_registry.py).
 
-ASSUMPTION FLAGGED (carried over from §9a, still true): relay/emitter.py
-already has a real, working transport (Pusher, one channel per
-session_id) that much of this codebase already emits through
-(agent_start/agent_done/routing_decision/etc., Part 6;
+RESOLVED (Notebooks Chat-First refinement, Phase 4 steps 4.1/4.2 — was
+the open question flagged below): _deliver() now pushes through BOTH
+transports. eo/ws_registry.py's self-hosted socket stays exactly as it
+was -- SessionContext.jsx's `/ws/{session_id}` connection is its real,
+working consumer today and this phase doesn't touch it. Every event is
+now ALSO mirrored onto relay/emitter.py's existing `session-{session_id}`
+Pusher channel (via emit_event(), see that file's own step-4.2 comment
+on its VALID_EVENT_TYPES) -- the channel WorkspaceDockContext.jsx
+already binds for every dock, with zero new subscription plumbing
+needed to receive these there. See decisions/step-4.1-notification-
+transport.md for the full writeup of why Pusher over a second
+self-hosted socket.
+
+ORIGINAL ASSUMPTION FLAGGED (kept for history, now resolved above):
+relay/emitter.py already has a real, working transport (Pusher, one
+channel per session_id) that much of this codebase already emits
+through (agent_start/agent_done/routing_decision/etc., Part 6;
 emit_user_event()'s per-user channel, Part 8.4). §9's own text asks for
 something separate, though -- "9a: notify() stub ... no transport yet"
 followed by "9b: WebSocket endpoint in api/server.py + per-session
@@ -33,6 +46,7 @@ import logging
 from datetime import datetime, timezone
 
 from eo.ws_registry import push as _ws_push
+from relay.emitter import emit_event as _emit_pusher_event   # NEW — Phase 4 step 4.2
 
 logger = logging.getLogger(__name__)
 
@@ -95,21 +109,33 @@ def notify(session_id: str, kind: str, payload: dict = None) -> dict | None:
 
 
 def _deliver(event: dict) -> None:
-    """§9b: the real per-session WebSocket push. Still logs first --
-    same reason §9a's stub did: loud enough to confirm a call site
-    fired correctly, without that log line being mistaken for a
-    delivery guarantee, since eo.ws_registry.push() below is itself a
-    documented no-op if no browser has an open socket for this
-    session_id (or the app's event loop hasn't been captured yet).
-    Never raises past this point -- an emission failure must not take
-    down the agent work that triggered it, same rule
-    relay/emitter.py:emit_event() already follows for its own
-    transport.
+    """§9b + Phase 4 step 4.2: pushes through BOTH transports, each
+    independently guarded -- one failing (or one kind not yet
+    registered on the other side, see relay/emitter.py's own
+    VALID_EVENT_TYPES comment) must never block or take down the
+    other. Still logs first -- same reason §9a's stub did: loud enough
+    to confirm a call site fired correctly, without that log line
+    being mistaken for a delivery guarantee on either transport, since
+    both eo.ws_registry.push() and relay.emitter.emit_event() are
+    themselves documented no-ops in various "nobody's listening yet"
+    conditions (no open socket for this session_id; Pusher not
+    configured in this environment).
     """
     print(f"  [notify] {event['kind']} -> session {event['session_id']}")
     try:
         _ws_push(event)
     except Exception:
         logger.exception(
-            "[notify] push failed for kind=%s session=%s", event["kind"], event["session_id"],
+            "[notify] ws_registry push failed for kind=%s session=%s", event["kind"], event["session_id"],
+        )
+    # NEW — step 4.2: mirrored onto the Pusher session channel too.
+    # `event["kind"]` is passed straight through as emit_event()'s
+    # `event_type` -- see relay/emitter.py's VALID_EVENT_TYPES comment
+    # for why every kind in this file's VALID_KINDS needs a matching
+    # entry there, and what to do when adding a new one (step 4.3 will).
+    try:
+        _emit_pusher_event(event["kind"], session_id=event["session_id"], payload=event["payload"])
+    except Exception:
+        logger.exception(
+            "[notify] pusher mirror failed for kind=%s session=%s", event["kind"], event["session_id"],
         )

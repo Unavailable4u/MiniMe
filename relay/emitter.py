@@ -52,7 +52,25 @@ VALID_EVENT_TYPES = {
     # (note_proposed today, workspace_shared/etc. later) — the kind
     # lives in payload, same as every other event's payload already
     # carries type-specific fields.
-    "notification",
+    # NEW — Phase 4 step 4.2 (Notebooks Chat-First refinement): the
+    # transport decision (step 4.1, see decisions/step-4.1-notification-
+    # transport.md) is for eo/notify.py's _deliver() to ALSO mirror every
+    # event onto this Pusher channel, not just eo/ws_registry.py's
+    # self-hosted socket -- see that file's own comment on why "also",
+    # not "only" (SessionContext.jsx's real, working /ws/{session_id}
+    # consumer stays on the old transport unchanged; this is additive).
+    # _deliver() passes eo/notify.py's `kind` straight through as this
+    # module's `event_type` (no wrapping "notification" envelope --
+    # that one's reserved for Part 8.4's per-USER channel, a different
+    # scope than these session-scoped kinds), so every kind in
+    # eo/notify.py's own VALID_KINDS needs a matching literal entry
+    # here or emit_event() raises on it. The two sets are meant to be
+    # kept in lockstep by hand -- whoever next adds a kind to
+    # eo/notify.py's VALID_KINDS (step 4.3 will, for
+    # generation_started/generation_done/generation_error) must add the
+    # same string here too.
+    "upload_processed", "backlinks_updated", "workspace_promoted",
+    "topic_added", "topic_merged", "connection_added",
 }
 
 _pusher_client = None
