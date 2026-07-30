@@ -116,7 +116,7 @@ from agents.note_clusterer import propose_clusters, list_candidates as list_clus
     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
 from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
 from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
-from agents.mind_mapper import generate_mindmap   # NEW — Notebooks integration guide §6.5 (Phase 2)
+from agents.mind_mapper import generate_mindmap, generate_suggested_route   # NEW — Notebooks integration guide §6.5 (Phase 2); generate_suggested_route wired up per chat audit (was dead code, no caller anywhere)
 from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
 from agents.workflow_suggester import suggest_workflows   # NEW — bug audit §7: suggested workflow diagrams
 from eo import node_summaries   # NEW — Notebooks integration guide §6.6/§7 (Phase 3)
@@ -1991,6 +1991,38 @@ def _generate_mindmap(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     return panel_content.set_content(ws_id, "mindmap", result["text"], owner_id, source_node_ids=source_node_ids)
 
 
+def _generate_suggested_route(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Chat audit fix: agents/mind_mapper.py:generate_suggested_route()
+    was fully implemented (Data Layer architecture §7c) but had no
+    caller anywhere in the codebase — not this endpoint, not the
+    frontend. This is that missing wiring.
+
+    Deterministic, no LLM call: walks agents/backlink_detector.py's own
+    "prerequisite-of" edges between topics and renders them as a
+    flowchart TD showing which topic to study before which — the
+    cross-notebook "what order do I work through this in" view, as
+    opposed to "mindmap"'s single topic-overview diagram. Saved under
+    its own panel_key ("suggested_route", added to
+    eo/panel_content.py's VALID_PANEL_KEYS/GENERATED_PANEL_KEYS)
+    so regenerating one never overwrites the other.
+
+    No source_node_ids scoping — generate_suggested_route() only takes
+    a project/chat scope (see its own docstring): a prerequisite route
+    is inherently about ordering across topics, so narrowing to a
+    handful of sources isn't a meaningful operation here the way it is
+    for mindmap/workflows/study.
+    """
+    try:
+        result = generate_suggested_route(ws_id, scope="project")
+    except LookupError:
+        raise RuntimeError(
+            "No prerequisite relationships between topics yet — this needs "
+            "Backlinks to have found at least one real \"study X before Y\" "
+            "connection first. Try running Backlinks, then Regenerate here."
+        )
+    return panel_content.set_content(ws_id, "suggested_route", result["text"], owner_id, source_node_ids=None)
+
+
 def _generate_backlinks(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     """Phase 3 (guide section 6.6). Unlike every other target here,
     "done" isn't the only successful outcome: link_concepts() returns
@@ -2036,7 +2068,14 @@ NOTEBOOKS_GENERATE_TARGETS = {
     "study_quiz": _make_study_generate("study_quiz"),
     "study_guide": _make_study_generate("study_guide"),
     "mindmap": _generate_mindmap,
-    "backlinks": _generate_backlinks,
+    "suggested_route": _generate_suggested_route,
+    # REMOVED — chat audit: "backlinks" unregistered as a Generate target.
+    # _generate_backlinks/link_concepts() below are left defined (in case
+    # something else needs them later) but no longer reachable from any
+    # picker or endpoint — real connection detection
+    # (agents/backlink_detector.py's run_after_source_manager()) is
+    # fully automatic on upload, per explicit request: no manual
+    # "generate backlinks" path anywhere.
     "workflows": _generate_workflows,
 }
 

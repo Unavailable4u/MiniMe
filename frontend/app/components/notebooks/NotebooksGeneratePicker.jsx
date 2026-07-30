@@ -44,7 +44,15 @@ export const TARGETS = [
   { key: "study_quiz", label: "Quiz", icon: GraduationCap, subTab: "study", keywords: ["quiz"] },
   { key: "study_guide", label: "Study guide", icon: GraduationCap, subTab: "study", keywords: ["study guide"] },
   { key: "mindmap", label: "Mind map", icon: Network, subTab: "diagrams", keywords: ["mind map", "mindmap", "concept map"] },
-  { key: "backlinks", label: "Backlinks", icon: GitBranch, subTab: "library", keywords: ["backlink", "backlinks", "concept graph", "concept links"] },
+  // REMOVED — chat audit: "Backlinks" used to trigger agents/concept_linker.py's
+  // link_concepts() by hand here, but the Library tab's BacklinksView no
+  // longer even renders that graph (it shows eo/secondary_data.py's
+  // auto-built topic tree instead — see NotebooksTab.jsx's own comment on
+  // that view). Real topic-to-topic connection detection
+  // (agents/backlink_detector.py's run_after_source_manager()) already
+  // runs automatically on every upload, no button needed — this entry
+  // was a dead end pointing at a graph nothing displays. Per explicit
+  // request: no manual "generate backlinks" affordance anywhere.
   { key: "workflows", label: "Workflows", icon: ListChecks, subTab: "diagrams", keywords: ["workflow", "workflows", "process diagram", "process diagrams", "steps", "procedure", "how to"] },
 ];
 

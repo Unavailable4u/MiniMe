@@ -215,6 +215,157 @@ def _build_ops(reparents: list[dict], connections: list[dict], doc: dict) -> lis
     return ops
 
 
+# NEW — chat audit fix: run_after_source_manager()'s "if not
+# existing_topics: return []" guard used to be the end of the story for
+# a workspace's first source (or any source landing where every OTHER
+# topic in the workspace also came from that same one source) -- there
+# was simply no code path that ever let a source's topics connect to
+# EACH OTHER, only to topics from a DIFFERENT, already-existing source.
+# That's structurally fine for a multi-source research workspace, but
+# for the much more common single-PDF-notebook case it meant
+# packet["connections"] (what Mind Map's Study Path and the Library
+# graph both read) stayed permanently empty no matter how many times
+# Backlinks got re-run -- there was never anything to reconcile
+# against. SELF_CONNECT_BRIEF/_run_self_connect_pass()/
+# _parse_self_connect_result() below are the same-source counterpart to
+# BACKLINK_DETECTOR_BRIEF/_run_incremental_pass()/_parse_backlink_result()
+# above, minus the reparent half (a source's topics already have their
+# own local parent from Mode A's own extraction pass -- see
+# agents/source_manager.py's own docstring on that division of labor)
+# -- just CONNECT, among one single list instead of two.
+SELF_CONNECT_BRIEF = (
+    "You are looking for real conceptual connections between topics that "
+    "were all just extracted from the SAME single source (e.g. one "
+    "lecture, one PDF, one document) -- there's nothing else in this "
+    "workspace yet to compare against, so every topic here comes from "
+    "the same place. You're given one labeled list, TOPICS, each "
+    "tagged with a bracketed id like [a1b2c3d4], its name, and its "
+    "summary.\n\n"
+    "For every pair of DIFFERENT topics in this list that has a real "
+    "relationship, name it with one of: \"prerequisite-of\" (you need to "
+    "understand the first before the second makes sense), "
+    "\"elaborates-on\" (the second goes deeper into something the first "
+    "already introduced), \"contradicts\", or \"restates\".\n\n"
+    "Output a single fenced ```json code block containing an object with "
+    "exactly one key, \"connections\": a JSON array of "
+    "{\"topic_a_id\": <bracketed id, no brackets>, \"topic_b_id\": "
+    "<bracketed id, no brackets>, \"relation\": <one of the four above>}. "
+    "topic_a_id and topic_b_id must be two DIFFERENT ids from the list "
+    "above. Nothing else outside that code block. Judge only real "
+    "matches -- under-connecting is fine, over-connecting turns this "
+    "into noise nobody trusts. Leave the array empty if nothing in this "
+    "list actually relates to anything else in it."
+)
+
+
+def _ensure_self_connect_role_registered() -> None:
+    if not get_role_prompt("backlink_self_connect"):
+        add_role_prompt("backlink_self_connect", SELF_CONNECT_BRIEF,
+                         source="backlink_self_connect_seed")
+
+
+def _run_self_connect_pass(topics: dict, session_id: str = None) -> str:
+    """Same-source counterpart to _run_incremental_pass() below, for the
+    case run_after_source_manager() used to just give up on entirely --
+    see this section's own top-of-block note.
+    """
+    _ensure_self_connect_role_registered()
+    from agents.generic_worker import run as run_role   # deferred, same
+                                                          # reasoning as
+                                                          # _run_incremental_pass()
+
+    context = _topic_context_block("TOPICS", topics)
+    task_text = (
+        "Find real connections between these topics, per your "
+        "instructions.\n\n" + context
+    )
+    result = run_role(
+        role="backlink_self_connect", task_text=task_text, input_keys=[],
+        session_id=session_id, include_conversation_context=False,
+        domain="notes",
+    )
+    return result.get("text") or ""
+
+
+def _parse_self_connect_result(raw: str, topic_ids: set) -> list[dict]:
+    """Same validate-against-the-real-id-set posture
+    _parse_backlink_result() above takes, for the single-list shape
+    _run_self_connect_pass() actually asks for -- connections only, no
+    reparents (see this section's own top-of-block note on why).
+    """
+    match = _JSON_BLOCK_RE.search(raw or "")
+    if not match:
+        return []
+    try:
+        parsed = json.loads(match.group(1))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+
+    connections = []
+    for item in parsed.get("connections") or []:
+        if not isinstance(item, dict):
+            continue
+        a = item.get("topic_a_id")
+        b = item.get("topic_b_id")
+        relation = (item.get("relation") or "").strip()
+        if a not in topic_ids or b not in topic_ids or a == b or not relation:
+            continue
+        connections.append({"from_topic": a, "to_topic": b, "relation": relation})
+    return connections
+
+
+def _run_self_connect_and_apply(workspace_id: str, new_topics: dict, doc: dict,
+                                 session_id: str = None) -> list[dict]:
+    """The same-source counterpart to run_after_source_manager()'s normal
+    phase 2 (below): used only when this source's topics have no OTHER
+    workspace topics yet to reconcile against. Same never-raises
+    posture, same emit_event/notify boundary as the rest of this module
+    -- kept as its own function so run_after_source_manager()'s early-
+    return stays a one-line change rather than duplicating all of phase
+    2's plumbing inline.
+    """
+    from relay.emitter import emit_event   # deferred, same reasoning as
+                                            # run_after_source_manager()'s
+                                            # own import below
+    from eo.notify import notify           # deferred, same reasoning
+
+    if len(new_topics) < 2:
+        return []  # nothing to connect a single topic to
+
+    agent_name = "backlink_detector"
+    emit_event("agent_start", session_id=session_id, agent=agent_name,
+               payload={"label": "Backlink Detector — connecting this source's own topics"})
+    applied: list[dict] = []
+    try:
+        raw = _run_self_connect_pass(new_topics, session_id=session_id)
+        connections = _parse_self_connect_result(raw, set(new_topics))
+        ops = _build_ops([], connections, doc)
+        if ops:
+            apply_patch(workspace_id, ops)
+            applied.extend(ops)
+    except Exception as exc:
+        print(f"  [Backlink Detector] self-connect skipped for {workspace_id}: {exc}")
+    else:
+        if applied:
+            try:
+                for op in applied:
+                    notify(session_id, "connection_added", {
+                        "workspace_id": workspace_id, **op["value"],
+                    })
+            except Exception as exc:
+                print(f"  [Backlink Detector] connection_added notify skipped: {exc}")
+
+    emit_event("agent_done", session_id=session_id, agent=agent_name,
+               payload={"summary": f"{len(applied)} connection(s)"})
+    notify(session_id, "backlinks_updated", {
+        "workspace_id": workspace_id, "topic_ids": list(new_topics),
+        "ops_applied": len(applied),
+    })
+    return applied
+
+
 def _run_incremental_pass(new_topics: dict, existing_topics: dict, session_id: str = None) -> str:
     """§3b's one LLM call: role "backlink_detector", context built from
     both topic sets, same generic_worker.run() shape
@@ -324,7 +475,14 @@ def run_after_source_manager(workspace_id: str, topic_ids: list[str],
                     # nothing real to reconcile
     existing_topics = {tid: t for tid, t in doc["topics"].items() if tid not in new_topics}
     if not existing_topics:
-        return []  # first source in this workspace -- no wider tree yet
+        # BUGFIX (chat audit): this used to just `return []` here --
+        # "first source in this workspace, nothing else to reconcile
+        # against" -- which is true, but left this source's OWN topics
+        # never connected to EACH OTHER either, since that was never
+        # this branch's job before. See _run_self_connect_and_apply()'s
+        # own docstring above for why that's the wrong call for the
+        # common single-source-notebook case.
+        return _run_self_connect_and_apply(workspace_id, new_topics, doc, session_id=session_id)
 
     if len(existing_topics) > BACKLINK_MAX_EXISTING_TOPICS:
         # dict insertion order -- see BACKLINK_MAX_EXISTING_TOPICS's own

@@ -90,7 +90,7 @@ const UNREAD_DOT_TABS = ["diagrams", "library", "study"];
 // candidates aren't — they compare against graph_edges/candidate
 // timestamps directly instead, see latestTabTimestamp below).
 const TAB_PANEL_KEYS = {
-  diagrams: ["mindmap", "suggested_workflows"],
+  diagrams: ["mindmap", "suggested_route", "suggested_workflows"],
   study: ["study_flashcards", "study_quiz", "study_guide"],
 };
 // NEW — §6.2: separate collapse key from WorkspaceChatPanel's own internal
@@ -351,32 +351,49 @@ function SourcesView({ workspaceId, nodes, edges, loading, onIngested, onSelectN
 // re-runs the same call and overwrites the saved content, same
 // last-write-wins posture as every other panel_content write (guide §9
 // leans silent-overwrite, no separate confirmation step here).
+// NEW — chat audit fix: agents/mind_mapper.py:generate_suggested_route()
+// existed but had no caller anywhere — this view is that missing wiring.
+// Two modes sharing one viewer: "mindmap" (the existing topic-overview
+// diagram) and "route" (agents/backlink_detector.py's own
+// "prerequisite-of" edges rendered as a study-order flowchart — "what
+// should I read before what"). Same MermaidDiagram, same Regenerate
+// action, same click-to-sub-chat behavior; only the fetched panel_key
+// and the Generate target name change between the two.
+const MINDMAP_MODES = [
+  { id: "mindmap", label: "Topic Map", panelKey: "mindmap", target: "mindmap" },
+  { id: "route", label: "Study Path", panelKey: "suggested_route", target: "suggested_route" },
+];
+
 function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks }) {
+  const [mode, setMode] = useState("mindmap");
   const [content, setContent] = useState("");
   const [updatedAt, setUpdatedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [regenerating, setRegenerating] = useState(false);
   const [error, setError] = useState(null);
 
+  const activeMode = MINDMAP_MODES.find((m) => m.id === mode) || MINDMAP_MODES[0];
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetchPanelContent(workspaceId, "mindmap").then((saved) => {
+    setError(null);
+    fetchPanelContent(workspaceId, activeMode.panelKey).then((saved) => {
       if (cancelled) return;
       setContent(saved?.content || "");
       setUpdatedAt(saved?.updated_at || null);
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [workspaceId, fetchPanelContent]);
+  }, [workspaceId, fetchPanelContent, activeMode.panelKey]);
 
   async function handleRegenerate() {
     setRegenerating(true);
     setError(null);
     try {
-      const { branches } = await generateNotebooks(workspaceId, ["mindmap"], null);
-      const branch = branches.find((b) => b.panel_key === "mindmap");
-      if (branch?.status === "error") throw new Error(branch.error || "Mind map generation failed");
+      const { branches } = await generateNotebooks(workspaceId, [activeMode.target], null);
+      const branch = branches.find((b) => b.panel_key === activeMode.target);
+      if (branch?.status === "error") throw new Error(branch.error || "Generation failed");
       setContent(branch?.result?.content || "");
       setUpdatedAt(branch?.result?.updated_at || null);
     } catch (err) {
@@ -386,17 +403,33 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
     }
   }
 
-  if (loading) {
-    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
-  }
+  const emptyHint = mode === "mindmap"
+    ? "No mind map yet — Generate reads this notebook's sources and proposes one."
+    : "No study path yet — Generate looks for \"study X before Y\" links Backlinks has already found between topics.";
 
   return (
     <div className="space-y-3">
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--neutral-800)] p-0.5 w-fit">
+        {MINDMAP_MODES.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => { if (!regenerating) setMode(m.id); }}
+            className={`text-[11px] px-2.5 py-1 rounded-md font-medium transition-colors ${
+              mode === m.id
+                ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                : "text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
+            }`}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-[var(--neutral-500)]">
           {content
             ? "Click any node to open a sub-chat scoped to this notebook."
-            : "No mind map yet — Generate reads this notebook's sources and proposes one."}
+            : emptyHint}
         </p>
         <div className="flex items-center gap-2 shrink-0">
           {updatedAt && !regenerating && (
@@ -404,7 +437,7 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
           )}
           <button
             onClick={handleRegenerate}
-            disabled={regenerating}
+            disabled={regenerating || loading}
             className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
           >
             {regenerating ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
@@ -413,7 +446,9 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
         </div>
       </div>
       {error && <p className="text-[11px] text-red-400">{error}</p>}
-      {content ? (
+      {loading ? (
+        <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>
+      ) : content ? (
         <div className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-4">
           <MermaidDiagram
             mermaidText={content}
@@ -421,7 +456,7 @@ function MindMapView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNo
             hideSourceOnFail /* NEW — bug #6a fix */
             showControls /* NEW — §7 refinements #5/#6: zoom/pan + export as image */
             maxHeight={520}
-            exportFilename="mind-map"
+            exportFilename={mode === "mindmap" ? "mind-map" : "study-path"}
           />
         </div>
       ) : (
