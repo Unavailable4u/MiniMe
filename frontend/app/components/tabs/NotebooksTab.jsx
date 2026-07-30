@@ -749,7 +749,7 @@ function WorkflowCard({ workflow, workspaceId, onOpenSubChat }) {
 // — one entry per topic node clicked so far this session, most-recent
 // first (DiagramsView's call). Nothing here reads from or writes to
 // panel_content; these are ephemeral, same as the mind map click itself.
-function WorkflowsView({ workspaceId, results, onOpenSubChat }) {
+function WorkflowsView({ workspaceId, results, onOpenSubChat, onDismiss }) {
   if (!results?.length) {
     return (
       <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-8 text-center text-xs text-[var(--neutral-600)]">
@@ -766,8 +766,21 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {results.map((r) => (
           <div key={r.label} className="space-y-1.5">
-            <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
-              <ListChecks size={11} /> {r.label}
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
+                <ListChecks size={11} /> {r.label}
+              </div>
+              {/* NEW — step 9: dismiss a card without waiting for it to be
+                  bumped off by new clicks; harmless for a loading card too
+                  (it just abandons the in-flight result on arrival, see
+                  DiagramsView's pendingLabelsRef guard). */}
+              <button
+                onClick={() => onDismiss?.(r.label)}
+                title="Dismiss"
+                className="shrink-0 text-[var(--neutral-600)] hover:text-[var(--neutral-300)]"
+              >
+                <X size={11} />
+              </button>
             </div>
             {r.status === "loading" && (
               <div className="rounded-lg border border-[var(--neutral-800)] p-3 text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
@@ -811,21 +824,64 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat }) {
 // (SessionContext, step 4) and drops the result into `topicWorkflows`,
 // an ordered array of
 // { label, status: "loading" | "error" | "done", workflow?, error? },
-// most-recent click first. Kept intentionally simple for this step --
-// re-clicking a topic that's already loading/loaded, clearing state on
-// workspace switch, and dismissing a card are step 9 polish, not
-// handled here yet.
+// most-recent click first.
+// NEW — step 9 polish, on top of step 8's plumbing:
+//   1. Re-click on an already-*loading* topic is a no-op — `pendingLabelsRef`
+//      tracks in-flight labels so a double-click (or clicking the same node
+//      twice before the first request resolves) can't fire a second
+//      request. Re-click on an already-*loaded* (done/error) topic is
+//      intentionally still allowed through — it's how you retry an error
+//      card (WorkflowsView already tells the user "click the node again to
+//      retry") or force a fresh generation, and it bumps that topic back to
+//      the front of the list the same way a first click would.
+//   2. Loading state is inherently per-topic already (each entry in
+//      `topicWorkflows` carries its own `status`), so nothing else is
+//      needed there — one topic's request never blocks another's.
+//   3. Switching workspaces clears `topicWorkflows` (and any in-flight
+//      labels): these results are ephemeral scratch space for the notebook
+//      you were just looking at, not something that should bleed into a
+//      different workspace's Diagrams tab.
+//   4. Dismissing a card removes it from the list outright; if that card
+//      was still loading, `pendingLabelsRef` is NOT cleared for it, so the
+//      in-flight request can still finish without erroring, but its result
+//      is simply dropped when it lands (see the `done`/`error` setters
+//      below, which check `dismissedLabelsRef` before re-inserting).
 function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow }) {
   const [topicWorkflows, setTopicWorkflows] = useState([]);
+  const pendingLabelsRef = useRef(new Set());
+  const dismissedLabelsRef = useRef(new Set());
+
+  // Edge case #3: notebook-scoped scratch state, reset on workspace switch.
+  useEffect(() => {
+    setTopicWorkflows([]);
+    pendingLabelsRef.current = new Set();
+    dismissedLabelsRef.current = new Set();
+  }, [workspaceId]);
 
   async function handleTopicSelect(label) {
+    // Edge case #1: ignore a click on a topic that's already in flight.
+    if (pendingLabelsRef.current.has(label)) return;
+    pendingLabelsRef.current.add(label);
+    dismissedLabelsRef.current.delete(label); // a fresh click un-dismisses it
     setTopicWorkflows((prev) => [{ label, status: "loading" }, ...prev.filter((r) => r.label !== label)]);
     try {
       const workflow = await generateTopicWorkflow(workspaceId, label);
+      pendingLabelsRef.current.delete(label);
+      if (dismissedLabelsRef.current.has(label)) return; // edge case #4: dismissed while loading
       setTopicWorkflows((prev) => prev.map((r) => (r.label === label ? { label, status: "done", workflow } : r)));
     } catch (err) {
+      pendingLabelsRef.current.delete(label);
+      if (dismissedLabelsRef.current.has(label)) return; // edge case #4: dismissed while loading
       setTopicWorkflows((prev) => prev.map((r) => (r.label === label ? { label, status: "error", error: String(err.message || err) } : r)));
     }
+  }
+
+  // Edge case #4: dismiss a card. If it's still loading, its in-flight
+  // request is left to finish (aborting the underlying fetch isn't wired
+  // up here) but the result is dropped on arrival, see above.
+  function handleDismissTopic(label) {
+    dismissedLabelsRef.current.add(label);
+    setTopicWorkflows((prev) => prev.filter((r) => r.label !== label));
   }
 
   return (
@@ -849,6 +905,7 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
           workspaceId={workspaceId}
           results={topicWorkflows}
           onOpenSubChat={onOpenSubChat}
+          onDismiss={handleDismissTopic}
         />
       </div>
     </div>
