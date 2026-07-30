@@ -2269,14 +2269,14 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
 
       {/* Desktop dock — side-by-side, lg+. */}
       <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} />
+        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked />
       </div>
 
       {/* Below lg — full-screen overlay instead of a side dock, so this
           tab never depends on the standalone Chat tab, at any width. */}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked />
         </div>
       )}
       {chatDockCollapsed && (

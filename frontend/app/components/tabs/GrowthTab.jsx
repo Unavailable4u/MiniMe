@@ -305,19 +305,20 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
           component NotebooksTab/ResearchTab embed (design doc §2.3:
           "Yes, same pattern, default collapsed"). It manages its own
           collapsed rendering internally based on the `collapsed` prop --
-          a narrow icon rail when true, chat box + WorkingPanel
-          side-by-side when false -- and renders its own toggle button
-          in both states (a MessageSquare rail button collapsed,
-          PanelRightClose expanded), so this wrapper only needs to size
-          the container; no chevron/toggle of our own like the old
-          placeholder had. */}
+          a narrow icon rail when true, Working Panel stacked on top of
+          the chat box when false (via the `stacked` prop below, so the
+          dock only ever needs the width this wrapper already gives it,
+          never more) -- and renders its own toggle button in both
+          states (a MessageSquare rail button collapsed, PanelRightClose
+          expanded), so this wrapper only needs to size the container;
+          no chevron/toggle of our own like the old placeholder had. */}
       {selectedWsId && (
         <div
           className={`shrink-0 border-l border-[var(--neutral-800)] ${
             dockCollapsed ? "w-10" : "w-[480px]"
           }`}
         >
-          <WorkspaceChatPanel collapsed={dockCollapsed} onToggleCollapse={toggleDock} workspaceId={selectedWsId} />
+          <WorkspaceChatPanel collapsed={dockCollapsed} onToggleCollapse={toggleDock} workspaceId={selectedWsId} stacked />
         </div>
       )}
 

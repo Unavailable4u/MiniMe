@@ -65,6 +65,16 @@ const WORKING_PANEL_DEFAULT_WIDTH = 420;
 const WORKING_PANEL_MIN_WIDTH = 280;
 const WORKING_PANEL_MAX_WIDTH = 720;
 
+// NEW — stacked (top/bottom) layout: used instead of the width constants
+// above when a caller passes `stacked` (every domain-tab dock — Build/
+// Plan/Research/Test/Notebooks/Growth — see each tab's WorkspaceChatPanel
+// call site). The standalone Chat tab never passes `stacked`, so it keeps
+// the original side-by-side layout and these are unused there.
+const WORKING_PANEL_HEIGHT_KEY = "minime_working_panel_height";
+const WORKING_PANEL_DEFAULT_HEIGHT = 320;
+const WORKING_PANEL_MIN_HEIGHT = 160;
+const WORKING_PANEL_MAX_HEIGHT = 640;
+
 // NEW — Data Layer §4b: every chat-tab surface embeds this one component
 // (see the header comment above), so the attach affordance below —
 // paperclip button + hidden file input + a small inline progress pill
@@ -87,7 +97,11 @@ function clampWorkingPanelWidth(w) {
   return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
 }
 
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
+function clampWorkingPanelHeight(h) {
+  return Math.min(WORKING_PANEL_MAX_HEIGHT, Math.max(WORKING_PANEL_MIN_HEIGHT, h));
+}
+
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -129,6 +143,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
   const [workingPanelWidth, setWorkingPanelWidth] = useState(WORKING_PANEL_DEFAULT_WIDTH);
+  const [workingPanelHeight, setWorkingPanelHeight] = useState(WORKING_PANEL_DEFAULT_HEIGHT); // NEW — stacked layout's counterpart to workingPanelWidth
   const resizeCleanupRef = useRef(null); // holds the active mousemove/mouseup remover, if a drag is in progress
 
   // NEW — Data Layer §4b: attach button state. Same "own pushItem/
@@ -189,6 +204,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
     const savedWidth = parseInt(localStorage.getItem(WORKING_PANEL_WIDTH_KEY), 10);
     if (!Number.isNaN(savedWidth)) setWorkingPanelWidth(clampWorkingPanelWidth(savedWidth));
+    const savedHeight = parseInt(localStorage.getItem(WORKING_PANEL_HEIGHT_KEY), 10);
+    if (!Number.isNaN(savedHeight)) setWorkingPanelHeight(clampWorkingPanelHeight(savedHeight));
     // If the panel unmounts mid-drag (e.g. clicking another top-level tab
     // without releasing the mouse), make sure the window listeners below
     // don't leak.
@@ -219,6 +236,37 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
       setWorkingPanelWidth((w) => {
         localStorage.setItem(WORKING_PANEL_WIDTH_KEY, String(w));
         return w;
+      });
+    }
+    function cleanup() {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      resizeCleanupRef.current = null;
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    resizeCleanupRef.current = cleanup;
+  }
+
+  // NEW — stacked layout's counterpart to startWorkingPanelResize above.
+  // Handle sits on the Working Panel's bottom edge (it's docked to the
+  // top, Chat Box below it), so dragging down grows it and dragging up
+  // shrinks it — same "only hit localStorage on mouseup" throttling.
+  function startWorkingPanelResizeVertical(e) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = workingPanelHeight;
+
+    function onMouseMove(ev) {
+      const deltaY = ev.clientY - startY;
+      setWorkingPanelHeight(clampWorkingPanelHeight(startHeight + deltaY));
+    }
+    function onMouseUp() {
+      cleanup();
+      setWorkingPanelHeight((h) => {
+        localStorage.setItem(WORKING_PANEL_HEIGHT_KEY, String(h));
+        return h;
       });
     }
     function cleanup() {
@@ -350,7 +398,17 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // passes collapsed=true (i.e. when docked inside a domain tab) — the
   // standalone ChatTab wrapper never does this, so nothing changes there.
   if (collapsed) {
-    return (
+    return stacked ? (
+      <div className="w-full h-10 flex flex-row items-center border-b border-[var(--neutral-800)] px-2">
+        <button
+          onClick={onToggleCollapse}
+          title="Show chat"
+          className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
+        >
+          <MessageSquare size={16} />
+        </button>
+      </div>
+    ) : (
       <div className="w-10 h-full flex flex-col items-center border-l border-[var(--neutral-800)] pt-2">
         <button
           onClick={onToggleCollapse}
@@ -364,9 +422,11 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   }
 
   return (
-    <div className="flex h-full max-w-6xl mx-auto">
-      {/* LEFT — Chat Box */}
-      <div className="flex flex-col flex-1 min-w-0 border-r border-[var(--neutral-800)]">
+    <div className={stacked ? "flex flex-col h-full" : "flex h-full max-w-6xl mx-auto"}>
+      {/* LEFT (or BOTTOM, when stacked) — Chat Box. `order-2` only takes
+          effect in stacked mode (flex-col), putting this below the
+          Working Panel without needing to reorder the JSX itself. */}
+      <div className={`flex flex-col flex-1 ${stacked ? "min-h-0 order-2 border-t" : "min-w-0 border-r"} border-[var(--neutral-800)]`}>
         <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)]">Chat Box</span>
           <div className="flex items-center gap-3">
@@ -566,20 +626,62 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         )}
       </div>
 
-      {/* RIGHT — Working Panel: resizable when open, collapses to a slim
-          icon rail (rather than vanishing entirely) so there's always a
-          visible way back in. Stays hidden below lg same as before —
-          there's no room for a rail either at that width. */}
-      <div className="hidden lg:flex shrink-0">
+      {/* RIGHT (or TOP, when stacked) — Working Panel: resizable when
+          open, collapses to a slim icon rail (rather than vanishing
+          entirely) so there's always a visible way back in.
+          CHANGED — `stacked` (passed by every domain-tab dock) swaps this
+          from a right-docked, fixed-WIDTH column (which needed extra
+          horizontal space beyond whatever the dock container was given,
+          forcing the page to scroll sideways once opened) to a
+          top-docked, fixed-HEIGHT row that's always full-width and never
+          asks for more width than its container already has. The
+          standalone Chat tab doesn't pass `stacked`, so it keeps the
+          original side-by-side layout, hidden below lg, unchanged. */}
+      <div className={stacked ? "flex flex-col shrink-0 order-1 w-full" : "hidden lg:flex shrink-0"}>
         {workingPanelCollapsed ? (
-          <div className="w-10 flex flex-col items-center border-l border-[var(--neutral-800)] pt-2">
-            <button
-              onClick={toggleWorkingPanel}
-              title="Show Working Panel"
-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
-            >
-              <PanelRightOpen size={16} />
-            </button>
+          stacked ? (
+            <div className="h-10 w-full flex flex-row items-center border-b border-[var(--neutral-800)] px-2">
+              <button
+                onClick={toggleWorkingPanel}
+                title="Show Working Panel"
+                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
+              >
+                <PanelRightOpen size={16} />
+              </button>
+            </div>
+          ) : (
+            <div className="w-10 flex flex-col items-center border-l border-[var(--neutral-800)] pt-2">
+              <button
+                onClick={toggleWorkingPanel}
+                title="Show Working Panel"
+                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
+              >
+                <PanelRightOpen size={16} />
+              </button>
+            </div>
+          )
+        ) : stacked ? (
+          <div className="flex flex-col w-full" style={{ height: workingPanelHeight }}>
+            <div className="flex-1 min-h-0 flex flex-col border-b border-[var(--neutral-800)]">
+              <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
+                <span className="text-xs font-medium text-[var(--neutral-400)]">Working Panel</span>
+                <button
+                  onClick={toggleWorkingPanel}
+                  title="Collapse"
+                  className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                >
+                  <PanelRightClose size={14} />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0">
+                <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
+              </div>
+            </div>
+            <div
+              onMouseDown={startWorkingPanelResizeVertical}
+              title="Drag to resize"
+              className="h-1.5 w-full shrink-0 cursor-row-resize hover:bg-[var(--neutral-700)] active:bg-[var(--neutral-600)] transition-colors"
+            />
           </div>
         ) : (
           <div className="flex" style={{ width: workingPanelWidth }}>
