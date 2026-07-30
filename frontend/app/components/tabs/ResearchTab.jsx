@@ -11,7 +11,7 @@ import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
   RefreshCw, ExternalLink, FolderOpen, Plus, X, Loader2, Sparkles, Trash2, MessageSquare,
-  ArrowUpRight, Pencil, Check,
+  ArrowUpRight, Pencil, Check, ChevronRight, ChevronLeft,
 } from "lucide-react";
 
 // Part 3 §3.9 — Research as a dedicated top-level section, same shape as
@@ -64,6 +64,9 @@ function bareNodeId(fullId) {
 // away in Research shouldn't affect Notebooks' dock state or vice versa,
 // same reasoning §6.2a already applied.
 const CHAT_DOCK_KEY = "minime_research_chatdock_collapsed";
+// NEW — collapsible project-picker sidebar, same pattern as the chat
+// dock's own collapse above.
+const PROJECTS_KEY = "minime_research_projects_collapsed";
 const PROMOTE_TARGETS = ["plan", "build", "test", "growth"];
 const PROMOTE_LABELS = {
   plan: "Plan",
@@ -107,6 +110,7 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
   // NEW — §6.2b: right-hand chat dock collapse state, restored from
   // localStorage on mount — same pattern as NotebooksTab's chatDockCollapsed.
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar
   // NEW — item #10 / B2: native "create project" trigger. This tab can
   // now create its own research-stage workspace directly, instead of
   // requiring a promotion from Notebooks or the chat sidebar's folder
@@ -123,11 +127,22 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
 
   useEffect(() => {
     setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
+    setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
   }, []);
 
   function toggleChatDock() {
     setChatDockCollapsed((prev) => {
       localStorage.setItem(CHAT_DOCK_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+
+  // NEW — collapsible project-picker sidebar, same toggle pattern as
+  // toggleChatDock above, its own localStorage key so the two collapse
+  // independently.
+  function toggleProjects() {
+    setProjectsCollapsed((prev) => {
+      localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
@@ -234,6 +249,13 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
     <div className="flex h-full">
       {/* Project picker — a "research project" is just a workspace, same
           as a "notebook" is. No new container concept. */}
+      {projectsCollapsed ? (
+        <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
+          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
         <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
@@ -241,13 +263,20 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
           </span>
           {/* NEW — item #10 / B2: native create, same stage-aware modal
               every other stage tab will wire up in B3. */}
-          <button
-            onClick={() => setShowCreateModal(true)}
-            title="New research project"
-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-          >
-            <Plus size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCreateModal(true)}
+              title="New research project"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            >
+              <Plus size={14} />
+            </button>
+            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+                own ChevronLeft toggle. */}
+            <button onClick={toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+              <ChevronLeft size={14} />
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {researchProjects.length === 0 && (
@@ -343,6 +372,7 @@ export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorksp
           })}
         </div>
       </div>
+      )}
 
       <div className="flex-1 min-h-0 flex flex-col">
         {/* NEW — §8 fix: title + promote row, same shape as NotebooksTab's

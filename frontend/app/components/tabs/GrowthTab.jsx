@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
-  Pencil, X, Trash2,
+  Pencil, X, Trash2, ChevronRight, ChevronLeft,
 } from "lucide-react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock; useWorkspaceDockActions/useLastActiveChatId added for item #11 / C2
@@ -28,6 +28,9 @@ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NE
 
 const SELECTED_GROWTH_WS_KEY = "minime_growth_selected_ws";
 const CHAT_DOCK_KEY = "minime_growth_chatdock_collapsed";
+// NEW — collapsible project-picker sidebar, same pattern as the chat
+// dock's own collapse above.
+const PROJECTS_KEY = "minime_growth_projects_collapsed";
 
 const SUB_TABS = [
   { id: "content", label: "Content Fan-out", icon: Layers },
@@ -46,6 +49,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
   const [selectedWsId, setSelectedWsId] = useState(null);
   const [activeSubTab, setActiveSubTab] = useState("voice"); // voice is the only fully-built sub-tab today
   const [dockCollapsed, setDockCollapsed] = useState(true); // §2.3: default collapsed, unlike Test
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar
   // NEW — item #10 / B3: native "create project" trigger, same pattern
   // as ResearchTab's B2. This tab can now create its own growth-stage
   // workspace directly, instead of requiring a promotion from Test or
@@ -74,6 +78,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
     const saved = localStorage.getItem(SELECTED_GROWTH_WS_KEY);
     if (saved) setSelectedWsId(saved);
     setDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) !== "0");
+    setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
   }, []);
 
   // §8 hand-off: a promote into "growth" from TestTab lands here via
@@ -98,6 +103,16 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
       // means the new state is false, so store "0"; that only happens
       // when `prev` was true, i.e. store `prev ? "0" : "1"`.
       localStorage.setItem(CHAT_DOCK_KEY, prev ? "0" : "1");
+      return !prev;
+    });
+  }
+
+  // NEW — collapsible project-picker sidebar, same toggle pattern as
+  // toggleDock above, its own localStorage key so the two collapse
+  // independently.
+  function toggleProjects() {
+    setProjectsCollapsed((prev) => {
+      localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
@@ -147,6 +162,13 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
     <div className="flex h-full min-h-0">
       {/* Left-hand project picker -- same contract as every other tab
           (§0 of the design doc), just filtered to stage === "growth". */}
+      {projectsCollapsed ? (
+        <aside className="w-10 border-r border-[var(--neutral-800)] flex flex-col items-center shrink-0 py-3 gap-3">
+          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show workspaces">
+            <ChevronRight size={16} />
+          </button>
+        </aside>
+      ) : (
       <aside className="w-56 border-r border-[var(--neutral-800)] flex flex-col shrink-0">
         <div className="px-3 py-2 flex items-center justify-between text-xs font-medium text-[var(--neutral-500)] uppercase tracking-wide">
           <span className="flex items-center gap-1.5">
@@ -154,13 +176,20 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
           </span>
           {/* NEW — item #10 / B3: native create, same stage-aware modal
               ResearchTab's B2 wired up first. */}
-          <button
-            onClick={() => setShowCreateModal(true)}
-            title="New growth workspace"
-            className="normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-          >
-            <Plus size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCreateModal(true)}
+              title="New growth workspace"
+              className="normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            >
+              <Plus size={14} />
+            </button>
+            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+                own ChevronLeft toggle. */}
+            <button onClick={toggleProjects} title="Hide workspaces" className="normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+              <ChevronLeft size={14} />
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {growthWorkspaces.length === 0 && (
@@ -255,6 +284,7 @@ export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspac
           })}
         </div>
       </aside>
+      )}
 
       {/* Right-hand content pane */}
       <div className="flex-1 min-w-0 flex flex-col">
