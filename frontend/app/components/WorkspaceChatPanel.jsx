@@ -343,17 +343,48 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // call, Working Panel branch bookkeeping, and "jump to the tab that
   // just got new content" behavior — one dispatch path, two different
   // ways of deciding to take it.
-  async function runGenerateTarget(key, scope) {
+  //
+  // CHANGED — step 2.10. `sourceText` is the raw text that triggered
+  // this run (only ever passed by the two chat-intent callers below,
+  // never by NotebooksGeneratePicker's manual Generate button, which
+  // still only has the Working Panel above to watch). When present, this
+  // now ALSO pushes into the message thread: the user's own text
+  // (previously silently swallowed — see MessageBubble.jsx's own
+  // step-2.10 comment for why) plus a live "generation" message this
+  // function updates in place, by runId, as the run resolves. The
+  // existing notebooksGenerateRun dock-state write is untouched — that's
+  // what the Working Panel graph reads, and this is additive to it, not
+  // a replacement for it.
+  async function runGenerateTarget(key, scope, sourceText = null) {
     const label = TARGETS_BY_KEY[key]?.label || key;
     const runningBranch = { panel_key: key, status: "running", label, subTab: TARGETS_BY_KEY[key]?.subTab };
+    // Unique per call, not per key — re-running the same capability
+    // twice in one chat must update its OWN card, not the previous run's.
+    const runId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (usingDock) {
       dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: [runningBranch] } });
+      if (sourceText) {
+        dock.setDockState((prev) => ({
+          messages: [
+            ...prev.messages,
+            { role: "user", text: sourceText },
+            { role: "generation", runId, branches: [runningBranch] },
+          ],
+        }));
+      }
     }
     try {
       const { branches } = await generateNotebooks(workspaceId, [key], scope);
       const withMeta = branches.map((b) => ({ ...b, label: TARGETS_BY_KEY[b.panel_key]?.label, subTab: TARGETS_BY_KEY[b.panel_key]?.subTab }));
       if (usingDock) {
         dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: withMeta } });
+        if (sourceText) {
+          dock.setDockState((prev) => ({
+            messages: prev.messages.map((m) =>
+              m.role === "generation" && m.runId === runId ? { ...m, branches: withMeta } : m
+            ),
+          }));
+        }
       }
       // Jump straight to the tab that just got new content so the run
       // doesn't feel like it vanished into the Working Panel — same
@@ -364,10 +395,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         onNavigateSubTab?.(TARGETS_BY_KEY[key].subTab);
       }
     } catch (err) {
+      const errorBranch = { panel_key: key, status: "error", error: String(err.message || err), label, subTab: TARGETS_BY_KEY[key]?.subTab };
       if (usingDock) {
-        dock.setDockState({
-          notebooksGenerateRun: { targets: [key], branches: [{ panel_key: key, status: "error", error: String(err.message || err), label, subTab: TARGETS_BY_KEY[key]?.subTab }] },
-        });
+        dock.setDockState({ notebooksGenerateRun: { targets: [key], branches: [errorBranch] } });
+        if (sourceText) {
+          dock.setDockState((prev) => ({
+            messages: prev.messages.map((m) =>
+              m.role === "generation" && m.runId === runId ? { ...m, branches: [errorBranch] } : m
+            ),
+          }));
+        }
       }
     }
     return true;
@@ -403,7 +440,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     if (!workspaceId || !generateNotebooks) return false;
     const { targetKeys, sourceNodeIds } = parseFreeText(text, []);
     if (targetKeys.length !== 1 || sourceNodeIds.length > 0) return false;
-    return runGenerateTarget(targetKeys[0], null);
+    return runGenerateTarget(targetKeys[0], null, text);
   }
 
   // NEW — Notebooks Chat-First refinement, Phase 2 step 2.5. Fires the
@@ -505,7 +542,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
       : activeContext?.type === "source" && activeContext.id
       ? { source_node_ids: [activeContext.id] }
       : null;
-    return runGenerateTarget(key, scope);
+    return runGenerateTarget(key, scope, text);
   }
 
   // NEW — step 2.6 feature flag. Default OFF: classifyIntent() keeps
@@ -662,7 +699,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               ref={(el) => (messageRefs.current[i] = el)}
               onClick={() => setActiveMessageIndex(i)}
             >
-              <MessageBubble message={m} />
+              <MessageBubble message={m} onNavigateSubTab={onNavigateSubTab} />
             </div>
           ))}
           {loading && (

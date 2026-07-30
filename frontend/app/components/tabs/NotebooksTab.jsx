@@ -2747,17 +2747,18 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                   </button>
                 ))}
               </nav>
-              {/* NEW — Notebooks integration guide §4.1: the picker +
-                  free-text chip-confirmation "Generate" command, wired
-                  straight to POST .../notebooks/generate. Refreshes
-                  nodes/edges/candidates on completion since Clusters,
-                  Facts, and Suggested Notes all land in lists this tab
-                  already renders from loadNotebookData's state. */}
+              {/* CHANGED — Phase 2 step 2.9: the popover/chips/manual
+                  "Generate" button this used to render are gone — chat
+                  (steps 2.5-2.8) is now the only way to trigger a
+                  generation. What's left is a live status readout of
+                  whatever's running or just finished, sourced from the
+                  same dock key WorkspaceChatPanel's runGenerateTarget()
+                  writes to, so it doesn't need workspace nodes or a
+                  post-run refresh callback anymore — see
+                  NotebooksGeneratePicker.jsx's file header. */}
               <NotebooksGeneratePicker
                 workspaceId={selected.id}
-                nodes={nodes}
                 generateNotebooks={generateNotebooks}
-                onComplete={() => loadNotebookData(selected.id)}
                 onNavigateSubTab={setSubTab}
               />
             </div>
