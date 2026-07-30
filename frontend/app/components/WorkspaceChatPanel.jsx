@@ -101,7 +101,15 @@ function clampWorkingPanelHeight(h) {
   return Math.min(WORKING_PANEL_MAX_HEIGHT, Math.max(WORKING_PANEL_MIN_HEIGHT, h));
 }
 
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false }) {
+// NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
+// resolution). `activeContext` is the caller's best guess at "what the
+// person is currently looking at" -- { type: "topic", id, label } or
+// { type: "source", id, label } -- fed from whichever sub-tab/view last
+// had something clicked (see NotebooksTab.jsx). Optional and null by
+// default: a standalone Chat tab, or a Notebooks session where nothing's
+// been clicked yet, simply has no default to fall back to, same as
+// today (see tryHandleClassifiedToolCall's scope resolution below).
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -481,8 +489,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
       return false;
     }
 
+    // NEW — step 2.6a: the model only returns source_ids when the
+    // message itself named/implied a specific source ("summarize the
+    // Chen paper"), so that branch is untouched and still wins outright.
+    // When it comes back empty -- the message didn't name anything --
+    // fall back to activeContext instead of going straight to null
+    // (whole-workspace). Only a source-typed activeContext can resolve
+    // to source_node_ids today, since NOTEBOOKS_GENERATE_TARGETS has no
+    // topic-scoped capability live yet (see the comment above); a
+    // topic-typed activeContext with nothing live to consume it still
+    // falls through to null rather than sending an argument no backend
+    // route reads.
     const scope = call.arguments?.source_ids?.length
       ? { source_node_ids: call.arguments.source_ids }
+      : activeContext?.type === "source" && activeContext.id
+      ? { source_node_ids: [activeContext.id] }
       : null;
     return runGenerateTarget(key, scope);
   }
