@@ -802,6 +802,134 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat, onDismiss }) {
   );
 }
 
+// --- Progress board (Not Started / Ongoing / Done) --------------------
+// NEW — Notebooks Chat-First refinement, Phase 6 step 6.9. Board view
+// for eo/study_progress.py, sourced from the Mind Map's own topic list
+// (`topicNodes` — the same GET /api/workspaces/{ws_id}/topics/graph
+// data BacklinksView above already renders) rather than keeping a
+// second list of "what topics exist." A topic with no
+// eo/study_progress.py record at all just renders in the Not Started
+// column — the same sparse-storage, implicit-default contract
+// study_progress.get_progress() itself documents, mirrored here
+// client-side instead of trusting the server to pre-populate every
+// topic_id.
+//
+// Status moves automatically off two real signals already wired
+// server-side (build_topic_workflow()'s first-click hook, step 6.6; a
+// passing quiz attempt, step 6.7) — this board just reflects those. The
+// per-card buttons below are the manual-override path (step 6.5's PUT
+// route, via setWorkspaceProgress from SessionContext) for anything
+// those signals miss, same "no confirmation needed, low-stakes and
+// reversible" posture the guide already settled on for markTopicDone()
+// (step 6.8)'s chat tool.
+const PROGRESS_COLUMNS = [
+  { status: "not_started", label: "Not Started" },
+  { status: "ongoing", label: "Ongoing" },
+  { status: "done", label: "Done" },
+];
+
+function ProgressCard({ topic, onSetStatus, busy }) {
+  return (
+    <div className="rounded-lg border border-[var(--neutral-800)] p-2.5 space-y-1.5">
+      <div className="text-xs text-[var(--neutral-200)] truncate" title={topic.title}>{topic.title}</div>
+      <div className="flex flex-wrap items-center gap-1">
+        {PROGRESS_COLUMNS.filter((c) => c.status !== topic.status).map((c) => (
+          <button
+            key={c.status}
+            onClick={() => onSetStatus(topic.topicId, c.status)}
+            disabled={busy}
+            className="text-[10px] px-1.5 py-0.5 rounded border border-[var(--neutral-800)] text-[var(--neutral-500)] hover:text-[var(--cyber-cyan)] hover:border-[var(--cyber-cyan)] disabled:opacity-50"
+          >
+            → {c.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProgressBoardView({ workspaceId, topicNodes, fetchWorkspaceProgress, setWorkspaceProgress }) {
+  const [progress, setProgress] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchWorkspaceProgress(workspaceId).then((board) => {
+      if (cancelled) return;
+      setProgress(board || {});
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchWorkspaceProgress]);
+
+  // Board topics = the Mind Map's own topic tree, never a second source
+  // of truth for "what topics exist" (see this section's header
+  // comment). `topicId` here is the topic tree's `node_id`, the exact
+  // same value build_topic_workflow() returns as `topic_id`/uses to key
+  // study_progress by (agents/workflow_suggester.py), so a record
+  // written by a Mind Map click lines up with a row here with no extra
+  // lookup.
+  const topics = (topicNodes || []).map((n) => ({
+    topicId: n.node_id,
+    title: n.title || n.node_id,
+    status: progress[n.node_id]?.status || "not_started",
+  }));
+
+  async function handleSetStatus(topicId, status) {
+    setBusyId(topicId);
+    const prevStatus = progress[topicId]?.status || "not_started";
+    // Optimistic update — a board should feel instant; rolled back on
+    // failure rather than left stuck on a status the server rejected.
+    setProgress((prev) => ({ ...prev, [topicId]: { ...(prev[topicId] || {}), status } }));
+    try {
+      await setWorkspaceProgress(workspaceId, topicId, { status });
+    } catch (err) {
+      setProgress((prev) => ({ ...prev, [topicId]: { ...(prev[topicId] || {}), status: prevStatus } }));
+      alert(`Couldn't update progress: ${err.message || err}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-[var(--neutral-600)]">Loading progress…</div>;
+  }
+  if (topics.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-8 text-center text-xs text-[var(--neutral-600)]">
+        No topics yet — generate a Mind Map above to populate the board.
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {PROGRESS_COLUMNS.map((col) => {
+        const colTopics = topics.filter((t) => t.status === col.status);
+        return (
+          <div key={col.status} className="space-y-2">
+            <div className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] flex items-center justify-between">
+              <span>{col.label}</span>
+              <span className="text-[var(--neutral-700)]">{colTopics.length}</span>
+            </div>
+            <div className="space-y-2">
+              {colTopics.length === 0 ? (
+                <div className="text-[10px] text-[var(--neutral-700)] px-1">—</div>
+              ) : (
+                colTopics.map((t) => (
+                  <ProgressCard key={t.topicId} topic={t} onSetStatus={handleSetStatus} busy={busyId === t.topicId} />
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // --- Diagrams (Mind Map + Workflows) --------------------------------------
 // NEW — Mind Map and Workflows merged into one "Diagrams" sub-tab (same
 // grouping move as Sources/Backlinks -> Library), rendering MindMapView
@@ -846,7 +974,10 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat, onDismiss }) {
 //      in-flight request can still finish without erroring, but its result
 //      is simply dropped when it lands (see the `done`/`error` setters
 //      below, which check `dismissedLabelsRef` before re-inserting).
-function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow, onActiveContext }) {
+function DiagramsView({
+  workspaceId, onOpenSubChat, fetchPanelContent, generateNotebooks, generateTopicWorkflow, onActiveContext,
+  topicNodes, fetchWorkspaceProgress, setWorkspaceProgress,   // NEW — step 6.9: progress board, sourced from the Mind Map's topic list
+}) {
   const [topicWorkflows, setTopicWorkflows] = useState([]);
   const pendingLabelsRef = useRef(new Set());
   const dismissedLabelsRef = useRef(new Set());
@@ -937,6 +1068,21 @@ function DiagramsView({ workspaceId, onOpenSubChat, fetchPanelContent, generateN
           results={topicWorkflows}
           onOpenSubChat={onOpenSubChat}
           onDismiss={handleDismissTopic}
+        />
+      </div>
+      {/* NEW — step 6.9: Not Started/Ongoing/Done board, stacked below
+          Workflows same as Workflows sits below Mind Map — sourced from
+          `topicNodes` (the Mind Map's own topic tree) rather than a
+          second topic list. */}
+      <div className="min-w-0 border-t border-[var(--neutral-800)] pt-6">
+        <h3 className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-2 flex items-center gap-1.5">
+          <ListChecks size={11} /> Progress
+        </h3>
+        <ProgressBoardView
+          workspaceId={workspaceId}
+          topicNodes={topicNodes}
+          fetchWorkspaceProgress={fetchWorkspaceProgress}
+          setWorkspaceProgress={setWorkspaceProgress}
         />
       </div>
     </div>
@@ -2030,6 +2176,7 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
      fetchPanelContent, savePanelContent, fetchPanelContentList,
      generateNotebooks,
      generateTopicWorkflow,   // NEW — step 8: per-topic workflow, owned by DiagramsView
+     fetchWorkspaceProgress, setWorkspaceProgress,   // NEW — step 6.9: progress board
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
     openScopedSubChat,
   } = useSession();
@@ -2807,6 +2954,9 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 generateNotebooks={generateNotebooks}
                 generateTopicWorkflow={generateTopicWorkflow}
                 onActiveContext={setActiveContext}
+                topicNodes={topicNodes}
+                fetchWorkspaceProgress={fetchWorkspaceProgress}
+                setWorkspaceProgress={setWorkspaceProgress}
               />
             )}
             {subTab === "study" && <StudyView workspaceId={selected.id} />}

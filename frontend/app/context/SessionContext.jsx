@@ -1515,6 +1515,45 @@ async function markTopicDone(wsId, topicId) {
   return res.json();
 }
 
+// NEW — Notebooks Chat-First refinement, Phase 6 step 6.9. Read side for
+// the Not Started/Ongoing/Done board view: thin client over GET
+// /api/workspaces/{ws_id}/progress. Omitting topicId returns the whole
+// {topic_id: record} map for the workspace in one call — study_progress.
+// get_progress()'s "no topic_id" branch, exactly what the board needs to
+// render every touched topic at once. Passing topicId narrows to a
+// single record (unused by the board itself today, kept for parity with
+// the route's other callers). Fails soft to an empty map/`null` rather
+// than throwing, since a board render shouldn't hard-fail a whole
+// notebook load over one flaky request — same posture fetchTopicsGraph()
+// above already takes.
+async function fetchWorkspaceProgress(wsId, topicId) {
+  const qs = topicId ? `?topic_id=${encodeURIComponent(topicId)}` : "";
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/progress${qs}`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return topicId ? null : {};
+  return res.json();
+}
+
+// NEW — step 6.9. General manual override for the board — same PUT
+// markTopicDone() above already calls, just not hardcoded to
+// status="done": lets a person drag/click a topic into any column
+// (Not Started/Ongoing/Done), or edit its notes, straight from the
+// board. `status`/`notes` are both optional and independent, mirroring
+// set_progress()'s own merge-update semantics — pass only what changed.
+async function setWorkspaceProgress(wsId, topicId, { status, notes } = {}) {
+  const res = await fetch(
+    `${API_URL}/api/workspaces/${wsId}/progress?topic_id=${encodeURIComponent(topicId)}`,
+    {
+      method: "PUT",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify({ status, notes }),
+    }
+  );
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 // Per-topic workflow, triggered by a Mind Map node click (step 4) — thin
 // client over POST /api/workspaces/{ws_id}/topics/workflow (step 2).
 // Deliberately separate from generateNotebooks() above: that one dispatches
@@ -2272,6 +2311,7 @@ async function openScopedSubChat(wsId, taskText) {
   generateTopicWorkflow,   // NEW — step 4: Mind Map node click -> single per-topic workflow (see step 2's endpoint)
   classifyIntent,   // NEW — Notebooks Chat-First refinement Phase 2 step 2.5: log-only tool-calling classification
   markTopicDone,   // NEW — Notebooks Chat-First refinement Phase 6 step 6.8: "mark X as done" chat tool
+  fetchWorkspaceProgress, setWorkspaceProgress,   // NEW — Phase 6 step 6.9: Not Started/Ongoing/Done board view
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,
