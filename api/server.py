@@ -102,6 +102,7 @@ from memory.bus import read_many as bus_read_many, set_app_slug, KEYS   # NEW �
 from eo.errors import MissingDependencyError   # NEW — Part 7 §7.4: deploy endpoints' 409 handling
 from eo import chat_store
 from eo import quiz_progress
+from eo import study_progress   # NEW — Phase 6 step 6.4: GET /api/workspaces/{ws_id}/progress
 from eo import memory_batch
 from eo import chat_workspace
 from eo import audit_log   # NEW — Part 8.6: audit log read endpoints
@@ -1541,6 +1542,24 @@ def put_workspace_panel_content(ws_id: str, panel_key: str, req: PanelContentReq
         return panel_content.set_content(ws_id, panel_key, req.content, owner_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+# --- mass progress-tracking (see eo/study_progress.py) -------------------
+# The Not Started/Ongoing/Done board view (step 6.9) and per-topic status
+# reads both go through here. Same ownership-gate-then-delegate shape as
+# get_workspace_facts()/list_workspace_panel_content() above.
+
+@app.get("/api/workspaces/{ws_id}/progress", dependencies=[Depends(require_auth)])
+def get_workspace_progress(ws_id: str, topic_id: Optional[str] = Query(None),
+                            owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    # No topic_id -> whole board (every topic touched so far, step 6.9's
+    # board view). With topic_id -> single record, defaulted to
+    # "not_started" by study_progress.get_progress() itself if the topic
+    # has never been written.
+    return study_progress.get_progress(ws_id, topic_id)
 
 # --- content audit: PageSpeed Insights (see agents/pagespeed_agent.py) --
 # Live-fetched, not persisted — same "fetch fresh on load/refresh, no
