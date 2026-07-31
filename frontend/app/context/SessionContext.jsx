@@ -1666,11 +1666,29 @@ async function gradeQuiz(quizText, answers) {
   return res.json();
 }
 
-async function recordQuizAttempt(wsId, quizNodeId, quizText, answers) {
+// CHANGED — step 6.7 gap fix: threads an optional `topicId` through to
+// the request body as `topic_id`, matching RecordQuizAttemptRequest's
+// field of the same name (api/server.py) that record_quiz_attempt_endpoint
+// already reads to bump study_progress on a passing score (step 6.7).
+// Until this patch, nothing in the frontend ever populated that field —
+// the backend hook existed but no caller could reach it. `topicId` is
+// optional and simply omitted from the body (not sent as null/undefined)
+// when the caller doesn't have one, same "only send what you know"
+// posture as RecordQuizAttemptRequest.topic_id's own doc comment.
+//
+// NOTE: today's only call site (NotebooksTab.jsx's whole-notebook Quiz
+// tab, `scopeAllowed: "whole"` per notebookCapabilities.js) has no topic
+// to pass and deliberately isn't changed to invent one here. This plumbing
+// is what a future topic-scoped quiz launch (e.g. Phase 6's Not Started/
+// Ongoing/Done board, or promoting `study_quiz` to a topic-scoped
+// capability) will call into once it exists.
+async function recordQuizAttempt(wsId, quizNodeId, quizText, answers, topicId) {
+  const body = { workspace_id: wsId, quiz_node_id: quizNodeId, quiz_text: quizText, answers };
+  if (topicId) body.topic_id = topicId;
   const res = await fetch(`${API_URL}/api/notes/study/quiz/attempts`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
-    body: JSON.stringify({ workspace_id: wsId, quiz_node_id: quizNodeId, quiz_text: quizText, answers }),
+    body: JSON.stringify(body),
   });
   return res.json();
 }
