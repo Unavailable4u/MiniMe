@@ -562,11 +562,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // canned test-harness messages.
   const CHAT_TOOL_CALLING_ENABLED = process.env.NEXT_PUBLIC_CHAT_TOOL_CALLING_ENABLED === "1";
 
-  function handleSubmit(e) {
-    e?.preventDefault();
-    const text = draft.trim();
-    if (!text || loading) return;
-    setDraft("");
+  // NEW — Phase 3 step 3.3. Pulled out of handleSubmit below (byte-for-
+  // byte the same body it used to run inline on `draft`) so there are
+  // two callers of the SAME dispatch path instead of a second one:
+  // handleSubmit (typed input) and the affinity-suggestion card's
+  // Generate button (MessageBubble.jsx's AffinitySuggestionCard, via
+  // the onSendCommand prop below) both now funnel through here. This is
+  // exactly the guide's "a button that just re-sends the equivalent
+  // chat command — don't build a second execution path for this" —
+  // clicking Generate quiz behaves identically to a person typing
+  // "Generate quiz": same keyword short-circuit first
+  // (tryHandleGenerateIntent), same tool-calling classification fallback
+  // (tryHandleClassifiedToolCall), same sendTask() dispatcher as a last
+  // resort. Nothing about accepting a suggestion needs its own
+  // generateNotebooks() call.
+  function dispatchText(text) {
     tryHandleGenerateIntent(text).then((handled) => {
       if (handled) return;
       if (CHAT_TOOL_CALLING_ENABLED) {
@@ -578,6 +588,14 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         sendTask(text);
       }
     });
+  }
+
+  function handleSubmit(e) {
+    e?.preventDefault();
+    const text = draft.trim();
+    if (!text || loading) return;
+    setDraft("");
+    dispatchText(text);
   }
 
   // Enter sends; Shift+Enter (or Alt/Ctrl+Enter) inserts a real newline —
@@ -707,7 +725,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               ref={(el) => (messageRefs.current[i] = el)}
               onClick={() => setActiveMessageIndex(i)}
             >
-              <MessageBubble message={m} onNavigateSubTab={onNavigateSubTab} />
+              <MessageBubble message={m} onNavigateSubTab={onNavigateSubTab} onSendCommand={dispatchText} />
             </div>
           ))}
           {loading && (

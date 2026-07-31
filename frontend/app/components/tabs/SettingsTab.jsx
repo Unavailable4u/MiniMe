@@ -1,6 +1,7 @@
 "use client";
 import { useSession } from "../../context/SessionContext";
 import { useDensity } from "../../hooks/useDensity";
+import { useProactiveSuggestions } from "../../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
 import IntegrationsPanel from "../IntegrationsPanel";   // NEW — Part 8.5/8.9
 import AuditLogTab from "./AuditLogTab";   // NEW — Part 8.6: audit log
 
@@ -12,6 +13,7 @@ const DENSITY_OPTIONS = [
 export default function SettingsTab() {
   const { sessionId, API_URL, registerProject, pusherConnected } = useSession();
   const [density, setDensity] = useDensity();
+  const [proactiveSuggestions, setProactiveSuggestions] = useProactiveSuggestions();   // NEW — Phase 3 step 3.7
   return (
     <div className="h-full overflow-y-auto px-4 py-6 max-w-xl mx-auto space-y-6 text-sm">
       <section>
@@ -32,6 +34,36 @@ export default function SettingsTab() {
                 onClick={() => setDensity(opt.id)}
                 className={`text-xs rounded-md px-2.5 py-1 transition-colors ${
                   density === opt.id
+                    ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                    : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+      <section>
+        <h2 className="text-[var(--neutral-400)] font-medium mb-2">Chat</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs text-[var(--neutral-300)]">Proactive suggestions</p>
+            <p className="text-[var(--neutral-600)] text-xs mt-0.5">
+              Offer a follow-up generation after one finishes (e.g. a quiz
+              after flashcards), and mention related topics you haven't
+              covered yet. Always a one-tap offer — nothing generates
+              without you accepting it.
+            </p>
+          </div>
+          <div className="flex shrink-0 rounded-lg border border-[var(--neutral-800)] p-0.5 gap-0.5">
+            {[{ id: true, label: "On" }, { id: false, label: "Off" }].map((opt) => (
+              <button
+                key={String(opt.id)}
+                type="button"
+                onClick={() => setProactiveSuggestions(opt.id)}
+                className={`text-xs rounded-md px-2.5 py-1 transition-colors ${
+                  proactiveSuggestions === opt.id
                     ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                     : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
                 }`}

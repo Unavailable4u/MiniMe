@@ -76,6 +76,9 @@
 import { createContext, useContext, useRef, useCallback, useSyncExternalStore } from "react";
 import { getPusherClient } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
+import { getSuggestedFollowUp } from "../lib/notebookAffinities";   // NEW — Phase 3 step 3.2
+import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
+import { readProactiveSuggestionsEnabled } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
 
 // Duplicated from SessionContext.jsx rather than imported from it. This
 // file is meant to be the "child" in the mother/child relationship
@@ -87,6 +90,14 @@ import { supabase } from "../lib/supabaseClient";
 // deleted in 3e, it'd be worth pulling both of these into a small
 // shared apiClient.js so neither file owns the canonical copy.
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+// NEW — Phase 3 step 3.2. Same reduction NotebooksGeneratePicker.jsx and
+// WorkspaceChatPanel.jsx each already build locally (see
+// notebookCapabilities.js's own step-1.7 comment on that duplication) —
+// added here too rather than importing a shared export, to keep this
+// step's diff to "one more local copy," not a refactor of the existing
+// ones.
+const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
 
 // Duplicated from SessionContext.jsx for the same reason as API_URL above.
 const ACTIVE_CHAT_KEY = "minime_active_chat_id";
@@ -424,12 +435,62 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           const idx = prev.generationNotifications.findIndex(
             (n) => n.panelKey === panelKey && n.workspaceId === workspaceId
           );
-          if (idx === -1) {
-            return { generationNotifications: [...prev.generationNotifications, entry] };
+          const wasAlreadyDone = idx !== -1 && prev.generationNotifications[idx].status === "done";
+          const generationNotifications =
+            idx === -1
+              ? [...prev.generationNotifications, entry]
+              : prev.generationNotifications.map((n, i) => (i === idx ? entry : n));
+
+          // NEW — Phase 3 step 3.1/3.2: post-generation cross-sell.
+          // Fires once per completed run (guarded by `wasAlreadyDone` so
+          // a redelivered/duplicate Pusher event — or an unrelated
+          // patch to this same notification, if a later step ever adds
+          // one — doesn't append a second suggestion for the same run),
+          // AND only when step 3.7's per-browser opt-out
+          // (useProactiveSuggestions.js) is still on. Checked here,
+          // not just at render time in MessageBubble.jsx, so a person
+          // who's opted out never even gets the message written into
+          // their thread/persisted history in the first place.
+          // Looks up notebookAffinities.js's hardcoded pairing for the
+          // panel_key that just finished; if the paired target isn't
+          // registered as `enabled` in the Phase 1 manifest (true today
+          // of `workflow`, since it's still a Phase 5 stub — see
+          // notebookCapabilities.js), there's nothing to suggest, so no
+          // message is appended. This is also what quietly defers the
+          // mindmap -> workflow pairing until Phase 5 lands workflow as
+          // a real, enabled capability: `workflow` is topic-scoped
+          // (scopeAllowed: "topic") and a whole-notebook mindmap
+          // completion has no single topic to suggest it for, so
+          // enabling it blindly here would offer something that can't
+          // actually run yet. Re-check that once Phase 5 flips
+          // `enabled: true` on it.
+          //
+          // Message is appended to dock state only (not persisted via
+          // persistMessage) — same as the chat-triggered "generation"
+          // role message runGenerateTarget() builds in
+          // WorkspaceChatPanel.jsx: an ephemeral, client-side thread
+          // entry, not a server-recorded chat turn.
+          let messagesPatch = {};
+          if (status === "done" && !wasAlreadyDone && readProactiveSuggestionsEnabled()) {
+            const suggestedKey = getSuggestedFollowUp(panelKey);
+            const suggestedTarget = suggestedKey ? TARGETS_BY_KEY[suggestedKey] : null;
+            if (suggestedTarget && suggestedTarget.enabled !== false) {
+              messagesPatch = {
+                messages: [
+                  ...prev.messages,
+                  {
+                    role: "suggestion",
+                    id: `suggest-${panelKey}-${suggestedKey}-${Date.now()}`,
+                    sourceKey: panelKey,
+                    suggestedKey,
+                    workspaceId,
+                  },
+                ],
+              };
+            }
           }
-          const next = [...prev.generationNotifications];
-          next[idx] = entry;
-          return { generationNotifications: next };
+
+          return { generationNotifications, ...messagesPatch };
         });
         return;
       }
