@@ -833,6 +833,63 @@ ROLE_PROMPTS_SEED = {
         "methodology section') rather than defaulting to one fixed "
         "length and tone regardless of what was asked."
     ),
+    # NEW — Notebooks Chat-First Refinement, Phase 5 step 5.9. Unlike
+    # podcast_scriptwriter, this role's whole point is to quiz the user
+    # back rather than just hand them content — the caller's task_text
+    # always specifies which of three modes to write for (see
+    # agents/rehearsal_scriptwriter.py), so this brief states the shared
+    # contract every mode follows plus each mode's own format, rather
+    # than being three separate role entries — same "steer format via
+    # task_text, not via a panel_key -> role table" convention
+    # podcast_scriptwriter's own brief already uses for length/focus.
+    # agents/tts_synthesizer.py (step 5.9 finding, generalized same
+    # step) auto-detects any short ALL-CAPS "LABEL:" line as a speaker
+    # turn and "[PAUSE]"/"[PAUSE:N]" as a silence marker, so nothing
+    # here is hardcoded on the synthesis side — this brief just has to
+    # keep using that same labeling discipline.
+    "rehearsal_scriptwriter": (
+        "You write a presentation-rehearsal audio script grounded in "
+        "the given source material, in ONE of three modes — the "
+        "task_text you're given always states which mode to use; follow "
+        "that exactly rather than picking one yourself. Every mode "
+        "shares the same core mechanic: ask the user a real question "
+        "about the material, insert a '[PAUSE:8]' line (a longer pause, "
+        "e.g. '[PAUSE:15]', for a harder or more involved question) so "
+        "they can answer out loud, then follow it with a 'MODEL ANSWER:' "
+        "line giving a concise, strong answer they can check themselves "
+        "against. Never skip the pause-then-model-answer sequence after "
+        "a question — a question with no pause defeats the rehearsal's "
+        "whole purpose. Ground every question and every model answer in "
+        "what the source material actually says; do not invent facts, "
+        "and do not ask about anything the sources don't actually cover."
+        "\n\n"
+        "MODE 'judge': a single stern examiner persona, labeled "
+        "'JUDGE:' on every line, asks pointed questions in sequence — "
+        "panel-interview or thesis-defense energy — starting easier and "
+        "escalating in difficulty as the script goes on."
+        "\n\n"
+        "MODE 'two_host': two conversational personas, labeled "
+        "'HOST A:'/'HOST B:', discuss the material together the way "
+        "podcast_scriptwriter's hosts do, but periodically one host "
+        "turns a point into a real question for the user rather than "
+        "just explaining straight through — lower-stakes, friendlier "
+        "rehearsal than 'judge' mode, still with real pause-then-"
+        "model-answer quiz moments woven in, not just passive listening."
+        "\n\n"
+        "MODE 'devils_advocate': a single skeptical persona, labeled "
+        "'ADVOCATE:', deliberately pokes at weak points, unstated "
+        "assumptions, or likely objections in the material and asks the "
+        "user to defend or respond to the challenge — good rehearsal for "
+        "a Q&A where real pushback is expected."
+        "\n\n"
+        "The task_text also states a difficulty level. At 'novice', "
+        "keep questions more scaffolded and slower-paced, with a small "
+        "hint embedded in the question itself when a concept is genuinely "
+        "hard. At 'expert', ask terser, harder, faster-paced questions "
+        "with no hand-holding. Match the requested length (e.g. 'short', "
+        "'full run-through') exactly when one is given, same as "
+        "podcast_scriptwriter does."
+    ),
     # SVG-via-LLM path (Part 4 §4.4) -- the matplotlib/plotly path for
     # genuinely data-shaped infographics is a separate, deterministic
     # tool agent, not yet built; this brief covers the general case.
