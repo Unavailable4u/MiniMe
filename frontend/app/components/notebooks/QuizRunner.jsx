@@ -71,7 +71,13 @@ function parseQuizForDisplay(markdown) {
   return { title, questions };
 }
 
-export default function QuizRunner({ quizText, workspaceId, quizNodeId }) {
+// CHANGED — step 6.7 gap fix: `topicId` is an optional new prop (default
+// undefined). When a caller has one (a quiz launched from a topic-scoped
+// entry point), it's forwarded to recordQuizAttempt() so a passing score
+// can drive study_progress (see api/server.py's record_quiz_attempt_endpoint,
+// step 6.7). No current call site passes this yet — see
+// SessionContext.jsx's recordQuizAttempt() comment for why.
+export default function QuizRunner({ quizText, workspaceId, quizNodeId, topicId }) {
   const { gradeQuiz, recordQuizAttempt, fetchMissedQuestions } = useSession();
   const { title, questions } = useMemo(() => parseQuizForDisplay(quizText), [quizText]);
 
@@ -125,7 +131,7 @@ export default function QuizRunner({ quizText, workspaceId, quizNodeId }) {
     try {
       const graded =
         workspaceId && quizNodeId
-          ? await recordQuizAttempt(workspaceId, quizNodeId, quizText, orderedAnswers)
+          ? await recordQuizAttempt(workspaceId, quizNodeId, quizText, orderedAnswers, topicId)
           : await gradeQuiz(quizText, orderedAnswers);
       setResult(graded);
     } finally {
