@@ -555,6 +555,17 @@ class RecordQuizAttemptRequest(BaseModel):
     quiz_node_id: str            # vector_id of the exported/stored quiz node
     quiz_text: str                # quiz_writer's raw Markdown stage_output
     answers: list[int]            # one option-index per question, in question order
+    # NEW — step 6.7: which topic (study_progress.py's topic_key, same
+    # value build_topic_workflow() returns/keys "topic_workflows" by)
+    # this attempt counts toward, so a passing score can bump that
+    # topic's progress record. Optional and best-effort on purpose —
+    # quiz_progress.py itself has no topic concept (a quiz_node_id
+    # carries no topic linkage anywhere in the store), so this only
+    # works once a caller (e.g. a topic-scoped quiz launched from the
+    # workflow/study board) actually knows and sends it. An attempt
+    # with no topic_id still grades and records exactly as before;
+    # it just can't drive study_progress.
+    topic_id: Optional[str] = None
 
 
 class GradeQuizRequest(BaseModel):
@@ -3237,15 +3248,50 @@ def grade_quiz_endpoint(req: GradeQuizRequest):
     return quiz_progress.grade_quiz(req.quiz_text, req.answers)
 
 
+# NEW — step 6.7: what counts as "passed" for the purposes of marking a
+# topic done. quiz_progress.grade_quiz()'s `percent` is 0-100 float;
+# picked 70 as a conventional passing bar since nothing in the codebase
+# already defines one (no PASSING/pass_threshold constant existed
+# anywhere before this). Module-level so it's one place to tune later
+# rather than a magic number inline in the endpoint below.
+QUIZ_PASS_PERCENT = 70.0
+
+
 @app.post("/api/notes/study/quiz/attempts", dependencies=[Depends(require_auth)])
 def record_quiz_attempt_endpoint(req: RecordQuizAttemptRequest):
-    return quiz_progress.record_attempt(
+    attempt = quiz_progress.record_attempt(
         workspace_id=req.workspace_id,
         quiz_node_id=req.quiz_node_id,
         quiz_markdown=req.quiz_text,
         answers=req.answers,
         created_by="user",
     )
+
+    # NEW — step 6.7: passing-quiz-attempt progress hook (see
+    # eo/study_progress.py). Kept here at the caller, not inside
+    # quiz_progress.record_attempt() itself, same reasoning as step
+    # 6.6's hook -- that function stays a pure "grade and log the
+    # attempt" helper with no study_progress side effects, and no
+    # notification either (see step 6.5's PUT route docstring: the
+    # Phase 4 push is reserved for the out-of-band hooks, this is one
+    # of them, but wiring the actual emit is step 6.13, not this one).
+    # req.topic_id is optional and best-effort (see its field comment
+    # above) -- an attempt with no topic_id just can't drive this.
+    # Only bumps toward "done": a topic already "done" doesn't get
+    # touched again by a later re-attempt, matching 6.6's "don't
+    # regress a further-along status" posture.
+    if req.topic_id and attempt["percent"] >= QUIZ_PASS_PERCENT:
+        try:
+            current = study_progress.get_progress(req.workspace_id, req.topic_id)
+            if current["status"] != study_progress.STATUS_DONE:
+                study_progress.set_progress(req.workspace_id, req.topic_id,
+                                             status=study_progress.STATUS_DONE)
+        except Exception:
+            # Best-effort, same "never let this be the reason the
+            # attempt-recording call errors" posture as 6.6's hook.
+            pass
+
+    return attempt
 
 
 @app.get("/api/notes/study/quiz/attempts", dependencies=[Depends(require_auth)])
