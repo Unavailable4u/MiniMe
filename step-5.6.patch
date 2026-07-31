@@ -1,0 +1,338 @@
+diff --git a/api/server.py b/api/server.py
+index cb51b2c..fe8d9e8 100644
+--- a/api/server.py
++++ b/api/server.py
+@@ -2065,6 +2065,104 @@ def _generate_workflows(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+                                       source_node_ids=source_node_ids)
+ 
+ 
++def _generate_podcast(ws_id: str, scope: dict | None, owner_id: str) -> dict:
++    """Phase 5 step 5.6. Same (ws_id, scope, owner_id) -> result shape
++    every other NOTEBOOKS_GENERATE_TARGETS entry above already has --
++    extracted out of notebooks_podcast() below (step 5.1's dedicated
++    route) so this same generation logic is reachable both from that
++    route directly AND from notebooks_generate()'s {"targets": [...]}
++    dispatch, without duplicating it. Raises LookupError/ValueError on
++    failure rather than an HTTPException -- notebooks_generate()'s own
++    try/except (see that function above) turns any raise into an "error"
++    branch the same way every other target's raise already does;
++    notebooks_podcast() itself still translates the same two exceptions
++    into a 400 for its own single-target callers.
++    """
++    source_node_ids = (scope or {}).get("source_node_ids")
++    script_text = generate_podcast_script(ws_id, source_node_ids)
++
++    audio_filename = f"podcast_{ws_id}.mp3"
++    out_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
++    synthesize_podcast(script_text, out_path)
++
++    # NEW — step 5.4: persist script_text + the (NOTES_EXPORTS_DIR-relative)
++    # audio_filename via panel_content, under the "podcast" panel_key.
++    # Same encode-on-write JSON-string shape _generate_workflows above
++    # already uses for "suggested_workflows".
++    saved = panel_content.set_content(
++        ws_id,
++        "podcast",
++        json.dumps({"script_text": script_text, "audio_path": audio_filename}),
++        owner_id,
++        source_node_ids=source_node_ids,
++    )
++
++    return {
++        "panel_key": "podcast",
++        "status": "done",
++        "script_text": script_text,
++        "audio_bytes": os.path.getsize(out_path),
++        "updated_at": saved["updated_at"],
++        "message": (
++            "Script + audio generated and saved (Phase 5 steps 5.2/5.3/5.4), "
++            "reachable via Generate as of step 5.6. A servable download URL "
++            f"(step 5.7+) isn't wired yet -- the mp3 exists on disk at {out_path!r} for now."
++        ),
++    }
++
++
++def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
++    """Phase 5 step 5.6. Same extraction _generate_podcast() above
++    describes, for notebooks_video_overview() (step 5.5's dedicated
++    route) instead. Raises LookupError/ValueError on failure, same
++    contract as every other target function here -- see
++    _generate_podcast()'s own docstring for why.
++    """
++    source_node_ids = (scope or {}).get("source_node_ids")
++
++    slide_text = generate_slide_deck(ws_id, source_node_ids)
++    script_text = generate_podcast_script(ws_id, source_node_ids)
++
++    audio_filename = f"video_overview_narration_{ws_id}.mp3"
++    audio_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
++    synthesize_podcast(script_text, audio_path)
++
++    slide_artifact = markdown_text_to_artifact(slide_text, title_fallback="video_overview")
++    video_filename = f"video_overview_{ws_id}.mp4"
++    video_path = os.path.join(NOTES_EXPORTS_DIR, video_filename)
++    build_video_overview(slide_artifact, audio_path, video_path)
++
++    # NEW — step 5.4/5.5: persist slide_text + script_text + the
++    # (NOTES_EXPORTS_DIR-relative) video_filename via panel_content,
++    # under the "video_overview" panel_key. Same shape _generate_podcast()
++    # above uses for its own "podcast" panel_key.
++    saved = panel_content.set_content(
++        ws_id,
++        "video_overview",
++        json.dumps({
++            "slide_text": slide_text,
++            "script_text": script_text,
++            "video_path": video_filename,
++        }),
++        owner_id,
++        source_node_ids=source_node_ids,
++    )
++
++    return {
++        "panel_key": "video_overview",
++        "status": "done",
++        "slide_text": slide_text,
++        "script_text": script_text,
++        "video_bytes": os.path.getsize(video_path),
++        "updated_at": saved["updated_at"],
++        "message": (
++            "Slide deck, narration, and video generated and saved (Phase 5 step 5.5), "
++            "reachable via Generate as of step 5.6. A servable download URL "
++            f"(step 5.7+) isn't wired yet -- the mp4 exists on disk at {video_path!r} for now."
++        ),
++    }
++
++
+ NOTEBOOKS_GENERATE_TARGETS = {
+     "clusters": _generate_clusters,
+     "facts": _generate_facts,
+@@ -2074,6 +2172,8 @@ NOTEBOOKS_GENERATE_TARGETS = {
+     "study_guide": _make_study_generate("study_guide"),
+     "mindmap": _generate_mindmap,
+     "suggested_route": _generate_suggested_route,
++    "podcast": _generate_podcast,  # NEW — Phase 5 step 5.6.
++    "video_overview": _generate_video_overview,  # NEW — Phase 5 step 5.6.
+     # REMOVED — chat audit: "backlinks" unregistered as a Generate target.
+     # _generate_backlinks/link_concepts() below are left defined (in case
+     # something else needs them later) but no longer reachable from any
+@@ -2327,11 +2427,21 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str
+ # --- Notebooks — Chat-First Refinement, Phase 5 step 5.1 / 5.2 / 5.3 -------
+ # Podcast, workspace-scoped route.
+ #
+-# Deliberately its own dedicated endpoint, NOT a NOTEBOOKS_GENERATE_TARGETS
+-# entry yet (that's step 5.6, once step 5.4's persistence gives it a full
+-# done-in-one-call result to dispatch to). The guide's own framing (§0's
+-# "what I found" bullet 4) is that podcast/video_overview live in a
+-# completely separate, non-workspace-scoped "notes" domain today
++# CHANGED — step 5.6: this is no longer the ONLY way to reach podcast
++# generation -- _generate_podcast() (defined above, right before
++# NOTEBOOKS_GENERATE_TARGETS) is now also registered under the "podcast"
++# key in that dict, so a chat-triggered {"targets": ["podcast"]} call to
++# notebooks_generate() reaches the exact same generation logic this
++# dedicated route calls. This route itself is kept -- a single-target
++# call with a plain 400 on failure (rather than a one-item branches
++# list) is a nicer shape for a direct "generate my podcast" caller, same
++# reasoning the per-topic workflow endpoint below gives for staying
++# outside NOTEBOOKS_GENERATE_TARGETS entirely, just one step less
++# extreme here since this target IS also dispatch-reachable.
++#
++# The guide's own framing (§0's "what I found" bullet 4) is that
++# podcast/video_overview live in a completely separate,
++# non-workspace-scoped "notes" domain today
+ # (POST /api/notes/podcast/synthesize, requiring a script_text the
+ # caller already has in hand -- see synthesize_podcast_endpoint() above)
+ # -- this route is the start of pulling that into the notebook-scoped
+@@ -2404,56 +2514,22 @@ def notebooks_podcast(ws_id: str, req: NotebooksPodcastRequest, owner_id: str =
+     except FileNotFoundError:
+         raise HTTPException(status_code=404, detail="Unknown workspace_id")
+ 
+-    source_node_ids = (req.scope or {}).get("source_node_ids")
+     try:
+-        script_text = generate_podcast_script(ws_id, source_node_ids)
+-    except LookupError as e:
+-        # Same "clear 400, not a 500" contract agents/study_generator.py's
+-        # own LookupError already gets from _make_study_generate's caller
+-        # (notebooks_generate's try/except turns any raise into an
+-        # "error" branch) -- there's no branches list here since this
+-        # isn't a multi-target dispatch, so it surfaces directly as an
+-        # HTTP error instead.
++        # CHANGED — step 5.6: the actual generation logic now lives in
++        # _generate_podcast() above (shared with NOTEBOOKS_GENERATE_TARGETS'
++        # "podcast" entry) -- this route's only job is the
++        # workspace-existence check above and translating that shared
++        # function's raises into an HTTP error, same "clear 400, not a
++        # 500" contract agents/study_generator.py's own LookupError
++        # already gets from _make_study_generate's caller. There's no
++        # branches list here since this isn't a multi-target dispatch,
++        # so both LookupError (bad scope) and ValueError (bad script)
++        # surface directly as a 400 rather than the "error" branch
++        # notebooks_generate() reports for the same two exceptions.
++        return _generate_podcast(ws_id, req.scope, owner_id)
++    except (LookupError, ValueError) as e:
+         raise HTTPException(status_code=400, detail=str(e))
+ 
+-    audio_filename = f"podcast_{ws_id}.mp3"
+-    out_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
+-    try:
+-        synthesize_podcast(script_text, out_path)
+-    except ValueError as e:
+-        # See header comment: same bad-input-not-server-error treatment
+-        # as generate_podcast_script()'s LookupError above. In practice
+-        # this should be rare -- podcast_scriptwriter's own brief already
+-        # asks for "HOST A:"/"HOST B:" lines -- but a model that ignores
+-        # the brief on a given run shouldn't surface as a 500.
+-        raise HTTPException(status_code=400, detail=str(e))
+-
+-    # NEW — step 5.4: persist script_text + the (NOTES_EXPORTS_DIR-relative)
+-    # audio_filename via panel_content, under the "podcast" panel_key just
+-    # added to VALID_PANEL_KEYS/GENERATED_PANEL_KEYS. Same
+-    # encode-on-write JSON-string shape _generate_workflows already uses
+-    # for "suggested_workflows" -- see that function's own comment.
+-    saved = panel_content.set_content(
+-        ws_id,
+-        "podcast",
+-        json.dumps({"script_text": script_text, "audio_path": audio_filename}),
+-        owner_id,
+-        source_node_ids=source_node_ids,
+-    )
+-
+-    return {
+-        "panel_key": "podcast",
+-        "status": "done",
+-        "script_text": script_text,
+-        "audio_bytes": os.path.getsize(out_path),
+-        "updated_at": saved["updated_at"],
+-        "message": (
+-            "Script + audio generated and saved (Phase 5 steps 5.2/5.3/5.4). "
+-            "A servable download URL and dispatch-table registration "
+-            f"(steps 5.6+) aren't wired yet -- the mp3 exists on disk at {out_path!r} for now."
+-        ),
+-    }
+-
+ 
+ # --- workspace-scoped Video Overview (Phase 5 step 5.5) --------------------
+ # Same "pull the notes-domain subsystem into the workspace-scoped world"
+@@ -2468,24 +2544,30 @@ def notebooks_podcast(ws_id: str, req: NotebooksPodcastRequest, owner_id: str =
+ # 5.5's own new module) AND narration audio. Rather than inventing a
+ # single-narrator TTS path with no role/voice precedent anywhere in this
+ # codebase, this reuses the exact two-host podcast pipeline
+-# notebooks_podcast() already runs (generate_podcast_script() +
++# _generate_podcast() already runs (generate_podcast_script() +
+ # synthesize_podcast()) as the narration track -- agents/
+ # video_overview_builder.py's own docstring already describes the result
+ # as "static slide-style frames narrated by ... already-synthesized
+ # podcast audio," so a two-host narration is the pipeline's own designed
+-# use case, not a repurposing. This route is fully self-contained (does
++# use case, not a repurposing. Generation is fully self-contained (does
+ # NOT read back a previously-saved "podcast" panel) -- same
+-# no-cross-endpoint-dependency posture notebooks_podcast() itself has,
++# no-cross-endpoint-dependency posture _generate_podcast() itself has,
+ # and the one the guide's own §0 finding on the old
+ # /api/notes/video-overview/build's by-title lookup flags as the thing
+ # worth fixing.
+ #
+-# Deliberately two separate try/except blocks below (slide deck, then
+-# narration) rather than one shared "generation failed" branch -- same
+-# "tell the caller which stage actually failed" discipline
+-# notebooks_podcast() already applies to its own two stages, so a
+-# LookupError from a genuinely slide-unfriendly source set isn't
+-# conflated with a narration-side ValueError.
++# CHANGED — step 5.6: the actual generation (both stages, the build,
++# and the panel_content persistence) now lives in
++# _generate_video_overview() above, registered under the
++# "video_overview" key in NOTEBOOKS_GENERATE_TARGETS -- same extraction
++# _generate_podcast() got, so this target is reachable both from the
++# dedicated route below AND from a chat-triggered
++# {"targets": ["video_overview"]} call to notebooks_generate(). This
++# route's job is now just the workspace-existence check and translating
++# _generate_video_overview()'s raise (LookupError from either generation
++# stage, or ValueError from the narration or build stage -- not
++# distinguished here, same single-400-either-way posture
++# notebooks_podcast() already takes) into an HTTP error.
+ #
+ # Persists via panel_content.set_content() under panel_key
+ # "video_overview" (added to eo/panel_content.py's VALID_PANEL_KEYS/
+@@ -2495,8 +2577,7 @@ def notebooks_podcast(ws_id: str, req: NotebooksPodcastRequest, owner_id: str =
+ # {"script_text", "audio_path"}. video_path is stored
+ # NOTES_EXPORTS_DIR-relative, same portability reasoning as podcast's
+ # audio_path. No GET route serves the mp4 back yet, and this isn't
+-# registered in NOTEBOOKS_GENERATE_TARGETS or the Phase 1 manifest --
+-# both are step 5.7.
++# registered in the Phase 1 manifest yet either -- that's step 5.7.
+ 
+ class NotebooksVideoOverviewRequest(BaseModel):
+     scope: Optional[dict[str, Any]] = None
+@@ -2510,65 +2591,16 @@ def notebooks_video_overview(ws_id: str, req: NotebooksVideoOverviewRequest, own
+     except FileNotFoundError:
+         raise HTTPException(status_code=404, detail="Unknown workspace_id")
+ 
+-    source_node_ids = (req.scope or {}).get("source_node_ids")
+-
+-    try:
+-        slide_text = generate_slide_deck(ws_id, source_node_ids)
+-    except LookupError as e:
+-        raise HTTPException(status_code=400, detail=str(e))
+-
+-    try:
+-        script_text = generate_podcast_script(ws_id, source_node_ids)
+-    except LookupError as e:
+-        raise HTTPException(status_code=400, detail=str(e))
+-
+-    audio_filename = f"video_overview_narration_{ws_id}.mp3"
+-    audio_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
+     try:
+-        synthesize_podcast(script_text, audio_path)
+-    except ValueError as e:
+-        # Same bad-input-not-server-error treatment notebooks_podcast()
+-        # already gives this exact ValueError.
++        # CHANGED — step 5.6: see notebooks_podcast()'s own comment above --
++        # same extraction, same shared-with-NOTEBOOKS_GENERATE_TARGETS
++        # reasoning, this time for _generate_video_overview()'s
++        # LookupError (either generation stage) / ValueError
++        # (narration or build stage).
++        return _generate_video_overview(ws_id, req.scope, owner_id)
++    except (LookupError, ValueError) as e:
+         raise HTTPException(status_code=400, detail=str(e))
+ 
+-    slide_artifact = markdown_text_to_artifact(slide_text, title_fallback="video_overview")
+-    video_filename = f"video_overview_{ws_id}.mp4"
+-    video_path = os.path.join(NOTES_EXPORTS_DIR, video_filename)
+-    try:
+-        build_video_overview(slide_artifact, audio_path, video_path)
+-    except ValueError as e:
+-        raise HTTPException(status_code=400, detail=str(e))
+-
+-    # NEW — step 5.4/5.5: persist slide_text + script_text + the
+-    # (NOTES_EXPORTS_DIR-relative) video_filename via panel_content,
+-    # under the "video_overview" panel_key. Same shape notebooks_podcast()
+-    # already uses for its own "podcast" panel_key.
+-    saved = panel_content.set_content(
+-        ws_id,
+-        "video_overview",
+-        json.dumps({
+-            "slide_text": slide_text,
+-            "script_text": script_text,
+-            "video_path": video_filename,
+-        }),
+-        owner_id,
+-        source_node_ids=source_node_ids,
+-    )
+-
+-    return {
+-        "panel_key": "video_overview",
+-        "status": "done",
+-        "slide_text": slide_text,
+-        "script_text": script_text,
+-        "video_bytes": os.path.getsize(video_path),
+-        "updated_at": saved["updated_at"],
+-        "message": (
+-            "Slide deck, narration, and video generated and saved (Phase 5 step 5.5). "
+-            "A servable download URL and dispatch-table registration "
+-            f"(steps 5.6+) aren't wired yet -- the mp4 exists on disk at {video_path!r} for now."
+-        ),
+-    }
+-
+ 
+ # --- per-topic workflow, triggered by a Mind Map node click (step 2) -------
+ # Deliberately its own endpoint rather than a NOTEBOOKS_GENERATE_TARGETS
