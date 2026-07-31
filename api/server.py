@@ -119,6 +119,7 @@ from agents.note_clusterer import propose_clusters, list_candidates as list_clus
 from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
 from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
 from agents.podcast_scriptwriter import generate_podcast_script   # NEW — Notebooks Chat-First refinement, Phase 5 step 5.2
+from agents.rehearsal_scriptwriter import generate_rehearsal_script   # NEW — Notebooks Chat-First refinement, Phase 5 step 5.10
 from agents.slide_deck_planner import generate_slide_deck   # NEW — Notebooks Chat-First refinement, Phase 5 step 5.5
 from agents.mind_mapper import generate_mindmap, generate_suggested_route   # NEW — Notebooks integration guide §6.5 (Phase 2); generate_suggested_route wired up per chat audit (was dead code, no caller anywhere)
 from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
@@ -2159,6 +2160,86 @@ def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> d
             "Slide deck, narration, and video generated and saved (Phase 5 step 5.5), "
             "reachable via Generate as of step 5.6. A servable download URL "
             f"(step 5.7+) isn't wired yet -- the mp4 exists on disk at {video_path!r} for now."
+        ),
+    }
+
+
+def _generate_presentation_rehearsal(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Phase 5 step 5.10. Same (ws_id, scope, owner_id) -> result shape
+    every other NOTEBOOKS_GENERATE_TARGETS entry above already has --
+    deliberately NOT registered in that dict yet (that's step 5.11, same
+    "define the target function first, wire it into dispatch/manifest as
+    a separate step" split podcast/video_overview already went through
+    across steps 5.1-5.6).
+
+    Reuses the podcast pipeline exactly, just with a different script
+    source: generate_rehearsal_script() (agents/rehearsal_scriptwriter.py,
+    step 5.9) in place of generate_podcast_script(), then the exact same
+    synthesize_podcast() call _generate_podcast() above already makes.
+    This works with zero changes to synthesize_podcast() itself because
+    step 5.9's tts_synthesizer generalization (generic "LABEL:" speaker
+    detection + "[PAUSE]"/"[PAUSE:N]" handling) already covers
+    "JUDGE:"/"HOST A:"/"HOST B:"/"ADVOCATE:"/"MODEL ANSWER:" — this
+    function doesn't need to know or care which labels a given mode's
+    script uses.
+
+    scope carries two new, rehearsal-specific keys on top of the usual
+    source_node_ids: "mode" (judge / two_host / devils_advocate) and
+    "difficulty" (novice / expert). Both are optional -- omitted, they
+    fall through to generate_rehearsal_script()'s own defaults (see that
+    module's _DEFAULT_MODE / _DEFAULT_DIFFICULTY) -- same "blank scope
+    still works" posture source_node_ids already has across every other
+    target in this file. An invalid mode/difficulty raises ValueError
+    from generate_rehearsal_script() itself, which notebooks_generate()'s
+    surrounding try/except (see that function above) turns into a normal
+    "error" branch, same as any other target's raise.
+
+    Persisted under its own "presentation_rehearsal" panel_key (added to
+    eo/panel_content.py's VALID_PANEL_KEYS/GENERATED_PANEL_KEYS alongside
+    "podcast"/"video_overview") rather than overloading the "podcast"
+    key -- a rehearsal script and a podcast script are different content
+    a user would reasonably want to keep side by side, not last-write-
+    wins overwrite each other. Content shape mirrors "podcast"'s own
+    {"script_text", "audio_path"} JSON string, plus "mode"/"difficulty"
+    so a reload can show which variant is saved without re-parsing the
+    script text to guess.
+    """
+    scope = scope or {}
+    source_node_ids = scope.get("source_node_ids")
+    mode = scope.get("mode") or "judge"
+    difficulty = scope.get("difficulty") or "expert"
+
+    script_text = generate_rehearsal_script(ws_id, mode, difficulty, source_node_ids)
+
+    audio_filename = f"presentation_rehearsal_{ws_id}.mp3"
+    out_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
+    synthesize_podcast(script_text, out_path)
+
+    saved = panel_content.set_content(
+        ws_id,
+        "presentation_rehearsal",
+        json.dumps({
+            "script_text": script_text,
+            "audio_path": audio_filename,
+            "mode": mode,
+            "difficulty": difficulty,
+        }),
+        owner_id,
+        source_node_ids=source_node_ids,
+    )
+
+    return {
+        "panel_key": "presentation_rehearsal",
+        "status": "done",
+        "script_text": script_text,
+        "mode": mode,
+        "difficulty": difficulty,
+        "audio_bytes": os.path.getsize(out_path),
+        "updated_at": saved["updated_at"],
+        "message": (
+            "Rehearsal script + audio generated and saved (Phase 5 step 5.10). "
+            "Not yet reachable via Generate or the chat tool list -- that's "
+            f"step 5.11. The mp3 exists on disk at {out_path!r} for now."
         ),
     }
 
