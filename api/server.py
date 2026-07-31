@@ -2255,6 +2255,7 @@ NOTEBOOKS_GENERATE_TARGETS = {
     "suggested_route": _generate_suggested_route,
     "podcast": _generate_podcast,  # NEW — Phase 5 step 5.6.
     "video_overview": _generate_video_overview,  # NEW — Phase 5 step 5.6.
+    "presentation_rehearsal": _generate_presentation_rehearsal,  # NEW — Phase 5 step 5.11.
     # REMOVED — chat audit: "backlinks" unregistered as a Generate target.
     # _generate_backlinks/link_concepts() below are left defined (in case
     # something else needs them later) but no longer reachable from any
@@ -2405,6 +2406,30 @@ CAPABILITIES_MANIFEST = [
         "key": "video_overview", "label": "Video overview", "subTab": "insights",
         "description": "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'.",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/video_overview",
+        "enabled": True,
+    },
+    {
+        # NEW — Phase 5 step 5.11: flips this from undefined-in-the-manifest
+        # (it had no Phase 1.5 stub -- rehearsal didn't exist as a concept
+        # until step 5.9) straight to a real, enabled entry, now that step
+        # 5.10 gave it a working _generate_presentation_rehearsal() target
+        # and this step just registered that in NOTEBOOKS_GENERATE_TARGETS
+        # above. No dedicated route exists for this one (unlike podcast/
+        # video_overview) -- it only needs the shared dispatch route, same
+        # as clusters/facts/etc., so `endpoint` points there rather than
+        # inventing a POST .../notebooks/presentation_rehearsal route this
+        # plan never asked for.
+        #
+        # `scope.mode`/`scope.difficulty` are called out explicitly in the
+        # description (rather than left to a generic "selected scope"
+        # phrase like the entries above) since Phase 2's tool-calling reads
+        # this string to build the LLM's tool list, and mode/difficulty are
+        # exactly the two things a caller might want to specify in the
+        # same turn as the request itself (e.g. "quiz me like a skeptical
+        # judge" or "give me an easy two-host run-through").
+        "key": "presentation_rehearsal", "label": "Presentation rehearsal", "subTab": "insights",
+        "description": "Generate an interactive audio rehearsal for defending or presenting the selected scope -- a mock Q&A or practice run, not a straight recap. Supports a 'judge' mode (a skeptical panelist grills you), 'two_host' mode (a friendly co-presenter walk-through), and 'devils_advocate' mode (a debate partner pushes back), each at 'novice' or 'expert' difficulty. Use this for requests like 'help me rehearse my presentation', 'quiz me like a thesis defense', 'practice defending this', or 'mock Q&A on this material'.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
