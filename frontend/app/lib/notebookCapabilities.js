@@ -1,5 +1,5 @@
 import {
-  Sparkles, Layers, BookMarked, GraduationCap, Network, Mic, Video, ListChecks,
+  Sparkles, Layers, BookMarked, GraduationCap, Network, Mic, Video, ListChecks, Drama,
 } from "lucide-react";
 
 // Phase 1 step 1.7: same NEXT_PUBLIC_API_URL convention SessionContext.jsx
@@ -108,6 +108,18 @@ export const TARGETS = [
   // "explainer" added as keyword + description synonyms, same fix
   // pattern as the block above.
   { key: "video_overview", label: "Video overview", icon: Video, subTab: "insights", keywords: ["video overview", "video summary", "video walkthrough", "explainer video"], description: "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/video_overview", enabled: true },
+  // NEW — Phase 5 step 5.11: no Phase 1.5 stub for this one (rehearsal
+  // didn't exist as a concept until step 5.9), so this is a brand-new
+  // entry rather than a stub flip like podcast/video_overview above.
+  // `endpoint` points at the shared .../notebooks/generate dispatch
+  // route (not a dedicated .../notebooks/presentation_rehearsal route --
+  // this plan never asked for one), matching how clusters/facts/etc.
+  // reach NOTEBOOKS_GENERATE_TARGETS in api/server.py. As with every
+  // other server-owned field here, this is just the initial local
+  // default -- syncCapabilitiesFromServer() overwrites it with whatever
+  // CAPABILITIES_MANIFEST's matching entry actually says the moment the
+  // fetch resolves.
+  { key: "presentation_rehearsal", label: "Presentation rehearsal", icon: Drama, subTab: "insights", keywords: ["rehearsal", "rehearse", "mock q&a", "mock interview", "practice defending", "thesis defense", "presentation practice"], description: "Generate an interactive audio rehearsal for defending or presenting the selected scope -- a mock Q&A or practice run, not a straight recap. Supports a 'judge' mode (a skeptical panelist grills you), 'two_host' mode (a friendly co-presenter walk-through), and 'devils_advocate' mode (a debate partner pushes back), each at 'novice' or 'expert' difficulty. Use this for requests like 'help me rehearse my presentation', 'quiz me like a thesis defense', 'practice defending this', or 'mock Q&A on this material'.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate", enabled: true },
   { key: "workflow", label: "Workflow", icon: ListChecks, subTab: "diagrams", keywords: ["workflow", "study plan", "learning path"], description: "Build a step-by-step study workflow for a single topic.", scopeAllowed: "topic", endpoint: null, enabled: false },
   // REMOVED — chat audit: "Backlinks" used to trigger agents/concept_linker.py's
   // link_concepts() by hand here, but the Library tab's BacklinksView no
