@@ -98,6 +98,48 @@ def _parameters_for_scope(capability: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
 
 
+# NEW — Phase 6 step 6.8. The first of the "hand-written entries" this
+# module's header comment said would show up "once Phase 6/3 give them
+# something real to call" -- study_progress.py (steps 6.1-6.7) now
+# backs a real "mark this topic done" action (PUT
+# /api/workspaces/{ws_id}/progress?status=done), so this is no longer
+# a generation target and doesn't belong in manifest_to_tools()/
+# CAPABILITIES_MANIFEST. Kept as its own small builder (rather than a
+# fake manifest entry with a made-up `endpoint`) so a future
+# non-generation tool (e.g. Phase 3's "what's related to X") has an
+# obvious place to sit next to this one instead of being smuggled into
+# the generation manifest.
+#
+# Reuses _parameters_for_scope's "topic" branch verbatim -- marking a
+# topic done is meaningless without knowing which topic, exactly like
+# the "workflow" capability's own scopeAllowed: "topic" -- so the same
+# {"topic_id": {...}} required-argument shape applies here too.
+def study_progress_tools() -> List[Dict[str, Any]]:
+    """
+    Hand-written (not manifest-derived) tools for eo/study_progress.py
+    actions. Currently just "mark_topic_done" (step 6.8); append here,
+    not to CAPABILITIES_MANIFEST, if/when more non-generation actions
+    get wired into chat.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "mark_topic_done",
+                "description": (
+                    "Mark a topic as done/complete in the study progress "
+                    "board. Use this when the user says something like "
+                    "'mark X as done', 'I finished X', or 'I'm done with "
+                    "X', where X is a topic from the workspace's Mind Map. "
+                    "This does not generate anything -- it only updates "
+                    "that topic's status."
+                ),
+                "parameters": _parameters_for_scope({"scopeAllowed": "topic"}),
+            },
+        }
+    ]
+
+
 def manifest_to_tools(
     manifest: List[Dict[str, Any]],
     *,
