@@ -718,15 +718,37 @@ function WorkflowCard({ workflow, workspaceId, onOpenSubChat }) {
             >
               <span className="flex-1">{step.label}</span>
               {step.type !== "decision" && (
-                <button
-                  onClick={() =>
-                    onOpenSubChat?.(workspaceId, `Explain this step in more detail: "${step.label}" (part of the "${workflow.title}" procedure), using this notebook's sources.`)
-                  }
-                  title="Ask about this step"
-                  className="shrink-0 text-[var(--neutral-600)] hover:text-[var(--cyber-cyan)]"
-                >
-                  <MessageSquareText size={11} />
-                </button>
+                <>
+                  <button
+                    onClick={() =>
+                      onOpenSubChat?.(workspaceId, `Explain this step in more detail: "${step.label}" (part of the "${workflow.title}" procedure), using this notebook's sources.`)
+                    }
+                    title="Ask about this step"
+                    className="shrink-0 text-[var(--neutral-600)] hover:text-[var(--cyber-cyan)]"
+                  >
+                    <MessageSquareText size={11} />
+                  </button>
+                  {/* NEW — Notebooks Chat-First refinement, Phase 6 step
+                      6.10: click alone (no typed text) starts a scoped
+                      sub-chat already primed to work through the step,
+                      not just explain it -- reuses the exact same
+                      onOpenSubChat -> handleOpenSubChat ->
+                      openScopedSubChat -> sendTask path as "Ask about
+                      this step" above, just a different synthetic
+                      message. Steps 6.11 (pull sources/notes scoped to
+                      the topic into that chat's response) and 6.12 (mark
+                      this step "ongoing" in eo/study_progress.py on this
+                      same click) build on top of this wiring next. */}
+                  <button
+                    onClick={() =>
+                      onOpenSubChat?.(workspaceId, `Let's work through: "${step.label}"`)
+                    }
+                    title="Work through this step"
+                    className="shrink-0 text-[var(--neutral-600)] hover:text-[var(--cyber-cyan)]"
+                  >
+                    <Send size={11} />
+                  </button>
+                </>
               )}
             </li>
           ))}
