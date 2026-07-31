@@ -118,6 +118,7 @@ from agents.note_clusterer import propose_clusters, list_candidates as list_clus
     accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
 from agents.fact_detector import detect_facts   # NEW — Notebooks integration guide §6.2
 from agents.study_generator import generate_study_content   # NEW — Notebooks integration guide §6.1
+from agents.podcast_scriptwriter import generate_podcast_script   # NEW — Notebooks Chat-First refinement, Phase 5 step 5.2
 from agents.mind_mapper import generate_mindmap, generate_suggested_route   # NEW — Notebooks integration guide §6.5 (Phase 2); generate_suggested_route wired up per chat audit (was dead code, no caller anywhere)
 from agents.concept_linker import link_concepts   # NEW — Notebooks integration guide §6.6 (Phase 3)
 from agents.workflow_suggester import suggest_workflows   # NEW — bug audit §7: suggested workflow diagrams
@@ -2320,6 +2321,109 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str 
                    {"panel_key": target, "workspace_id": ws_id, "label": str(exc)})
 
     return {"branches": branches}
+
+
+# --- Notebooks — Chat-First Refinement, Phase 5 step 5.1 / 5.2 / 5.3 -------
+# Podcast, workspace-scoped route.
+#
+# Deliberately its own dedicated endpoint, NOT a NOTEBOOKS_GENERATE_TARGETS
+# entry yet (that's step 5.6, once step 5.4's persistence gives it a full
+# done-in-one-call result to dispatch to). The guide's own framing (§0's
+# "what I found" bullet 4) is that podcast/video_overview live in a
+# completely separate, non-workspace-scoped "notes" domain today
+# (POST /api/notes/podcast/synthesize, requiring a script_text the
+# caller already has in hand -- see synthesize_podcast_endpoint() above)
+# -- this route is the start of pulling that into the notebook-scoped
+# world instead: ws_id-addressed, same require_auth +
+# chat_workspace.get_workspace() existence check every other
+# /api/workspaces/{ws_id}/... route above already uses, same request
+# shape (scope, session_id) as NotebooksGenerateRequest so step 5.4 can
+# grow this handler in place without a breaking request-shape change
+# once persistence lands. session_id is accepted (not used yet) for the
+# same forward-compatibility reason NotebooksGenerateRequest's own
+# session_id field gives -- step 5.4+ will want to emit Phase 4's
+# generation_started/generation_done/generation_error notifications the
+# same way notebooks_generate() already does, and threading it through
+# from the start avoids a second request-shape change later.
+#
+# CHANGED — step 5.2: now actually runs agents/podcast_scriptwriter.py's
+# generate_podcast_script() over the workspace's (optionally scoped)
+# sources and returns the real two-host Markdown script.
+# scope["source_node_ids"] is read the same "blank scope = whole
+# notebook" way every other Generate target in this file already reads
+# it (see _generate_facts, _make_study_generate above).
+#
+# CHANGED — step 5.3: now also feeds that script straight into
+# agents/tts_synthesizer.py:synthesize_podcast() (already imported
+# above for synthesize_podcast_endpoint's own use -- no new import
+# needed) and writes a real mp3. Written to NOTES_EXPORTS_DIR under
+# `podcast_{ws_id}.mp3` -- unlike synthesize_podcast_endpoint's
+# free-text `req.title`-derived filename (which needs slugifying), ws_id
+# is already an opaque, filesystem-safe id, same "use the id directly,
+# no slugify needed" precedent /api/workspaces/{ws_id}/export/files's
+# own `{ws_id}_export.zip` naming already sets a few hundred lines up.
+# Deliberately a single fixed per-workspace filename, not one per call
+# -- last-write-wins on regenerate, same overwrite semantics every other
+# Generate target in this file already has (see _generate_mindmap's own
+# "Regenerate is meant to be a last-write-wins overwrite" comment).
+# Still nothing persisted via panel_content (step 5.4) and no GET route
+# serves this file back yet -- status stays "audio_synthesized", not
+# "done", and the response reports the on-disk byte count as the
+# "confirm audio output" step 5.3 itself asks for, rather than
+# returning the file directly (a FileResponse here would break this
+# route's JSON response shape, which step 5.4/5.6 both build on).
+# synthesize_podcast()'s own ValueError ("no HOST X: dialogue lines
+# found") is treated the same 400 way generate_podcast_script()'s
+# LookupError already is just below -- a malformed script is a bad-
+# input case, not a server error, whichever of the two stages produced
+# it.
+
+class NotebooksPodcastRequest(BaseModel):
+    scope: Optional[dict[str, Any]] = None
+    session_id: Optional[str] = None
+
+
+@app.post("/api/workspaces/{ws_id}/notebooks/podcast")
+def notebooks_podcast(ws_id: str, req: NotebooksPodcastRequest, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    source_node_ids = (req.scope or {}).get("source_node_ids")
+    try:
+        script_text = generate_podcast_script(ws_id, source_node_ids)
+    except LookupError as e:
+        # Same "clear 400, not a 500" contract agents/study_generator.py's
+        # own LookupError already gets from _make_study_generate's caller
+        # (notebooks_generate's try/except turns any raise into an
+        # "error" branch) -- there's no branches list here since this
+        # isn't a multi-target dispatch, so it surfaces directly as an
+        # HTTP error instead.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    out_path = os.path.join(NOTES_EXPORTS_DIR, f"podcast_{ws_id}.mp3")
+    try:
+        synthesize_podcast(script_text, out_path)
+    except ValueError as e:
+        # See header comment: same bad-input-not-server-error treatment
+        # as generate_podcast_script()'s LookupError above. In practice
+        # this should be rare -- podcast_scriptwriter's own brief already
+        # asks for "HOST A:"/"HOST B:" lines -- but a model that ignores
+        # the brief on a given run shouldn't surface as a 500.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "panel_key": "podcast",
+        "status": "audio_synthesized",
+        "script_text": script_text,
+        "audio_bytes": os.path.getsize(out_path),
+        "message": (
+            "Script + audio generated (Phase 5 steps 5.2/5.3). Persistence via "
+            "panel_content and a servable download URL (step 5.4) aren't wired yet -- "
+            f"the mp3 exists on disk at {out_path!r} for now."
+        ),
+    }
 
 
 # --- per-topic workflow, triggered by a Mind Map node click (step 2) -------
