@@ -1493,6 +1493,28 @@ async function classifyIntent(wsId, message) {
   }
 }
 
+// NEW — Notebooks Chat-First refinement, Phase 6 step 6.8. Thin client
+// over the SAME PUT /api/workspaces/{ws_id}/progress route step 6.5's
+// manual-override board already uses (see api/server.py's
+// put_workspace_progress()) — "mark X as done" from chat is just
+// another caller of that one endpoint, status="done", no notes. No
+// new backend route needed: reusing the manual-override path is
+// exactly what makes this low-stakes/reversible (guide's step 6.8
+// decision — no confirmation needed), since it's the same one-field
+// PUT a person could already do by hand from the board.
+async function markTopicDone(wsId, topicId) {
+  const res = await fetch(
+    `${API_URL}/api/workspaces/${wsId}/progress?topic_id=${encodeURIComponent(topicId)}`,
+    {
+      method: "PUT",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify({ status: "done" }),
+    }
+  );
+  if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 // Per-topic workflow, triggered by a Mind Map node click (step 4) — thin
 // client over POST /api/workspaces/{ws_id}/topics/workflow (step 2).
 // Deliberately separate from generateNotebooks() above: that one dispatches
@@ -2249,6 +2271,7 @@ async function openScopedSubChat(wsId, taskText) {
   generateNotebooks,   // NEW — Notebooks integration guide §4/§6: the picker/chip-confirmation "Generate" command
   generateTopicWorkflow,   // NEW — step 4: Mind Map node click -> single per-topic workflow (see step 2's endpoint)
   classifyIntent,   // NEW — Notebooks Chat-First refinement Phase 2 step 2.5: log-only tool-calling classification
+  markTopicDone,   // NEW — Notebooks Chat-First refinement Phase 6 step 6.8: "mark X as done" chat tool
   fetchDeviceSpec, refreshPartPrices, toggleInstructionStep, // NEW — Blueprint (Plan sub-tab)
   proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
   openScopedSubChat,

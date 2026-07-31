@@ -21,7 +21,7 @@ import requests  # NEW — Part 8.3: Admin API lookup for workspace-invite-by-em
 import secrets   # NEW — Part 8.5: OAuth state tokens
 import urllib.parse  # NEW — Part 8.5: building the Google consent URL
 from eo import panel_content
-from utils.capability_tools import manifest_to_tools   # NEW — Phase 2 step 2.5: real classify-intent endpoint
+from utils.capability_tools import manifest_to_tools, study_progress_tools   # NEW — Phase 2 step 2.5: real classify-intent endpoint; study_progress_tools NEW — step 6.8
 from utils.llm_client import classify_tool_intent   # NEW — Phase 2 step 2.5
 from agents import pagespeed_agent   # NEW — Step 2: PageSpeed Insights connector for GrowthTab's Content Audit
 from agents.part_price_finder import find_price
@@ -2567,7 +2567,11 @@ def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depe
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
 
-    tools = manifest_to_tools(CAPABILITIES_MANIFEST)
+    # NEW — step 6.8: "mark X as done" isn't a generation target, so it
+    # doesn't live in CAPABILITIES_MANIFEST -- it's appended from its own
+    # hand-written builder (see utils/capability_tools.py's header
+    # comment on why generation and non-generation tools stay separate).
+    tools = manifest_to_tools(CAPABILITIES_MANIFEST) + study_progress_tools()
     return classify_tool_intent(req.message, tools)
 
 

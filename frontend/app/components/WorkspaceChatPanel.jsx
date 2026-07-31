@@ -112,7 +112,7 @@ function clampWorkingPanelHeight(h) {
 // today (see tryHandleClassifiedToolCall's scope resolution below).
 export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null }) {
   const legacy = useSession();
-  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5
+  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
   const { createWorkspaceChat } = useWorkspaceDockActions();
@@ -418,6 +418,55 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     return true;
   }
 
+  // NEW — Notebooks Chat-First refinement, Phase 6 step 6.8. The
+  // mark_topic_done counterpart to runGenerateTarget() above: same
+  // "push the user's text, then a live status message, update it in
+  // place by runId" shape, but there's no BranchRow/Working Panel
+  // bookkeeping to do here -- this isn't a generation, just a one-field
+  // progress-store write (see SessionContext.jsx's markTopicDone(),
+  // which reuses step 6.5's manual-override PUT route).
+  //
+  // No confirmation step before calling markTopicDone() -- this mirrors
+  // the guide's step 6.8 decision (low-stakes, reversible: a person can
+  // always re-open the board and flip it back, same as any other manual
+  // status edit). If that decision ever changes, this is the one place
+  // to add a confirm-first branch.
+  async function runMarkTopicDone(topicId, sourceText) {
+    const runId = `done-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    if (usingDock && sourceText) {
+      dock.setDockState((prev) => ({
+        messages: [
+          ...prev.messages,
+          { role: "user", text: sourceText },
+          { role: "progress_update", runId, status: "running" },
+        ],
+      }));
+    }
+    try {
+      await markTopicDone(workspaceId, topicId);
+      if (usingDock && sourceText) {
+        dock.setDockState((prev) => ({
+          messages: prev.messages.map((m) =>
+            m.role === "progress_update" && m.runId === runId
+              ? { ...m, status: "done", topicId }
+              : m
+          ),
+        }));
+      }
+    } catch (err) {
+      if (usingDock && sourceText) {
+        dock.setDockState((prev) => ({
+          messages: prev.messages.map((m) =>
+            m.role === "progress_update" && m.runId === runId
+              ? { ...m, status: "error", error: String(err.message || err) }
+              : m
+          ),
+        }));
+      }
+    }
+    return true;
+  }
+
   // NEW — chat audit bug #1 fix. Per NotebooksGeneratePicker.jsx's own
   // long-standing SCOPE NOTE: "typing 'make flashcards' into
   // WorkspaceChatPanel should short-circuit the normal staffed-dispatcher
@@ -525,6 +574,25 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     }
 
     const call = result.tool_calls[0];
+
+    // NEW — Phase 6 step 6.8. mark_topic_done is a hand-written,
+    // non-generation tool (see utils/capability_tools.py's
+    // study_progress_tools()) — it isn't in TARGETS_BY_KEY at all, so
+    // it has to be checked ahead of the "generate_" lookup below rather
+    // than folded into it. Requires a topic_id from either the model's
+    // own arguments (it named the topic in the message text) or a
+    // topic-typed activeContext, same fallback order the source_ids ->
+    // activeContext resolution below uses. No topic to act on at all
+    // (neither the model nor the surrounding UI knows which one) falls
+    // through to sendTask() same as any other non-match — there's
+    // nothing safe to guess here.
+    if (call.name === "mark_topic_done") {
+      const topicId = call.arguments?.topic_id
+        || (activeContext?.type === "topic" ? activeContext.id : null);
+      if (!topicId) return false;
+      return runMarkTopicDone(topicId, text);
+    }
+
     const key = call.name?.startsWith("generate_") ? call.name.slice("generate_".length) : null;
     if (!key || !TARGETS_BY_KEY[key]) {
       // Unknown/unrecognized tool name -- shouldn't happen since tools
