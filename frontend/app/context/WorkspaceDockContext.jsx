@@ -161,6 +161,18 @@ function makeInitialDockState() {
     // to keep working for a chat-triggered generation that never went
     // through the Picker at all.
     generationNotifications: [],
+    // NEW — Phase 3 step 3.8: "don't repeat the same nudge/pairing
+    // twice in a session." Tracks which `${sourceKey}->${suggestedKey}`
+    // pairs (notebookAffinities.js's NOTEBOOK_AFFINITIES keys/values)
+    // have already been appended as a suggestion message in THIS dock
+    // — i.e. this workspace's currently-open chat session, the same
+    // scope every other per-dock field above already lives at. A plain
+    // array (not a Set) since dock state is a plain object read via
+    // useSyncExternalStore's snapshot equality — matches
+    // generationNotifications/liveSteps' own "array of plain values"
+    // shape rather than introducing a non-serializable field type this
+    // file doesn't otherwise use anywhere in dock state.
+    shownSuggestionPairs: [],
   };
 }
 
@@ -471,10 +483,19 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           // WorkspaceChatPanel.jsx: an ephemeral, client-side thread
           // entry, not a server-recorded chat turn.
           let messagesPatch = {};
+          let shownSuggestionPairsPatch = {};
           if (status === "done" && !wasAlreadyDone && readProactiveSuggestionsEnabled()) {
             const suggestedKey = getSuggestedFollowUp(panelKey);
             const suggestedTarget = suggestedKey ? TARGETS_BY_KEY[suggestedKey] : null;
-            if (suggestedTarget && suggestedTarget.enabled !== false) {
+            // NEW — Phase 3 step 3.8: pairing key mirrors
+            // notebookAffinities.js's own key->value shape, so it reads
+            // the same way as the map itself (`study_flashcards ->
+            // study_quiz`) rather than inventing a second encoding.
+            const pairingKey = suggestedKey ? `${panelKey}->${suggestedKey}` : null;
+            const alreadyShown = pairingKey
+              ? prev.shownSuggestionPairs.includes(pairingKey)
+              : false;
+            if (suggestedTarget && suggestedTarget.enabled !== false && !alreadyShown) {
               messagesPatch = {
                 messages: [
                   ...prev.messages,
@@ -487,10 +508,20 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
                   },
                 ],
               };
+              // Recorded whether or not the person ever acts on it —
+              // same "counts as shown, not as accepted" posture step
+              // 3.8's own wording ("never repeated ... in a session")
+              // asks for, and matches eo/prerequisite_suggestions.py's
+              // _mark_nudged() marking immediately rather than waiting
+              // on an accept/dismiss signal that doesn't exist for
+              // this pairing type either.
+              shownSuggestionPairsPatch = {
+                shownSuggestionPairs: [...prev.shownSuggestionPairs, pairingKey],
+              };
             }
           }
 
-          return { generationNotifications, ...messagesPatch };
+          return { generationNotifications, ...messagesPatch, ...shownSuggestionPairsPatch };
         });
         return;
       }

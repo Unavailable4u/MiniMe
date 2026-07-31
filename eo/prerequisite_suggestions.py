@@ -43,6 +43,53 @@ _PREREQ_RELATION = "prerequisite-of"
 # (e.g. eo/source_index.py:_topic_skeleton()'s own field trim).
 MAX_SUGGESTIONS = 3
 
+# NEW — Notebooks Chat-First refinement, Phase 3 step 3.8: "don't repeat
+# the same nudge/pairing twice in a session." A person can ask several
+# turns' worth of questions that all ground on the same discussed
+# topic — without this, they'd get the exact same "X is a prerequisite
+# of Y" offer re-appended to the thread every single turn, which is the
+# noisy behavior the guide's own open-questions section explicitly
+# warned this feature needs to avoid.
+#
+# Deliberately a small in-process dict keyed by session_id, NOT a
+# panel_content/DB-backed store: same fail-open, "ephemeral bookkeeping,
+# not a source of truth" posture this file already takes for its own
+# reads (see MAX_SUGGESTIONS' framing above and _is_untouched()'s
+# fail-open comment). Worst case on a process restart or a
+# multi-instance deploy is one redundant nudge repeats once — not a
+# correctness issue for anything the person relies on, same as
+# stepSeqs/openStepStacks in WorkspaceDockContext.jsx being plain,
+# non-persisted Maps for their own per-session lifecycle bookkeeping.
+# If this ever needs to survive a restart or be shared across
+# instances, the natural home is a per-session row in panel_content
+# (or a new small eo/*_progress.py-shaped store) — not solved here,
+# same "noted, not solved" posture the file already uses elsewhere.
+#
+# Bounded so a long-lived server process can't leak memory over many
+# sessions: oldest session (by insertion order — plain dict insertion
+# order, Python 3.7+) is evicted once the cap is hit. A generous cap,
+# since each entry is just a small set of (from_id, to_id) string
+# tuples, not anything heavy.
+_MAX_TRACKED_SESSIONS = 500
+_nudged_pairs_by_session: dict = {}  # session_id -> set of (topic_id, for_topic_id)
+
+
+def _already_nudged(session_id: str, from_id: str, to_id: str) -> bool:
+    if not session_id:
+        return False  # no session to key off of — never suppress in that case
+    return (from_id, to_id) in _nudged_pairs_by_session.get(session_id, set())
+
+
+def _mark_nudged(session_id: str, from_id: str, to_id: str) -> None:
+    if not session_id:
+        return
+    if session_id not in _nudged_pairs_by_session:
+        if len(_nudged_pairs_by_session) >= _MAX_TRACKED_SESSIONS:
+            oldest = next(iter(_nudged_pairs_by_session))
+            del _nudged_pairs_by_session[oldest]
+        _nudged_pairs_by_session[session_id] = set()
+    _nudged_pairs_by_session[session_id].add((from_id, to_id))
+
 
 # NEW — Notebooks Chat-First refinement, Phase 3 step 3.5: "add an
 # 'untouched topic' check (no panel content, no notes) before nudging."
@@ -121,7 +168,14 @@ def find_prerequisite_suggestions(
     legitimately feed more than one discussed topic; it's only offered
     once). Step 3.5: also skipped if that prerequisite topic already
     has a generated per-topic workflow, or already has an accepted note
-    folded into its sources — see _is_untouched() above.
+    folded into its sources — see _is_untouched() above. Step 3.8: also
+    skipped if this exact (prerequisite, discussed-topic) pairing was
+    already offered earlier in the same session_id — see
+    _already_nudged()/_mark_nudged() above. Note this means the
+    per-call MAX_SUGGESTIONS cap can return fewer than 3 even when more
+    than 3 untouched prerequisites exist, once some have already been
+    nudged this session — that's intentional; a re-offer doesn't count
+    against a person's "quick glance" budget for genuinely new offers.
 
     Fail-open, same posture api/task_runner.py:_grounded_task_text()
     already takes for its own Secondary Data / Primary Source read: a
@@ -171,6 +225,8 @@ def find_prerequisite_suggestions(
         prereq = topics[from_id]
         if not _is_untouched(from_id, prereq.get("covers"), workflow_topic_ids, note_node_ids):
             continue   # NEW — step 3.5: already worked on, don't nudge
+        if _already_nudged(session_id, from_id, to_id):
+            continue   # NEW — step 3.8: already offered this exact pairing this session
         seen_from.add(from_id)
         suggestions.append({
             "topic_id": from_id,
@@ -180,6 +236,12 @@ def find_prerequisite_suggestions(
             "for_topic_name": (topics.get(to_id) or {}).get("name") or "Untitled topic",
             "source_node_ids": list(prereq.get("covers") or []),
         })
+        # NEW — step 3.8: mark immediately (not after the whole call
+        # succeeds) so a person who never scrolls back up to read this
+        # turn's offer still doesn't get it repeated next turn — the
+        # guide's wording is "never repeated for the same pairing in a
+        # session," not "never repeated until accepted/dismissed."
+        _mark_nudged(session_id, from_id, to_id)
         if len(suggestions) >= MAX_SUGGESTIONS:
             break
 
