@@ -4,6 +4,10 @@ import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
 import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — Data Layer §9d
 import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
+import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
+import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
+
+const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));   // NEW — Phase 3 step 3.2
 
 // Per-tier accent color — gives each response a quick at-a-glance
 // identity in the chat instead of every bubble looking identical. Kept
@@ -24,7 +28,17 @@ function tierStyle(data) {
   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
 }
 
-export default function MessageBubble({ message, onNavigateSubTab }) {
+export default function MessageBubble({ message, onNavigateSubTab, onSendCommand }) {
+  // NEW — Phase 3 step 3.7. Called unconditionally, ahead of every
+  // early-return branch below (role === "generation"/"suggestion"/
+  // "user") — Rules of Hooks: a hook can't be called only on the path
+  // that happens to reach the assistant-bubble render further down.
+  // Only that render actually reads the value (see the
+  // prerequisite_suggestions check below); the other branches just
+  // carry an unused variable, same cost as any other hook call every
+  // component already pays for on every render.
+  const [proactiveSuggestionsEnabled] = useProactiveSuggestions();
+
   // NEW — Notebooks Chat-First refinement, Phase 2 step 2.10. A
   // chat-triggered generation's own inline status card — pushed and
   // then live-updated in place (by runId) as the run progresses, by
@@ -47,6 +61,30 @@ export default function MessageBubble({ message, onNavigateSubTab }) {
           ))}
         </div>
       </div>
+    );
+  }
+
+  // NEW — Phase 3 step 3.2/3.3. The post-generation cross-sell card:
+  // WorkspaceDockContext.jsx's generation_done handling (step 3.1's
+  // notebookAffinities.js lookup) appends one of these right after a
+  // completed run has a defined pairing. Deliberately its own component
+  // rather than folded into PrerequisiteSuggestions below — that one's
+  // suggestions come from the backend (task_runner's prerequisite pass,
+  // one per chat turn, keyed by topic_id) and accept by calling
+  // generateNotebooks() directly for one scoped topic; this one comes
+  // from the client-side affinity map (one per finished panel_key) and
+  // accepts by re-sending an equivalent chat command through
+  // WorkspaceChatPanel.jsx's own send path (step 3.3's onSendCommand —
+  // see that file's dispatchText()), same as PrerequisiteSuggestions'
+  // "offer, never auto-run" shape but without a second execution path.
+  // Card styling below intentionally still matches its sibling's.
+  if (message.role === "suggestion") {
+    return (
+      <AffinitySuggestionCard
+        sourceKey={message.sourceKey}
+        suggestedKey={message.suggestedKey}
+        onSendCommand={onSendCommand}
+      />
     );
   }
 
@@ -79,8 +117,15 @@ export default function MessageBubble({ message, onNavigateSubTab }) {
             _maybe_attach_prerequisite_suggestions()'s own docstring for
             the gating) — every other tier/status is simply undefined
             here, so this check alone is enough, no separate tier check
-            needed on the frontend side. */}
-        {data.result?.prerequisite_suggestions?.length > 0 && (
+            needed on the frontend side.
+            CHANGED — Phase 3 step 3.7: also requires the per-browser
+            opt-out (useProactiveSuggestions.js) to still be on. Checked
+            at render time (not by asking the backend not to attach the
+            data at all) since this is a client-only preference — the
+            backend has no notion of it and doesn't need one, it just
+            always computes the suggestion the same way it always did;
+            this is the one place that decides whether to show it. */}
+        {data.result?.prerequisite_suggestions?.length > 0 && proactiveSuggestionsEnabled && (
           <PrerequisiteSuggestions suggestions={data.result.prerequisite_suggestions} />
         )}
       </div>
@@ -115,6 +160,91 @@ export default function MessageBubble({ message, onNavigateSubTab }) {
 // picker for anything else (flashcards, a mind map, etc.) is still one
 // click away in Notebooks — this card isn't meant to replace it, just to
 // surface the offer where the conversation already is.
+// NEW — Phase 3 step 3.2. One card per notebookAffinities.js pairing
+// (study_flashcards -> study_quiz, study_quiz -> study_guide,
+// clusters -> suggested_notes as of this step — mindmap -> workflow is
+// deferred, see WorkspaceDockContext.jsx's generation_done comment).
+// Local run state only (isRunning/isDone/error/dismissed) — no
+// dock/BranchRow/notebooksGenerateRun wiring — same reasoning as
+// PrerequisiteSuggestions just below: this is a single, scoped,
+// explicitly-accepted action, not a run the Working Panel needs to
+// trace. Calls generateNotebooks() with `null` scope (whole notebook),
+// matching every existing whole-notebook call site
+// (NotebooksGeneratePicker.jsx, NotebooksTab.jsx) — every capability
+// this can currently suggest has scopeAllowed: "whole" in the Phase 1
+// manifest (workflow, the one topic-scoped entry, can't reach this card
+// yet per the `enabled` gate in WorkspaceDockContext.jsx).
+function AffinitySuggestionCard({ sourceKey, suggestedKey, onSendCommand }) {
+  const [dismissed, setDismissed] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const sourceTarget = TARGETS_BY_KEY[sourceKey];
+  const suggestedTarget = TARGETS_BY_KEY[suggestedKey];
+  // Defensive — a manifest sync (notebookCapabilities.js's
+  // syncCapabilitiesFromServer) that drops/renames a key between this
+  // message being appended and being rendered shouldn't crash the
+  // thread, it should just quietly show nothing.
+  if (dismissed || !suggestedTarget) return null;
+
+  // NEW — Phase 3 step 3.3. `onSendCommand` is WorkspaceChatPanel.jsx's
+  // `dispatchText()` — the exact same function handleSubmit calls for
+  // typed input. Sends `Generate <keyword>`, built from the suggested
+  // capability's own first keyword (notebookCapabilities.js's
+  // TARGETS[].keywords, the same array parseFreeText() already matches
+  // against), so this reliably short-circuits through
+  // tryHandleGenerateIntent()'s cheap keyword path before ever reaching
+  // classification — no different, latency- or path-wise, than the
+  // person having typed it themselves. Once sent, the actual run shows
+  // up as its own "generation"-role message (runGenerateTarget()) or,
+  // if CHAT_TOOL_CALLING_ENABLED routes it through classification
+  // instead, whatever tryHandleClassifiedToolCall() renders for that —
+  // this card's own job ends at "sent," it doesn't track the run itself
+  // (that would be the second execution path the guide calls out to
+  // avoid).
+  function accept() {
+    onSendCommand?.(`Generate ${suggestedTarget.keywords[0]}`);
+    setSent(true);
+  }
+
+  const Icon = suggestedTarget.icon || Sparkles;
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[80%] rounded-lg border border-[var(--neutral-800)] bg-black/20 px-2.5 py-2 text-xs space-y-1.5">
+        <div className="flex items-start gap-1.5 text-[var(--neutral-300)]">
+          <Icon size={12} className="mt-0.5 shrink-0 text-amber-400" />
+          <span>
+            Want a <strong>{suggestedTarget.label}</strong> to go with that{" "}
+            {sourceTarget?.label || sourceKey}?
+          </span>
+        </div>
+        {sent ? (
+          <div className="flex items-center gap-1 pl-[18px] text-emerald-400">
+            <CheckCircle2 size={12} /> Sent — check the thread above.
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 pl-[18px]">
+            <button
+              type="button"
+              onClick={accept}
+              className="flex items-center gap-1 rounded px-2 py-1 bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+            >
+              Generate {suggestedTarget.label.toLowerCase()}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDismissed(true)}
+              className="flex items-center gap-1 text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            >
+              <X size={11} /> No thanks
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PrerequisiteSuggestions({ suggestions }) {
   const { generateNotebooks } = useSession();
   const [dismissed, setDismissed] = useState(() => new Set());
