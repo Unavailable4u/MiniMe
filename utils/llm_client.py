@@ -467,20 +467,78 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
 CLASSIFY_INTENT_MODEL = "llama-3.3-70b-versatile"
 CLASSIFY_INTENT_KEY_ENV = "GROQ_API_KEY"  # shared default key, same as most chains above
 
+
+# CHANGED — Phase 2 step 2.4 revisit, surfaced by Phase 5 step 5.8's
+# fuller coverage run (scripts/test_capability_coverage.py). The
+# original prompt's closing line -- "if a request could reasonably map
+# to more than one tool, don't call any of them" -- turned out to be
+# read by the model far more broadly than intended: it started treating
+# *the mere existence of other, differently-shaped tools* as grounds to
+# hedge, not just genuinely open-ended requests. Confirmed misfires
+# (5.8's run, all 3/3 repeats, well-tuned model just refusing to
+# commit): "Quiz me on what I just read." / "Can you test me on this
+# material?" (both -> no call, expected generate_study_quiz), "Give me
+# a summary I can study from." / "I need a written summary to study
+# from." (both -> no call, expected generate_study_guide), "Map out the
+# connections between these topics." (-> no call, expected
+# generate_mindmap, model asked "mind map or clusters?"), "What should
+# I be taking notes on here?" (-> no call, expected
+# generate_suggested_notes), and (new in 5.8) "Give me a video
+# walkthrough of this material." (-> no call, expected
+# generate_video_overview). In every one of these the user named a
+# specific kind of material clearly enough for a human to act on
+# without asking -- the old prompt's "more than one tool could apply"
+# framing was true only in the trivial sense that *some* tool always
+# exists that isn't the right one, not that this request was actually
+# unclear between two candidates.
+#
+# Fix: replace the blanket "hedge if >1 tool could apply" rule with (a)
+# a few concrete examples of confident classification despite wording
+# that doesn't echo the tool's own name, and (b) an explicit statement
+# that other tools merely existing isn't itself a reason to hedge --
+# only genuine open-endedness about *which* material the user wants
+# (e.g. "what should I do next", "help me study this") should trigger a
+# clarifying question instead of a call. The individual tool
+# descriptions (api/server.py's CAPABILITIES_MANIFEST) were tightened
+# alongside this same fix to spell out the confusable-neighbor
+# distinctions this prompt's examples reference (study_guide vs
+# mindmap vs facts, mindmap vs clusters, video_overview's "walkthrough"
+# synonym) -- prompt and descriptions were tuned together against the
+# same 5.8 test cases, not independently.
 CLASSIFY_INTENT_SYSTEM_PROMPT = (
     "You are the assistant for a study workspace app. You have tools "
     "that generate study materials from the sources currently in the "
     "user's workspace.\n\n"
-    "Only call a tool when the user is clearly asking for one of these "
-    "specific study materials to be generated. If the request doesn't "
-    "match any tool -- including requests for things that sound similar "
-    "but aren't offered, small talk, or anything unrelated to the "
-    "workspace -- do NOT call a tool. Just reply normally in plain "
-    "text: say what you can help with instead, or ask a clarifying "
-    "question.\n\n"
-    "Call at most one tool per turn. If a request could reasonably map "
-    "to more than one tool, don't call any of them -- ask the user "
-    "which one they want instead."
+    "Call a tool whenever the user's request clearly names or "
+    "describes one of these materials -- even if their wording doesn't "
+    "echo the tool's own name. For example: 'quiz me', 'test my "
+    "understanding', and 'test me on this material' should all call "
+    "generate_study_quiz; 'a summary I can study from' and 'a written "
+    "summary' should both call generate_study_guide; 'map out how "
+    "these connect' and 'show me how these relate' should call "
+    "generate_mindmap; 'what should I take notes on' should call "
+    "generate_suggested_notes; 'a video walkthrough' or 'an explainer "
+    "video' should call generate_video_overview. The fact that *other*, "
+    "differently-shaped tools also exist is not itself a reason to "
+    "hedge or ask a clarifying question -- only do that when the "
+    "request itself is genuinely open-ended about which kind of "
+    "material the user wants (e.g. 'what should I do next', 'help me "
+    "study this'), not merely because more than one tool happens to be "
+    "available.\n\n"
+    "Watch out for near-misses that sound like a tool but aren't: 'a "
+    "step-by-step study workflow' or 'a good study plan' for a topic "
+    "asks for an ordered sequence of steps, NOT a written summary -- "
+    "don't call generate_study_guide for these, and don't call any "
+    "other tool either, since none of them cover ordered study plans "
+    "yet. Being willing to commit to a clear match (above) doesn't mean "
+    "reaching for the closest-sounding tool when the request is asking "
+    "for something structurally different from anything on offer.\n\n"
+    "If the request doesn't match any tool -- including requests for "
+    "things that sound similar but aren't offered, small talk, or "
+    "anything unrelated to the workspace -- do NOT call a tool. Just "
+    "reply normally in plain text: say what you can help with instead, "
+    "or ask a clarifying question.\n\n"
+    "Call at most one tool per turn."
 )
 
 
