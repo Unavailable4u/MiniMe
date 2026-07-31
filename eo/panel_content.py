@@ -101,6 +101,15 @@ VALID_PANEL_KEYS = {
                 # is NOTES_EXPORTS_DIR-relative (currently
                 # "video_overview_<ws_id>.mp4"), same portability reasoning
                 # as podcast's audio_path.
+    "presentation_rehearsal",  # NEW — Phase 5 step 5.10: api/server.py's
+                # _generate_presentation_rehearsal(), own key rather than
+                # overloading "podcast" — a rehearsal script/audio is
+                # content a user would want kept separate from (not
+                # overwriting) a saved podcast. content is a JSON string —
+                # {"script_text", "audio_path", "mode", "difficulty"} —
+                # audio_path is NOTES_EXPORTS_DIR-relative (currently
+                # "presentation_rehearsal_<ws_id>.mp3"), same portability
+                # reasoning as podcast's own audio_path.
 }
 
 # NEW — bug audit §2 real fix (migration 0001). The subset of
@@ -142,6 +151,12 @@ GENERATED_PANEL_KEYS = {
     "video_overview",  # NEW — Phase 5 step 5.5. Same reasoning as
                 # "podcast" immediately above — notebooks_video_overview()
                 # is source-scoped the same way.
+    "presentation_rehearsal",  # NEW — Phase 5 step 5.10. Same reasoning
+                # as "podcast"/"video_overview" immediately above —
+                # _generate_presentation_rehearsal() reads
+                # scope["source_node_ids"] the same "blank scope = whole
+                # notebook" way, so it's source-scoped exactly like its
+                # two siblings and belongs in this set too.
 }
 
 
