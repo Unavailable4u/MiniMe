@@ -497,6 +497,14 @@ class WorkspaceFactsRequest(BaseModel):
 class PanelContentRequest(BaseModel):
     content: str
 
+class ProgressUpdateRequest(BaseModel):
+    # Manual override body (step 6.5) — mirrors set_progress()'s optional,
+    # independent args: pass only what you're changing. Both are optional
+    # so a caller can e.g. edit notes without touching status.
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
 class CreateEdgeRequest(BaseModel):
     from_node_id: str
     to_node_id: str
@@ -1560,6 +1568,28 @@ def get_workspace_progress(ws_id: str, topic_id: Optional[str] = Query(None),
     # "not_started" by study_progress.get_progress() itself if the topic
     # has never been written.
     return study_progress.get_progress(ws_id, topic_id)
+
+
+@app.put("/api/workspaces/{ws_id}/progress", dependencies=[Depends(require_auth)])
+def put_workspace_progress(ws_id: str, topic_id: str, req: ProgressUpdateRequest,
+                            owner_id: str = Depends(require_auth)):
+    """Manual override (step 6.5) — a person correcting the board directly,
+    distinct from the automatic hooks (steps 6.6/6.7) that call
+    set_progress() off workflow/quiz events. topic_id is a query param
+    (not part of the body) since PUT targets one topic's record within
+    the workspace-scoped path, matching the GET route's query-param
+    topic_id above rather than nesting it into the path itself.
+    """
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    try:
+        return study_progress.set_progress(
+            ws_id, topic_id, status=req.status, notes=req.notes
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # --- content audit: PageSpeed Insights (see agents/pagespeed_agent.py) --
 # Live-fetched, not persisted — same "fetch fresh on load/refresh, no
@@ -2859,6 +2889,27 @@ def topic_workflow_endpoint(ws_id: str, req: TopicWorkflowRequest, owner_id: str
         # won't survive a refresh this one time. Same "never let this
         # be the reason a topic click errors" posture build_topic_workflow()
         # already takes internally.
+        pass
+
+    # NEW — step 6.6: first-generation-only progress hook (see
+    # eo/study_progress.py). Kept here at the caller rather than inside
+    # build_topic_workflow() itself, same reasoning as the
+    # topic_workflows persistence block above -- that function stays a
+    # pure "compute a workflow" helper with no storage side effects.
+    # Keyed by topic_key (never None) rather than topic_id (None on a
+    # generic-fallback miss), matching how the persistence block above
+    # keys "topic_workflows" too.
+    # Only bumps not_started -> ongoing: a topic a user has already
+    # marked "done" (or that's already "ongoing") shouldn't regress
+    # just because they re-click/regenerate its workflow later.
+    try:
+        current = study_progress.get_progress(ws_id, workflow["topic_key"])
+        if current["status"] == study_progress.STATUS_NOT_STARTED:
+            study_progress.set_progress(ws_id, workflow["topic_key"],
+                                         status=study_progress.STATUS_ONGOING)
+    except Exception:
+        # Best-effort, same "never let this be the reason a topic
+        # click errors" posture as the persistence block above.
         pass
 
     return workflow
