@@ -84,6 +84,23 @@ VALID_PANEL_KEYS = {
                          # keeps this allowlist and invalidate_for_nodes()'s
                          # fixed-list query untouched. See api/server.py's
                          # topic_workflow_endpoint for the get-merge-set.
+    "podcast",  # NEW — Phase 5 step 5.4: api/server.py's notebooks_podcast()
+                # used to hand back script_text + an on-disk mp3 with nothing
+                # saved, so a reload lost both. content is a JSON string —
+                # {"script_text", "audio_path"} — same encode-on-write/
+                # decode-on-read shape as suggested_workflows above.
+                # audio_path is NOTES_EXPORTS_DIR-relative (currently just
+                # "podcast_<ws_id>.mp3"), not an absolute filesystem path,
+                # so this row stays portable if NOTES_EXPORTS_DIR ever moves —
+                # no GET route serves the file back yet (that's step 5.6+
+                # alongside the manifest/dispatch registration).
+    "video_overview",  # NEW — Phase 5 step 5.5: api/server.py's
+                # notebooks_video_overview(), same shape as "podcast" above
+                # one step up the chain. content is a JSON string —
+                # {"slide_text", "script_text", "video_path"} — video_path
+                # is NOTES_EXPORTS_DIR-relative (currently
+                # "video_overview_<ws_id>.mp4"), same portability reasoning
+                # as podcast's audio_path.
 }
 
 # NEW — bug audit §2 real fix (migration 0001). The subset of
@@ -115,6 +132,16 @@ GENERATED_PANEL_KEYS = {
                          # second column — same tradeoff the NULL-scope
                          # case for mindmap/suggested_workflows already
                          # accepts for a whole-notebook Regenerate.
+    "podcast",  # NEW — Phase 5 step 5.4. notebooks_podcast() reads
+                # scope["source_node_ids"] the same "blank scope = whole
+                # notebook" way every other Generate target does, so it's
+                # source-scoped exactly like suggested_workflows and
+                # belongs in this set too — deleting a source that fed a
+                # saved podcast script should invalidate it, same as any
+                # other generated panel.
+    "video_overview",  # NEW — Phase 5 step 5.5. Same reasoning as
+                # "podcast" immediately above — notebooks_video_overview()
+                # is source-scoped the same way.
 }
 
 
