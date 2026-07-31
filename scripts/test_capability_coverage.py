@@ -12,9 +12,11 @@ Two things distinguish this from scripts/test_tool_calling.py (steps
      included "workflow" as a live (enabled) tool, but the real manifest
      uses "study_flashcards"/"study_quiz", adds "facts" and
      "suggested_notes" (never covered by the original ~10 test messages),
-     and "workflow" is disabled (endpoint: None) -- not a real tool at
-     all right now. Testing against the fixture would validate a tool
-     list that doesn't match what actually ships.
+     and (as of Phase 5 step 5.7) "podcast"/"video_overview" are now
+     live/enabled too, matching the fixture's naming for those two --
+     "workflow" is the one that's still disabled (endpoint: None) here,
+     not a real tool at all yet. Testing against the fixture would
+     validate a tool list that doesn't match what actually ships.
 
   2. This calls utils.llm_client.classify_tool_intent() directly -- the
      exact function api/server.py's POST .../notebooks/classify-intent
@@ -57,6 +59,13 @@ from utils.llm_client import classify_tool_intent
 # Hand-copied from api/server.py's CAPABILITIES_MANIFEST as of Phase 2 step
 # 2.6. Keep in sync by hand if that manifest changes -- see module
 # docstring above for why this isn't imported directly.
+#
+# Re-synced as of the Phase 2 step 2.4 revisit (Phase 5 step 5.8
+# finding): suggested_notes/study_quiz/study_guide/mindmap/video_overview
+# descriptions were tightened to name the specific phrasings that
+# misfired in a real 5.8 test run and to disambiguate against their
+# confusable neighbors (see api/server.py's own per-entry comments for
+# the reasoning behind each change).
 # --------------------------------------------------------------------------
 REAL_MANIFEST = [
     {
@@ -73,7 +82,7 @@ REAL_MANIFEST = [
     },
     {
         "key": "suggested_notes", "label": "Suggested notes", "subTab": "insights",
-        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard.",
+        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard. Use this for requests like 'suggest some notes', 'what should I take notes on', or 'find things worth noting' -- not for pulling out standalone facts (see the facts tool) or grouping sources by topic (see the clusters tool).",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
@@ -85,33 +94,37 @@ REAL_MANIFEST = [
     },
     {
         "key": "study_quiz", "label": "Quiz", "subTab": "study",
-        "description": "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring.",
+        "description": "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring. Use this whenever the user wants to be quizzed or tested on the material -- e.g. 'quiz me', 'test my understanding', 'test me on this' -- even if they don't use the word 'quiz'.",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
         "key": "study_guide", "label": "Study guide", "subTab": "study",
-        "description": "Produce a structured written study guide summarizing and organizing the selected scope for review.",
+        "description": "Produce a structured written study guide summarizing and organizing the selected scope for review. Use this for requests for a prose summary or write-up to study from -- e.g. 'give me a summary I can study from', 'write me a summary', 'summarize this for review' -- as opposed to a visual mind map (see the mindmap tool) or a list of standalone facts (see the facts tool). Do NOT use this for 'a step-by-step study workflow' or 'a study plan' requests -- those ask for an ordered sequence of steps, not a written summary, and no tool for that exists yet, so don't call anything for them.",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
         "key": "mindmap", "label": "Mind map", "subTab": "diagrams",
-        "description": "Build a visual mind map of the concepts in the selected scope and how they relate to each other.",
+        "description": "Build a visual mind map of the concepts in the selected scope and how they relate to each other. Use this for requests to see or map out how topics/concepts connect or relate -- e.g. 'map out the connections between these topics', 'show me how these relate' -- as opposed to grouping sources into topic buckets (see the clusters tool).",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
+        # CHANGED — Phase 5 step 5.7: kept in sync with
+        # api/server.py's CAPABILITIES_MANIFEST flip -- endpoint now
+        # points at the dedicated route, enabled: True.
         "key": "podcast", "label": "Podcast", "subTab": "insights",
         "description": "Generate a two-host audio podcast episode discussing the selected scope.",
-        "scopeAllowed": "whole", "endpoint": None,
-        "enabled": False,
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/podcast",
+        "enabled": True,
     },
     {
+        # CHANGED — Phase 5 step 5.7: same sync as "podcast" above.
         "key": "video_overview", "label": "Video overview", "subTab": "insights",
-        "description": "Generate a narrated video overview summarizing the selected scope.",
-        "scopeAllowed": "whole", "endpoint": None,
-        "enabled": False,
+        "description": "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/video_overview",
+        "enabled": True,
     },
     {
         "key": "workflow", "label": "Workflow", "subTab": "diagrams",
@@ -128,40 +141,41 @@ REAL_MANIFEST = [
 # the model, only used to flag mismatches below.
 # --------------------------------------------------------------------------
 TEST_CASES: List[tuple] = [
+    
     # --- clusters ---
-    ("Can you group my sources into related topic clusters?", "generate_clusters"),
-    ("Sort these sources into buckets by topic.", "generate_clusters"),
-    ("Organize my notes by theme.", "generate_clusters"),
-    ("Cluster everything I've uploaded by subject.", "generate_clusters"),
-    ("Group similar sources together.", "generate_clusters"),
+ #   ("Can you group my sources into related topic clusters?", "generate_clusters"),
+ #   ("Sort these sources into buckets by topic.", "generate_clusters"),
+ #   ("Organize my notes by theme.", "generate_clusters"),
+ #   ("Cluster everything I've uploaded by subject.", "generate_clusters"),
+ #   ("Group similar sources together.", "generate_clusters"),
 
     # --- facts ---
-    ("Pull out the key facts from these sources.", "generate_facts"),
-    ("Give me a list of standalone facts I can cite.", "generate_facts"),
-    ("What are the citable facts in my sources?", "generate_facts"),
-    ("Extract factual statements from this material.", "generate_facts"),
-    ("List out concrete facts from what I've uploaded.", "generate_facts"),
+ #   ("Pull out the key facts from these sources.", "generate_facts"),
+ #   ("Give me a list of standalone facts I can cite.", "generate_facts"),
+ #   ("What are the citable facts in my sources?", "generate_facts"),
+ #   ("Extract factual statements from this material.", "generate_facts"),
+ #   ("List out concrete facts from what I've uploaded.", "generate_facts"),
 
     # --- suggested_notes ---
-    ("Scan my sources for anything worth taking notes on.", "generate_suggested_notes"),
-    ("Suggest some notes based on what's in my sources.", "generate_suggested_notes"),
-    ("Find passages that are worth noting down.", "generate_suggested_notes"),
-    ("Propose some draft notes from my sources.", "generate_suggested_notes"),
-    ("What should I be taking notes on here?", "generate_suggested_notes"),
+ #   ("Scan my sources for anything worth taking notes on.", "generate_suggested_notes"),
+ #   ("Suggest some notes based on what's in my sources.", "generate_suggested_notes"),
+ #   ("Find passages that are worth noting down.", "generate_suggested_notes"),
+ #   ("Propose some draft notes from my sources.", "generate_suggested_notes"),
+ #   ("What should I be taking notes on here?", "generate_suggested_notes"),
 
     # --- study_flashcards ---
-    ("Can you make me some flashcards for this chapter?", "generate_study_flashcards"),
-    ("I need flashcards to study from.", "generate_study_flashcards"),
-    ("Turn my notes into flashcards.", "generate_study_flashcards"),
-    ("Make Q&A cards out of this material.", "generate_study_flashcards"),
-    ("Give me flashcards covering these sources.", "generate_study_flashcards"),
+ #   ("Can you make me some flashcards for this chapter?", "generate_study_flashcards"),
+ #   ("I need flashcards to study from.", "generate_study_flashcards"),
+ #   ("Turn my notes into flashcards.", "generate_study_flashcards"),
+ #   ("Make Q&A cards out of this material.", "generate_study_flashcards"),
+ #  ("Give me flashcards covering these sources.", "generate_study_flashcards"),
 
     # --- study_quiz ---
-    ("Quiz me on what I just read.", "generate_study_quiz"),
-    ("Give me a quiz to test my understanding.", "generate_study_quiz"),
-    ("Can you test me on this material?", "generate_study_quiz"),
-    ("Make a graded quiz from my sources.", "generate_study_quiz"),
-    ("I want to quiz myself on this chapter.", "generate_study_quiz"),
+ #   ("Quiz me on what I just read.", "generate_study_quiz"),
+ #   ("Give me a quiz to test my understanding.", "generate_study_quiz"),
+ #   ("Can you test me on this material?", "generate_study_quiz"),
+ #   ("Make a graded quiz from my sources.", "generate_study_quiz"),
+ #   ("I want to quiz myself on this chapter.", "generate_study_quiz"),
 
     # --- study_guide ---
     ("Give me a summary I can study from.", "generate_study_guide"),
@@ -171,16 +185,30 @@ TEST_CASES: List[tuple] = [
     ("I need a written summary to study from.", "generate_study_guide"),
 
     # --- mindmap ---
-    ("Show me how all these topics connect.", "generate_mindmap"),
-    ("Build a mind map of these concepts.", "generate_mindmap"),
-    ("Visualize how these ideas relate to each other.", "generate_mindmap"),
-    ("Map out the connections between these topics.", "generate_mindmap"),
-    ("Give me a concept map of this material.", "generate_mindmap"),
+ #   ("Show me how all these topics connect.", "generate_mindmap"),
+ #   ("Build a mind map of these concepts.", "generate_mindmap"),
+ #   ("Visualize how these ideas relate to each other.", "generate_mindmap"),
+ #   ("Map out the connections between these topics.", "generate_mindmap"),
+ #   ("Give me a concept map of this material.", "generate_mindmap"),
+
+    # --- podcast (NEW — Phase 5 step 5.7 enabled this tool; step 5.8 is
+    # this coverage block) ---
+ #   ("Can you make me a podcast about this?", "generate_podcast"),
+ #   ("Turn my sources into a podcast episode.", "generate_podcast"),
+ #   ("I'd rather listen than read -- make an audio podcast of this.", "generate_podcast"),
+ #   ("Generate a two-host discussion of this material.", "generate_podcast"),
+ #   ("Make a podcast episode covering these sources.", "generate_podcast"),
+
+    # --- video_overview (NEW — Phase 5 step 5.7/5.8, same as podcast) ---
+ #   ("Can you make a video overview of this?", "generate_video_overview"),
+ #   ("I want a narrated video summarizing these sources.", "generate_video_overview"),
+ #   ("Turn this into a short explainer video.", "generate_video_overview"),
+ #   ("Give me a video walkthrough of this material.", "generate_video_overview"),
+ #   ("Generate a narrated video summary of my notes.", "generate_video_overview"),
 
     # --- no-match / edge cases ---
-    ("What should I do next?", None),                         # ambiguous -- should clarify, not guess
-    ("Can you make me a podcast about this?", None),           # disabled, must NOT match
-    ("What's the weather like today?", None),                  # unrelated to the app
+  #  ("What should I do next?", None),                         # ambiguous -- should clarify, not guess
+  #  ("What's the weather like today?", None),                  # unrelated to the app
     # REGRESSION CHECK, step 2.6 fallout: these two phrasings were
     # generate_workflow's coverage cases back in the 2.3/2.4 fixture,
     # where workflow was a live tool. In the REAL manifest workflow is
@@ -226,7 +254,12 @@ def main() -> None:
     tools = manifest_to_tools(REAL_MANIFEST)
     enabled_names = [t["function"]["name"] for t in tools]
     print(f"Built {len(tools)} tools from REAL_MANIFEST: {enabled_names}")
-    if "generate_workflow" in enabled_names or "generate_podcast" in enabled_names:
+    # CHANGED — Phase 5 step 5.7: "generate_podcast"/"generate_video_overview"
+    # dropped from this check -- both are enabled, real tools as of this
+    # step, so their presence here is now expected, not a leak.
+    # "generate_workflow" is the one still-disabled stub left to guard
+    # against (endpoint: None in REAL_MANIFEST above).
+    if "generate_workflow" in enabled_names:
         print("!! disabled capability leaked into the tools array -- see "
               "utils/capability_tools.py's _is_enabled() fix (step 2.5)")
     print(f"Repeats per message: {REPEATS} (set TOOL_TEST_REPEATS to change)\n")

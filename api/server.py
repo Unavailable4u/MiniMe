@@ -2227,8 +2227,15 @@ CAPABILITIES_MANIFEST = [
         "enabled": True,
     },
     {
+        # CHANGED — Phase 2 step 2.4 revisit (5.8 finding): description
+        # now names the actual phrasing that misfired in 5.8's coverage
+        # run ("What should I be taking notes on here?" -> no tool call,
+        # 3/3) and calls out the facts/clusters neighbors it gets
+        # confused with, so the model has enough to commit instead of
+        # hedging. See utils/llm_client.py's CLASSIFY_INTENT_SYSTEM_PROMPT
+        # comment for the paired prompt-level fix.
         "key": "suggested_notes", "label": "Suggested notes", "subTab": "insights",
-        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard.",
+        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard. Use this for requests like 'suggest some notes', 'what should I take notes on', or 'find things worth noting' -- not for pulling out standalone facts (see the facts tool) or grouping sources by topic (see the clusters tool).",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
@@ -2239,34 +2246,85 @@ CAPABILITIES_MANIFEST = [
         "enabled": True,
     },
     {
+        # CHANGED — Phase 2 step 2.4 revisit (5.8 finding): "Quiz me on
+        # what I just read." and "Can you test me on this material?"
+        # both misfired to no-tool-call 3/3 in 5.8's run -- neither says
+        # "quiz" but both are unambiguous requests to be tested.
         "key": "study_quiz", "label": "Quiz", "subTab": "study",
-        "description": "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring.",
+        "description": "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring. Use this whenever the user wants to be quizzed or tested on the material -- e.g. 'quiz me', 'test my understanding', 'test me on this' -- even if they don't use the word 'quiz'.",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
+        # CHANGED — Phase 2 step 2.4 revisit (5.8 finding): "Give me a
+        # summary I can study from." and "I need a written summary to
+        # study from." both misfired to no-tool-call 3/3, with the model
+        # asking whether they meant a study guide, a mind map, or
+        # flashcards -- "summary" alone reads as ambiguous across those.
+        # Naming the phrasing directly and contrasting against mindmap/
+        # facts resolves it.
+        # CHANGED — regression from the first tuning pass (spotted in
+        # the follow-up test run): broadening this description to cover
+        # "a summary I can study from" made it also swallow "step-by-
+        # step study workflow"/"study plan" requests, which must stay
+        # no-tool-call (no workflow-planning tool is live yet -- see
+        # this same regression already called out in
+        # scripts/test_capability_coverage.py's TEST_CASES comment).
+        # Added an explicit negative example rather than narrowing the
+        # positive examples back down, since those still need to work.
         "key": "study_guide", "label": "Study guide", "subTab": "study",
-        "description": "Produce a structured written study guide summarizing and organizing the selected scope for review.",
+        "description": "Produce a structured written study guide summarizing and organizing the selected scope for review. Use this for requests for a prose summary or write-up to study from -- e.g. 'give me a summary I can study from', 'write me a summary', 'summarize this for review' -- as opposed to a visual mind map (see the mindmap tool) or a list of standalone facts (see the facts tool). Do NOT use this for 'a step-by-step study workflow' or 'a study plan' requests -- those ask for an ordered sequence of steps, not a written summary, and no tool for that exists yet, so don't call anything for them.",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
+        # CHANGED — Phase 2 step 2.4 revisit (5.8 finding): "Map out the
+        # connections between these topics." misfired to no-tool-call
+        # 3/3, with the model asking "mind map or clusters?" -- the old
+        # description's "how they relate to each other" didn't clearly
+        # separate this from clusters' "grouped together." Spelled out
+        # the relate-vs-group distinction directly.
         "key": "mindmap", "label": "Mind map", "subTab": "diagrams",
-        "description": "Build a visual mind map of the concepts in the selected scope and how they relate to each other.",
+        "description": "Build a visual mind map of the concepts in the selected scope and how they relate to each other. Use this for requests to see or map out how topics/concepts connect or relate -- e.g. 'map out the connections between these topics', 'show me how these relate' -- as opposed to grouping sources into topic buckets (see the clusters tool).",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
+        # CHANGED — Phase 5 step 5.7: endpoint/enabled flipped from the
+        # Phase 1.5 stub (endpoint: None, enabled: False) now that steps
+        # 5.1-5.4 gave this a real, workspace-scoped route and step 5.6
+        # registered it in NOTEBOOKS_GENERATE_TARGETS. Points at the
+        # dedicated POST .../notebooks/podcast route (not the shared
+        # .../notebooks/generate dispatch route every other entry above
+        # uses) since that's the more specific, real endpoint behind this
+        # key -- see notebooks_podcast()'s own step 5.6 comment for why
+        # both remain reachable. `endpoint` is documentation only today
+        # (nothing reads it for routing -- generateNotebooks() always
+        # calls .../notebooks/generate regardless of this string), so
+        # this doesn't change any runtime dispatch, only what a future
+        # help menu / the LLM's tool metadata would report. `enabled:
+        # True` is what actually matters -- utils/capability_tools.py's
+        # manifest_to_tools() only skips entries where `enabled` is
+        # False, so this is what makes "generate_podcast" appear in
+        # Phase 2's tools array for the first time.
         "key": "podcast", "label": "Podcast", "subTab": "insights",
         "description": "Generate a two-host audio podcast episode discussing the selected scope.",
-        "scopeAllowed": "whole", "endpoint": None,
-        "enabled": False,
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/podcast",
+        "enabled": True,
     },
     {
+        # CHANGED — Phase 5 step 5.7: same flip as "podcast" above, now
+        # that step 5.5 gave video_overview a real route and step 5.6
+        # registered it in NOTEBOOKS_GENERATE_TARGETS.
+        # CHANGED — Phase 5 step 5.8 finding: "Give me a video
+        # walkthrough of this material." misfired to no-tool-call 3/3 --
+        # the model correctly recognized "video overview" was the
+        # closest tool but hedged because "walkthrough" wasn't in the
+        # description. Added it (and "explainer") as explicit synonyms.
         "key": "video_overview", "label": "Video overview", "subTab": "insights",
-        "description": "Generate a narrated video overview summarizing the selected scope.",
-        "scopeAllowed": "whole", "endpoint": None,
-        "enabled": False,
+        "description": "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'.",
+        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/video_overview",
+        "enabled": True,
     },
     {
         "key": "workflow", "label": "Workflow", "subTab": "diagrams",

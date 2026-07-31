@@ -69,13 +69,45 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 export const TARGETS = [
   { key: "clusters", label: "Clusters", icon: Layers, subTab: "insights", keywords: ["cluster", "clusters", "group notes", "organize notes"], description: "Group the workspace's notes and sources into topic clusters, so related material is organized together instead of a flat list.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
   { key: "facts", label: "Facts", icon: BookMarked, subTab: "insights", keywords: ["fact", "facts"], description: "Pull out standalone factual statements from the sources and list them as discrete, citable facts.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
-  { key: "suggested_notes", label: "Suggested notes", icon: Sparkles, subTab: "insights", keywords: ["suggested note", "suggest notes", "scan for notes", "note suggestions", "note candidates"], description: "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
+  // CHANGED — Phase 2 step 2.4 revisit (Phase 5 step 5.8 finding): the
+  // keyword arrays below for suggested_notes/study_quiz/study_guide/
+  // mindmap got a few phrases added, each one lifted directly from a
+  // TEST_CASES phrasing in scripts/test_capability_coverage.py that
+  // misfired to no-tool-call 3/3 in the 5.8 run. tryHandleGenerateIntent()
+  // (WorkspaceChatPanel.jsx) checks this synchronous keyword match
+  // BEFORE the LLM classifier ever runs, so these catch the exact
+  // failing phrasings for free, with zero added latency -- the paired
+  // description/prompt fixes (api/server.py's CAPABILITIES_MANIFEST,
+  // utils/llm_client.py's CLASSIFY_INTENT_SYSTEM_PROMPT) are what cover
+  // rephrasings of the same intent this fast path doesn't happen to
+  // match verbatim. Kept deliberately as specific multi-word phrases
+  // (not single generic words like "summary" or "test") to avoid
+  // false-positiving on unrelated messages that happen to contain one
+  // of those words -- same "specific phrase, not a bare keyword"
+  // pattern the pre-existing entries below already use.
+  { key: "suggested_notes", label: "Suggested notes", icon: Sparkles, subTab: "insights", keywords: ["suggested note", "suggest notes", "scan for notes", "note suggestions", "note candidates", "worth taking notes", "take notes on"], description: "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard. Use this for requests like 'suggest some notes', 'what should I take notes on', or 'find things worth noting' -- not for pulling out standalone facts (see the facts tool) or grouping sources by topic (see the clusters tool).", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
   { key: "study_flashcards", label: "Flashcards", icon: GraduationCap, subTab: "study", keywords: ["flashcard", "flash card"], description: "Generate a set of question/answer flashcards for studying the selected scope.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
-  { key: "study_quiz", label: "Quiz", icon: GraduationCap, subTab: "study", keywords: ["quiz"], description: "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
-  { key: "study_guide", label: "Study guide", icon: GraduationCap, subTab: "study", keywords: ["study guide"], description: "Produce a structured written study guide summarizing and organizing the selected scope for review.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
-  { key: "mindmap", label: "Mind map", icon: Network, subTab: "diagrams", keywords: ["mind map", "mindmap", "concept map"], description: "Build a visual mind map of the concepts in the selected scope and how they relate to each other.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
-  { key: "podcast", label: "Podcast", icon: Mic, subTab: "insights", keywords: ["podcast"], description: "Generate a two-host audio podcast episode discussing the selected scope.", scopeAllowed: "whole", endpoint: null, enabled: false },
-  { key: "video_overview", label: "Video overview", icon: Video, subTab: "insights", keywords: ["video overview", "video summary"], description: "Generate a narrated video overview summarizing the selected scope.", scopeAllowed: "whole", endpoint: null, enabled: false },
+  { key: "study_quiz", label: "Quiz", icon: GraduationCap, subTab: "study", keywords: ["quiz", "quiz me", "test me on this", "test my understanding"], description: "Generate a graded quiz covering the selected scope, which the user can take and submit for scoring. Use this whenever the user wants to be quizzed or tested on the material -- e.g. 'quiz me', 'test my understanding', 'test me on this' -- even if they don't use the word 'quiz'.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
+  { key: "study_guide", label: "Study guide", icon: GraduationCap, subTab: "study", keywords: ["study guide", "summary i can study", "written summary to study"], description: "Produce a structured written study guide summarizing and organizing the selected scope for review. Use this for requests for a prose summary or write-up to study from -- e.g. 'give me a summary I can study from', 'write me a summary', 'summarize this for review' -- as opposed to a visual mind map (see the mindmap tool) or a list of standalone facts (see the facts tool). Do NOT use this for 'a step-by-step study workflow' or 'a study plan' requests -- those ask for an ordered sequence of steps, not a written summary, and no tool for that exists yet, so don't call anything for them.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
+  { key: "mindmap", label: "Mind map", icon: Network, subTab: "diagrams", keywords: ["mind map", "mindmap", "concept map", "map out the connections", "how these relate", "how these topics connect"], description: "Build a visual mind map of the concepts in the selected scope and how they relate to each other. Use this for requests to see or map out how topics/concepts connect or relate -- e.g. 'map out the connections between these topics', 'show me how these relate' -- as opposed to grouping sources into topic buckets (see the clusters tool).", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate" },
+  // CHANGED — Phase 5 step 5.7: endpoint/enabled flipped from the Phase
+  // 1.5 stub (endpoint: null, enabled: false) now that api/server.py's
+  // CAPABILITIES_MANIFEST flips the same way in this step's companion
+  // change. These are just the *initial* local defaults per this file's
+  // step 1.7 comment above — syncCapabilitiesFromServer() overwrites
+  // `endpoint`/`enabled` (and every other SERVER_OWNED_FIELDS entry)
+  // with whatever GET /api/capabilities actually returns the moment it
+  // resolves, so keeping these two literally in sync with the server
+  // isn't load-bearing — but leaving them stale here (still `false`)
+  // would mean anything that reads TARGETS before that fetch resolves
+  // (e.g. first paint) sees the old, wrong disabled state for a beat
+  // longer than it needs to.
+  { key: "podcast", label: "Podcast", icon: Mic, subTab: "insights", keywords: ["podcast"], description: "Generate a two-host audio podcast episode discussing the selected scope.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/podcast", enabled: true },
+  // CHANGED — Phase 5 step 5.8 finding: "Give me a video walkthrough of
+  // this material." misfired to no-tool-call 3/3 -- "walkthrough"/
+  // "explainer" added as keyword + description synonyms, same fix
+  // pattern as the block above.
+  { key: "video_overview", label: "Video overview", icon: Video, subTab: "insights", keywords: ["video overview", "video summary", "video walkthrough", "explainer video"], description: "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/video_overview", enabled: true },
   { key: "workflow", label: "Workflow", icon: ListChecks, subTab: "diagrams", keywords: ["workflow", "study plan", "learning path"], description: "Build a step-by-step study workflow for a single topic.", scopeAllowed: "topic", endpoint: null, enabled: false },
   // REMOVED — chat audit: "Backlinks" used to trigger agents/concept_linker.py's
   // link_concepts() by hand here, but the Library tab's BacklinksView no
