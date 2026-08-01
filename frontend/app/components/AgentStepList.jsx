@@ -52,6 +52,40 @@ function roleColor(role) {
   return ROLE_COLORS[hash % ROLE_COLORS.length];
 }
 
+// NEW — Phase 8 step 8.2. Mirrors eo/structure.py's PATH_TO_TIER exactly
+// (kept as a literal copy, not derived from anything at build time --
+// this file has no route into the Python source, same tradeoff every
+// other frontend constant that shadows a backend enum already makes,
+// e.g. notebookCapabilities.js's `key` strings matching
+// CAPABILITIES_MANIFEST by hand). `step.path` is constant for every
+// step in one run (see SessionContext.jsx's step-8.2 comment on
+// `agent_start` for why it's stored per-step anyway), so this is really
+// a run-level badge repeated per row -- intentional, per the plan's own
+// "tier per step" framing: the reader shouldn't have to scroll up to
+// the routing card to know what tier the step they're looking at ran
+// under, even though every step in view shares the same answer.
+const TIER_LABELS = {
+  instant: "Tier 0 · instant",
+  direct: "Tier 1 · direct",
+  fixed: "Tier 2 · fixed",
+  adaptive: "Tier 3 · adaptive",
+};
+
+// NEW — Phase 8 step 8.4. The exact three reason codes
+// eo/dispatcher.py's next_step() ever returns (confirmed by reading
+// that function directly, not guessed) -- "plan" (the ordinary next
+// role in the staffed sequence), "recheck" (routed back to an earlier
+// role that already ran), "escalate" (a role asked for a NEW role not
+// in the original plan, spliced in on the fly). A fourth internal value,
+// "requested" (agents/*'s MissingDependencyError self-heal path), never
+// reaches dispatch_event -- it's its own event type
+// (agent_requested_role), not something this map needs to cover.
+const REASON_LABELS = {
+  plan: "next step",
+  recheck: "sent back to recheck",
+  escalate: "escalated to",
+};
+
 function StepRow({ step, onResume }) {
   // Part 2 §2.4/§2.7: a step paused for human approval auto-opens (the
   // whole point is to show the output for review, not make the user
@@ -59,7 +93,9 @@ function StepRow({ step, onResume }) {
   // showing regardless of the collapsible toggle below.
   const isPaused = step.status === "awaiting_approval";
   const [open, setOpen] = useState(isPaused);
-  const hasBody = Boolean(step.text || step.summary || step.image);
+  const hasGiven = Boolean(step.givenRoles?.length);
+  const hasCalledOutTo = Boolean(step.calledOutTo?.destination);
+  const hasBody = Boolean(step.text || step.summary || step.image || hasGiven || hasCalledOutTo);
   const wasTruncated = !step.text && step.summary && TRUNCATED_SUFFIX.test(step.summary);
   const color = step.status === "error" ? "text-red-400" : roleColor(step.role);
   const category = categorize(step.role);
@@ -87,6 +123,16 @@ function StepRow({ step, onResume }) {
           {hasBody && <span className="text-[var(--neutral-600)]">{open ? "▾" : "▸"}</span>}
           <span style={{ color: category.color }} aria-hidden="true">{category.icon}</span>
           {step.role}
+          {/* NEW — Phase 8 step 8.2: undefined for any step captured
+              before this patch (persisted snapshots have no `path` on
+              them yet) -- TIER_LABELS[undefined] is undefined, so this
+              silently renders nothing for old data instead of "Tier
+              undefined". */}
+          {TIER_LABELS[step.path] && (
+            <span className="font-normal text-[10px] text-[var(--neutral-600)]">
+              {TIER_LABELS[step.path]}
+            </span>
+          )}
         </span>
         <span className={step.status === "running" ? "animate-pulse text-[var(--neutral-500)]" : isPaused ? "text-amber-500" : "text-[var(--neutral-500)]"}>
           {isPaused ? "awaiting approval" : step.status}
@@ -95,6 +141,21 @@ function StepRow({ step, onResume }) {
       </button>
       {open && hasBody && (
         <div className="border-t border-[var(--neutral-800)] px-3 py-2">
+          {/* NEW — Phase 8 step 8.3: "what it was given" — the roles
+              already staffed/finished before this one started, i.e.
+              what this step had on the memory bus to draw on. Rendered
+              ahead of the step's own output, not mixed into it, since
+              it describes the INPUT side of the step rather than being
+              part of the result. Only ever empty for the very first
+              step of a run (nothing ran before it yet) or an
+              instant/direct-path entrypoint that never had a
+              role_names[:idx] to report — hasGiven already gates this
+              out for those, no empty "Given:" line renders. */}
+          {hasGiven && (
+            <p className="text-[var(--neutral-500)] mb-2">
+              Given: {step.givenRoles.join(", ")}
+            </p>
+          )}
           {step.status === "error" ? (
             <div className="text-red-400 whitespace-pre-wrap">{step.summary}</div>
           ) : (
@@ -112,12 +173,27 @@ function StepRow({ step, onResume }) {
                 />
               )}
               <div className="max-h-64 overflow-y-auto">
-                <Markdown>{step.text || step.summary}</Markdown>
+                {(step.text || step.summary) && <Markdown>{step.text || step.summary}</Markdown>}
               </div>
               {wasTruncated && (
                 <p className="mt-1 text-[var(--neutral-600)] text-xs">
                   This output was too long to stream in full and was
                   truncated.
+                </p>
+              )}
+              {/* NEW — Phase 8 step 8.4: "called out to" — what this
+                  step's completion chained to next, and why. Placed
+                  after the step's own output rather than up with
+                  "Given:" above, since this describes what happens
+                  AFTER the step, not what it started with. Absent for
+                  a run's last step (eo/dispatcher.py's _log_route()
+                  never fires when destination is None) and for any
+                  error step (the executor loop re-raises instead of
+                  calling next_step() on an exception) -- both expected,
+                  not missing data. */}
+              {hasCalledOutTo && (
+                <p className="mt-1 text-[var(--neutral-500)]">
+                  → {REASON_LABELS[step.calledOutTo.reason] || "routed to"} <span className="font-medium">{step.calledOutTo.destination}</span>
                 </p>
               )}
             </>

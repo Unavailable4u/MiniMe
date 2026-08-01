@@ -230,8 +230,13 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     started_at = {}
     for member_role in group_roles:
         started_at[member_role] = _time.monotonic()
+        # NEW — Phase 8 step 8.3: same field as the main sequential loop's
+        # agent_start emit (see that call's comment) -- flat_input_keys is
+        # already exactly role_names[:idx] flattened, computed above for
+        # generic_worker's own input_keys argument, so this is free here
+        # too, not a second computation.
         emit_event("agent_start", session_id=session_id, agent=f"generic:{member_role}", path=path,
-                    payload={"label": member_role})
+                    payload={"label": member_role, "given_roles": flat_input_keys})
 
     member_results = {}
     with ThreadPoolExecutor(max_workers=len(group_roles)) as pool:
@@ -439,8 +444,25 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         override = key_overrides.get(role)
 
         print(f"  [Executor] running: {current_name} (role={role})")
+        # NEW — Phase 8 step 8.3 ("what it was given"). eo/executor.py has
+        # no notion of source/secondary-data scope the way a Notebooks
+        # generate call does (see api/server.py's NOTEBOOKS_GENERATE_TARGETS
+        # for that, a completely separate, step-less code path this panel
+        # never renders) -- this pipeline's real, honest equivalent of
+        # "what did this step have to work with" is which earlier roles'
+        # results were already on the memory bus for it to read.
+        # role_names[:idx] IS exactly that set, for every dispatch branch
+        # below (generic_worker actually passes it as input_keys; every
+        # other branch's underlying agent reads memory.bus directly
+        # instead of taking it as an argument, but the set of what's
+        # THERE for it to read is identical either way -- this reports
+        # availability, not a per-branch argument). _flatten_role_names
+        # handles role_names containing concurrent-group sublists the
+        # same way every other consumer of role_names[:idx] already does
+        # (see _run_concurrent_group's own flat_input_keys just above).
+        given_roles = list(_flatten_role_names(role_names[:idx]))
         emit_event("agent_start", session_id=session_id, agent=current_name, path=path,
-                    payload={"label": role})
+                    payload={"label": role, "given_roles": given_roles})
         started = time.monotonic()
         try:
             if current_name == "prompt_writer_lean" and task_text:

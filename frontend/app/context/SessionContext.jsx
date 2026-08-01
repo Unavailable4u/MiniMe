@@ -266,6 +266,66 @@ export function SessionProvider({ children }) {
     const channelName = `session-${sessionId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
     const channel = pusher.subscribe(channelName);
     channel.bind_global((eventType, data) => {
+      // NEW — Phase 8 (Working Panel transparency) step 8.1: log the
+      // RAW envelope (relay/emitter.py's Part 6.3 shape: {type,
+      // session_id, agent, path, timestamp, payload}) for the four
+      // event types AgentStepList.jsx will need to render richer step
+      // rows from, ahead of writing any of 8.2-8.5. `data` here, not
+      // the destructured `agent`/`payload` below, so nothing this repo
+      // already throws away (notably `path`) is hidden from the log.
+      //
+      // FINDINGS (confirmed by reading the emitting code directly,
+      // eo/executor.py + relay/emitter.py + eo/dispatcher.py +
+      // eo/loop_v4.py, not by guessing from the frontend side — this
+      // console.log is here to CONFIRM those reads against real traffic,
+      // not to discover the shape from scratch):
+      //   - agent_start payload today is ONLY {label: role}
+      //     (eo/executor.py's `payload={"label": role}`). No source/
+      //     secondary-data scope, no key_overrides, nothing about what
+      //     the agent was actually given -- 8.3 ("what it was given")
+      //     has NO existing field to read yet; that step needs a real
+      //     eo/executor.py payload addition, not just a frontend change.
+      //   - Every event's top-level `path` (e.g. "adaptive"/"direct"/
+      //     "fixed"/"instant") is the SAME for every step in one run --
+      //     it's the run's pipeline path, set once by eo/loop_v4.py's
+      //     routing_decision, not decided per-step. eo/structure.py's
+      //     PATH_TO_TIER maps it to the numeric tier (0-3). This IS
+      //     already on every agent_start/agent_done envelope today --
+      //     SessionContext.jsx's handler below just doesn't read `path`
+      //     off `data` yet, only `agent`/`payload`. 8.2 ("tier per
+      //     step") can get tier for free from this, no backend change
+      //     needed, by threading `data.path` into the step object here.
+      //   - agent_done payload is {summary, duration_ms, image?}
+      //     (eo/executor.py). No chained-call info on it.
+      //   - dispatch_event (agent: "dispatcher") fires payload
+      //     {destination, reason} AFTER a role finishes and the
+      //     Dispatcher picks the next hop (eo/dispatcher.py's
+      //     _log_route()) -- this is the closest existing thing to
+      //     "what it called out to" (8.4), but `reason` is a short
+      //     internal code today ("escalate"/"recheck"/etc, see
+      //     eo/dispatcher.py's next_step()), not a human sentence, and
+      //     it isn't role-scoped the way agent_start/agent_done are --
+      //     it has to be correlated to the preceding step by arrival
+      //     order. WorkspaceChatPanel/SessionContext already collects
+      //     these into `routeTrace`, just not merged onto `liveSteps`
+      //     entries yet.
+      //   - routing_decision's payload IS the full Inspector/Panel
+      //     `decision` dict (eo/loop_v4.py's `_get_decision()`) --
+      //     `tier`, `domain`, `confidence`, `suggested_agents`, and a
+      //     `reasoning` string ("classification failed, defaulting to
+      //     tier 3 (safest)" being the one confirmed literal value in
+      //     this codebase; the Panel/Inspector supply their own text
+      //     the rest of the time). This is RUN-level, fired once before
+      //     any agent_start, already captured as `liveDecision`/
+      //     `m.data.decision` and rendered by RoutingTraceCard.jsx --
+      //     8.5's "one-line routing why" per STEP most likely means
+      //     reusing this same `reasoning` string on every step's row
+      //     (it doesn't vary per step either), not a new per-step why.
+      // No behavior change in this step — every existing branch below
+      // is untouched; this only adds visibility for 8.2-8.5 to build on.
+      if (["routing_decision", "agent_start", "agent_done", "dispatch_event"].includes(eventType)) {
+        console.log(`[Phase 8 / 8.1 payload check] ${eventType}`, data);
+      }
       const { agent, payload } = data;
       if (eventType === "routing_decision") {
         setLiveDecision(payload);
@@ -279,6 +339,31 @@ export function SessionProvider({ children }) {
         const nextRouteTrace = [...routeTraceRef.current, { destination: payload?.destination, reason: payload?.reason }];
         routeTraceRef.current = nextRouteTrace;
         setRouteTrace(nextRouteTrace);
+        // NEW — Phase 8 step 8.4 ("chained calls"). eo/dispatcher.py's
+        // _log_route() (called from next_step()) always fires this
+        // AFTER the step (or, for a concurrent group, every member of
+        // the group) it's deciding about has already emitted its own
+        // agent_done, and BEFORE the next step's agent_start -- see
+        // eo/executor.py's main loop and _run_concurrent_group(), both
+        // of which call next_step() only once results[role] is written.
+        // That ordering means the last entry currently in
+        // stepsRef.current is always the step this exact decision was
+        // made about, so it's safe to just tag the array's last item —
+        // no id/role matching needed, same "trust arrival order" shape
+        // the openStepStack LIFO logic above already relies on for
+        // nested chained calls within a single step. destination is
+        // null on a normal run's final step (dispatcher.py's
+        // _log_route() no-ops rather than emitting when destination is
+        // None) so most runs' last row simply never gets tagged --
+        // expected, not a bug.
+        if (payload?.destination && stepsRef.current.length > 0) {
+          const lastIdx = stepsRef.current.length - 1;
+          const updated = stepsRef.current.map((s, i) =>
+            i === lastIdx ? { ...s, calledOutTo: { destination: payload.destination, reason: payload.reason } } : s
+          );
+          stepsRef.current = updated;
+          setLiveSteps(updated);
+        }
         return;
       }
       if (eventType === "macro_loop_decision") {
@@ -318,6 +403,30 @@ export function SessionProvider({ children }) {
           id: stepSeq.current++,
           agent,                                   // resolved module name (executor.py's current_name)
           role: payload?.label || agent,            // actual role — payload.label per executor.py's emit_event() call
+          // NEW — Phase 8 step 8.2: `path` is the run's pipeline path
+          // ("instant"/"direct"/"fixed"/"adaptive"), sitting on every
+          // event envelope already (relay/emitter.py's Part 6.3 shape)
+          // but never read off `data` here before 8.1's payload-check
+          // pass confirmed it. Same value for every step in a run (set
+          // once, at routing_decision time) — stored per-step anyway so
+          // AgentStepList.jsx doesn't need to reach outside `steps` to
+          // label each row, and so a finished message's persisted
+          // snapshot (this same object, see `steps: stepsRef.current`
+          // below) carries its own tier without depending on that run's
+          // liveDecision still being in memory.
+          path: data.path || null,
+          // NEW — Phase 8 step 8.3: eo/executor.py now reports which
+          // earlier roles' results were already on the memory bus for
+          // this step to draw on (see that file's agent_start comment
+          // for why this, not a source/secondary-data scope, is the
+          // honest equivalent inside the staffed-task pipeline —
+          // Notebooks generate's actual source scoping is a separate,
+          // step-less code path this panel never renders anyway).
+          // Defaults to [] for any event from a not-yet-updated backend
+          // (older payload shape, or agent_start events this build
+          // doesn't handle specially, e.g. instant/direct's own
+          // entrypoints which never had role_names[:idx] to report).
+          givenRoles: payload?.given_roles || [],
           text: "",
           summary: null,
           image: null,
