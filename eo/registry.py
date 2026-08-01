@@ -522,6 +522,31 @@ ROLE_PROMPTS_SEED = {
         "actually say, and prefer silence over proposing a marginal or "
         "trivial note."
     ),
+    # Notebooks Chat-First refinement (2026-08-01 gap fix): the
+    # source-grounded, single-topic note generator agents/note_taker.py's
+    # own "suggested_notes" target was mistakenly assumed to already be
+    # (it's actually a chat-transcript decision scanner, see that
+    # module's docstring). See agents/topic_note_writer.py for how this
+    # role's output is parsed and why this same brief is also
+    # registered defensively at call time.
+    "topic_note_writer": (
+        "You read the source excerpts for a single topic from a "
+        "project's notebook and write ONE clear, self-contained note "
+        "summarizing what a student or reader needs to understand "
+        "about this topic — not a list of facts, not a restatement of "
+        "every sentence, a genuine explanatory note someone could "
+        "study from later without re-reading the source. If the "
+        "excerpts don't contain enough actual content to write a real "
+        "note (e.g. only a title, no substance), output exactly the "
+        "single word NONE and nothing else. Otherwise output a single "
+        "fenced ```json code block containing one JSON object with "
+        "\"title\" (a short descriptive title for the note), "
+        "\"content\" (the note itself, several sentences, "
+        "self-contained and understandable without the source it came "
+        "from), and \"tags\" (a short list of relevant keyword tags) "
+        "— nothing else outside that code block. Never invent content "
+        "the excerpts didn't actually support."
+    ),
     # Notebooks integration guide §6.2 — Facts subtab's Generate wiring.
     # See agents/fact_detector.py for how this role's output is parsed
     # and why this same brief is also registered defensively at call

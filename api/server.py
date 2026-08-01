@@ -2006,6 +2006,43 @@ def _generate_suggested_notes(ws_id: str, scope: dict | None, owner_id: str) -> 
     return {"candidate": scan_conversation(chat_id, owner_id)}
 
 
+def _generate_topic_notes(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """NEW — 2026-08-01 gap fix: "suggested_notes" above scans the chat
+    transcript for decisions/action items and ignores `scope` entirely
+    -- it was never actually a "write me a note on topic X" generator,
+    despite its CAPABILITIES_MANIFEST description implying it was (see
+    agents/topic_note_writer.py's module docstring for the full finding).
+    This is the real thing: requires scope.topic_id, pulls that one
+    topic's actual source content, and writes a single source-grounded
+    note candidate through the same eo/note_candidates.py review queue.
+
+    Raises ValueError (becomes a failed branch, same as every other
+    target's validation error) if scope.topic_id is missing -- this
+    target has no whole-notebook fallback, unlike facts/clusters/etc.,
+    since "write a note about the whole notebook" isn't a coherent
+    single note the way "write a note about this one topic" is.
+    """
+    topic_id = (scope or {}).get("topic_id")
+    if not topic_id:
+        raise ValueError("topic_notes requires scope.topic_id")
+    from agents.topic_note_writer import generate_topic_note   # deferred,
+                                                                  # same
+                                                                  # circular-import
+                                                                  # reason
+                                                                  # every
+                                                                  # other
+                                                                  # target
+                                                                  # function
+                                                                  # here
+                                                                  # already
+                                                                  # gives
+    try:
+        candidate = generate_topic_note(ws_id, topic_id)
+    except KeyError:
+        raise ValueError(f"topic_id {topic_id!r} not found in this workspace")
+    return {"candidate": candidate}
+
+
 def _make_study_generate(panel_key: str):
     """Flashcards/Quiz/Study Guide are the one truly zero-new-storage
     case (guide §6.1): generate_study_content() returns raw Markdown,
@@ -2308,6 +2345,9 @@ NOTEBOOKS_GENERATE_TARGETS = {
     "clusters": _generate_clusters,
     "facts": _generate_facts,
     "suggested_notes": _generate_suggested_notes,
+    "topic_notes": _generate_topic_notes,  # NEW — 2026-08-01 gap fix, see
+                                            # _generate_topic_notes()'s own
+                                            # comment above.
     "study_flashcards": _make_study_generate("study_flashcards"),
     "study_quiz": _make_study_generate("study_quiz"),
     "study_guide": _make_study_generate("study_guide"),
@@ -2377,8 +2417,29 @@ CAPABILITIES_MANIFEST = [
         # hedging. See utils/llm_client.py's CLASSIFY_INTENT_SYSTEM_PROMPT
         # comment for the paired prompt-level fix.
         "key": "suggested_notes", "label": "Suggested notes", "subTab": "insights",
-        "description": "Scan the sources for note-worthy passages and propose draft notes the user can accept or discard. Use this for requests like 'suggest some notes', 'what should I take notes on', or 'find things worth noting' -- not for pulling out standalone facts (see the facts tool) or grouping sources by topic (see the clusters tool).",
+        # CHANGED — 2026-08-01 gap fix: description corrected to match
+        # what this target actually does (_generate_suggested_notes
+        # calls agents/note_taker.py's scan_conversation() -- a chat
+        # transcript scan for decisions/action items, not a source
+        # scan). The old description ("Scan the sources for note-worthy
+        # passages") was aspirational, not accurate, and is exactly why
+        # asking this tool to write a note on a specific topic reliably
+        # produced nothing (see agents/topic_note_writer.py's docstring
+        # for the confirmed test). "topic_notes" right below is the
+        # actual source-scanning tool that description used to promise.
+        "description": "Scan the recent chat conversation in this notebook for a decision, insight, or action item worth saving as a note, and propose a draft the user can accept or discard. This does NOT read the sources/topics themselves -- it only looks at what's been said in chat. Use this for requests like 'was there anything worth noting in our conversation' or 'save that as a note' -- NOT for 'write a note about <topic>' or 'summarize this topic as a note' (see the topic_notes tool for that), pulling out standalone facts (see the facts tool), or grouping sources by topic (see the clusters tool).",
         "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "enabled": True,
+    },
+    {
+        # NEW — 2026-08-01 gap fix: the source-grounded, single-topic
+        # note generator "suggested_notes" was mistakenly assumed to
+        # already be. See agents/topic_note_writer.py's module
+        # docstring for the full finding, and _generate_topic_notes()
+        # above for why this has no whole-notebook fallback.
+        "key": "topic_notes", "label": "Notes on this topic", "subTab": "insights",
+        "description": "Write one draft note summarizing a SPECIFIC topic's actual source material, for the user to accept or discard. Requires a single topic in scope (e.g. after clicking a Mind Map node, or naming a topic by title) -- reads that topic's real source excerpts, not the chat conversation. Use this for requests like 'write a note on <topic>', 'summarize this topic as a note', or 'give me notes on <topic>'. NOT for a whole-notebook scan of the chat for things worth noting (see the suggested_notes tool for that).",
+        "scopeAllowed": "topic", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
         "enabled": True,
     },
     {
