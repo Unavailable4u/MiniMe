@@ -316,8 +316,21 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         return;
       }
       if (eventType === "dispatch_event") {
+        // NEW — Phase 8 step 8.4, ported from SessionContext.jsx's own
+        // dispatch_event branch (see that file's comment for the full
+        // ordering argument). Folded into one setState call rather than
+        // two, since this store's setState only shallow-merges one
+        // patch per call -- a second call here would just be a second
+        // notify() for the same logical update.
         setState(key, (prev) => ({
           routeTrace: [...prev.routeTrace, { destination: payload?.destination, reason: payload?.reason }],
+          liveSteps: payload?.destination && prev.liveSteps.length > 0
+            ? prev.liveSteps.map((s, i) =>
+                i === prev.liveSteps.length - 1
+                  ? { ...s, calledOutTo: { destination: payload.destination, reason: payload.reason } }
+                  : s
+              )
+            : prev.liveSteps,
         }));
         return;
       }
@@ -354,6 +367,18 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           id: nextSeq,
           agent,
           role: payload?.label || agent,
+          // NEW — Phase 8 step 8.2, ported from SessionContext.jsx's own
+          // agent_start branch (see that file's comment for the full
+          // reasoning): `path` rides on every event envelope already,
+          // constant for the whole run, and maps to tier via
+          // eo/structure.py's PATH_TO_TIER -- stored per-step so
+          // AgentStepList.jsx can label a step's tier without reaching
+          // outside `steps`, same as the non-dock path.
+          path: data.path || null,
+          // NEW — Phase 8 step 8.3, ported from SessionContext.jsx's own
+          // agent_start branch (see that file's comment for the full
+          // reasoning).
+          givenRoles: payload?.given_roles || [],
           text: "",
           summary: null,
           image: null,

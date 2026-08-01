@@ -497,6 +497,29 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     if (!workspaceId || !generateNotebooks) return false;
     const { targetKeys, sourceNodeIds } = parseFreeText(text, []);
     if (targetKeys.length !== 1 || sourceNodeIds.length > 0) return false;
+
+    // FIX — overlap-check finding (2026-08-02): this fast path predates
+    // topic_notes (scopeAllowed: "topic") and always dispatched with
+    // scope=null. That's correct for "whole"-scope targets, but for a
+    // "topic"-scope target it means _generate_topic_notes() on the
+    // server unconditionally raises "topic_notes requires scope.topic_id"
+    // -- so typing exactly the phrasing topic_notes's own manifest
+    // description recommends ("write a note on <topic>") always failed,
+    // short-circuiting past the scope-aware classifier below (which
+    // already knows how to resolve a topic from activeContext or the
+    // model's own arguments -- see tryHandleClassifiedToolCall's
+    // mark_topic_done/source_ids handling) before it ever got a turn.
+    // Same activeContext fallback as that branch, not a new rule: if a
+    // topic is in scope, dispatch with it; if not, don't guess -- fall
+    // through so the classifier (or, failing that, sendTask()) can
+    // still make sense of it.
+    const target = TARGETS_BY_KEY[targetKeys[0]];
+    if (target?.scopeAllowed === "topic") {
+      const topicId = activeContext?.type === "topic" ? activeContext.id : null;
+      if (!topicId) return false;
+      return runGenerateTarget(targetKeys[0], { topic_id: topicId }, text);
+    }
+
     return runGenerateTarget(targetKeys[0], null, text);
   }
 
