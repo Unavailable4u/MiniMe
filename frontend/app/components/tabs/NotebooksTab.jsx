@@ -632,6 +632,26 @@ function WorkflowCard({ workflow, workspaceId, onOpenSubChat }) {
   const storageKey = `${WORKFLOW_PROGRESS_PREFIX}:${workspaceId}:${workflow.title}`;
   const [completedSteps, setCompletedSteps] = useState(() => new Set());
 
+  // NEW — Notebooks Chat-First refinement, step 6.11.a: verification only,
+  // no behavior change. Confirms what agents/workflow_suggester.py's
+  // build_topic_workflow() actually put on `workflow` by the time it
+  // reaches this component, for BOTH paths that can hand WorkflowCard a
+  // workflow prop — a live Mind Map click (topic_workflow_endpoint's raw
+  // `return workflow`) and a hydrated one (api/server.py's
+  // topic_workflows-panel merge, step 7.3). topic_id can legitimately be
+  // None (build_topic_workflow()'s own generic-fallback-on-no-match case)
+  // — topic_key is the one that's never None and is what 6.11.b/6.11.c
+  // will actually thread through onOpenSubChat -> sendTask -> /api/task.
+  // Remove this once 6.11.b lands and the values are visibly flowing
+  // through the real pipeline instead.
+  useEffect(() => {
+    console.debug("[6.11.a] WorkflowCard topic scope check", {
+      title: workflow.title,
+      topic_id: workflow.topic_id ?? null,
+      topic_key: workflow.topic_key ?? null,
+    });
+  }, [workflow.title, workflow.topic_id, workflow.topic_key]);
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(storageKey);
@@ -741,7 +761,13 @@ function WorkflowCard({ workflow, workspaceId, onOpenSubChat }) {
                       same click) build on top of this wiring next. */}
                   <button
                     onClick={() =>
-                      onOpenSubChat?.(workspaceId, `Let's work through: "${step.label}"`)
+                      // NEW — step 6.11.b: thread topic_key through as an
+                      // optional 3rd arg (6.11.a confirmed topic_key is the
+                      // field that's never None). Nothing downstream reads
+                      // it yet — handleOpenSubChat/openScopedSubChat just
+                      // pass it along one hop further. 6.11.c is what
+                      // actually puts it on the wire to /api/task.
+                      onOpenSubChat?.(workspaceId, `Let's work through: "${step.label}"`, workflow.topic_key ?? null)
                     }
                     title="Work through this step"
                     className="shrink-0 text-[var(--neutral-600)] hover:text-[var(--cyber-cyan)]"
@@ -2560,8 +2586,12 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     setPendingDeleteChat(null);
   }
 
-  async function handleOpenSubChat(wsId, prompt) {
-    const chatId = await openScopedSubChat(wsId, prompt);
+  // CHANGED — step 6.11.b: topicId is optional and purely pass-through
+  // here. Every existing caller (the "Explain this step" button, and
+  // anything else on this onOpenSubChat/handleOpenSubChat path) keeps
+  // working unchanged since they simply don't supply a 3rd arg.
+  async function handleOpenSubChat(wsId, prompt, topicId = null) {
+    const chatId = await openScopedSubChat(wsId, prompt, topicId);
     await openInDock(chatId);
   }
 
