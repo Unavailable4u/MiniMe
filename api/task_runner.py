@@ -65,8 +65,11 @@ from eo import conversation_memory
 from eo import chat_workspace
 from eo import workspace_facts
 from eo import fact_summarizer   # NEW — Part 3
-from eo.knowledge_graph import search_nodes   # NEW — bug #4 fix, notebook grounding
+from eo.knowledge_graph import search_nodes, get_node   # NEW — bug #4 fix, notebook grounding;
+# get_node NEW — Step 6.11.f, resolving a topic's covered source ids into content
 from eo.prerequisite_suggestions import find_prerequisite_suggestions   # NEW — Data Layer §9d
+from eo.source_index import get_topic_covered_sources   # NEW — Step 6.11.f (6.11.d's helper)
+from eo.note_candidates import get_topic_related_notes   # NEW — Step 6.11.f (6.11.e's helper)
 
 # NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
 # ingested sources into the prompt (task_text had a workspace_id for
@@ -81,7 +84,94 @@ MAX_NOTEBOOK_CONTEXT_CHARS_PER_SOURCE = 4000
 NOTEBOOK_CONTEXT_TOP_K = 6
 
 
-def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = None) -> tuple:
+def _topic_scoped_task_text(workspace_id: str, topic_id: str, task_text: str,
+                             session_id: str = None) -> tuple:
+    """Step 6.11.f: deterministic, exact-topic grounding for a "Work
+    through: <step title>" chat turn — mirrors `attachment`'s posture
+    above in that a topic_id's mere presence is the signal, not
+    something guessed at. A workflow step click is scoped to one known
+    topic; there's no reason to make _grounded_task_text()'s similarity
+    search guess that back out of a synthetic "Let's work through:
+    <step title>" message, whose wording rarely echoes the source
+    material anyway.
+
+    Pulls the topic's covered sources (6.11.d's
+    get_topic_covered_sources(), zero LLM calls) and any notes already
+    tied to it (6.11.e's get_topic_related_notes()). Deliberately does
+    NOT call agents/topic_note_writer.py — that role drafts a new,
+    persisted note (an explicit "write me a note" ask), a different job
+    from grounding a live turn's answer in material that already
+    exists. Per the 6.11.g decision: read-only, no note_taker/
+    extraction_table_builder/topic_note_writer call of its own.
+
+    Returns (None, None) when there's nothing usable to build from
+    (no workspace_id/topic_id, a lookup failure, or a real topic_id
+    with zero covered sources and zero related notes) so the caller
+    falls back to _grounded_task_text()'s generic search-based
+    grounding — same fail-open posture that function already takes for
+    a Vector hiccup. Otherwise returns (grounded_text, source_node_ids),
+    matching _grounded_task_text()'s own return shape.
+    """
+    if not workspace_id or not topic_id:
+        return None, None
+
+    try:
+        source_ids = get_topic_covered_sources(workspace_id, topic_id, session_id=session_id)
+    except Exception as exc:
+        print(f"  [task_runner] topic-scoped source lookup failed for topic_id={topic_id!r}, "
+              f"falling back to search grounding (fail-open): {exc}")
+        return None, None
+
+    source_parts = []
+    for node_id in source_ids:
+        node = get_node(workspace_id, node_id)
+        if not node:
+            continue
+        title = node.get("title") or node_id
+        content = (node.get("content") or "").strip()[:MAX_NOTEBOOK_CONTEXT_CHARS_PER_SOURCE]
+        if content:
+            source_parts.append(f"--- {title} ---\n{content}")
+
+    try:
+        related_notes = get_topic_related_notes(workspace_id, topic_id, session_id=session_id)
+    except Exception as exc:
+        print(f"  [task_runner] topic-scoped note lookup failed for topic_id={topic_id!r}, "
+              f"continuing with sources only (fail-open): {exc}")
+        related_notes = []
+
+    note_parts = []
+    for n in related_notes:
+        title = n.get("title") or n.get("node_id")
+        content = (n.get("content") or "").strip()
+        if content:
+            note_parts.append(f"--- {title} ---\n{content}")
+
+    if not source_parts and not note_parts:
+        # A real topic_id with genuinely nothing behind it yet (no
+        # ingested sources, no notes) — not an error, just nothing to
+        # splice in. Caller falls back to generic grounding, which will
+        # likely also come up empty, and the model answers from the
+        # step title alone rather than claiming access it doesn't have.
+        return None, source_ids
+
+    sections = []
+    if source_parts:
+        sections.append("Source excerpts for this topic:\n\n" + "\n\n".join(source_parts))
+    if note_parts:
+        sections.append("Existing notes on this topic:\n\n" + "\n\n".join(note_parts))
+    context = "\n\n".join(sections)
+
+    grounded_text = (
+        "This chat turn is scoped to one notebook topic. Use the "
+        "topic-specific material below to answer — it's more precise "
+        "for this turn than the notebook's general contents.\n\n"
+        f"{context}\n\n---\n\n{task_text}"
+    )
+    return grounded_text, source_ids
+
+
+def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = None,
+                         topic_id: str = None) -> tuple:
     """Retrieval-scoped notebook grounding for chat. Returns task_text
     unchanged when there's no workspace, no matching sources, or the
     search itself fails — fail-open, same posture eo/knowledge_graph.py's
@@ -97,7 +187,19 @@ def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = Non
     actually grounded on rather than issuing a second, separate
     retrieval call. Always a list (possibly empty), never None, on
     every return path — callers don't need to guard for that.
+
+    topic_id: NEW — Step 6.11.f. When set, tries
+    _topic_scoped_task_text()'s deterministic exact-topic path first.
+    Falls through to this function's own similarity search when that
+    returns nothing (bad topic_id, or a real topic with no sources/
+    notes yet) — same fail-open posture as everything else here.
     """
+    if topic_id:
+        topic_grounded_text, topic_node_ids = _topic_scoped_task_text(
+            workspace_id, topic_id, task_text, session_id=session_id)
+        if topic_grounded_text:
+            return topic_grounded_text, topic_node_ids or []
+
     if not workspace_id:
         return task_text, []
     try:
@@ -301,7 +403,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
              mode: str = "auto", project_unique_name: str = None,
              approval_roles: set = None,
              no_conversation_context_roles: set = None, owner_id: str = None,
-             attachment: dict = None) -> dict:
+             attachment: dict = None, topic_id: str = None) -> dict:
     """
     ...docstring unchanged, plus:
 
@@ -315,6 +417,13 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     attachment: NEW — Data Layer §4a, forwarded unchanged to
     _resolve_decision_and_hires() via _run_task_inner(). See that
     function's docstring for the shape and the reasoning.
+
+    topic_id: NEW — Step 6.11.f. The Notebooks topic (if any) this turn
+    is scoped to, e.g. from a "Work through: <step title>" click.
+    Forwarded unchanged to _resolve_decision_and_hires() via
+    _run_task_inner(), where it's consulted by _grounded_task_text()'s
+    exact-topic path before falling back to similarity search. None for
+    every non-Notebooks caller — identical behavior to today.
     """
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)
@@ -326,6 +435,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         no_conversation_context_roles=no_conversation_context_roles,
         owner_id=owner_id,   # FIXED
         attachment=attachment,   # NEW — Data Layer §4a
+        topic_id=topic_id,   # NEW — Step 6.11.f
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
@@ -687,7 +797,7 @@ def _maybe_record_sga_fact(workspace_id: str, task_text: str, session_id: str, s
 
 def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
                                  app_slug: str, session_id: str, mode: str, owner_id: str = None,
-                                 attachment: dict = None) -> dict:
+                                 attachment: dict = None, topic_id: str = None) -> dict:
     """Part 2 §2.5: the shared first half of dispatch — semantic cache,
     SGA, Inspector/Panel classification, staff_task()'s hiring, and mode
     adjustment — factored out of _run_task_inner() so preview_task() can
@@ -708,6 +818,14 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     to guess a domain/agent-set for; it always means "hire Source
     Manager", which (via agents/source_manager.py's own §3a wiring)
     hires the Backlink Detector right after itself, unconditionally.
+
+    topic_id: NEW — Step 6.11.f. Passed straight through to
+    _grounded_task_text() below, which tries the deterministic
+    exact-topic path before falling back to its own similarity search.
+    Unlike attachment, this never short-circuits routing/cache/SGA/
+    Inspector — it only changes what context the eventual answer is
+    grounded in, so cache/SGA/classification below still see the
+    original task_text exactly as before.
     """
     conv_context = conversation_memory.get_full_context(session_id)
 
@@ -759,7 +877,8 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     # docstring) so the "resolved" dict below can carry them through to
     # _run_task_inner()'s new prerequisite-suggestion pass without a
     # second retrieval call.
-    grounded_task_text, grounded_node_ids = _grounded_task_text(workspace_id, task_text, session_id=session_id)
+    grounded_task_text, grounded_node_ids = _grounded_task_text(
+        workspace_id, task_text, session_id=session_id, topic_id=topic_id)   # topic_id NEW — Step 6.11.f
 
     if tier_override is None and mode != "beast":
         cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
@@ -876,17 +995,18 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                      mode: str = "auto", project_unique_name: str = None,
                      approval_roles: set = None,
                      no_conversation_context_roles: set = None, owner_id: str = None,
-                     attachment: dict = None) -> dict:
+                     attachment: dict = None, topic_id: str = None) -> dict:
     """The actual routing/execution body — split out of run_task() so
     that wrapper can do turn-recording on either side without every
     early-return point needing to do it individually. session_id is
     always already resolved to a real value by the time this is called.
 
     owner_id: NEW — passed through to _resolve_decision_and_hires().
-    attachment: NEW — Data Layer §4a, passed through unchanged."""
+    attachment: NEW — Data Layer §4a, passed through unchanged.
+    topic_id: NEW — Step 6.11.f, passed through unchanged."""
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
                                             app_slug, session_id, mode, owner_id=owner_id,
-                                            attachment=attachment)   # FIXED
+                                            attachment=attachment, topic_id=topic_id)   # FIXED / 6.11.f
     if not resolved["resolved"]:
         return resolved["response"]
     # CHANGED — bug #4 fix: dispatch the grounded text (falls back to the
