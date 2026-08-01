@@ -1811,7 +1811,15 @@ async function createWorkspaceChat(wsId, title = "New Chat") {
   return chat.id;
 }
 
-async function openScopedSubChat(wsId, taskText) {
+// CHANGED — step 6.11.b: topicId is a new optional 3rd param, threaded
+// down from NotebooksTab.jsx's WorkflowCard "Work through" button via
+// onOpenSubChat -> handleOpenSubChat. It's accepted and logged here only
+// — sendTask(taskText) below is untouched, so nothing about today's
+// dispatch behavior changes. Step 6.11.c is what actually adds topic_id
+// to sendTask's POST body / the TaskRequest model server-side; until
+// that lands this value goes nowhere past this console.debug.
+async function openScopedSubChat(wsId, taskText, topicId = null) {
+  console.debug("[6.11.b] openScopedSubChat topic scope (not yet sent to server)", { wsId, topicId });
   const chatId = await createWorkspaceChat(wsId);
   await sendTask(taskText);
   return chatId;
