@@ -3340,6 +3340,13 @@ class TaskRequest(BaseModel):
     # Inspector classification entirely and hires Source Manager (which,
     # per §3a, hires the Backlink Detector right after itself) — see
     # api/task_runner.py's _resolve_decision_and_hires() docstring.
+    topic_id: Optional[str] = None   # NEW — Step 6.11.c: the Notebooks
+    # topic (if any) this chat turn is scoped to, e.g. from a "Work
+    # through: <step title>" click on a per-topic workflow step. Accepted
+    # and logged only for now — not yet consulted by run_task()/
+    # task_runner.py. Step 6.11.f is what actually splices topic-scoped
+    # source/note context into the run, mirroring how `attachment` above
+    # short-circuits routing.
 
 
 class TaskResponse(BaseModel):
@@ -3365,6 +3372,10 @@ class TaskResponse(BaseModel):
 
 @app.post("/api/task", response_model=TaskResponse, dependencies=[Depends(require_auth)])
 def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXED — capture owner_id
+    if req.topic_id:   # NEW — Step 6.11.c: log-only, confirms the field
+        # is actually arriving from the frontend before 6.11.f wires it
+        # into task_runner.py's context-splicing.
+        print(f"[task] topic_id={req.topic_id!r} received for session={req.session_id!r} (not yet used in routing)")
     try:
         return run_task(
             task_text=req.task_text,
