@@ -160,6 +160,75 @@ def accept_candidate(workspace_id: str, candidate_id: str, section: str = "notes
     return node_id
 
 
+def get_topic_related_notes(
+    workspace_id: str,
+    topic_id: str,
+    top_k: int = 10,
+    min_score: float | None = None,
+    scope: str = "project",
+    session_id: str = None,
+) -> list[dict]:
+    """Step 6.11.e ("Work through: <step title>" scoping): accepted
+    notes tied to a single topic.
+
+    ASSUMPTION FLAGGED (same posture as eo/source_index.py's own
+    module-docstring flag for "covers"): there is no stored topic ->
+    note edge anywhere in this codebase. accept_candidate() above calls
+    eo/knowledge_graph.py:write_node() with no topic_id/
+    source_section_ids param at all -- a note becomes a graph node with
+    only workspace_id/section/node_type/tags/created_by on it, nothing
+    that names which topic it came from. The one existing mechanism
+    that CAN relate a note to a topic is knowledge_graph.py's own
+    search_nodes(), a semantic vector search already used for global
+    search (§0.1) -- so this reuses that, querying with the topic's own
+    name+summary (from eo/source_index.py's get_topic_covered_sources()
+    sibling, get_packet_depth()) rather than inventing a second,
+    unrelated matching mechanism. If a real topic_id/covers-style edge
+    ever gets added to write_node() later, this should be swapped for
+    an exact-match filter instead -- semantic similarity is a
+    best-available proxy here, not the intended long-term shape.
+
+    Returns search_nodes()'s own result shape (node_id, score, title,
+    content, tags, created_by, created_at, ...) filtered to
+    node_type="note", most-similar first. Empty list (not an error) if
+    the topic has neither a name nor a summary to query with, or if
+    search_nodes() itself comes back empty/degraded -- same
+    "degrade, don't hard-fail" posture search_nodes() already documents
+    for a Vector hiccup.
+
+    min_score is optional and unset by default: search_nodes() already
+    ranks by similarity, and Upstash Vector's score scale varies by
+    index config, so imposing a hard cutoff here would be a guess.
+    Pass one only if the caller has already tuned a threshold that
+    fits their index.
+    """
+    from eo.source_index import get_packet_depth
+
+    packet = get_packet_depth(
+        workspace_id,
+        starting_topic_id=topic_id,
+        requested_depth=0,
+        scope=scope,
+        session_id=session_id,
+    )
+    topic = packet["topics"][topic_id]
+    query_text = "\n".join(part for part in (topic.get("name"), topic.get("summary")) if part)
+    if not query_text:
+        return []
+
+    from eo.knowledge_graph import search_nodes   # deferred — same
+    # reasoning accept_candidate() above already gives for its own
+    # write_node import: keeps this module importable/testable without
+    # the Vector stack wired up.
+    notes = search_nodes(
+        workspace_id, query_text, top_k=top_k,
+        node_type="note", session_id=session_id,
+    )
+    if min_score is not None:
+        notes = [n for n in notes if (n.get("score") or 0) >= min_score]
+    return notes
+
+
 def reject_candidate(workspace_id: str, candidate_id: str) -> None:
     candidates = read(_key(workspace_id), default=[])
     match_index = next((i for i, c in enumerate(candidates) if c.get("candidate_id") == candidate_id), None)

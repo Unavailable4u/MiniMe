@@ -175,6 +175,43 @@ def get_packet_depth(
     }
 
 
+def get_topic_covered_sources(
+    workspace_id: str,
+    topic_id: str,
+    scope: str = "project",
+    session_id: str = None,
+) -> list:
+    """Step 6.11.d ("Work through: <step title>" scoping): given a
+    workspace + a single topic, return just that topic's `covers` list
+    (the source_section_ids it's backed by -- see this module's
+    docstring for why "covers" means that and not a separate stored
+    edge) with zero LLM calls and no Primary Source fetch.
+
+    A thin wrapper over get_packet_depth(requested_depth=0) -- depth 0
+    means "just the starting topic itself, no descendants" (see that
+    function's own docstring), which is exactly the "one topic's
+    sources" shape 6.11.f's context-splicing needs. Deliberately not a
+    new tree walk: reusing get_packet_depth() keeps this one code path
+    for "resolve a topic in scope" instead of a second one that could
+    drift from it (e.g. missing scope="chat"'s session_id requirement).
+
+    Returns a plain list of source_section_ids (possibly empty --
+    a topic with no covers is valid, not an error). Raises the same
+    ValueError/KeyError as get_packet_depth() for a bad workspace_id/
+    scope/topic_id -- a caller passing a topic_id that doesn't resolve
+    is a caller bug, not a "just return []" situation, same reasoning
+    get_packet_depth() already documents for its own starting_topic_id.
+    """
+    packet = get_packet_depth(
+        workspace_id,
+        starting_topic_id=topic_id,
+        requested_depth=0,
+        scope=scope,
+        session_id=session_id,
+    )
+    return packet["topics"][topic_id]["covers"]
+
+
 def get_packet(workspace_id: str, scope: str = "project", session_id: str = None) -> dict:
     """The one Mode C entry point: everything a Mode-C-only generation
     agent (§6a: Mind Mapper, Concept Linker) needs, and nothing it

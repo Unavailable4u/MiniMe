@@ -1819,9 +1819,12 @@ async function createWorkspaceChat(wsId, title = "New Chat") {
 // to sendTask's POST body / the TaskRequest model server-side; until
 // that lands this value goes nowhere past this console.debug.
 async function openScopedSubChat(wsId, taskText, topicId = null) {
-  console.debug("[6.11.b] openScopedSubChat topic scope (not yet sent to server)", { wsId, topicId });
+  // Step 6.11.c: topicId now actually reaches sendTask() and rides the
+  // /api/task POST body as topic_id. The server still only logs it
+  // (see api/server.py's post_task()) — 6.11.f is what makes routing
+  // consult it — so this is still safe to land ahead of that.
   const chatId = await createWorkspaceChat(wsId);
-  await sendTask(taskText);
+  await sendTask(taskText, topicId);
   return chatId;
 }
 
@@ -2031,7 +2034,12 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     };
   }
 
-  async function sendTask(taskText) {
+  // topicId (NEW — Step 6.11.c) is optional and, for now, purely passed
+  // through to the server for logging — see api/server.py's post_task().
+  // 6.11.f is what makes the backend actually act on it. Every existing
+  // call site (dock.sendTask, PlanTab's WireframesPanel, etc.) keeps
+  // working unchanged since this param defaults to null.
+  async function sendTask(taskText, topicId = null) {
     const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
     setMessages((prev) => [...prev, userMessage]);
     persistMessage(userMessage);   // NEW
@@ -2085,7 +2093,12 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
       const res = await fetch(`${API_URL}/api/task`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
-        body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
+        body: JSON.stringify({
+          task_text: taskText,
+          session_id: sessionId,
+          mode,
+          ...(topicId ? { topic_id: topicId } : {}),   // NEW — Step 6.11.c
+        }),
       });
       const data = await res.json();
       // Part 2 §2.4/§2.7: post_task() blocks synchronously until either
