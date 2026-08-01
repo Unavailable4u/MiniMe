@@ -77,6 +77,20 @@ VALID_EVENT_TYPES = {
     # generate flow itself; this step just makes _deliver()'s Pusher mirror
     # stop raising on them.
     "generation_started", "generation_done", "generation_error",
+    # FIX — confirmed 2026-08-01: Part 8.4's own design comment above
+    # (see "NEW — Part 8.4" block) says per-user notifications use the
+    # literal event_type "notification" as an envelope, with the actual
+    # kind (note_proposed, etc.) living in payload["kind"] -- exactly
+    # what eo/note_candidates.py's propose_note() already calls
+    # (emit_user_event("notification", ..., payload={"kind": "note_proposed", ...})).
+    # That literal was never actually added to this set, so every such
+    # call has been raising inside emit_user_event()'s try/except and
+    # silently failing (caught and printed by the caller, never
+    # crashing, but never delivering the notification either) since
+    # Part 8.4 landed. Confirmed via scripts/seed_test_note.py:
+    # "[note_candidates] notification emit failed: [relay] Unknown
+    # event type 'notification'."
+    "notification",
 }
 
 _pusher_client = None
