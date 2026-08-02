@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock; useWorkspaceDockActions/useLastActiveChatId added for item #11 / C2
 import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
@@ -42,7 +43,7 @@ const SUB_TABS = [
 ];
 
 function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
-  const { chats } = useSession();
+  const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
   // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.

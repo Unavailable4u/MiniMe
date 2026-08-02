@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { useSession } from "../context/SessionContext";
+import { useWorkspaces } from "../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
 import { useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — bug #1 fix
 import { useAuth } from "../context/AuthContext";
 import { Pencil, Check, X, FolderMinus, Trash2, UserPlus, LogOut, ShieldAlert, Eye, EyeOff, Download, Upload } from "lucide-react";
@@ -18,13 +19,14 @@ const ASSIGNABLE_ROLES = ["viewer", "editor", "moderator", "partner"];
 
 export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
   const {
-    renameWorkspace, removeWorkspaceChat, deleteWorkspace, workspaces,
+    renameWorkspace, removeWorkspaceChat, deleteWorkspace,
     exportWorkspace, importWorkspace,   // NEW — Part 8.7
     fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
     removeWorkspaceMember, leaveWorkspaceMembership, forceRemoveOwner,
     fetchWorkspaceVotes, castWorkspaceVote,
     setWorkspaceAttribution, setMemberAttributionGrant,
   } = useSession();
+  const { workspaces } = useWorkspaces();   // FIX — was destructured off useSession(), which no longer serves it (see WorkspacesContext.jsx's header comment); this call site was missed at the time
   const { removeWorkspace } = useWorkspaceDockActions();   // NEW — bug #1 fix
   const { user } = useAuth();
 

@@ -1,6 +1,8 @@
 "use client";
 import { useState, useEffect, memo } from "react";
 import { useSession } from "../../context/SessionContext";
+import { useWorkspaces } from "../../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
+import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import MermaidDiagram from "../MermaidDiagram";
 import WireframePreview from "../WireframePreview";
 import Markdown from "../Markdown";
@@ -156,9 +158,11 @@ function unfenceMermaid(text) {
 }
 
 function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
-  const { workspaces, fetchWorkspaces, chats, promoteWorkspace, openScopedSubChat,
+  const { promoteWorkspace, openScopedSubChat,
     fetchPanelContent, savePanelContent,
     fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
+  const { workspaces, fetchWorkspaces } = useWorkspaces();   // FIX — was destructured off useSession(), which no longer serves it; this call site was missed at the time
+  const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite the old comment here claiming so —
   // it had no workspaceId prop, so it read messages/sessionId off

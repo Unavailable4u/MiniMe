@@ -4,6 +4,7 @@ import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
 import { useUsageStats } from "./UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent now live there
 import { useWorkspaces } from "./WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces now live there
+import { useChatList } from "./ChatListContext";   // NEW — Item 2 concern split, slice 4: chats/refreshChatList now live there (see that file's header comment for what's still deliberately NOT moved: messages/sessionId/live-run state)
 // useAuth import REMOVED — its only use here (the notification-bell
 // per-user Pusher channel) moved to NotificationsContext.jsx.
 
@@ -39,7 +40,6 @@ export function useSession() {
 export function SessionProvider({ children }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [chats, setChats] = useState([]);                 // NEW — sidebar list
   const [batches, setBatches] = useState([]);              // NEW — §4/§5: memory_batch groups, parallel to `chats`
   // workspaces state MOVED — now in WorkspacesContext.jsx (Item 2 concern
   // split, slice 3). Consumed here via the hook: this component still
@@ -48,8 +48,16 @@ export function SessionProvider({ children }) {
   // comment for why the ~25 workspace CRUD functions stayed here instead
   // of moving too.
   const { workspaces, fetchWorkspaces } = useWorkspaces();
+  // chats state MOVED — now in ChatListContext.jsx (Item 2 concern split,
+  // slice 4). Consumed here via the hook: this component still reads
+  // `chats` (removeWorkspaceChat's fallback, below) and still calls
+  // `refreshChatList()` (mount effect + most chat-lifecycle functions
+  // below) — see that file's header comment for why switchChat/
+  // createNewChat/etc. and `messages`/`sessionId` stayed here instead of
+  // moving too.
+  const { chats, refreshChatList } = useChatList();
   const [sessionId, setSessionId] = useState(null);        // CHANGED — no longer random-on-mount; this IS chat_id
-  const [chatsLoading, setChatsLoading] = useState(true);  // NEW
+  const [chatsLoading, setChatsLoading] = useState(true);  // NEW — still local: reflects the whole mount/restore sequence below (fetch chats -> restore/create active chat), not just the chat-list fetch itself, so it doesn't cleanly belong to ChatListContext's narrower scope. Unconsumed by any component today (grepped) — kept for API compatibility.
   const [liveDecision, setLiveDecision] = useState(null);
   // CHANGE — Part 18: liveLanes (object keyed by module name) replaced
   // with liveSteps (an ordered array). Two reasons, both found reading
@@ -160,22 +168,18 @@ export function SessionProvider({ children }) {
   // disappears on refresh" (see guide §0).
   useEffect(() => {
     (async () => {
-      const res = await fetch(`${API_URL}/api/chats`, {
-        headers: await authHeaders(),
-      });
-      const body = await res.json();
-      // Guard against a non-array response (e.g. an error body like
-      // {"detail": "..."} from require_auth()/a 500) ever reaching
-      // ChatSidebar.jsx's chats.filter() — fail visibly in the console
-      // instead of crashing the whole app on a backend error.
-      if (!res.ok || !Array.isArray(body)) {
-        console.error("Failed to load chats:", res.status, body);
-        setChats([]);
+      // CHANGED — Item 2 concern split, slice 4: was an inline
+      // fetch(`${API_URL}/api/chats`) duplicating refreshChatList()'s own
+      // body further down this file; now calls the same function
+      // ChatListContext.jsx exposes (it returns the fetched array so this
+      // effect can still make its restore/create decision off it, or
+      // `null` on failure — see that function's own comment for why the
+      // null/[] distinction matters here specifically).
+      const list = await refreshChatList();
+      if (list === null) {
         setChatsLoading(false);
         return;
       }
-      const list = body;
-      setChats(list);
       fetchBatches();   // NEW — §4: don't block chat restore on this, batches are additive UI
       fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
       const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
@@ -635,12 +639,12 @@ export function SessionProvider({ children }) {
   // linking chats. sessionId and chat_id are the same string everywhere
   // (see eo/chat_store.py's docstring), so these just move sessionId
   // around and keep the persisted chat store + local state in sync.
-  const refreshChatList = useCallback(async () => {
-    const res = await fetch(`${API_URL}/api/chats`, {
-      headers: await authHeaders(),
-    });
-    setChats(await res.json());
-  }, []);
+  // refreshChatList MOVED — now defined in ChatListContext.jsx (Item 2
+  // concern split, slice 4), consumed above via useChatList(). Every call
+  // site below is unchanged (still `await refreshChatList()`/
+  // `refreshChatList` in a dep array) since the hook returns a reference
+  // with the same name and shape (mostly — see that file's own comment on
+  // it now returning the fetched array/`null` instead of nothing).
 
   // Step 2.3i (perf audit item #2, ninth useCallback batch, continued):
   // switchChat/createNewChat land HERE, right after refreshChatList,
@@ -2449,8 +2453,14 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   const value = useMemo(() => ({
   sessionId, API_URL,
   messages, loading,
-  chats, chatsLoading,
-  refreshChatList, getWorkspaceIdForChat,   // NEW — step 3e prereq: threaded into WorkspaceDockProvider as props
+  chatsLoading,
+  // chats/refreshChatList REMOVED from this value — now served by
+  // useChatList() (ChatListContext.jsx), not useSession(). See that
+  // file's header comment for why this stayed a "state-only" slice like
+  // WorkspacesContext.jsx, and SessionContext.jsx's own top-of-file
+  // comment for why the functions that read/call them (switchChat,
+  // createNewChat, removeWorkspaceChat, etc.) stayed here regardless.
+  getWorkspaceIdForChat,   // NEW — step 3e prereq: threaded into WorkspaceDockProvider as props
   batches, fetchBatches,
   createBatch, estimateBatch,
   renameBatch, unlinkBatchMembers, deleteBatch,
@@ -2515,8 +2525,8 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
   fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
   }), [
-    sessionId, API_URL, messages, loading, chats, chatsLoading,
-    refreshChatList, getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
+    sessionId, API_URL, messages, loading, chatsLoading,
+    getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
     renameBatch, unlinkBatchMembers, deleteBatch, createWorkspace,
     createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,
     promoteWorkspace, fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole, removeWorkspaceMember, leaveWorkspaceMembership,

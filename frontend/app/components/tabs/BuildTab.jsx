@@ -2,6 +2,7 @@
 import { useEffect, useState, memo } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
@@ -514,7 +515,8 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.
-  const { promoteWorkspace, API_URL, chats } = useSession();
+  const { promoteWorkspace, API_URL } = useSession();
+  const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
   // pattern as ResearchTab/PlanTab's C1.
