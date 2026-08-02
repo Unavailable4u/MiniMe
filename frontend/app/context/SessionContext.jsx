@@ -773,6 +773,68 @@ async function runTemplate(templateId, taskText) {
     setChats(await res.json());
   }, []);
 
+  // Step 2.3i (perf audit item #2, ninth useCallback batch, continued):
+  // switchChat/createNewChat land HERE, right after refreshChatList,
+  // rather than at their original textual position further down the
+  // file. Reason: removeWorkspaceChat (2.3c, below) already has both of
+  // these in its dependency array, and that array is evaluated
+  // synchronously during render as part of the useCallback(...) call --
+  // not deferred the way a useEffect body is. Leaving switchChat/
+  // createNewChat declared after removeWorkspaceChat would mean
+  // referencing a `const` before its initializer has run in the same
+  // render pass: a genuine temporal-dead-zone ReferenceError, not the
+  // "it's fine, it's only called later from an event handler" pattern
+  // every ordering check up through 2.3h has been able to rely on. Every
+  // other call site of switchChat/createNewChat (the mount effect near
+  // the top of the file) is inside useEffect(..., []), so it still runs
+  // after this render completes either way -- moving the declaration up
+  // doesn't change anything for those callers, it only fixes the one
+  // that actually mattered.
+  //
+  // Both close over a pile of setState setters and refs (setSessionId,
+  // setMessages, stepsRef, setLiveSteps, routeTraceRef, setRouteTrace,
+  // dependencyMapRef, setDependencyMap, structurePlanRef,
+  // setStructurePlan, roleRequestsRef, setRoleRequests,
+  // setMacroLoopDecisions, setLiveDecision) -- all stable by React's own
+  // guarantee, so none of those belong in the dep array (same omission
+  // rule established for _syncProcessingWorkspaces in the very first
+  // useCallback batch). The only real dependency either one has is
+  // refreshChatList, already stable directly above.
+  const switchChat = useCallback(async (chatId, { skipListReload = false } = {}) => {
+    const res = await fetch(`${API_URL}/api/chats/${chatId}`, {
+      headers: await authHeaders(),
+    });
+    if (!res.ok) return;
+    const chat = await res.json();
+    setSessionId(chatId);
+    localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
+    setMessages(chat.messages || []);
+    // Clear transient Working Panel state — it belongs to whatever run is
+    // in flight, not to a chat you just reloaded from disk.
+    stepsRef.current = []; setLiveSteps([]);
+    routeTraceRef.current = []; setRouteTrace([]);
+    dependencyMapRef.current = {}; setDependencyMap({});
+    structurePlanRef.current = null; setStructurePlan(null);
+    roleRequestsRef.current = []; setRoleRequests([]);
+    setMacroLoopDecisions([]);
+    setLiveDecision(null);
+    if (!skipListReload) await refreshChatList();
+  }, [refreshChatList]);
+
+  const createNewChat = useCallback(async () => {
+    const res = await fetch(`${API_URL}/api/chats`, {
+      method: "POST",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify({ title: "New Chat" }),
+    });
+    const chat = await res.json();
+    setSessionId(chat.id);
+    localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
+    setMessages([]);
+    await refreshChatList();
+    return chat.id;
+  }, [refreshChatList]);
+
   // NEW — step 3e prereq: pure lookup, no state mutation. Same check
   // ChatTab.jsx already did inline to find its activeWorkspace. Exposed
   // here (rather than left duplicated) so WorkspaceDockContext's
@@ -888,7 +950,23 @@ async function createWorkspaceWithChats(name, chatIds = [], stage) {
   await fetchWorkspaces();
   }, [fetchWorkspaces]);
 
-async function addWorkspaceChat(wsId, chatId) {
+// Step 2.3c (perf audit item #2, third useCallback batch): continuing
+// the same "workspaces" bucket started in 2.3b. Same ordering check as
+// before -- fetchWorkspaces/refreshChatList are already `const ...
+// useCallback` and declared above (lines 769/842), so referencing them
+// here is safe with no hoisting concern.
+//
+// removeWorkspaceChat is the one that needs care: it closes over
+// `chats`/`sessionId` (state, must be in the dep array) *and* calls
+// switchChat()/createNewChat(). Originally noted here that those two
+// were "still plain function declarations further down the file" and
+// that this wouldn't actually stabilize until a later batch converted
+// them -- UPDATE as of 2.3i: they're now useCallback-wrapped too, and
+// specifically moved to right after refreshChatList (near line 769),
+// ahead of this function, for a reason beyond simple hoisting -- see
+// the comment there. With that move, this dependency array is both
+// correct and fully stable.
+const addWorkspaceChat = useCallback(async (wsId, chatId) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}/chats`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -896,9 +974,9 @@ async function addWorkspaceChat(wsId, chatId) {
   });
   await fetchWorkspaces();
   await refreshChatList(); // membership changes linked_chat_ids server-side (chat_workspace.py's _sync)
-}
+}, [fetchWorkspaces, refreshChatList]);
 
-async function removeWorkspaceChat(wsId, chatId, deleteChat = false) {
+const removeWorkspaceChat = useCallback(async (wsId, chatId, deleteChat = false) => {
   await fetch(
     `${API_URL}/api/workspaces/${wsId}/chats/${chatId}?delete_chat=${deleteChat}`,
     { method: "DELETE", headers: await authHeaders() }
@@ -914,16 +992,16 @@ async function removeWorkspaceChat(wsId, chatId, deleteChat = false) {
   } else {
     await refreshChatList();
   }
-}
+}, [fetchWorkspaces, refreshChatList, chats, sessionId, switchChat, createNewChat]);
 
-async function deleteWorkspace(wsId) {
+const deleteWorkspace = useCallback(async (wsId) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
   await fetchWorkspaces();
   await refreshChatList();
-}
+}, [fetchWorkspaces, refreshChatList]);
 
 // NEW — §8: advances a workspace along the fixed stage sequence
 // (note -> research -> plan -> build -> test -> growth). Defaults to
@@ -940,7 +1018,7 @@ async function deleteWorkspace(wsId) {
 // Just threads the choice through to the backend, which already
 // supports both (see chat_workspace.promote()) — no other client-side
 // logic needed here.
-async function promoteWorkspace(wsId, toStage = null, mode = "complete") {
+const promoteWorkspace = useCallback(async (wsId, toStage = null, mode = "complete") => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/promote`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -952,7 +1030,7 @@ async function promoteWorkspace(wsId, toStage = null, mode = "complete") {
   }
   await fetchWorkspaces();
   return res.json();
-}
+}, [fetchWorkspaces]);
 
 // --- NEW — Part 8.9: workspace membership, ownership transitions, voting,
 // and attribution. Mirrors eo/chat_workspace.py's role model 1:1 (viewer <
@@ -969,7 +1047,7 @@ async function promoteWorkspace(wsId, toStage = null, mode = "complete") {
 // non-2xx convention as the membership functions below, since
 // ManageWorkspaceModal needs a real error message to show on failure.
 
-async function exportWorkspace(wsId) {
+const exportWorkspace = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/export`, {
     headers: await authHeaders(),
   });
@@ -978,9 +1056,9 @@ async function exportWorkspace(wsId) {
     throw new Error(err.detail || `Export failed (${res.status})`);
   }
   return res.json(); // the manifest itself — caller decides what to do with it (e.g. trigger a download)
-}
+}, []);
 
-async function importWorkspace(wsId, manifest) {
+const importWorkspace = useCallback(async (wsId, manifest) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/import`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -993,9 +1071,18 @@ async function importWorkspace(wsId, manifest) {
   await fetchWorkspaces();
   await refreshChatList();
   return res.json();
-}
+}, [fetchWorkspaces, refreshChatList]);
 
-async function fetchWorkspaceMembers(wsId) {
+// Step 2.3d (perf audit item #2, fourth useCallback batch): Part 8.9's
+// membership functions. All five are call-site-isolated -- none of them
+// are called by any other function in this file (confirmed via grep),
+// so there's no ordering/hoisting concern to check here, unlike the
+// last two batches. Four of the five (fetchWorkspaceMembers,
+// addWorkspaceMember, updateWorkspaceMemberRole, removeWorkspaceMember)
+// close over nothing but their own arguments, so they get `[]`.
+// leaveWorkspaceMembership is the odd one out -- it calls
+// fetchWorkspaces/refreshChatList on success, so it depends on those two.
+const fetchWorkspaceMembers = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members`, {
     headers: await authHeaders(),
   });
@@ -1004,9 +1091,9 @@ async function fetchWorkspaceMembers(wsId) {
     throw new Error(err.detail || `Failed to load members (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
-async function addWorkspaceMember(wsId, email, role = "viewer") {
+const addWorkspaceMember = useCallback(async (wsId, email, role = "viewer") => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -1017,9 +1104,9 @@ async function addWorkspaceMember(wsId, email, role = "viewer") {
     throw new Error(err.detail || `Failed to add member (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
-async function updateWorkspaceMemberRole(wsId, targetUserId, role) {
+const updateWorkspaceMemberRole = useCallback(async (wsId, targetUserId, role) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
@@ -1030,9 +1117,9 @@ async function updateWorkspaceMemberRole(wsId, targetUserId, role) {
     throw new Error(err.detail || `Failed to update role (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
-async function removeWorkspaceMember(wsId, targetUserId) {
+const removeWorkspaceMember = useCallback(async (wsId, targetUserId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
     method: "DELETE",
     headers: await authHeaders(),
@@ -1042,9 +1129,9 @@ async function removeWorkspaceMember(wsId, targetUserId) {
     throw new Error(err.detail || `Failed to remove member (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
-async function leaveWorkspaceMembership(wsId, successorId = null) {
+const leaveWorkspaceMembership = useCallback(async (wsId, successorId = null) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/leave`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -1056,9 +1143,16 @@ async function leaveWorkspaceMembership(wsId, successorId = null) {
   }
   await fetchWorkspaces();
   await refreshChatList();
-}
+}, [fetchWorkspaces, refreshChatList]);
 
-async function forceRemoveOwner(wsId) {
+// Step 2.3e (perf audit item #2, fifth useCallback batch): finishing
+// off Part 8.9 -- ownership, voting, and attribution settings. Same
+// call-site check as 2.3d: none of these five are called by any other
+// function in this file (confirmed via grep), only from modal
+// components elsewhere in the tree. fetchWorkspaceVotes and
+// setMemberAttributionGrant close over nothing, so `[]`; the other
+// three call fetchWorkspaces() on success, so they depend on it.
+const forceRemoveOwner = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/owner/remove`, {
     method: "POST",
     headers: await authHeaders(),
@@ -1070,9 +1164,9 @@ async function forceRemoveOwner(wsId) {
   const updated = await res.json();
   await fetchWorkspaces();
   return updated;
-}
+}, [fetchWorkspaces]);
 
-async function fetchWorkspaceVotes(wsId) {
+const fetchWorkspaceVotes = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
     headers: await authHeaders(),
   });
@@ -1081,9 +1175,9 @@ async function fetchWorkspaceVotes(wsId) {
     throw new Error(err.detail || `Failed to load vote status (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
-async function castWorkspaceVote(wsId, voteTarget = null) {
+const castWorkspaceVote = useCallback(async (wsId, voteTarget = null) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -1096,9 +1190,9 @@ async function castWorkspaceVote(wsId, voteTarget = null) {
   const result = await res.json();
   await fetchWorkspaces(); // a vote may have just resolved ownership — owner_id can change
   return result;
-}
+}, [fetchWorkspaces]);
 
-async function setWorkspaceAttribution(wsId, show) {
+const setWorkspaceAttribution = useCallback(async (wsId, show) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/attribution`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
@@ -1111,9 +1205,9 @@ async function setWorkspaceAttribution(wsId, show) {
   const updated = await res.json();
   await fetchWorkspaces();
   return updated;
-}
+}, [fetchWorkspaces]);
 
-async function setMemberAttributionGrant(wsId, targetUserId, canToggle) {
+const setMemberAttributionGrant = useCallback(async (wsId, targetUserId, canToggle) => {
   const res = await fetch(
     `${API_URL}/api/workspaces/${wsId}/members/${targetUserId}/attribution-grant`,
     {
@@ -1127,36 +1221,51 @@ async function setMemberAttributionGrant(wsId, targetUserId, canToggle) {
     throw new Error(err.detail || `Failed to update attribution grant (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
 // --- NEW — §4.7: Notebooks tab. A "notebook" is a workspace (§4.3), so
 // these all just parameterize the existing /api/workspaces/{ws_id}/...
 // surface — no new container concept, matching the domain doc's own
 // framing of notebook == workspace_id.
 
-async function fetchWorkspaceNodes(wsId, nodeType) {
+// Step 2.3f (perf audit item #2, sixth useCallback batch): the
+// Notebooks-tab / graph / extraction-table functions. All six are
+// call-site-isolated and close over nothing but their own arguments
+// (fetchSimulationResults's `sessionId` param shadows the outer
+// session-id state, so it's not a real closure either) -- so every one
+// of these gets `[]`.
+//
+// Side note, not part of this batch's scope: renameWorkspaceNode
+// doesn't appear in the `value` object or its dependency array at all
+// (confirmed via grep -- fetchWorkspaceNodes/deleteWorkspaceNode/
+// fetchGraphEdges/buildExtractionTable/fetchSimulationResults are all
+// there, this one isn't). Either it's dead code or something consumes
+// it a different way I haven't found -- flagging in case it's meant to
+// be exposed and just got missed, not fixing it here since it's outside
+// what this useCallback pass is meant to touch.
+const fetchWorkspaceNodes = useCallback(async (wsId, nodeType) => {
   const qs = nodeType ? `?node_type=${encodeURIComponent(nodeType)}` : "";
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes${qs}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
-}
+}, []);
 
 // NEW — §2 fix: deletes a single ingested source/node. Caller is
 // responsible for refetching the node list afterward (same pattern
 // ingestFile()'s callers already follow via onIngested), since the
 // delete endpoint itself only returns {status, id}, not a fresh list.
-async function deleteWorkspaceNode(wsId, nodeId) {
+const deleteWorkspaceNode = useCallback(async (wsId, nodeId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
-}
+}, []);
 
-async function renameWorkspaceNode(wsId, nodeId, title) {
+const renameWorkspaceNode = useCallback(async (wsId, nodeId, title) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}/rename`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
@@ -1164,15 +1273,15 @@ async function renameWorkspaceNode(wsId, nodeId, title) {
   });
   if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `${res.status} ${res.statusText}`);
   return res.json();
-}
+}, []);
 
-async function fetchGraphEdges(wsId) {
+const fetchGraphEdges = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/graph/edges?workspace_id=${encodeURIComponent(wsId)}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
-}
+}, []);
 
 // §3.5 — auto-generates a structured table from a workspace's own
 // ingested nodes (agents/note_table_builder.py), instead of the user
@@ -1180,7 +1289,7 @@ async function fetchGraphEdges(wsId) {
 // non-2xx so the caller can surface the server's actual error message
 // (e.g. "no ingested sources with content found") rather than silently
 // returning nothing.
-async function buildExtractionTable(wsId, fieldNames, { nodeType, expanded } = {}) {
+const buildExtractionTable = useCallback(async (wsId, fieldNames, { nodeType, expanded } = {}) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/table`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -1199,7 +1308,7 @@ async function buildExtractionTable(wsId, fieldNames, { nodeType, expanded } = {
     throw new Error(detail);
   }
   return res.json();
-}
+}, []);
 
 // Test tab / "simulate" domain — reads back whatever persona roles +
 // simulation_synthesizer already wrote to the memory bus for a given
@@ -1207,7 +1316,7 @@ async function buildExtractionTable(wsId, fieldNames, { nodeType, expanded } = {
 // being a POST, same shape as buildExtractionTable above; see
 // api/server.py's get_simulation_results() docstring for why this reads
 // the bus instead of wrapping review_aggregator.py.
-async function fetchSimulationResults(wsId, sessionId) {
+const fetchSimulationResults = useCallback(async (wsId, sessionId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/simulate`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -1222,7 +1331,7 @@ async function fetchSimulationResults(wsId, sessionId) {
     throw new Error(detail);
   }
   return res.json();
-}
+}, []);
 
 // Test tab / `personas` sub-tab — thin client for the same Role Library
 // store the Role Library panel already reads/writes via GET/PUT/PATCH
@@ -1232,7 +1341,20 @@ async function fetchSimulationResults(wsId, sessionId) {
 // client-side, same "reuse, don't rebuild" reasoning the /simulate
 // endpoint itself used for stage_output reads.
 
-async function fetchRoles() {
+// Step 2.3g (perf audit item #2, seventh useCallback batch): the Role
+// Library thin-client trio for the Test tab's `personas` sub-tab. All
+// three are call-site-isolated, close over nothing but their own
+// arguments, so `[]` across the board.
+//
+// Deliberately NOT touching the five ingest* functions right after this
+// (ingestClip, ingestVideoUrl, ingestFile, ingestPdfFile, and a fifth) —
+// the comment already on them says they're meant to stay plain,
+// unbound functions that IngestionDropzone.jsx/lib/ingestDispatch.js
+// call directly by name, with the *_wrapped versions further down being
+// the ones that actually go through the context/useCallback treatment.
+// Converting the plain ones here would fight that existing design, not
+// help it, so this batch stops before them.
+const fetchRoles = useCallback(async () => {
   const res = await fetch(`${API_URL}/api/roles`, {
     headers: await authHeaders(),
   });
@@ -1245,9 +1367,9 @@ async function fetchRoles() {
     throw new Error(detail);
   }
   return res.json();
-}
+}, []);
 
-async function updateRolePrompt(roleName, brief) {
+const updateRolePrompt = useCallback(async (roleName, brief) => {
   const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}`, {
     method: "PUT",
     headers: await authHeaders({ json: true }),
@@ -1262,9 +1384,9 @@ async function updateRolePrompt(roleName, brief) {
     throw new Error(detail);
   }
   return res.json();
-}
+}, []);
 
-async function setRolePinned(roleName, pinned) {
+const setRolePinned = useCallback(async (roleName, pinned) => {
   const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}/pin`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
@@ -1279,7 +1401,7 @@ async function setRolePinned(roleName, pinned) {
     throw new Error(detail);
   }
   return res.json();
-}
+}, []);
 
 // Capture — one function per ingestor family (§4.2), all landing through
 // write_ingested_source() server-side into the exact same node shape, so
@@ -1973,16 +2095,34 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   // so each refreshes both `batches` and `chats` the same way §3/§4's
   // create flow already does.
 
-  async function renameBatch(batchId, name) {
+  // Step 2.3i (perf audit item #2, ninth useCallback batch): batch
+  // management (renameBatch/unlinkBatchMembers/deleteBatch) here, plus
+  // persistMessage below. switchChat/createNewChat are also part of
+  // this batch but got MOVED up near refreshChatList (right after line
+  // 774) instead of staying in their original textual position --
+  // see the comment there for why. Leaving them declared here would
+  // have been a real crash, not just a missed-optimization note like
+  // the last few batches flagged: removeWorkspaceChat's dependency
+  // array (2.3c, line 919, evaluated synchronously during render, not
+  // deferred like a useEffect) already references switchChat and
+  // createNewChat. If those stayed `const`-declared down here at their
+  // original spot -- after removeWorkspaceChat -- render would hit a
+  // genuine temporal-dead-zone ReferenceError the first time through,
+  // not the "safe because it's called later, from an event handler"
+  // pattern every previous batch's ordering check has been able to
+  // rely on. Moving the declaration earlier is the actual fix; a
+  // comment explaining why it'd be fine (which is what I almost wrote
+  // here) would have been wrong.
+  const renameBatch = useCallback(async (batchId, name) => {
     await fetch(`${API_URL}/api/batches/${batchId}/rename`, {
       method: "PATCH",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ name }),
     });
     await fetchBatches();
-  }
+  }, [fetchBatches]);
 
-  async function unlinkBatchMembers(batchId, chatIds) {
+  const unlinkBatchMembers = useCallback(async (batchId, chatIds) => {
     await fetch(`${API_URL}/api/batches/${batchId}/unlink`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
@@ -1990,53 +2130,21 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     });
     await fetchBatches();
     await refreshChatList();
-  }
+  }, [fetchBatches, refreshChatList]);
 
-  async function deleteBatch(batchId) {
+  const deleteBatch = useCallback(async (batchId) => {
     await fetch(`${API_URL}/api/batches/${batchId}`, {
       method: "DELETE",
       headers: await authHeaders(),
     });
     await fetchBatches();
     await refreshChatList();
-  }
+  }, [fetchBatches, refreshChatList]);
 
-  async function switchChat(chatId, { skipListReload = false } = {}) {
-    const res = await fetch(`${API_URL}/api/chats/${chatId}`, {
-      headers: await authHeaders(),
-    });
-    if (!res.ok) return;
-    const chat = await res.json();
-    setSessionId(chatId);
-    localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
-    setMessages(chat.messages || []);
-    // Clear transient Working Panel state — it belongs to whatever run is
-    // in flight, not to a chat you just reloaded from disk.
-    stepsRef.current = []; setLiveSteps([]);
-    routeTraceRef.current = []; setRouteTrace([]);
-    dependencyMapRef.current = {}; setDependencyMap({});
-    structurePlanRef.current = null; setStructurePlan(null);
-    roleRequestsRef.current = []; setRoleRequests([]);
-    setMacroLoopDecisions([]);
-    setLiveDecision(null);
-    if (!skipListReload) await refreshChatList();
-  }
+  // (switchChat and createNewChat used to be declared here -- moved up
+  // near refreshChatList; see the note on renameBatch above for why.)
 
-  async function createNewChat() {
-    const res = await fetch(`${API_URL}/api/chats`, {
-      method: "POST",
-      headers: await authHeaders({ json: true }),
-      body: JSON.stringify({ title: "New Chat" }),
-    });
-    const chat = await res.json();
-    setSessionId(chat.id);
-    localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
-    setMessages([]);
-    await refreshChatList();
-    return chat.id;
-  }
-
-  async function persistMessage(message) {
+  const persistMessage = useCallback(async (message) => {
     // Fire-and-forget-ish: don't block the UI on this, but don't swallow
     // errors silently either — a failed save here is exactly the "lost
     // my chat" bug again, just moved one layer down.
@@ -2049,7 +2157,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     } catch (err) {
       console.error("Failed to persist message:", err);
     }
-  }
+  }, [sessionId]);
 
   // NEW — Workflow Templates fix. createNewChat()/persistMessage() above
   // both act on the CURRENTLY ACTIVE chat (they read/write `sessionId`),
@@ -2375,50 +2483,66 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   // Exported below under the SAME five names the module functions
   // have, replacing them in the context value — nothing outside this
   // file should ever import the raw module functions directly.
-  async function ingestClipWrapped(wsId, url, signal) {
+  // Step 2.3h (perf audit item #2, eighth useCallback batch): the
+  // *_wrapped ingest functions -- these are what actually goes into the
+  // context value, so getting their deps right matters more than most.
+  // Each closes over `sessionId` (state) and calls
+  // markSourceProcessingStarted/markSourceProcessingSettled (already
+  // useCallback'd, stable references) plus its own plain-function
+  // counterpart (ingestClip, ingestVideoUrl, etc. -- deliberately left
+  // as plain `function` declarations in 2.3g, so still a new reference
+  // every render). Same correctness-first call as removeWorkspaceChat
+  // back in 2.3c: the plain ingest function goes in the dep array even
+  // though it means these five won't stabilize until that plain
+  // function itself is wrapped -- which, per that same 2.3g note, isn't
+  // happening, since IngestionDropzone.jsx/lib/ingestDispatch.js need
+  // it to stay a plain, directly-importable function. So these five
+  // will keep getting new references every render until that tension
+  // is resolved by a bigger design change, not a mechanical wrap here.
+  const ingestClipWrapped = useCallback(async (wsId, url, signal) => {
     markSourceProcessingStarted(wsId);
     try {
       return await ingestClip(wsId, url, signal, sessionId);
     } finally {
       markSourceProcessingSettled(wsId);
     }
-  }
+  }, [markSourceProcessingStarted, markSourceProcessingSettled, sessionId, ingestClip]);
 
-  async function ingestVideoUrlWrapped(wsId, url, signal) {
+  const ingestVideoUrlWrapped = useCallback(async (wsId, url, signal) => {
     markSourceProcessingStarted(wsId);
     try {
       return await ingestVideoUrl(wsId, url, signal, sessionId);
     } finally {
       markSourceProcessingSettled(wsId);
     }
-  }
+  }, [markSourceProcessingStarted, markSourceProcessingSettled, sessionId, ingestVideoUrl]);
 
-  async function ingestFileWrapped(wsId, file, signal) {
+  const ingestFileWrapped = useCallback(async (wsId, file, signal) => {
     markSourceProcessingStarted(wsId);
     try {
       return await ingestFile(wsId, file, signal, sessionId);
     } finally {
       markSourceProcessingSettled(wsId);
     }
-  }
+  }, [markSourceProcessingStarted, markSourceProcessingSettled, sessionId, ingestFile]);
 
-  async function ingestPdfFileWrapped(wsId, file, signal) {
+  const ingestPdfFileWrapped = useCallback(async (wsId, file, signal) => {
     markSourceProcessingStarted(wsId);
     try {
       return await ingestPdfFile(wsId, file, signal, sessionId);
     } finally {
       markSourceProcessingSettled(wsId);
     }
-  }
+  }, [markSourceProcessingStarted, markSourceProcessingSettled, sessionId, ingestPdfFile]);
 
-  async function ingestVoiceFileWrapped(wsId, file, signal) {
+  const ingestVoiceFileWrapped = useCallback(async (wsId, file, signal) => {
     markSourceProcessingStarted(wsId);
     try {
       return await ingestVoiceFile(wsId, file, signal, sessionId);
     } finally {
       markSourceProcessingSettled(wsId);
     }
-  }
+  }, [markSourceProcessingStarted, markSourceProcessingSettled, sessionId, ingestVoiceFile]);
 
   // Step 2.2 (perf audit item #2): value was previously a plain object
   // literal, rebuilt fresh on every render with a brand-new reference

@@ -1,0 +1,59 @@
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index 1f4572c..dcafe3f 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -1281,7 +1281,20 @@ const fetchSimulationResults = useCallback(async (wsId, sessionId) => {
+ // client-side, same "reuse, don't rebuild" reasoning the /simulate
+ // endpoint itself used for stage_output reads.
+ 
+-async function fetchRoles() {
++// Step 2.3g (perf audit item #2, seventh useCallback batch): the Role
++// Library thin-client trio for the Test tab's `personas` sub-tab. All
++// three are call-site-isolated, close over nothing but their own
++// arguments, so `[]` across the board.
++//
++// Deliberately NOT touching the five ingest* functions right after this
++// (ingestClip, ingestVideoUrl, ingestFile, ingestPdfFile, and a fifth) —
++// the comment already on them says they're meant to stay plain,
++// unbound functions that IngestionDropzone.jsx/lib/ingestDispatch.js
++// call directly by name, with the *_wrapped versions further down being
++// the ones that actually go through the context/useCallback treatment.
++// Converting the plain ones here would fight that existing design, not
++// help it, so this batch stops before them.
++const fetchRoles = useCallback(async () => {
+   const res = await fetch(`${API_URL}/api/roles`, {
+     headers: await authHeaders(),
+   });
+@@ -1294,9 +1307,9 @@ async function fetchRoles() {
+     throw new Error(detail);
+   }
+   return res.json();
+-}
++}, []);
+ 
+-async function updateRolePrompt(roleName, brief) {
++const updateRolePrompt = useCallback(async (roleName, brief) => {
+   const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}`, {
+     method: "PUT",
+     headers: await authHeaders({ json: true }),
+@@ -1311,9 +1324,9 @@ async function updateRolePrompt(roleName, brief) {
+     throw new Error(detail);
+   }
+   return res.json();
+-}
++}, []);
+ 
+-async function setRolePinned(roleName, pinned) {
++const setRolePinned = useCallback(async (roleName, pinned) => {
+   const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}/pin`, {
+     method: "PATCH",
+     headers: await authHeaders({ json: true }),
+@@ -1328,7 +1341,7 @@ async function setRolePinned(roleName, pinned) {
+     throw new Error(detail);
+   }
+   return res.json();
+-}
++}, []);
+ 
+ // Capture — one function per ingestor family (§4.2), all landing through
+ // write_ingested_source() server-side into the exact same node shape, so

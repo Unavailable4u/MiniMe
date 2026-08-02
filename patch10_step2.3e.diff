@@ -1,0 +1,77 @@
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index 3a6f077..14ef66a 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -1085,7 +1085,14 @@ const leaveWorkspaceMembership = useCallback(async (wsId, successorId = null) =>
+   await refreshChatList();
+ }, [fetchWorkspaces, refreshChatList]);
+ 
+-async function forceRemoveOwner(wsId) {
++// Step 2.3e (perf audit item #2, fifth useCallback batch): finishing
++// off Part 8.9 -- ownership, voting, and attribution settings. Same
++// call-site check as 2.3d: none of these five are called by any other
++// function in this file (confirmed via grep), only from modal
++// components elsewhere in the tree. fetchWorkspaceVotes and
++// setMemberAttributionGrant close over nothing, so `[]`; the other
++// three call fetchWorkspaces() on success, so they depend on it.
++const forceRemoveOwner = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/owner/remove`, {
+     method: "POST",
+     headers: await authHeaders(),
+@@ -1097,9 +1104,9 @@ async function forceRemoveOwner(wsId) {
+   const updated = await res.json();
+   await fetchWorkspaces();
+   return updated;
+-}
++}, [fetchWorkspaces]);
+ 
+-async function fetchWorkspaceVotes(wsId) {
++const fetchWorkspaceVotes = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
+     headers: await authHeaders(),
+   });
+@@ -1108,9 +1115,9 @@ async function fetchWorkspaceVotes(wsId) {
+     throw new Error(err.detail || `Failed to load vote status (${res.status})`);
+   }
+   return res.json();
+-}
++}, []);
+ 
+-async function castWorkspaceVote(wsId, voteTarget = null) {
++const castWorkspaceVote = useCallback(async (wsId, voteTarget = null) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
+     method: "POST",
+     headers: await authHeaders({ json: true }),
+@@ -1123,9 +1130,9 @@ async function castWorkspaceVote(wsId, voteTarget = null) {
+   const result = await res.json();
+   await fetchWorkspaces(); // a vote may have just resolved ownership — owner_id can change
+   return result;
+-}
++}, [fetchWorkspaces]);
+ 
+-async function setWorkspaceAttribution(wsId, show) {
++const setWorkspaceAttribution = useCallback(async (wsId, show) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/attribution`, {
+     method: "PATCH",
+     headers: await authHeaders({ json: true }),
+@@ -1138,9 +1145,9 @@ async function setWorkspaceAttribution(wsId, show) {
+   const updated = await res.json();
+   await fetchWorkspaces();
+   return updated;
+-}
++}, [fetchWorkspaces]);
+ 
+-async function setMemberAttributionGrant(wsId, targetUserId, canToggle) {
++const setMemberAttributionGrant = useCallback(async (wsId, targetUserId, canToggle) => {
+   const res = await fetch(
+     `${API_URL}/api/workspaces/${wsId}/members/${targetUserId}/attribution-grant`,
+     {
+@@ -1154,7 +1161,7 @@ async function setMemberAttributionGrant(wsId, targetUserId, canToggle) {
+     throw new Error(err.detail || `Failed to update attribution grant (${res.status})`);
+   }
+   return res.json();
+-}
++}, []);
+ 
+ // --- NEW — §4.7: Notebooks tab. A "notebook" is a workspace (§4.3), so
+ // these all just parameterize the existing /api/workspaces/{ws_id}/...
