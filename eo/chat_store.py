@@ -100,6 +100,15 @@ _CHAT_COLUMNS = (
     "messages, workspace_id"
 )
 
+# Step 1.4: used only by get_chat()'s new read path. Every OTHER
+# function in this file still selects the old JSONB `messages` column
+# via _CHAT_COLUMNS above (export_chats, restore_chats, rename_chat,
+# etc.) -- untouched on purpose, this is a narrowly-scoped cutover of
+# the read path only, not a full removal of the old column yet.
+_CHAT_COLUMNS_NO_MESSAGES = (
+    "id, title, created_at, updated_at, linked_chat_ids, tags, template_id, workspace_id"
+)
+
 
 def export_chats(owner_id: str, chat_ids: list) -> list[dict]:
     """Part 8.7: the portable-backup half of backup/restore. Deliberately
@@ -244,14 +253,64 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
     return [_row_to_chat(r, include_messages=False) for r in rows]
 
 
-def get_chat(chat_id: str, owner_id: str) -> dict:
+def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
+             before_seq: int | None = None) -> dict:
+    """Step 1.4: messages now come from chat_messages (the normalized
+    table written by append_message()'s dual-write -- see step 1.3),
+    NOT the old chats.messages JSONB column. This query no longer
+    selects that column at all, so opening a chat no longer ships its
+    entire historical blob over the wire just to read a title.
+
+    Default behavior (limit=None) is UNCHANGED from before this step:
+    every message, oldest-first -- every existing caller (this file's
+    get_linked_context_text/estimate_batch_context_tokens, and
+    api/server.py's chat routes) still gets the exact same shape it
+    always has, just sourced from a table that's cheap to query
+    instead of a column that gets more expensive to touch as a chat
+    grows.
+
+    limit/before_seq are new, OPT-IN pagination for callers that want
+    it -- not wired into any route yet (a later step does that,
+    alongside the frontend's virtualized list). limit returns the
+    most recent `limit` messages (optionally strictly before
+    before_seq, for "load older messages" on scroll-up), still
+    returned oldest-first so callers never have to special-case
+    ordering based on whether they paginated."""
     with db.cursor() as cur:
-        cur.execute(f"select {_CHAT_COLUMNS} from chats where id = %s and owner_id = %s",
-                     (chat_id, owner_id))
+        cur.execute(
+            f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where id = %s and owner_id = %s",
+            (chat_id, owner_id),
+        )
         row = cur.fetchone()
-    if not row:
-        raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
-    return _row_to_chat(row)
+        if not row:
+            raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
+
+        if limit is None:
+            cur.execute(
+                "select payload from chat_messages where chat_id = %s order by seq asc",
+                (chat_id,),
+            )
+            messages = [r["payload"] for r in cur.fetchall()]
+        else:
+            params = [chat_id]
+            extra_clause = ""
+            if before_seq is not None:
+                extra_clause = " and seq < %s"
+                params.append(before_seq)
+            params.append(limit)
+            cur.execute(
+                f"select payload from chat_messages where chat_id = %s{extra_clause} "
+                f"order by seq desc limit %s",
+                params,
+            )
+            # fetched newest-first (for LIMIT to grab the right end of
+            # the range); reversed back to oldest-first before
+            # returning, matching the unpaginated case above.
+            messages = [r["payload"] for r in reversed(cur.fetchall())]
+
+    chat = _row_to_chat(row, include_messages=False)
+    chat["messages"] = messages
+    return chat
 
 
 def chat_exists(chat_id: str, owner_id: str) -> bool:
@@ -276,6 +335,25 @@ def set_chat_tags(chat_id: str, owner_id: str, tags: list) -> dict:
     if not row:
         raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
     return _row_to_chat(row)
+
+
+def _insert_chat_message(cur, chat_id: str, owner_id: str, seq: int, message: dict) -> None:
+    """Step 1.3: dual-write half of the chat_messages migration (see
+    migrations/0002_add_chat_messages_table.sql and
+    scripts/backfill_chat_messages.py). Writes the SAME message that
+    just went into chats.messages into the new normalized table too,
+    inside the same transaction/lock as the JSONB write it accompanies
+    -- so the two can never disagree about whether a given append
+    succeeded. This is additive only: nothing yet reads from
+    chat_messages (that's step 1.4), and the JSONB write this
+    accompanies is left completely alone."""
+    cur.execute(
+        """
+        insert into chat_messages (chat_id, owner_id, seq, role, payload)
+        values (%s, %s, %s, %s, %s)
+        """,
+        (chat_id, owner_id, seq, message.get("role"), db.Json(message)),
+    )
 
 
 def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
@@ -310,7 +388,9 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
                 """,
                 (chat_id, title, owner_id, db.Json([message])),
             )
-            return _row_to_chat(cur.fetchone())
+            row = cur.fetchone()
+            _insert_chat_message(cur, chat_id, owner_id, seq=0, message=message)
+            return _row_to_chat(row)
 
         messages = (existing["messages"] or []) + [message]
         title = existing["title"]
@@ -327,7 +407,16 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
             """,
             (db.Json(messages), title, _now(), chat_id, owner_id),
         )
-        return _row_to_chat(cur.fetchone())
+        row = cur.fetchone()
+        # existing["messages"] is the array BEFORE this append, so its
+        # length is exactly the next seq (0-based) -- same enumerate()
+        # convention scripts/backfill_chat_messages.py uses, and it's
+        # safe to trust here without a separate `select max(seq)` round
+        # trip because the `for update` lock above already serializes
+        # every writer to this chat_id.
+        next_seq = len(existing["messages"] or [])
+        _insert_chat_message(cur, chat_id, owner_id, seq=next_seq, message=message)
+        return _row_to_chat(row)
 
 
 def rename_chat(chat_id: str, owner_id: str, new_title: str) -> dict:

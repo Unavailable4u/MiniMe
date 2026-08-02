@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useContext, useState, useRef, useEffect, useCallback } from "react";
+import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "./AuthContext";   // NEW — Part 8.9: notification bell's per-user Pusher channel
@@ -542,7 +542,14 @@ export function SessionProvider({ children }) {
   // NotebooksTab.jsx's BacklinksView -> KnowledgeGraphView's
   // `pulsingIds` prop.
   const [topicPulsingIds, setTopicPulsingIds] = useState(() => new Set());
-  function pulseTopicNode(id) {
+  // Step 2.3a (perf audit item #2, first useCallback batch): wrapped so
+  // this stops being a new function reference on every render, which is
+  // required for the useMemo'd `value` (step 2.2) to actually start
+  // holding a stable reference for consumers that only use this field.
+  // No deps needed -- setTopicPulsingIds (useState setter) is stable
+  // across renders by React's own contract, and nothing else outside
+  // this function's own scope is referenced.
+  const pulseTopicNode = useCallback((id) => {
     if (!id) return;
     setTopicPulsingIds((prev) => new Set(prev).add(id));
     setTimeout(() => {
@@ -552,25 +559,34 @@ export function SessionProvider({ children }) {
         return next;
       });
     }, 1800);
-  }
+  }, []);
 
-  function _syncProcessingWorkspaces() {
+  // _syncProcessingWorkspaces reads/writes processingCountsRef.current
+  // (a ref, not state) and calls the stable setProcessingWorkspaces
+  // setter -- refs are stable by identity across renders too, so this
+  // needs no deps either.
+  const _syncProcessingWorkspaces = useCallback(() => {
     setProcessingWorkspaces(
       new Set(Object.keys(processingCountsRef.current).filter((k) => processingCountsRef.current[k] > 0))
     );
-  }
+  }, []);
 
-  function markSourceProcessingStarted(wsId) {
+  // Depend on _syncProcessingWorkspaces itself, now that it's a stable
+  // useCallback reference rather than a fresh function every render --
+  // if it weren't wrapped above, listing it here would defeat the
+  // point (the dep would change every render, invalidating this memo
+  // right along with it).
+  const markSourceProcessingStarted = useCallback((wsId) => {
     if (!wsId) return;
     processingCountsRef.current[wsId] = (processingCountsRef.current[wsId] || 0) + 1;
     _syncProcessingWorkspaces();
-  }
+  }, [_syncProcessingWorkspaces]);
 
-  function markSourceProcessingSettled(wsId) {
+  const markSourceProcessingSettled = useCallback((wsId) => {
     if (!wsId || !processingCountsRef.current[wsId]) return;   // already at 0 (or never started) — the other clear path already handled it
     processingCountsRef.current[wsId] = Math.max(0, processingCountsRef.current[wsId] - 1);
     _syncProcessingWorkspaces();
-  }
+  }, [_syncProcessingWorkspaces]);
 
   // NEW — Data Layer §9c: the frontend's first consumer of §9b's real
   // /ws/{session_id} push transport. Deliberately a plain WebSocket,
@@ -685,10 +701,10 @@ export function SessionProvider({ children }) {
     };
   }, [user?.id]);
 
-  function markNotificationsRead() {
+  const markNotificationsRead = useCallback(() => {
     setUnreadCount(0);
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-  }
+  }, []);
 
   // --- NEW: chat list + switching / creating / renaming / deleting /
   // linking chats. sessionId and chat_id are the same string everywhere
@@ -750,12 +766,12 @@ async function runTemplate(templateId, taskText) {
   await refreshChatList();
 }
 
-  async function refreshChatList() {
+  const refreshChatList = useCallback(async () => {
     const res = await fetch(`${API_URL}/api/chats`, {
       headers: await authHeaders(),
     });
     setChats(await res.json());
-  }
+  }, []);
 
   // NEW — step 3e prereq: pure lookup, no state mutation. Same check
   // ChatTab.jsx already did inline to find its activeWorkspace. Exposed
@@ -764,12 +780,12 @@ async function runTemplate(templateId, taskText) {
   // chatId belong to" without importing this file or duplicating the
   // `workspaces` state itself — it's passed down as a callback prop
   // instead (see AppShell.jsx's WorkspaceDockBridge).
-  function getWorkspaceIdForChat(chatId) {
+  const getWorkspaceIdForChat = useCallback((chatId) => {
     const ws = (workspaces || []).find(
       (w) => Array.isArray(w.chat_ids) && w.chat_ids.includes(chatId)
     );
     return ws?.id ?? null;
-  }
+  }, [workspaces]);
 
   // NEW — §4: loads memory_batch groups so the sidebar can render batch
   // sections and the Working Panel can show "sharing memory with..."
@@ -778,7 +794,27 @@ async function runTemplate(templateId, taskText) {
   // NEW — §6: repurposes the old LinkChatsModal save flow. Creates a
   // real batch (mutual membership) instead of the old one-directional
   // linkChats() call — see ChatSidebar.jsx's LinkChatsModal.
-  async function createBatch(name, memberChatIds) {
+  // Step 2.3b: fetchBatches moved ABOVE createBatch (previously
+  // createBatch, at the top of this file's source order, called
+  // fetchBatches, which was declared further down -- fine when both
+  // were hoisted `function` declarations, but a real bug waiting to
+  // happen once both become `const ... = useCallback(...)`: unlike
+  // functions, `const` bindings are NOT hoisted, so createBatch's
+  // dependency array would try to read `fetchBatches` before its own
+  // const initializer has run and throw a ReferenceError (temporal
+  // dead zone) the first time this component renders. Every batch
+  // from here on checks this same thing before converting: does this
+  // function call another function converted in this same batch (or
+  // an earlier one), and if so, is that dependency's const
+  // declaration actually above this one in source order?
+  const fetchBatches = useCallback(async () => {
+    const res = await fetch(`${API_URL}/api/batches`, {
+      headers: await authHeaders(),
+    });
+    setBatches(await res.json());
+  }, []);
+
+  const createBatch = useCallback(async (name, memberChatIds) => {
     await fetch(`${API_URL}/api/batches`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
@@ -786,30 +822,24 @@ async function runTemplate(templateId, taskText) {
     });
     await fetchBatches();
     await refreshChatList();
-  }
+  }, [fetchBatches, refreshChatList]);
   // NEW — §9.2: live estimate for the create-batch modal. Not stored in
 // context state — it's ephemeral per-modal-open, computed fresh each
 // time the checkbox selection changes.
-  async function estimateBatch(chatIds) {
+  const estimateBatch = useCallback(async (chatIds) => {
     const res = await fetch(`${API_URL}/api/batches/estimate`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ chat_ids: chatIds }),
     });
     return res.json();
-  }
-  async function fetchBatches() {
-    const res = await fetch(`${API_URL}/api/batches`, {
-      headers: await authHeaders(),
-    });
-    setBatches(await res.json());
-  }
+  }, []);
   // NEW — §7: workspaces ("Projects" in the UI). Mirrors the batch functions
 // above 1:1, with one thing to keep straight: workspaces store members as
 // `chat_ids` (see eo/chat_workspace.py), batches use `member_chat_ids` —
 // don't cross the two up when reading a response.
 
-async function fetchWorkspaces() {
+  const fetchWorkspaces = useCallback(async () => {
   const res = await fetch(`${API_URL}/api/workspaces`, {
     headers: await authHeaders(),
   });
@@ -823,9 +853,9 @@ async function fetchWorkspaces() {
     return;
   }
   setWorkspaces(body);
-}
+  }, []);
 
-async function createWorkspace(name, stage) {
+  const createWorkspace = useCallback(async (name, stage) => {
   // NEW — item #10 / B0: optional stage lets a caller (e.g. a stage
   // tab's own "New project" button) create a workspace that natively
   // belongs to that tab. Omitted = old behavior (backend defaults to
@@ -839,7 +869,7 @@ async function createWorkspace(name, stage) {
   const workspace = await res.json();
   await fetchWorkspaces();
   return workspace;
-}
+  }, [fetchWorkspaces]);
 
 async function createWorkspaceWithChats(name, chatIds = [], stage) {
   const workspace = await createWorkspace(name, stage);
@@ -849,14 +879,14 @@ async function createWorkspaceWithChats(name, chatIds = [], stage) {
   return workspace;
 }
 
-async function renameWorkspace(wsId, name) {
+  const renameWorkspace = useCallback(async (wsId, name) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ name }),
   });
   await fetchWorkspaces();
-}
+  }, [fetchWorkspaces]);
 
 async function addWorkspaceChat(wsId, chatId) {
   await fetch(`${API_URL}/api/workspaces/${wsId}/chats`, {
@@ -2390,7 +2420,18 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     }
   }
 
-  const value = {
+  // Step 2.2 (perf audit item #2): value was previously a plain object
+  // literal, rebuilt fresh on every render with a brand-new reference
+  // every time -- so every useSession() consumer re-rendered on ANY
+  // state change anywhere in this provider, not just the fields it
+  // actually uses. useMemo alone does NOT fully fix that yet: most of
+  // the ~100 functions below aren't wrapped in useCallback, so their
+  // references are still new every render, which still invalidates
+  // this memo every render. That's the deliberate next step (2.3,
+  // batched) -- this step lands the memo boilerplate and the complete,
+  // accurate dependency list first, so each useCallback added in 2.3
+  // starts paying off immediately with no further change needed here.
+  const value = useMemo(() => ({
   sessionId, API_URL,
   messages, loading,
   chats, chatsLoading,
@@ -2449,7 +2490,29 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   synthesizePodcast,   // NEW — Part 4 §4.4: podcast synthesis
   buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
   fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
-  };
+  }), [
+    sessionId, API_URL, messages, loading, chats, chatsLoading,
+    refreshChatList, getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
+    renameBatch, unlinkBatchMembers, deleteBatch, workspaces, fetchWorkspaces, createWorkspace,
+    createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,
+    promoteWorkspace, fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole, removeWorkspaceMember, leaveWorkspaceMembership,
+    forceRemoveOwner, fetchWorkspaceVotes, castWorkspaceVote, setWorkspaceAttribution, setMemberAttributionGrant, liveDecision,
+    liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap,
+    structurePlan, handleUsageEvent, macroLoopDecisions, roleRequests, mode, setMode,
+    pusherConnected, fetchTopicsGraph, topicPulsingIds, notifications, unreadCount, markNotificationsRead,
+    exportWorkspace, importWorkspace, activeMessageIndex, setActiveMessageIndex, sendTask, registerProject,
+    reviewBeforeDispatch, setReviewBeforeDispatch, pendingHireReview, confirmHireReview, cancelHireReview, pausedApproval,
+    resumeRun, templateRuns, runTemplate, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges,
+    buildExtractionTable, fetchSimulationResults, fetchRoles, updateRolePrompt, setRolePinned, ingestClipWrapped,
+    ingestVideoUrlWrapped, ingestFileWrapped, ingestPdfFileWrapped, ingestVoiceFileWrapped, processingWorkspaces, detectBacklinks,
+    fetchNodeSummaries, fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate, fetchWorkspaceFacts, saveWorkspaceFacts,
+    fetchFactCandidates, acceptFactCandidate, rejectFactCandidate, submitCorrection, fetchPatchCandidates, acceptPatchCandidate,
+    rejectPatchCandidate, fetchPanelContent, savePanelContent, fetchPanelContentList, generateNotebooks, generateTopicWorkflow,
+    classifyIntent, markTopicDone, fetchWorkspaceProgress, setWorkspaceProgress, fetchDeviceSpec, refreshPartPrices,
+    toggleInstructionStep, proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate, openScopedSubChat,
+    gradeQuiz, recordQuizAttempt, fetchMissedQuestions, synthesizePodcast, buildVideoOverview, fetchWorkspaceAudit,
+    fetchMyAudit,
+  ]);
   return (
     <SessionContext.Provider value={value}>
       {children}
