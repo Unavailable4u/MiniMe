@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import IngestionDropzone from "../notebooks/IngestionDropzone";
 import FlashcardFlipper from "../notebooks/FlashcardFlipper";
@@ -2213,7 +2213,7 @@ function NodePreviewModal({ node, onClose }) {
 
 // --- Main tab ------------------------------------------------------
 
-export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
    const {
      workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
      fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, fetchNodeSummaries,
@@ -3112,3 +3112,10 @@ export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   );
 }
 
+// Item 6 (perf audit, tab-body pass): NotebooksTab takes props from its parent
+// (onPromoted, onActiveWorkspaceChange). Wrapped in memo() now that
+// SessionContext's useCallback pass (item 2) means its stable-identity
+// props/callbacks stay stable across unrelated parent re-renders -- prop
+// objects/arrays it reads (workspaces, chats, etc.) are only ever replaced,
+// never mutated in place, so a shallow prop comparison here is meaningful.
+export default memo(NotebooksTab);

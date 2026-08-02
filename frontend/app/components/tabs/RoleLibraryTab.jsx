@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, memo } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
 import { Pencil, Check, X, RotateCcw, ListChecks, Copy, LayoutTemplate, Pin } from "lucide-react";
@@ -173,7 +173,7 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
   );
 }
 
-export default function RoleLibraryTab({ onStartTemplate }) {
+function RoleLibraryTab({ onStartTemplate }) {
   const { API_URL } = useSession();
   const [roles, setRoles] = useState(null);
   const [error, setError] = useState(null);
@@ -432,3 +432,11 @@ export default function RoleLibraryTab({ onStartTemplate }) {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): RoleLibraryTab takes props from its
+// parent (onStartTemplate). Wrapped in memo() now that SessionContext's
+// useCallback pass (item 2) means its stable-identity props/callbacks stay
+// stable across unrelated parent re-renders -- prop objects/arrays it reads
+// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
+// a shallow prop comparison here is meaningful.
+export default memo(RoleLibraryTab);

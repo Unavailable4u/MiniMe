@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
@@ -143,7 +143,7 @@ function pushRunHistory(wsId, entry) {
   return next;
 }
 
-export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const {
     workspaces, fetchWorkspaces, promoteWorkspace,
     fetchSimulationResults,
@@ -1172,3 +1172,12 @@ function HistoryPanel({ runHistory, viewedSessionId, lastSessionId, onView, open
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): TestTab takes props from its parent
+// (initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
+// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
+// useCallback pass (item 2) means its stable-identity props/callbacks stay
+// stable across unrelated parent re-renders -- prop objects/arrays it reads
+// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
+// a shallow prop comparison here is meaningful.
+export default memo(TestTab);

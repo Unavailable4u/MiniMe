@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import MermaidDiagram from "../MermaidDiagram";
 import WireframePreview from "../WireframePreview";
@@ -155,7 +155,7 @@ function unfenceMermaid(text) {
   return (m ? m[1] : text || "").trim();
 }
 
-export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, openScopedSubChat,
     fetchPanelContent, savePanelContent,
     fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
@@ -1083,3 +1083,12 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggle
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): PlanTab takes props from its parent
+// (onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
+// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
+// useCallback pass (item 2) means its stable-identity props/callbacks stay
+// stable across unrelated parent re-renders -- prop objects/arrays it reads
+// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
+// a shallow prop comparison here is meaningful.
+export default memo(PlanTab);

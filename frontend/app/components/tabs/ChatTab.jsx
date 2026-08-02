@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import { useLastActiveChatId } from "../../context/WorkspaceDockContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
@@ -21,7 +21,7 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";
 // any tab, dock-side) and resolving its workspace via
 // `getWorkspaceIdForChat`, then handing both ids down to
 // WorkspaceChatPanel so it renders in dock mode instead of legacy mode.
-export default function ChatTab({ onActiveWorkspaceChange }) {
+function ChatTab({ onActiveWorkspaceChange }) {
   const { workspaces, getWorkspaceIdForChat } = useSession();
   const lastActiveChatId = useLastActiveChatId();
   const activeWorkspaceId = lastActiveChatId ? getWorkspaceIdForChat(lastActiveChatId) : null;
@@ -43,3 +43,11 @@ export default function ChatTab({ onActiveWorkspaceChange }) {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pilot): unlike SettingsTab/AuditLogTab
+// above, ChatTab does take a prop from its parent (onActiveWorkspaceChange).
+// memo only pays off here once AppShell passes a stable callback identity
+// for it (a useCallback-wrapped handler, not a fresh inline arrow function
+// each render) -- still correct either way, just not free until that's
+// true, same caveat as MermaidDiagram's onNodeClick.
+export default memo(ChatTab);

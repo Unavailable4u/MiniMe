@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, memo } from "react";
 import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
 import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — Data Layer §9d
@@ -28,7 +28,7 @@ function tierStyle(data) {
   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
 }
 
-export default function MessageBubble({ message, onNavigateSubTab, onSendCommand }) {
+function MessageBubble({ message, onNavigateSubTab, onSendCommand }) {
   // NEW — Phase 3 step 3.7. Called unconditionally, ahead of every
   // early-return branch below (role === "generation"/"suggestion"/
   // "user") — Rules of Hooks: a hook can't be called only on the path
@@ -132,6 +132,16 @@ export default function MessageBubble({ message, onNavigateSubTab, onSendCommand
     </div>
   );
 }
+
+// Item 6 (perf audit): memoized so a re-render of WorkspaceChatPanel's
+// message list (e.g. from an unrelated sibling message streaming in)
+// doesn't force every OTHER already-rendered bubble to re-render too.
+// Only pays off now that SessionContext's useCallback pass (item 2) is
+// done -- onNavigateSubTab/onSendCommand are stable function identities
+// from their callers, and `message` objects are only ever replaced
+// (never mutated in place), so this comparison is meaningful rather
+// than always-true.
+export default memo(MessageBubble);
 
 // NEW — Data Layer §9d: chat proactive suggestions, rendered directly
 // under a tier 0/1 chat answer whenever eo/prerequisite_suggestions.py's

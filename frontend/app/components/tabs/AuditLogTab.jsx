@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import { ScrollText, User, ShieldAlert, Loader2 } from "lucide-react";
 
@@ -49,7 +49,7 @@ function AuditRow({ entry }) {
   );
 }
 
-export default function AuditLogTab() {
+function AuditLogTab() {
   const { workspaces, fetchWorkspaceAudit, fetchMyAudit } = useSession();
 
   const [selectedId, setSelectedId] = useState(null);
@@ -154,3 +154,9 @@ export default function AuditLogTab() {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pilot): no props from its parent (SettingsTab
+// renders it bare), so same reasoning as SettingsTab's own memo() -- this
+// only skips a re-render forced by SettingsTab re-rendering for an
+// unrelated reason (e.g. a density toggle), not a real update.
+export default memo(AuditLogTab);
