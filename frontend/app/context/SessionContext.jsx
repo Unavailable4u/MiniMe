@@ -57,7 +57,6 @@ export function SessionProvider({ children }) {
   // moving too.
   const { chats, refreshChatList } = useChatList();
   const [sessionId, setSessionId] = useState(null);        // CHANGED — no longer random-on-mount; this IS chat_id
-  const [chatsLoading, setChatsLoading] = useState(true);  // NEW — still local: reflects the whole mount/restore sequence below (fetch chats -> restore/create active chat), not just the chat-list fetch itself, so it doesn't cleanly belong to ChatListContext's narrower scope. Unconsumed by any component today (grepped) — kept for API compatibility.
   const [liveDecision, setLiveDecision] = useState(null);
   // CHANGE — Part 18: liveLanes (object keyed by module name) replaced
   // with liveSteps (an ordered array). Two reasons, both found reading
@@ -160,42 +159,23 @@ export function SessionProvider({ children }) {
   // in the Chat tab.
   const [templateRuns, setTemplateRuns] = useState({});
 
-  // --- NEW: on mount, load the chat list, then restore the last active
-  // chat (or create the very first one). This replaces the old
-  // `useState(() => "sess_" + ...)` initializer — sessionId is no longer
-  // minted randomly on every page load, it's loaded from localStorage /
-  // the persisted chat store, which is the actual fix for "everything
-  // disappears on refresh" (see guide §0).
+  // --- On mount, load the chat list plus the two additive fetches that
+  // used to tag along here. CHANGED — Item 2 remaining piece, live-run-
+  // state slice, step 1: this effect used to also decide which chat to
+  // open (restore the last active one from localStorage, fall back to
+  // the most recent, or create the first one ever) by calling THIS
+  // component's own switchChat()/createNewChat(), writing into the
+  // sessionId/messages state above. That decision now lives in
+  // AppShell.jsx's AppShellBody, going through useWorkspaceDockActions()'s
+  // switchChat()/createNewChat() instead — see that effect's own comment
+  // for why. refreshChatList() stays here because plenty of functions
+  // further down this file still call it directly (unaffected by this
+  // change); fetchBatches()/fetchWorkspaces() stay here too since nothing
+  // about where they run depends on which chat ends up active.
   useEffect(() => {
-    (async () => {
-      // CHANGED — Item 2 concern split, slice 4: was an inline
-      // fetch(`${API_URL}/api/chats`) duplicating refreshChatList()'s own
-      // body further down this file; now calls the same function
-      // ChatListContext.jsx exposes (it returns the fetched array so this
-      // effect can still make its restore/create decision off it, or
-      // `null` on failure — see that function's own comment for why the
-      // null/[] distinction matters here specifically).
-      const list = await refreshChatList();
-      if (list === null) {
-        setChatsLoading(false);
-        return;
-      }
-      fetchBatches();   // NEW — §4: don't block chat restore on this, batches are additive UI
-      fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
-      const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
-      const stillExists = savedId && list.some((c) => c.id === savedId);
-
-      if (stillExists) {
-        await switchChat(savedId, { skipListReload: true });
-      } else if (list.length > 0) {
-        // Don't silently jump to a "new chat" tab on reload — reopen
-        // whatever chat is most recently updated instead.
-        await switchChat(list[0].id, { skipListReload: true });
-      } else {
-        await createNewChat();
-      }
-      setChatsLoading(false);
-    })();
+    refreshChatList();
+    fetchBatches();
+    fetchWorkspaces();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2453,7 +2433,6 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   const value = useMemo(() => ({
   sessionId, API_URL,
   messages, loading,
-  chatsLoading,
   // chats/refreshChatList REMOVED from this value — now served by
   // useChatList() (ChatListContext.jsx), not useSession(). See that
   // file's header comment for why this stayed a "state-only" slice like
@@ -2525,7 +2504,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
   fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
   }), [
-    sessionId, API_URL, messages, loading, chatsLoading,
+    sessionId, API_URL, messages, loading,
     getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
     renameBatch, unlinkBatchMembers, deleteBatch, createWorkspace,
     createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,

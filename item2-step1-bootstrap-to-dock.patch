@@ -1,0 +1,165 @@
+diff --git a/frontend/app/components/AppShell.jsx b/frontend/app/components/AppShell.jsx
+index fe0b9e3..be4aef5 100644
+--- a/frontend/app/components/AppShell.jsx
++++ b/frontend/app/components/AppShell.jsx
+@@ -38,6 +38,7 @@ const TABS = [
+ 
+ const SIDEBAR_KEY = "minime_sidebar_collapsed";
+ const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refresh, same pattern as SIDEBAR_KEY
++const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — Item 2 remaining piece, live-run-state slice, step 1: same key SessionContext.jsx/WorkspaceDockContext.jsx already read/write, needed here to decide which chat AppShellBody's bootstrap effect restores
+ 
+ // NEW — item #13: the 7 tabs that resolve a workspaceId and therefore
+ // have a Data bubble to show in the nav. Role Library, Workflow
+@@ -130,7 +131,18 @@ function AppShellBody() {
+   // NEW — step 3e: switchChat now resolves the correct per-workspace (or
+   // per-standalone-chat) dock itself from the chatId a notification hands
+   // it — it no longer writes into one shared SessionContext sessionId.
+-  const { switchChat } = useWorkspaceDockActions();
++  // CHANGED — Item 2 remaining piece, live-run-state slice, step 1: also
++  // pulls in createNewChat now, for the bootstrap effect below (same
++  // reasoning as switchChat above — that decision needed to move off
++  // SessionContext's own copy too, not just openChat()'s).
++  const { switchChat, createNewChat } = useWorkspaceDockActions();
++  // NEW — step 1: fetchBatches/fetchWorkspaces/refreshChatList, for the
++  // same bootstrap effect. fetchBatches has no concern-context of its
++  // own yet (Item 1 territory, not this slice), so it still comes off
++  // useSession() — everything else here already has its own hook.
++  const { fetchBatches } = useSession();
++  const { fetchWorkspaces } = useWorkspaces();
++  const { refreshChatList } = useChatList();
+   const [activeTab, setActiveTabState] = useState("chat");
+   // NEW — §4 fix: tabs that have been visited at least once stay mounted
+   // (hidden via CSS, not unmounted) so their in-memory state — sub-tab,
+@@ -184,6 +196,44 @@ function AppShellBody() {
+     }
+   }, []);
+ 
++  // NEW — Item 2 remaining piece, live-run-state slice, step 1: on mount,
++  // load the chat list, then restore the last active chat (or create the
++  // very first one). MOVED from SessionContext.jsx's own mount effect,
++  // same body, same behavior — just retargeted from that component's own
++  // switchChat()/createNewChat() (which wrote into a global sessionId/
++  // messages pair that step 3e already stopped wiring any real consumer
++  // to) onto the dock's copies via useWorkspaceDockActions(). Those write
++  // into lastActiveChatId and the correct per-key dock slot directly, the
++  // same way every other chat-lifecycle action (ChatSidebar's row click,
++  // "+ New chat", etc.) already does — so the default Chat tab now boots
++  // straight into dock mode instead of relying on WorkspaceChatPanel's
++  // "legacy" fallback (dock.key == null) until the user's first click.
++  // SessionContext.jsx's own switchChat/createNewChat are untouched by
++  // this — removeWorkspaceChat's fallback (SessionContext.jsx) still
++  // calls its own copies, so they can't be deleted yet; this only moves
++  // who's responsible for the very first "which chat opens" decision.
++  useEffect(() => {
++    (async () => {
++      const list = await refreshChatList();
++      if (list === null) return;
++      fetchBatches();     // NEW — §4: don't block chat restore on this, batches are additive UI
++      fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
++      const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
++      const stillExists = savedId && list.some((c) => c.id === savedId);
++
++      if (stillExists) {
++        await switchChat(savedId, { skipListReload: true });
++      } else if (list.length > 0) {
++        // Don't silently jump to a "new chat" tab on reload — reopen
++        // whatever chat is most recently updated instead.
++        await switchChat(list[0].id, { skipListReload: true });
++      } else {
++        await createNewChat();
++      }
++    })();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
+   // NEW — §4 fix: every tab switch both updates the active tab and marks
+   // it as visited (so it starts rendering, and then stays mounted), and
+   // persists the choice so a page refresh reopens the same tab.
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index bf471a2..1837fab 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -57,7 +57,6 @@ export function SessionProvider({ children }) {
+   // moving too.
+   const { chats, refreshChatList } = useChatList();
+   const [sessionId, setSessionId] = useState(null);        // CHANGED — no longer random-on-mount; this IS chat_id
+-  const [chatsLoading, setChatsLoading] = useState(true);  // NEW — still local: reflects the whole mount/restore sequence below (fetch chats -> restore/create active chat), not just the chat-list fetch itself, so it doesn't cleanly belong to ChatListContext's narrower scope. Unconsumed by any component today (grepped) — kept for API compatibility.
+   const [liveDecision, setLiveDecision] = useState(null);
+   // CHANGE — Part 18: liveLanes (object keyed by module name) replaced
+   // with liveSteps (an ordered array). Two reasons, both found reading
+@@ -160,42 +159,23 @@ export function SessionProvider({ children }) {
+   // in the Chat tab.
+   const [templateRuns, setTemplateRuns] = useState({});
+ 
+-  // --- NEW: on mount, load the chat list, then restore the last active
+-  // chat (or create the very first one). This replaces the old
+-  // `useState(() => "sess_" + ...)` initializer — sessionId is no longer
+-  // minted randomly on every page load, it's loaded from localStorage /
+-  // the persisted chat store, which is the actual fix for "everything
+-  // disappears on refresh" (see guide §0).
++  // --- On mount, load the chat list plus the two additive fetches that
++  // used to tag along here. CHANGED — Item 2 remaining piece, live-run-
++  // state slice, step 1: this effect used to also decide which chat to
++  // open (restore the last active one from localStorage, fall back to
++  // the most recent, or create the first one ever) by calling THIS
++  // component's own switchChat()/createNewChat(), writing into the
++  // sessionId/messages state above. That decision now lives in
++  // AppShell.jsx's AppShellBody, going through useWorkspaceDockActions()'s
++  // switchChat()/createNewChat() instead — see that effect's own comment
++  // for why. refreshChatList() stays here because plenty of functions
++  // further down this file still call it directly (unaffected by this
++  // change); fetchBatches()/fetchWorkspaces() stay here too since nothing
++  // about where they run depends on which chat ends up active.
+   useEffect(() => {
+-    (async () => {
+-      // CHANGED — Item 2 concern split, slice 4: was an inline
+-      // fetch(`${API_URL}/api/chats`) duplicating refreshChatList()'s own
+-      // body further down this file; now calls the same function
+-      // ChatListContext.jsx exposes (it returns the fetched array so this
+-      // effect can still make its restore/create decision off it, or
+-      // `null` on failure — see that function's own comment for why the
+-      // null/[] distinction matters here specifically).
+-      const list = await refreshChatList();
+-      if (list === null) {
+-        setChatsLoading(false);
+-        return;
+-      }
+-      fetchBatches();   // NEW — §4: don't block chat restore on this, batches are additive UI
+-      fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
+-      const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
+-      const stillExists = savedId && list.some((c) => c.id === savedId);
+-
+-      if (stillExists) {
+-        await switchChat(savedId, { skipListReload: true });
+-      } else if (list.length > 0) {
+-        // Don't silently jump to a "new chat" tab on reload — reopen
+-        // whatever chat is most recently updated instead.
+-        await switchChat(list[0].id, { skipListReload: true });
+-      } else {
+-        await createNewChat();
+-      }
+-      setChatsLoading(false);
+-    })();
++    refreshChatList();
++    fetchBatches();
++    fetchWorkspaces();
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
+ 
+@@ -2453,7 +2433,6 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   const value = useMemo(() => ({
+   sessionId, API_URL,
+   messages, loading,
+-  chatsLoading,
+   // chats/refreshChatList REMOVED from this value — now served by
+   // useChatList() (ChatListContext.jsx), not useSession(). See that
+   // file's header comment for why this stayed a "state-only" slice like
+@@ -2525,7 +2504,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
+   fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
+   }), [
+-    sessionId, API_URL, messages, loading, chatsLoading,
++    sessionId, API_URL, messages, loading,
+     getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
+     renameBatch, unlinkBatchMembers, deleteBatch, createWorkspace,
+     createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,
