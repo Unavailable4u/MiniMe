@@ -1,0 +1,106 @@
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index b8bb9f2..b158a6d 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -794,7 +794,27 @@ async function runTemplate(templateId, taskText) {
+   // NEW — §6: repurposes the old LinkChatsModal save flow. Creates a
+   // real batch (mutual membership) instead of the old one-directional
+   // linkChats() call — see ChatSidebar.jsx's LinkChatsModal.
+-  async function createBatch(name, memberChatIds) {
++  // Step 2.3b: fetchBatches moved ABOVE createBatch (previously
++  // createBatch, at the top of this file's source order, called
++  // fetchBatches, which was declared further down -- fine when both
++  // were hoisted `function` declarations, but a real bug waiting to
++  // happen once both become `const ... = useCallback(...)`: unlike
++  // functions, `const` bindings are NOT hoisted, so createBatch's
++  // dependency array would try to read `fetchBatches` before its own
++  // const initializer has run and throw a ReferenceError (temporal
++  // dead zone) the first time this component renders. Every batch
++  // from here on checks this same thing before converting: does this
++  // function call another function converted in this same batch (or
++  // an earlier one), and if so, is that dependency's const
++  // declaration actually above this one in source order?
++  const fetchBatches = useCallback(async () => {
++    const res = await fetch(`${API_URL}/api/batches`, {
++      headers: await authHeaders(),
++    });
++    setBatches(await res.json());
++  }, []);
++
++  const createBatch = useCallback(async (name, memberChatIds) => {
+     await fetch(`${API_URL}/api/batches`, {
+       method: "POST",
+       headers: await authHeaders({ json: true }),
+@@ -802,30 +822,24 @@ async function runTemplate(templateId, taskText) {
+     });
+     await fetchBatches();
+     await refreshChatList();
+-  }
++  }, [fetchBatches, refreshChatList]);
+   // NEW — §9.2: live estimate for the create-batch modal. Not stored in
+ // context state — it's ephemeral per-modal-open, computed fresh each
+ // time the checkbox selection changes.
+-  async function estimateBatch(chatIds) {
++  const estimateBatch = useCallback(async (chatIds) => {
+     const res = await fetch(`${API_URL}/api/batches/estimate`, {
+       method: "POST",
+       headers: await authHeaders({ json: true }),
+       body: JSON.stringify({ chat_ids: chatIds }),
+     });
+     return res.json();
+-  }
+-  async function fetchBatches() {
+-    const res = await fetch(`${API_URL}/api/batches`, {
+-      headers: await authHeaders(),
+-    });
+-    setBatches(await res.json());
+-  }
++  }, []);
+   // NEW — §7: workspaces ("Projects" in the UI). Mirrors the batch functions
+ // above 1:1, with one thing to keep straight: workspaces store members as
+ // `chat_ids` (see eo/chat_workspace.py), batches use `member_chat_ids` —
+ // don't cross the two up when reading a response.
+ 
+-async function fetchWorkspaces() {
++  const fetchWorkspaces = useCallback(async () => {
+   const res = await fetch(`${API_URL}/api/workspaces`, {
+     headers: await authHeaders(),
+   });
+@@ -839,9 +853,9 @@ async function fetchWorkspaces() {
+     return;
+   }
+   setWorkspaces(body);
+-}
++  }, []);
+ 
+-async function createWorkspace(name, stage) {
++  const createWorkspace = useCallback(async (name, stage) => {
+   // NEW — item #10 / B0: optional stage lets a caller (e.g. a stage
+   // tab's own "New project" button) create a workspace that natively
+   // belongs to that tab. Omitted = old behavior (backend defaults to
+@@ -855,7 +869,7 @@ async function createWorkspace(name, stage) {
+   const workspace = await res.json();
+   await fetchWorkspaces();
+   return workspace;
+-}
++  }, [fetchWorkspaces]);
+ 
+ async function createWorkspaceWithChats(name, chatIds = [], stage) {
+   const workspace = await createWorkspace(name, stage);
+@@ -865,14 +879,14 @@ async function createWorkspaceWithChats(name, chatIds = [], stage) {
+   return workspace;
+ }
+ 
+-async function renameWorkspace(wsId, name) {
++  const renameWorkspace = useCallback(async (wsId, name) => {
+   await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
+     method: "PATCH",
+     headers: await authHeaders({ json: true }),
+     body: JSON.stringify({ name }),
+   });
+   await fetchWorkspaces();
+-}
++  }, [fetchWorkspaces]);
+ 
+ async function addWorkspaceChat(wsId, chatId) {
+   await fetch(`${API_URL}/api/workspaces/${wsId}/chats`, {

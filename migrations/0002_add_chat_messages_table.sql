@@ -1,0 +1,75 @@
+-- 0002_add_chat_messages_table.sql
+--
+-- Perf audit item #1: eo/chat_store.py's append_message() currently
+-- rewrites the ENTIRE chats.messages JSONB array on every single
+-- message -- SELECT ... FOR UPDATE the whole array, deserialize it in
+-- Python, append one item, re-serialize the whole thing, UPDATE the
+-- whole column back. O(n) work per append, and the row lock is held
+-- for the full round trip, serializing concurrent writers on the same
+-- chat. get_chat() has the same problem on the read side -- it always
+-- returns the full array, no pagination.
+--
+-- This migration ONLY adds the new table. It does NOT touch
+-- chats.messages, and no application code changes yet -- that happens
+-- in later steps (backfill script, then switching append_message()/
+-- get_chat() over to read/write this table, then eventually dropping
+-- the old column once the new path is confirmed stable). Safe to run
+-- any time; purely additive, nothing existing reads or writes this
+-- table yet.
+--
+-- Design notes:
+--   - `seq` (not `created_at`) is the authoritative ordering column.
+--     Existing messages inside chats.messages don't carry a reliable
+--     per-message id or a guaranteed-unique timestamp (two messages
+--     saved in the same request can share the same `ts` string), so
+--     array position is the only trustworthy order to preserve when
+--     backfilling. `seq` is a plain per-chat counter starting at 0,
+--     assigned in array order during backfill, and continued by the
+--     updated append_message() going forward.
+--   - `payload` is the full original message dict (role, text, ts,
+--     data, and whatever else a given agent/message type carries)
+--     stored as-is in JSONB, so backfill is lossless and no caller
+--     needs to change what fields it expects on a message. `role` is
+--     ALSO pulled out into its own column, purely so it can be
+--     indexed/filtered without unpacking JSONB -- it's a copy of
+--     payload->>'role', not a replacement for it.
+--   - owner_id is denormalized onto this table (not just reachable via
+--     a join to chats) so this table's own access-scoping can match
+--     chat_store.py's existing "WHERE owner_id = %s scoping IS the
+--     access control" discipline from Part 8.2, independent of chats.
+--
+-- HOW TO APPLY:
+--   psql "$DATABASE_URL" -f migrations/0002_add_chat_messages_table.sql
+-- IF NOT EXISTS guards make it safe to run more than once.
+
+create table if not exists chat_messages (
+    id          uuid primary key default gen_random_uuid(),
+    chat_id     text not null references chats(id) on delete cascade,
+    owner_id    text not null,
+    seq         bigint not null,
+    role        text,
+    payload     jsonb not null,
+    created_at  timestamptz not null default now()
+);
+
+-- Every read pattern we care about (get_chat's paginated fetch, a
+-- future "load more" on scroll-up) is "give me chat X's messages, in
+-- order, possibly limited/offset" -- this index serves all of those,
+-- and also enforces that seq is unique per chat.
+create unique index if not exists chat_messages_chat_id_seq_idx
+    on chat_messages (chat_id, seq);
+
+-- Mirrors the owner_id-scoping pattern used on chats itself. Not
+-- strictly required for correctness (chat_id already implies an owner
+-- via the chats table) but matches this module's existing "every
+-- query filters by owner_id directly" discipline and keeps
+-- owner-scoped queries against this table sargable without a join.
+create index if not exists chat_messages_owner_id_idx
+    on chat_messages (owner_id);
+
+comment on table chat_messages is
+    'Normalized per-message rows mirroring chats.messages (see '
+    'migration 0002 and eo/chat_store.py). Once backfilled and cut '
+    'over, this replaces the JSONB messages column as the source of '
+    'truth for chat history. seq (not created_at) is the authoritative '
+    'order -- see migration comments for why.';

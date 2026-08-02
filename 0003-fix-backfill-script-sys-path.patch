@@ -1,0 +1,18 @@
+diff --git a/scripts/backfill_chat_messages.py b/scripts/backfill_chat_messages.py
+index c3bc1c0..a2afcaa 100644
+--- a/scripts/backfill_chat_messages.py
++++ b/scripts/backfill_chat_messages.py
+@@ -28,6 +28,13 @@ Usage (PowerShell):
+ """
+ import argparse
+ import sys
++from pathlib import Path
++
++# Matches the convention in scripts/seed_test_note.py -- this script
++# lives in scripts/, but `eo` is a top-level package at the project
++# root, so the root needs to be on sys.path when this is run directly
++# (python scripts/backfill_chat_messages.py) rather than as a module.
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ 
+ from eo import db
+ 
