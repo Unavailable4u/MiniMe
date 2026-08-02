@@ -1,0 +1,103 @@
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index a58d517..9f4893b 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -2039,7 +2039,22 @@ async function fetchWorkspaceAudit(wsId, limit = 100) {
+   return res.json();
+ }
+ 
+-async function fetchMyAudit(limit = 100) {
++// Step 2.3j (perf audit item #2, tenth useCallback batch): the rest of
++// the chat-creation cluster. fetchMyAudit/createChatSilently/
++// persistMessageTo close over nothing but their own arguments -- `[]`
++// for all three. createWorkspaceChat depends on fetchWorkspaces/
++// refreshChatList (both already stable). openScopedSubChat calls
++// createWorkspaceChat (converting right here, so include it) and
++// sendTask -- sendTask is still a plain `function` declaration further
++// down the file (not converted in this batch; it's sendTask()'s own
++// turn next, and it's big enough to deserve a dedicated pass rather
++// than getting bundled in here). Referencing sendTask before its own
++// declaration is safe here specifically because it's still a `function`
++// (fully hoisted, unlike the `const switchChat` case from 2.3i) --
++// but per the same correctness-first rule from 2.3b/2.3c, it still goes
++// in the dep array so this doesn't silently stale-close over whatever
++// sendTask reference existed at mount.
++const fetchMyAudit = useCallback(async (limit = 100) => {
+   const res = await fetch(`${API_URL}/api/audit/me?limit=${limit}`, {
+     headers: await authHeaders(),
+   });
+@@ -2048,7 +2063,7 @@ async function fetchMyAudit(limit = 100) {
+     throw new Error(err.detail || `Failed to load your activity (${res.status})`);
+   }
+   return res.json();
+-}
++}, []);
+ 
+ // Was: createNewChat() then addWorkspaceChat() — two round trips where the
+ // second one always immediately followed the first. Swapped for the
+@@ -2056,7 +2071,7 @@ async function fetchMyAudit(limit = 100) {
+ // POST /api/workspaces/{ws_id}/chats/create). Same local-state side effects
+ // as createNewChat() (sessionId, ACTIVE_CHAT_KEY, messages) plus the
+ // workspace-list refresh addWorkspaceChat used to do, just in one fetch.
+-async function createWorkspaceChat(wsId, title = "New Chat") {
++const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/chats/create`, {
+     method: "POST",
+     headers: await authHeaders({ json: true }),
+@@ -2070,7 +2085,7 @@ async function createWorkspaceChat(wsId, title = "New Chat") {
+   await fetchWorkspaces();   // membership changed server-side
+   await refreshChatList();
+   return chat.id;
+-}
++}, [fetchWorkspaces, refreshChatList]);
+ 
+ // CHANGED — step 6.11.b: topicId is a new optional 3rd param, threaded
+ // down from NotebooksTab.jsx's WorkflowCard "Work through" button via
+@@ -2079,7 +2094,7 @@ async function createWorkspaceChat(wsId, title = "New Chat") {
+ // dispatch behavior changes. Step 6.11.c is what actually adds topic_id
+ // to sendTask's POST body / the TaskRequest model server-side; until
+ // that lands this value goes nowhere past this console.debug.
+-async function openScopedSubChat(wsId, taskText, topicId = null) {
++const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null) => {
+   // Step 6.11.c: topicId now actually reaches sendTask() and rides the
+   // /api/task POST body as topic_id. The server still only logs it
+   // (see api/server.py's post_task()) — 6.11.f is what makes routing
+@@ -2087,7 +2102,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
+   const chatId = await createWorkspaceChat(wsId);
+   await sendTask(taskText, topicId);
+   return chatId;
+-}
++}, [createWorkspaceChat, sendTask]);
+ 
+   // NEW — §5: manage-batch modal actions (rename / unlink members /
+   // delete the whole batch). All three touch batch membership, which
+@@ -2165,7 +2180,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
+   // here — running a template must not silently swap out whatever chat
+   // the person currently has open. These two are the same two API calls,
+   // parameterized by an explicit chatId instead of the active sessionId.
+-  async function createChatSilently(title) {
++  const createChatSilently = useCallback(async (title) => {
+     const res = await fetch(`${API_URL}/api/chats`, {
+       method: "POST",
+       headers: await authHeaders({ json: true }),
+@@ -2174,9 +2189,9 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
+     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+     const chat = await res.json();
+     return chat.id;
+-  }
++  }, []);
+ 
+-  async function persistMessageTo(chatId, message) {
++  const persistMessageTo = useCallback(async (chatId, message) => {
+     try {
+       await fetch(`${API_URL}/api/chats/${chatId}/messages`, {
+         method: "POST",
+@@ -2186,7 +2201,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
+     } catch (err) {
+       console.error("Failed to persist message:", err);
+     }
+-  }
++  }, []);
+ 
+   // NEW — Workflow Templates fix. Mirrors sendTask()'s dispatch +
+   // persistence shape, but:
