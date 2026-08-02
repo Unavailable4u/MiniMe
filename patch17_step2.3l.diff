@@ -1,0 +1,225 @@
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -877,13 +877,10 @@
+   return workspace;
+   }, [fetchWorkspaces]);
+ 
+-async function createWorkspaceWithChats(name, chatIds = [], stage) {
+-  const workspace = await createWorkspace(name, stage);
+-  for (const chatId of chatIds) {
+-    await addWorkspaceChat(workspace.id, chatId);
+-  }
+-  return workspace;
+-}
++// createWorkspaceWithChats used to live here (right after createWorkspace)
++// but its useCallback dep array needs addWorkspaceChat, which isn't
++// declared until below — same TDZ hazard as the openScopedSubChat/sendTask
++// case in 2.3k. Moved to right after addWorkspaceChat's own declaration.
+ 
+   const renameWorkspace = useCallback(async (wsId, name) => {
+   await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
+@@ -920,6 +917,17 @@
+   await refreshChatList(); // membership changes linked_chat_ids server-side (chat_workspace.py's _sync)
+ }, [fetchWorkspaces, refreshChatList]);
+ 
++// Step 2.3l (perf audit item #2, twelfth useCallback batch): relocated
++// here (was right after createWorkspace, before addWorkspaceChat existed
++// in scope) so its dep array can safely reference addWorkspaceChat.
++const createWorkspaceWithChats = useCallback(async (name, chatIds = [], stage) => {
++  const workspace = await createWorkspace(name, stage);
++  for (const chatId of chatIds) {
++    await addWorkspaceChat(workspace.id, chatId);
++  }
++  return workspace;
++}, [createWorkspace, addWorkspaceChat]);
++
+ const removeWorkspaceChat = useCallback(async (wsId, chatId, deleteChat = false) => {
+   await fetch(
+     `${API_URL}/api/workspaces/${wsId}/chats/${chatId}?delete_chat=${deleteChat}`,
+@@ -1444,26 +1452,26 @@
+ // Organize — on-demand rescans (§4.3), same "candidate, not auto-applied"
+ // posture as note-candidates below.
+ 
+-async function detectBacklinks(wsId) {
++const detectBacklinks = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/backlinks/detect`, {
+     method: "POST",
+     headers: await authHeaders(),
+   });
+   return res.json();
+-}
++}, []);
+ 
+ // NEW — Notebooks integration guide §6.6/§7 (Phase 3): short
+ // agent-written blurbs written by agents/concept_linker.py, read by
+ // KnowledgeGraphView.jsx's node-click rationale panel. Read-only on
+ // the frontend by design -- there's no corresponding save function
+ // here on purpose, matching api/server.py's GET-only route.
+-async function fetchNodeSummaries(wsId) {
++const fetchNodeSummaries = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/graph/node_summaries`, {
+     headers: await authHeaders(),
+   });
+   if (!res.ok) return {};
+   return res.json();
+-}
++}, []);
+ 
+ // NEW — Backlinks-as-topic-tree: eo/secondary_data.py's {topics,
+ // connections} document, re-projected server-side into the same
+@@ -1473,44 +1481,44 @@
+ // fetchNodeSummaries above -- this store's only write path is
+ // apply_patch() (source_manager.py / backlink_detector.py), never a
+ // direct frontend call.
+-async function fetchTopicsGraph(wsId) {
++const fetchTopicsGraph = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/topics/graph`, {
+     headers: await authHeaders(),
+   });
+   if (!res.ok) return { nodes: [], edges: [] };
+   return res.json();
+-}
++}, []);
+ 
+ // Silent note-taking agent candidates (§4.6) — never auto-committed;
+ // accept/reject here is the review step Definition-of-Done #6 requires.
+ 
+-async function fetchNoteCandidates(wsId) {
++const fetchNoteCandidates = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates`, {
+     headers: await authHeaders(),
+   });
+   if (!res.ok) return [];
+   return res.json();
+-}
++}, []);
+ 
+ // FIX — bug audit §9 (candidates accept/reject write path): both of
+ // these used to take a plain list `index`. Switched to `candidate_id`
+ // to match eo/note_candidates.py's accept_candidate/reject_candidate —
+ // see that module's docstring for why an index isn't safe once two
+ // users can be reviewing the same pending list at once.
+-async function acceptNoteCandidate(wsId, candidateId) {
++const acceptNoteCandidate = useCallback(async (wsId, candidateId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}/accept`, {
+     method: "POST",
+     headers: await authHeaders(),
+   });
+   return res.json();
+-}
++}, []);
+ 
+-async function rejectNoteCandidate(wsId, candidateId) {
++const rejectNoteCandidate = useCallback(async (wsId, candidateId) => {
+   await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}`, {
+     method: "DELETE",
+     headers: await authHeaders(),
+   });
+-}
++}, []);
+ 
+ // Workspace facts (eo/workspace_facts.py, Part 0 §0.3) — durable
+ // brand_voice/target_user/tech_stack/custom facts for a workspace, plus
+@@ -1519,45 +1527,45 @@
+ // reject_candidate now take a stable candidate_id, not a list index —
+ // see bug audit §9).
+ 
+-async function fetchWorkspaceFacts(wsId) {
++const fetchWorkspaceFacts = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
+     headers: await authHeaders(),
+   });
+   if (!res.ok) return { brand_voice: "", target_user: "", tech_stack: [], custom: {} };
+   return res.json();
+-}
++}, []);
+ 
+-async function saveWorkspaceFacts(wsId, facts) {
++const saveWorkspaceFacts = useCallback(async (wsId, facts) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
+     method: "PUT",
+     headers: await authHeaders({ json: true }),
+     body: JSON.stringify(facts),
+   });
+   return res.json();
+-}
++}, []);
+ 
+-async function fetchFactCandidates(wsId) {
++const fetchFactCandidates = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates`, {
+     headers: await authHeaders(),
+   });
+   if (!res.ok) return [];
+   return res.json();
+-}
++}, []);
+ 
+-async function acceptFactCandidate(wsId, candidateId) {
++const acceptFactCandidate = useCallback(async (wsId, candidateId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}/accept`, {
+     method: "POST",
+     headers: await authHeaders(),
+   });
+   return res.json();
+-}
++}, []);
+ 
+-async function rejectFactCandidate(wsId, candidateId) {
++const rejectFactCandidate = useCallback(async (wsId, candidateId) => {
+   await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}`, {
+     method: "DELETE",
+     headers: await authHeaders(),
+   });
+-}
++}, []);
+ 
+ // Corrections + Patch Review (Data Layer architecture §8c) — §8a's
+ // Corrections tab posts a plain-language correction here; the server
+@@ -1566,37 +1574,37 @@
+ // nothing to locate. Same accept/reject shape as every other
+ // candidate store above — a candidate_id, never a list index.
+ 
+-async function submitCorrection(wsId, { text, scopeNodeId }) {
++const submitCorrection = useCallback(async (wsId, { text, scopeNodeId }) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections`, {
+     method: "POST",
+     headers: await authHeaders({ json: true }),
+     body: JSON.stringify({ text, scope_node_id: scopeNodeId ?? null }),
+   });
+   return res.json();
+-}
++}, []);
+ 
+-async function fetchPatchCandidates(wsId) {
++const fetchPatchCandidates = useCallback(async (wsId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates`, {
+     headers: await authHeaders(),
+   });
+   if (!res.ok) return [];
+   return res.json();
+-}
++}, []);
+ 
+-async function acceptPatchCandidate(wsId, candidateId) {
++const acceptPatchCandidate = useCallback(async (wsId, candidateId) => {
+   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}/accept`, {
+     method: "POST",
+     headers: await authHeaders(),
+   });
+   return res.json();
+-}
++}, []);
+ 
+-async function rejectPatchCandidate(wsId, candidateId) {
++const rejectPatchCandidate = useCallback(async (wsId, candidateId) => {
+   await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}`, {
+     method: "DELETE",
+     headers: await authHeaders(),
+   });
+-}
++}, []);
+ 
+ // Generic paste-panel content (eo/panel_content.py) — backs Mind Map,
+ // Study (flashcards/quiz/study guide), and the other "paste the chat's
