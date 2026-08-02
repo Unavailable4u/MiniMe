@@ -52,6 +52,27 @@ import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 // mode these are local state on THIS component instance — not read from
 // SessionContext, not stored on the dock. In legacy mode they still come
 // straight from SessionContext, unchanged.
+//
+// CHANGED — Item 2 remaining piece, live-run-state slice, step 2: the
+// merged messages/loading/mode/etc. variables below still read from
+// `legacy` (SessionContext) when `!usingDock`, same as 3d/3e left it —
+// that part is untouched. What changed is what gets RENDERED in that
+// state: audited every call site and found `dock.key == null` isn't just
+// a mount-time gap, it's the everyday "no project selected yet" state for
+// TestTab/BuildTab/ResearchTab/PlanTab (each renders this component
+// unconditionally, not gated behind an `activeWs &&`). Silently falling
+// through to the full chat UI with legacy's values meant those tabs, with
+// nothing selected, showed the GLOBAL Chat-tab conversation inside their
+// embedded dock — a leftover from before WorkspaceDockContext existed, not
+// an intentional empty state. Now shows an explicit placeholder instead
+// (see the `!usingDock` branch below, after the existing `collapsed` early
+// return so the rail toggle still works with nothing selected). This does
+// NOT yet make `legacy` fully dead — GrowthTab/NotebooksTab gate their own
+// call site behind a selection already, and ChatTab's `standalone` case
+// still legitimately needs `legacy` for the split-second before
+// AppShell.jsx's bootstrap effect resolves `chatId` — so SessionContext's
+// state/functions stay in place for now. Full legacy-branch removal is a
+// later step once nothing reachable still depends on it.
 const MODES = [
   { id: "auto", label: "Auto", icon: Sparkles, hint: "Let the Inspector decide" },
   { id: "simple", label: "Simple", icon: Feather, hint: "Cheapest capable tier only" },
@@ -110,7 +131,7 @@ function clampWorkingPanelHeight(h) {
 // default: a standalone Chat tab, or a Notebooks session where nothing's
 // been clicked yet, simply has no default to fall back to, same as
 // today (see tryHandleClassifiedToolCall's scope resolution below).
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null }) {
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -747,6 +768,29 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         >
           <MessageSquare size={16} />
         </button>
+      </div>
+    );
+  }
+
+  // NEW — Item 2 remaining piece, live-run-state slice, step 2: nothing
+  // resolved to a dock key (see this file's DUAL MODE comment up top for
+  // why that's a real, common state for TestTab/BuildTab/ResearchTab/
+  // PlanTab, not just a mount-time gap). `standalone` (only ChatTab.jsx
+  // passes it) distinguishes its transient "bootstrap hasn't resolved
+  // chatId yet" case, worth different copy than "nothing selected."
+  if (!usingDock) {
+    return (
+      <div
+        className={
+          stacked
+            ? "flex flex-col items-center justify-center h-full w-full text-center px-6 py-10"
+            : "hidden lg:flex flex-col items-center justify-center h-full w-full text-center px-6 py-10"
+        }
+      >
+        <MessageSquare size={28} className="text-[var(--neutral-700)] mb-3" />
+        <p className="text-sm text-[var(--neutral-400)]">
+          {standalone ? "Loading your chat…" : "Select a project to chat"}
+        </p>
       </div>
     );
   }

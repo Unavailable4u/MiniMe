@@ -41,7 +41,7 @@ function ChatTab({ onActiveWorkspaceChange }) {
 
   return (
     <div className="relative h-full min-h-0">
-      <WorkspaceChatPanel workspaceId={activeWorkspaceId} chatId={lastActiveChatId} />
+      <WorkspaceChatPanel workspaceId={activeWorkspaceId} chatId={lastActiveChatId} standalone />
     </div>
   );
 }

@@ -38,6 +38,7 @@ const TABS = [
 
 const SIDEBAR_KEY = "minime_sidebar_collapsed";
 const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refresh, same pattern as SIDEBAR_KEY
+const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — Item 2 remaining piece, live-run-state slice, step 1: same key SessionContext.jsx/WorkspaceDockContext.jsx already read/write, needed here to decide which chat AppShellBody's bootstrap effect restores
 
 // NEW — item #13: the 7 tabs that resolve a workspaceId and therefore
 // have a Data bubble to show in the nav. Role Library, Workflow
@@ -130,7 +131,18 @@ function AppShellBody() {
   // NEW — step 3e: switchChat now resolves the correct per-workspace (or
   // per-standalone-chat) dock itself from the chatId a notification hands
   // it — it no longer writes into one shared SessionContext sessionId.
-  const { switchChat } = useWorkspaceDockActions();
+  // CHANGED — Item 2 remaining piece, live-run-state slice, step 1: also
+  // pulls in createNewChat now, for the bootstrap effect below (same
+  // reasoning as switchChat above — that decision needed to move off
+  // SessionContext's own copy too, not just openChat()'s).
+  const { switchChat, createNewChat } = useWorkspaceDockActions();
+  // NEW — step 1: fetchBatches/fetchWorkspaces/refreshChatList, for the
+  // same bootstrap effect. fetchBatches has no concern-context of its
+  // own yet (Item 1 territory, not this slice), so it still comes off
+  // useSession() — everything else here already has its own hook.
+  const { fetchBatches } = useSession();
+  const { fetchWorkspaces } = useWorkspaces();
+  const { refreshChatList } = useChatList();
   const [activeTab, setActiveTabState] = useState("chat");
   // NEW — §4 fix: tabs that have been visited at least once stay mounted
   // (hidden via CSS, not unmounted) so their in-memory state — sub-tab,
@@ -182,6 +194,44 @@ function AppShellBody() {
       setActiveTabState(savedTab);
       setVisitedTabs((prev) => new Set(prev).add(savedTab));
     }
+  }, []);
+
+  // NEW — Item 2 remaining piece, live-run-state slice, step 1: on mount,
+  // load the chat list, then restore the last active chat (or create the
+  // very first one). MOVED from SessionContext.jsx's own mount effect,
+  // same body, same behavior — just retargeted from that component's own
+  // switchChat()/createNewChat() (which wrote into a global sessionId/
+  // messages pair that step 3e already stopped wiring any real consumer
+  // to) onto the dock's copies via useWorkspaceDockActions(). Those write
+  // into lastActiveChatId and the correct per-key dock slot directly, the
+  // same way every other chat-lifecycle action (ChatSidebar's row click,
+  // "+ New chat", etc.) already does — so the default Chat tab now boots
+  // straight into dock mode instead of relying on WorkspaceChatPanel's
+  // "legacy" fallback (dock.key == null) until the user's first click.
+  // SessionContext.jsx's own switchChat/createNewChat are untouched by
+  // this — removeWorkspaceChat's fallback (SessionContext.jsx) still
+  // calls its own copies, so they can't be deleted yet; this only moves
+  // who's responsible for the very first "which chat opens" decision.
+  useEffect(() => {
+    (async () => {
+      const list = await refreshChatList();
+      if (list === null) return;
+      fetchBatches();     // NEW — §4: don't block chat restore on this, batches are additive UI
+      fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
+      const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
+      const stillExists = savedId && list.some((c) => c.id === savedId);
+
+      if (stillExists) {
+        await switchChat(savedId, { skipListReload: true });
+      } else if (list.length > 0) {
+        // Don't silently jump to a "new chat" tab on reload — reopen
+        // whatever chat is most recently updated instead.
+        await switchChat(list[0].id, { skipListReload: true });
+      } else {
+        await createNewChat();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // NEW — §4 fix: every tab switch both updates the active tab and marks
