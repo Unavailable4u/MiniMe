@@ -1,5 +1,7 @@
 import { useState, useEffect, memo } from "react";
 import { useSession } from "../../context/SessionContext";
+import { useWorkspaces } from "../../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
+import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import Markdown from "../Markdown";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e (+ follow-up fix below); useLastActiveChatId added for item #11 / C2
@@ -145,11 +147,12 @@ function pushRunHistory(wsId, entry) {
 
 function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const {
-    workspaces, fetchWorkspaces, promoteWorkspace,
+    promoteWorkspace,
     fetchSimulationResults,
     fetchRoles, updateRolePrompt, setRolePinned,
-    chats,
   } = useSession();
+  const { workspaces, fetchWorkspaces } = useWorkspaces();   // FIX — was destructured off useSession(), which no longer serves it; this call site was missed at the time
+  const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite this comment previously claiming so —
   // it had no workspaceId prop, so it read messages/sessionId off

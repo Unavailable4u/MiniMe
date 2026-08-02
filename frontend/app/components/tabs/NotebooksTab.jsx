@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, memo } from "react";
 import { useSession } from "../../context/SessionContext";
+import { useWorkspaces } from "../../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
+import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import IngestionDropzone from "../notebooks/IngestionDropzone";
 import FlashcardFlipper from "../notebooks/FlashcardFlipper";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
@@ -2215,7 +2217,7 @@ function NodePreviewModal({ node, onClose }) {
 
 function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
    const {
-     workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
+     createWorkspace, promoteWorkspace,
      fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, fetchNodeSummaries,
      fetchTopicsGraph, topicPulsingIds,   // NEW — Backlinks-as-topic-tree
      fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate,
@@ -2228,6 +2230,8 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
      proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate,
     openScopedSubChat,
   } = useSession();
+  const { workspaces, fetchWorkspaces } = useWorkspaces();   // FIX — was destructured off useSession(), which no longer serves it; this call site was missed at the time
+  const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   // NEW — step 3e: switchChat/createNewChat now resolve the dock for
   // whichever workspace a chat belongs to, instead of writing into one
   // shared SessionContext sessionId. This tab's own <WorkspaceChatPanel>

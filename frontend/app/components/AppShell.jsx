@@ -4,6 +4,7 @@ import { SessionProvider, useSession } from "../context/SessionContext";
 import { NotificationsProvider } from "../context/NotificationsContext";   // NEW — Item 2 concern split, slice 1: notifications/unreadCount/markNotificationsRead moved out of SessionContext
 import { UsageStatsProvider, useUsageStats } from "../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent moved out of SessionContext
 import { WorkspacesProvider, useWorkspaces } from "../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces moved out of SessionContext
+import { ChatListProvider, useChatList } from "../context/ChatListContext";   // NEW — Item 2 concern split, slice 4: chats/refreshChatList moved out of SessionContext
 import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
 import ChatSidebar from "./ChatSidebar";
 import ChatTab from "./tabs/ChatTab";
@@ -56,19 +57,22 @@ export default function AppShell() {
   return (
     // NEW — NotificationsProvider sits alongside SessionProvider (it
     // only needs useAuth() and doesn't read/feed anything on
-    // SessionContext — see its own comment). UsageStatsProvider and
-    // WorkspacesProvider both have to sit ABOVE SessionProvider instead,
-    // because SessionContext.jsx calls useUsageStats()/useWorkspaces()
-    // internally (see each context's own header comment for why —
-    // SessionContext still owns the CRUD functions that mutate
-    // workspaces, and still needs to read `workspaces`/call
-    // `fetchWorkspaces()` itself).
+    // SessionContext — see its own comment). UsageStatsProvider,
+    // WorkspacesProvider, and (CHANGED — slice 4) ChatListProvider all
+    // have to sit ABOVE SessionProvider instead, because SessionContext.jsx
+    // calls useUsageStats()/useWorkspaces()/useChatList() internally (see
+    // each context's own header comment for why — SessionContext still
+    // owns the chat-lifecycle functions that read/call `chats`/
+    // `refreshChatList`, same as it still owns the workspace CRUD
+    // functions that read/call `workspaces`/`fetchWorkspaces`).
     <NotificationsProvider>
       <UsageStatsProvider>
         <WorkspacesProvider>
-          <SessionProvider>
-            <WorkspaceDockBridge />
-          </SessionProvider>
+          <ChatListProvider>
+            <SessionProvider>
+              <WorkspaceDockBridge />
+            </SessionProvider>
+          </ChatListProvider>
         </WorkspacesProvider>
       </UsageStatsProvider>
     </NotificationsProvider>
@@ -97,8 +101,11 @@ export default function AppShell() {
 // directly instead of being forwarded through useSession().
 // fetchWorkspaces similarly CHANGED (Item 2 concern split, slice 3): read
 // from useWorkspaces() directly instead of useSession().
+// refreshChatList/chats similarly CHANGED (Item 2 concern split, slice 4):
+// read from useChatList() directly instead of useSession().
 function WorkspaceDockBridge() {
-  const { refreshChatList, getWorkspaceIdForChat, chats } = useSession();
+  const { getWorkspaceIdForChat } = useSession();
+  const { refreshChatList, chats } = useChatList();
   const { handleUsageEvent } = useUsageStats();
   const { fetchWorkspaces } = useWorkspaces();
   return (
