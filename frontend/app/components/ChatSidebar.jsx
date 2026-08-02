@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";   // CHANGED — add useEffect
 import { useSession } from "../context/SessionContext";
+import { useWorkspaces } from "../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext"; // NEW — step 3e
 import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
@@ -37,7 +38,8 @@ function hashBatchColor(batchId) {
 // component.
 
 export default function ChatSidebar({ collapsed, onToggle }) {
-  const { chats, batches, workspaces } = useSession();
+  const { chats, batches } = useSession();
+  const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — step 3e: these five used to come from useSession() and wrote
   // into one shared global sessionId/messages. ChatSidebar is global
   // (item #6, kept that way on purpose) and lists chats belonging to

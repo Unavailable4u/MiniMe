@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, memo } from "react";
 import { useSession } from "../../context/SessionContext";
+import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import ExtractionTableView from "../research/ExtractionTableView";
 import Markdown from "../Markdown";
@@ -76,7 +77,8 @@ const PROMOTE_LABELS = {
 };
 
 function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
-  const { workspaces, fetchWorkspaces, chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
+  const { chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
+  const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite the old comment here claiming so —
   // it had no workspaceId prop, so it read messages/sessionId off

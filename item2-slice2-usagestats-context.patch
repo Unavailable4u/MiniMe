@@ -1,0 +1,328 @@
+diff --git a/frontend/app/components/AppShell.jsx b/frontend/app/components/AppShell.jsx
+index c3762fa..30b501b 100644
+--- a/frontend/app/components/AppShell.jsx
++++ b/frontend/app/components/AppShell.jsx
+@@ -2,6 +2,7 @@
+ import { useState, useEffect, useCallback, useRef } from "react";
+ import { SessionProvider, useSession } from "../context/SessionContext";
+ import { NotificationsProvider } from "../context/NotificationsContext";   // NEW — Item 2 concern split, slice 1: notifications/unreadCount/markNotificationsRead moved out of SessionContext
++import { UsageStatsProvider, useUsageStats } from "../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent moved out of SessionContext
+ import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
+ import ChatSidebar from "./ChatSidebar";
+ import ChatTab from "./tabs/ChatTab";
+@@ -52,17 +53,20 @@ const STAGE_TAB_MAP = { note: "notebooks", research: "research", plan: "plan", b
+ 
+ export default function AppShell() {
+   return (
+-    // NEW — NotificationsProvider sits alongside SessionProvider, not
+-    // inside/wrapping it either way for a dependency reason — it only
+-    // needs useAuth() (already available here, AppShell only mounts
+-    // once a signed-in user exists — see page.js's Gate) and doesn't
+-    // read or feed anything on SessionContext. Order between the two
+-    // doesn't matter; listed first since NotificationBell (a consumer)
+-    // sits in AppShellBody, itself inside both.
++    // NEW — NotificationsProvider sits alongside SessionProvider (it
++    // only needs useAuth() and doesn't read/feed anything on
++    // SessionContext — see its own comment). UsageStatsProvider is
++    // different: it has to sit ABOVE SessionProvider, not alongside it,
++    // because SessionContext.jsx calls useUsageStats() internally (its
++    // own session-${sessionId} Pusher handler still needs to invoke
++    // handleUsageEvent on the usage_update/quota_alert branches — see
++    // UsageStatsContext.jsx's header comment).
+     <NotificationsProvider>
+-      <SessionProvider>
+-        <WorkspaceDockBridge />
+-      </SessionProvider>
++      <UsageStatsProvider>
++        <SessionProvider>
++          <WorkspaceDockBridge />
++        </SessionProvider>
++      </UsageStatsProvider>
+     </NotificationsProvider>
+   );
+ }
+@@ -83,10 +87,13 @@ export default function AppShell() {
+ // event ownership, option 1 (see WorkspaceDockContext.jsx's file-header
+ // comment): usage_update/quota_alert are handled by the per-dock
+ // subscription now, forwarded up through this callback so usageStats/
+-// usageHistory/combinedUsageHistory can stay app-wide on SessionContext,
+-// same intent as refreshChatList's existing round-trip.
++// usageHistory/combinedUsageHistory can stay app-wide — CHANGED (Item 2
++// concern split, slice 2): "app-wide" now means UsageStatsContext, not
++// SessionContext, so handleUsageEvent is read from useUsageStats()
++// directly instead of being forwarded through useSession().
+ function WorkspaceDockBridge() {
+-  const { refreshChatList, getWorkspaceIdForChat, chats, fetchWorkspaces, handleUsageEvent } = useSession();
++  const { refreshChatList, getWorkspaceIdForChat, chats, fetchWorkspaces } = useSession();
++  const { handleUsageEvent } = useUsageStats();
+   return (
+     <WorkspaceDockProvider
+       refreshChatList={refreshChatList}
+diff --git a/frontend/app/components/tabs/TokenUsageTab.jsx b/frontend/app/components/tabs/TokenUsageTab.jsx
+index 14625a7..a5d8dbe 100644
+--- a/frontend/app/components/tabs/TokenUsageTab.jsx
++++ b/frontend/app/components/tabs/TokenUsageTab.jsx
+@@ -2,6 +2,7 @@
+ import { useMemo, useState, useEffect, memo } from "react";
+ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
+ import { useSession, authHeaders } from "../../context/SessionContext";
++import { useUsageStats } from "../../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2
+ 
+ const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
+ 
+@@ -410,7 +411,8 @@ function ProjectSectionUsagePanel({ apiUrl }) {
+ }
+ 
+ function TokenUsageTab() {
+-  const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
++  const { API_URL } = useSession();
++  const { usageStats, usageHistory, combinedUsageHistory } = useUsageStats();   // CHANGED — was useSession()
+ 
+   const byProvider = useMemo(() => groupByProvider(usageStats), [usageStats]);
+   const providers = Object.keys(byProvider).sort();
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index 14a75af..867a7dd 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -2,6 +2,7 @@
+ import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from "react";
+ import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
+ import { supabase } from "../lib/supabaseClient";
++import { useUsageStats } from "./UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent now live there
+ // useAuth import REMOVED — its only use here (the notification-bell
+ // per-user Pusher channel) moved to NotificationsContext.jsx.
+ 
+@@ -93,10 +94,8 @@ export function SessionProvider({ children }) {
+   const routeTraceRef = useRef([]);
+   const dependencyMapRef = useRef({});
+   const structurePlanRef = useRef(null);
+-  const [usageStats, setUsageStats] = useState({});
+-  const [usageHistory, setUsageHistory] = useState({});       // { [statKey]: [{t, tokens}, ...] } — Part 17
+-  const [combinedUsageHistory, setCombinedUsageHistory] = useState([]); // [{t, [provider]: tokens}, ...] — Part 17
+-  const latestByProviderRef = useRef({});                       // provider -> summed tokens across its keys, for the combined chart — Part 17
++  // usageStats/usageHistory/combinedUsageHistory/latestByProviderRef
++  // MOVED — now in UsageStatsContext.jsx (Item 2 concern split, slice 2).
+   const [routeTrace, setRouteTrace] = useState([]);
+   const [macroLoopDecisions, setMacroLoopDecisions] = useState([]);
+   const [dependencyMap, setDependencyMap] = useState({});
+@@ -189,65 +188,12 @@ export function SessionProvider({ children }) {
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
+ 
+-  // NEW — 3e usage-event ownership (architecture doc §2.3's three
+-  // options; going with option 1): extracted out of the sessionId-keyed
+-  // bind_global handler below so WorkspaceDockContext's per-dock
+-  // handleDockEvent can invoke this exact same logic via a threaded-in
+-  // callback (`onUsageEvent`, passed through WorkspaceDockBridge in
+-  // AppShell.jsx same as refreshChatList/getWorkspaceIdForChat/
+-  // fetchWorkspaces already are), rather than duplicating it or leaving
+-  // usage_update/quota_alert permanently unhandled once this
+-  // subscription is deleted (see WorkspaceDockContext.jsx's file-header
+-  // comment on the open question this resolves). Pure extraction — the
+-  // branch bodies are unchanged, only the call site moved.
+-  const handleUsageEvent = useCallback((eventType, payload) => {
+-    if (eventType === "usage_update") {
+-      const statKey = `${payload?.provider}:${payload?.key_id}`;
+-      setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
+-
+-      // Part 17: append to this key's own history (capped so a very
+-      // long session doesn't grow this unbounded).
+-      setUsageHistory((prev) => {
+-        const series = prev[statKey] || [];
+-        const next = [...series, { t: Date.now(), tokens: payload?.tokens_used_today ?? 0 }];
+-        return { ...prev, [statKey]: next.length > 300 ? next.slice(-300) : next };
+-      });
+-
+-      // Part 17: maintain a per-provider running total (summed across
+-      // every key seen so far for that provider) and append one row to
+-      // a combined, time-aligned series every update, forward-filling
+-      // every OTHER provider's last known value so the combined chart
+-      // has a real value for every provider at every timestamp, not
+-      // just the one that happened to fire this particular event.
+-      const provider = payload?.provider;
+-      if (provider) {
+-        // Recompute this provider's total from every key of theirs
+-        // we've seen so far, rather than a running += — a += would
+-        // double count if this same key's usage_update fires again
+-        // with a lower number for any reason (shouldn't happen, but
+-        // recomputing from source is one fewer thing to trust blindly).
+-        setUsageStats((prevStats) => {
+-          const total = Object.entries(prevStats)
+-            .filter(([k]) => k.startsWith(`${provider}:`))
+-            .reduce((sum, [, v]) => sum + (v.tokens_used_today || 0), 0)
+-            + (payload?.tokens_used_today || 0); // this event's own key may not be in prevStats yet
+-          latestByProviderRef.current = { ...latestByProviderRef.current, [provider]: total };
+-          return prevStats; // this call is read-only against usageStats — the actual write already happened above
+-        });
+-        setCombinedUsageHistory((prev) => {
+-          const row = { t: Date.now(), ...latestByProviderRef.current };
+-          const next = [...prev, row];
+-          return next.length > 300 ? next.slice(-300) : next;
+-        });
+-      }
+-      return;
+-    }
+-    if (eventType === "quota_alert") {
+-      console.warn("quota_alert:", payload);
+-      return;
+-    }
+-    // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, []);
++  // handleUsageEvent (Part 17 usage-tracking, plus its 3e "usage-event
++  // ownership" extraction) MOVED — now defined in UsageStatsContext.jsx
++  // (Item 2 concern split, slice 2). Consumed here via the hook so the
++  // two call sites below (usage_update/quota_alert, inside this
++  // component's own session-${sessionId} handler) don't have to change.
++  const { handleUsageEvent } = useUsageStats();
+ 
+   // --- Pusher subscription: identical to today's page.js effect, just
+   // living up here instead of inside the page that used to render
+@@ -2519,8 +2465,12 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   removeWorkspaceMember, leaveWorkspaceMembership, forceRemoveOwner,
+   fetchWorkspaceVotes, castWorkspaceVote,
+   setWorkspaceAttribution, setMemberAttributionGrant,
+-  liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
+-  handleUsageEvent,   // NEW — 3e: threaded into WorkspaceDockProvider as onUsageEvent (option 1, usage-event ownership)
++  liveDecision, liveSteps, routeTrace, dependencyMap, structurePlan,
++  // usageStats/usageHistory/combinedUsageHistory/handleUsageEvent REMOVED
++  // — now served by useUsageStats() (UsageStatsContext.jsx), not
++  // useSession(). WorkspaceDockBridge (AppShell.jsx) reads
++  // handleUsageEvent from there directly instead of getting it forwarded
++  // through here.
+   macroLoopDecisions,
+   roleRequests,
+   mode, setMode,
+@@ -2571,8 +2521,8 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+     createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,
+     promoteWorkspace, fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole, removeWorkspaceMember, leaveWorkspaceMembership,
+     forceRemoveOwner, fetchWorkspaceVotes, castWorkspaceVote, setWorkspaceAttribution, setMemberAttributionGrant, liveDecision,
+-    liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap,
+-    structurePlan, handleUsageEvent, macroLoopDecisions, roleRequests, mode, setMode,
++    liveSteps, routeTrace, dependencyMap,
++    structurePlan, macroLoopDecisions, roleRequests, mode, setMode,
+     pusherConnected, fetchTopicsGraph, topicPulsingIds,
+     exportWorkspace, importWorkspace, activeMessageIndex, setActiveMessageIndex, sendTask, registerProject,
+     reviewBeforeDispatch, setReviewBeforeDispatch, pendingHireReview, confirmHireReview, cancelHireReview, pausedApproval,
+diff --git a/frontend/app/context/UsageStatsContext.jsx b/frontend/app/context/UsageStatsContext.jsx
+new file mode 100644
+index 0000000..73dd6eb
+--- /dev/null
++++ b/frontend/app/context/UsageStatsContext.jsx
+@@ -0,0 +1,117 @@
++"use client";
++// frontend/app/context/UsageStatsContext.jsx
++//
++// Audit §2.1 / Item 2 (remaining work), slice 2 of the "split
++// SessionContext into concern-based contexts" fix (slice 1 was
++// NotificationsContext.jsx — see that file's header comment).
++//
++// Extracted verbatim from SessionContext.jsx's Part 17 usage-tracking
++// code: `usageStats`/`usageHistory`/`combinedUsageHistory`, the
++// `latestByProviderRef` bookkeeping ref, and `handleUsageEvent` itself.
++// Branch bodies are byte-for-byte unchanged from the original — only the
++// call sites moved.
++//
++// UNLIKE slice 1, this state isn't fed by its own standalone Pusher
++// subscription — `handleUsageEvent` is invoked from two other places
++// that keep ownership of their own subscriptions:
++//   - SessionContext.jsx's session-${sessionId} bind_global handler,
++//     on the "usage_update" and "quota_alert" branches (unchanged call
++//     sites, now calling into this context via useUsageStats() instead
++//     of a same-component useCallback).
++//   - WorkspaceDockContext.jsx's per-dock handleDockEvent, via the
++//     `onUsageEvent` prop threaded in from AppShell's WorkspaceDockBridge
++//     (see that file's own header comment on "usage-event ownership,
++//     option 1" — unchanged by this slice, just re-sourced from
++//     useUsageStats() instead of useSession()).
++// That means UsageStatsProvider has to sit ABOVE SessionProvider in the
++// tree (not just alongside it, the way NotificationsProvider does) so
++// SessionContext can call useUsageStats() internally. See AppShell.jsx.
++//
++// A usage_update tick now only re-renders whoever calls useUsageStats()
++// (today: TokenUsageTab) instead of every useSession() consumer
++// app-wide — this was explicitly called out in §2.1 as one of the
++// three example ticks that used to re-render the whole tree.
++import { createContext, useContext, useState, useRef, useCallback, useMemo } from "react";
++
++const UsageStatsContext = createContext(null);
++
++export function useUsageStats() {
++  const ctx = useContext(UsageStatsContext);
++  if (!ctx) throw new Error("useUsageStats() must be used inside <UsageStatsProvider>");
++  return ctx;
++}
++
++export function UsageStatsProvider({ children }) {
++  const [usageStats, setUsageStats] = useState({});
++  const [usageHistory, setUsageHistory] = useState({});       // { [statKey]: [{t, tokens}, ...] } — Part 17
++  const [combinedUsageHistory, setCombinedUsageHistory] = useState([]); // [{t, [provider]: tokens}, ...] — Part 17
++  const latestByProviderRef = useRef({});                       // provider -> summed tokens across its keys, for the combined chart — Part 17
++
++  // NEW — 3e usage-event ownership (architecture doc §2.3's three
++  // options; going with option 1): called from both SessionContext's
++  // own session-${sessionId} handler AND WorkspaceDockContext's per-dock
++  // handler (via the threaded-in onUsageEvent callback), rather than
++  // duplicated or left unhandled on either path. Pure extraction from
++  // SessionContext.jsx — the branch bodies are unchanged, only the
++  // definition site moved from a useCallback in SessionProvider to one
++  // here.
++  const handleUsageEvent = useCallback((eventType, payload) => {
++    if (eventType === "usage_update") {
++      const statKey = `${payload?.provider}:${payload?.key_id}`;
++      setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
++
++      // Part 17: append to this key's own history (capped so a very
++      // long session doesn't grow this unbounded).
++      setUsageHistory((prev) => {
++        const series = prev[statKey] || [];
++        const next = [...series, { t: Date.now(), tokens: payload?.tokens_used_today ?? 0 }];
++        return { ...prev, [statKey]: next.length > 300 ? next.slice(-300) : next };
++      });
++
++      // Part 17: maintain a per-provider running total (summed across
++      // every key seen so far for that provider) and append one row to
++      // a combined, time-aligned series every update, forward-filling
++      // every OTHER provider's last known value so the combined chart
++      // has a real value for every provider at every timestamp, not
++      // just the one that happened to fire this particular event.
++      const provider = payload?.provider;
++      if (provider) {
++        // Recompute this provider's total from every key of theirs
++        // we've seen so far, rather than a running += — a += would
++        // double count if this same key's usage_update fires again
++        // with a lower number for any reason (shouldn't happen, but
++        // recomputing from source is one fewer thing to trust blindly).
++        setUsageStats((prevStats) => {
++          const total = Object.entries(prevStats)
++            .filter(([k]) => k.startsWith(`${provider}:`))
++            .reduce((sum, [, v]) => sum + (v.tokens_used_today || 0), 0)
++            + (payload?.tokens_used_today || 0); // this event's own key may not be in prevStats yet
++          latestByProviderRef.current = { ...latestByProviderRef.current, [provider]: total };
++          return prevStats; // this call is read-only against usageStats — the actual write already happened above
++        });
++        setCombinedUsageHistory((prev) => {
++          const row = { t: Date.now(), ...latestByProviderRef.current };
++          const next = [...prev, row];
++          return next.length > 300 ? next.slice(-300) : next;
++        });
++      }
++      return;
++    }
++    if (eventType === "quota_alert") {
++      console.warn("quota_alert:", payload);
++      return;
++    }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
++  const value = useMemo(
++    () => ({ usageStats, usageHistory, combinedUsageHistory, handleUsageEvent }),
++    [usageStats, usageHistory, combinedUsageHistory, handleUsageEvent]
++  );
++
++  return (
++    <UsageStatsContext.Provider value={value}>
++      {children}
++    </UsageStatsContext.Provider>
++  );
++}

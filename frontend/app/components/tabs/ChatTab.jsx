@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, memo } from "react";
 import { useSession } from "../../context/SessionContext";
+import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useLastActiveChatId } from "../../context/WorkspaceDockContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 
@@ -22,7 +23,8 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";
 // `getWorkspaceIdForChat`, then handing both ids down to
 // WorkspaceChatPanel so it renders in dock mode instead of legacy mode.
 function ChatTab({ onActiveWorkspaceChange }) {
-  const { workspaces, getWorkspaceIdForChat } = useSession();
+  const { getWorkspaceIdForChat } = useSession();
+  const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
   const lastActiveChatId = useLastActiveChatId();
   const activeWorkspaceId = lastActiveChatId ? getWorkspaceIdForChat(lastActiveChatId) : null;
   const activeWorkspace = useMemo(

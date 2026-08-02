@@ -2,6 +2,7 @@
 import { useMemo, useState, useEffect, memo } from "react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 import { useSession, authHeaders } from "../../context/SessionContext";
+import { useUsageStats } from "../../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2
 
 const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
 
@@ -410,7 +411,8 @@ function ProjectSectionUsagePanel({ apiUrl }) {
 }
 
 function TokenUsageTab() {
-  const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
+  const { API_URL } = useSession();
+  const { usageStats, usageHistory, combinedUsageHistory } = useUsageStats();   // CHANGED — was useSession()
 
   const byProvider = useMemo(() => groupByProvider(usageStats), [usageStats]);
   const providers = Object.keys(byProvider).sort();
