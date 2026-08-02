@@ -710,62 +710,6 @@ export function SessionProvider({ children }) {
   // linking chats. sessionId and chat_id are the same string everywhere
   // (see eo/chat_store.py's docstring), so these just move sessionId
   // around and keep the persisted chat store + local state in sync.
-  // NOTE: SessionContext.jsx itself was not present in the uploaded repo
-// (both repomix dumps are backend-only — eo/, api/, utils/). This is the
-// runTemplate() function as specified, to paste into your actual
-// SessionContext.jsx in place of the current implementation.
-
-async function runTemplate(templateId, taskText) {
-  setTemplateRuns((prev) => ({
-    ...prev,
-    [templateId]: { running: true, result: null, chatId: prev[templateId]?.chatId ?? null },
-  }));
-
-  let chatId;
-  try {
-    const existing = await fetch(`${API_URL}/api/workflow-templates/${templateId}/chat`, {
-      headers: await authHeaders(),
-    }).then((r) => r.json());
-    chatId = existing?.id;
-    if (!chatId) {
-      const res = await fetch(`${API_URL}/api/chats`, {
-        method: "POST",
-        headers: await authHeaders({ json: true }),
-        body: JSON.stringify({ title: taskText.trim().slice(0, 60) || "Template run", template_id: templateId }),
-      });
-      chatId = (await res.json()).id;
-    }
-  } catch (err) {
-    setTemplateRuns((prev) => ({
-      ...prev,
-      [templateId]: { running: false, result: { status: "error", message: `Couldn't create chat: ${err.message || err}` }, chatId: null },
-    }));
-    return;
-  }
-
-  // NEW — show "Open chat" right away, not just once the run finishes.
-  setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: true, result: null, chatId } }));
-
-  await persistMessageTo(chatId, { role: "user", text: taskText });
-  await refreshChatList();
-
-  try {
-    const res = await fetch(`${API_URL}/api/task/from-template`, {
-      method: "POST",
-      headers: await authHeaders({ json: true }),
-      body: JSON.stringify({ template_id: templateId, task_text: taskText, session_id: chatId }),
-    });
-    const data = await res.json();
-    await persistMessageTo(chatId, { role: "assistant", data, task: taskText });
-    setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: data, chatId } }));
-  } catch (err) {
-    const errData = { status: "error", message: String(err) };
-    await persistMessageTo(chatId, { role: "assistant", data: errData, task: taskText });
-    setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: errData, chatId } }));
-  }
-  await refreshChatList();
-}
-
   const refreshChatList = useCallback(async () => {
     const res = await fetch(`${API_URL}/api/chats`, {
       headers: await authHeaders(),
@@ -933,13 +877,10 @@ async function runTemplate(templateId, taskText) {
   return workspace;
   }, [fetchWorkspaces]);
 
-async function createWorkspaceWithChats(name, chatIds = [], stage) {
-  const workspace = await createWorkspace(name, stage);
-  for (const chatId of chatIds) {
-    await addWorkspaceChat(workspace.id, chatId);
-  }
-  return workspace;
-}
+// createWorkspaceWithChats used to live here (right after createWorkspace)
+// but its useCallback dep array needs addWorkspaceChat, which isn't
+// declared until below — same TDZ hazard as the openScopedSubChat/sendTask
+// case in 2.3k. Moved to right after addWorkspaceChat's own declaration.
 
   const renameWorkspace = useCallback(async (wsId, name) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
@@ -975,6 +916,17 @@ const addWorkspaceChat = useCallback(async (wsId, chatId) => {
   await fetchWorkspaces();
   await refreshChatList(); // membership changes linked_chat_ids server-side (chat_workspace.py's _sync)
 }, [fetchWorkspaces, refreshChatList]);
+
+// Step 2.3l (perf audit item #2, twelfth useCallback batch): relocated
+// here (was right after createWorkspace, before addWorkspaceChat existed
+// in scope) so its dep array can safely reference addWorkspaceChat.
+const createWorkspaceWithChats = useCallback(async (name, chatIds = [], stage) => {
+  const workspace = await createWorkspace(name, stage);
+  for (const chatId of chatIds) {
+    await addWorkspaceChat(workspace.id, chatId);
+  }
+  return workspace;
+}, [createWorkspace, addWorkspaceChat]);
 
 const removeWorkspaceChat = useCallback(async (wsId, chatId, deleteChat = false) => {
   await fetch(
@@ -1500,26 +1452,26 @@ async function ingestVoiceFile(wsId, file, signal, sessionId) {
 // Organize — on-demand rescans (§4.3), same "candidate, not auto-applied"
 // posture as note-candidates below.
 
-async function detectBacklinks(wsId) {
+const detectBacklinks = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/backlinks/detect`, {
     method: "POST",
     headers: await authHeaders(),
   });
   return res.json();
-}
+}, []);
 
 // NEW — Notebooks integration guide §6.6/§7 (Phase 3): short
 // agent-written blurbs written by agents/concept_linker.py, read by
 // KnowledgeGraphView.jsx's node-click rationale panel. Read-only on
 // the frontend by design -- there's no corresponding save function
 // here on purpose, matching api/server.py's GET-only route.
-async function fetchNodeSummaries(wsId) {
+const fetchNodeSummaries = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/graph/node_summaries`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return {};
   return res.json();
-}
+}, []);
 
 // NEW — Backlinks-as-topic-tree: eo/secondary_data.py's {topics,
 // connections} document, re-projected server-side into the same
@@ -1529,44 +1481,44 @@ async function fetchNodeSummaries(wsId) {
 // fetchNodeSummaries above -- this store's only write path is
 // apply_patch() (source_manager.py / backlink_detector.py), never a
 // direct frontend call.
-async function fetchTopicsGraph(wsId) {
+const fetchTopicsGraph = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/topics/graph`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return { nodes: [], edges: [] };
   return res.json();
-}
+}, []);
 
 // Silent note-taking agent candidates (§4.6) — never auto-committed;
 // accept/reject here is the review step Definition-of-Done #6 requires.
 
-async function fetchNoteCandidates(wsId) {
+const fetchNoteCandidates = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
-}
+}, []);
 
 // FIX — bug audit §9 (candidates accept/reject write path): both of
 // these used to take a plain list `index`. Switched to `candidate_id`
 // to match eo/note_candidates.py's accept_candidate/reject_candidate —
 // see that module's docstring for why an index isn't safe once two
 // users can be reviewing the same pending list at once.
-async function acceptNoteCandidate(wsId, candidateId) {
+const acceptNoteCandidate = useCallback(async (wsId, candidateId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
   return res.json();
-}
+}, []);
 
-async function rejectNoteCandidate(wsId, candidateId) {
+const rejectNoteCandidate = useCallback(async (wsId, candidateId) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
-}
+}, []);
 
 // Workspace facts (eo/workspace_facts.py, Part 0 §0.3) — durable
 // brand_voice/target_user/tech_stack/custom facts for a workspace, plus
@@ -1575,45 +1527,45 @@ async function rejectNoteCandidate(wsId, candidateId) {
 // reject_candidate now take a stable candidate_id, not a list index —
 // see bug audit §9).
 
-async function fetchWorkspaceFacts(wsId) {
+const fetchWorkspaceFacts = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return { brand_voice: "", target_user: "", tech_stack: [], custom: {} };
   return res.json();
-}
+}, []);
 
-async function saveWorkspaceFacts(wsId, facts) {
+const saveWorkspaceFacts = useCallback(async (wsId, facts) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
     method: "PUT",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify(facts),
   });
   return res.json();
-}
+}, []);
 
-async function fetchFactCandidates(wsId) {
+const fetchFactCandidates = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
-}
+}, []);
 
-async function acceptFactCandidate(wsId, candidateId) {
+const acceptFactCandidate = useCallback(async (wsId, candidateId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
   return res.json();
-}
+}, []);
 
-async function rejectFactCandidate(wsId, candidateId) {
+const rejectFactCandidate = useCallback(async (wsId, candidateId) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
-}
+}, []);
 
 // Corrections + Patch Review (Data Layer architecture §8c) — §8a's
 // Corrections tab posts a plain-language correction here; the server
@@ -1622,37 +1574,37 @@ async function rejectFactCandidate(wsId, candidateId) {
 // nothing to locate. Same accept/reject shape as every other
 // candidate store above — a candidate_id, never a list index.
 
-async function submitCorrection(wsId, { text, scopeNodeId }) {
+const submitCorrection = useCallback(async (wsId, { text, scopeNodeId }) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ text, scope_node_id: scopeNodeId ?? null }),
   });
   return res.json();
-}
+}, []);
 
-async function fetchPatchCandidates(wsId) {
+const fetchPatchCandidates = useCallback(async (wsId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
   return res.json();
-}
+}, []);
 
-async function acceptPatchCandidate(wsId, candidateId) {
+const acceptPatchCandidate = useCallback(async (wsId, candidateId) => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
   return res.json();
-}
+}, []);
 
-async function rejectPatchCandidate(wsId, candidateId) {
+const rejectPatchCandidate = useCallback(async (wsId, candidateId) => {
   await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
-}
+}, []);
 
 // Generic paste-panel content (eo/panel_content.py) — backs Mind Map,
 // Study (flashcards/quiz/study guide), and the other "paste the chat's
@@ -2039,7 +1991,22 @@ async function fetchWorkspaceAudit(wsId, limit = 100) {
   return res.json();
 }
 
-async function fetchMyAudit(limit = 100) {
+// Step 2.3j (perf audit item #2, tenth useCallback batch): the rest of
+// the chat-creation cluster. fetchMyAudit/createChatSilently/
+// persistMessageTo close over nothing but their own arguments -- `[]`
+// for all three. createWorkspaceChat depends on fetchWorkspaces/
+// refreshChatList (both already stable). openScopedSubChat calls
+// createWorkspaceChat (converting right here, so include it) and
+// sendTask -- sendTask is still a plain `function` declaration further
+// down the file (not converted in this batch; it's sendTask()'s own
+// turn next, and it's big enough to deserve a dedicated pass rather
+// than getting bundled in here). Referencing sendTask before its own
+// declaration is safe here specifically because it's still a `function`
+// (fully hoisted, unlike the `const switchChat` case from 2.3i) --
+// but per the same correctness-first rule from 2.3b/2.3c, it still goes
+// in the dep array so this doesn't silently stale-close over whatever
+// sendTask reference existed at mount.
+const fetchMyAudit = useCallback(async (limit = 100) => {
   const res = await fetch(`${API_URL}/api/audit/me?limit=${limit}`, {
     headers: await authHeaders(),
   });
@@ -2048,7 +2015,7 @@ async function fetchMyAudit(limit = 100) {
     throw new Error(err.detail || `Failed to load your activity (${res.status})`);
   }
   return res.json();
-}
+}, []);
 
 // Was: createNewChat() then addWorkspaceChat() — two round trips where the
 // second one always immediately followed the first. Swapped for the
@@ -2056,7 +2023,7 @@ async function fetchMyAudit(limit = 100) {
 // POST /api/workspaces/{ws_id}/chats/create). Same local-state side effects
 // as createNewChat() (sessionId, ACTIVE_CHAT_KEY, messages) plus the
 // workspace-list refresh addWorkspaceChat used to do, just in one fetch.
-async function createWorkspaceChat(wsId, title = "New Chat") {
+const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   const res = await fetch(`${API_URL}/api/workspaces/${wsId}/chats/create`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
@@ -2070,24 +2037,15 @@ async function createWorkspaceChat(wsId, title = "New Chat") {
   await fetchWorkspaces();   // membership changed server-side
   await refreshChatList();
   return chat.id;
-}
+}, [fetchWorkspaces, refreshChatList]);
 
-// CHANGED — step 6.11.b: topicId is a new optional 3rd param, threaded
-// down from NotebooksTab.jsx's WorkflowCard "Work through" button via
-// onOpenSubChat -> handleOpenSubChat. It's accepted and logged here only
-// — sendTask(taskText) below is untouched, so nothing about today's
-// dispatch behavior changes. Step 6.11.c is what actually adds topic_id
-// to sendTask's POST body / the TaskRequest model server-side; until
-// that lands this value goes nowhere past this console.debug.
-async function openScopedSubChat(wsId, taskText, topicId = null) {
-  // Step 6.11.c: topicId now actually reaches sendTask() and rides the
-  // /api/task POST body as topic_id. The server still only logs it
-  // (see api/server.py's post_task()) — 6.11.f is what makes routing
-  // consult it — so this is still safe to land ahead of that.
-  const chatId = await createWorkspaceChat(wsId);
-  await sendTask(taskText, topicId);
-  return chatId;
-}
+// openScopedSubChat used to live here (right after createWorkspaceChat) but
+// its useCallback dep array needs `sendTask`, which — now that sendTask is
+// a `const … = useCallback(...)` (converted in 2.3k) instead of the old
+// hoisted `function sendTask` — is NOT hoisted. Declaring it here would
+// read `sendTask` out of its temporal dead zone and throw on first render,
+// the same class of bug 2.3i's switchChat/createNewChat crash was. Moved
+// below sendTask's own declaration instead; see the note there.
 
   // NEW — §5: manage-batch modal actions (rename / unlink members /
   // delete the whole batch). All three touch batch membership, which
@@ -2165,7 +2123,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   // here — running a template must not silently swap out whatever chat
   // the person currently has open. These two are the same two API calls,
   // parameterized by an explicit chatId instead of the active sessionId.
-  async function createChatSilently(title) {
+  const createChatSilently = useCallback(async (title) => {
     const res = await fetch(`${API_URL}/api/chats`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
@@ -2174,9 +2132,9 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const chat = await res.json();
     return chat.id;
-  }
+  }, []);
 
-  async function persistMessageTo(chatId, message) {
+  const persistMessageTo = useCallback(async (chatId, message) => {
     try {
       await fetch(`${API_URL}/api/chats/${chatId}/messages`, {
         method: "POST",
@@ -2186,7 +2144,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     } catch (err) {
       console.error("Failed to persist message:", err);
     }
-  }
+  }, []);
 
   // NEW — Workflow Templates fix. Mirrors sendTask()'s dispatch +
   // persistence shape, but:
@@ -2205,7 +2163,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   //   4. Stores the resulting chatId in templateRuns so the UI can
   //      offer a real "Open chat" action instead of an inert session_id
   //      string.
-  async function runTemplate(templateId, taskText) {
+  const runTemplate = useCallback(async (templateId, taskText) => {
     setTemplateRuns((prev) => ({
       ...prev,
       [templateId]: { running: true, result: null, chatId: prev[templateId]?.chatId ?? null },
@@ -2241,13 +2199,13 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
       setTemplateRuns((prev) => ({ ...prev, [templateId]: { running: false, result: errData, chatId } }));
     }
     await refreshChatList();
-  }
+  }, [createChatSilently, persistMessageTo, refreshChatList]);
 
   // Part 2 §2.5 — pulled out of sendTask() so confirmHireReview() (below)
   // can reset the exact same live-run state a normal dispatch does; a
   // confirmed hire review is starting a real run just as much as a
   // one-click sendTask() call is.
-  function _resetLiveRunState() {
+  const _resetLiveRunState = useCallback(() => {
     setLiveDecision(null);
     stepsRef.current = [];
     setLiveSteps([]);
@@ -2261,14 +2219,14 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     structurePlanRef.current = null;
     setStructurePlan(null);
     setMacroLoopDecisions([]);
-  }
+  }, []);
 
   // Part 2 §2.5 — same reasoning as the Part 18/21 comments this
   // replaces: snapshot from the refs (not the stale-closure state vars)
   // so the message carries its own self-contained Working Panel section,
   // whether it came from sendTask()'s direct path or confirmHireReview()'s
   // post-review dispatch.
-  function _buildAssistantMessage(taskText, data) {
+  const _buildAssistantMessage = useCallback((taskText, data) => {
     return {
       role: "assistant",
       data,
@@ -2279,14 +2237,14 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
       dependencyMap: dependencyMapRef.current,
       structurePlan: structurePlanRef.current,
     };
-  }
+  }, []);
 
   // topicId (NEW — Step 6.11.c) is optional and, for now, purely passed
   // through to the server for logging — see api/server.py's post_task().
   // 6.11.f is what makes the backend actually act on it. Every existing
   // call site (dock.sendTask, PlanTab's WireframesPanel, etc.) keeps
   // working unchanged since this param defaults to null.
-  async function sendTask(taskText, topicId = null) {
+  const sendTask = useCallback(async (taskText, topicId = null) => {
     const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
     setMessages((prev) => [...prev, userMessage]);
     persistMessage(userMessage);   // NEW
@@ -2369,7 +2327,26 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
       persistMessage(assistantMessage);   // NEW
       setLoading(false);
     }
-  }
+  }, [sessionId, mode, reviewBeforeDispatch, persistMessage, _resetLiveRunState, _buildAssistantMessage]);
+
+  // CHANGED — step 6.11.b: topicId is a new optional 3rd param, threaded
+  // down from NotebooksTab.jsx's WorkflowCard "Work through" button via
+  // onOpenSubChat -> handleOpenSubChat. It's accepted and logged here only
+  // — sendTask(taskText) above is untouched, so nothing about today's
+  // dispatch behavior changes. Step 6.11.c is what actually adds topic_id
+  // to sendTask's POST body / the TaskRequest model server-side; until
+  // that lands this value goes nowhere past this console.debug.
+  // (Relocated here in 2.3k, right after sendTask's own declaration — see
+  // the note left in its old spot near createWorkspaceChat for why.)
+  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null) => {
+    // Step 6.11.c: topicId now actually reaches sendTask() and rides the
+    // /api/task POST body as topic_id. The server still only logs it
+    // (see api/server.py's post_task()) — 6.11.f is what makes routing
+    // consult it — so this is still safe to land ahead of that.
+    const chatId = await createWorkspaceChat(wsId);
+    await sendTask(taskText, topicId);
+    return chatId;
+  }, [createWorkspaceChat, sendTask]);
 
   // Part 2 §2.4/§2.7 — resolves the checkpoint AgentStepList.jsx's
   // approval actions raised. `decision` is {action: "approve"|"edit"|
@@ -2380,7 +2357,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   // just leaves `loading`/`pausedRun` as they are and returns. Anything
   // else (finished or errored) finalizes the message exactly like
   // sendTask()'s own direct-dispatch path.
-  async function resumeRun(decision) {
+  const resumeRun = useCallback(async (decision) => {
     if (!pausedRun) return;
     try {
       const res = await fetch(`${API_URL}/api/resume`, {
@@ -2404,14 +2381,14 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
       setLoading(false);
       setPausedRun(null);
     }
-  }
+  }, [pausedRun, persistMessage, _buildAssistantMessage]);
 
   // Part 2 §2.5 — HireReviewScreen's "Confirm & Run" calls this with its
   // edited hires array ({role, agent_key, brief, update_library}[]).
   // Dispatches straight through /api/task/confirm — no second
   // staff_task() call — then finishes the run exactly like sendTask()'s
   // direct path (same message shape, same live-state reset).
-  async function confirmHireReview(editedHires) {
+  const confirmHireReview = useCallback(async (editedHires) => {
     if (!pendingHireReview) return;
     const { taskText, sessionId: reviewSessionId, decision } = pendingHireReview;
     setLoading(true);
@@ -2440,7 +2417,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
       setLoading(false);
       setPendingHireReview(null);
     }
-  }
+  }, [pendingHireReview, mode, _resetLiveRunState, _buildAssistantMessage, persistMessage]);
 
   // Part 2 §2.5 — HireReviewScreen's "Cancel". Nothing was ever
   // dispatched (preview_task() stopped before execute_graph()/
@@ -2448,11 +2425,11 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
   // pending review. The user's message stays in the transcript with no
   // assistant reply, the same way a "needs_app"/"needs_directed_task_type"
   // response leaves an unanswered turn today.
-  function cancelHireReview() {
+  const cancelHireReview = useCallback(() => {
     setPendingHireReview(null);
-  }
+  }, []);
 
-  async function registerProject() {
+  const registerProject = useCallback(async () => {
     const path = prompt("Full path to the project folder:");
     const name = prompt("Display name for this project:");
     if (!path || !name) return;
@@ -2471,7 +2448,7 @@ async function openScopedSubChat(wsId, taskText, topicId = null) {
     } catch (err) {
       alert(`Registration failed: ${String(err)}`);
     }
-  }
+  }, []);
 
   // NEW — Data Layer §9c: binds sessionId (this component's own state,
   // not available to the plain module functions above) onto each of
