@@ -1,0 +1,302 @@
+diff -ru a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+--- a/frontend/app/components/tabs/BuildTab.jsx	2026-08-02 16:22:49.015722430 +0000
++++ b/frontend/app/components/tabs/BuildTab.jsx	2026-08-02 16:22:49.023343094 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useEffect, useState } from "react";
++import { useEffect, useState, memo } from "react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import WorkspaceChatPanel from "../WorkspaceChatPanel";
+ import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
+@@ -509,7 +509,7 @@
+   );
+ }
+ 
+-export default function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
++function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+   // §7 fix: workspaces + promoteWorkspace come from the same
+   // SessionContext NotebooksTab/ResearchTab already use — no new context
+   // plumbing needed, Tasks just reads the shared list and filters it.
+@@ -1036,3 +1036,11 @@
+     </div>
+   );
+ }
++
++// Item 6 (perf audit, tab-body pass): BuildTab takes props from its parent
++// (onPromoted, onActiveWorkspaceChange). Wrapped in memo() now that
++// SessionContext's useCallback pass (item 2) means its stable-identity
++// props/callbacks stay stable across unrelated parent re-renders -- prop
++// objects/arrays it reads (workspaces, chats, etc.) are only ever replaced,
++// never mutated in place, so a shallow prop comparison here is meaningful.
++export default memo(BuildTab);
+diff -ru a/frontend/app/components/tabs/GrowthTab.jsx b/frontend/app/components/tabs/GrowthTab.jsx
+--- a/frontend/app/components/tabs/GrowthTab.jsx	2026-08-02 16:22:49.029815222 +0000
++++ b/frontend/app/components/tabs/GrowthTab.jsx	2026-08-02 16:22:49.030886783 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useState, useEffect, useCallback } from "react";
++import { useState, useEffect, useCallback, memo } from "react";
+ import {
+   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
+   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
+@@ -40,7 +40,7 @@
+   { id: "analytics", label: "Analytics", icon: BarChart3 },
+ ];
+ 
+-export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
++function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+   const { workspaces, fetchWorkspaces, chats } = useSession();
+   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
+   // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.
+@@ -1369,4 +1369,13 @@
+       is Analytics (step 6).
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): GrowthTab takes props from its parent
++// (initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
++// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
++// useCallback pass (item 2) means its stable-identity props/callbacks stay
++// stable across unrelated parent re-renders -- prop objects/arrays it reads
++// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
++// a shallow prop comparison here is meaningful.
++export default memo(GrowthTab);
+diff -ru a/frontend/app/components/tabs/NotebooksTab.jsx b/frontend/app/components/tabs/NotebooksTab.jsx
+--- a/frontend/app/components/tabs/NotebooksTab.jsx	2026-08-02 16:22:49.032176861 +0000
++++ b/frontend/app/components/tabs/NotebooksTab.jsx	2026-08-02 16:22:49.034269025 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useEffect, useMemo, useRef, useState } from "react";
++import { useEffect, useMemo, useRef, useState, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
+ import IngestionDropzone from "../notebooks/IngestionDropzone";
+ import FlashcardFlipper from "../notebooks/FlashcardFlipper";
+@@ -2213,7 +2213,7 @@
+ 
+ // --- Main tab ------------------------------------------------------
+ 
+-export default function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
++function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
+    const {
+      workspaces, fetchWorkspaces, createWorkspace, chats, promoteWorkspace,
+      fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, fetchNodeSummaries,
+@@ -3112,3 +3112,10 @@
+   );
+ }
+ 
++// Item 6 (perf audit, tab-body pass): NotebooksTab takes props from its parent
++// (onPromoted, onActiveWorkspaceChange). Wrapped in memo() now that
++// SessionContext's useCallback pass (item 2) means its stable-identity
++// props/callbacks stay stable across unrelated parent re-renders -- prop
++// objects/arrays it reads (workspaces, chats, etc.) are only ever replaced,
++// never mutated in place, so a shallow prop comparison here is meaningful.
++export default memo(NotebooksTab);
+diff -ru a/frontend/app/components/tabs/PlanTab.jsx b/frontend/app/components/tabs/PlanTab.jsx
+--- a/frontend/app/components/tabs/PlanTab.jsx	2026-08-02 16:22:49.036015914 +0000
++++ b/frontend/app/components/tabs/PlanTab.jsx	2026-08-02 16:22:49.037280218 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useState, useEffect } from "react";
++import { useState, useEffect, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
+ import MermaidDiagram from "../MermaidDiagram";
+ import WireframePreview from "../WireframePreview";
+@@ -155,7 +155,7 @@
+   return (m ? m[1] : text || "").trim();
+ }
+ 
+-export default function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
++function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, openScopedSubChat,
+     fetchPanelContent, savePanelContent,
+     fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
+@@ -1082,4 +1082,13 @@
+       )}
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): PlanTab takes props from its parent
++// (onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
++// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
++// useCallback pass (item 2) means its stable-identity props/callbacks stay
++// stable across unrelated parent re-renders -- prop objects/arrays it reads
++// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
++// a shallow prop comparison here is meaningful.
++export default memo(PlanTab);
+diff -ru a/frontend/app/components/tabs/ResearchTab.jsx b/frontend/app/components/tabs/ResearchTab.jsx
+--- a/frontend/app/components/tabs/ResearchTab.jsx	2026-08-02 16:22:49.038493178 +0000
++++ b/frontend/app/components/tabs/ResearchTab.jsx	2026-08-02 16:22:49.043911524 +0000
+@@ -1,4 +1,4 @@
+-import { useState, useEffect, useMemo } from "react";
++import { useState, useEffect, useMemo, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
+ import KnowledgeGraphView from "../KnowledgeGraphView";
+ import ExtractionTableView from "../research/ExtractionTableView";
+@@ -75,7 +75,7 @@
+   growth: "Growth",
+ };
+ 
+-export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
++function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
+   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
+   // NOT actually dock-driven despite the old comment here claiming so —
+@@ -1074,4 +1074,13 @@
+       </button>
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): ResearchTab takes props from its parent
++// (initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
++// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
++// useCallback pass (item 2) means its stable-identity props/callbacks stay
++// stable across unrelated parent re-renders -- prop objects/arrays it reads
++// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
++// a shallow prop comparison here is meaningful.
++export default memo(ResearchTab);
+diff -ru a/frontend/app/components/tabs/RoleLibraryTab.jsx b/frontend/app/components/tabs/RoleLibraryTab.jsx
+--- a/frontend/app/components/tabs/RoleLibraryTab.jsx	2026-08-02 16:22:49.045136074 +0000
++++ b/frontend/app/components/tabs/RoleLibraryTab.jsx	2026-08-02 16:22:49.046119190 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useEffect, useMemo, useState } from "react";
++import { useEffect, useMemo, useState, memo } from "react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
+ import { Pencil, Check, X, RotateCcw, ListChecks, Copy, LayoutTemplate, Pin } from "lucide-react";
+@@ -173,7 +173,7 @@
+   );
+ }
+ 
+-export default function RoleLibraryTab({ onStartTemplate }) {
++function RoleLibraryTab({ onStartTemplate }) {
+   const { API_URL } = useSession();
+   const [roles, setRoles] = useState(null);
+   const [error, setError] = useState(null);
+@@ -431,4 +431,12 @@
+       )}
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): RoleLibraryTab takes props from its
++// parent (onStartTemplate). Wrapped in memo() now that SessionContext's
++// useCallback pass (item 2) means its stable-identity props/callbacks stay
++// stable across unrelated parent re-renders -- prop objects/arrays it reads
++// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
++// a shallow prop comparison here is meaningful.
++export default memo(RoleLibraryTab);
+diff -ru a/frontend/app/components/tabs/TestTab.jsx b/frontend/app/components/tabs/TestTab.jsx
+--- a/frontend/app/components/tabs/TestTab.jsx	2026-08-02 16:22:49.047108404 +0000
++++ b/frontend/app/components/tabs/TestTab.jsx	2026-08-02 16:22:49.049205406 +0000
+@@ -1,4 +1,4 @@
+-import { useState, useEffect } from "react";
++import { useState, useEffect, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
+ import Markdown from "../Markdown";
+ import WorkspaceChatPanel from "../WorkspaceChatPanel";
+@@ -143,7 +143,7 @@
+   return next;
+ }
+ 
+-export default function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
++function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+   const {
+     workspaces, fetchWorkspaces, promoteWorkspace,
+     fetchSimulationResults,
+@@ -1171,4 +1171,13 @@
+       })}
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): TestTab takes props from its parent
++// (initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
++// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
++// useCallback pass (item 2) means its stable-identity props/callbacks stay
++// stable across unrelated parent re-renders -- prop objects/arrays it reads
++// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
++// a shallow prop comparison here is meaningful.
++export default memo(TestTab);
+diff -ru a/frontend/app/components/tabs/TokenUsageTab.jsx b/frontend/app/components/tabs/TokenUsageTab.jsx
+--- a/frontend/app/components/tabs/TokenUsageTab.jsx	2026-08-02 16:22:49.050530686 +0000
++++ b/frontend/app/components/tabs/TokenUsageTab.jsx	2026-08-02 16:22:49.052420652 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useMemo, useState, useEffect } from "react";
++import { useMemo, useState, useEffect, memo } from "react";
+ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ 
+@@ -409,7 +409,7 @@
+   );
+ }
+ 
+-export default function TokenUsageTab() {
++function TokenUsageTab() {
+   const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
+ 
+   const byProvider = useMemo(() => groupByProvider(usageStats), [usageStats]);
+@@ -629,4 +629,12 @@
+       />
+     </Card>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): TokenUsageTab takes no props from its
++// parent. Wrapped in memo() now that SessionContext's useCallback pass (item 2)
++// means its stable-identity props/callbacks stay stable across unrelated parent
++// re-renders -- prop objects/arrays it reads (workspaces, chats, etc.) are only
++// ever replaced, never mutated in place, so a shallow prop comparison here is
++// meaningful.
++export default memo(TokenUsageTab);
+diff -ru a/frontend/app/components/tabs/WorkflowTemplatesTab.jsx b/frontend/app/components/tabs/WorkflowTemplatesTab.jsx
+--- a/frontend/app/components/tabs/WorkflowTemplatesTab.jsx	2026-08-02 16:22:49.053529191 +0000
++++ b/frontend/app/components/tabs/WorkflowTemplatesTab.jsx	2026-08-02 16:22:49.054506056 +0000
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useEffect, useState } from "react";
++import { useEffect, useState, memo } from "react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
+ import RolePickerOverlay from "../RolePickerOverlay";
+@@ -24,7 +24,7 @@
+ // per §2.7, that's an optional convenience to layer on once the Role
+ // Library and Workflow Template panels alone make the underlying data
+ // reachable.
+-export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles }) {
++function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles }) {
+   const { API_URL } = useSession();
+ 
+   const [templates, setTemplates] = useState(null);
+@@ -408,4 +408,13 @@
+       )}
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++// Item 6 (perf audit, tab-body pass): WorkflowTemplatesTab takes props from its
++// parent (onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles).
++// Wrapped in memo() now that SessionContext's useCallback pass (item 2) means
++// its stable-identity props/callbacks stay stable across unrelated parent re-
++// renders -- prop objects/arrays it reads (workspaces, chats, etc.) are only
++// ever replaced, never mutated in place, so a shallow prop comparison here is
++// meaningful.
++export default memo(WorkflowTemplatesTab);

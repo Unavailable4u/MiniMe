@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, memo } from "react";
 import {
   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
@@ -40,7 +40,7 @@ const SUB_TABS = [
   { id: "analytics", label: "Analytics", icon: BarChart3 },
 ];
 
-export default function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { workspaces, fetchWorkspaces, chats } = useSession();
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
   // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.
@@ -1370,3 +1370,12 @@ function ComingSoonPanel({ subTabId }) {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): GrowthTab takes props from its parent
+// (initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
+// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
+// useCallback pass (item 2) means its stable-identity props/callbacks stay
+// stable across unrelated parent re-renders -- prop objects/arrays it reads
+// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
+// a shallow prop comparison here is meaningful.
+export default memo(GrowthTab);

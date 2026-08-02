@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, memo } from "react";
 import mermaid from "mermaid";
 import { ZoomIn, ZoomOut, Maximize2, Download } from "lucide-react";
 
@@ -69,7 +69,7 @@ mermaid.initialize({ startOnLoad: false, theme: "dark", suppressErrorRendering: 
 // case the guide calls out. No heavy pan/zoom library: panning is just
 // the scroll container's native scrollbars, zoom is a couple of buttons
 // that resize the rendered SVG directly.
-export default function MermaidDiagram({
+function MermaidDiagram({
   mermaidText,
   onNodeClick,
   hideSourceOnFail = false,
@@ -369,3 +369,15 @@ export default function MermaidDiagram({
     </div>
   );
 }
+
+// Item 6 (perf audit): mermaid.render() is the expensive part of this
+// component (a full re-parse + re-layout of the diagram), so skipping
+// re-renders on unchanged props matters more here than for most leaf
+// components. Helps every caller that passes stable props as-is (PlanTab's
+// structure-plan diagrams, Markdown.jsx's inline chat diagrams). Doesn't
+// help MindMapView's onNodeClick specifically -- see that prop's own
+// BUGFIX comment above, a fresh inline function every render defeats
+// memo's shallow prop comparison regardless -- but memoizing here is still
+// correct and free, and sets this component up to benefit the moment that
+// caller is updated to pass a stable callback too.
+export default memo(MermaidDiagram);

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, memo } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
@@ -509,7 +509,7 @@ function PartsPanel({ wsId, apiUrl }) {
   );
 }
 
-export default function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.
@@ -1036,3 +1036,11 @@ export default function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): BuildTab takes props from its parent
+// (onPromoted, onActiveWorkspaceChange). Wrapped in memo() now that
+// SessionContext's useCallback pass (item 2) means its stable-identity
+// props/callbacks stay stable across unrelated parent re-renders -- prop
+// objects/arrays it reads (workspaces, chats, etc.) are only ever replaced,
+// never mutated in place, so a shallow prop comparison here is meaningful.
+export default memo(BuildTab);

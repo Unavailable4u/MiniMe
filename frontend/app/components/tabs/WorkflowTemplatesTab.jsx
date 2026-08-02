@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, memo } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
 import RolePickerOverlay from "../RolePickerOverlay";
@@ -24,7 +24,7 @@ import { Trash2, Plus, Play, X, Pencil } from "lucide-react";
 // per §2.7, that's an optional convenience to layer on once the Role
 // Library and Workflow Template panels alone make the underlying data
 // reachable.
-export default function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles }) {
+function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles }) {
   const { API_URL } = useSession();
 
   const [templates, setTemplates] = useState(null);
@@ -409,3 +409,12 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onSta
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): WorkflowTemplatesTab takes props from its
+// parent (onOpenChat, initialTemplateRoles, onConsumeInitialTemplateRoles).
+// Wrapped in memo() now that SessionContext's useCallback pass (item 2) means
+// its stable-identity props/callbacks stay stable across unrelated parent re-
+// renders -- prop objects/arrays it reads (workspaces, chats, etc.) are only
+// ever replaced, never mutated in place, so a shallow prop comparison here is
+// meaningful.
+export default memo(WorkflowTemplatesTab);

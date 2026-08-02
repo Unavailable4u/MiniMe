@@ -1,4 +1,5 @@
 "use client";
+import { memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import { useDensity } from "../../hooks/useDensity";
 import { useProactiveSuggestions } from "../../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
@@ -10,7 +11,7 @@ const DENSITY_OPTIONS = [
   { id: "compact", label: "Compact" },
 ];
 
-export default function SettingsTab() {
+function SettingsTab() {
   const { sessionId, API_URL, registerProject, pusherConnected } = useSession();
   const [density, setDensity] = useDensity();
   const [proactiveSuggestions, setProactiveSuggestions] = useProactiveSuggestions();   // NEW — Phase 3 step 3.7
@@ -113,3 +114,10 @@ export default function SettingsTab() {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pilot): SettingsTab takes no props from its
+// parent -- everything it reads comes from useSession()/useDensity()/
+// useProactiveSuggestions() -- so memo here only skips a re-render forced
+// by an unrelated parent re-render; it still updates normally whenever any
+// of those hooks' own values change.
+export default memo(SettingsTab);

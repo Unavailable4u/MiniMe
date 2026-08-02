@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import ExtractionTableView from "../research/ExtractionTableView";
@@ -75,7 +75,7 @@ const PROMOTE_LABELS = {
   growth: "Growth",
 };
 
-export default function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { workspaces, fetchWorkspaces, chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
   // NOT actually dock-driven despite the old comment here claiming so —
@@ -1075,3 +1075,12 @@ function DatasetPanel({ wsId, openScopedSubChat, openInDock }) {
     </div>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): ResearchTab takes props from its parent
+// (initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted,
+// onActiveWorkspaceChange). Wrapped in memo() now that SessionContext's
+// useCallback pass (item 2) means its stable-identity props/callbacks stay
+// stable across unrelated parent re-renders -- prop objects/arrays it reads
+// (workspaces, chats, etc.) are only ever replaced, never mutated in place, so
+// a shallow prop comparison here is meaningful.
+export default memo(ResearchTab);

@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, memo } from "react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 import { useSession, authHeaders } from "../../context/SessionContext";
 
@@ -409,7 +409,7 @@ function ProjectSectionUsagePanel({ apiUrl }) {
   );
 }
 
-export default function TokenUsageTab() {
+function TokenUsageTab() {
   const { usageStats, usageHistory, combinedUsageHistory, API_URL } = useSession();
 
   const byProvider = useMemo(() => groupByProvider(usageStats), [usageStats]);
@@ -630,3 +630,11 @@ function GrafanaQuotaPanel({ url }) {
     </Card>
   );
 }
+
+// Item 6 (perf audit, tab-body pass): TokenUsageTab takes no props from its
+// parent. Wrapped in memo() now that SessionContext's useCallback pass (item 2)
+// means its stable-identity props/callbacks stay stable across unrelated parent
+// re-renders -- prop objects/arrays it reads (workspaces, chats, etc.) are only
+// ever replaced, never mutated in place, so a shallow prop comparison here is
+// meaningful.
+export default memo(TokenUsageTab);
