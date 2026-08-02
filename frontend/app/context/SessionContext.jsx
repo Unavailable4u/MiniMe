@@ -2,7 +2,10 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
-import { useAuth } from "./AuthContext";   // NEW — Part 8.9: notification bell's per-user Pusher channel
+import { useUsageStats } from "./UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent now live there
+import { useWorkspaces } from "./WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces now live there
+// useAuth import REMOVED — its only use here (the notification-bell
+// per-user Pusher channel) moved to NotificationsContext.jsx.
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — persists which chat to reopen on refresh
@@ -38,7 +41,13 @@ export function SessionProvider({ children }) {
   const [loading, setLoading] = useState(false);
   const [chats, setChats] = useState([]);                 // NEW — sidebar list
   const [batches, setBatches] = useState([]);              // NEW — §4/§5: memory_batch groups, parallel to `chats`
-  const [workspaces, setWorkspaces] = useState([]); // NEW — §7: named containers, function like an always-on batch           
+  // workspaces state MOVED — now in WorkspacesContext.jsx (Item 2 concern
+  // split, slice 3). Consumed here via the hook: this component still
+  // reads `workspaces` (getWorkspaceIdForChat, below) and still calls
+  // `fetchWorkspaces()` (mount effect, below) — see that file's header
+  // comment for why the ~25 workspace CRUD functions stayed here instead
+  // of moving too.
+  const { workspaces, fetchWorkspaces } = useWorkspaces();
   const [sessionId, setSessionId] = useState(null);        // CHANGED — no longer random-on-mount; this IS chat_id
   const [chatsLoading, setChatsLoading] = useState(true);  // NEW
   const [liveDecision, setLiveDecision] = useState(null);
@@ -92,18 +101,16 @@ export function SessionProvider({ children }) {
   const routeTraceRef = useRef([]);
   const dependencyMapRef = useRef({});
   const structurePlanRef = useRef(null);
-  const [usageStats, setUsageStats] = useState({});
-  const [usageHistory, setUsageHistory] = useState({});       // { [statKey]: [{t, tokens}, ...] } — Part 17
-  const [combinedUsageHistory, setCombinedUsageHistory] = useState([]); // [{t, [provider]: tokens}, ...] — Part 17
-  const latestByProviderRef = useRef({});                       // provider -> summed tokens across its keys, for the combined chart — Part 17
+  // usageStats/usageHistory/combinedUsageHistory/latestByProviderRef
+  // MOVED — now in UsageStatsContext.jsx (Item 2 concern split, slice 2).
   const [routeTrace, setRouteTrace] = useState([]);
   const [macroLoopDecisions, setMacroLoopDecisions] = useState([]);
   const [dependencyMap, setDependencyMap] = useState({});
   const [structurePlan, setStructurePlan] = useState(null);
   const [mode, setMode] = useState("auto");
   const [pusherConnected, setPusherConnected] = useState(false); // NEW — Settings tab diagnostic, §6
-  const [notifications, setNotifications] = useState([]);   // NEW — Part 8.9: newest first
-  const [unreadCount, setUnreadCount] = useState(0);          // NEW — Part 8.9
+  // notifications/unreadCount MOVED — now in NotificationsContext.jsx (Item 2
+  // concern split, slice 1). See that file's header comment for why.
   const [activeMessageIndex, setActiveMessageIndex] = useState(null); // NEW — Part 21: shared scroll-sync index between Chat and Working panels
   // NEW — Part 2 §2.5: gates whether sendTask() calls /api/task directly
   // (today's exact one-click behavior, default) or /api/task/preview
@@ -188,65 +195,12 @@ export function SessionProvider({ children }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // NEW — 3e usage-event ownership (architecture doc §2.3's three
-  // options; going with option 1): extracted out of the sessionId-keyed
-  // bind_global handler below so WorkspaceDockContext's per-dock
-  // handleDockEvent can invoke this exact same logic via a threaded-in
-  // callback (`onUsageEvent`, passed through WorkspaceDockBridge in
-  // AppShell.jsx same as refreshChatList/getWorkspaceIdForChat/
-  // fetchWorkspaces already are), rather than duplicating it or leaving
-  // usage_update/quota_alert permanently unhandled once this
-  // subscription is deleted (see WorkspaceDockContext.jsx's file-header
-  // comment on the open question this resolves). Pure extraction — the
-  // branch bodies are unchanged, only the call site moved.
-  const handleUsageEvent = useCallback((eventType, payload) => {
-    if (eventType === "usage_update") {
-      const statKey = `${payload?.provider}:${payload?.key_id}`;
-      setUsageStats((prev) => ({ ...prev, [statKey]: payload }));
-
-      // Part 17: append to this key's own history (capped so a very
-      // long session doesn't grow this unbounded).
-      setUsageHistory((prev) => {
-        const series = prev[statKey] || [];
-        const next = [...series, { t: Date.now(), tokens: payload?.tokens_used_today ?? 0 }];
-        return { ...prev, [statKey]: next.length > 300 ? next.slice(-300) : next };
-      });
-
-      // Part 17: maintain a per-provider running total (summed across
-      // every key seen so far for that provider) and append one row to
-      // a combined, time-aligned series every update, forward-filling
-      // every OTHER provider's last known value so the combined chart
-      // has a real value for every provider at every timestamp, not
-      // just the one that happened to fire this particular event.
-      const provider = payload?.provider;
-      if (provider) {
-        // Recompute this provider's total from every key of theirs
-        // we've seen so far, rather than a running += — a += would
-        // double count if this same key's usage_update fires again
-        // with a lower number for any reason (shouldn't happen, but
-        // recomputing from source is one fewer thing to trust blindly).
-        setUsageStats((prevStats) => {
-          const total = Object.entries(prevStats)
-            .filter(([k]) => k.startsWith(`${provider}:`))
-            .reduce((sum, [, v]) => sum + (v.tokens_used_today || 0), 0)
-            + (payload?.tokens_used_today || 0); // this event's own key may not be in prevStats yet
-          latestByProviderRef.current = { ...latestByProviderRef.current, [provider]: total };
-          return prevStats; // this call is read-only against usageStats — the actual write already happened above
-        });
-        setCombinedUsageHistory((prev) => {
-          const row = { t: Date.now(), ...latestByProviderRef.current };
-          const next = [...prev, row];
-          return next.length > 300 ? next.slice(-300) : next;
-        });
-      }
-      return;
-    }
-    if (eventType === "quota_alert") {
-      console.warn("quota_alert:", payload);
-      return;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // handleUsageEvent (Part 17 usage-tracking, plus its 3e "usage-event
+  // ownership" extraction) MOVED — now defined in UsageStatsContext.jsx
+  // (Item 2 concern split, slice 2). Consumed here via the hook so the
+  // two call sites below (usage_update/quota_alert, inside this
+  // component's own session-${sessionId} handler) don't have to change.
+  const { handleUsageEvent } = useUsageStats();
 
   // --- Pusher subscription: identical to today's page.js effect, just
   // living up here instead of inside the page that used to render
@@ -671,40 +625,11 @@ export function SessionProvider({ children }) {
     return unsubscribe;
   }, []);
 
-  // NEW — Part 8.4/8.9: second Pusher subscription, on the user's own
-  // channel rather than the current chat's. Deliberately a SEPARATE
-  // effect/subscription from the session one above — different channel
-  // scheme, different lifecycle (this one only remounts when the signed-
-  // in user changes, not on every switchChat()), same "add a scheme
-  // alongside, don't touch the existing one" instruction from §8.4.
-  const { user } = useAuth();
-  useEffect(() => {
-    if (!user?.id) return;
-    const pusher = getPusherClient();
-    if (!pusher) return; // SettingsTab's pusherConnected diagnostic already covers the "not configured" case
-
-    const channelName = `user-${user.id.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
-    const channel = pusher.subscribe(channelName);
-    channel.bind("notification", (data) => {
-      const note = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        kind: data?.payload?.kind,
-        payload: data?.payload,
-        timestamp: data?.timestamp || new Date().toISOString(),
-        read: false,
-      };
-      setNotifications((prev) => [note, ...prev].slice(0, 50)); // cap, same reasoning usageHistory's 300-cap follows
-      setUnreadCount((prev) => prev + 1);
-    });
-    return () => {
-      pusher.unsubscribe(channelName);
-    };
-  }, [user?.id]);
-
-  const markNotificationsRead = useCallback(() => {
-    setUnreadCount(0);
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-  }, []);
+  // The user-{id} Pusher subscription that used to live here (Part
+  // 8.4/8.9) — filling notifications/unreadCount and defining
+  // markNotificationsRead — MOVED to NotificationsContext.jsx (Item 2
+  // concern split, slice 1). NotificationBell.jsx now reads it via
+  // useNotifications() instead of useSession().
 
   // --- NEW: chat list + switching / creating / renaming / deleting /
   // linking chats. sessionId and chat_id are the same string everywhere
@@ -844,22 +769,11 @@ export function SessionProvider({ children }) {
 // above 1:1, with one thing to keep straight: workspaces store members as
 // `chat_ids` (see eo/chat_workspace.py), batches use `member_chat_ids` —
 // don't cross the two up when reading a response.
-
-  const fetchWorkspaces = useCallback(async () => {
-  const res = await fetch(`${API_URL}/api/workspaces`, {
-    headers: await authHeaders(),
-  });
-  const body = await res.json();
-  // Same guard as fetchChats() above — never let a non-array response
-  // (e.g. {"detail": "..."} from an auth/server error) reach
-  // GrowthTab.jsx's workspaces.filter() and crash the app.
-  if (!res.ok || !Array.isArray(body)) {
-    console.error("Failed to load workspaces:", res.status, body);
-    setWorkspaces([]);
-    return;
-  }
-  setWorkspaces(body);
-  }, []);
+// fetchWorkspaces itself MOVED — now defined in WorkspacesContext.jsx
+// (Item 2 concern split, slice 3) and consumed above via useWorkspaces().
+// Every function below that calls fetchWorkspaces() is calling that
+// hoisted one — same referentially-stable useCallback as before, so none
+// of their dependency arrays needed to change.
 
   const createWorkspace = useCallback(async (name, stage) => {
   // NEW — item #10 / B0: optional stage lets a caller (e.g. a stage
@@ -2540,21 +2454,30 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   batches, fetchBatches,
   createBatch, estimateBatch,
   renameBatch, unlinkBatchMembers, deleteBatch,
-  workspaces, fetchWorkspaces, createWorkspace, createWorkspaceWithChats, renameWorkspace,
+  // workspaces/fetchWorkspaces REMOVED from this value — now served by
+  // useWorkspaces() (WorkspacesContext.jsx), not useSession(). The CRUD
+  // functions below still live here (see WorkspacesContext.jsx's header
+  // comment on why) and are unaffected.
+  createWorkspace, createWorkspaceWithChats, renameWorkspace,
   addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace, promoteWorkspace,   // NEW — §7 / §8
   // NEW — Part 8.9: workspace membership, ownership, voting, attribution
   fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
   removeWorkspaceMember, leaveWorkspaceMembership, forceRemoveOwner,
   fetchWorkspaceVotes, castWorkspaceVote,
   setWorkspaceAttribution, setMemberAttributionGrant,
-  liveDecision, liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap, structurePlan,
-  handleUsageEvent,   // NEW — 3e: threaded into WorkspaceDockProvider as onUsageEvent (option 1, usage-event ownership)
+  liveDecision, liveSteps, routeTrace, dependencyMap, structurePlan,
+  // usageStats/usageHistory/combinedUsageHistory/handleUsageEvent REMOVED
+  // — now served by useUsageStats() (UsageStatsContext.jsx), not
+  // useSession(). WorkspaceDockBridge (AppShell.jsx) reads
+  // handleUsageEvent from there directly instead of getting it forwarded
+  // through here.
   macroLoopDecisions,
   roleRequests,
   mode, setMode,
   pusherConnected,
   fetchTopicsGraph, topicPulsingIds,   // NEW — Backlinks-as-topic-tree
-  notifications, unreadCount, markNotificationsRead,   // NEW — Part 8.9
+  // notifications/unreadCount/markNotificationsRead REMOVED — now served
+  // by useNotifications() (NotificationsContext.jsx), not useSession().
   exportWorkspace, importWorkspace,                       // NEW — Part 8.7
   activeMessageIndex, setActiveMessageIndex,
   sendTask, registerProject,
@@ -2594,13 +2517,13 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   }), [
     sessionId, API_URL, messages, loading, chats, chatsLoading,
     refreshChatList, getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
-    renameBatch, unlinkBatchMembers, deleteBatch, workspaces, fetchWorkspaces, createWorkspace,
+    renameBatch, unlinkBatchMembers, deleteBatch, createWorkspace,
     createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,
     promoteWorkspace, fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole, removeWorkspaceMember, leaveWorkspaceMembership,
     forceRemoveOwner, fetchWorkspaceVotes, castWorkspaceVote, setWorkspaceAttribution, setMemberAttributionGrant, liveDecision,
-    liveSteps, usageStats, usageHistory, combinedUsageHistory, routeTrace, dependencyMap,
-    structurePlan, handleUsageEvent, macroLoopDecisions, roleRequests, mode, setMode,
-    pusherConnected, fetchTopicsGraph, topicPulsingIds, notifications, unreadCount, markNotificationsRead,
+    liveSteps, routeTrace, dependencyMap,
+    structurePlan, macroLoopDecisions, roleRequests, mode, setMode,
+    pusherConnected, fetchTopicsGraph, topicPulsingIds,
     exportWorkspace, importWorkspace, activeMessageIndex, setActiveMessageIndex, sendTask, registerProject,
     reviewBeforeDispatch, setReviewBeforeDispatch, pendingHireReview, confirmHireReview, cancelHireReview, pausedApproval,
     resumeRun, templateRuns, runTemplate, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges,

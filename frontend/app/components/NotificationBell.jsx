@@ -9,7 +9,7 @@
 "use client";
 import { useState } from "react";
 import { Bell } from "lucide-react";
-import { useSession } from "../context/SessionContext";
+import { useNotifications } from "../context/NotificationsContext";   // CHANGED — Item 2 concern split: was useSession()
 
 const KIND_LABELS = {
   note_proposed: "New note proposed",
@@ -32,7 +32,7 @@ function timeAgo(iso) {
 }
 
 export default function NotificationBell({ onOpenChat }) {
-  const { notifications, unreadCount, markNotificationsRead } = useSession();
+  const { notifications, unreadCount, markNotificationsRead } = useNotifications();
   const [open, setOpen] = useState(false);
 
   function toggle() {

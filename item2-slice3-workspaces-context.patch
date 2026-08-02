@@ -1,0 +1,371 @@
+diff --git a/frontend/app/components/AppShell.jsx b/frontend/app/components/AppShell.jsx
+index 30b501b..060690e 100644
+--- a/frontend/app/components/AppShell.jsx
++++ b/frontend/app/components/AppShell.jsx
+@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
+ import { SessionProvider, useSession } from "../context/SessionContext";
+ import { NotificationsProvider } from "../context/NotificationsContext";   // NEW — Item 2 concern split, slice 1: notifications/unreadCount/markNotificationsRead moved out of SessionContext
+ import { UsageStatsProvider, useUsageStats } from "../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent moved out of SessionContext
++import { WorkspacesProvider, useWorkspaces } from "../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces moved out of SessionContext
+ import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
+ import ChatSidebar from "./ChatSidebar";
+ import ChatTab from "./tabs/ChatTab";
+@@ -55,17 +56,20 @@ export default function AppShell() {
+   return (
+     // NEW — NotificationsProvider sits alongside SessionProvider (it
+     // only needs useAuth() and doesn't read/feed anything on
+-    // SessionContext — see its own comment). UsageStatsProvider is
+-    // different: it has to sit ABOVE SessionProvider, not alongside it,
+-    // because SessionContext.jsx calls useUsageStats() internally (its
+-    // own session-${sessionId} Pusher handler still needs to invoke
+-    // handleUsageEvent on the usage_update/quota_alert branches — see
+-    // UsageStatsContext.jsx's header comment).
++    // SessionContext — see its own comment). UsageStatsProvider and
++    // WorkspacesProvider both have to sit ABOVE SessionProvider instead,
++    // because SessionContext.jsx calls useUsageStats()/useWorkspaces()
++    // internally (see each context's own header comment for why —
++    // SessionContext still owns the CRUD functions that mutate
++    // workspaces, and still needs to read `workspaces`/call
++    // `fetchWorkspaces()` itself).
+     <NotificationsProvider>
+       <UsageStatsProvider>
+-        <SessionProvider>
+-          <WorkspaceDockBridge />
+-        </SessionProvider>
++        <WorkspacesProvider>
++          <SessionProvider>
++            <WorkspaceDockBridge />
++          </SessionProvider>
++        </WorkspacesProvider>
+       </UsageStatsProvider>
+     </NotificationsProvider>
+   );
+@@ -91,9 +95,12 @@ export default function AppShell() {
+ // concern split, slice 2): "app-wide" now means UsageStatsContext, not
+ // SessionContext, so handleUsageEvent is read from useUsageStats()
+ // directly instead of being forwarded through useSession().
++// fetchWorkspaces similarly CHANGED (Item 2 concern split, slice 3): read
++// from useWorkspaces() directly instead of useSession().
+ function WorkspaceDockBridge() {
+-  const { refreshChatList, getWorkspaceIdForChat, chats, fetchWorkspaces } = useSession();
++  const { refreshChatList, getWorkspaceIdForChat, chats } = useSession();
+   const { handleUsageEvent } = useUsageStats();
++  const { fetchWorkspaces } = useWorkspaces();
+   return (
+     <WorkspaceDockProvider
+       refreshChatList={refreshChatList}
+diff --git a/frontend/app/components/ChatSidebar.jsx b/frontend/app/components/ChatSidebar.jsx
+index 9e3af92..3337d2c 100644
+--- a/frontend/app/components/ChatSidebar.jsx
++++ b/frontend/app/components/ChatSidebar.jsx
+@@ -1,6 +1,7 @@
+ "use client";
+ import { useState, useEffect } from "react";   // CHANGED — add useEffect
+ import { useSession } from "../context/SessionContext";
++import { useWorkspaces } from "../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext"; // NEW — step 3e
+ import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
+ import ManageBatchModal from "./ManageBatchModal";
+@@ -37,7 +38,8 @@ function hashBatchColor(batchId) {
+ // component.
+ 
+ export default function ChatSidebar({ collapsed, onToggle }) {
+-  const { chats, batches, workspaces } = useSession();
++  const { chats, batches } = useSession();
++  const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
+   // NEW — step 3e: these five used to come from useSession() and wrote
+   // into one shared global sessionId/messages. ChatSidebar is global
+   // (item #6, kept that way on purpose) and lists chats belonging to
+diff --git a/frontend/app/components/tabs/AuditLogTab.jsx b/frontend/app/components/tabs/AuditLogTab.jsx
+index 571f3c5..485287f 100644
+--- a/frontend/app/components/tabs/AuditLogTab.jsx
++++ b/frontend/app/components/tabs/AuditLogTab.jsx
+@@ -1,6 +1,7 @@
+ "use client";
+ import { useEffect, useState, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
++import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { ScrollText, User, ShieldAlert, Loader2 } from "lucide-react";
+ 
+ const SUB_TABS = [
+@@ -50,7 +51,8 @@ function AuditRow({ entry }) {
+ }
+ 
+ function AuditLogTab() {
+-  const { workspaces, fetchWorkspaceAudit, fetchMyAudit } = useSession();
++  const { fetchWorkspaceAudit, fetchMyAudit } = useSession();
++  const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
+ 
+   const [selectedId, setSelectedId] = useState(null);
+   const [subTab, setSubTab] = useState("workspace");
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 62eafcf..b3e798e 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -1,6 +1,7 @@
+ "use client";
+ import { useEffect, useState, memo } from "react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
++import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import WorkspaceChatPanel from "../WorkspaceChatPanel";
+ import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
+ import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
+@@ -513,7 +514,8 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+   // §7 fix: workspaces + promoteWorkspace come from the same
+   // SessionContext NotebooksTab/ResearchTab already use — no new context
+   // plumbing needed, Tasks just reads the shared list and filters it.
+-  const { workspaces, fetchWorkspaces, promoteWorkspace, API_URL, chats } = useSession();
++  const { promoteWorkspace, API_URL, chats } = useSession();
++  const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
+   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
+   // pattern as ResearchTab/PlanTab's C1.
+   const { switchChat, renameChat, deleteChat, createWorkspaceChat } = useWorkspaceDockActions();
+diff --git a/frontend/app/components/tabs/ChatTab.jsx b/frontend/app/components/tabs/ChatTab.jsx
+index 6594abf..6d3aeb5 100644
+--- a/frontend/app/components/tabs/ChatTab.jsx
++++ b/frontend/app/components/tabs/ChatTab.jsx
+@@ -1,6 +1,7 @@
+ "use client";
+ import { useEffect, useMemo, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
++import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { useLastActiveChatId } from "../../context/WorkspaceDockContext";
+ import WorkspaceChatPanel from "../WorkspaceChatPanel";
+ 
+@@ -22,7 +23,8 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";
+ // `getWorkspaceIdForChat`, then handing both ids down to
+ // WorkspaceChatPanel so it renders in dock mode instead of legacy mode.
+ function ChatTab({ onActiveWorkspaceChange }) {
+-  const { workspaces, getWorkspaceIdForChat } = useSession();
++  const { getWorkspaceIdForChat } = useSession();
++  const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
+   const lastActiveChatId = useLastActiveChatId();
+   const activeWorkspaceId = lastActiveChatId ? getWorkspaceIdForChat(lastActiveChatId) : null;
+   const activeWorkspace = useMemo(
+diff --git a/frontend/app/components/tabs/GrowthTab.jsx b/frontend/app/components/tabs/GrowthTab.jsx
+index 0d70c80..e8e8118 100644
+--- a/frontend/app/components/tabs/GrowthTab.jsx
++++ b/frontend/app/components/tabs/GrowthTab.jsx
+@@ -6,6 +6,7 @@ import {
+   Pencil, X, Trash2, ChevronRight, ChevronLeft,
+ } from "lucide-react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
++import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e follow-up: GrowthTab's chat dock; useWorkspaceDockActions/useLastActiveChatId added for item #11 / C2
+ import { FactsView } from "./NotebooksTab";
+ import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
+@@ -41,7 +42,8 @@ const SUB_TABS = [
+ ];
+ 
+ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+-  const { workspaces, fetchWorkspaces, chats } = useSession();
++  const { chats } = useSession();
++  const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
+   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
+   // pattern as ResearchTab/PlanTab/BuildTab/TestTab's C1/C2.
+   const { switchChat, renameChat, deleteChat, createWorkspaceChat } = useWorkspaceDockActions();
+diff --git a/frontend/app/components/tabs/ResearchTab.jsx b/frontend/app/components/tabs/ResearchTab.jsx
+index 24cfdd2..a1827de 100644
+--- a/frontend/app/components/tabs/ResearchTab.jsx
++++ b/frontend/app/components/tabs/ResearchTab.jsx
+@@ -1,5 +1,6 @@
+ import { useState, useEffect, useMemo, memo } from "react";
+ import { useSession } from "../../context/SessionContext";
++import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import KnowledgeGraphView from "../KnowledgeGraphView";
+ import ExtractionTableView from "../research/ExtractionTableView";
+ import Markdown from "../Markdown";
+@@ -76,7 +77,8 @@ const PROMOTE_LABELS = {
+ };
+ 
+ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+-  const { workspaces, fetchWorkspaces, chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
++  const { chats, promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
++  const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
+   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
+   // NOT actually dock-driven despite the old comment here claiming so —
+   // it had no workspaceId prop, so it read messages/sessionId off
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index 867a7dd..5d5ea08 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -3,6 +3,7 @@ import { createContext, useContext, useState, useRef, useEffect, useCallback, us
+ import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
+ import { supabase } from "../lib/supabaseClient";
+ import { useUsageStats } from "./UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent now live there
++import { useWorkspaces } from "./WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces now live there
+ // useAuth import REMOVED — its only use here (the notification-bell
+ // per-user Pusher channel) moved to NotificationsContext.jsx.
+ 
+@@ -40,7 +41,13 @@ export function SessionProvider({ children }) {
+   const [loading, setLoading] = useState(false);
+   const [chats, setChats] = useState([]);                 // NEW — sidebar list
+   const [batches, setBatches] = useState([]);              // NEW — §4/§5: memory_batch groups, parallel to `chats`
+-  const [workspaces, setWorkspaces] = useState([]); // NEW — §7: named containers, function like an always-on batch           
++  // workspaces state MOVED — now in WorkspacesContext.jsx (Item 2 concern
++  // split, slice 3). Consumed here via the hook: this component still
++  // reads `workspaces` (getWorkspaceIdForChat, below) and still calls
++  // `fetchWorkspaces()` (mount effect, below) — see that file's header
++  // comment for why the ~25 workspace CRUD functions stayed here instead
++  // of moving too.
++  const { workspaces, fetchWorkspaces } = useWorkspaces();
+   const [sessionId, setSessionId] = useState(null);        // CHANGED — no longer random-on-mount; this IS chat_id
+   const [chatsLoading, setChatsLoading] = useState(true);  // NEW
+   const [liveDecision, setLiveDecision] = useState(null);
+@@ -762,22 +769,11 @@ export function SessionProvider({ children }) {
+ // above 1:1, with one thing to keep straight: workspaces store members as
+ // `chat_ids` (see eo/chat_workspace.py), batches use `member_chat_ids` —
+ // don't cross the two up when reading a response.
+-
+-  const fetchWorkspaces = useCallback(async () => {
+-  const res = await fetch(`${API_URL}/api/workspaces`, {
+-    headers: await authHeaders(),
+-  });
+-  const body = await res.json();
+-  // Same guard as fetchChats() above — never let a non-array response
+-  // (e.g. {"detail": "..."} from an auth/server error) reach
+-  // GrowthTab.jsx's workspaces.filter() and crash the app.
+-  if (!res.ok || !Array.isArray(body)) {
+-    console.error("Failed to load workspaces:", res.status, body);
+-    setWorkspaces([]);
+-    return;
+-  }
+-  setWorkspaces(body);
+-  }, []);
++// fetchWorkspaces itself MOVED — now defined in WorkspacesContext.jsx
++// (Item 2 concern split, slice 3) and consumed above via useWorkspaces().
++// Every function below that calls fetchWorkspaces() is calling that
++// hoisted one — same referentially-stable useCallback as before, so none
++// of their dependency arrays needed to change.
+ 
+   const createWorkspace = useCallback(async (name, stage) => {
+   // NEW — item #10 / B0: optional stage lets a caller (e.g. a stage
+@@ -2458,7 +2454,11 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   batches, fetchBatches,
+   createBatch, estimateBatch,
+   renameBatch, unlinkBatchMembers, deleteBatch,
+-  workspaces, fetchWorkspaces, createWorkspace, createWorkspaceWithChats, renameWorkspace,
++  // workspaces/fetchWorkspaces REMOVED from this value — now served by
++  // useWorkspaces() (WorkspacesContext.jsx), not useSession(). The CRUD
++  // functions below still live here (see WorkspacesContext.jsx's header
++  // comment on why) and are unaffected.
++  createWorkspace, createWorkspaceWithChats, renameWorkspace,
+   addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace, promoteWorkspace,   // NEW — §7 / §8
+   // NEW — Part 8.9: workspace membership, ownership, voting, attribution
+   fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole,
+@@ -2517,7 +2517,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   }), [
+     sessionId, API_URL, messages, loading, chats, chatsLoading,
+     refreshChatList, getWorkspaceIdForChat, batches, fetchBatches, createBatch, estimateBatch,
+-    renameBatch, unlinkBatchMembers, deleteBatch, workspaces, fetchWorkspaces, createWorkspace,
++    renameBatch, unlinkBatchMembers, deleteBatch, createWorkspace,
+     createWorkspaceWithChats, renameWorkspace, addWorkspaceChat, createWorkspaceChat, removeWorkspaceChat, deleteWorkspace,
+     promoteWorkspace, fetchWorkspaceMembers, addWorkspaceMember, updateWorkspaceMemberRole, removeWorkspaceMember, leaveWorkspaceMembership,
+     forceRemoveOwner, fetchWorkspaceVotes, castWorkspaceVote, setWorkspaceAttribution, setMemberAttributionGrant, liveDecision,
+diff --git a/frontend/app/context/WorkspacesContext.jsx b/frontend/app/context/WorkspacesContext.jsx
+new file mode 100644
+index 0000000..9c88a70
+--- /dev/null
++++ b/frontend/app/context/WorkspacesContext.jsx
+@@ -0,0 +1,101 @@
++"use client";
++// frontend/app/context/WorkspacesContext.jsx
++//
++// Audit §2.1 / Item 2 (remaining work), slice 3 of the "split
++// SessionContext into concern-based contexts" fix (slice 1:
++// NotificationsContext.jsx, slice 2: UsageStatsContext.jsx).
++//
++// SCOPE NOTE — read before extending this file: this slice moves the
++// `workspaces` array itself and `fetchWorkspaces()` (the only two things
++// that actually cause the god-object re-render problem §2.1 describes —
++// everything else in the old "§7: workspaces" block of SessionContext.jsx
++// is a stateless useCallback wrapping a fetch, not reactive state). The
++// ~25 workspace CRUD/membership/voting/attribution functions
++// (createWorkspace, renameWorkspace, deleteWorkspace, promoteWorkspace,
++// addWorkspaceChat, removeWorkspaceChat, createWorkspaceChat,
++// fetchWorkspaceMembers/addWorkspaceMember/etc., fetchWorkspaceVotes/
++// castWorkspaceVote, setWorkspaceAttribution/setMemberAttributionGrant,
++// exportWorkspace/importWorkspace) DELIBERATELY stayed in
++// SessionContext.jsx rather than moving here too. Reason: several of them
++// (addWorkspaceChat, removeWorkspaceChat, createWorkspaceChat,
++// deleteWorkspace, leaveWorkspaceMembership, importWorkspace) close over
++// refreshChatList/chats/sessionId/switchChat/createNewChat — chat/
++// messages-concern state and functions that haven't been split out of
++// SessionContext.jsx yet (that's the NEXT planned slice). Moving those
++// functions here now would mean either (a) this context becoming an
++// ancestor of SessionProvider while also needing callbacks threaded UP
++// from a descendant, which isn't expressible in React (a provider can't
++// consume props from its own descendant), or (b) copying the
++// mother/child callback-prop pattern WorkspaceDockContext.jsx already
++// uses relative to SessionContext (see that file's header comment) a
++// second time, for a context that ALSO needs to sit above SessionProvider
++// for a different reason (see next paragraph) — genuinely circular given
++// today's boundaries. Revisit this once chat/messages has its own
++// context: at that point the coupled functions can move here cleanly,
++// taking the chat context's functions as an import instead of a
++// same-component closure.
++//
++// This context has to sit ABOVE SessionProvider (like
++// UsageStatsProvider, unlike NotificationsProvider) because
++// SessionContext.jsx still reads `workspaces` (getWorkspaceIdForChat)
++// and calls `fetchWorkspaces()` (its own mount effect) internally — see
++// AppShell.jsx's provider tree.
++import { createContext, useContext, useState, useCallback, useMemo } from "react";
++import { supabase } from "../lib/supabaseClient";
++
++const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
++
++// Duplicated from SessionContext.jsx rather than imported from it, same
++// reasoning WorkspaceDockContext.jsx gives for its own copy of this
++// function: both read the same env vars via the same shared
++// supabaseClient.js singleton, so they can't drift in practice.
++async function authHeaders(opts = {}) {
++  const { data: { session } } = await supabase.auth.getSession();
++  const token = session?.access_token;
++  const headers = {};
++  if (opts.json) headers["Content-Type"] = "application/json";
++  if (token) headers["Authorization"] = `Bearer ${token}`;
++  return headers;
++}
++
++const WorkspacesContext = createContext(null);
++
++export function useWorkspaces() {
++  const ctx = useContext(WorkspacesContext);
++  if (!ctx) throw new Error("useWorkspaces() must be used inside <WorkspacesProvider>");
++  return ctx;
++}
++
++export function WorkspacesProvider({ children }) {
++  const [workspaces, setWorkspaces] = useState([]); // NEW — §7: named containers, function like an always-on batch
++
++  // NEW — §7: workspaces ("Projects" in the UI). Mirrors the batch
++  // functions' fetchBatches() 1:1. Unchanged from SessionContext.jsx —
++  // pure extraction, only the definition site moved.
++  const fetchWorkspaces = useCallback(async () => {
++    const res = await fetch(`${API_URL}/api/workspaces`, {
++      headers: await authHeaders(),
++    });
++    const body = await res.json();
++    // Same guard as fetchChats() in SessionContext.jsx — never let a
++    // non-array response (e.g. {"detail": "..."} from an auth/server
++    // error) reach GrowthTab.jsx's workspaces.filter() and crash the app.
++    if (!res.ok || !Array.isArray(body)) {
++      console.error("Failed to load workspaces:", res.status, body);
++      setWorkspaces([]);
++      return;
++    }
++    setWorkspaces(body);
++  }, []);
++
++  const value = useMemo(
++    () => ({ workspaces, fetchWorkspaces }),
++    [workspaces, fetchWorkspaces]
++  );
++
++  return (
++    <WorkspacesContext.Provider value={value}>
++      {children}
++    </WorkspacesContext.Provider>
++  );
++}

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, memo } from "react";
 import { useSession } from "../../context/SessionContext";
+import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { ScrollText, User, ShieldAlert, Loader2 } from "lucide-react";
 
 const SUB_TABS = [
@@ -50,7 +51,8 @@ function AuditRow({ entry }) {
 }
 
 function AuditLogTab() {
-  const { workspaces, fetchWorkspaceAudit, fetchMyAudit } = useSession();
+  const { fetchWorkspaceAudit, fetchMyAudit } = useSession();
+  const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
 
   const [selectedId, setSelectedId] = useState(null);
   const [subTab, setSubTab] = useState("workspace");
