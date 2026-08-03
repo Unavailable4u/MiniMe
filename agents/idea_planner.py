@@ -4,7 +4,6 @@ import json
 from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, read_many, KEYS
-from utils.retry import call_with_retry
 from utils.llm_client import generate_text
 load_dotenv()
 
@@ -54,11 +53,14 @@ def run(session_id: str = None, domain: str = None):
         user_content += f"\n\nPrior cycle report: {json.dumps(prior_report)}"
     else:
         user_content += "\n\nThis is cycle 1. No prior report exists yet."
-    raw_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Idea Planner",
-                               session_id=session_id, domain=domain),
-        agent_name="Idea Planner",
-    )
+    # perf audit §4.4 / priority #7: was double-wrapped in call_with_retry
+    # on top of generate_text()'s own chain-walk fallback — a real
+    # multi-provider outage retried the whole CHAIN up to 4 times with
+    # real sleeps (1/2/4/8s) in between, on top of generate_text() already
+    # having walked every step in CHAIN once per attempt. generate_text()
+    # is the single source of retry/fallback behavior now.
+    raw_text = generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Idea Planner",
+                              session_id=session_id, domain=domain)
     # Strip markdown code fences if the model adds them anyway
     if raw_text.startswith("```"):
         raw_text = raw_text.split("```")[1]

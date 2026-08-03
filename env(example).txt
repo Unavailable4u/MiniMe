@@ -251,6 +251,13 @@ HUGGINGFACE_API_KEY_10=
 
 # --- Postgres connection (used by the new eo/db.py I'll write next) ---
 DATABASE_URL=
+# perf audit §4.6 / priority #9: ThreadedConnectionPool sizing —
+# defaults to DB_POOL_MIN=1 / DB_POOL_MAX=20 in eo/db.py if left unset
+# here. Raise DB_POOL_MAX for a deployment expecting real concurrent
+# load; bound it by your actual Postgres connection limit (Supabase's
+# pooler has its own cap, separate from this pool).
+# DB_POOL_MIN=1
+# DB_POOL_MAX=20
 
 # --- Supabase project ---
 SUPABASE_URL=

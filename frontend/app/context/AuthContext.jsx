@@ -26,12 +26,29 @@ export function useAuth() {
   return ctx;
 }
 
-export function AuthProvider({ children }) {
+// initialUser — perf audit §2.3 step C: page.js is now a Server Component
+// that checks the session cookie via supabaseServer() before anything
+// client-side ever mounts, and passes the result down here. undefined
+// (the default) means "no server check happened, resolve client-side as
+// before"; null/object means "server already resolved this to
+// signed-out/signed-in" and the initial client render should reflect
+// that immediately instead of re-showing a loading state for a fetch
+// that's redundant. page.js always passes one of null/object, never
+// undefined, so this codepath below only matters for any other caller
+// that mounts AuthProvider without doing that check first.
+function initialSessionFor(initialUser) {
+  if (initialUser === undefined) return undefined;
+  return initialUser ? { user: initialUser } : null;
+}
+
+export function AuthProvider({ children, initialUser }) {
   // undefined = auth state not yet resolved (first paint); null = resolved,
   // signed out; object = resolved, signed in. Kept distinct from `null`
-  // deliberately so the Gate component (page.js) can show a loading state
-  // instead of flashing the login screen for a moment on every reload.
-  const [session, setSession] = useState(undefined);
+  // deliberately so the Gate component (components/auth/Gate.jsx) can show
+  // a loading state instead of flashing the login screen for a moment on
+  // every reload — though with initialUser now seeded from the server,
+  // that loading state is no longer the common path (see above).
+  const [session, setSession] = useState(() => initialSessionFor(initialUser));
   const [authError, setAuthError] = useState(null);
 
   useEffect(() => {

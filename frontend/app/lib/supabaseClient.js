@@ -7,7 +7,15 @@
 // independently-created client would maintain its own separate in-memory
 // session and silently drift out of sync with the first (e.g. one
 // refreshing a token the other doesn't know about).
-import { createClient } from "@supabase/supabase-js";
+//
+// Perf audit §2.3 step C: switched from supabase-js's bare createClient()
+// to @supabase/ssr's createBrowserClient(). Behaves the same day-to-day
+// (still persists across reloads, still auto-refreshes, still handles
+// email-link redirects) but stores the session in a cookie instead of
+// localStorage — that's what lets app/lib/supabaseServer.js and
+// middleware.js read the same session on the server. A plain
+// createClient() session is invisible to the server; this one isn't.
+import { createBrowserClient } from "@supabase/ssr";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -25,10 +33,4 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    persistSession: true,       // survives a page refresh
-    autoRefreshToken: true,     // keeps access_token fresh in the background
-    detectSessionInUrl: true,   // needed for email-link / OAuth-style sign-in redirects
-  },
-});
+export const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey);

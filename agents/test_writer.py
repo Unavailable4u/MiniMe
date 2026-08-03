@@ -29,7 +29,6 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
-from utils.retry import call_with_retry
 from utils.llm_client import generate_text
 from eo.errors import MissingDependencyError   # NEW — bug fix
 
@@ -126,11 +125,14 @@ def run(session_id: str = None, domain: str = None):
         "Modules to write tests for:\n" + json.dumps(submitted_code, indent=2)
     )
 
-    raw_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Test Writer",
-                               session_id=session_id, domain=domain),
-        agent_name="Test Writer",
-    )
+    # perf audit §4.4 / priority #7: was double-wrapped in call_with_retry
+    # on top of generate_text()'s own chain-walk fallback — a real
+    # multi-provider outage retried the whole CHAIN up to 4 times with
+    # real sleeps (1/2/4/8s) in between, on top of generate_text() already
+    # having walked every step in CHAIN once per attempt. generate_text()
+    # is the single source of retry/fallback behavior now.
+    raw_text = generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Test Writer",
+                              session_id=session_id, domain=domain)
     
     cleaned = _strip_fences(raw_text)
 

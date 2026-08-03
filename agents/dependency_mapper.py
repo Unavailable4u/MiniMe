@@ -24,7 +24,6 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
-from utils.retry import call_with_retry
 from utils.llm_client import generate_text
 from relay.emitter import emit_event
 
@@ -76,11 +75,14 @@ def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
     }
     user_prompt = json.dumps({"modules": preview}, indent=2)
 
-    raw_text = call_with_retry(
-        lambda: generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Dependency Mapper",
-                               session_id=session_id, tier=tier, domain=domain),
-        agent_name="Dependency Mapper",
-    )
+    # perf audit §4.4 / priority #7: was double-wrapped in call_with_retry
+    # on top of generate_text()'s own chain-walk fallback — a real
+    # multi-provider outage retried the whole CHAIN up to 4 times with
+    # real sleeps (1/2/4/8s) in between, on top of generate_text() already
+    # having walked every step in CHAIN once per attempt. generate_text()
+    # is the single source of retry/fallback behavior now.
+    raw_text = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Dependency Mapper",
+                              session_id=session_id, tier=tier, domain=domain)
     dep_map = json.loads(_strip_fences(raw_text))
     write(KEYS["dependency_map"], dep_map)
     emit_event("dependency_map", session_id, agent="dependency_mapper", payload={"map": dep_map})
