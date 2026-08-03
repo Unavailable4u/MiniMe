@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageRow from "./MessageRow"; // Perf audit #3 step 3 — extracted from messages.map() below
@@ -236,7 +236,22 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const mode = dockMode;
   const setMode = setDockMode;
   const activeMessageIndex = dock.state.activeMessageIndex;
-  const setActiveMessageIndex = (i) => dock.setDockState({ activeMessageIndex: i });
+  // Fix (render-loop, take 2): the first fix's `[dock]` dependency was
+  // itself the bug — useWorkspaceDock() returns a brand-new object literal
+  // on every render (only its individual fields, like setDockState, are
+  // internally memoized). Depending on the whole `dock` object meant this
+  // callback was STILL recreated every render, which meant rowProps below
+  // was still unstable, which is exactly what keeps react-window's
+  // internal setIndices effect retriggering. Depending on the specific
+  // stable field (dock.setDockState) and the specific primitive value
+  // (dock.state.activeMessageIndex) actually breaks the cycle.
+  const setActiveMessageIndex = useCallback(
+    (i) => {
+      if (i === dock.state.activeMessageIndex) return;
+      dock.setDockState({ activeMessageIndex: i });
+    },
+    [dock.setDockState, dock.state.activeMessageIndex]
+  );
   const reviewBeforeDispatch = dockReviewBeforeDispatch;   // Part 2 §2.5
   const setReviewBeforeDispatch = setDockReviewBeforeDispatch;   // Part 2 §2.5
   const pendingHireReview = dock.state.pendingHireReview;   // Part 2 §2.5
@@ -246,9 +261,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // never grows this field — it's Notebooks Chat-First-only).
   const generationNotifications = dock.state.generationNotifications;
 
-  function sendTask(taskText) {
-    return dock.sendTask(taskText, { mode, reviewBeforeDispatch });
-  }
+  // Fix (render-loop, take 2): same class of bug as setActiveMessageIndex
+  // above — must depend on dock.sendTask (stable) specifically, never on
+  // `dock` itself (a fresh object every render).
+  const sendTask = useCallback(
+    (taskText) => dock.sendTask(taskText, { mode, reviewBeforeDispatch }),
+    [dock.sendTask, mode, reviewBeforeDispatch]
+  );
 
   const textareaRef = useRef(null);
   const chatContainerRef = useRef(null);
@@ -825,19 +844,28 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // (tryHandleClassifiedToolCall), same sendTask() dispatcher as a last
   // resort. Nothing about accepting a suggestion needs its own
   // generateNotebooks() call.
-  function dispatchText(text) {
-    tryHandleGenerateIntent(text).then((handled) => {
-      if (handled) return;
-      if (CHAT_TOOL_CALLING_ENABLED) {
-        tryHandleClassifiedToolCall(text).then((toolHandled) => {
-          if (!toolHandled) sendTask(text);
-        });
-      } else {
-        logClassifiedIntent(text);
-        sendTask(text);
-      }
-    });
-  }
+  // Fix (render-loop): wrapped in useCallback so this has a stable identity
+  // across renders — it's passed into rowProps below (onSendCommand), and an
+  // unstable rowProps object was part of the same chain that caused the
+  // "Maximum update depth exceeded" crash. See handleRowsRendered's comment
+  // for the full chain.
+  const dispatchText = useCallback(
+    (text) => {
+      tryHandleGenerateIntent(text).then((handled) => {
+        if (handled) return;
+        if (CHAT_TOOL_CALLING_ENABLED) {
+          tryHandleClassifiedToolCall(text).then((toolHandled) => {
+            if (!toolHandled) sendTask(text);
+          });
+        } else {
+          logClassifiedIntent(text);
+          sendTask(text);
+        }
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask` is what actually matters for rowProps below.
+    [sendTask]
+  );
 
   function handleSubmit(e) {
     e?.preventDefault();
@@ -880,11 +908,11 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // component only sees the result once the dock state it's subscribed
   // to updates — the two effects near listRef.scrollToRow above consume
   // this anchor once messages.length actually grows.
-  function handleLoadOlder() {
+  const handleLoadOlder = useCallback(() => {
     if (loadingOlder || !hasMoreOlder || !chatId) return;
     prependAnchorRef.current = { prevLength: messages.length, index: activeMessageIndex ?? 0 };
     loadOlderMessages(chatId);
-  }
+  }, [loadingOlder, hasMoreOlder, chatId, messages.length, activeMessageIndex, loadOlderMessages]);
 
   // visibleRows.startIndex <= 3 (not just === 0) so the fetch starts a
   // little before the person hits the literal top row — same "prefetch
@@ -892,11 +920,42 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // data-fetching instead of DOM mounting. loadingOlder/hasMoreOlder are
   // also checked inside handleLoadOlder itself, so this can fire on every
   // qualifying scroll event without needing its own separate guard here.
-  function handleRowsRendered(visibleRows) {
-    if (isSyncingRef.current) return;
-    setActiveMessageIndex(visibleRows.startIndex);
-    if (visibleRows.startIndex <= 3) handleLoadOlder();
-  }
+  // BUGFIX (Maximum update depth exceeded / react-window useVirtualizer
+  // setIndices crash): this was a plain function, recreated on every render,
+  // passed straight into <List onRowsRendered={...}>. react-window
+  // re-invokes onRowsRendered whenever that reference changes (it's in the
+  // dependency array of its own internal effect) — not only when the
+  // visible range actually changes. It then called setActiveMessageIndex
+  // unconditionally, which wrote to dock state unconditionally, which
+  // re-rendered this component, which created a new handleRowsRendered
+  // reference, which react-window called again — an infinite loop. Wrapping
+  // this in useCallback (so its identity is stable across unrelated
+  // renders) plus the equality guard below (so it doesn't fire a state
+  // update when the index hasn't actually changed) closes the loop.
+  const handleRowsRendered = useCallback(
+    (visibleRows) => {
+      if (isSyncingRef.current) return;
+      if (visibleRows.startIndex !== activeMessageIndex) {
+        setActiveMessageIndex(visibleRows.startIndex);
+      }
+      if (visibleRows.startIndex <= 3) handleLoadOlder();
+    },
+    [activeMessageIndex, setActiveMessageIndex, handleLoadOlder]
+  );
+
+  // Fix (render-loop): memoized so this object's identity only changes when
+  // one of its actual contents changes, instead of on every render — it's
+  // passed as <List rowProps={...}>, and an unstable rowProps object was
+  // part of the same instability that fed the crash above.
+  const rowProps = useMemo(
+    () => ({
+      messages,
+      onSelect: setActiveMessageIndex,
+      onNavigateSubTab,
+      onSendCommand: dispatchText,
+    }),
+    [messages, setActiveMessageIndex, onNavigateSubTab, dispatchText]
+  );
 
   // Perf audit #3 step 8 fix — Row now lives at module scope (see
   // VirtualMessageRow above this component) instead of being redefined
@@ -1128,12 +1187,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             rowComponent={VirtualMessageRow}
             rowCount={messages.length}
             rowHeight={dynamicRowHeight}
-            rowProps={{
-              messages,
-              onSelect: setActiveMessageIndex,
-              onNavigateSubTab,
-              onSendCommand: dispatchText,
-            }}
+            rowProps={rowProps}
             overscanCount={6}
             onRowsRendered={handleRowsRendered}
           />
