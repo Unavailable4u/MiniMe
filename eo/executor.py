@@ -227,6 +227,19 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     fn = resolve("generic_worker")
     flat_input_keys = list(_flatten_role_names(role_names[:idx]))
 
+    # Step 7 (parallel-execution work) — observability. Fired exactly
+    # once per group, right as it actually begins dispatching (this
+    # function is only ever reached once a group has already cleared
+    # Step 3's sanitize_parallel_groups() and Step 5's approval_roles
+    # backstop in _run_loop() — see that check's own comment). One event
+    # per group, not per member, since agent_start/agent_done below
+    # already give per-member detail; this is the "a group ran at all"
+    # signal for seeing this feature fire on real traffic and evaluating
+    # whether the Panel's proposed groups are actually sensible over time.
+    emit_event("parallel_group_dispatched", session_id=session_id, path=path,
+               payload={"roles": sorted(group_roles), "group_size": len(group_roles),
+                        "given_roles": flat_input_keys})
+
     started_at = {}
     for member_role in group_roles:
         started_at[member_role] = _time.monotonic()
@@ -414,7 +427,16 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
     {"status": "paused", "paused_at_role": role} instead of the results
     dict. Callers up the stack (eo/loop_controller.py's run_with_looping(),
     and anything calling execute_graph() directly) must check for this
-    sentinel before treating the return value as finished output."""
+    sentinel before treating the return value as finished output.
+
+    Group/approval_roles backstop (Step 5, parallel-execution work): a
+    concurrent group (role_names[idx] is a list) is never dispatched if
+    any of its members is in approval_roles — it's degraded to plain
+    sequential slots in place instead, with a logged warning, so the
+    single-role branch's existing pause handling covers every member.
+    This should never actually fire in practice (Steps 2/3 upstream
+    already filter these out); it's a defensive backstop, not the
+    primary enforcement point."""
     no_conversation_context_roles = no_conversation_context_roles or set()
 
     while idx is not None and idx < len(agent_names):
@@ -424,6 +446,33 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # for what it does and does not support yet (no approval_roles
         # pausing, no MissingDependencyError self-heal, for any member).
         if isinstance(role_names[idx], list):
+            group_roles = role_names[idx]
+
+            # Step 5 (parallel-execution work) — belt-and-braces backstop.
+            # eo/panel.py's _merge_parallel_groups() (Step 2) and
+            # eo/router.py's sanitize_parallel_groups() (Step 3) are BOTH
+            # already supposed to keep an approval_roles member out of any
+            # group before it ever reaches here — see
+            # _run_concurrent_group()'s own docstring for why a group
+            # can't support the pause checkpoint (no snapshot shape for
+            # "idx currently covers N roles running together, not one").
+            # This is the last line of defense if either of them has a
+            # bug: NEVER actually dispatch a group containing one.
+            # Instead, splice this one group-slot back into N ordinary
+            # sequential slots, in place, and fall through to the normal
+            # single-role dispatch branch below — which already handles
+            # approval_roles pausing correctly — for every member,
+            # including the unsafe one, one at a time.
+            unsafe_members = approval_roles.intersection(group_roles)
+            if unsafe_members:
+                print(f"  [Executor] WARNING: group at position {idx} contains "
+                      f"approval_roles member(s) {sorted(unsafe_members)} — "
+                      f"concurrent groups don't support the pause checkpoint. "
+                      f"Degrading to sequential execution: {group_roles}")
+                agent_names[idx:idx + 1] = [resolve_role(r) for r in group_roles]
+                role_names[idx:idx + 1] = list(group_roles)
+                continue
+
             next_idx, reason = _run_concurrent_group(
                 role_names[idx], role_names, idx, results, task_text,
                 session_id, path, key_overrides, next_step,
