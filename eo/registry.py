@@ -15,6 +15,7 @@ Stage 4 steps 2-4 of the roadmap), are all wired up here.
 """
 import sys
 import os
+import contextvars
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 
@@ -394,6 +395,61 @@ ROLE_PROMPTS_KEY = "registry:role_prompts"
 # followed in §8.2, just applied to a module that stayed on the memory
 # bus instead of moving to Postgres.
 ROLE_LIBRARY_SCOPE = os.getenv("ROLE_LIBRARY_SCOPE", "global")  # "global" | "per_user"
+
+
+# Performance Audit §4.3/§5A: role-prompt lookups hit Redis fresh on
+# every call with no in-process cache -- staff_task() alone does a
+# get_role_prompt() + record_role_hire() PER HIRED ROLE (2 fresh reads +
+# a write of the whole role-prompts blob each), and then
+# agents/generic_worker.py calls get_role_prompt() AGAIN when that role
+# actually dispatches. For N hired roles that's up to 3N Redis round
+# trips for a blob that barely changes within one run -- _load_prompts()
+# already reads the WHOLE store in one call (not per-role), so the
+# waste isn't fan-out per role, it's the same whole-store read repeated
+# N times over.
+#
+# Fix: a per-run cache, not a process-wide one. A process-wide cache
+# would go stale the moment a DIFFERENT concurrent request edits a
+# role's brief (PUT /api/roles/{role_name}) or hires it for the first
+# time -- exactly the kind of cross-request staleness bug a shared
+# mutable global invites. Scoping it to a ContextVar instead reuses the
+# EXACT isolation memory/bus.py's own _app_slug_ctx already relies on
+# (see that module's Migration Part B comment): FastAPI's sync-route
+# threadpool (Starlette's run_in_threadpool) propagates context INTO a
+# request's worker thread, but each new incoming request starts a fresh
+# context that was never touched by an earlier one -- so this falls
+# back to a real Redis read automatically at the start of every request
+# instead of needing an explicit "clear cache" call anywhere. Within one
+# request/CLI run, every _load_prompts() call after the first is free.
+#
+# Deliberately keyed by the store key itself (not e.g. by role_name) --
+# every function in this module already loads the WHOLE store per call,
+# so caching at that same granularity is what actually eliminates the
+# repeated round trips. A writer (add_role_prompt()/record_role_hire()/
+# set_role_pinned()) mutates the SAME dict object this cache hands back
+# from _load_prompts() before calling write() -- since it's the same
+# object reference, not a copy, the cache is automatically kept in sync
+# with every write with no separate invalidation step needed.
+_role_prompts_cache_ctx: "contextvars.ContextVar" = contextvars.ContextVar(
+    "role_prompts_cache", default=None)
+
+
+def _get_cached_prompts(key: str):
+    cache = _role_prompts_cache_ctx.get()
+    return cache.get(key) if cache is not None else None
+
+
+def _cache_prompts(key: str, prompts: dict) -> None:
+    cache = _role_prompts_cache_ctx.get()
+    if cache is None:
+        # First role-library touch in this context -- create the cache
+        # dict now rather than defaulting the ContextVar itself to {},
+        # which would hand every fresh context the SAME mutable dict
+        # object (contextvars.ContextVar's default is evaluated once,
+        # not per-context).
+        cache = {}
+        _role_prompts_cache_ctx.set(cache)
+    cache[key] = prompts
 
 
 def _role_prompts_key(user_id: str | None = None) -> str:
@@ -1265,8 +1321,20 @@ def _load_prompts(user_id: str | None = None) -> dict:
     user's own, isolated one (ROLE_LIBRARY_SCOPE=per_user). A per-user
     store bootstraps from the SAME ROLE_PROMPTS_SEED as the shared one
     the first time that specific user is ever seen, so nobody's library
-    starts empty."""
+    starts empty.
+
+    Performance Audit §5A: checks the per-run cache (see
+    _get_cached_prompts()/_cache_prompts() above) before touching Redis
+    at all. Every return path below still populates/refreshes the cache
+    on its way out, so a cache miss costs exactly the one read() this
+    function already did before caching existed — this only removes the
+    REPEATED reads across multiple calls within the same run, not the
+    first one."""
     key = _role_prompts_key(user_id)
+    cached = _get_cached_prompts(key)
+    if cached is not None:
+        return cached
+
     prompts = read(key, default=None)
     if prompts is None:
         prompts = {
@@ -1274,6 +1342,7 @@ def _load_prompts(user_id: str | None = None) -> dict:
             for name, brief in ROLE_PROMPTS_SEED.items()
         }
         write(key, prompts)
+        _cache_prompts(key, prompts)
         return prompts
 
     changed = False
@@ -1283,6 +1352,7 @@ def _load_prompts(user_id: str | None = None) -> dict:
             changed = True
     if changed:
         write(key, prompts)
+    _cache_prompts(key, prompts)
     return prompts
 
 
