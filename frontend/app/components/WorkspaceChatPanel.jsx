@@ -53,26 +53,26 @@ import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 // SessionContext, not stored on the dock. In legacy mode they still come
 // straight from SessionContext, unchanged.
 //
-// CHANGED — Item 2 remaining piece, live-run-state slice, step 2: the
-// merged messages/loading/mode/etc. variables below still read from
-// `legacy` (SessionContext) when `!usingDock`, same as 3d/3e left it —
-// that part is untouched. What changed is what gets RENDERED in that
-// state: audited every call site and found `dock.key == null` isn't just
-// a mount-time gap, it's the everyday "no project selected yet" state for
-// TestTab/BuildTab/ResearchTab/PlanTab (each renders this component
-// unconditionally, not gated behind an `activeWs &&`). Silently falling
-// through to the full chat UI with legacy's values meant those tabs, with
-// nothing selected, showed the GLOBAL Chat-tab conversation inside their
-// embedded dock — a leftover from before WorkspaceDockContext existed, not
-// an intentional empty state. Now shows an explicit placeholder instead
-// (see the `!usingDock` branch below, after the existing `collapsed` early
-// return so the rail toggle still works with nothing selected). This does
-// NOT yet make `legacy` fully dead — GrowthTab/NotebooksTab gate their own
-// call site behind a selection already, and ChatTab's `standalone` case
-// still legitimately needs `legacy` for the split-second before
-// AppShell.jsx's bootstrap effect resolves `chatId` — so SessionContext's
-// state/functions stay in place for now. Full legacy-branch removal is a
-// later step once nothing reachable still depends on it.
+// CHANGED — Item 2 remaining piece, live-run-state slice, step 4: the
+// merged messages/loading/mode/etc. variables below no longer read from
+// `legacy` (SessionContext) at all — audited every path that reaches
+// them (the compose form, MessageBubble list, handleChatScroll,
+// dispatchText/sendTask) and confirmed every one of those only renders
+// or fires from inside the `if (!usingDock) return <placeholder>`
+// branch below, so the `usingDock ? dock… : legacy…` reads were dead in
+// the same way WorkingPanel.jsx's were (Item 2 step 3) — the
+// `!usingDock` case (TestTab/BuildTab/ResearchTab/PlanTab with nothing
+// selected, or ChatTab's brief bootstrap gap) shows an explicit
+// placeholder instead, never the real chat UI, so there was nothing
+// left for those particular legacy values to feed. This does NOT make
+// `legacy` fully dead in this file: `ingestFile`/`ingestPdfFile`/
+// `ingestVoiceFile`/`generateNotebooks`/`classifyIntent`/
+// `markTopicDone` above are still read unconditionally off
+// `useSession()` (no dock equivalent — see line ~136), and
+// SessionContext.jsx itself still owns the real global Chat-tab
+// conversation `standalone` mode ultimately resolves into a dock key
+// for. Full `SessionContext.jsx` cleanup is Item 2 steps 5-6, once
+// nothing reachable still depends on its dead state.
 const MODES = [
   { id: "auto", label: "Auto", icon: Sparkles, hint: "Let the Inspector decide" },
   { id: "simple", label: "Simple", icon: Feather, hint: "Cheapest capable tier only" },
@@ -175,32 +175,23 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const [dockMode, setDockMode] = useState("auto");
   const [dockReviewBeforeDispatch, setDockReviewBeforeDispatch] = useState(false);
 
-  const messages = usingDock ? dock.state.messages : legacy.messages;
-  const loading = usingDock ? dock.state.loading : legacy.loading;
-  const mode = usingDock ? dockMode : legacy.mode;
-  const setMode = usingDock ? setDockMode : legacy.setMode;
-  const activeMessageIndex = usingDock ? dock.state.activeMessageIndex : legacy.activeMessageIndex;
-  const setActiveMessageIndex = usingDock
-    ? (i) => dock.setDockState({ activeMessageIndex: i })
-    : legacy.setActiveMessageIndex;
-  const reviewBeforeDispatch = usingDock ? dockReviewBeforeDispatch : legacy.reviewBeforeDispatch;   // Part 2 §2.5
-  const setReviewBeforeDispatch = usingDock ? setDockReviewBeforeDispatch : legacy.setReviewBeforeDispatch;   // Part 2 §2.5
-  const pendingHireReview = usingDock ? dock.state.pendingHireReview : legacy.pendingHireReview;   // Part 2 §2.5
-  const confirmHireReview = usingDock ? dock.confirmHireReview : legacy.confirmHireReview;   // Part 2 §2.5
-  const cancelHireReview = usingDock ? dock.cancelHireReview : legacy.cancelHireReview;   // Part 2 §2.5
+  const messages = dock.state.messages;
+  const loading = dock.state.loading;
+  const mode = dockMode;
+  const setMode = setDockMode;
+  const activeMessageIndex = dock.state.activeMessageIndex;
+  const setActiveMessageIndex = (i) => dock.setDockState({ activeMessageIndex: i });
+  const reviewBeforeDispatch = dockReviewBeforeDispatch;   // Part 2 §2.5
+  const setReviewBeforeDispatch = setDockReviewBeforeDispatch;   // Part 2 §2.5
+  const pendingHireReview = dock.state.pendingHireReview;   // Part 2 §2.5
+  const confirmHireReview = dock.confirmHireReview;   // Part 2 §2.5
+  const cancelHireReview = dock.cancelHireReview;   // Part 2 §2.5
   // NEW — Phase 4 step 4.5: no legacy-mode equivalent (SessionContext.jsx
-  // never grows this field — it's Notebooks Chat-First-only), so this is
-  // simply empty outside dock mode rather than reading from `legacy`.
-  // Step 4.6 renders these; this step only wires the subscription (dock
-  // state is already live off the Pusher channel via
-  // WorkspaceDockContext.jsx's handleDockEvent — see that file).
-  const generationNotifications = usingDock ? dock.state.generationNotifications : [];
+  // never grows this field — it's Notebooks Chat-First-only).
+  const generationNotifications = dock.state.generationNotifications;
 
   function sendTask(taskText) {
-    if (usingDock) {
-      return dock.sendTask(taskText, { mode, reviewBeforeDispatch });
-    }
-    return legacy.sendTask(taskText);
+    return dock.sendTask(taskText, { mode, reviewBeforeDispatch });
   }
 
   const bottomRef = useRef(null);

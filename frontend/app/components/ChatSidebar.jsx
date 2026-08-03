@@ -40,6 +40,12 @@ function hashBatchColor(batchId) {
 
 export default function ChatSidebar({ collapsed, onToggle }) {
   const { batches } = useSession();
+  // Ensure `batches` is an array-like list before using array helpers
+  const batchesArr = Array.isArray(batches)
+    ? batches
+    : batches && typeof batches === "object"
+    ? (typeof batches[Symbol.iterator] === "function" ? Array.from(batches) : Object.values(batches))
+    : [];
   const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — step 3e: these five used to come from useSession() and wrote
@@ -78,7 +84,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 // A chat that's somehow in both a workspace and a batch is shown under
 // the workspace only — it's the more structural, persistent grouping.
   const batchedChatIds = new Set(
-    batches.flatMap((b) => b.member_chat_ids).filter((id) => !workspacedChatIds.has(id))
+    batchesArr.flatMap((b) => b.member_chat_ids).filter((id) => !workspacedChatIds.has(id))
   );
   const unbatchedChats = chats.filter((c) => !batchedChatIds.has(c.id) && !workspacedChatIds.has(c.id));
 
@@ -96,10 +102,10 @@ export default function ChatSidebar({ collapsed, onToggle }) {
     : workspaces;
 
   const filteredBatches = q
-    ? batches.filter(
+    ? batchesArr.filter(
         (b) => b.name.toLowerCase().includes(q) || chats.some((c) => b.member_chat_ids.includes(c.id) && chatMatches(c))
       )
-    : batches;
+    : batchesArr;
 
   const filteredUnbatchedChats = unbatchedChats.filter(chatMatches);
 
@@ -307,7 +313,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 
       {managingBatch && (
         <ManageBatchModal
-          batch={batches.find((b) => b.id === managingBatch.id) || managingBatch}
+          batch={batchesArr.find((b) => b.id === managingBatch.id) || managingBatch}
           allChats={chats}
           onClose={() => setManagingBatch(null)}
         />
