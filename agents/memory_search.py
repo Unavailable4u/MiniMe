@@ -29,7 +29,7 @@ import json
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, vector_index
+from memory.bus import read, write, read_many, KEYS, vector_index
 from utils.llm_client import log_usage, embed_text_with_fallback
 
 load_dotenv()
@@ -52,8 +52,12 @@ def _app_slug() -> str:
 
 def store_cycle_memory(cycle_num: int, session_id: str = None, tier: int = None,
                         domain: str = None) -> None:
-    report = read(KEYS["latest_report"], default=None)
-    plan = read(KEYS["current_plan"], default={})
+    # Batched into a single MGET instead of 2 sequential round trips --
+    # these two keys are unrelated and neither is used until after both
+    # are read anyway.
+    _vals = read_many([KEYS["latest_report"], KEYS["current_plan"]], default=None)
+    report = _vals[KEYS["latest_report"]]
+    plan = _vals[KEYS["current_plan"]] or {}
     if not report:
         return
     slug = _app_slug()

@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback, useRef } from "react";
+import dynamic from "next/dynamic";   // NEW — perf audit §2.3 step A: code-split the non-default tab bodies
 import { SessionProvider, useSession } from "../context/SessionContext";
 import { NotificationsProvider } from "../context/NotificationsContext";   // NEW — Item 2 concern split, slice 1: notifications/unreadCount/markNotificationsRead moved out of SessionContext
 import { UsageStatsProvider, useUsageStats } from "../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent moved out of SessionContext
@@ -7,19 +8,52 @@ import { WorkspacesProvider, useWorkspaces } from "../context/WorkspacesContext"
 import { ChatListProvider, useChatList } from "../context/ChatListContext";   // NEW — Item 2 concern split, slice 4: chats/refreshChatList moved out of SessionContext
 import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
 import ChatSidebar from "./ChatSidebar";
-import ChatTab from "./tabs/ChatTab";
-import TokenUsageTab from "./tabs/TokenUsageTab";
-import SettingsTab from "./tabs/SettingsTab";
-import RoleLibraryTab from "./tabs/RoleLibraryTab";
-import WorkflowTemplatesTab from "./tabs/WorkflowTemplatesTab";
-import NotebooksTab from "./tabs/NotebooksTab";   // NEW — §4.7: dedicated Notebooks section
-import ResearchTab from "./tabs/ResearchTab";     // NEW — Part 3 §3.9: dedicated Research section
-import PlanTab from "./tabs/PlanTab";             // FIX — Part 5: was built as a file but never registered here, so it had no top-nav entry and no way to receive a promoted workspace
-import BuildTab from "./tabs/BuildTab";           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
-import TestTab from "./tabs/TestTab";             // NEW — Test tab design spec §1: simulate & test
-import GrowthTab from "./tabs/GrowthTab";           // NEW — Growth tab design spec §2: growth & marketing
+import ChatTab from "./tabs/ChatTab";   // stays a static import — "chat" is the initial activeTab and always the first (often only) tab visited/mounted on load, so there's nothing to defer here.
 import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
 import NotificationBell from "./NotificationBell";   // NEW — Part 8.9: cross-chat notification inbox
+
+// NEW — perf audit §2.3 step A: the other ten tab bodies were all static
+// imports, so every one of them — including 3,100+-line NotebooksTab —
+// landed in the SAME initial JS chunk as ChatTab and everything else
+// AppShell needs to boot, even though TABS.filter((t) =>
+// visitedTabs.has(t.id)) below already means most of them are never even
+// RENDERED until the user actually clicks that tab. Static imports still
+// get bundled regardless of whether they're rendered; only next/dynamic
+// (or React.lazy) defers the module fetch itself to first use. This
+// converts every tab except the always-mounted "chat" one, cutting them
+// out of the initial bundle without changing the "stays mounted once
+// visited" behavior below at all — dynamic() just defers *when* the
+// module is fetched, not whether the mounted-tab-stays-mounted logic
+// applies to it once it lands.
+//
+// No `ssr: false` here: this whole component tree is already
+// client-only (page.js's root "use client"), so there's no SSR/CSR
+// markup mismatch to guard against the way ForceGraphBase.jsx has to
+// (see that file's own comment on why IT avoids next/dynamic — a ref-
+// forwarding problem that doesn't apply here, since none of these tabs
+// receive a ref from AppShell).
+function TabLoadingFallback() {
+  // Deliberately minimal — this only shows for the one-time chunk fetch
+  // the first time a given tab is opened this session (visitedTabs means
+  // it's never re-fetched on subsequent switches), so it's on screen for
+  // a beat, not something worth animating or building out further.
+  return (
+    <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-500)]">
+      Loading…
+    </div>
+  );
+}
+
+const TokenUsageTab = dynamic(() => import("./tabs/TokenUsageTab"), { loading: TabLoadingFallback });
+const SettingsTab = dynamic(() => import("./tabs/SettingsTab"), { loading: TabLoadingFallback });
+const RoleLibraryTab = dynamic(() => import("./tabs/RoleLibraryTab"), { loading: TabLoadingFallback });
+const WorkflowTemplatesTab = dynamic(() => import("./tabs/WorkflowTemplatesTab"), { loading: TabLoadingFallback });
+const NotebooksTab = dynamic(() => import("./tabs/NotebooksTab"), { loading: TabLoadingFallback });   // NEW — §4.7: dedicated Notebooks section
+const ResearchTab = dynamic(() => import("./tabs/ResearchTab"), { loading: TabLoadingFallback });     // NEW — Part 3 §3.9: dedicated Research section
+const PlanTab = dynamic(() => import("./tabs/PlanTab"), { loading: TabLoadingFallback });             // FIX — Part 5: was built as a file but never registered here, so it had no top-nav entry and no way to receive a promoted workspace
+const BuildTab = dynamic(() => import("./tabs/BuildTab"), { loading: TabLoadingFallback });           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
+const TestTab = dynamic(() => import("./tabs/TestTab"), { loading: TabLoadingFallback });             // NEW — Test tab design spec §1: simulate & test
+const GrowthTab = dynamic(() => import("./tabs/GrowthTab"), { loading: TabLoadingFallback });           // NEW — Growth tab design spec §2: growth & marketing
 import WorkspaceDataBubble from "./WorkspaceDataBubble";   // NEW — items #5/#13: relocated from floating-over-tab-content into the top nav
 
 const TABS = [
@@ -212,12 +246,23 @@ function AppShellBody() {
   // this — removeWorkspaceChat's fallback (SessionContext.jsx) still
   // calls its own copies, so they can't be deleted yet; this only moves
   // who's responsible for the very first "which chat opens" decision.
+  //
+  // CHANGED — perf audit §2.3 step B: fetchBatches()/fetchWorkspaces()
+  // used to sit AFTER `await refreshChatList()` (and after its `if (list
+  // === null) return`), even though neither one reads anything off the
+  // chat list — they were waiting on a network round trip they have no
+  // actual dependency on, and a chat-list fetch FAILURE silently skipped
+  // them entirely (an unrelated failure killing two unrelated,
+  // independently-recoverable fetches). Both are now fired in the same
+  // tick as refreshChatList(), not chained behind it, so all three go
+  // out concurrently; only the chat-restore decision below still awaits
+  // refreshChatList() specifically, since it genuinely needs that data.
   useEffect(() => {
+    fetchBatches();     // NEW — §4: independent of the chat list, no reason to wait on it (see comment above)
+    fetchWorkspaces();  // NEW — §7: same
     (async () => {
       const list = await refreshChatList();
       if (list === null) return;
-      fetchBatches();     // NEW — §4: don't block chat restore on this, batches are additive UI
-      fetchWorkspaces();  // NEW — §7: also additive, don't block chat restore on it
       const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
       const stillExists = savedId && list.some((c) => c.id === savedId);
 

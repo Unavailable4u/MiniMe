@@ -3,7 +3,7 @@ import sys
 import json
 from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from memory.bus import read, write, read_many, KEYS
 from utils.retry import call_with_retry
 from utils.llm_client import generate_text
 from eo.errors import MissingDependencyError   # NEW — bug fix
@@ -26,16 +26,24 @@ and by the next planning agent as plain text.
 
 
 def run_report_writer(session_id: str = None, domain: str = None):
-    fixed_code = read(KEYS["fixed_code"])
-    submitted_code = read(KEYS["submitted_code"])
+    # Batched into a single MGET instead of 5 sequential round trips --
+    # these five keys are unrelated and none is used until after all of
+    # them are read anyway.
+    _vals = read_many(
+        [KEYS["fixed_code"], KEYS["submitted_code"], KEYS["test_results"],
+         KEYS["review_notes"], KEYS["current_plan"]],
+        default=None,
+    )
+    fixed_code = _vals[KEYS["fixed_code"]]
+    submitted_code = _vals[KEYS["submitted_code"]]
     # Bug fix: fall back to submitted_code, same reasoning as
     # sandbox_tester.py's own fallback -- report_writer can still write a
     # meaningful cycle summary from the Code Writers' raw output even if
     # the Fixer Pool never ran (e.g. review found nothing to fix).
     code_source = fixed_code or submitted_code
-    test_results = read(KEYS["test_results"])
-    review_notes = read(KEYS["review_notes"])
-    current_plan = read(KEYS["current_plan"], default={})
+    test_results = _vals[KEYS["test_results"]]
+    review_notes = _vals[KEYS["review_notes"]]
+    current_plan = _vals[KEYS["current_plan"]] or {}
     if not code_source:
         # Bug fix: was `raise ValueError(...)`. "implementer" specifically
         # (not "fixer") -- if code_source is empty, code_writers.py never
