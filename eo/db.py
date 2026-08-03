@@ -34,7 +34,16 @@ except ImportError:
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 _POOL_MIN = int(os.getenv("DB_POOL_MIN", "1"))
-_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
+# perf audit §4.6 / priority #9: was defaulting to 10 while FastAPI's own
+# sync-route threadpool (api/server.py's 121-of-124 sync `def` routes,
+# each dispatched via Starlette's run_in_threadpool) can run well more
+# than 10 of them concurrently — meaning under real concurrent load,
+# requests would queue for a DB connection even with idle threadpool
+# capacity to actually run them. Raised the default closer to that
+# threadpool's own concurrency headroom; still fully overridable via
+# DB_POOL_MAX (see env(example).txt) so a given deployment can tune it
+# against its actual Postgres connection limit rather than this default.
+_POOL_MAX = int(os.getenv("DB_POOL_MAX", "20"))
 
 _pool: ThreadedConnectionPool | None = None
 
