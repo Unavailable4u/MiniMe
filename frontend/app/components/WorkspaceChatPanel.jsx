@@ -1,10 +1,10 @@
 "use client";
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState } from "react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
 import MessageRow from "./MessageRow"; // Perf audit #3 step 3 — extracted from messages.map() below
-import { List } from "react-window"; // Perf audit #3 step 5d — react-window is v2 (see package.json), a
+import { List, useDynamicRowHeight } from "react-window"; // Perf audit #3 step 5d — react-window is v2 (see package.json), a
 // ground-up rewrite: no VariableSizeList/FixedSizeList split, no itemSize/
 // estimatedItemSize/outerRef/resetAfterIndex/scrollToItem. One `List`
 // component instead, sized automatically off its own parent via an
@@ -122,6 +122,45 @@ const WORKING_PANEL_MAX_HEIGHT = 640;
 // path §4a describes, independent of whatever's typed in the textarea.
 const ATTACH_DONE_AUTOCLEAR_MS = 3000;
 
+// Perf audit #3 step 8 fix — hoisted to module scope, deliberately outside
+// WorkspaceChatPanel. react-window v2 wraps whatever you pass as
+// `rowComponent` in its own React.memo, keyed off that function's identity
+// (see node_modules/react-window/dist/react-window.js — `useMemo(() =>
+// memo(rowComponent, arePropsEqual), [rowComponent])`). Step 5b/7's `Row`
+// was defined *inside* WorkspaceChatPanel's render body, so it was a brand
+// new function on every render — meaning react-window's memo wrapper was
+// also brand new every render, which React treats as an entirely
+// different component type. Net effect: every currently-visible message
+// row fully unmounted and remounted (not just re-rendered) on every
+// keystroke in the composer, every mode-menu toggle, etc — exactly the
+// "mounting/rendering every message on unrelated re-renders" step 8's own
+// checklist says to rule out via the Profiler, and it would not have
+// passed. Data that used to come from closing over the parent's render
+// scope (messages, messageRefs, the two callbacks) now arrives via
+// `rowProps` instead — react-window's built-in, documented way to feed a
+// stable row component fresh data without recreating the component itself
+// (see the <List rowProps={...}> call site below).
+//
+// Not wiring up a ResizeObserver/data-react-window-index here: List
+// itself already does this automatically for every rendered row once
+// `rowHeight` is a DynamicRowHeight object (same source file, the effect
+// right after the row-rendering loop) — that was redundant, and has been
+// removed from this component's Row-equivalent.
+function VirtualMessageRow({ index, style, messages, messageRefs, onSelect, onNavigateSubTab, onSendCommand }) {
+  return (
+    <div style={style}>
+      <MessageRow
+        message={messages[index]}
+        index={index}
+        messageRefs={messageRefs}
+        onSelect={onSelect}
+        onNavigateSubTab={onNavigateSubTab}
+        onSendCommand={onSendCommand}
+      />
+    </div>
+  );
+}
+
 function clampWorkingPanelWidth(w) {
   return Math.min(WORKING_PANEL_MAX_WIDTH, Math.max(WORKING_PANEL_MIN_WIDTH, w));
 }
@@ -210,28 +249,30 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // effect below, which replaced the old bottomRef.scrollIntoView() call).
   const listRef = useRef(null);
   const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
-  // Perf audit #3 step 5a — height-cache + getItemSize/estimatedItemSize
-  // helpers for the upcoming VariableSizeList (step 5d wires these into
-  // the actual list; nothing below reads these yet, and nothing renders
-  // any differently after this substep). Keyed by a stable message id
-  // where one exists, falling back to the row index per the step 4
-  // design comment above — messages from chat_store.py's JSONB blob
-  // don't currently carry an id field (see audit item 4.1), so the
-  // fallback is the common case today, not an edge case.
-  const heightCache = useRef({});
-  const ESTIMATED_ROW_HEIGHT = 88; // rough single-paragraph-message guess; re-tune after step 5e's smoke test on a real short chat
-
-  const getMessageKey = useCallback((message, index) => {
-    return message?.id ?? message?.message_id ?? index;
-  }, []);
-
-  const getItemSize = useCallback(
-    (index) => {
-      const key = getMessageKey(messages[index], index);
-      return heightCache.current[key] ?? ESTIMATED_ROW_HEIGHT;
-    },
-    [messages, getMessageKey]
-  );
+  // Perf audit #3 step 8 fix — step 5a's plan (a hand-rolled heightCache
+  // ref + a manual resetAfterIndex call) was written against react-window
+  // v1 and never actually got finished for v2: nothing anywhere wrote
+  // into heightCache, so getItemSize always fell through to
+  // ESTIMATED_ROW_HEIGHT — every row was silently pinned at 88px forever,
+  // and v2 doesn't even have a resetAfterIndex to call once a real
+  // measurement came in. This would have failed step 8's stress test the
+  // moment a Mermaid diagram or code block finished its async render and
+  // grew taller than the estimate: react-window would still think the row
+  // is 88px, so the row below it would start overlapping the bottom of
+  // the diagram instead of being pushed down.
+  //
+  // v2 ships a built-in answer to exactly this — useDynamicRowHeight —
+  // instead of hand-rolling the cache/invalidation dance ourselves.
+  // `key: dock.state.sessionId` clears its measured-height map whenever
+  // the active chat changes, so heights measured in one chat can't leak
+  // into a different one when this same panel instance gets reused
+  // across chats (see the Row component below for why keying by row
+  // index rather than message id is fine here).
+  const ESTIMATED_ROW_HEIGHT = 88; // rough single-paragraph-message guess; only used before a row's first real measurement
+  const dynamicRowHeight = useDynamicRowHeight({
+    defaultRowHeight: ESTIMATED_ROW_HEIGHT,
+    key: dock.state.sessionId,
+  });
 
   // Perf audit #3 step 5c — sizing the list itself. VariableSizeList needs
   // explicit height/width props; unlike the current overflow-y-auto div,
@@ -810,38 +851,11 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     setActiveMessageIndex(visibleRows.startIndex);
   }
 
-  // Perf audit #3 step 5b — row wrapper for VariableSizeList (wired up in
-  // step 5d; until then this function exists but nothing calls it yet).
-  // react-window invokes its `children` prop as a component called with
-  // { index, style } per visible row, where `style` carries the absolute
-  // position/height it computed for that row from getItemSize (step 5a).
-  // That style MUST land on the outermost element Row returns — react-window
-  // owns layout once this is inside the list, so skipping it means rows
-  // overlap or collapse to zero height.
-  //
-  // MessageRow's own root div still does the messageRefs.current[i] = el
-  // assignment from step 3 — as of step 7, this is fully dead: cross-panel
-  // sync now reads the visible range straight off List's onRowsRendered
-  // callback (see handleRowsRendered above) instead of walking live DOM
-  // refs, so nothing reads messageRefs.current anymore. Left in place
-  // rather than pulled here on purpose — step 9 cleanup is where the
-  // messageRefs ref/prop/assignment (this component, MessageRow.jsx) all
-  // get removed together, once the rest of the virtualization work is
-  // done and there's nothing else about to need it.
-  function Row({ index, style }) {
-    return (
-      <div style={style}>
-        <MessageRow
-          message={messages[index]}
-          index={index}
-          messageRefs={messageRefs}
-          onSelect={setActiveMessageIndex}
-          onNavigateSubTab={onNavigateSubTab}
-          onSendCommand={dispatchText}
-        />
-      </div>
-    );
-  }
+  // Perf audit #3 step 8 fix — Row now lives at module scope (see
+  // VirtualMessageRow above this component) instead of being redefined
+  // here on every render. Wiring its data through rowProps below, rather
+  // than closing over messages/setActiveMessageIndex/etc from this
+  // render's scope.
 
   const activeMode = MODES.find((m) => m.id === mode) || MODES[0];
   const ActiveIcon = activeMode.icon;
@@ -1035,13 +1049,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               since it's called out as the piece most likely to need
               rework. Nothing below this comment changes yet. */}
           {/* Perf audit #3 step 5d — the plain .map() is now react-window's
-              List, wrapping the Row function from step 5b. rowHeight is
-              step 5a's getItemSize as-is: v2's rowHeight signature is
-              (index, rowProps) => number, and getItemSize's extra unused
-              second arg is harmless. No width/height props — List fills
-              this wrapper div on its own. onScroll moves here since
-              List's outer div (not the wrapper above) is the actual
-              scrollport now.
+              List, wrapping the Row function from step 5b. rowHeight was
+              step 5a's getItemSize (a hand-rolled, never-populated cache)
+              until the step 8 fix swapped it for dynamicRowHeight, v2's
+              own dynamic-height object — see that fix's comment above for
+              why. No width/height props — List fills this wrapper div on
+              its own. onScroll moves here since List's outer div (not the
+              wrapper above) is the actual scrollport now.
 
               Smoke-test scope only (step 5e): a short chat should render
               virtualized and scroll with mouse/trackpad. At this substep,
@@ -1052,10 +1066,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               cross-panel sync. */}
           <List
             listRef={listRef}
-            rowComponent={Row}
+            rowComponent={VirtualMessageRow}
             rowCount={messages.length}
-            rowHeight={getItemSize}
-            rowProps={{}}
+            rowHeight={dynamicRowHeight}
+            rowProps={{
+              messages,
+              messageRefs,
+              onSelect: setActiveMessageIndex,
+              onNavigateSubTab,
+              onSendCommand: dispatchText,
+            }}
             overscanCount={6}
             onRowsRendered={handleRowsRendered}
           />
