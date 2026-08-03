@@ -201,13 +201,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     return dock.sendTask(taskText, { mode, reviewBeforeDispatch });
   }
 
-  const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const chatContainerRef = useRef(null);
   const messageRefs = useRef([]);
   // Perf audit #3 step 5d — imperative handle for the List below. react-window
   // v2 exposes { element, scrollToRow } here instead of v1's scrollToItem/
-  // resetAfterIndex; wired up for real in step 6 (bottomRef replacement).
+  // resetAfterIndex. Step 6 wires this up for real (see the scrollToRow
+  // effect below, which replaced the old bottomRef.scrollIntoView() call).
   const listRef = useRef(null);
   const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
   // Perf audit #3 step 5a — height-cache + getItemSize/estimatedItemSize
@@ -406,9 +406,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     resizeCleanupRef.current = cleanup;
   }
 
+  // Perf audit #3 step 6 — bottomRef.scrollIntoView() replaced. That div
+  // no longer sits inside a real scroll container (step 5d moved scrolling
+  // onto List's own internal scrollport — see the comment above
+  // chatContainerRef's div), so scrollIntoView had nothing meaningful left
+  // to do. react-window v2's imperative API is scrollToRow({ index, align,
+  // behavior }), not v1's scrollToItem — matches the note already left on
+  // listRef's declaration above.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    if (messages.length === 0) return;
+    listRef.current?.scrollToRow({
+      index: messages.length - 1,
+      align: "end",
+      behavior: "smooth",
+    });
+  }, [messages.length, loading]);
 
   // Auto-grow the textarea as the person types multiple lines, capped so
   // it doesn't swallow the whole viewport on a very long paste.
@@ -1029,10 +1041,11 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               scrollport now.
 
               Smoke-test scope only (step 5e): a short chat should render
-              virtualized and scroll with mouse/trackpad. bottomRef
-              auto-scroll and cross-panel sync are expected to still be
-              broken here — Steps 6 and 7, not a regression from this
-              substep. */}
+              virtualized and scroll with mouse/trackpad. At this substep,
+              bottomRef auto-scroll and cross-panel sync were both expected
+              to be broken — not a regression from this substep, just not
+              fixed yet. Step 6 (listRef.scrollToRow, above) fixed
+              auto-scroll; cross-panel sync is still Step 7's problem. */}
           <List
             listRef={listRef}
             rowComponent={Row}
@@ -1081,7 +1094,6 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               ))}
             </div>
           )}
-          <div ref={bottomRef} />
         </div>
 
         {/* Part 2 §2.5: the review screen renders in place of the
