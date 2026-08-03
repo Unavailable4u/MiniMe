@@ -48,7 +48,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from eo import loop_v4
 from eo.modes import apply_mode
-from eo.router import build_execution_graph, build_execution_graph_from_hires, EXPLAIN_CODE_ROUTE
+from eo.router import build_execution_graph, build_execution_graph_from_hires, EXPLAIN_CODE_ROUTE, sanitize_parallel_groups
 from eo.executor import execute_graph
 from eo.loop_controller import run_with_looping
 from eo.sga import attempt as sga_attempt
@@ -311,6 +311,18 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     to run_with_looping() -> execute_graph() the same way approval_roles
     is, on every macro-loop pass. None/empty means every role sees the
     full conversation-memory transcript, today's exact default.
+
+    parallel_groups (Step 4 of the parallel-execution work): decision may
+    now also carry a Panel-synthesized "parallel_groups" list (see
+    eo/panel.py's _merge_parallel_groups(), eo/inspector.py Step 1 for
+    where it first enters a vote's schema). It never reaches
+    run_with_looping() directly — eo/router.py's sanitize_parallel_groups()
+    (Step 3) is the hard gatekeeper that turns it, plus the flat
+    execution_order, approval_roles, and the actual hires list, into the
+    nested-list execution_order shape build_execution_graph_from_hires()
+    already understands (Part 2 §2.6). This is the only production call
+    site that changes for this work; every other caller of
+    run_with_looping() is untouched.
     """
     from memory.bus import set_app_slug, slugify
     # Scopes every bus key this run touches (module_specs, current_plan,
@@ -324,8 +336,21 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # human-readable instead of a bare opaque UUID.
     set_app_slug(app_slug or f"{slugify(task_text)}_{session_id[:8]}")
 
+    # Step 4: fold any Panel-agreed parallel_groups into execution_order's
+    # existing nested-list shape, through the hard sanitizer — never pass
+    # decision.get("parallel_groups") to anything downstream unsanitized.
+    # hires is the actual staffed roster (not suggested_agents), so a
+    # group proposed around a role that never got an available account
+    # is dropped here rather than reaching run_with_looping() at all.
+    sanitized_execution_order = sanitize_parallel_groups(
+        decision.get("parallel_groups") or [],
+        decision.get("execution_order") or [],
+        approval_roles or set(),
+        hires,
+    )
+
     looped = run_with_looping(
-        hires, decision.get("execution_order"), task_text, session_id=session_id,
+        hires, sanitized_execution_order, task_text, session_id=session_id,
         mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
         path="adaptive",
         approval_roles=approval_roles,

@@ -82,6 +82,7 @@ _UNREACHABLE_VOTE = {
     "reasoning": "member unreachable — all providers in its chain failed",
     "domain": None,
     "execution_order": [],
+    "parallel_groups": [],
 }
 
 
@@ -133,6 +134,92 @@ def _merge_execution_order(votes: list, all_agents_sorted: list) -> list:
     return merged
 
 
+def _merge_parallel_groups(votes: list, all_agents_sorted: list) -> list:
+    """Step 2 of the parallel-execution work (see eo/inspector.py Step 1
+    for where `parallel_groups` first enters a vote's schema, and
+    eo/router.py Step 3 for the hard sanitizer that actually gates
+    dispatch — this function only decides what the PANEL collectively
+    believes is safe to run concurrently; it is not itself the
+    gatekeeper).
+
+    Synthesis rule: same "never trust a lone voice on something
+    safety-relevant" posture as the rest of this module (compare the
+    max-tier and directed_task_type rules in _synthesize() below). A
+    candidate group only survives if at least 2 of the 3 members
+    proposed something compatible with it — an exact match, a superset,
+    or a subset — since two members drawing the boundary slightly
+    differently around the same core parallel set is still agreement on
+    the underlying claim "these can run together," not disagreement.
+    A single member's unconfirmed guess is dropped, exactly like a
+    single member's unconfirmed directed_task_type is dropped below.
+
+    Once a candidate has >=2 supporting votes, the surviving group is
+    the INTERSECTION of the supporting members' own proposals (not the
+    raw candidate) — this keeps one member's overly-broad group from
+    smuggling in a role the other supporting member never actually
+    named alongside it. Groups that end up nested inside another
+    surviving group after this are dropped in favor of the larger one.
+
+    Every group returned here still has to clear eo/router.py's hard
+    sanitizer (hired check, approval_roles exclusion, overlap/dedup,
+    singleton/size-cap) before anything downstream is allowed to act on
+    it — this function only reflects panel consensus, nothing more."""
+    all_agents_set = set(all_agents_sorted)
+
+    # Normalize each vote's own groups: drop anything malformed, any
+    # member not in the union of hired-candidate roles, and collapse to
+    # size>=2 (a "group" of one isn't a parallelism claim at all — that's
+    # eo/router.py's singleton rule, restated here so a lone-role
+    # "group" can't even enter the candidate pool).
+    normalized = []
+    for v in votes:
+        groups, seen = [], set()
+        for g in v.get("parallel_groups", []) or []:
+            if not isinstance(g, list):
+                continue
+            fs = frozenset(r for r in g if isinstance(r, str) and r in all_agents_set)
+            if len(fs) < 2 or fs in seen:
+                continue
+            seen.add(fs)
+            groups.append(fs)
+        normalized.append(groups)
+
+    # Candidate pool: every distinct group any member proposed at all.
+    candidates = set()
+    for groups in normalized:
+        candidates.update(groups)
+
+    survivors = set()
+    for cand in candidates:
+        supporting = [
+            i for i, groups in enumerate(normalized)
+            if any(cand <= g or g <= cand for g in groups)
+        ]
+        if len(supporting) < 2:
+            continue
+        # Tightest compatible proposal per supporting vote (closest to
+        # `cand` by symmetric difference), then intersect across those —
+        # the conservative merge described above.
+        tightest = []
+        for i in supporting:
+            match = min(
+                (g for g in normalized[i] if cand <= g or g <= cand),
+                key=lambda g: len(g.symmetric_difference(cand)),
+            )
+            tightest.append(match)
+        merged = frozenset.intersection(*tightest)
+        if len(merged) >= 2:
+            survivors.add(merged)
+
+    # Drop any survivor strictly contained in another surviving group —
+    # the larger, still-2-of-3-agreed group is strictly more informative.
+    final = [g for g in survivors if not any(g < other for other in survivors)]
+
+    # Deterministic, JSON-stable output: sorted role names, groups
+    # ordered by (size, role names) rather than set-iteration order.
+    return [sorted(g) for g in sorted(final, key=lambda g: (len(g), sorted(g)))]
+
+
 def _synthesize(votes: list, draft: dict) -> dict:
     tiers = [v["tier"] for v in votes]
     max_tier = max(tiers)
@@ -159,6 +246,7 @@ def _synthesize(votes: list, draft: dict) -> dict:
     domain = domains.pop() if len(domains) == 1 else None
     all_agents_sorted = sorted(all_agents)
     execution_order = _merge_execution_order(votes, all_agents_sorted)
+    parallel_groups = _merge_parallel_groups(votes, all_agents_sorted)
 
     reasoning = " | ".join(
         f"member {label}: {v.get('reasoning', '')}"
@@ -184,6 +272,11 @@ def _synthesize(votes: list, draft: dict) -> dict:
         "panel_votes": panel_votes,
         "domain": domain,
         "execution_order": execution_order,
+        # Present on the return dict as of Step 2 of the parallel-execution
+        # work; not yet consumed by any caller. eo/router.py Step 3 is the
+        # actual gatekeeper that decides whether any of this is safe to
+        # act on — nothing downstream should dispatch off this list alone.
+        "parallel_groups": parallel_groups,
     }
 
 

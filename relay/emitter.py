@@ -91,6 +91,14 @@ VALID_EVENT_TYPES = {
     # "[note_candidates] notification emit failed: [relay] Unknown
     # event type 'notification'."
     "notification",
+    # NEW — Step 7 of the parallel-execution work: fired from
+    # eo/executor.py's _run_concurrent_group() whenever a Panel-agreed
+    # parallel group actually dispatches (i.e. it already cleared Step
+    # 3's sanitize_parallel_groups() and Step 5's approval_roles
+    # backstop) — the observability point for seeing this feature fire
+    # on real traffic and evaluating whether the Panel's proposed
+    # groups are actually sensible over time.
+    "parallel_group_dispatched",
 }
 
 _pusher_client = None

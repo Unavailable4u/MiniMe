@@ -67,6 +67,14 @@ MODE_CEILINGS = {
     "expert": None,      # no ceiling
     "beast": None,        # sized as ~2.5x assessed max instead, see eo/modes.py
 }
+
+# Step 3 of the parallel-execution work (see eo/panel.py's
+# _merge_parallel_groups() for how a group makes it this far, and
+# sanitize_parallel_groups() below for where this is enforced). A cap
+# against a degenerate/adversarial "everyone in one group" proposal --
+# unrelated to MODE_CEILINGS above, which bounds total roster size, not
+# how many of those roles can be told to run at once.
+MAX_PARALLEL_GROUP_SIZE = 4
 # ---------------------------------------------------------------------------
 # Tier 2 — directed-task subsets of the SAME 19-agent roster (Part 2.5:
 # "No new models — Tier 2 calls directly into the existing 19-agent
@@ -129,6 +137,141 @@ def build_execution_graph(tier: int, directed_task_type: str = None, run_tests: 
             raise KeyError(f"Unknown directed_task_type '{directed_task_type}'.")
         return list(DIRECTED_TASK_MAP[directed_task_type])
     raise ValueError(f"Unknown tier: {tier!r}")
+
+
+def _flatten_role_names(execution_order: list) -> set:
+    """Every role name appearing anywhere in an execution_order list,
+    whether as a flat entry or inside an existing nested group (e.g. one
+    a saved workflow template already carries in from a PRIOR pass
+    through this same sanitizer, or from Part 2 §2.6's template-authored
+    grouping — this sanitizer has to be safe to run on either shape)."""
+    flat = set()
+    for entry in execution_order or []:
+        if isinstance(entry, list):
+            flat.update(r for r in entry if isinstance(r, str))
+        elif isinstance(entry, str):
+            flat.add(entry)
+    return flat
+
+
+def sanitize_parallel_groups(parallel_groups: list, execution_order: list,
+                              approval_roles: list, hires: list) -> list:
+    """
+    Step 3 of the parallel-execution work — the HARD gatekeeper. Everything
+    upstream of this function is a proposal, not a guarantee:
+      - eo/inspector.py Step 1 lets a single model free-associate
+        `parallel_groups` into its raw JSON output.
+      - eo/panel.py's _merge_parallel_groups() (Step 2) only enforces
+        "at least 2 of 3 panel members agreed" — it has no idea what was
+        actually hired, which roles are approval checkpoints, or what
+        eo/executor.py's own concurrency mechanism can safely support.
+
+    This is the one place that decides a group is safe enough to become a
+    real nested-list entry in execution_order (the shape
+    build_execution_graph_from_hires() above already understands, per its
+    own Part 2 §2.6 docstring — this function's job is producing that
+    shape safely, not inventing a new one). Malformed or adversarial model
+    output must degrade to the existing flat, sequential execution_order,
+    never raise and never silently do something unsafe.
+
+    A candidate group survives only if ALL of:
+      - every member names a role that was ACTUALLY hired (present in
+        `hires`) — a group can't run something that was never staffed.
+      - every member also appears somewhere in `execution_order` itself —
+        if a group references a role the final order doesn't even know
+        about, something upstream disagrees with itself; drop rather than
+        guess where it belongs.
+      - no member is in `approval_roles` — eo/executor.py's
+        _run_concurrent_group() has no support for pausing mid-group for
+        the human-approval checkpoint (its own documented limitation), so
+        a checkpoint role can never be folded into a concurrent group.
+      - it doesn't overlap any role already claimed by an earlier-accepted
+        group — no role runs in two places, and a partially-safe group
+        (some members clean, one member reused) is dropped WHOLESALE
+        rather than partially honored, same as any other failed check.
+      - it has at least 2 members after dedup — a "group" of one isn't a
+        concurrency claim, it's just a normal sequential slot.
+      - it has at most MAX_PARALLEL_GROUP_SIZE members — a cap against a
+        degenerate or adversarial "everyone in one group" proposal.
+
+    Candidates are processed in the order given, so callers that want a
+    deterministic winner among overlapping candidates should pass
+    `parallel_groups` pre-sorted (eo/panel.py's _merge_parallel_groups()
+    already returns a deterministically-ordered list for exactly this
+    reason).
+
+    Returns a NEW list in execution_order's own shape: every surviving
+    group's members collapsed into one nested sublist at the position of
+    that group's earliest-appearing member in `execution_order`; every
+    other entry (whether it was already flat or already a pre-existing
+    nested group untouched by this pass) is left exactly where it was, in
+    its original relative order. Roles present in `hires` but absent from
+    `execution_order` are intentionally NOT appended here —
+    build_execution_graph_from_hires() already does that itself (see its
+    own docstring), so duplicating it here would just be two places that
+    could drift out of sync.
+    """
+    hired_roles = {h["role"] for h in (hires or [])}
+    approval_set = set(approval_roles or [])
+    order_role_set = _flatten_role_names(execution_order)
+
+    accepted, used = [], set()
+    for raw_group in parallel_groups or []:
+        if not isinstance(raw_group, list):
+            continue
+        # Dedup within the candidate itself first — a group can't overlap
+        # itself, and this keeps the size check below honest.
+        role_set, seen = [], set()
+        for r in raw_group:
+            if isinstance(r, str) and r not in seen:
+                seen.add(r)
+                role_set.append(r)
+
+        if len(role_set) < 2 or len(role_set) > MAX_PARALLEL_GROUP_SIZE:
+            continue
+        if any(r not in hired_roles for r in role_set):
+            continue
+        if any(r not in order_role_set for r in role_set):
+            continue
+        if any(r in approval_set for r in role_set):
+            continue
+        if any(r in used for r in role_set):
+            # Overlaps a group already accepted earlier in this pass —
+            # drop this whole candidate rather than trim it down to the
+            # non-overlapping remainder, which would silently turn into a
+            # DIFFERENT group than anything the Panel actually proposed.
+            continue
+
+        accepted.append(role_set)
+        used.update(role_set)
+
+    if not accepted:
+        # Nothing survived — hand back execution_order completely
+        # unmodified rather than an equivalent-but-rebuilt copy, so a
+        # caller doing identity/equality checks in a test sees exactly
+        # what it passed in.
+        return list(execution_order or [])
+
+    role_to_group = {r: tuple(g) for g in accepted for r in g}
+    result, emitted = [], set()
+    for entry in execution_order or []:
+        if isinstance(entry, list):
+            # A pre-existing nested group this pass didn't touch (e.g.
+            # every one of its members failed a check, or it came in
+            # already grouped from a template) — passed through as-is.
+            result.append(entry)
+            continue
+        if entry in emitted:
+            # Already emitted as part of an accepted group below.
+            continue
+        group_key = role_to_group.get(entry)
+        if group_key is None:
+            result.append(entry)
+            continue
+        result.append(list(group_key))
+        emitted.update(group_key)
+
+    return result
 
 
 def build_execution_graph_from_hires(hires: list, execution_order: list = None) -> tuple:
