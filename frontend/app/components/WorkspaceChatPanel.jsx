@@ -789,26 +789,25 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     }
   }
 
-  // Scroll-sync: figure out which message is closest to the top of the
-  // viewport and publish it as activeMessageIndex, so WorkingPanel can
-  // scroll its own matching section into view. Guarded by isSyncingRef
-  // so a programmatic sync-scroll (triggered by WorkingPanel's own
-  // scroll) doesn't bounce right back and fight the other panel.
-  function handleChatScroll() {
+  // Perf audit #3 step 7 — cross-panel scroll sync, rewired for
+  // react-window v2. The old handleChatScroll (DOM-distance loop over
+  // messageRefs.current) is broken under virtualization: react-window
+  // only mounts on-screen rows, so anything scrolled out of view is
+  // `null` in messageRefs — the loop would silently skip most of a long
+  // chat and pick the wrong index (or none).
+  //
+  // v2's ListImperativeAPI has no "row index at scroll offset" query
+  // (just `element` + `scrollToRow`), but it doesn't need one:
+  // `onRowsRendered` already reports the live visible-row range on every
+  // scroll/resize with no DOM re-derivation required.
+  // `visibleRows.startIndex` (topmost row with any pixel on-screen) is a
+  // like-for-like swap for what handleChatScroll was approximating —
+  // in a top-to-bottom stack, "row whose top is closest to the
+  // container's top" and "topmost visible row" agree in effectively all
+  // cases. Same isSyncingRef guard as before, unchanged semantics.
+  function handleRowsRendered(visibleRows) {
     if (isSyncingRef.current) return;
-    let closestIndex = null;
-    let closestDist = Infinity;
-    messageRefs.current.forEach((el, i) => {
-      if (!el) return;
-      const dist = Math.abs(
-        el.getBoundingClientRect().top - (chatContainerRef.current?.getBoundingClientRect().top ?? 0)
-      );
-      if (dist < closestDist) {
-        closestDist = dist;
-        closestIndex = i;
-      }
-    });
-    if (closestIndex != null) setActiveMessageIndex(closestIndex);
+    setActiveMessageIndex(visibleRows.startIndex);
   }
 
   // Perf audit #3 step 5b — row wrapper for VariableSizeList (wired up in
@@ -821,12 +820,14 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // overlap or collapse to zero height.
   //
   // MessageRow's own root div still does the messageRefs.current[i] = el
-  // assignment from step 3 — left as-is here on purpose. It doesn't do
-  // anything useful yet (Step 7 is what makes the cross-panel sync read
-  // from list offsets instead of live refs), and since react-window only
-  // mounts on-screen rows, messageRefs.current will now have holes for
-  // anything scrolled out of view. Not a regression introduced by this
-  // substep — Step 7 is explicitly where that gets fixed for real.
+  // assignment from step 3 — as of step 7, this is fully dead: cross-panel
+  // sync now reads the visible range straight off List's onRowsRendered
+  // callback (see handleRowsRendered above) instead of walking live DOM
+  // refs, so nothing reads messageRefs.current anymore. Left in place
+  // rather than pulled here on purpose — step 9 cleanup is where the
+  // messageRefs ref/prop/assignment (this component, MessageRow.jsx) all
+  // get removed together, once the rest of the virtualization work is
+  // done and there's nothing else about to need it.
   function Row({ index, style }) {
     return (
       <div style={style}>
@@ -961,13 +962,15 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           {/* Perf audit #3 step 5d — this div is now just a sized wrapper;
               `overflow-y-auto`/`space-y-4` came off it because List owns
               its own scrolling and absolutely-positions each row (a CSS
-              gap doesn't apply to that), and `onScroll` moved onto List
-              itself below, since List's outer div is the real scroll
-              container now, not this wrapper. chatContainerRef stays
-              attached here (rather than deleted) because handleChatScroll
-              still reads chatContainerRef.current?.getBoundingClientRect()
-              for the cross-panel sync math — that's Step 7's problem to
-              rework against list offsets instead, not this substep's. */}
+              gap doesn't apply to that), and the scroll-sync callback
+              moved onto List itself below (`onRowsRendered`, wired in
+              step 7), since List's outer div is the real scroll container
+              now, not this wrapper. chatContainerRef stays attached here
+              rather than deleted — nothing in this file reads its
+              getBoundingClientRect() anymore post-step-7, but WorkingPanel
+              still gets `isSyncingRef` from this component and the two
+              panels' layout code elsewhere may still expect the ref to
+              exist; not worth chasing down as part of this substep. */}
           {needsChatFirst ? (
             <p className="text-[var(--neutral-500)] text-sm">
               {needsBrandNewChat
@@ -1045,7 +1048,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               bottomRef auto-scroll and cross-panel sync were both expected
               to be broken — not a regression from this substep, just not
               fixed yet. Step 6 (listRef.scrollToRow, above) fixed
-              auto-scroll; cross-panel sync is still Step 7's problem. */}
+              auto-scroll; step 7 (handleRowsRendered, above) fixed
+              cross-panel sync. */}
           <List
             listRef={listRef}
             rowComponent={Row}
@@ -1053,7 +1057,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             rowHeight={getItemSize}
             rowProps={{}}
             overscanCount={6}
-            onScroll={handleChatScroll}
+            onRowsRendered={handleRowsRendered}
           />
           {/* NOTE: the old `space-y-4` gap doesn't carry over — List rows
               are position:absolute, so a parent `space-y-*`/gap utility is
