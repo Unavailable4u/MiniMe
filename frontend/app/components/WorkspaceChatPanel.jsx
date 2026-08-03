@@ -3,6 +3,7 @@ import { useRef, useEffect, useState } from "react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
+import MessageRow from "./MessageRow"; // Perf audit #3 step 3 — extracted from messages.map() below
 import GenerationNotificationRow from "./notebooks/GenerationNotificationRow";   // NEW — Phase 4 step 4.6
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
@@ -828,6 +829,23 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           </div>
         </div>
 
+        {/* Perf audit #3 (message-list virtualization) — pre-work checklist.
+            Anything that changes how this list renders (this step and the
+            ones after it) must keep all four of these working, since none
+            of them are covered by the audit's own description of the fix:
+              1. Auto-scroll to bottom on new message — currently
+                 bottomRef.current?.scrollIntoView() below.
+              2. Cross-panel scroll sync with WorkingPanel — currently
+                 reads live DOM nodes out of messageRefs.current[i].
+              3. Message heights are NOT uniform — markdown, code blocks,
+                 and Mermaid diagrams (which render async and change
+                 height after mount) mean a fixed-row-height list won't
+                 work; whatever replaces this needs a variable-size
+                 strategy with a way to invalidate a cached height when a
+                 diagram finishes rendering late.
+              4. Tabs stay mounted (display:none) rather than unmounting
+                 (AppShell.jsx) — scroll position must survive a tab
+                 switch, not just a re-render. */}
         <div
           ref={chatContainerRef}
           onScroll={handleChatScroll}
@@ -846,13 +864,15 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             </p>
           )}
           {messages.map((m, i) => (
-            <div
+            <MessageRow
               key={i}
-              ref={(el) => (messageRefs.current[i] = el)}
-              onClick={() => setActiveMessageIndex(i)}
-            >
-              <MessageBubble message={m} onNavigateSubTab={onNavigateSubTab} onSendCommand={dispatchText} />
-            </div>
+              message={m}
+              index={i}
+              messageRefs={messageRefs}
+              onSelect={setActiveMessageIndex}
+              onNavigateSubTab={onNavigateSubTab}
+              onSendCommand={dispatchText}
+            />
           ))}
           {loading && (
             <div className="text-[var(--neutral-500)] text-sm animate-pulse">Working…</div>
