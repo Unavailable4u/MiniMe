@@ -863,6 +863,57 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               the appropriate tier.
             </p>
           )}
+          {/* Perf audit #3, step 4 (design-only — no VariableSizeList yet,
+              that's step 5): row-height strategy for when MessageRow below
+              moves out of this plain .map() and into react-window.
+
+              Problem: messages aren't fixed-height (markdown, code blocks,
+              Mermaid diagrams — see step 2's checklist above), so this has
+              to be VariableSizeList, which needs a height *estimate* per
+              row up front and a way to correct that estimate after the
+              real content mounts.
+
+              Planned shape:
+                - heightCache = useRef({}) keyed by a stable message id
+                  (index is NOT stable enough here — react-window indices
+                  shift if messages are ever pruned/reordered, so this
+                  should be whatever stable id MessageRow/message objects
+                  already carry, falling back to index only if nothing
+                  else exists).
+                - MessageRow measures its own rendered height via
+                  ResizeObserver after mount (and on every subsequent
+                  resize — this is what catches a Mermaid diagram or
+                  syntax-highlighted code block finishing its async render
+                  and growing taller than the initial estimate).
+                - On a measured height that differs from what's cached,
+                  update heightCache.current[id] and call
+                  listRef.current.resetAfterIndex(i) so react-window
+                  re-lays-out from that row down instead of leaving stale
+                  offsets for every row below it.
+                - VariableSizeList's itemSize=(i) => heightCache.current[id
+                  for row i] ?? someReasonableDefaultEstimate.
+
+              Open questions to settle before step 5 writes any of this:
+                - Where does listRef live — created here and passed down,
+                  or does react-window's own ref suffice without a second
+                  wrapper?
+                - Does the ResizeObserver belong inside MessageRow itself
+                  (one observer per row) or should this component own a
+                  single observer and .observe() each row's node — the
+                  former is simpler per-row but is one observer per
+                  on-screen row at all times; the latter is more setup
+                  but only one observer total.
+                - Default/initial estimate: a flat guess (e.g. one line of
+                  text) will undercount code/Mermaid messages on first
+                  paint before ResizeObserver's first callback fires —
+                  worth a slightly taller default for messages known up
+                  front to contain a code block or diagram, if that's
+                  cheap to detect from the message content.
+
+              This comment is the pinned-down plan per the audit's own
+              guidance to design the height strategy before touching code,
+              since it's called out as the piece most likely to need
+              rework. Nothing below this comment changes yet. */}
           {messages.map((m, i) => (
             <MessageRow
               key={i}
