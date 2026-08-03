@@ -25,7 +25,7 @@ import json
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from memory.bus import read, write, read_many, KEYS
 from utils.retry import call_with_retry
 from utils.llm_client import generate_text
 
@@ -82,10 +82,18 @@ def _strip_fences(text: str) -> str:
 
 
 def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
-    idea = read(KEYS["original_idea"], default="")
-    feature_status = read(KEYS["feature_status"], default={})
-    report = read(KEYS["latest_report"], default={})
-    file_map = read(KEYS["file_map"], default={})
+    # Batched into a single MGET instead of 4 sequential round trips --
+    # these four keys are unrelated and none is used until after all of
+    # them are read anyway.
+    _vals = read_many(
+        [KEYS["original_idea"], KEYS["feature_status"],
+         KEYS["latest_report"], KEYS["file_map"]],
+        default=None,
+    )
+    idea = _vals[KEYS["original_idea"]] or ""
+    feature_status = _vals[KEYS["feature_status"]] or {}
+    report = _vals[KEYS["latest_report"]] or {}
+    file_map = _vals[KEYS["file_map"]] or {}
     # Migration Part B (session isolation fix): was read(KEYS["app_slug"], ...),
     # which -- "app_slug" being exempt from memory.bus's namespacing --
     # always reads the raw, UNSCOPED global Redis record, not this run's

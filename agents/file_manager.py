@@ -15,7 +15,7 @@ import sys
 import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from memory.bus import read, write, read_many, KEYS
 from eo.project_registry import resolve_project_root
 from eo.errors import MissingDependencyError   # NEW — bug fix
 
@@ -156,10 +156,17 @@ def run_file_manager(project_unique_name: str = None) -> dict:
     # docstring. Still prefer fixed_code (Fixer Pool's cleaned-up output)
     # over submitted_code (Code Writers' raw output) when both exist, same
     # preference order structure_architect.py now uses.
-    fixed_code = read(KEYS["fixed_code"], default=None)
-    submitted_code = read(KEYS["submitted_code"], default=None)
+    # Batched into a single MGET instead of 3 sequential round trips --
+    # these three keys are unrelated and none is used until after all of
+    # them are read anyway.
+    _vals = read_many(
+        [KEYS["fixed_code"], KEYS["submitted_code"], FILE_PLAN_KEY],
+        default=None,
+    )
+    fixed_code = _vals[KEYS["fixed_code"]]
+    submitted_code = _vals[KEYS["submitted_code"]]
     code_source = fixed_code or submitted_code or {}
-    plan = read(FILE_PLAN_KEY)
+    plan = _vals[FILE_PLAN_KEY]
     if not plan:
         # Bug fix: was `raise ValueError(...)` -- this is exactly the
         # "another agent needs to run first" case eo/errors.py exists for.
@@ -311,19 +318,32 @@ def write_back_existing_app(project_unique_name: str = None) -> dict:
     runs once for the whole batch below, since this function always
     overwrites files by design rather than exposing per-op choices).
     """
-    app_slug = read(APP_SLUG_KEY, default=None)
+    # Batched into a single MGET instead of 4 sequential round trips --
+    # these four keys are unrelated and none is used until after all of
+    # them are read anyway. APP_SLUG_KEY == "app_slug" normally gets a
+    # side-effect ctx-var sync from read() (see memory/bus.py); read_many()
+    # doesn't do that per-key special-casing, so we replicate it below via
+    # set_app_slug() once we have the value, keeping later same-context
+    # reads of app_slug just as warm as before.
+    _vals = read_many(
+        [APP_SLUG_KEY, FILE_MAP_KEY, KEYS["fixed_code"], KEYS["submitted_code"]],
+        default=None,
+    )
+    app_slug = _vals[APP_SLUG_KEY]
     if not app_slug:
         raise ValueError("No app_slug in memory -- write_back_existing_app() must run "
                           "after eo/code_loader.py has loaded an app.")
+    from memory.bus import set_app_slug
+    set_app_slug(app_slug)
 
     if project_unique_name:
         app_dir = _confine_to_root(resolve_project_root(project_unique_name), project_unique_name)
     else:
         app_dir = _confine_to_root(os.path.join(APPS_ROOT, app_slug), project_unique_name)
 
-    file_map = read(FILE_MAP_KEY, default={})
-    fixed_code = read(KEYS["fixed_code"], default=None)
-    submitted_code = read(KEYS["submitted_code"], default=None)
+    file_map = _vals[FILE_MAP_KEY] or {}
+    fixed_code = _vals[KEYS["fixed_code"]]
+    submitted_code = _vals[KEYS["submitted_code"]]
     code_source = fixed_code if fixed_code else (submitted_code or {})
 
     if project_unique_name and code_source and not _confirm_destructive(
@@ -403,10 +423,19 @@ def write_back_test_code(project_unique_name: str = None) -> dict:
     they still land inside a user's own project, so the same confirmation
     gate applies per §6.3's "touching an external project" framing.
     """
-    app_slug = read(APP_SLUG_KEY, default=None)
+    # Batched into a single MGET instead of 4 sequential round trips --
+    # same reasoning and same ctx-var-sync replication as
+    # write_back_existing_app() above.
+    _vals = read_many(
+        [APP_SLUG_KEY, KEYS["fixed_code"], KEYS["submitted_code"], KEYS["test_code"]],
+        default=None,
+    )
+    app_slug = _vals[APP_SLUG_KEY]
     if not app_slug:
         raise ValueError("No app_slug in memory -- write_back_test_code() must run "
                           "after eo/code_loader.py has loaded an app.")
+    from memory.bus import set_app_slug
+    set_app_slug(app_slug)
 
     if project_unique_name:
         app_dir = _confine_to_root(resolve_project_root(project_unique_name), project_unique_name)
@@ -414,10 +443,10 @@ def write_back_test_code(project_unique_name: str = None) -> dict:
         app_dir = _confine_to_root(os.path.join(APPS_ROOT, app_slug), project_unique_name)
     os.makedirs(os.path.join(app_dir, "tests"), exist_ok=True)
 
-    fixed_code = read(KEYS["fixed_code"], default=None)
-    submitted_code = read(KEYS["submitted_code"], default=None)
+    fixed_code = _vals[KEYS["fixed_code"]]
+    submitted_code = _vals[KEYS["submitted_code"]]
     code_source = fixed_code if fixed_code else (submitted_code or {})
-    test_code_map = read(KEYS["test_code"], default={})
+    test_code_map = _vals[KEYS["test_code"]] or {}
 
     if project_unique_name and test_code_map and not _confirm_destructive(
         f"add up to {len(test_code_map)} test file(s)", project_unique_name

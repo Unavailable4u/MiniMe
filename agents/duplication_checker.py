@@ -35,7 +35,7 @@ import json
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, vector_index
+from memory.bus import read, write, read_many, KEYS, vector_index
 from utils.llm_client import log_usage, embed_text_with_fallback
 
 load_dotenv()
@@ -78,8 +78,14 @@ def _app_slug() -> str:
 
 
 def run(session_id: str = None, tier=None, domain: str = None) -> dict:
-    submitted_code = read(KEYS["submitted_code"], default={})
-    cycle_num = read(KEYS["cycle_count"], default=1)
+    # Batched into a single MGET instead of 2 sequential round trips --
+    # these two keys are unrelated and neither is used until after both
+    # are read anyway.
+    _vals = read_many([KEYS["submitted_code"], KEYS["cycle_count"]], default=None)
+    submitted_code = _vals[KEYS["submitted_code"]] or {}
+    cycle_num = _vals[KEYS["cycle_count"]]
+    if cycle_num is None:
+        cycle_num = 1
     slug = _app_slug()
 
     flagged = []

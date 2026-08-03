@@ -159,25 +159,30 @@ export function SessionProvider({ children }) {
   // in the Chat tab.
   const [templateRuns, setTemplateRuns] = useState({});
 
-  // --- On mount, load the chat list plus the two additive fetches that
-  // used to tag along here. CHANGED — Item 2 remaining piece, live-run-
-  // state slice, step 1: this effect used to also decide which chat to
-  // open (restore the last active one from localStorage, fall back to
-  // the most recent, or create the first one ever) by calling THIS
-  // component's own switchChat()/createNewChat(), writing into the
-  // sessionId/messages state above. That decision now lives in
-  // AppShell.jsx's AppShellBody, going through useWorkspaceDockActions()'s
-  // switchChat()/createNewChat() instead — see that effect's own comment
-  // for why. refreshChatList() stays here because plenty of functions
-  // further down this file still call it directly (unaffected by this
-  // change); fetchBatches()/fetchWorkspaces() stay here too since nothing
-  // about where they run depends on which chat ends up active.
-  useEffect(() => {
-    refreshChatList();
-    fetchBatches();
-    fetchWorkspaces();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // --- On-mount fetch of the chat list + the two additive fetches used
+  // to live in a `useEffect(() => { refreshChatList(); fetchBatches();
+  // fetchWorkspaces(); }, [])` right here. REMOVED as part of perf audit
+  // §2.3 step B: SessionProvider always renders WorkspaceDockBridge ->
+  // WorkspaceDockProvider -> AppShellBody as its only child (confirmed —
+  // SessionProvider has exactly one call site, AppShell.jsx, and nothing
+  // conditionally skips this subtree), and AppShellBody's OWN mount
+  // effect (see that file, the one that resolves which chat to
+  // restore/create) already calls this exact same trio — refreshChatList()
+  // first, then fetchBatches()/fetchWorkspaces() fired without awaiting
+  // (non-blocking, same "additive UI, don't block chat restore on it"
+  // reasoning noted there). Both effects have `[]` deps, so both fired
+  // on every single page load: GET /api/chats, and whatever
+  // fetchBatches()/fetchWorkspaces() hit, were each going out TWICE for
+  // no reason — one set from this effect, a second identical set from
+  // AppShellBody's. That's not a sequencing problem (the two fire-and-
+  // forget calls were already non-blocking, correctly, before this fix)
+  // it's pure duplicate network traffic left behind by the "Item 2
+  // remaining piece, live-run-state slice, step 1" move that relocated
+  // the chat-restore decision to AppShellBody but didn't remove the now-
+  // redundant fetch trio here. refreshChatList/fetchBatches/fetchWorkspaces
+  // themselves are UNCHANGED and stay defined here — plenty of other
+  // functions in this file still call refreshChatList() directly, same
+  // as before; only this specific redundant mount-time call site is gone.
 
   // handleUsageEvent (Part 17 usage-tracking, plus its 3e "usage-event
   // ownership" extraction) MOVED — now defined in UsageStatsContext.jsx

@@ -3,7 +3,7 @@ import sys
 import json
 from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from memory.bus import read, write, read_many, KEYS
 from utils.retry import call_with_retry
 from utils.llm_client import generate_text
 load_dotenv()
@@ -38,9 +38,16 @@ RULES for choosing target_feature:
 - Do not invent features outside the original idea's scope.
 Respond with ONLY valid JSON, no markdown, no explanation."""
 def run(session_id: str = None, domain: str = None):
-    idea = read(KEYS["original_idea"])
-    prior_report = read(KEYS["latest_report"], default=None)
-    feature_status = read(KEYS["feature_status"], default={})
+    # Batched into a single MGET instead of 3 sequential round trips --
+    # these three keys are unrelated and none is used until after all of
+    # them are read anyway.
+    _vals = read_many(
+        [KEYS["original_idea"], KEYS["latest_report"], KEYS["feature_status"]],
+        default=None,
+    )
+    idea = _vals[KEYS["original_idea"]]
+    prior_report = _vals[KEYS["latest_report"]]
+    feature_status = _vals[KEYS["feature_status"]] or {}
     user_content = f"Original idea: {idea}"
     user_content += f"\n\nCurrent feature_status: {json.dumps(feature_status)}"
     if prior_report:
