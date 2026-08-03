@@ -269,6 +269,18 @@ Also decide:
 - "domain": one of {domains}, or null if none genuinely fits.
 - "execution_order": the order these chosen roles (suggested_agents)
   should run in, as a list using ONLY the roles you already chose.
+- "parallel_groups": any 2+ roles in execution_order that can genuinely
+  run AT THE SAME TIME because neither reads the other's output — each
+  only needs whatever ran BEFORE both of them, not each other. Format as
+  a list of lists, e.g. [["persona_customer", "persona_skeptic"]] — each
+  inner list is one group of role names, all drawn from execution_order.
+  Default to an empty list [] whenever you're not genuinely confident two
+  roles are independent: a role wrongly left sequential only costs a
+  little time; a role wrongly marked independent that actually needed
+  another group member's output produces a broken result. Never propose
+  a group out of roles that are sequentially adjacent for a REASON (one
+  clearly builds on the specific content of another) — only genuinely
+  parallel, unrelated work belongs in the same group.
 
 If a reference structure is given below for this domain, treat it as a
 STRONG SUGGESTION for ordering and for noticing roles you may have
@@ -281,8 +293,8 @@ structure doesn't match — your own judgment always wins.
 Reference structure for this domain (if any):
 {reference_structure}
 
-Add "domain" and "execution_order" to your JSON response alongside the
-fields already described above."""
+Add "domain", "execution_order", and "parallel_groups" to your JSON
+response alongside the fields already described above."""
 
 
 def build_reference_structure_addition(task_text: str) -> str:
