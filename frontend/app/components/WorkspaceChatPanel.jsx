@@ -2,14 +2,13 @@
 import { useRef, useEffect, useState } from "react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
-import MessageBubble from "./MessageBubble";
 import MessageRow from "./MessageRow"; // Perf audit #3 step 3 — extracted from messages.map() below
 import { List, useDynamicRowHeight } from "react-window"; // Perf audit #3 step 5d — react-window is v2 (see package.json), a
 // ground-up rewrite: no VariableSizeList/FixedSizeList split, no itemSize/
 // estimatedItemSize/outerRef/resetAfterIndex/scrollToItem. One `List`
 // component instead, sized automatically off its own parent via an
-// internal ResizeObserver (which is why step 5c's manual containerSize
-// tracking below is now dead — nothing reads it after this substep).
+// internal ResizeObserver — step 5c's manual containerSize tracking was
+// dead from the moment this landed and has been removed (step 9 cleanup).
 import GenerationNotificationRow from "./notebooks/GenerationNotificationRow";   // NEW — Phase 4 step 4.6
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
@@ -146,13 +145,22 @@ const ATTACH_DONE_AUTOCLEAR_MS = 3000;
 // `rowHeight` is a DynamicRowHeight object (same source file, the effect
 // right after the row-rendering loop) — that was redundant, and has been
 // removed from this component's Row-equivalent.
-function VirtualMessageRow({ index, style, messages, messageRefs, onSelect, onNavigateSubTab, onSendCommand }) {
+//
+// Perf audit #3 step 9 cleanup: no longer threads `messageRefs` through.
+// That was the old DOM-node-per-row wiring cross-panel scroll sync used
+// to read (`messageRefs.current[i]`) before virtualization — step 7
+// replaced it with `handleRowsRendered`/`onRowsRendered`, which reports
+// the live visible-row range directly instead of scanning DOM refs. Once
+// step 7 landed, nothing read `messageRefs.current` for its original
+// purpose anymore, so it — and the ref-setting div wrapper in
+// MessageRow.jsx — were dead weight kept alive only by being passed
+// through. Removed here, and MessageRow's ref prop dropped to match.
+function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab, onSendCommand }) {
   return (
     <div style={style}>
       <MessageRow
         message={messages[index]}
         index={index}
-        messageRefs={messageRefs}
         onSelect={onSelect}
         onNavigateSubTab={onNavigateSubTab}
         onSendCommand={onSendCommand}
@@ -244,7 +252,6 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
 
   const textareaRef = useRef(null);
   const chatContainerRef = useRef(null);
-  const messageRefs = useRef([]);
   // Perf audit #3 step 5d — imperative handle for the List below. react-window
   // v2 exposes { element, scrollToRow } here instead of v1's scrollToItem/
   // resetAfterIndex. Step 6 wires this up for real (see the scrollToRow
@@ -282,37 +289,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     key: dock.state.sessionId,
   });
 
-  // Perf audit #3 step 5c — sizing the list itself. VariableSizeList needs
-  // explicit height/width props; unlike the current overflow-y-auto div,
-  // it won't auto-fill a flex parent on its own. Smallest viable fix:
-  // watch that same div (chatContainerRef) with a ResizeObserver and feed
-  // its content box into state, so step 5d can pass containerSize straight
-  // through as height/width instead of pulling in
-  // react-virtualized-auto-sizer for this. Not wired into any JSX yet —
-  // the messages.map() below still renders exactly as before; this effect
-  // just runs alongside it and tracks a number nothing reads yet.
-  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
-
-  useEffect(() => {
-    // chatContainerRef's div only renders in the `usingDock && !collapsed`
-    // branch below (see the early returns above it) — on any render that
-    // takes an earlier branch, el is null and there's nothing to observe
-    // yet. Depending on the same two flags that gate that branch means
-    // this re-runs and actually attaches once that div shows up, instead
-    // of only checking once on first mount and giving up.
-    const el = chatContainerRef.current;
-    if (!el) return;
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const { width, height } = entry.contentRect;
-      setContainerSize((prev) =>
-        prev.width === width && prev.height === height ? prev : { width, height }
-      );
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [usingDock, collapsed]);
+  // Perf audit #3 step 9 cleanup: step 5c's containerSize state + the
+  // ResizeObserver effect that fed it are gone. They were written when
+  // VariableSizeList's explicit height/width props were still the plan;
+  // once step 5d landed on react-window v2's `List` (which sizes itself
+  // off its own parent via its own internal ResizeObserver — see the
+  // import comment above), nothing in this file ever read containerSize
+  // again. Confirmed via search before removing.
 
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -1016,23 +999,23 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           </div>
         </div>
 
-        {/* Perf audit #3 (message-list virtualization) — pre-work checklist.
-            Anything that changes how this list renders (this step and the
-            ones after it) must keep all four of these working, since none
-            of them are covered by the audit's own description of the fix:
-              1. Auto-scroll to bottom on new message — currently
-                 bottomRef.current?.scrollIntoView() below.
-              2. Cross-panel scroll sync with WorkingPanel — currently
-                 reads live DOM nodes out of messageRefs.current[i].
+        {/* Perf audit #3 (message-list virtualization) — original pre-work
+            checklist, kept as a record of what had to keep working across
+            the whole migration. All four landed:
+              1. Auto-scroll to bottom on new message — now
+                 listRef.current?.scrollToRow(...) (step 6).
+              2. Cross-panel scroll sync with WorkingPanel — now driven by
+                 onRowsRendered/handleRowsRendered (step 7); the old
+                 messageRefs DOM-ref loop this replaced has been removed
+                 (step 9).
               3. Message heights are NOT uniform — markdown, code blocks,
                  and Mermaid diagrams (which render async and change
-                 height after mount) mean a fixed-row-height list won't
-                 work; whatever replaces this needs a variable-size
-                 strategy with a way to invalidate a cached height when a
-                 diagram finishes rendering late.
+                 height after mount) — handled by react-window v2's
+                 useDynamicRowHeight (step 8).
               4. Tabs stay mounted (display:none) rather than unmounting
-                 (AppShell.jsx) — scroll position must survive a tab
-                 switch, not just a re-render. */}
+                 (AppShell.jsx) — scroll position survives a tab switch
+                 since it lives in List's own scrollport, not this
+                 component's state. */}
         <div
           ref={chatContainerRef}
           className="flex-1 min-h-0 flex flex-col px-4 py-6"
@@ -1147,7 +1130,6 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             rowHeight={dynamicRowHeight}
             rowProps={{
               messages,
-              messageRefs,
               onSelect: setActiveMessageIndex,
               onNavigateSubTab,
               onSendCommand: dispatchText,

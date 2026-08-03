@@ -116,9 +116,10 @@ system maintains a growing library of these and will write a proper brief \
 for any role it hasn't seen before. Do not limit yourself to roles you've \
 used in past examples.
 
-You will also be given, below the task, an explanation of two more \
-fields to decide: "domain" and "execution_order" (Migration Part 10). \
-Follow those instructions exactly as given there.
+You will also be given, below the task, an explanation of three more \
+fields to decide: "domain", "execution_order", and "parallel_groups" \
+(Migration Part 10; parallel_groups added by the parallel-execution \
+rollout). Follow those instructions exactly as given there.
 
 Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly \
 this shape:
@@ -129,7 +130,8 @@ this shape:
   "suggested_agents": ["implementer", "verifier"],
   "reasoning": "one short sentence",
   "domain": "coding",
-  "execution_order": ["implementer", "verifier"]
+  "execution_order": ["implementer", "verifier"],
+  "parallel_groups": []
 }
 "path" must be exactly one of "instant", "direct", "fixed", "adaptive" — \
 never a number, never "sga"/"cache" (see note above). "confidence" must \
@@ -138,7 +140,10 @@ exactly "fixed", in which case it must be one of the seven strings above \
 — never invent a new one. "domain" must be null, or one of the domain \
 names given below the task. "execution_order" must be a list containing \
 only role names that also appear in "suggested_agents" — never a role \
-you didn't already choose."""
+you didn't already choose. "parallel_groups" must be a list of lists, \
+where every role named in any group also appears in "execution_order" — \
+leave it as [] (the safe default) whenever you aren't genuinely \
+confident two or more roles are independent of each other."""
 def _strip_fences(text: str) -> str:
     text = text.strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -196,6 +201,41 @@ def _validate(parsed: dict) -> dict:
         # classification.
         execution_order = [r for r in execution_order if r in parsed["suggested_agents"]]
 
+    # Parallel-execution rollout, step 1: "parallel_groups" gets the same
+    # loose validate-and-default treatment as domain/execution_order just
+    # above -- a malformed or overreaching value is dropped down to a
+    # safe empty list rather than failing the whole classification.
+    #
+    # This function's job stops at "is this shaped like a list of
+    # role-name groups drawn from execution_order" -- it does NOT check
+    # approval_roles, real hire status, group-size limits, or overlaps
+    # between groups. Those need approval_roles and the actual hires
+    # list, neither of which exists yet at classification time -- that's
+    # step 3's sanitizer, which runs later, right before a group is
+    # allowed to become a real concurrent-execution slot. Nothing reads
+    # parallel_groups downstream of this module yet; carrying a
+    # conservative, well-shaped value forward now is what makes that
+    # later step possible without also having to defend against
+    # completely malformed input at the same time.
+    raw_groups = parsed.get("parallel_groups")
+    parallel_groups = []
+    if isinstance(raw_groups, list):
+        order_set = set(execution_order)
+        for group in raw_groups:
+            if not isinstance(group, list):
+                continue
+            # Dedupe while preserving the model's own within-group
+            # order; only keep roles that also made it into the final
+            # (already-sanitized) execution_order above.
+            deduped = []
+            for role in group:
+                if isinstance(role, str) and role in order_set and role not in deduped:
+                    deduped.append(role)
+            # A "group" of fewer than 2 roles has nothing to parallelize
+            # against -- drop it rather than carry noise forward.
+            if len(deduped) >= 2:
+                parallel_groups.append(deduped)
+
     return {
         "path": path,
         "directed_task_type": directed,
@@ -204,6 +244,7 @@ def _validate(parsed: dict) -> dict:
         "reasoning": parsed.get("reasoning", ""),
         "domain": domain,
         "execution_order": execution_order,
+        "parallel_groups": parallel_groups,
     }
 def classify(task_text: str, context: str = None, session_id: str = None) -> dict:
     """
