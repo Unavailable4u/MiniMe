@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
@@ -200,6 +200,29 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const chatContainerRef = useRef(null);
   const messageRefs = useRef([]);
   const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
+  // Perf audit #3 step 5a — height-cache + getItemSize/estimatedItemSize
+  // helpers for the upcoming VariableSizeList (step 5d wires these into
+  // the actual list; nothing below reads these yet, and nothing renders
+  // any differently after this substep). Keyed by a stable message id
+  // where one exists, falling back to the row index per the step 4
+  // design comment above — messages from chat_store.py's JSONB blob
+  // don't currently carry an id field (see audit item 4.1), so the
+  // fallback is the common case today, not an edge case.
+  const heightCache = useRef({});
+  const ESTIMATED_ROW_HEIGHT = 88; // rough single-paragraph-message guess; re-tune after step 5e's smoke test on a real short chat
+
+  const getMessageKey = useCallback((message, index) => {
+    return message?.id ?? message?.message_id ?? index;
+  }, []);
+
+  const getItemSize = useCallback(
+    (index) => {
+      const key = getMessageKey(messages[index], index);
+      return heightCache.current[key] ?? ESTIMATED_ROW_HEIGHT;
+    },
+    [messages, getMessageKey]
+  );
+
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
@@ -732,6 +755,37 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
       }
     });
     if (closestIndex != null) setActiveMessageIndex(closestIndex);
+  }
+
+  // Perf audit #3 step 5b — row wrapper for VariableSizeList (wired up in
+  // step 5d; until then this function exists but nothing calls it yet).
+  // react-window invokes its `children` prop as a component called with
+  // { index, style } per visible row, where `style` carries the absolute
+  // position/height it computed for that row from getItemSize (step 5a).
+  // That style MUST land on the outermost element Row returns — react-window
+  // owns layout once this is inside the list, so skipping it means rows
+  // overlap or collapse to zero height.
+  //
+  // MessageRow's own root div still does the messageRefs.current[i] = el
+  // assignment from step 3 — left as-is here on purpose. It doesn't do
+  // anything useful yet (Step 7 is what makes the cross-panel sync read
+  // from list offsets instead of live refs), and since react-window only
+  // mounts on-screen rows, messageRefs.current will now have holes for
+  // anything scrolled out of view. Not a regression introduced by this
+  // substep — Step 7 is explicitly where that gets fixed for real.
+  function Row({ index, style }) {
+    return (
+      <div style={style}>
+        <MessageRow
+          message={messages[index]}
+          index={index}
+          messageRefs={messageRefs}
+          onSelect={setActiveMessageIndex}
+          onNavigateSubTab={onNavigateSubTab}
+          onSendCommand={dispatchText}
+        />
+      </div>
+    );
   }
 
   const activeMode = MODES.find((m) => m.id === mode) || MODES[0];
