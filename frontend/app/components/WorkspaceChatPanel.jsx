@@ -4,6 +4,12 @@ import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";
 import MessageBubble from "./MessageBubble";
 import MessageRow from "./MessageRow"; // Perf audit #3 step 3 — extracted from messages.map() below
+import { List } from "react-window"; // Perf audit #3 step 5d — react-window is v2 (see package.json), a
+// ground-up rewrite: no VariableSizeList/FixedSizeList split, no itemSize/
+// estimatedItemSize/outerRef/resetAfterIndex/scrollToItem. One `List`
+// component instead, sized automatically off its own parent via an
+// internal ResizeObserver (which is why step 5c's manual containerSize
+// tracking below is now dead — nothing reads it after this substep).
 import GenerationNotificationRow from "./notebooks/GenerationNotificationRow";   // NEW — Phase 4 step 4.6
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
@@ -199,6 +205,10 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const textareaRef = useRef(null);
   const chatContainerRef = useRef(null);
   const messageRefs = useRef([]);
+  // Perf audit #3 step 5d — imperative handle for the List below. react-window
+  // v2 exposes { element, scrollToRow } here instead of v1's scrollToItem/
+  // resetAfterIndex; wired up for real in step 6 (bottomRef replacement).
+  const listRef = useRef(null);
   const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
   // Perf audit #3 step 5a — height-cache + getItemSize/estimatedItemSize
   // helpers for the upcoming VariableSizeList (step 5d wires these into
@@ -934,9 +944,18 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
                  switch, not just a re-render. */}
         <div
           ref={chatContainerRef}
-          onScroll={handleChatScroll}
-          className="flex-1 overflow-y-auto px-4 py-6 space-y-4"
+          className="flex-1 min-h-0 flex flex-col px-4 py-6"
         >
+          {/* Perf audit #3 step 5d — this div is now just a sized wrapper;
+              `overflow-y-auto`/`space-y-4` came off it because List owns
+              its own scrolling and absolutely-positions each row (a CSS
+              gap doesn't apply to that), and `onScroll` moved onto List
+              itself below, since List's outer div is the real scroll
+              container now, not this wrapper. chatContainerRef stays
+              attached here (rather than deleted) because handleChatScroll
+              still reads chatContainerRef.current?.getBoundingClientRect()
+              for the cross-panel sync math — that's Step 7's problem to
+              rework against list offsets instead, not this substep's. */}
           {needsChatFirst ? (
             <p className="text-[var(--neutral-500)] text-sm">
               {needsBrandNewChat
@@ -1000,17 +1019,37 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               guidance to design the height strategy before touching code,
               since it's called out as the piece most likely to need
               rework. Nothing below this comment changes yet. */}
-          {messages.map((m, i) => (
-            <MessageRow
-              key={i}
-              message={m}
-              index={i}
-              messageRefs={messageRefs}
-              onSelect={setActiveMessageIndex}
-              onNavigateSubTab={onNavigateSubTab}
-              onSendCommand={dispatchText}
-            />
-          ))}
+          {/* Perf audit #3 step 5d — the plain .map() is now react-window's
+              List, wrapping the Row function from step 5b. rowHeight is
+              step 5a's getItemSize as-is: v2's rowHeight signature is
+              (index, rowProps) => number, and getItemSize's extra unused
+              second arg is harmless. No width/height props — List fills
+              this wrapper div on its own. onScroll moves here since
+              List's outer div (not the wrapper above) is the actual
+              scrollport now.
+
+              Smoke-test scope only (step 5e): a short chat should render
+              virtualized and scroll with mouse/trackpad. bottomRef
+              auto-scroll and cross-panel sync are expected to still be
+              broken here — Steps 6 and 7, not a regression from this
+              substep. */}
+          <List
+            listRef={listRef}
+            rowComponent={Row}
+            rowCount={messages.length}
+            rowHeight={getItemSize}
+            rowProps={{}}
+            overscanCount={6}
+            onScroll={handleChatScroll}
+          />
+          {/* NOTE: the old `space-y-4` gap doesn't carry over — List rows
+              are position:absolute, so a parent `space-y-*`/gap utility is
+              a no-op on them. Gap has to move into Row's own wrapper div
+              (e.g. paddingBottom) in step 5b's Row, which also means
+              bumping ESTIMATED_ROW_HEIGHT and any measured heights to
+              include it. Left as a known gap for 5e's smoke test rather
+              than folded in here, since it touches an already-committed
+              substep. */}
           {loading && (
             <div className="text-[var(--neutral-500)] text-sm animate-pulse">Working…</div>
           )}
