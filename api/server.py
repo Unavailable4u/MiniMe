@@ -621,10 +621,22 @@ def create_chat(req: CreateChatRequest, owner_id: str = Depends(require_auth)):
 
 
 @app.get("/api/chats/{chat_id}")
-def get_chat(chat_id: str, owner_id: str = Depends(require_auth)):
+def get_chat(
+    chat_id: str,
+    owner_id: str = Depends(require_auth),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    before_seq: Optional[int] = Query(default=None, ge=0),
+):
     real_owner_id = _resolve_chat_or_404(chat_id, owner_id)
     try:
-        chat = chat_store.get_chat(chat_id, real_owner_id)
+        # Perf audit item #3: limit/before_seq pass straight through to
+        # chat_store.get_chat() (already supported it — see that
+        # function's docstring — this is the "wire it into a route"
+        # step). Both default to None, so a plain GET with no query
+        # params is byte-for-byte the same unpaginated call every
+        # existing caller (including this route, before this change)
+        # already relies on.
+        chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit, before_seq=before_seq)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown chat_id")
 

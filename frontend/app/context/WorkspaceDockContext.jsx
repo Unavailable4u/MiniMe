@@ -136,6 +136,14 @@ function makeInitialDockState() {
     messages: [],
     sessionId: null,
     loading: false,
+    // Perf audit item #3: paired with the messages page fetched by
+    // switchChat/loadOlderMessages below — hasMoreOlder is whether
+    // chat_store.get_chat() reported more messages older than what's
+    // currently loaded; loadingOlder guards loadOlderMessages against
+    // being fired again (e.g. from a second scroll event) while a page
+    // is already in flight.
+    hasMoreOlder: false,
+    loadingOlder: false,
     liveDecision: null,
     liveSteps: [],
     routeTrace: [],
@@ -849,19 +857,66 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // key isn't known until the chatId is. See useWorkspaceDockActions()
     // below, a second, key-agnostic hook for exactly this reason.
     const switchChat = async (chatId, { skipListReload = false } = {}) => {
-      const res = await fetch(`${API_URL}/api/chats/${chatId}`, { headers: await authHeaders() });
+      // Perf audit item #3: opening a chat now fetches only the most
+      // recent page (limit=60) instead of the whole history — see
+      // eo/chat_store.py's get_chat() docstring for why the JSONB blob
+      // this used to ship was expensive in the first place. hasMoreOlder
+      // (from the response's has_more) drives the "Load older messages"
+      // affordance in WorkspaceChatPanel.jsx; loadOlderMessages below
+      // fetches earlier pages on demand.
+      const res = await fetch(`${API_URL}/api/chats/${chatId}?limit=60`, { headers: await authHeaders() });
       if (!res.ok) return null;
       const chat = await res.json();
       const { getWorkspaceIdForChat, refreshChatList } = callbacksRef.current;
       const key = normalizeDockKey(getWorkspaceIdForChat?.(chatId) ?? null, chatId);
       if (key) {
-        setState(key, { sessionId: chatId, messages: chat.messages || [] });
+        setState(key, { sessionId: chatId, messages: chat.messages || [], hasMoreOlder: !!chat.has_more, loadingOlder: false });
         resetLiveRunState(key);
       }
       localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
       setLastActiveChatId(chatId);
       if (!skipListReload) await refreshChatList?.();
       return chat;
+    };
+
+    // Perf audit item #3: the actual "load older messages on scroll-up"
+    // fetch — pages backward from the earliest message currently held in
+    // state, using that message's own `seq` (now returned by
+    // get_chat()/append_message() — see chat_store.py) as before_seq.
+    // Key-agnostic like switchChat above, for the same reason: the chat
+    // list can trigger this for a chat that isn't necessarily the
+    // caller's own dock instance.
+    const loadOlderMessages = async (chatId) => {
+      const { getWorkspaceIdForChat } = callbacksRef.current;
+      const key = normalizeDockKey(getWorkspaceIdForChat?.(chatId) ?? null, chatId);
+      if (!key) return;
+      const current = states.get(key);
+      if (!current || current.loadingOlder || !current.hasMoreOlder) return;
+      const earliest = current.messages[0];
+      if (!earliest || earliest.seq == null) return; // nothing loaded yet, or an
+      // older message predating this patch with no seq recorded — either
+      // way there's no safe before_seq to page from, so stop rather than
+      // guess and risk skipping or repeating messages.
+      setState(key, { loadingOlder: true });
+      try {
+        const res = await fetch(
+          `${API_URL}/api/chats/${chatId}?limit=60&before_seq=${earliest.seq}`,
+          { headers: await authHeaders() },
+        );
+        if (!res.ok) {
+          setState(key, { loadingOlder: false });
+          return;
+        }
+        const chat = await res.json();
+        setState(key, (prev) => ({
+          messages: [...(chat.messages || []), ...prev.messages],
+          hasMoreOlder: !!chat.has_more,
+          loadingOlder: false,
+        }));
+      } catch (err) {
+        console.error("Failed to load older messages:", err);
+        setState(key, { loadingOlder: false });
+      }
     };
 
     const createNewChat = async () => {
@@ -989,7 +1044,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     storeRef.current = {
       getState, subscribe, setState, remove, removeWorkspace,   // CHANGED — bug #1 fix, added removeWorkspace
       persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
-      switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat, createWorkspaceChat,
+      switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat, createWorkspaceChat, loadOlderMessages,
       getLastActiveChatId, setLastActiveChatId, subscribeLastActiveChatId,
     };
   }
@@ -1104,8 +1159,8 @@ export function useWorkspaceDockActions() {
   if (!store) {
     throw new Error("useWorkspaceDockActions must be used within a WorkspaceDockProvider");
   }
-  const { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat, removeWorkspace } = store;   // CHANGED — bug #1 fix, added removeWorkspace
-  return { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat, removeWorkspace };
+  const { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat, removeWorkspace, loadOlderMessages } = store;   // CHANGED — bug #1 fix, added removeWorkspace; loadOlderMessages NEW — perf audit item #3
+  return { switchChat, createNewChat, renameChat, deleteChat, linkChats, createWorkspaceChat, removeWorkspace, loadOlderMessages };
 }
 
 /**
