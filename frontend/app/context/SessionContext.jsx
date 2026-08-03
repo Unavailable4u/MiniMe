@@ -631,67 +631,21 @@ export function SessionProvider({ children }) {
   // with the same name and shape (mostly — see that file's own comment on
   // it now returning the fetched array/`null` instead of nothing).
 
-  // Step 2.3i (perf audit item #2, ninth useCallback batch, continued):
-  // switchChat/createNewChat land HERE, right after refreshChatList,
-  // rather than at their original textual position further down the
-  // file. Reason: removeWorkspaceChat (2.3c, below) already has both of
-  // these in its dependency array, and that array is evaluated
-  // synchronously during render as part of the useCallback(...) call --
-  // not deferred the way a useEffect body is. Leaving switchChat/
-  // createNewChat declared after removeWorkspaceChat would mean
-  // referencing a `const` before its initializer has run in the same
-  // render pass: a genuine temporal-dead-zone ReferenceError, not the
-  // "it's fine, it's only called later from an event handler" pattern
-  // every ordering check up through 2.3h has been able to rely on. Every
-  // other call site of switchChat/createNewChat (the mount effect near
-  // the top of the file) is inside useEffect(..., []), so it still runs
-  // after this render completes either way -- moving the declaration up
-  // doesn't change anything for those callers, it only fixes the one
-  // that actually mattered.
-  //
-  // Both close over a pile of setState setters and refs (setSessionId,
-  // setMessages, stepsRef, setLiveSteps, routeTraceRef, setRouteTrace,
-  // dependencyMapRef, setDependencyMap, structurePlanRef,
-  // setStructurePlan, roleRequestsRef, setRoleRequests,
-  // setMacroLoopDecisions, setLiveDecision) -- all stable by React's own
-  // guarantee, so none of those belong in the dep array (same omission
-  // rule established for _syncProcessingWorkspaces in the very first
-  // useCallback batch). The only real dependency either one has is
-  // refreshChatList, already stable directly above.
-  const switchChat = useCallback(async (chatId, { skipListReload = false } = {}) => {
-    const res = await fetch(`${API_URL}/api/chats/${chatId}`, {
-      headers: await authHeaders(),
-    });
-    if (!res.ok) return;
-    const chat = await res.json();
-    setSessionId(chatId);
-    localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
-    setMessages(chat.messages || []);
-    // Clear transient Working Panel state — it belongs to whatever run is
-    // in flight, not to a chat you just reloaded from disk.
-    stepsRef.current = []; setLiveSteps([]);
-    routeTraceRef.current = []; setRouteTrace([]);
-    dependencyMapRef.current = {}; setDependencyMap({});
-    structurePlanRef.current = null; setStructurePlan(null);
-    roleRequestsRef.current = []; setRoleRequests([]);
-    setMacroLoopDecisions([]);
-    setLiveDecision(null);
-    if (!skipListReload) await refreshChatList();
-  }, [refreshChatList]);
-
-  const createNewChat = useCallback(async () => {
-    const res = await fetch(`${API_URL}/api/chats`, {
-      method: "POST",
-      headers: await authHeaders({ json: true }),
-      body: JSON.stringify({ title: "New Chat" }),
-    });
-    const chat = await res.json();
-    setSessionId(chat.id);
-    localStorage.setItem(ACTIVE_CHAT_KEY, chat.id);
-    setMessages([]);
-    await refreshChatList();
-    return chat.id;
-  }, [refreshChatList]);
+  // switchChat/createNewChat used to be defined here (Step 2.3i). REMOVED
+  // — wiring check turned up that they'd become dead code: never exposed
+  // in this file's `value` object below, and their only two former
+  // internal callers are both gone (the old on-mount effect that called
+  // them was removed in perf audit §2.3 step B; removeWorkspaceChat's
+  // fallback that called them moved to ManageWorkspaceModal.jsx, see
+  // that function's own comment). Every real caller in the app —
+  // AppShell.jsx, ChatSidebar.jsx, ManageWorkspaceModal.jsx, and the tab
+  // files — already gets switchChat/createNewChat from
+  // useWorkspaceDockActions() (WorkspaceDockContext.jsx's own separate
+  // implementation), so nothing downstream of SessionContext's copy was
+  // ever running. Removing outright rather than leaving in place, since
+  // two same-named, unsynced implementations sitting in the codebase —
+  // one live, one dead — is exactly the kind of thing that causes real
+  // bugs if anyone ever wires the dead one back up by mistake.
 
   // NEW — step 3e prereq: pure lookup, no state mutation. Same check
   // ChatTab.jsx already did inline to find its activeWorkspace. Exposed
@@ -2483,7 +2437,14 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // templateRuns' own comment above.
   templateRuns, runTemplate,
   // NEW — §4.7: Notebooks tab
-  fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, buildExtractionTable,
+  // BUGFIX — wiring check: renameWorkspaceNode was defined above (node
+  // rename PATCH call) but never threaded into this value object, even
+  // though NotebooksTab.jsx destructures it straight from useSession()
+  // and calls it in onRenameNode — every node rename in the Notebooks
+  // tab was hitting `undefined(...)` and throwing. Added alongside its
+  // sibling deleteWorkspaceNode, same as it's defined right next to it
+  // above.
+  fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges, buildExtractionTable,
   fetchSimulationResults,   // NEW — Test tab: reads simulate-domain stage_output back off the bus
   fetchRoles, updateRolePrompt, setRolePinned,   // NEW — Test tab `personas`: thin client over the Role Library store
   ingestClip: ingestClipWrapped, ingestVideoUrl: ingestVideoUrlWrapped,
@@ -2519,7 +2480,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     pusherConnected, fetchTopicsGraph, topicPulsingIds,
     exportWorkspace, importWorkspace, activeMessageIndex, setActiveMessageIndex, sendTask, registerProject,
     reviewBeforeDispatch, setReviewBeforeDispatch, pendingHireReview, confirmHireReview, cancelHireReview, pausedApproval,
-    resumeRun, templateRuns, runTemplate, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges,
+    resumeRun, templateRuns, runTemplate, fetchWorkspaceNodes, deleteWorkspaceNode, renameWorkspaceNode, fetchGraphEdges,
     buildExtractionTable, fetchSimulationResults, fetchRoles, updateRolePrompt, setRolePinned, ingestClipWrapped,
     ingestVideoUrlWrapped, ingestFileWrapped, ingestPdfFileWrapped, ingestVoiceFileWrapped, processingWorkspaces, detectBacklinks,
     fetchNodeSummaries, fetchNoteCandidates, acceptNoteCandidate, rejectNoteCandidate, fetchWorkspaceFacts, saveWorkspaceFacts,
