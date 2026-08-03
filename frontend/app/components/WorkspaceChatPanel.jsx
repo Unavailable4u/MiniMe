@@ -182,7 +182,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
-  const { createWorkspaceChat } = useWorkspaceDockActions();
+  const { createWorkspaceChat, loadOlderMessages } = useWorkspaceDockActions();
   const globalActiveChatId = useLastActiveChatId();
 
   // CHANGED — chat-gating, take 2. Was `!dock.state.sessionId` — but a
@@ -223,6 +223,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
 
   const messages = dock.state.messages;
   const loading = dock.state.loading;
+  const hasMoreOlder = dock.state.hasMoreOlder;   // NEW — perf audit item #3
+  const loadingOlder = dock.state.loadingOlder;   // NEW — perf audit item #3
   const mode = dockMode;
   const setMode = setDockMode;
   const activeMessageIndex = dock.state.activeMessageIndex;
@@ -248,6 +250,12 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // resetAfterIndex. Step 6 wires this up for real (see the scrollToRow
   // effect below, which replaced the old bottomRef.scrollIntoView() call).
   const listRef = useRef(null);
+  // Perf audit item #3: { prevLength, index } captured right before a
+  // "load older messages" fetch fires, consumed by the two effects near
+  // scrollToRow below once the prepend actually lands. null whenever no
+  // load-older is in flight/pending — that's also the signal the normal
+  // bottom-follow effect checks to decide whether it's safe to run.
+  const prependAnchorRef = useRef(null);
   const isSyncingRef = useRef(false); // shared lock, passed to WorkingPanel's scroll handler too
   // Perf audit #3 step 8 fix — step 5a's plan (a hand-rolled heightCache
   // ref + a manual resetAfterIndex call) was written against react-window
@@ -454,14 +462,50 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // to do. react-window v2's imperative API is scrollToRow({ index, align,
   // behavior }), not v1's scrollToItem — matches the note already left on
   // listRef's declaration above.
+  //
+  // Perf audit item #3, pagination follow-up: this used to key ONLY off
+  // messages.length, which broke the moment "load older messages" started
+  // prepending to the front of the array — a scroll-up load also changes
+  // messages.length, and this effect can't tell "grew at the bottom" (a
+  // new message arrived, scroll down) from "grew at the top" (older
+  // messages loaded, scroll position should NOT move) using length alone.
+  // prependAnchorRef (set by handleLoadOlder below, right before it calls
+  // the store's loadOlderMessages) is the signal: when it's non-null this
+  // render, a prepend is in flight/just landed, so this effect backs off
+  // and lets the anchor-restoring effect below handle scroll position
+  // instead. It's cleared there once consumed.
   useEffect(() => {
     if (messages.length === 0) return;
+    if (prependAnchorRef.current) return;
     listRef.current?.scrollToRow({
       index: messages.length - 1,
       align: "end",
       behavior: "smooth",
     });
   }, [messages.length, loading]);
+
+  // Perf audit item #3: after a "load older messages" prepend lands,
+  // jump back to the same message the person was looking at rather than
+  // letting the list silently re-anchor to whatever now sits at the old
+  // scroll offset (which, since everything shifted down by the number of
+  // newly-inserted rows, would visually yank the view further down the
+  // list than where they were reading). prependAnchorRef carries the
+  // pre-fetch { index, count } captured in handleLoadOlder; this effect
+  // only fires once new rows have actually landed (messages.length grew
+  // by that same count), then restores position and clears the anchor so
+  // the effect above resumes its normal bottom-follow behavior on the
+  // next genuinely-new message.
+  useEffect(() => {
+    const anchor = prependAnchorRef.current;
+    if (!anchor) return;
+    if (messages.length <= anchor.prevLength) return; // fetch still in flight
+    const insertedCount = messages.length - anchor.prevLength;
+    listRef.current?.scrollToRow({
+      index: anchor.index + insertedCount,
+      align: "start",
+    });
+    prependAnchorRef.current = null;
+  }, [messages.length]);
 
   // Auto-grow the textarea as the person types multiple lines, capped so
   // it doesn't swallow the whole viewport on a very long paste.
@@ -846,9 +890,29 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // in a top-to-bottom stack, "row whose top is closest to the
   // container's top" and "topmost visible row" agree in effectively all
   // cases. Same isSyncingRef guard as before, unchanged semantics.
+  // Perf audit item #3: fires the actual "load older messages on
+  // scroll-up" fetch. Captures the pre-fetch anchor (current earliest
+  // rendered row + current message count) BEFORE calling the store's
+  // loadOlderMessages, since that call resolves asynchronously and this
+  // component only sees the result once the dock state it's subscribed
+  // to updates — the two effects near listRef.scrollToRow above consume
+  // this anchor once messages.length actually grows.
+  function handleLoadOlder() {
+    if (loadingOlder || !hasMoreOlder || !chatId) return;
+    prependAnchorRef.current = { prevLength: messages.length, index: activeMessageIndex ?? 0 };
+    loadOlderMessages(chatId);
+  }
+
+  // visibleRows.startIndex <= 3 (not just === 0) so the fetch starts a
+  // little before the person hits the literal top row — same "prefetch
+  // just ahead of the edge" idea as overscanCount below, just applied to
+  // data-fetching instead of DOM mounting. loadingOlder/hasMoreOlder are
+  // also checked inside handleLoadOlder itself, so this can fire on every
+  // qualifying scroll event without needing its own separate guard here.
   function handleRowsRendered(visibleRows) {
     if (isSyncingRef.current) return;
     setActiveMessageIndex(visibleRows.startIndex);
+    if (visibleRows.startIndex <= 3) handleLoadOlder();
   }
 
   // Perf audit #3 step 8 fix — Row now lives at module scope (see
@@ -1064,6 +1128,18 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               fixed yet. Step 6 (listRef.scrollToRow, above) fixed
               auto-scroll; step 7 (handleRowsRendered, above) fixed
               cross-panel sync. */}
+          {/* Perf audit item #3: loadingOlder is set by the store while a
+              "load older messages" fetch (triggered from handleRowsRendered
+              near the top of this file) is in flight. This sits above
+              List's own scrollport rather than inside it, so it doesn't
+              consume a virtualized row index or interfere with
+              prependAnchorRef's position-restore effect above. */}
+          {loadingOlder && (
+            <div className="flex items-center justify-center gap-2 py-2 text-xs text-[var(--neutral-500)]">
+              <Loader2 size={12} className="animate-spin" />
+              Loading older messages…
+            </div>
+          )}
           <List
             listRef={listRef}
             rowComponent={VirtualMessageRow}

@@ -100,11 +100,17 @@ _CHAT_COLUMNS = (
     "messages, workspace_id"
 )
 
-# Step 1.4: used only by get_chat()'s new read path. Every OTHER
-# function in this file still selects the old JSONB `messages` column
-# via _CHAT_COLUMNS above (export_chats, restore_chats, rename_chat,
-# etc.) -- untouched on purpose, this is a narrowly-scoped cutover of
-# the read path only, not a full removal of the old column yet.
+# Step 1.4/#2: originally used only by get_chat()'s read path; now also
+# used by append_message() and export_chats() (perf audit item #2),
+# since neither needs the JSONB `messages` column anymore -- both read
+# messages from chat_messages instead. restore_chats(), rename_chat(),
+# set_chat_tags(), etc. still select the old column via _CHAT_COLUMNS
+# above -- untouched on purpose, out of scope for item #2 (see
+# append_message()'s docstring for the one known gap this leaves:
+# restore_chats() writes chats.messages but does not seed
+# chat_messages, so a restored chat's history won't appear via
+# get_chat() either -- pre-existing since the item #1 cutover, not
+# introduced by this patch).
 _CHAT_COLUMNS_NO_MESSAGES = (
     "id, title, created_at, updated_at, linked_chat_ids, tags, template_id, workspace_id"
 )
@@ -126,16 +132,33 @@ def export_chats(owner_id: str, chat_ids: list) -> list[dict]:
     chat rows is the more faithful "portable backup of your data"
     instrument here; the artifact shape is for docx/pptx/etc. file
     export via agents/exporter.py, which is a separate, still-open
-    piece of work (that module wasn't in scope this session)."""
+    piece of work (that module wasn't in scope this session).
+
+    Perf audit item #2: messages are now read from chat_messages, NOT
+    the chats.messages column — append_message() (below) stopped
+    keeping that column in sync once it cut over to the normalized
+    table, so selecting it here would silently export a stale/frozen
+    snapshot for any chat messaged after that cutover. One query per
+    chat_id is more round trips than the old single-query version, but
+    each one is an indexed point lookup, not a blob read, and export is
+    an infrequent, user-initiated action rather than a hot path."""
     if not chat_ids:
         return []
     with db.cursor() as cur:
         cur.execute(
-            f"select {_CHAT_COLUMNS} from chats where owner_id = %s and id = any(%s)",
+            f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where owner_id = %s and id = any(%s)",
             (owner_id, list(chat_ids)),
         )
-        rows = cur.fetchall()
-    return [_row_to_chat(r) for r in rows]
+        chats = [_row_to_chat(r, include_messages=False) for r in cur.fetchall()]
+
+        for chat in chats:
+            cur.execute(
+                "select payload from chat_messages where chat_id = %s order by seq asc",
+                (chat["id"],),
+            )
+            chat["messages"] = [r["payload"] for r in cur.fetchall()]
+
+    return chats
 
 
 def restore_chats(owner_id: str, exported_chats: list[dict], workspace_id: str | None = None) -> list[dict]:
@@ -269,13 +292,42 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
     instead of a column that gets more expensive to touch as a chat
     grows.
 
-    limit/before_seq are new, OPT-IN pagination for callers that want
-    it -- not wired into any route yet (a later step does that,
-    alongside the frontend's virtualized list). limit returns the
-    most recent `limit` messages (optionally strictly before
-    before_seq, for "load older messages" on scroll-up), still
-    returned oldest-first so callers never have to special-case
-    ordering based on whether they paginated."""
+    limit/before_seq are OPT-IN pagination for callers that want it —
+    wired into GET /api/chats/{chat_id} as of perf audit item #3 (query
+    params of the same names), used by the frontend's virtualized list
+    to fetch messages a page at a time instead of the whole chat.
+    limit returns the most recent `limit` messages (optionally
+    strictly before before_seq, for "load older messages" on
+    scroll-up), still returned oldest-first so callers never have to
+    special-case ordering based on whether they paginated.
+
+    Perf audit item #3/#4-adjacent: every returned message dict now
+    carries its own `seq` (the chat_messages row's ordering column),
+    folded in here rather than left as a bare `payload`. `seq` was
+    exposed for item #3 specifically because pagination needs it (a
+    caller doing "load older" needs to tell the server what before_seq
+    to page from, and the only place that number can come from is the
+    earliest message it already has).
+
+    Perf audit item #4: every returned message dict now also carries
+    its own `id` (chat_messages' uuid primary key) — the piece that
+    was still missing after item #3. This is a stable, real per-message
+    identifier where none existed before (the array-position/seq
+    ordering isn't itself an id — seq is stable per chat but says
+    nothing about the message beyond its position), for whatever
+    eventually needs one (e.g. React row keys, "jump to this message"
+    deep links, editing/deleting a single message) instead of the
+    frontend continuing to key off array index, which breaks the
+    moment messages can be inserted/removed anywhere but the end.
+    Nothing in this codebase reads `id` off a message dict as of this
+    patch — it isn't wired to a consumer yet, it's just no longer
+    silently unavailable.
+
+    chat["has_more"] is only meaningful when limit is given — True
+    means there are still older messages beyond what this call
+    returned (fetches limit+1 rows under the hood and trims the extra
+    one, rather than a separate count() round trip). It's always False
+    on the unpaginated path, since that path returns everything."""
     with db.cursor() as cur:
         cur.execute(
             f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where id = %s and owner_id = %s",
@@ -285,31 +337,39 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
         if not row:
             raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
 
+        has_more = False
         if limit is None:
             cur.execute(
-                "select payload from chat_messages where chat_id = %s order by seq asc",
+                "select id, seq, payload from chat_messages where chat_id = %s order by seq asc",
                 (chat_id,),
             )
-            messages = [r["payload"] for r in cur.fetchall()]
+            messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in cur.fetchall()]
         else:
             params = [chat_id]
             extra_clause = ""
             if before_seq is not None:
                 extra_clause = " and seq < %s"
                 params.append(before_seq)
-            params.append(limit)
+            # Fetch one extra row purely to detect whether there's more
+            # beyond this page -- trimmed back off below, never
+            # returned to the caller.
+            params.append(limit + 1)
             cur.execute(
-                f"select payload from chat_messages where chat_id = %s{extra_clause} "
+                f"select id, seq, payload from chat_messages where chat_id = %s{extra_clause} "
                 f"order by seq desc limit %s",
                 params,
             )
+            rows = cur.fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
             # fetched newest-first (for LIMIT to grab the right end of
             # the range); reversed back to oldest-first before
             # returning, matching the unpaginated case above.
-            messages = [r["payload"] for r in reversed(cur.fetchall())]
+            messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in reversed(rows)]
 
     chat = _row_to_chat(row, include_messages=False)
     chat["messages"] = messages
+    chat["has_more"] = has_more
     return chat
 
 
@@ -366,11 +426,44 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
     the duration of this transaction — unlike the old threading.Lock(),
     this correctly serializes concurrent writers even across multiple
     server processes/replicas, not just threads in one process (closes
-    the second gap flagged in Part 8.1)."""
+    the second gap flagged in Part 8.1).
+
+    Perf audit item #2: this used to read the FULL chats.messages
+    array, append in Python, and write the FULL array back on every
+    single message (the O(n) read-modify-write item #1's migration
+    exists to fix), on top of the chat_messages insert added by the
+    dual-write step. That's gone now — this only ever touches
+    chats.title/updated_at (small, fixed-size columns) plus one insert
+    into chat_messages; get_chat() has read exclusively from
+    chat_messages since the item #1 cutover, so chats.messages no
+    longer needs to be kept in sync at all for the chat's own history
+    to work. The one remaining reader of that column is export_chats()
+    (above), which was switched to chat_messages in the same patch as
+    this change.
+
+    next_seq is now a `max(seq) + 1` query against chat_messages rather
+    than len(existing["messages"]) — still race-free, because the
+    `for update` lock on the chats row already serializes every
+    concurrent append_message() call for this chat_id (this is the
+    only function that writes chat_messages), so no two callers ever
+    compute next_seq for the same chat_id at the same time.
+
+    NOTE: chats.messages is only ever written once now — an empty
+    array at chat creation (kept, rather than omitted, since this
+    column's schema/constraints live outside this repo and every other
+    insert here already passes it explicitly; safer to match that
+    convention than assume a default exists). It is never rewritten on
+    append. For chats that existed before this change it keeps
+    whatever value the old dual-write path last left it at (a frozen
+    snapshot as of the last append before this patch shipped). If
+    anything outside this module still reads that column directly
+    (nothing in this codebase does as of this patch — verified via
+    export_chats above and grep for `.messages` reads), it will see a
+    stale/empty value, not current history."""
     message = {**message, "ts": message.get("ts") or _now().isoformat()}
 
     with db.cursor() as cur:
-        cur.execute("select title, messages from chats where id = %s and owner_id = %s for update",
+        cur.execute("select title from chats where id = %s and owner_id = %s for update",
                      (chat_id, owner_id))
         existing = cur.fetchone()
 
@@ -384,15 +477,14 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
                 f"""
                 insert into chats (id, title, owner_id, messages)
                 values (%s, %s, %s, %s)
-                returning {_CHAT_COLUMNS}
+                returning {_CHAT_COLUMNS_NO_MESSAGES}
                 """,
-                (chat_id, title, owner_id, db.Json([message])),
+                (chat_id, title, owner_id, db.Json([])),
             )
             row = cur.fetchone()
             _insert_chat_message(cur, chat_id, owner_id, seq=0, message=message)
-            return _row_to_chat(row)
+            return _row_to_chat(row, include_messages=False)
 
-        messages = (existing["messages"] or []) + [message]
         title = existing["title"]
         if title == "New Chat" and message.get("role") == "user":
             text = (message.get("text") or "").strip().replace("\n", " ")
@@ -401,22 +493,21 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
 
         cur.execute(
             f"""
-            update chats set messages = %s, title = %s, updated_at = %s
+            update chats set title = %s, updated_at = %s
             where id = %s and owner_id = %s
-            returning {_CHAT_COLUMNS}
+            returning {_CHAT_COLUMNS_NO_MESSAGES}
             """,
-            (db.Json(messages), title, _now(), chat_id, owner_id),
+            (title, _now(), chat_id, owner_id),
         )
         row = cur.fetchone()
-        # existing["messages"] is the array BEFORE this append, so its
-        # length is exactly the next seq (0-based) -- same enumerate()
-        # convention scripts/backfill_chat_messages.py uses, and it's
-        # safe to trust here without a separate `select max(seq)` round
-        # trip because the `for update` lock above already serializes
-        # every writer to this chat_id.
-        next_seq = len(existing["messages"] or [])
+
+        cur.execute(
+            "select coalesce(max(seq) + 1, 0) as next_seq from chat_messages where chat_id = %s",
+            (chat_id,),
+        )
+        next_seq = cur.fetchone()["next_seq"]
         _insert_chat_message(cur, chat_id, owner_id, seq=next_seq, message=message)
-        return _row_to_chat(row)
+        return _row_to_chat(row, include_messages=False)
 
 
 def rename_chat(chat_id: str, owner_id: str, new_title: str) -> dict:
