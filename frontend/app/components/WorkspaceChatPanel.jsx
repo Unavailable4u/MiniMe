@@ -223,6 +223,38 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     [messages, getMessageKey]
   );
 
+  // Perf audit #3 step 5c — sizing the list itself. VariableSizeList needs
+  // explicit height/width props; unlike the current overflow-y-auto div,
+  // it won't auto-fill a flex parent on its own. Smallest viable fix:
+  // watch that same div (chatContainerRef) with a ResizeObserver and feed
+  // its content box into state, so step 5d can pass containerSize straight
+  // through as height/width instead of pulling in
+  // react-virtualized-auto-sizer for this. Not wired into any JSX yet —
+  // the messages.map() below still renders exactly as before; this effect
+  // just runs alongside it and tracks a number nothing reads yet.
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    // chatContainerRef's div only renders in the `usingDock && !collapsed`
+    // branch below (see the early returns above it) — on any render that
+    // takes an earlier branch, el is null and there's nothing to observe
+    // yet. Depending on the same two flags that gate that branch means
+    // this re-runs and actually attaches once that div shows up, instead
+    // of only checking once on first mount and giving up.
+    const el = chatContainerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      setContainerSize((prev) =>
+        prev.width === width && prev.height === height ? prev : { width, height }
+      );
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [usingDock, collapsed]);
+
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
