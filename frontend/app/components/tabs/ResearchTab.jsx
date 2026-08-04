@@ -204,8 +204,18 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
     }
   }, [initialWorkspaceId, onConsumeInitialWorkspaceId]);
 
+  // FIX — was `if (!activeWsId && ...)`, which only ever filled in a
+  // blank selection and never re-checked one that was already set. If
+  // the active project got deleted (from this tab or any other — every
+  // visited tab stays mounted, see AppShell.jsx) while this tab was kept
+  // alive in the background, activeWsId stayed pointed at the now-gone
+  // id forever, and every fetch keyed on it (nodes/panels/topics-graph)
+  // 404'd on every subsequent visit. Same stillExists recovery
+  // NotebooksTab's selectedId effect already does.
   useEffect(() => {
-    if (!activeWsId && researchProjects.length > 0) setActiveWsId(researchProjects[0].id);
+    if (researchProjects.length === 0) return;
+    const stillExists = activeWsId && researchProjects.some((w) => w.id === activeWsId);
+    if (!stillExists) setActiveWsId(researchProjects[0].id);
   }, [researchProjects, activeWsId]);
 
   const activeWs = researchProjects.find((w) => w.id === activeWsId) || null;

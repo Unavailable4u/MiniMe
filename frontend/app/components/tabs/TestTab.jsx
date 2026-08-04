@@ -274,8 +274,15 @@ function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, 
     }
   }, [initialWorkspaceId, onConsumeInitialWorkspaceId]);
 
+  // FIX — same stale-selection bug as ResearchTab: was `if (!activeWsId
+  // && ...)`, which never re-checked an id that was already set. A
+  // project deleted while this tab was kept alive in the background
+  // (every visited tab stays mounted — see AppShell.jsx) left
+  // activeWsId pointed at a dead id forever, 404ing on every visit.
   useEffect(() => {
-    if (!activeWsId && testProjects.length > 0) setActiveWsId(testProjects[0].id);
+    if (testProjects.length === 0) return;
+    const stillExists = activeWsId && testProjects.some((w) => w.id === activeWsId);
+    if (!stillExists) setActiveWsId(testProjects[0].id);
   }, [testProjects, activeWsId]);
 
   const activeWs = testProjects.find((w) => w.id === activeWsId) || null;
