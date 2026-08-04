@@ -1,0 +1,809 @@
+diff --git a/tests/unit/test_cli_api_symmetry.py b/tests/unit/test_cli_api_symmetry.py
+new file mode 100644
+index 0000000..b98d686
+--- /dev/null
++++ b/tests/unit/test_cli_api_symmetry.py
+@@ -0,0 +1,62 @@
++"""
++tests/unit/test_cli_api_symmetry.py — rebuilt around FakeRedis +
++mock_llm (was a print-and-eyeball script that hit real Groq/Cerebras
++for the brief-writing cold-start path; see the old
++tests/test_cli_api_symmetry.py).
++
++Confirms eo/panel.py's staff_task() produces an identical hire for a
++brand-new role regardless of which real entrypoint calls it: the CLI
++path (eo/loop_v4.py: staff_task(decision, task_text=task_text)) and the
++API path (task_runner.py: staff_task(decision, task_text=task_text,
++session_id=session_id)) must never diverge on the brief a novel role
++gets written.
++"""
++from eo.panel import staff_task
++from eo.registry import get_role_prompt, ROLE_PROMPTS_KEY
++from memory.bus import read, write
++
++NOVEL_ROLE = "cli_api_symmetry_test_role"
++
++
++def _fake_classification():
++    return {
++        "tier": 2,
++        "directed_task_type": "write_docs",
++        "confidence": 0.8,
++        "suggested_agents": [NOVEL_ROLE],
++        "reasoning": "checking CLI/API symmetry",
++    }
++
++
++def test_cli_and_api_call_styles_produce_the_identical_brief():
++    task_text = "Write a short glossary entry explaining a new technical term."
++
++    # "CLI-style" call: staff_task(decision, task_text=task_text)
++    cli_hires = staff_task(_fake_classification(), task_text=task_text)
++
++    # "API-style" call: staff_task(decision, task_text=task_text, session_id=...)
++    api_hires = staff_task(
++        _fake_classification(), task_text=task_text, session_id="fake-session-id-123"
++    )
++
++    assert cli_hires, "CLI-style call produced no hires at all"
++    assert api_hires, "API-style call produced no hires at all"
++    assert cli_hires[0]["role"] == api_hires[0]["role"] == NOVEL_ROLE
++    # The second call hits the fast path (get_role_prompt() already has
++    # it) -- confirms persistence works regardless of caller.
++    assert cli_hires[0]["brief"] == api_hires[0]["brief"]
++
++
++def test_second_call_does_not_write_a_new_brief():
++    task_text = "Write a short glossary entry explaining a new technical term."
++    staff_task(_fake_classification(), task_text=task_text)
++    brief_after_first_call = get_role_prompt(NOVEL_ROLE)
++
++    existing = read(ROLE_PROMPTS_KEY, default={})
++    updated_at_after_first = existing[NOVEL_ROLE]["updated_at"]
++
++    staff_task(_fake_classification(), task_text=task_text)
++    existing_after_second = read(ROLE_PROMPTS_KEY, default={})
++
++    assert get_role_prompt(NOVEL_ROLE) == brief_after_first_call
++    assert existing_after_second[NOVEL_ROLE]["updated_at"] == updated_at_after_first
+diff --git a/tests/unit/test_eo_router.py b/tests/unit/test_eo_router.py
+new file mode 100644
+index 0000000..e3cf0bd
+--- /dev/null
++++ b/tests/unit/test_eo_router.py
+@@ -0,0 +1,96 @@
++"""
++tests/unit/test_eo_router.py — rebuilt around the current eo/router.py.
++
++Migration Part 27 §2 retired the classic, fixed 19-agent TIERS[3]
++roster: neither live entrypoint ever called
++build_execution_graph(tier=3) in practice (tier 3 always goes through
++the adaptive/hires-driven build_execution_graph_from_hires() instead --
++see test_router.py), so TIERS no longer has a 3 key at all, and
++build_execution_graph(tier=3) now raises ValueError like any other
++unknown tier. This file replaces the old tests/test_eo_router.py, which
++asserted against the now-deleted TIERS[3]/EXPECTED_TIER3_ORDER.
++"""
++import pytest
++
++from eo.router import TIERS, DIRECTED_TASK_MAP, build_execution_graph, validate_registry_coverage
++from eo.registry import resolve
++
++
++def test_tier3_is_no_longer_a_static_graph():
++    # Migration Part 27 §2 -- confirms the retirement stuck.
++    assert 3 not in TIERS
++    with pytest.raises(ValueError):
++        build_execution_graph(tier=3)
++
++
++def test_tier_0_routes_to_responder():
++    assert build_execution_graph(tier=0) == ["responder"]
++
++
++def test_tier_1_routes_to_lean_pipeline():
++    assert build_execution_graph(tier=1) == [
++        "prompt_writer_lean", "code_writer_lean", "reviewer_fixer_lean",
++    ]
++
++
++def test_tier_1_run_tests_appends_sandbox_tester_lean():
++    graph = build_execution_graph(tier=1, run_tests=True)
++    assert graph[-1] == "sandbox_tester_lean"
++    assert build_execution_graph(tier=1, run_tests=False) == build_execution_graph(tier=1)
++
++
++def test_tier2_directed_task_routing():
++    assert build_execution_graph(tier=2, directed_task_type="review") == ["reviewer"]
++    assert build_execution_graph(tier=2, directed_task_type="debug") == [
++        "reviewer", "fixer_pool", "sandbox_tester", "file_manager_writeback",
++    ]
++    assert build_execution_graph(tier=2, directed_task_type="add_tests") == [
++        "test_writer", "sandbox_tester", "file_manager_test_writeback",
++    ]
++    assert build_execution_graph(tier=2, directed_task_type="refactor") == [
++        "code_writers", "file_manager_writeback",
++    ]
++    assert build_execution_graph(tier=2, directed_task_type="security_scan") == [
++        "security_scanner", "security_aggregator",
++    ]
++    assert build_execution_graph(tier=2, directed_task_type="write_docs") == [
++        "documentation_agent",
++    ]
++
++
++def test_tier2_missing_directed_task_type_raises():
++    with pytest.raises(ValueError):
++        build_execution_graph(tier=2)
++
++
++def test_tier2_unknown_directed_task_type_raises():
++    with pytest.raises(KeyError):
++        build_execution_graph(tier=2, directed_task_type="not_a_real_task")
++
++
++def test_explain_code_routes_to_responder():
++    # explain_code is deliberately NOT in DIRECTED_TASK_MAP (it's
++    # read-only, kept in its own EXPLAIN_CODE_ROUTE constant) but still
++    # reachable through build_execution_graph(tier=2, ...).
++    assert "explain_code" not in DIRECTED_TASK_MAP
++    assert build_execution_graph(tier=2, directed_task_type="explain_code") == ["responder"]
++
++
++def test_unknown_tier_raises_value_error():
++    with pytest.raises(ValueError):
++        build_execution_graph(tier=99)
++
++
++def test_every_tier0_tier1_and_directed_task_agent_resolves_to_a_real_callable():
++    names = set(build_execution_graph(tier=0))
++    names.update(build_execution_graph(tier=1, run_tests=True))
++    names.update(build_execution_graph(tier=2, directed_task_type="explain_code"))
++    for task_type in DIRECTED_TASK_MAP:
++        names.update(build_execution_graph(tier=2, directed_task_type=task_type))
++    for name in names:
++        fn = resolve(name)
++        assert callable(fn), f"{name} did not resolve to a callable"
++
++
++def test_registry_covers_every_referenced_agent_name():
++    validate_registry_coverage()  # raises AssertionError on any gap
+diff --git a/tests/unit/test_memory_bus.py b/tests/unit/test_memory_bus.py
+new file mode 100644
+index 0000000..526bf35
+--- /dev/null
++++ b/tests/unit/test_memory_bus.py
+@@ -0,0 +1,58 @@
++"""
++tests/unit/test_memory_bus.py — Part 5 checklist item, rebuilt around
++the FakeRedis fixture (was a print-and-eyeball script hitting real
++Upstash; see the old tests/test_memory_bus.py).
++
++Covers memory/bus.py's basic contract: write/read round-trips any
++JSON-serializable value, read() returns the given default for a missing
++key instead of raising, read_many() batches multiple keys through one
++MGET and keys its result by the ORIGINAL (un-namespaced) key names, and
++delete() actually removes a key rather than leaving an empty record.
++"""
++from memory.bus import write, read, read_many, delete, KEYS
++
++
++def test_write_read_round_trips_a_string():
++    write(KEYS["original_idea"], "A simple todo list app")
++    assert read(KEYS["original_idea"]) == "A simple todo list app"
++
++
++def test_write_read_round_trips_a_dict():
++    plan = {"features": ["add task", "delete task"], "cycle_goal": "build add task"}
++    write(KEYS["current_plan"], plan)
++    assert read(KEYS["current_plan"]) == plan
++
++
++def test_read_missing_key_returns_default():
++    assert read("some_key_never_written") is None
++    assert read("some_key_never_written", default="fallback") == "fallback"
++
++
++def test_read_many_batches_and_keys_by_original_name():
++    write(KEYS["original_idea"], "idea text")
++    write(KEYS["current_plan"], {"features": ["a"]})
++    # KEYS["test_code"] deliberately never written -- should come back
++    # as the default, not raise or get dropped from the result dict.
++    result = read_many(
++        [KEYS["original_idea"], KEYS["current_plan"], KEYS["test_code"]],
++        default="MISSING",
++    )
++    assert result == {
++        "original_idea": "idea text",
++        "current_plan": {"features": ["a"]},
++        "test_code": "MISSING",
++    }
++
++
++def test_read_many_empty_list_returns_empty_dict():
++    assert read_many([]) == {}
++
++
++def test_delete_removes_key_entirely():
++    write("some_temp_key", {"x": 1})
++    assert read("some_temp_key") is not None
++    delete("some_temp_key")
++    assert read("some_temp_key") is None
++    # Distinct from write(key, None): a deleted key should behave
++    # exactly like one that was never written, i.e. honor `default`.
++    assert read("some_temp_key", default="gone") == "gone"
+diff --git a/tests/unit/test_namespacing.py b/tests/unit/test_namespacing.py
+new file mode 100644
+index 0000000..4073931
+--- /dev/null
++++ b/tests/unit/test_namespacing.py
+@@ -0,0 +1,60 @@
++"""
++tests/unit/test_namespacing.py — rebuilt around FakeRedis (was a
++print-and-eyeball script; see the old tests/test_namespacing.py).
++
++Covers memory/bus.py's _namespaced() contract: ordinary keys are scoped
++per app_slug so two "projects" never see each other's data, while the
++documented exempt prefixes (app_slug itself, project_registry, usage:*,
++registry:*, conversation:*, cooldown_until:*, paused_execution:*) are
++deliberately shared across every app_slug.
++"""
++import pytest
++
++from memory.bus import write, read, KEYS
++
++
++def test_ordinary_key_is_isolated_per_app_slug():
++    write(KEYS["app_slug"], "project_a")
++    write("current_plan", {"hello": "project_a's plan"})
++
++    write(KEYS["app_slug"], "project_b")
++    # project_b never wrote "current_plan" -- must not see project_a's value.
++    assert read("current_plan") is None
++
++    write(KEYS["app_slug"], "project_a")
++    # Switching back to project_a restores its own value.
++    assert read("current_plan") == {"hello": "project_a's plan"}
++
++
++@pytest.mark.parametrize("key", [
++    "project_registry",
++    "usage:groq_key_1",
++    "registry:role_prompts",
++    "conversation:abc123",
++    "cooldown_until:groq_key_1",
++    "paused_execution:session-xyz",
++])
++def test_exempt_prefixes_are_shared_across_app_slugs(key):
++    write(KEYS["app_slug"], "project_a")
++    write(key, "shared_value")
++
++    write(KEYS["app_slug"], "project_b")
++    # An exempt key is a property of the system/session/account, not
++    # whatever app_slug happens to be active -- must be visible here too.
++    assert read(key) == "shared_value"
++
++
++def test_app_slug_key_itself_is_never_prefixed():
++    # app_slug is the bootstrap key -- it can't be namespaced by its own
++    # value. Writing it under one slug and reading it back after
++    # switching to another slug should still return the raw global value.
++    write(KEYS["app_slug"], "project_a")
++    write(KEYS["app_slug"], "project_b")
++    assert read(KEYS["app_slug"]) == "project_b"
++
++
++def test_no_app_slug_set_falls_back_to_unprefixed_key():
++    # Before any app_slug is ever written, ordinary keys behave as if
++    # there's no namespace at all.
++    write("some_key", "value_with_no_slug")
++    assert read("some_key") == "value_with_no_slug"
+diff --git a/tests/unit/test_part14_retirement.py b/tests/unit/test_part14_retirement.py
+new file mode 100644
+index 0000000..13c4b37
+--- /dev/null
++++ b/tests/unit/test_part14_retirement.py
+@@ -0,0 +1,153 @@
++"""
++tests/unit/test_part14_retirement.py — automates the checkable items
++from Part 14 §7's testing checklist:
++
++  [ ] Force a tier-3 task where suggested_agents comes back empty ->
++      confirm _ensure_staffable() fills in a sane default
++  [ ] Grep the entire repo for `import loop` and `loop.main()` -> zero hits
++  [ ] Confirm loop.py and its compiled .pyc are actually deleted from disk
++
++Items 4-6 (macro_loop_decision firing on a real large task, the
++no-task-text CLI message, and the small-tier-3-task no-prompt check) need
++a live run against real agents/LLM calls and are NOT covered here -- see
++the accompanying manual/nightly check for those.
++
++Relocated from the flat tests/ directory into tests/unit/ (Part B1 §0);
++no behavior changes from the original version besides the repo-root
++resolution, which now walks up two levels instead of one to land back
++at the actual project root.
++"""
++import os
++import re
++import subprocess
++
++import pytest
++
++REPO_ROOT = os.environ.get(
++    "MINIME_REPO_ROOT",
++    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
++)
++
++
++# ---------------------------------------------------------------------------
++# Item 1 — _ensure_staffable() never leaves a tier-3 decision unstaffable
++# ---------------------------------------------------------------------------
++
++@pytest.fixture
++def ensure_staffable():
++    from eo.loop_v4 import _ensure_staffable
++    return _ensure_staffable
++
++
++@pytest.mark.parametrize("domain,expected", [
++    ("coding", ["implementer", "verifier", "fixer"]),
++    ("creative_writing", ["writer", "editor"]),
++    ("research", ["researcher", "writer"]),
++    ("data_analysis", ["analyst", "writer"]),
++    (None, ["writer"]),
++    ("some_unrecognized_domain", ["writer"]),
++])
++def test_empty_suggested_agents_gets_filled(ensure_staffable, domain, expected):
++    decision = {"tier": 3, "domain": domain, "suggested_agents": []}
++    result = ensure_staffable(decision)
++    assert result["suggested_agents"] == expected
++
++
++def test_nonempty_suggested_agents_left_untouched(ensure_staffable):
++    decision = {"tier": 3, "domain": "coding", "suggested_agents": ["implementer"]}
++    result = ensure_staffable(decision)
++    assert result["suggested_agents"] == ["implementer"]
++
++
++def test_non_tier3_decision_left_untouched(ensure_staffable):
++    decision = {"tier": 2, "domain": "coding", "suggested_agents": []}
++    result = ensure_staffable(decision)
++    assert result["suggested_agents"] == [], (
++        "_ensure_staffable should only ever fire for tier == 3"
++    )
++
++
++def test_missing_suggested_agents_key_also_gets_filled(ensure_staffable):
++    decision = {"tier": 3, "domain": "research"}
++    result = ensure_staffable(decision)
++    assert result["suggested_agents"] == ["researcher", "writer"]
++
++
++# ---------------------------------------------------------------------------
++# Item 2 — zero remaining `import loop` / `loop.main()` anywhere in the repo
++# ---------------------------------------------------------------------------
++
++IMPORT_LOOP_PATTERN = re.compile(r"^\s*import loop\b|loop\.main\(\)")
++
++
++_THIS_FILE = os.path.abspath(__file__)
++
++
++def _iter_python_files(root):
++    for dirpath, dirnames, filenames in os.walk(root):
++        dirnames[:] = [d for d in dirnames if d not in
++                        (".git", "__pycache__", "node_modules", ".venv", "venv")]
++        for name in filenames:
++            if name.endswith(".py"):
++                path = os.path.join(dirpath, name)
++                # Skip this test file itself -- its own docstring/checklist
++                # text and regex literal legitimately contain the strings
++                # this scan is looking for.
++                if os.path.abspath(path) == _THIS_FILE:
++                    continue
++                yield path
++
++
++def test_no_live_import_loop_anywhere():
++    hits = []
++    for path in _iter_python_files(REPO_ROOT):
++        rel = os.path.relpath(path, REPO_ROOT)
++        with open(path, "r", encoding="utf-8", errors="ignore") as f:
++            for lineno, line in enumerate(f, start=1):
++                stripped = line.strip()
++                if stripped.startswith("#"):
++                    continue  # comments referencing the retirement are fine
++                if IMPORT_LOOP_PATTERN.search(line):
++                    hits.append(f"{rel}:{lineno}: {stripped}")
++    assert not hits, "Found live `import loop` / `loop.main()` references:\n" + "\n".join(hits)
++
++
++def test_grep_for_loop_reference_matches_pytest_scan():
++    """Cross-check using the actual grep command from the guide's
++    checklist, in case the pure-Python walk above missed something (e.g.
++    a non-.py file, or an unusual import form)."""
++    result = subprocess.run(
++        ["grep", "-rn", "--include=*.py",
++         "--exclude=" + os.path.basename(_THIS_FILE),
++         r"import loop\b\|loop\.main()", REPO_ROOT],
++        capture_output=True, text=True,
++    )
++    real_hits = [
++        line for line in result.stdout.splitlines()
++        if not line.split(":", 2)[-1].strip().startswith("#")
++    ]
++    # grep exit code 1 == no matches found, which is what we want.
++    assert result.returncode == 1 or not real_hits, (
++        "grep found live import loop / loop.main() references:\n" + result.stdout
++    )
++
++
++# ---------------------------------------------------------------------------
++# Item 3 — loop.py and its compiled artifact are actually gone from disk
++# ---------------------------------------------------------------------------
++
++def test_loop_py_deleted_from_disk():
++    assert not os.path.exists(os.path.join(REPO_ROOT, "loop.py")), (
++        "loop.py still exists on disk -- delete it"
++    )
++
++
++def test_loop_pyc_deleted_from_disk():
++    pycache_dir = os.path.join(REPO_ROOT, "__pycache__")
++    stale = []
++    if os.path.isdir(pycache_dir):
++        stale = [
++            os.path.join(pycache_dir, f) for f in os.listdir(pycache_dir)
++            if f.startswith("loop.cpython")
++        ]
++    assert not stale, f"Stale compiled loop.py artifact(s) still on disk: {stale}"
+diff --git a/tests/unit/test_planner.py b/tests/unit/test_planner.py
+new file mode 100644
+index 0000000..af3fc53
+--- /dev/null
++++ b/tests/unit/test_planner.py
+@@ -0,0 +1,48 @@
++"""
++tests/unit/test_planner.py — rebuilt around FakeRedis (was a
++print-and-write-only script; see the old tests/test_planner.py).
++
++Scoped deliberately to the bus-level contract agents/idea_planner.py's
++run() depends on for its inputs -- original_idea, latest_report, and
++feature_status via a single batched read_many() call -- WITHOUT
++actually invoking run() itself (that requires an LLM call and belongs
++in the mocked-LLM agent-integration suite, alongside the other agent
++per-role JSON-shape checks).
++"""
++from memory.bus import write, read, read_many, KEYS
++
++
++def test_original_idea_round_trips():
++    idea = "A simple to-do list web app where users can add, complete, and delete tasks"
++    write(KEYS["original_idea"], idea)
++    assert read(KEYS["original_idea"]) == idea
++
++
++def test_planner_inputs_batch_read_with_sensible_defaults_when_unset():
++    # Mirrors exactly the read_many() call idea_planner.run() makes
++    # before it ever touches the LLM: on a fresh app_slug, none of
++    # these three keys exist yet.
++    result = read_many(
++        [KEYS["original_idea"], KEYS["latest_report"], KEYS["feature_status"]],
++        default=None,
++    )
++    assert result[KEYS["original_idea"]] is None
++    assert result[KEYS["latest_report"]] is None
++    # idea_planner.run() itself does `feature_status = ... or {}` on top
++    # of this -- confirm the raw bus-level default really is None, not
++    # already {}, so that fallback is doing real work.
++    assert result[KEYS["feature_status"]] is None
++
++
++def test_planner_inputs_batch_read_reflects_prior_writes():
++    write(KEYS["original_idea"], "A todo app")
++    write(KEYS["latest_report"], {"summary": "cycle 1 done"})
++    write(KEYS["feature_status"], {"add task": "done", "delete task": "in_progress"})
++
++    result = read_many(
++        [KEYS["original_idea"], KEYS["latest_report"], KEYS["feature_status"]],
++        default=None,
++    )
++    assert result[KEYS["original_idea"]] == "A todo app"
++    assert result[KEYS["latest_report"]] == {"summary": "cycle 1 done"}
++    assert result[KEYS["feature_status"]] == {"add task": "done", "delete task": "in_progress"}
+diff --git a/tests/unit/test_registry.py b/tests/unit/test_registry.py
+new file mode 100644
+index 0000000..0270cec
+--- /dev/null
++++ b/tests/unit/test_registry.py
+@@ -0,0 +1,47 @@
++"""
++tests/unit/test_registry.py — Part 5 checklist item 1, rebuilt around
++the current eo/registry.py. resolve() maps an agent (module) NAME --
++not a role name -- to a real callable, and raises KeyError with a clear
++message for anything not in REGISTRY. resolve_role() (see
++test_resolve_role.py) is the separate role-name -> module-name step
++upstream of this.
++"""
++import pytest
++
++from eo.registry import REGISTRY, REAL_ACTION_ROLES, resolve, resolve_role
++
++
++def test_every_real_action_role_target_resolves_to_a_real_callable():
++    for role_name, module_name in REAL_ACTION_ROLES.items():
++        fn = resolve(module_name)
++        assert callable(fn), f"{role_name} -> {module_name} did not resolve to a callable"
++
++
++def test_generic_worker_resolves_to_a_real_callable():
++    fn = resolve("generic_worker")
++    assert callable(fn)
++
++
++def test_role_to_callable_end_to_end():
++    # resolve_role() then resolve() -- the two-step path every real
++    # caller (eo/executor.py) actually takes.
++    for role_name, expected_module in [
++        ("implementer", "code_writers"),
++        ("verifier", "reviewer"),
++        ("fixer", "fixer_pool"),
++        ("security_reviewer", "security_scanner"),
++    ]:
++        module_name = resolve_role(role_name)
++        assert module_name == expected_module
++        assert callable(resolve(module_name))
++
++
++def test_unknown_agent_name_raises_keyerror_not_silent_none():
++    with pytest.raises(KeyError):
++        resolve("not_a_real_agent")
++
++
++def test_registry_has_no_none_callables():
++    for name, entry in REGISTRY.items():
++        assert entry["callable"] is not None, f"{name} has a None callable"
++        assert callable(entry["callable"]), f"{name}'s callable isn't callable"
+diff --git a/tests/unit/test_resolve_role.py b/tests/unit/test_resolve_role.py
+new file mode 100644
+index 0000000..fb933e3
+--- /dev/null
++++ b/tests/unit/test_resolve_role.py
+@@ -0,0 +1,40 @@
++"""
++tests/unit/test_resolve_role.py — rebuilt around the current
++eo/registry.py, whose resolve_role() no longer raises KeyError for an
++unmapped role (Migration Part 10 §2.1 replaced the old ROLE_TO_AGENT /
++KeyError design entirely). Every real-action role listed in
++REAL_ACTION_ROLES resolves to its dedicated module name; every other
++role name -- known or brand new -- resolves to the literal string
++"generic_worker".
++"""
++from eo.registry import resolve_role, REAL_ACTION_ROLES
++
++
++def test_unmapped_role_falls_back_to_generic_worker():
++    unmapped_role = "some_role_nobody_ever_mapped_xyz"
++    assert unmapped_role not in REAL_ACTION_ROLES, (
++        "test role accidentally collides with a real mapping"
++    )
++    assert resolve_role(unmapped_role) == "generic_worker"
++
++
++def test_real_action_role_resolves_to_its_dedicated_module():
++    assert resolve_role("implementer") == "code_writers"
++    assert resolve_role("verifier") == "reviewer"
++    assert resolve_role("fixer") == "fixer_pool"
++
++
++def test_every_real_action_role_resolves_to_its_own_mapping():
++    for role_name, expected_module in REAL_ACTION_ROLES.items():
++        assert resolve_role(role_name) == expected_module
++
++
++def test_retired_dedicated_modules_now_fall_back_to_generic_worker():
++    # Migration Part 27: changelog_writer, final_qa, and gatekeeper's
++    # dedicated agent modules were retired. Their role names are still
++    # valid for the Panel to hire, but -- not being in
++    # REAL_ACTION_ROLES -- they now resolve straight to generic_worker
++    # instead of a module that no longer exists.
++    for role_name in ("changelog_writer", "final_qa", "gatekeeper"):
++        assert role_name not in REAL_ACTION_ROLES
++        assert resolve_role(role_name) == "generic_worker"
+diff --git a/tests/unit/test_router.py b/tests/unit/test_router.py
+new file mode 100644
+index 0000000..8247d64
+--- /dev/null
++++ b/tests/unit/test_router.py
+@@ -0,0 +1,97 @@
++"""
++tests/unit/test_router.py — Part 5 checklist item 2, rebuilt around the
++current eo/router.py. build_execution_graph_from_hires() now returns a
++3-tuple (agent_names, role_names, key_overrides) -- role_names was added
++by Migration Part 2 §2.6 for parallel-group support (see
++sanitize_parallel_groups()'s docstring) -- and key_overrides is keyed by
++ROLE NAME (Part 11 §0 fix), not resolved module name.
++"""
++from eo.router import build_execution_graph_from_hires, validate_registry_coverage
++
++
++def test_duplicate_role_hires_produce_a_list_of_key_overrides():
++    hires = [
++        {"role": "implementer", "agent_key": "CEREBRAS_CODE_1", "brief": "part A"},
++        {"role": "implementer", "agent_key": "CEREBRAS_CODE_2", "brief": "part B"},
++        {"role": "verifier", "agent_key": "GROQ_API_KEY", "brief": "check it"},
++    ]
++    agent_names, role_names, key_overrides = build_execution_graph_from_hires(hires)
++
++    assert agent_names == ["code_writers", "code_writers", "reviewer"]
++    assert role_names == ["implementer", "implementer", "verifier"]
++    assert isinstance(key_overrides["implementer"], list)
++    assert key_overrides["implementer"] == ["CEREBRAS_CODE_1", "CEREBRAS_CODE_2"]
++    assert key_overrides["verifier"] == "GROQ_API_KEY"  # single hire -> plain string
++
++
++def test_three_way_duplicate_accumulates_in_hire_order():
++    hires = [
++        {"role": "implementer", "agent_key": "K1", "brief": ""},
++        {"role": "implementer", "agent_key": "K2", "brief": ""},
++        {"role": "implementer", "agent_key": "K3", "brief": ""},
++    ]
++    _, role_names, overrides = build_execution_graph_from_hires(hires)
++    assert overrides["implementer"] == ["K1", "K2", "K3"]
++    assert role_names == ["implementer", "implementer", "implementer"]
++
++
++def test_single_hire_key_override_stays_a_plain_string():
++    hires = [{"role": "fixer", "agent_key": "SOLO_KEY", "brief": ""}]
++    _, _, overrides = build_execution_graph_from_hires(hires)
++    assert overrides["fixer"] == "SOLO_KEY"
++    assert not isinstance(overrides["fixer"], list)
++
++
++def test_key_overrides_are_keyed_by_role_not_by_resolved_module():
++    # "verifier" resolves to module "reviewer" -- key_overrides must
++    # still use the role name "verifier" as its key (Part 11 §0 fix),
++    # not the resolved module name, so distinct roles that happen to
++    # share a module never clobber each other's account choice.
++    hires = [{"role": "verifier", "agent_key": "GROQ_API_KEY", "brief": ""}]
++    agent_names, role_names, overrides = build_execution_graph_from_hires(hires)
++    assert agent_names == ["reviewer"]
++    assert role_names == ["verifier"]
++    assert "verifier" in overrides
++    assert "reviewer" not in overrides
++
++
++def test_execution_order_collapses_a_multi_member_group():
++    hires = [
++        {"role": "writer_a", "agent_key": "K1", "brief": ""},
++        {"role": "writer_b", "agent_key": "K2", "brief": ""},
++        {"role": "implementer", "agent_key": "K3", "brief": ""},
++    ]
++    execution_order = [["writer_a", "writer_b"], "implementer"]
++    agent_names, role_names, overrides = build_execution_graph_from_hires(
++        hires, execution_order=execution_order
++    )
++    assert agent_names == ["generic_worker", "code_writers"]
++    assert role_names == [["writer_a", "writer_b"], "implementer"]
++    assert overrides["writer_a"] == "K1"
++    assert overrides["writer_b"] == "K2"
++
++
++def test_execution_order_group_with_only_one_member_staffed_degrades_to_single_slot():
++    # writer_b was never actually hired -- a "group of one" is just a
++    # normal single-role slot, not a concurrent group.
++    hires = [{"role": "writer_a", "agent_key": "K1", "brief": ""}]
++    execution_order = [["writer_a", "writer_b"]]
++    agent_names, role_names, overrides = build_execution_graph_from_hires(
++        hires, execution_order=execution_order
++    )
++    assert agent_names == ["generic_worker"]
++    assert role_names == ["writer_a"]
++
++
++def test_hires_not_mentioned_in_execution_order_go_to_the_end():
++    hires = [
++        {"role": "forgotten_role", "agent_key": "K1", "brief": ""},
++        {"role": "implementer", "agent_key": "K2", "brief": ""},
++    ]
++    execution_order = ["implementer"]
++    _, role_names, _ = build_execution_graph_from_hires(hires, execution_order=execution_order)
++    assert role_names == ["implementer", "forgotten_role"]
++
++
++def test_registry_coverage_has_no_gaps():
++    validate_registry_coverage()  # raises AssertionError on any gap
+diff --git a/tests/unit/test_seed_bootstrap.py b/tests/unit/test_seed_bootstrap.py
+new file mode 100644
+index 0000000..364ad12
+--- /dev/null
++++ b/tests/unit/test_seed_bootstrap.py
+@@ -0,0 +1,88 @@
++"""
++tests/unit/test_seed_bootstrap.py — rebuilt around the current
++eo/registry.py. The store's shape widened (Part 2 §2.2) from bare
++{role_name: brief_string} to {role_name: {brief, source, updated_at,
++times_hired, pinned, pinned_at}}, and reads now go through a per-run
++ContextVar cache (Performance Audit §5A) — see the local
++`reset_role_prompts_cache` fixture below, which clears that cache
++before every test in this file so one test's bootstrap can never leak
++into the next test's "should it reseed or just read?" assertion.
++"""
++import pytest
++
++import eo.registry as registry
++from memory.bus import read, write
++from eo.registry import get_role_prompt, get_role_metadata, ROLE_PROMPTS_KEY, ROLE_PROMPTS_SEED
++
++
++@pytest.fixture(autouse=True)
++def reset_role_prompts_cache():
++    # _load_prompts() caches the whole store per store-key in a
++    # ContextVar for the life of one request/run (see registry.py's
++    # Performance Audit §5A comment). Tests run sequentially in the
++    # same thread/context, so without this reset, a later test would
++    # see an earlier test's already-cached result instead of hitting
++    # FakeRedis fresh -- exactly the kind of cross-test leakage the
++    # ContextVar's own design intentionally avoids across real
++    # requests.
++    registry._role_prompts_cache_ctx.set(None)
++    yield
++    registry._role_prompts_cache_ctx.set(None)
++
++
++def test_first_call_bootstraps_from_seed_and_persists_it():
++    assert read(ROLE_PROMPTS_KEY) is None  # nothing written yet this test
++
++    result = get_role_prompt("implementer")
++    assert result == ROLE_PROMPTS_SEED["implementer"]
++
++    raw_after_first = read(ROLE_PROMPTS_KEY)
++    assert sorted(raw_after_first.keys()) == sorted(ROLE_PROMPTS_SEED.keys())
++    # Part 2 §2.2 schema widening: bootstrap wraps each seed brief into
++    # the richer {brief, source, ...} shape, not a bare string.
++    entry = raw_after_first["implementer"]
++    assert entry["brief"] == ROLE_PROMPTS_SEED["implementer"]
++    assert entry["source"] == "seed"
++    assert entry["times_hired"] == 0
++    assert entry["pinned"] is False
++
++
++def test_second_call_just_reads_without_reseeding():
++    result1 = get_role_prompt("implementer")
++    raw_after_first = dict(read(ROLE_PROMPTS_KEY))  # snapshot before 2nd call
++
++    registry._role_prompts_cache_ctx.set(None)  # force a fresh bus read
++    result2 = get_role_prompt("implementer")
++
++    assert result1 == result2 == ROLE_PROMPTS_SEED["implementer"]
++    assert read(ROLE_PROMPTS_KEY) == raw_after_first  # unchanged, no reseed
++
++
++def test_get_role_prompt_returns_none_for_a_role_with_no_brief():
++    assert get_role_prompt("some_role_never_briefed_xyz") is None
++
++
++def test_get_role_metadata_returns_the_full_object_not_just_the_brief():
++    get_role_prompt("implementer")  # trigger bootstrap
++    meta = get_role_metadata("implementer")
++    assert meta["brief"] == ROLE_PROMPTS_SEED["implementer"]
++    assert set(meta.keys()) >= {"brief", "source", "updated_at", "times_hired", "pinned", "pinned_at"}
++
++
++def test_legacy_bare_string_entries_get_migrated_on_read():
++    # Simulate a pre-migration store: bare {role_name: brief_string}.
++    write(ROLE_PROMPTS_KEY, {"implementer": ROLE_PROMPTS_SEED["implementer"],
++                              "custom_role": "a hand-written legacy brief"})
++    registry._role_prompts_cache_ctx.set(None)
++
++    assert get_role_prompt("custom_role") == "a hand-written legacy brief"
++
++    raw = read(ROLE_PROMPTS_KEY)
++    # Both entries migrated to the object shape in the same pass.
++    assert raw["custom_role"]["brief"] == "a hand-written legacy brief"
++    # Byte-for-byte matches the current seed value -> tagged "seed",
++    # honestly reflecting how it actually got there.
++    assert raw["implementer"]["source"] == "seed"
++    # A genuinely different string -> tagged "panel_brief_writer", the
++    # only other way a bare string could have landed pre-migration.
++    assert raw["custom_role"]["source"] == "panel_brief_writer"
