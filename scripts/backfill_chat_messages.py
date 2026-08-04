@@ -94,7 +94,10 @@ def main():
                          help="Report what would be backfilled without writing anything.")
     args = parser.parse_args()
 
-    with db.cursor() as cur:
+    # trusted=True: this is an offline, developer-run admin script that
+    # walks every owner's chats in one pass, not a per-user request --
+    # see migration 0003 for what this flag does under RLS.
+    with db.cursor(trusted=True) as cur:
         candidates = _chats_needing_backfill(cur)
         to_process = [c for c in candidates if c["source_count"] != c["backfilled_count"]]
 

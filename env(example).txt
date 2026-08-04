@@ -251,6 +251,11 @@ HUGGINGFACE_API_KEY_10=
 
 # --- Postgres connection (used by the new eo/db.py I'll write next) ---
 DATABASE_URL=
+# As of migration 0003 (A1): this MUST be the minime_app role's
+# connection string, not postgres's -- see that migration's header
+# comment for why (RLS is a no-op against postgres/table-owner
+# connections). Keep a separate admin (postgres) URL somewhere
+# outside this file for running future migrations.
 # perf audit §4.6 / priority #9: ThreadedConnectionPool sizing —
 # defaults to DB_POOL_MIN=1 / DB_POOL_MAX=20 in eo/db.py if left unset
 # here. Raise DB_POOL_MAX for a deployment expecting real concurrent

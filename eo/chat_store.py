@@ -144,7 +144,7 @@ def export_chats(owner_id: str, chat_ids: list) -> list[dict]:
     an infrequent, user-initiated action rather than a hot path."""
     if not chat_ids:
         return []
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where owner_id = %s and id = any(%s)",
             (owner_id, list(chat_ids)),
@@ -183,7 +183,7 @@ def restore_chats(owner_id: str, exported_chats: list[dict], workspace_id: str |
     api/server.py) is responsible for checking the caller actually has
     edit access to that workspace before calling this."""
     restored = []
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         for chat in exported_chats:
             chat_id = new_chat_id()
             cur.execute(
@@ -206,7 +206,7 @@ def create_chat(owner_id: str, title: str = "New Chat", tags: list | None = None
                  template_id: str | None = None) -> dict:
     """Creates an empty chat row. Returns the chat dict."""
     chat_id = new_chat_id()
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             f"""
             insert into chats (id, title, owner_id, tags, template_id, messages, linked_chat_ids)
@@ -224,7 +224,7 @@ def find_chat_for_template(owner_id: str, template_id: str) -> dict | None:
     """The chat this template already has, if any — reused by every
     subsequent run instead of minting a new chat each time. Most
     recently updated wins if somehow more than one exists."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             """
             select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
@@ -242,7 +242,7 @@ def find_chat_for_template(owner_id: str, template_id: str) -> dict | None:
 
 def list_chats(owner_id: str) -> list:
     """Sidebar listing — most recently updated first."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             """
             select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
@@ -261,7 +261,7 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
     """Every chat (any workspace) this owner has carrying this exact
     tag — unchanged behavior, now a WHERE clause instead of a Python
     filter over the whole index."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             """
             select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
@@ -328,7 +328,7 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
     returned (fetches limit+1 rows under the hood and trims the extra
     one, rather than a separate count() round trip). It's always False
     on the unpaginated path, since that path returns everything."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where id = %s and owner_id = %s",
             (chat_id, owner_id),
@@ -374,7 +374,7 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
 
 
 def chat_exists(chat_id: str, owner_id: str) -> bool:
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute("select 1 from chats where id = %s and owner_id = %s", (chat_id, owner_id))
         return cur.fetchone() is not None
 
@@ -382,7 +382,7 @@ def chat_exists(chat_id: str, owner_id: str) -> bool:
 def set_chat_tags(chat_id: str, owner_id: str, tags: list) -> dict:
     """Full replace — the tag editor UI sends the whole list back on
     save, same convention as before."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             f"""
             update chats set tags = %s, updated_at = %s
@@ -462,7 +462,7 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
     stale/empty value, not current history."""
     message = {**message, "ts": message.get("ts") or _now().isoformat()}
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute("select title from chats where id = %s and owner_id = %s for update",
                      (chat_id, owner_id))
         existing = cur.fetchone()
@@ -512,7 +512,7 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
 
 def rename_chat(chat_id: str, owner_id: str, new_title: str) -> dict:
     new_title = new_title.strip()[:120]
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         if new_title:
             cur.execute(
                 f"update chats set title = %s, updated_at = %s where id = %s and owner_id = %s "
@@ -541,7 +541,7 @@ def set_linked_chats(chat_id: str, owner_id: str, linked_chat_ids: list) -> dict
     owner_id and exists — same filter as the original's chat_exists()
     check, now additionally scoped so one user can never link to
     another user's chat."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute("select id from chats where owner_id = %s and id = any(%s)",
                      (owner_id, linked_chat_ids))
         existing_ids = {r["id"] for r in cur.fetchall()}
@@ -566,7 +566,7 @@ def delete_chat(chat_id: str, owner_id: str) -> None:
     owned by owner_id, matching the original's silent-no-op-on-missing
     behavior), strips it out of every other of this owner's chats'
     linked_chat_ids, and clears its Redis working memory."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute("delete from chats where id = %s and owner_id = %s returning id",
                      (chat_id, owner_id))
         if not cur.fetchone():
@@ -701,7 +701,7 @@ def resolve_chat_access(chat_id: str, requesting_user_id: str) -> tuple[str, str
     if chat_exists(chat_id, requesting_user_id):
         return (requesting_user_id, "owner")
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=requesting_user_id) as cur:
         cur.execute(
             "select owner_id, workspace_id, is_private from chats where id = %s",
             (chat_id,),

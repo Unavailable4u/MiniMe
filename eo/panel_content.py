@@ -195,7 +195,7 @@ def get_content(ws_id: str, panel_key: str) -> dict:
     saved yet — a panel nobody's touched should render blank, not error."""
     if panel_key not in VALID_PANEL_KEYS:
         raise ValueError(f"unknown panel_key {panel_key!r}")
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute(
             "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids "
             "from workspace_panel_content where workspace_id = %s and panel_key = %s",
@@ -209,7 +209,7 @@ def list_content(ws_id: str) -> dict:
     """All saved panels for a workspace in one round trip, keyed by
     panel_key. Panels with no saved row simply don't appear in the
     dict — callers fall back to empty-string same as get_content."""
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute(
             "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids "
             "from workspace_panel_content where workspace_id = %s",
@@ -232,7 +232,7 @@ def set_content(ws_id: str, panel_key: str, content: str, user_id: str, source_n
     are actually told apart (by panel_key, not by this value)."""
     if panel_key not in VALID_PANEL_KEYS:
         raise ValueError(f"unknown panel_key {panel_key!r}")
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             """
             insert into workspace_panel_content (workspace_id, panel_key, content, updated_at, updated_by, source_node_ids)
@@ -254,7 +254,7 @@ def delete_content(ws_id: str, panel_key: str, user_id: str) -> None:
     "clear this panel" button doesn't need a new module function."""
     if panel_key not in VALID_PANEL_KEYS:
         raise ValueError(f"unknown panel_key {panel_key!r}")
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "delete from workspace_panel_content where workspace_id = %s and panel_key = %s",
             (ws_id, panel_key),
@@ -294,7 +294,7 @@ def invalidate_for_nodes(ws_id: str, node_ids: list[str], user_id: str) -> list[
         return []
     node_id_set = set(node_ids)
     cleared = []
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "select panel_key, source_node_ids from workspace_panel_content "
             "where workspace_id = %s and panel_key = any(%s)",
@@ -323,7 +323,7 @@ def clear_workspace(ws_id: str, user_id: str) -> int:
     delete-source cascade (see invalidate_for_nodes() above); kept for
     any future "reset this notebook" affordance that actually wants the
     blunt version. Returns the number of rows removed."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute("delete from workspace_panel_content where workspace_id = %s", (ws_id,))
         count = cur.rowcount
     if count:

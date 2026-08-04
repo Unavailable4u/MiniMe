@@ -69,7 +69,7 @@ def _owned_chat_ids(chat_ids: list[str], owner_id: str) -> list[str]:
     owned by owner_id — preserves input order."""
     if not chat_ids:
         return []
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute("select id from chats where owner_id = %s and id = any(%s)",
                      (owner_id, chat_ids))
         valid = {r["id"] for r in cur.fetchall()}
@@ -77,7 +77,7 @@ def _owned_chat_ids(chat_ids: list[str], owner_id: str) -> list[str]:
 
 
 def list_batches(owner_id: str) -> list:
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             _BATCH_SELECT + " where b.owner_id = %s group by b.id order by b.updated_at desc",
             (owner_id,),
@@ -87,7 +87,7 @@ def list_batches(owner_id: str) -> list:
 
 
 def get_batch(batch_id: str, owner_id: str) -> dict:
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             _BATCH_SELECT + " where b.id = %s and b.owner_id = %s group by b.id",
             (batch_id, owner_id),
@@ -105,7 +105,7 @@ def create_batch(owner_id: str, name: str, member_chat_ids: list[str]) -> dict:
     batch_id = f"batch_{uuid.uuid4().hex[:10]}"
     clean_name = name.strip() or "Untitled batch"
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             "insert into batches (id, name, owner_id) values (%s, %s, %s)",
             (batch_id, clean_name, owner_id),
@@ -122,7 +122,7 @@ def create_batch(owner_id: str, name: str, member_chat_ids: list[str]) -> dict:
 
 def rename_batch(batch_id: str, owner_id: str, new_name: str) -> dict:
     clean_name = new_name.strip()[:80]
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         if clean_name:
             cur.execute(
                 "update batches set name = %s, updated_at = %s where id = %s and owner_id = %s "
@@ -151,14 +151,14 @@ def unlink_members(batch_id: str, owner_id: str, remove_ids: list[str]) -> dict 
         for cid in batch["member_chat_ids"]:
             if chat_store.chat_exists(cid, owner_id):
                 chat_store.set_linked_chats(cid, owner_id, [])
-        with db.cursor() as cur:
+        with db.cursor(user_id=owner_id) as cur:
             cur.execute("delete from batches where id = %s and owner_id = %s", (batch_id, owner_id))
         return None
 
     for cid in remove_ids:
         if chat_store.chat_exists(cid, owner_id):
             chat_store.set_linked_chats(cid, owner_id, [])
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             "delete from batch_members where batch_id = %s and chat_id = any(%s)",
             (batch_id, remove_ids),
@@ -176,7 +176,7 @@ def add_member(batch_id: str, owner_id: str, chat_id: str) -> dict:
         # unrecognized chat_id — it's simply not added.
         return batch
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             "insert into batch_members (batch_id, chat_id) values (%s, %s) "
             "on conflict (batch_id, chat_id) do nothing",
@@ -193,7 +193,7 @@ def delete_batch(batch_id: str, owner_id: str) -> None:
     """Deletes the batch entirely and clears linked_chat_ids for every
     member — does NOT delete the chats themselves, only the grouping."""
     batch = get_batch(batch_id, owner_id)  # raises FileNotFoundError if missing
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute("delete from batches where id = %s and owner_id = %s", (batch_id, owner_id))
     for cid in batch["member_chat_ids"]:
         if chat_store.chat_exists(cid, owner_id):
@@ -201,7 +201,7 @@ def delete_batch(batch_id: str, owner_id: str) -> None:
 
 
 def batch_for_chat(chat_id: str, owner_id: str) -> dict | None:
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             "select batch_id from batch_members where chat_id = %s limit 1",
             (chat_id,),

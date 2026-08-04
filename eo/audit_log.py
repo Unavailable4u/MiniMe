@@ -35,7 +35,7 @@ def write_audit(user_id: str, action: str, target_type: str, target_id: str,
     take down the operation it's describing. Caller doesn't need to (and
     shouldn't) wrap this in its own try/except."""
     try:
-        with db.cursor() as cur:
+        with db.cursor(user_id=user_id) as cur:
             cur.execute(
                 """
                 insert into audit_log (user_id, action, target_type, target_id, detail)
@@ -53,7 +53,7 @@ def list_for_target(target_type: str, target_id: str, limit: int = 100) -> list[
     most recent first. No access check here — same discipline as every
     other read function in this codebase: callers (api/server.py) decide
     who's allowed to ask, this module just answers the query."""
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute(
             """
             select id, user_id, action, target_type, target_id, detail, created_at
@@ -73,7 +73,7 @@ def list_for_user(user_id: str, limit: int = 100) -> list[dict]:
     rather than "what happened to this thing." Distinct query, same
     table, since the two access patterns have different index needs
     (see the migration's two indexes)."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             """
             select id, user_id, action, target_type, target_id, detail, created_at

@@ -159,7 +159,7 @@ def promote(ws_id: str, user_id: str, to_stage: str | None = None, mode: str = "
     if mode not in ("complete", "partial"):
         raise ValueError(f"unknown promote mode {mode!r} — must be 'complete' or 'partial'")
     _require_edit_access(ws_id, user_id)
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute("select stage, stage_history, active_stages from workspaces where id = %s", (ws_id,))
         row = cur.fetchone()
         if not row:
@@ -256,7 +256,7 @@ def active_stages_precheck(ws_id: str, to_stage: str) -> dict:
     move — this function only tells them whether that call is expected
     to succeed, it doesn't perform it.
     """
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute("select stage, active_stages from workspaces where id = %s", (ws_id,))
         row = cur.fetchone()
     if not row:
@@ -327,7 +327,7 @@ def auto_partial_promote(ws_id: str, to_stage: str) -> dict | None:
     check = active_stages_precheck(ws_id, to_stage)
     if not check["eligible"]:
         return None
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute(
             "select stage, stage_history, active_stages from workspaces where id = %s",
             (ws_id,),
@@ -454,7 +454,7 @@ def member_role(ws_id: str, user_id: str) -> str | None:
     """Returns 'owner', 'partner', 'moderator', 'editor', 'viewer', or
     None (no access at all). Single source of truth for workspace
     access — every other function in this module calls this first."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute("select owner_id from workspaces where id = %s", (ws_id,))
         ws = cur.fetchone()
         if not ws:
@@ -523,7 +523,7 @@ def _sync_by_owner(chat_ids: list):
     owner's own subset."""
     if not chat_ids:
         return
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute("select id, owner_id from chats where id = any(%s)", (chat_ids,))
         rows = cur.fetchall()
     by_owner: dict[str, list[str]] = {}
@@ -538,7 +538,7 @@ def _sync_by_owner(chat_ids: list):
 def list_workspaces(user_id: str) -> list:
     """Every workspace this user can see: owned, or where they're a
     member (any of the four workspace_members roles)."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             f"""
             select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.active_stages, w.stage_history, w.created_at, w.updated_at,
@@ -558,7 +558,7 @@ def list_workspaces(user_id: str) -> list:
 
 def get_workspace(ws_id: str, user_id: str) -> dict:
     _require_access(ws_id, user_id)  # raises FileNotFoundError if no access at all
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             f"""
             select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.active_stages, w.stage_history, w.created_at, w.updated_at,
@@ -585,7 +585,7 @@ def create_workspace(owner_id: str, name: str, stage: str = "note") -> dict:
     ws_id = f"ws_{uuid.uuid4().hex[:10]}"
     clean_name = name.strip() or "Untitled project"
     clean_stage = stage if stage in _STAGE_SEQUENCE else "note"
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             "insert into workspaces (id, name, owner_id, stage, active_stages) values (%s, %s, %s, %s, %s) "
             "returning id, name, owner_id, show_attribution, stage, active_stages, created_at, updated_at",
@@ -601,7 +601,7 @@ def create_workspace(owner_id: str, name: str, stage: str = "note") -> dict:
 def rename_workspace(ws_id: str, user_id: str, name: str) -> dict:
     _require_edit_access(ws_id, user_id)  # editor tier or above
     clean_name = name.strip()[:80]
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         if clean_name:
             cur.execute(
                 "update workspaces set name = %s, updated_at = %s where id = %s returning id",
@@ -622,7 +622,7 @@ def add_chat(ws_id: str, user_id: str, chat_id: str) -> dict:
     """user_id must have edit access to the WORKSPACE, and must OWN the
     chat_id being added."""
     _require_edit_access(ws_id, user_id)
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "update chats set workspace_id = %s, updated_at = %s where id = %s and owner_id = %s",
             (ws_id, _now(), chat_id, user_id),
@@ -646,7 +646,7 @@ def create_chat_in_workspace(ws_id: str, user_id: str, title: str = "New Chat") 
 def remove_chat(ws_id: str, user_id: str, chat_id: str, delete_chat: bool = False) -> dict:
     _require_edit_access(ws_id, user_id)
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         if not delete_chat:
             cur.execute(
                 "update chats set workspace_id = null, updated_at = %s "
@@ -673,7 +673,7 @@ def delete_workspace(ws_id: str, user_id: str) -> None:
     membership management."""
     role = _require_owner_or_partner(ws_id, user_id)
     ws = get_workspace(ws_id, user_id)
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute("delete from workspaces where id = %s", (ws_id,))
     write_audit(user_id, "workspace.delete", "workspace", ws_id, {"name": ws["name"]})
     for cid in ws["chat_ids"]:
@@ -682,7 +682,7 @@ def delete_workspace(ws_id: str, user_id: str) -> None:
 
 
 def workspace_for_chat(chat_id: str, owner_id: str) -> dict | None:
-    with db.cursor() as cur:
+    with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             "select workspace_id from chats where id = %s and owner_id = %s",
             (chat_id, owner_id),
@@ -708,7 +708,7 @@ def list_notify_targets(ws_id: str) -> list[str]:
     specific user's request, so there's no actor_id to check access
     against. Never call this from an API route — routes always have a
     real caller to scope to; use list_members(ws_id, user_id) there."""
-    with db.cursor() as cur:
+    with db.cursor(trusted=True) as cur:
         cur.execute("select owner_id from workspaces where id = %s", (ws_id,))
         row = cur.fetchone()
         if not row:
@@ -728,7 +728,7 @@ def list_members(ws_id: str, user_id: str) -> list:
     hierarchy benefits from everyone knowing who else has access. Admin
     actions (add/change/remove) are still gated separately below."""
     _require_access(ws_id, user_id)
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "select user_id, role, can_toggle_attribution, added_at from workspace_members "
             "where workspace_id = %s order by added_at",
@@ -754,7 +754,7 @@ def add_member(ws_id: str, actor_id: str, target_user_id: str, role: str = "view
         raise WorkspaceAccessError(
             f"user {actor_id} (role={actor_role!r}) cannot grant partner-tier access"
         )
-    with db.cursor() as cur:
+    with db.cursor(user_id=actor_id) as cur:
         cur.execute("select owner_id from workspaces where id = %s", (ws_id,))
         ws = cur.fetchone()
         if not ws:
@@ -786,7 +786,7 @@ def update_member_role(ws_id: str, actor_id: str, target_user_id: str, role: str
         raise ValueError(f"role must be one of {_VALID_ROLES}, got {role!r}")
     actor_role = _require_membership_manage_access(ws_id, actor_id)  # moderator+
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=actor_id) as cur:
         cur.execute(
             "select role from workspace_members where workspace_id = %s and user_id = %s",
             (ws_id, target_user_id),
@@ -825,7 +825,7 @@ def remove_member(ws_id: str, actor_id: str, target_user_id: str) -> None:
     (partner-only, not moderator)."""
     actor_role = _require_membership_manage_access(ws_id, actor_id)  # moderator+
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=actor_id) as cur:
         cur.execute(
             "select role from workspace_members where workspace_id = %s and user_id = %s",
             (ws_id, target_user_id),
@@ -864,7 +864,7 @@ def remove_owner(ws_id: str, partner_id: str) -> dict:
             f"(the owner cannot be removed by a moderator, and the owner "
             f"cannot remove themself this way — see leave_workspace)"
         )
-    with db.cursor() as cur:
+    with db.cursor(user_id=partner_id) as cur:
         cur.execute("select owner_id from workspaces where id = %s", (ws_id,))
         ws = cur.fetchone()
         if not ws:
@@ -905,7 +905,7 @@ def leave_workspace(ws_id: str, user_id: str, successor_id: str | None = None) -
         raise FileNotFoundError(ws_id)
 
     if role == "owner":
-        with db.cursor() as cur:
+        with db.cursor(user_id=user_id) as cur:
             if successor_id:
                 succ_role = member_role(ws_id, successor_id)
                 if succ_role != "partner":
@@ -932,7 +932,7 @@ def leave_workspace(ws_id: str, user_id: str, successor_id: str | None = None) -
         # nothing to return on their behalf.
         return None
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "delete from workspace_members where workspace_id = %s and user_id = %s",
             (ws_id, user_id),
@@ -947,7 +947,7 @@ def get_vote_status(ws_id: str, user_id: str) -> dict:
     """Any member can see the current ballot — transparency about who's
     voted for whom is the point, not a secret."""
     _require_access(ws_id, user_id)
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute("select owner_id from workspaces where id = %s", (ws_id,))
         ws = cur.fetchone()
         if not ws:
@@ -989,7 +989,7 @@ def cast_vote(ws_id: str, voter_id: str, vote_target: str | None) -> dict:
     if role != "partner":
         raise WorkspaceAccessError(f"user {voter_id} must be a partner of workspace {ws_id} to vote")
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=voter_id) as cur:
         cur.execute("select owner_id from workspaces where id = %s", (ws_id,))
         ws = cur.fetchone()
         if not ws:
@@ -1054,7 +1054,7 @@ def set_show_attribution(ws_id: str, actor_id: str, show: bool) -> dict:
     if role not in ("owner", "partner"):
         if role != "moderator":
             raise WorkspaceAccessError(f"user {actor_id} cannot toggle attribution visibility")
-        with db.cursor() as cur:
+        with db.cursor(user_id=actor_id) as cur:
             cur.execute(
                 "select can_toggle_attribution from workspace_members "
                 "where workspace_id = %s and user_id = %s",
@@ -1065,7 +1065,7 @@ def set_show_attribution(ws_id: str, actor_id: str, show: bool) -> dict:
             raise WorkspaceAccessError(
                 f"moderator {actor_id} has not been granted attribution-toggle rights"
             )
-    with db.cursor() as cur:
+    with db.cursor(user_id=actor_id) as cur:
         cur.execute(
             "update workspaces set show_attribution = %s, updated_at = %s where id = %s",
             (show, _now(), ws_id),
@@ -1078,7 +1078,7 @@ def set_moderator_attribution_grant(ws_id: str, actor_id: str, moderator_user_id
     """Owner/partner only — grants or revokes a specific moderator's
     right to toggle attribution visibility."""
     _require_owner_or_partner(ws_id, actor_id)
-    with db.cursor() as cur:
+    with db.cursor(user_id=actor_id) as cur:
         cur.execute(
             "select role from workspace_members where workspace_id = %s and user_id = %s",
             (ws_id, moderator_user_id),
@@ -1117,7 +1117,7 @@ def can_see_attribution(ws_id: str, user_id: str) -> bool:
     if role in ("owner", "partner", "moderator"):
         return True
     if role in ("viewer", "editor"):
-        with db.cursor() as cur:
+        with db.cursor(user_id=user_id) as cur:
             cur.execute("select show_attribution from workspaces where id = %s", (ws_id,))
             row = cur.fetchone()
         return bool(row and row["show_attribution"])
