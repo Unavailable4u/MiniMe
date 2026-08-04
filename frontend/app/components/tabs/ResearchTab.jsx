@@ -852,7 +852,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
     <div className="space-y-4">
       <div className="border border-[var(--neutral-800)] rounded-lg p-3 space-y-3">
         <div>
-          <label className="text-[11px] text-[var(--neutral-500)]">Fields to extract</label>
+          <div className="text-[11px] text-[var(--neutral-500)]">Fields to extract</div>
           <div className="flex flex-wrap gap-1.5 mt-1.5 mb-2">
             {fields.map((f) => (
               <span
