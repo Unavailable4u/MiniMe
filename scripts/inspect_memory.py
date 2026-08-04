@@ -1,10 +1,10 @@
 """
-tests/inspect_memory.py — read-only peek at the current state of shared
+scripts/inspect_memory.py — read-only peek at the current state of shared
 memory. Doesn't run any agent, doesn't touch the filesystem. Use this
 whenever something looks inconsistent (e.g. cycle_goal doesn't match the
 idea you passed in) to see what's actually stored right now.
 
-Run: python tests/inspect_memory.py
+Run: python scripts/inspect_memory.py
 """
 import sys
 import os

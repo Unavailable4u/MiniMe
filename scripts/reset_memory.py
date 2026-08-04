@@ -1,5 +1,5 @@
 """
-tests/reset_memory.py — clears the memory keys that carry state BETWEEN
+scripts/reset_memory.py — clears the memory keys that carry state BETWEEN
 cycles of the same app. Run this before starting a genuinely different
 idea, or whenever memory looks contaminated (e.g. cycle_goal doesn't match
 the idea you passed in -- see inspect_memory.py to check first).
@@ -8,7 +8,7 @@ Does NOT touch: the Upstash Vector index (cross-cycle memory/duplication
 embeddings) -- those are separate and out of scope here.
 Does NOT delete any files on disk under apps/ -- only clears memory keys.
 
-Run: python tests/reset_memory.py
+Run: python scripts/reset_memory.py
 """
 import sys
 import os
