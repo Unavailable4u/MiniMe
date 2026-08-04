@@ -366,6 +366,7 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onSta
         <input
           value={taskText}
           onChange={(e) => setTaskText(e.target.value)}
+          aria-label="Task text"
           placeholder="Task text to run through this template…"
           className="flex-1 bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
         />

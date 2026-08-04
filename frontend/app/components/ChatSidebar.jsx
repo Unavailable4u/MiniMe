@@ -164,6 +164,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
             <input
               autoFocus
+              aria-label="Chat title"
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && commitRename(chat.id)}
@@ -236,6 +237,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
         <input
           id="chat-sidebar-search"
           name="chat-sidebar-search"
+          aria-label="Search chats, batches, projects"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search chats, batches, projects…"

@@ -1309,6 +1309,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
                 ref={attachInputRef}
                 type="file"
                 multiple
+                aria-label="Attach files"
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files?.length) handleAttachFiles(e.target.files);

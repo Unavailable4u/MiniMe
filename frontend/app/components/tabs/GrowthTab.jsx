@@ -256,6 +256,7 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
@@ -706,6 +707,7 @@ function ContentView({ wsId, onDispatched }) {
             value={customPlatform}
             onChange={(e) => setCustomPlatform(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addCustomPlatform()}
+            aria-label="Custom platform"
             placeholder="custom platform (e.g. reddit_post)"
             className="flex-1 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1 text-xs text-[var(--neutral-200)]"
           />
@@ -1054,6 +1056,7 @@ function CalendarView() {
           type="datetime-local"
           value={range.timeMin}
           onChange={(e) => setRange((r) => ({ ...r, timeMin: e.target.value }))}
+          aria-label="Range start"
           className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
         />
         <span className="text-[10px] text-[var(--neutral-600)]">to</span>
@@ -1061,6 +1064,7 @@ function CalendarView() {
           type="datetime-local"
           value={range.timeMax}
           onChange={(e) => setRange((r) => ({ ...r, timeMax: e.target.value }))}
+          aria-label="Range end"
           className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
         />
         <button
@@ -1209,6 +1213,7 @@ function ContentAuditView({ wsId }) {
             type="url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
+            aria-label="Launch page URL"
             placeholder="https://your-launch-page.com"
             className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
           />

@@ -52,8 +52,9 @@ export default function LoginScreen() {
         <form onSubmit={handleSubmit} className="space-y-3">
           {mode === "signup" && (
             <div>
-              <label className="block text-xs text-[var(--neutral-500)] mb-1">Name</label>
+              <label htmlFor="login-name" className="block text-xs text-[var(--neutral-500)] mb-1">Name</label>
               <input
+                id="login-name"
                 type="text"
                 autoComplete="name"
                 placeholder="Optional — shown to project collaborators"
@@ -64,8 +65,9 @@ export default function LoginScreen() {
             </div>
           )}
           <div>
-            <label className="block text-xs text-[var(--neutral-500)] mb-1">Email</label>
+            <label htmlFor="login-email" className="block text-xs text-[var(--neutral-500)] mb-1">Email</label>
             <input
+              id="login-email"
               type="email"
               required
               autoComplete="email"
@@ -75,8 +77,9 @@ export default function LoginScreen() {
             />
           </div>
           <div>
-            <label className="block text-xs text-[var(--neutral-500)] mb-1">Password</label>
+            <label htmlFor="login-password" className="block text-xs text-[var(--neutral-500)] mb-1">Password</label>
             <input
+              id="login-password"
               type="password"
               required
               minLength={6}

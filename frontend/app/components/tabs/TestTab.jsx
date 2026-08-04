@@ -444,6 +444,7 @@ function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, 
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}

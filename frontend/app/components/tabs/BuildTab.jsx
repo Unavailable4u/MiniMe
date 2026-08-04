@@ -323,6 +323,7 @@ function MonitoringWidget({ sessionId, apiUrl, monitoring, onRefresh }) {
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
+              aria-label="UptimeRobot API key"
               placeholder="UptimeRobot API key"
               className="flex-1 min-w-[140px] bg-cyber-bg border border-cyber-border rounded px-2 py-1 text-cyber-text placeholder:text-cyber-dim/50 outline-none"
             />
@@ -340,6 +341,7 @@ function MonitoringWidget({ sessionId, apiUrl, monitoring, onRefresh }) {
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
+              aria-label="Deployed URL"
               placeholder="https://your-deployed-url.example.com"
               className="flex-1 min-w-[180px] bg-cyber-bg border border-cyber-border rounded px-2 py-1 text-cyber-text placeholder:text-cyber-dim/50 outline-none"
             />
@@ -488,6 +490,7 @@ function PartsPanel({ wsId, apiUrl }) {
           <input
             value={newPartName}
             onChange={(e) => setNewPartName(e.target.value)}
+            aria-label="Part name"
             placeholder="Part name, e.g. HolyBro Kakute H7 V2"
             className="flex-1 min-w-0 bg-black/30 border border-cyber-border rounded px-2 py-1 text-[11px] outline-none focus:border-cyber-cyan"
           />
@@ -496,6 +499,7 @@ function PartsPanel({ wsId, apiUrl }) {
             min={1}
             value={newPartQty}
             onChange={(e) => setNewPartQty(e.target.value)}
+            aria-label="Part quantity"
             className="w-14 bg-black/30 border border-cyber-border rounded px-2 py-1 text-[11px] outline-none focus:border-cyber-cyan"
           />
           <button
@@ -801,6 +805,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
