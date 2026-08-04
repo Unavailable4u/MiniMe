@@ -5,8 +5,13 @@ so we can see whether the "passed: true" from the last run means
 anything or is a false-positive from tests that were defined but never
 executed.
 
-Run from the ai_loop project root, same venv as loop_v4.py:
-    python inspect_test_code.py
+Moved from tests/ to scripts/ (B1 reorg) -- this is a debug/inspection
+script, not a test (no assertions), so it was never collected by
+pytest.ini's testpaths anyway. Kept alongside scripts/inspect_memory.py,
+same category of tool.
+
+Run from the project root, same venv as eo/loop_v4.py:
+    python scripts/inspect_test_code.py
 """
 import sys, os, json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
