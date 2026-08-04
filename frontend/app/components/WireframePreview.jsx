@@ -92,6 +92,8 @@ export default function WireframePreview({ html, screenLabel, onRequestEdit }) {
       {onRequestEdit && (
         <div className="border-t border-[var(--neutral-800)] px-3 py-2 flex items-end gap-2">
           <textarea
+            id="wireframe-edit-text"
+            name="wireframeEditText"
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onKeyDown={handleKeyDown}

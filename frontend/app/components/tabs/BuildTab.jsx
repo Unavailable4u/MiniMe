@@ -321,6 +321,8 @@ function MonitoringWidget({ sessionId, apiUrl, monitoring, onRefresh }) {
           <div className="flex flex-wrap gap-1.5 pt-1">
             <input
               type="password"
+              id="build-uptimerobot-api-key"
+              name="buildUptimerobotApiKey"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               aria-label="UptimeRobot API key"
@@ -339,6 +341,8 @@ function MonitoringWidget({ sessionId, apiUrl, monitoring, onRefresh }) {
           <div className="flex flex-wrap gap-1.5">
             <input
               type="text"
+              id="build-uptimerobot-url"
+              name="buildUptimerobotUrl"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               aria-label="Deployed URL"
@@ -488,6 +492,8 @@ function PartsPanel({ wsId, apiUrl }) {
         {error && <p className="text-rose-400">{error}</p>}
         <div className="flex gap-1.5 pt-1">
           <input
+            id="build-new-part-name"
+            name="buildNewPartName"
             value={newPartName}
             onChange={(e) => setNewPartName(e.target.value)}
             aria-label="Part name"
@@ -496,6 +502,8 @@ function PartsPanel({ wsId, apiUrl }) {
           />
           <input
             type="number"
+            id="build-new-part-qty"
+            name="buildNewPartQty"
             min={1}
             value={newPartQty}
             onChange={(e) => setNewPartQty(e.target.value)}
@@ -805,6 +813,8 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          id={`chat-title-${chat.id}`}
+                          name="chatTitle"
                           aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}

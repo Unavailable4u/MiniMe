@@ -256,6 +256,8 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          id={`chat-title-${chat.id}`}
+                          name="chatTitle"
                           aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
@@ -471,10 +473,12 @@ function VoiceView({ wsId }) {
       />
 
       <div className="pt-4 border-t border-[var(--neutral-800)]">
-        <label className="block text-xs font-medium text-[var(--neutral-500)] mb-1">
+        <label htmlFor="growth-brand-voice-draft" className="block text-xs font-medium text-[var(--neutral-500)] mb-1">
           Check a draft against brand voice
         </label>
         <textarea
+          id="growth-brand-voice-draft"
+          name="growthBrandVoiceDraft"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           rows={4}
@@ -660,10 +664,12 @@ function ContentView({ wsId, onDispatched }) {
       </p>
 
       <div>
-        <label className="block text-xs font-medium text-[var(--neutral-500)] mb-1">
+        <label htmlFor="growth-core-message" className="block text-xs font-medium text-[var(--neutral-500)] mb-1">
           Core message
         </label>
         <textarea
+          id="growth-core-message"
+          name="growthCoreMessage"
           value={coreMessage}
           onChange={(e) => setCoreMessage(e.target.value)}
           rows={4}
@@ -704,6 +710,8 @@ function ContentView({ wsId, onDispatched }) {
         </div>
         <div className="flex items-center gap-2 mt-2">
           <input
+            id="growth-custom-platform"
+            name="growthCustomPlatform"
             value={customPlatform}
             onChange={(e) => setCustomPlatform(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addCustomPlatform()}
@@ -1054,6 +1062,8 @@ function CalendarView() {
       <div className="flex items-center gap-2">
         <input
           type="datetime-local"
+          id="growth-range-start"
+          name="growthRangeStart"
           value={range.timeMin}
           onChange={(e) => setRange((r) => ({ ...r, timeMin: e.target.value }))}
           aria-label="Range start"
@@ -1062,6 +1072,8 @@ function CalendarView() {
         <span className="text-[10px] text-[var(--neutral-600)]">to</span>
         <input
           type="datetime-local"
+          id="growth-range-end"
+          name="growthRangeEnd"
           value={range.timeMax}
           onChange={(e) => setRange((r) => ({ ...r, timeMax: e.target.value }))}
           aria-label="Range end"
@@ -1211,6 +1223,8 @@ function ContentAuditView({ wsId }) {
         <div className="flex items-center gap-2">
           <input
             type="url"
+            id="growth-launch-url"
+            name="growthLaunchUrl"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             aria-label="Launch page URL"
@@ -1218,6 +1232,8 @@ function ContentAuditView({ wsId }) {
             className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
           />
           <select
+            id="growth-lighthouse-strategy"
+            name="growthLighthouseStrategy"
             value={strategy}
             onChange={(e) => setStrategy(e.target.value)}
             className="text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
@@ -1340,6 +1356,8 @@ function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelConte
         PRD/Feasibility tabs.
       </p>
       <textarea
+        id="growth-seo-audit-raw"
+        name="growthSeoAuditRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         placeholder="Paste the role's markdown output here…"

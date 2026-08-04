@@ -235,6 +235,8 @@ function ApprovalActions({ step, onResume }) {
       {editing ? (
         <>
           <textarea
+            id={`approval-edit-${step.id}`}
+            name={`approval-edit-${step.id}`}
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={5}

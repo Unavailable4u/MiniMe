@@ -289,6 +289,8 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
             <>
               <input
                 autoFocus
+                id="workspace-name"
+                name="workspaceName"
                 aria-label="Workspace name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -373,6 +375,8 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
                   <div className="flex items-center gap-2 shrink-0">
                     {m.role !== "owner" && canChangeRoleFor(m) ? (
                       <select
+                        id={`member-role-${m.user_id}`}
+                        name={`member-role-${m.user_id}`}
                         value={m.role}
                         onChange={(e) => handleRoleChange(m, e.target.value)}
                         className="text-[10px] bg-[var(--neutral-800)] text-[var(--neutral-300)] rounded px-1 py-0.5 outline-none border border-[var(--neutral-700)]"
@@ -430,6 +434,8 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
             <form onSubmit={handleInvite} className="flex items-center gap-1 mt-2">
               <input
                 type="email"
+                id="invite-email"
+                name="inviteEmail"
                 required
                 aria-label="Invite by email"
                 placeholder="Invite by email"
@@ -438,6 +444,8 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
                 className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-1 text-xs outline-none"
               />
               <select
+                id="invite-role"
+                name="inviteRole"
                 value={inviteRole}
                 onChange={(e) => setInviteRole(e.target.value)}
                 className="text-[10px] bg-[var(--neutral-800)] text-[var(--neutral-300)] rounded px-1 py-1 outline-none border border-[var(--neutral-700)]"
@@ -538,7 +546,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
             >
               <Upload size={12} /> {importBusy ? "Importing…" : "Import"}
             </button>
-            <input ref={fileInputRef} type="file" accept="application/json" aria-label="Import workspace backup file" className="hidden" onChange={handleImportFile} />
+            <input ref={fileInputRef} id="workspace-import-file" name="workspaceImportFile" type="file" accept="application/json" aria-label="Import workspace backup file" className="hidden" onChange={handleImportFile} />
           </div>
           <p className="text-[var(--neutral-600)] text-[10px] mt-1.5">
             Export downloads a portable backup of your own chats in this
@@ -618,6 +626,8 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
                 </p>
                 {eligiblePartners.length > 0 && (
                   <select
+                    id="leave-successor"
+                    name="leaveSuccessor"
                     value={successorId}
                     onChange={(e) => setSuccessorId(e.target.value)}
                     className="w-full mb-2 text-xs bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-2 py-1.5 outline-none"

@@ -96,6 +96,8 @@ function AuditLogTab() {
       <div className="flex items-center justify-end gap-2">
         {subTab === "workspace" && workspaces.length > 0 && (
           <select
+            id="audit-log-workspace"
+            name="auditLogWorkspace"
             value={selectedId || ""}
             onChange={(e) => setSelectedId(e.target.value)}
             className="text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1 text-[var(--neutral-300)]"

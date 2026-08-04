@@ -192,6 +192,8 @@ function SourceRow({ node, onSelectNode, onRequestDelete, onRename, indent }) {
       <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--cyber-cyan)] ${indent ? "ml-5" : ""}`}>
         <input
           autoFocus
+          id="notebook-source-name"
+          name="notebookSourceName"
           aria-label="Source name"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -1284,6 +1286,8 @@ function StudyView({ workspaceId }) {
       )}
       {kind === "video_overview" && (
         <textarea
+          id="notebook-slide-text"
+          name="notebookSlideText"
           value={slideText}
           onChange={(e) => setSlideText(e.target.value)}
           rows={5}
@@ -1293,6 +1297,8 @@ function StudyView({ workspaceId }) {
       )}
       {kind === "podcast" && (
         <textarea
+          id="notebook-podcast-script-text"
+          name="notebookPodcastScriptText"
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={5}
@@ -1342,6 +1348,8 @@ function StudyView({ workspaceId }) {
       {kind === "podcast" ? (
         <div className="space-y-2">
           <input
+            id="notebook-podcast-title"
+            name="notebookPodcastTitle"
             value={podcastTitle}
             onChange={(e) => setPodcastTitle(e.target.value)}
             aria-label="Podcast title"
@@ -1375,6 +1383,8 @@ function StudyView({ workspaceId }) {
       ) : kind === "video_overview" ? (
         <div className="space-y-2">
           <input
+            id="notebook-video-source-podcast-title"
+            name="notebookVideoSourcePodcastTitle"
             value={podcastTitle}
             onChange={(e) => setPodcastTitle(e.target.value)}
             aria-label="Source podcast title"
@@ -1388,6 +1398,8 @@ function StudyView({ workspaceId }) {
             </p>
           )}
           <input
+            id="notebook-video-title"
+            name="notebookVideoTitle"
             value={videoTitle}
             onChange={(e) => setVideoTitle(e.target.value)}
             aria-label="Video title"
@@ -1603,8 +1615,10 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
           Durable facts about this notebook — folded into every agent prompt automatically, so you don't have to re-explain brand voice, audience, or stack in every chat.
         </p>
         <div>
-          <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Brand voice</label>
+          <label htmlFor="notebook-facts-brand-voice" className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Brand voice</label>
           <textarea
+            id="notebook-facts-brand-voice"
+            name="notebookFactsBrandVoice"
             value={facts.brand_voice || ""}
             onChange={(e) => setFacts((f) => ({ ...f, brand_voice: e.target.value }))}
             rows={2}
@@ -1613,8 +1627,10 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
           />
         </div>
         <div>
-          <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Target user</label>
+          <label htmlFor="notebook-facts-target-user" className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Target user</label>
           <textarea
+            id="notebook-facts-target-user"
+            name="notebookFactsTargetUser"
             value={facts.target_user || ""}
             onChange={(e) => setFacts((f) => ({ ...f, target_user: e.target.value }))}
             rows={2}
@@ -1647,6 +1663,8 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
             {customEntries.map((entry, i) => (
               <div key={i} className="flex items-center gap-1.5">
                 <input
+                  id={`notebook-custom-entry-key-${i}`}
+                  name={`notebook-custom-entry-key-${i}`}
                   value={entry.key}
                   onChange={(e) => setCustomEntries((entries) => entries.map((en, j) => (j === i ? { ...en, key: e.target.value } : en)))}
                   aria-label="Custom field key"
@@ -1654,6 +1672,8 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
                   className="w-28 shrink-0 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
                 />
                 <input
+                  id={`notebook-custom-entry-value-${i}`}
+                  name={`notebook-custom-entry-value-${i}`}
                   value={entry.value}
                   onChange={(e) => setCustomEntries((entries) => entries.map((en, j) => (j === i ? { ...en, value: e.target.value } : en)))}
                   aria-label="Custom field value"
@@ -1899,6 +1919,8 @@ function CorrectionCaptureView({ workspaceId, nodes, edges, submitCorrection, on
           "All files" if it's about the notebook as a whole.
         </p>
         <select
+          id="notebook-correction-scope"
+          name="notebookCorrectionScope"
           value={scopeId}
           onChange={(e) => setScopeId(e.target.value)}
           className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
@@ -1909,6 +1931,8 @@ function CorrectionCaptureView({ workspaceId, nodes, edges, submitCorrection, on
           ))}
         </select>
         <textarea
+          id="notebook-correction-text"
+          name="notebookCorrectionText"
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder='e.g. "The mind map says the deadline is March 3rd, but the source says March 13th."'
@@ -2709,6 +2733,8 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
           <form onSubmit={handleCreateNotebook} className="px-3 py-2 border-b border-[var(--neutral-900)] flex gap-1">
             <input
               autoFocus
+              id="notebook-new-name"
+              name="notebookNewName"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               aria-label="Notebook name"
@@ -2781,6 +2807,8 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          id={`chat-title-${chat.id}`}
+                          name="chatTitle"
                           aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}

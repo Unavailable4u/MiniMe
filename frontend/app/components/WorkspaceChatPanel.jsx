@@ -1307,6 +1307,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             <>
               <input
                 ref={attachInputRef}
+                id="workspace-chat-attach-files"
+                name="attachFiles"
                 type="file"
                 multiple
                 aria-label="Attach files"

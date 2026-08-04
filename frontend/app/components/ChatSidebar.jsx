@@ -164,6 +164,8 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
             <input
               autoFocus
+              id={`chat-title-${chat.id}`}
+              name="chatTitle"
               aria-label="Chat title"
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
@@ -437,7 +439,13 @@ function LinkChatsModal({ chatId, allChats, onClose }) {
         <div className="space-y-1">
           {allChats.filter((c) => c.id !== chatId).map((c) => (
             <label key={c.id} className="flex items-center gap-2 text-xs text-[var(--neutral-300)] py-1 cursor-pointer">
-              <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+              <input
+                type="checkbox"
+                id={`batch-select-${c.id}`}
+                name={`batch-select-${c.id}`}
+                checked={selected.has(c.id)}
+                onChange={() => toggle(c.id)}
+              />
               {c.title}
             </label>
           ))}

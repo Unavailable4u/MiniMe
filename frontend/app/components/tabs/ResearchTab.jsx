@@ -355,6 +355,8 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          id={`chat-title-${chat.id}`}
+                          name="chatTitle"
                           aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
@@ -635,6 +637,8 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
     <div className="space-y-4">
       <div className="flex gap-2">
         <input
+          id="research-query"
+          name="researchQuery"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && runSearch()}
@@ -869,6 +873,8 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
           </div>
           <div className="flex gap-2">
             <input
+              id="research-field-draft"
+              name="researchFieldDraft"
               value={fieldDraft}
               onChange={(e) => setFieldDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addField(); } }}
@@ -888,8 +894,10 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
 
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-2">
-            <label className="text-[11px] text-[var(--neutral-500)]">Source scope</label>
+            <label htmlFor="research-source-scope" className="text-[11px] text-[var(--neutral-500)]">Source scope</label>
             <select
+              id="research-source-scope"
+              name="researchSourceScope"
               value={nodeType}
               onChange={(e) => setNodeType(e.target.value)}
               className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-violet)]"
@@ -900,7 +908,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
             </select>
           </div>
           <label className="flex items-center gap-1.5 text-[11px] text-[var(--neutral-500)] cursor-pointer">
-            <input type="checkbox" checked={expanded} onChange={(e) => setExpanded(e.target.checked)} />
+            <input type="checkbox" id="research-thorough-mode" name="researchThoroughMode" checked={expanded} onChange={(e) => setExpanded(e.target.checked)} />
             Thorough mode (more workers, slower)
           </label>
         </div>
@@ -941,6 +949,8 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
                 previous paste.
               </p>
               <textarea
+                id="research-comparison-raw"
+                name="researchComparisonRaw"
                 value={raw}
                 onChange={(e) => setRaw(e.target.value)}
                 placeholder="| Title | Year | Sample Size | Methodology | ... |&#10;|---|---|---|---|---|&#10;| ... |"
@@ -1018,6 +1028,8 @@ function ContradictionsPanel({ workspaceId, fetchPanelContent, savePanelContent 
         project — pasting here again for the same project overwrites the previous paste.
       </p>
       <textarea
+        id="research-consensus-raw"
+        name="researchConsensusRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         placeholder="Paste the role's markdown output here…"
@@ -1076,6 +1088,8 @@ function DatasetPanel({ wsId, openScopedSubChat, openInDock }) {
         already be a readable file the task can name.
       </p>
       <textarea
+        id="research-dataset-task"
+        name="researchDatasetTask"
         value={task}
         onChange={(e) => setTask(e.target.value)}
         placeholder="analyze sales.csv: show the trend by region for Q3"

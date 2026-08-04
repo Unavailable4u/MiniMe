@@ -86,6 +86,8 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
         </button>
       </div>
       <input
+        id="template-name"
+        name="templateName"
         value={name}
         onChange={(e) => setName(e.target.value)}
         aria-label="Template name"
@@ -93,6 +95,8 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
         className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2 py-1 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
       />
       <input
+        id="template-description"
+        name="templateDescription"
         value={description}
         onChange={(e) => setDescription(e.target.value)}
         aria-label="Description (optional)"

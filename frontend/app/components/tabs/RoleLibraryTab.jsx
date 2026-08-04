@@ -81,6 +81,8 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
           {selectable && (
             <input
               type="checkbox"
+              id={`role-select-${entry.role}`}
+              name={`role-select-${entry.role}`}
               checked={selected}
               onChange={() => onToggleSelect(entry.role)}
               className="shrink-0 accent-[var(--neutral-300)]"
@@ -115,6 +117,8 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
       {editing ? (
         <>
           <textarea
+            id={`role-brief-${entry.role}`}
+            name={`role-brief-${entry.role}`}
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
             rows={4}
@@ -316,6 +320,8 @@ function RoleLibraryTab({ onStartTemplate }) {
         </div>
 
         <input
+          id="role-filter"
+          name="roleFilter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           aria-label="Filter by role name"
