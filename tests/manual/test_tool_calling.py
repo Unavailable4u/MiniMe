@@ -52,11 +52,12 @@ my_vcr = vcr.VCR(
     record_mode="once",
     match_on=["method", "uri", "body"],
     filter_headers=["authorization"],
-    # See cassettes/README.md -- lets every repeat of an identical
-    # message reuse the same recorded interaction instead of requiring
-    # one distinct recording per repeat.
-    allow_playback_repeats=True,
 )
+# allow_playback_repeats moved here: in vcrpy 8.x it's a per-cassette
+# option (passed to use_cassette), not a VCR() constructor kwarg. See
+# cassettes/README.md -- lets every repeat of an identical message
+# reuse the same recorded interaction instead of requiring one
+# distinct recording per repeat.
 
 
 def _cassette_exists() -> bool:
@@ -217,7 +218,7 @@ def _call_with_retries(client: OpenAI, **kwargs) -> Any:
     not (os.getenv("GROQ_API_KEY") or _cassette_exists()),
     reason="GROQ_API_KEY not set and no recorded cassette found -- see tests/manual/cassettes/README.md",
 )
-@my_vcr.use_cassette(CASSETTE_NAME)
+@my_vcr.use_cassette(CASSETTE_NAME, allow_playback_repeats=True)
 def test_tool_calling_classification_coverage(monkeypatch):
     # A real key is only required to RECORD (cassette missing); once a
     # cassette exists, replay needs a syntactically-valid key but never

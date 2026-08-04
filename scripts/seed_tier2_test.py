@@ -4,7 +4,7 @@ submitted_code, so a tier-2 add_tests task has something real to act on.
 Run this once, THEN submit the tier-2 task through the frontend/CLI.
 
 Usage:
-    python seed_tier2_test.py
+    python scripts/seed_tier2_test.py
 """
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
