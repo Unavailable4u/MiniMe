@@ -88,12 +88,14 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
+        aria-label="Template name"
         placeholder="Template name"
         className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2 py-1 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
       />
       <input
         value={description}
         onChange={(e) => setDescription(e.target.value)}
+        aria-label="Description (optional)"
         placeholder="Description (optional)"
         className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2 py-1 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
       />

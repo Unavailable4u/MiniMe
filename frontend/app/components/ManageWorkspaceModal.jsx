@@ -289,6 +289,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
             <>
               <input
                 autoFocus
+                aria-label="Workspace name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && saveName()}
@@ -430,6 +431,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
               <input
                 type="email"
                 required
+                aria-label="Invite by email"
                 placeholder="Invite by email"
                 value={inviteEmail}
                 onChange={(e) => setInviteEmail(e.target.value)}
@@ -536,7 +538,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
             >
               <Upload size={12} /> {importBusy ? "Importing…" : "Import"}
             </button>
-            <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={handleImportFile} />
+            <input ref={fileInputRef} type="file" accept="application/json" aria-label="Import workspace backup file" className="hidden" onChange={handleImportFile} />
           </div>
           <p className="text-[var(--neutral-600)] text-[10px] mt-1.5">
             Export downloads a portable backup of your own chats in this

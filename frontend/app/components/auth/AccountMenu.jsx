@@ -70,8 +70,9 @@ export default function AccountMenu() {
                   </button>
                 </div>
                 <div>
-                  <label className="block text-[10px] text-[var(--neutral-500)] mb-0.5">Name</label>
+                  <label htmlFor="account-menu-name" className="block text-[10px] text-[var(--neutral-500)] mb-0.5">Name</label>
                   <input
+                    id="account-menu-name"
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -80,8 +81,9 @@ export default function AccountMenu() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] text-[var(--neutral-500)] mb-0.5">Avatar URL</label>
+                  <label htmlFor="account-menu-avatar-url" className="block text-[10px] text-[var(--neutral-500)] mb-0.5">Avatar URL</label>
                   <input
+                    id="account-menu-avatar-url"
                     type="url"
                     value={avatarUrl}
                     onChange={(e) => setAvatarUrl(e.target.value)}

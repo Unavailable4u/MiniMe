@@ -170,6 +170,7 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
           ref={inputRef}
           type="file"
           multiple
+          aria-label="Upload files"
           className="hidden"
           onChange={(e) => e.target.files?.length && handleFiles(e.target.files)}
         />
@@ -180,6 +181,7 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
         <input
           value={urlDraft}
           onChange={(e) => setUrlDraft(e.target.value)}
+          aria-label="Paste a web page or YouTube URL"
           placeholder="Paste a web page or YouTube URL…"
           className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
         />

@@ -109,8 +109,9 @@ function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
         />
       </div>
       <div>
-        <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">App slug</label>
+        <label htmlFor="plan-app-slug" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">App slug</label>
         <input
+          id="plan-app-slug"
           value={appSlug}
           onChange={(e) => setAppSlug(e.target.value)}
           placeholder="my-app_ab12cd34"
@@ -460,6 +461,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}

@@ -1,5 +1,6 @@
 "use client";
-import { useRef, useEffect, useState, useMemo } from "react";
+import { useRef, useEffect, useState, useMemo, useCallback } from "react";
+import { useIsVisible } from "../hooks/useIsVisible";
 
 // react-force-graph-2d touches the canvas/window at import time, so it
 // has to load client-side only. This used to go through next/dynamic()
@@ -72,6 +73,23 @@ export default function ForceGraphBase({
   const [dims, setDims] = useState({ width: 600, height });
   const lastZoomRef = useRef(0);
 
+  // FIX (silent version of the Recharts 0x0-while-hidden issue): same
+  // display:none-collapses-descendants shape as useIsVisible.js describes,
+  // just landing on this component's own ResizeObserver instead of
+  // Recharts' ResponsiveContainer. Not currently spamming a warning (the
+  // stale 0 self-corrects once the tab becomes visible and the observer
+  // fires again), but guarding it keeps this component from depending on
+  // that self-correction always being clean, and matches the guard already
+  // applied to ProviderCard/CombinedChart for consistency.
+  const [visibilityRef, isVisible] = useIsVisible();
+  const setRefs = useCallback(
+    (el) => {
+      containerRef.current = el;
+      visibilityRef.current = el;
+    },
+    [visibilityRef]
+  );
+
   // Manually load the real component client-side instead of via
   // next/dynamic() -- see the note above the imports for why. Once
   // loaded, ForceGraph2D below is the actual library export, so
@@ -102,11 +120,12 @@ export default function ForceGraphBase({
     if (!containerRef.current) return;
     const el = containerRef.current;
     const observer = new ResizeObserver(([entry]) => {
+      if (!isVisible) return; // hidden ancestor collapses this to 0x0 -- ignore, not a real size
       setDims({ width: entry.contentRect.width, height });
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [height]);
+  }, [height, isVisible]);
 
   // See FIX comment above the component docstring: this reference must
   // stay stable across renders that don't actually change the node/link
@@ -115,8 +134,8 @@ export default function ForceGraphBase({
   const graphData = useMemo(() => ({ nodes, links }), [nodes, links]);
 
   return (
-    <div ref={containerRef} className="relative rounded-lg border border-[var(--neutral-800)] overflow-hidden">
-      {ForceGraph2D && (
+    <div ref={setRefs} className="relative rounded-lg border border-[var(--neutral-800)] overflow-hidden">
+      {ForceGraph2D && isVisible && (
         <ForceGraph2D
           ref={fgRef}
           graphData={graphData}

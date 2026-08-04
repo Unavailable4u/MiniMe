@@ -192,6 +192,7 @@ function SourceRow({ node, onSelectNode, onRequestDelete, onRename, indent }) {
       <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--cyber-cyan)] ${indent ? "ml-5" : ""}`}>
         <input
           autoFocus
+          aria-label="Source name"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -1343,6 +1344,7 @@ function StudyView({ workspaceId }) {
           <input
             value={podcastTitle}
             onChange={(e) => setPodcastTitle(e.target.value)}
+            aria-label="Podcast title"
             placeholder="Title (used as the audio filename)"
             className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           />
@@ -1375,6 +1377,7 @@ function StudyView({ workspaceId }) {
           <input
             value={podcastTitle}
             onChange={(e) => setPodcastTitle(e.target.value)}
+            aria-label="Source podcast title"
             placeholder="Podcast title (must match an already-synthesized podcast)"
             className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           />
@@ -1387,6 +1390,7 @@ function StudyView({ workspaceId }) {
           <input
             value={videoTitle}
             onChange={(e) => setVideoTitle(e.target.value)}
+            aria-label="Video title"
             placeholder="Video title (used as the output filename)"
             className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           />
@@ -1619,8 +1623,9 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
           />
         </div>
         <div>
-          <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Tech stack (comma-separated)</label>
+          <label htmlFor="tech-stack-input" className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Tech stack (comma-separated)</label>
           <input
+            id="tech-stack-input"
             value={techStackText}
             onChange={(e) => setTechStackText(e.target.value)}
             placeholder="e.g. Next.js, FastAPI, Postgres"
@@ -1644,12 +1649,14 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
                 <input
                   value={entry.key}
                   onChange={(e) => setCustomEntries((entries) => entries.map((en, j) => (j === i ? { ...en, key: e.target.value } : en)))}
+                  aria-label="Custom field key"
                   placeholder="key"
                   className="w-28 shrink-0 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
                 />
                 <input
                   value={entry.value}
                   onChange={(e) => setCustomEntries((entries) => entries.map((en, j) => (j === i ? { ...en, value: e.target.value } : en)))}
+                  aria-label="Custom field value"
                   placeholder="value"
                   className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
                 />
@@ -2704,6 +2711,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               autoFocus
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
+              aria-label="Notebook name"
               placeholder="Notebook name"
               disabled={submittingNotebook}
               className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-1.5 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)] disabled:opacity-60"
@@ -2773,6 +2781,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}

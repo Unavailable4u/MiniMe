@@ -49,6 +49,7 @@ export default function ManageBatchModal({ batch, allChats, onClose }) {
             <div className="flex items-center gap-1 mb-3">
               <input
                 autoFocus
+                aria-label="Batch name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && commitRename()}

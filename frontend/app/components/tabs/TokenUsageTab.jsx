@@ -377,6 +377,7 @@ function ProjectSectionUsagePanel({ apiUrl }) {
         <input
           value={workspaceId}
           onChange={(e) => setWorkspaceId(e.target.value)}
+          aria-label="Filter by workspace ID"
           placeholder="workspace_id (optional)"
           className="bg-black/40 border border-cyber-border rounded px-2 py-1 text-xs text-cyber-text flex-1 min-w-[140px]"
         />

@@ -213,6 +213,7 @@ export default function RolePickerOverlay({
         <div className="absolute z-20 mt-1 w-full max-h-80 overflow-y-auto rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-xl p-2 space-y-2">
           <input
             ref={searchInputRef}
+            aria-label="Search or type a new role name"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={handleSearchKeyDown}

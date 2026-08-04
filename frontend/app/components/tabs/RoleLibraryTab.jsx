@@ -318,6 +318,7 @@ function RoleLibraryTab({ onStartTemplate }) {
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          aria-label="Filter by role name"
           placeholder="Filter by role name…"
           className="w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-lg px-3 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
         />

@@ -355,6 +355,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
@@ -637,6 +638,7 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && runSearch()}
+          aria-label="Research query"
           placeholder="e.g. transformer attention mechanisms, systematic review of..."
           className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)]"
         />
@@ -870,6 +872,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
               value={fieldDraft}
               onChange={(e) => setFieldDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addField(); } }}
+              aria-label="Add a field name"
               placeholder="Add a field name and press Enter"
               className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-1.5 text-xs outline-none focus:border-[var(--cyber-violet)]"
             />
