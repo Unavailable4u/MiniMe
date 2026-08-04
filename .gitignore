@@ -20,7 +20,7 @@ apps/shipping_test/
 filelist.txt
 
 # Test files to ignore
-tests/
+#tests/
 
 # Persistent chat data (user content, not source)
 data/
