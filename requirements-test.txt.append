@@ -1,0 +1,9 @@
+# --- Append to requirements.txt for B1/B3 (test infra) ---
+pytest>=8.0
+pytest-mock>=3.14
+vcrpy>=6.0
+# NOTE: fakeredis is deliberately NOT used here — memory/bus.py talks to
+# Upstash's REST-based `upstash_redis.Redis` client, not redis-py, and
+# fakeredis emulates the redis-py wire protocol, not the Upstash REST
+# surface. tests/conftest.py ships a small hand-rolled FakeRedis instead
+# that matches the 4 methods bus.py actually calls (get/set/delete/mget).
