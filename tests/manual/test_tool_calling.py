@@ -1,55 +1,66 @@
 """
-Notebooks Chat-First refinement, Phase 2 step 2.3.
+tests/manual/test_tool_calling.py — moved from scripts/test_tool_calling.py
+(B1 manual-tier migration; originally Notebooks Chat-First refinement,
+Phase 2 step 2.3).
 
 Isolated test harness: sends a handful of canned user messages, plus the
 `tools` array built from the Phase 1 capability manifest (via
-utils/capability_tools.manifest_to_tools), to the LLM and logs the raw
-tool-call response.
+utils/capability_tools.manifest_to_tools), to the real Groq API and
+checks the raw tool-call response for consistency across repeated runs.
+Hits a live LLM, so this lives in tests/manual/ and is never run in CI
+-- see pytest.ini's `manual` marker.
 
 Deliberately does NOT touch the real send path (WorkspaceChatPanel.jsx /
-sendTask()) -- that's step 2.5/2.6. This script is scratch-only, meant to
-be iterated on for step 2.4 (tune descriptions/prompt against ~10 test
-messages until classification looks reliable).
+sendTask()) -- that's step 2.5/2.6. FIXTURE_MANIFEST below is a
+deliberately kept-separate fixture, not the real manifest (contrast
+with test_capability_coverage.py, which uses a hand-synced copy of the
+real one) -- this file's job is tuning tool-call classification in
+isolation, not validating against production shape.
 
-Usage (PowerShell):
-    $env:GROQ_API_KEY = "your_key_here"
-    python scripts/test_tool_calling.py
+Records/replays via a vcrpy cassette (tests/manual/cassettes/ -- see the
+README.md there for the full recording workflow) instead of re-hitting
+the live API and re-spending REPEATS x len(TEST_CASES) calls every run.
+First run needs a real GROQ_API_KEY to record; every run after that
+replays the cassette and needs no key and no network call at all.
 
-Usage (bash):
-    export GROQ_API_KEY=your_key_here
-    python scripts/test_tool_calling.py
-
-Requires: pip install openai
-(Groq exposes an OpenAI-compatible endpoint, so the standard `openai`
-client works against it -- just point base_url at Groq.)
+Usage:
+    # first time (or to refresh a stale cassette):
+    GROQ_API_KEY=your_key_here pytest tests/manual/test_tool_calling.py -v -s
+    # every run after that -- no key needed, replays the cassette:
+    pytest tests/manual/test_tool_calling.py -v -s
+    (add TOOL_TEST_REPEATS=N to change repeats per message, default 3)
 """
-
 import json
 import os
-import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-# Running this file directly (python scripts/test_tool_calling.py) puts
-# only scripts/ on sys.path, not the project root -- so `utils` wouldn't
-# be importable otherwise. Add the repo root explicitly.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-try:
-    from openai import OpenAI
-    from openai import APIStatusError
-except ImportError:
-    print(
-        "Missing dependency. Run: pip install openai\n"
-        "(or: pip install openai --break-system-packages, if your "
-        "environment requires it)",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-import time
+import pytest
+import vcr
+from openai import OpenAI, APIStatusError
 
 from utils.capability_tools import manifest_to_tools
+
+pytestmark = pytest.mark.manual
+
+CASSETTE_DIR = Path(__file__).parent / "cassettes"
+CASSETTE_NAME = "test_tool_calling_classification_coverage.yaml"
+
+my_vcr = vcr.VCR(
+    cassette_library_dir=str(CASSETTE_DIR),
+    record_mode="once",
+    match_on=["method", "uri", "body"],
+    filter_headers=["authorization"],
+    # See cassettes/README.md -- lets every repeat of an identical
+    # message reuse the same recorded interaction instead of requiring
+    # one distinct recording per repeat.
+    allow_playback_repeats=True,
+)
+
+
+def _cassette_exists() -> bool:
+    return (CASSETTE_DIR / CASSETTE_NAME).exists()
 
 
 # --------------------------------------------------------------------------
@@ -108,8 +119,8 @@ FIXTURE_MANIFEST = [
 ]
 
 # --------------------------------------------------------------------------
-# Canned test messages -- start here for 2.3, expand toward ~10 for 2.4.
-# Mix clear-intent, ambiguous, and no-match phrasings on purpose.
+# Canned test messages -- mix clear-intent, ambiguous, and no-match
+# phrasings on purpose.
 #
 # `expected` is the tool name we WANT to see (None means "no tool call is
 # correct"). Used only to flag mismatches in the summary below -- it's not
@@ -135,6 +146,29 @@ TEST_CASES = [
 
 MAX_RETRIES = 4
 BACKOFF_BASE_SECONDS = 2  # 2, 4, 8, 16...
+
+MODEL = "llama-3.3-70b-versatile"
+
+SYSTEM_PROMPT = (
+    "You are the assistant for a study workspace app. You have tools "
+    "that generate study materials (flashcards, quizzes, study guides, "
+    "mind maps, topic clusters, workflows) from the sources currently "
+    "in the user's workspace.\n\n"
+    "Only call a tool when the user is clearly asking for one of these "
+    "specific study materials to be generated. If the request doesn't "
+    "match any tool -- including requests for things that sound similar "
+    "but aren't offered (e.g. a podcast/audio overview), small talk, "
+    "or anything unrelated to the workspace (e.g. the weather) -- do "
+    "NOT call a tool. Just reply normally in plain text: say what you "
+    "can help with instead, or ask a clarifying question.\n\n"
+    "Call at most one tool per turn. If a request could reasonably map "
+    "to more than one tool (e.g. 'what should I do next'), don't call "
+    "any of them -- ask the user which one they want instead."
+)
+
+
+def _is_malformed_tool_call_error(err: APIStatusError) -> bool:
+    return err.status_code == 400 and "tool_use_failed" in str(getattr(err, "body", "") or err)
 
 
 def _call_with_retries(client: OpenAI, **kwargs) -> Any:
@@ -179,48 +213,25 @@ def _call_with_retries(client: OpenAI, **kwargs) -> Any:
     raise last_err
 
 
-def _is_malformed_tool_call_error(err: APIStatusError) -> bool:
-    return err.status_code == 400 and "tool_use_failed" in str(getattr(err, "body", "") or err)
-
-
-MODEL = "llama-3.3-70b-versatile"
-REPEATS = int(os.environ.get("TOOL_TEST_REPEATS", "3"))
-
-SYSTEM_PROMPT = (
-    "You are the assistant for a study workspace app. You have tools "
-    "that generate study materials (flashcards, quizzes, study guides, "
-    "mind maps, topic clusters, workflows) from the sources currently "
-    "in the user's workspace.\n\n"
-    "Only call a tool when the user is clearly asking for one of these "
-    "specific study materials to be generated. If the request doesn't "
-    "match any tool -- including requests for things that sound similar "
-    "but aren't offered (e.g. a podcast/audio overview), small talk, "
-    "or anything unrelated to the workspace (e.g. the weather) -- do "
-    "NOT call a tool. Just reply normally in plain text: say what you "
-    "can help with instead, or ask a clarifying question.\n\n"
-    "Call at most one tool per turn. If a request could reasonably map "
-    "to more than one tool (e.g. 'what should I do next'), don't call "
-    "any of them -- ask the user which one they want instead."
+@pytest.mark.skipif(
+    not (os.getenv("GROQ_API_KEY") or _cassette_exists()),
+    reason="GROQ_API_KEY not set and no recorded cassette found -- see tests/manual/cassettes/README.md",
 )
-
-
-def main() -> None:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        print(
-            "GROQ_API_KEY is not set in this shell.\n"
-            "PowerShell:  $env:GROQ_API_KEY = \"your_key_here\"\n"
-            "bash:        export GROQ_API_KEY=your_key_here",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
+@my_vcr.use_cassette(CASSETTE_NAME)
+def test_tool_calling_classification_coverage(monkeypatch):
+    # A real key is only required to RECORD (cassette missing); once a
+    # cassette exists, replay needs a syntactically-valid key but never
+    # actually sends it anywhere -- vcrpy intercepts the request first.
+    if not os.getenv("GROQ_API_KEY"):
+        monkeypatch.setenv("GROQ_API_KEY", "sk-cassette-replay-placeholder")
+    api_key = os.environ["GROQ_API_KEY"]
+    repeats = int(os.environ.get("TOOL_TEST_REPEATS", "3"))
     client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
     tools = manifest_to_tools(FIXTURE_MANIFEST)
     enabled_names = [t["function"]["name"] for t in tools]
     print(f"Built {len(tools)} tools from manifest: {enabled_names}")
-    print(f"Repeats per message: {REPEATS} (set TOOL_TEST_REPEATS to change)\n")
+    print(f"Repeats per message: {repeats} (set TOOL_TEST_REPEATS to change)\n")
 
     # message -> list of per-run outcome dicts, for the summary table
     results: Dict[str, List[Dict[str, Any]]] = {}
@@ -230,7 +241,7 @@ def main() -> None:
         print("=" * 70)
         print(f"USER: {message}  (expected: {expected or 'no tool call'})")
 
-        for run in range(1, REPEATS + 1):
+        for run in range(1, repeats + 1):
             try:
                 response = _call_with_retries(
                     client,
@@ -314,13 +325,13 @@ def main() -> None:
             })
 
     # ----------------------------------------------------------------
-    # Summary: per message, how consistent was the model across REPEATS
+    # Summary: per message, how consistent was the model across repeats
     # runs, and did it ever diverge from the expected tool?
     # ----------------------------------------------------------------
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    any_issue = False
+    failing_messages = []
     for message, expected in TEST_CASES:
         runs = results[message]
         clean_runs = [r for r in runs if not r.get("malformed") and not r.get("api_error")]
@@ -343,29 +354,27 @@ def main() -> None:
         if missing_required_seen:
             flags.append("missing required arg seen")
         if malformed_count:
-            flags.append(f"MALFORMED TOOL CALL x{malformed_count}/{REPEATS} "
+            flags.append(f"MALFORMED TOOL CALL x{malformed_count}/{repeats} "
                           "(Llama emitted native <function=...> text; Groq rejected it)")
         if api_error_count:
-            flags.append(f"API ERROR (unretried) x{api_error_count}/{REPEATS}")
+            flags.append(f"API ERROR (unretried) x{api_error_count}/{repeats}")
 
         status = "OK" if not flags else " / ".join(flags)
+        # null-args alone is a known, already-handled quirk (see the
+        # normalization shim note below) -- not itself a failure signal.
         if flags and any(k in status for k in
                           ("INCONSISTENT", "MISMATCH", "missing required",
                            "MALFORMED", "API ERROR")):
-            any_issue = True
+            failing_messages.append(f"{message!r}: {status}")
 
         print(f"- {message!r}")
         print(f"    runs: {outcomes}")
         print(f"    status: {status}")
 
     print("=" * 70)
-    if any_issue:
-        print("Coverage gap or misfire found above -- do not close out 2.4 yet.")
-    else:
-        print("All cases consistent and matched expectations across "
-              f"{REPEATS} runs each. (null-args, if flagged above, still "
-              "needs the normalization shim in the real dispatcher.)")
-
-
-if __name__ == "__main__":
-    main()
+    assert not failing_messages, (
+        "Tool-call classification coverage gap(s) found "
+        "(null-args alone, if seen above, still just needs the "
+        "normalization shim in the real dispatcher and isn't counted "
+        "as a failure here):\n" + "\n".join(failing_messages)
+    )

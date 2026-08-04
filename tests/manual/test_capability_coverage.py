@@ -1,16 +1,33 @@
 """
-Notebooks Chat-First refinement, Phase 2 step 2.8.
+tests/manual/test_capability_coverage.py — moved from
+scripts/test_capability_coverage.py (B1 manual-tier migration;
+originally Notebooks Chat-First refinement, Phase 2 step 2.8:
+"Test 5-10 phrasings per capability; log misfires.").
 
-"Test 5-10 phrasings per capability; log misfires."
+Hits a live LLM via utils.llm_client.classify_tool_intent(), so this
+lives in tests/manual/ and is never run in CI -- see pytest.ini's
+`manual` marker.
 
-Two things distinguish this from scripts/test_tool_calling.py (steps
-2.3/2.4):
+FIXED as a followup to the B1 migration: TEST_CASES had most of its
+content commented out in the original scripts/ version -- only
+"study_guide" (5 phrasings) plus the 2 generate_workflow
+regression-check cases were active; the other 7 capability categories
+(clusters, facts, suggested_notes, study_flashcards, study_quiz,
+mindmap, podcast, video_overview) had ZERO live coverage, just
+commented-out placeholders, against this file's own "5-10 phrasings per
+capability" goal. All of it is now uncommented and active -- 40 phrasings
+across the 8 enabled categories (5 each) plus the 2 regression-check
+cases, 42 total. The no-match/edge-case pair ("What should I do next?",
+"What's the weather like today?") that was also commented out is
+restored too.
+
+Two things distinguish this from test_tool_calling.py (steps 2.3/2.4):
 
   1. REAL_MANIFEST below is a hand-kept-in-sync copy of api/server.py's
-     CAPABILITIES_MANIFEST -- not the 2.3/2.4 FIXTURE_MANIFEST. The two
-     have drifted apart: the fixture used "flashcards"/"quiz" as keys and
-     included "workflow" as a live (enabled) tool, but the real manifest
-     uses "study_flashcards"/"study_quiz", adds "facts" and
+     CAPABILITIES_MANIFEST -- not test_tool_calling.py's FIXTURE_MANIFEST.
+     The two have drifted apart: the fixture used "flashcards"/"quiz" as
+     keys and included "workflow" as a live (enabled) tool, but the real
+     manifest uses "study_flashcards"/"study_quiz", adds "facts" and
      "suggested_notes" (never covered by the original ~10 test messages),
      and (as of Phase 5 step 5.7) "podcast"/"video_overview" are now
      live/enabled too, matching the fixture's naming for those two --
@@ -29,30 +46,55 @@ Two things distinguish this from scripts/test_tool_calling.py (steps
 
 Does NOT import api/server.py directly to get CAPABILITIES_MANIFEST --
 that module pulls in FastAPI, Supabase, Pusher, and starts wiring up
-lifespan/CORS/etc. at import time, none of which this script needs or
+lifespan/CORS/etc. at import time, none of which this file needs or
 wants side effects from. REAL_MANIFEST is hand-copied instead, same
 "deliberately hand-kept in sync, nothing enforces it automatically"
 tradeoff api/server.py's own CAPABILITIES_MANIFEST comment already
 accepts for its relationship to notebookCapabilities.js.
 
-Usage (bash):
-    export GROQ_API_KEY=your_key_here
-    python scripts/test_capability_coverage.py
+Records/replays via a vcrpy cassette (tests/manual/cassettes/ -- see the
+README.md there for the full recording workflow) instead of re-hitting
+the live API and re-spending REPEATS x len(TEST_CASES) calls every run.
+First run needs a real GROQ_API_KEY to record; every run after that
+replays the cassette and needs no key and no network call at all.
 
-Usage (PowerShell):
-    $env:GROQ_API_KEY = "your_key_here"
-    python scripts/test_capability_coverage.py
+Usage:
+    # first time (or to refresh a stale cassette):
+    GROQ_API_KEY=your_key_here pytest tests/manual/test_capability_coverage.py -v -s
+    # every run after that -- no key needed, replays the cassette:
+    pytest tests/manual/test_capability_coverage.py -v -s
+    (add TOOL_TEST_REPEATS=N to change repeats per message, default 3)
 """
-
-import sys
+import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import pytest
+import vcr
 
 from utils.capability_tools import manifest_to_tools
 from utils.llm_client import classify_tool_intent
+
+pytestmark = pytest.mark.manual
+
+CASSETTE_DIR = Path(__file__).parent / "cassettes"
+CASSETTE_NAME = "test_capability_coverage_classification.yaml"
+
+my_vcr = vcr.VCR(
+    cassette_library_dir=str(CASSETTE_DIR),
+    record_mode="once",
+    match_on=["method", "uri", "body"],
+    filter_headers=["authorization"],
+    # See cassettes/README.md -- lets every repeat of an identical
+    # message reuse the same recorded interaction instead of requiring
+    # one distinct recording per repeat.
+    allow_playback_repeats=True,
+)
+
+
+def _cassette_exists() -> bool:
+    return (CASSETTE_DIR / CASSETTE_NAME).exists()
 
 
 # --------------------------------------------------------------------------
@@ -139,43 +181,45 @@ REAL_MANIFEST = [
 # no-match/edge-case block at the end. `expected` is the tool name we WANT
 # ("generate_<key>") or None for "no tool call is correct" -- not fed to
 # the model, only used to flag mismatches below.
+#
+# Restored to full coverage as a B1 followup -- see module docstring.
 # --------------------------------------------------------------------------
 TEST_CASES: List[tuple] = [
-    
+
     # --- clusters ---
- #   ("Can you group my sources into related topic clusters?", "generate_clusters"),
- #   ("Sort these sources into buckets by topic.", "generate_clusters"),
- #   ("Organize my notes by theme.", "generate_clusters"),
- #   ("Cluster everything I've uploaded by subject.", "generate_clusters"),
- #   ("Group similar sources together.", "generate_clusters"),
+    ("Can you group my sources into related topic clusters?", "generate_clusters"),
+    ("Sort these sources into buckets by topic.", "generate_clusters"),
+    ("Organize my notes by theme.", "generate_clusters"),
+    ("Cluster everything I've uploaded by subject.", "generate_clusters"),
+    ("Group similar sources together.", "generate_clusters"),
 
     # --- facts ---
- #   ("Pull out the key facts from these sources.", "generate_facts"),
- #   ("Give me a list of standalone facts I can cite.", "generate_facts"),
- #   ("What are the citable facts in my sources?", "generate_facts"),
- #   ("Extract factual statements from this material.", "generate_facts"),
- #   ("List out concrete facts from what I've uploaded.", "generate_facts"),
+    ("Pull out the key facts from these sources.", "generate_facts"),
+    ("Give me a list of standalone facts I can cite.", "generate_facts"),
+    ("What are the citable facts in my sources?", "generate_facts"),
+    ("Extract factual statements from this material.", "generate_facts"),
+    ("List out concrete facts from what I've uploaded.", "generate_facts"),
 
     # --- suggested_notes ---
- #   ("Scan my sources for anything worth taking notes on.", "generate_suggested_notes"),
- #   ("Suggest some notes based on what's in my sources.", "generate_suggested_notes"),
- #   ("Find passages that are worth noting down.", "generate_suggested_notes"),
- #   ("Propose some draft notes from my sources.", "generate_suggested_notes"),
- #   ("What should I be taking notes on here?", "generate_suggested_notes"),
+    ("Scan my sources for anything worth taking notes on.", "generate_suggested_notes"),
+    ("Suggest some notes based on what's in my sources.", "generate_suggested_notes"),
+    ("Find passages that are worth noting down.", "generate_suggested_notes"),
+    ("Propose some draft notes from my sources.", "generate_suggested_notes"),
+    ("What should I be taking notes on here?", "generate_suggested_notes"),
 
     # --- study_flashcards ---
- #   ("Can you make me some flashcards for this chapter?", "generate_study_flashcards"),
- #   ("I need flashcards to study from.", "generate_study_flashcards"),
- #   ("Turn my notes into flashcards.", "generate_study_flashcards"),
- #   ("Make Q&A cards out of this material.", "generate_study_flashcards"),
- #  ("Give me flashcards covering these sources.", "generate_study_flashcards"),
+    ("Can you make me some flashcards for this chapter?", "generate_study_flashcards"),
+    ("I need flashcards to study from.", "generate_study_flashcards"),
+    ("Turn my notes into flashcards.", "generate_study_flashcards"),
+    ("Make Q&A cards out of this material.", "generate_study_flashcards"),
+    ("Give me flashcards covering these sources.", "generate_study_flashcards"),
 
     # --- study_quiz ---
- #   ("Quiz me on what I just read.", "generate_study_quiz"),
- #   ("Give me a quiz to test my understanding.", "generate_study_quiz"),
- #   ("Can you test me on this material?", "generate_study_quiz"),
- #   ("Make a graded quiz from my sources.", "generate_study_quiz"),
- #   ("I want to quiz myself on this chapter.", "generate_study_quiz"),
+    ("Quiz me on what I just read.", "generate_study_quiz"),
+    ("Give me a quiz to test my understanding.", "generate_study_quiz"),
+    ("Can you test me on this material?", "generate_study_quiz"),
+    ("Make a graded quiz from my sources.", "generate_study_quiz"),
+    ("I want to quiz myself on this chapter.", "generate_study_quiz"),
 
     # --- study_guide ---
     ("Give me a summary I can study from.", "generate_study_guide"),
@@ -185,30 +229,30 @@ TEST_CASES: List[tuple] = [
     ("I need a written summary to study from.", "generate_study_guide"),
 
     # --- mindmap ---
- #   ("Show me how all these topics connect.", "generate_mindmap"),
- #   ("Build a mind map of these concepts.", "generate_mindmap"),
- #   ("Visualize how these ideas relate to each other.", "generate_mindmap"),
- #   ("Map out the connections between these topics.", "generate_mindmap"),
- #   ("Give me a concept map of this material.", "generate_mindmap"),
+    ("Show me how all these topics connect.", "generate_mindmap"),
+    ("Build a mind map of these concepts.", "generate_mindmap"),
+    ("Visualize how these ideas relate to each other.", "generate_mindmap"),
+    ("Map out the connections between these topics.", "generate_mindmap"),
+    ("Give me a concept map of this material.", "generate_mindmap"),
 
-    # --- podcast (NEW — Phase 5 step 5.7 enabled this tool; step 5.8 is
-    # this coverage block) ---
- #   ("Can you make me a podcast about this?", "generate_podcast"),
- #   ("Turn my sources into a podcast episode.", "generate_podcast"),
- #   ("I'd rather listen than read -- make an audio podcast of this.", "generate_podcast"),
- #   ("Generate a two-host discussion of this material.", "generate_podcast"),
- #   ("Make a podcast episode covering these sources.", "generate_podcast"),
+    # --- podcast (Phase 5 step 5.7 enabled this tool; step 5.8 is this
+    # coverage block) ---
+    ("Can you make me a podcast about this?", "generate_podcast"),
+    ("Turn my sources into a podcast episode.", "generate_podcast"),
+    ("I'd rather listen than read -- make an audio podcast of this.", "generate_podcast"),
+    ("Generate a two-host discussion of this material.", "generate_podcast"),
+    ("Make a podcast episode covering these sources.", "generate_podcast"),
 
-    # --- video_overview (NEW — Phase 5 step 5.7/5.8, same as podcast) ---
- #   ("Can you make a video overview of this?", "generate_video_overview"),
- #   ("I want a narrated video summarizing these sources.", "generate_video_overview"),
- #   ("Turn this into a short explainer video.", "generate_video_overview"),
- #   ("Give me a video walkthrough of this material.", "generate_video_overview"),
- #   ("Generate a narrated video summary of my notes.", "generate_video_overview"),
+    # --- video_overview (Phase 5 step 5.7/5.8, same as podcast) ---
+    ("Can you make a video overview of this?", "generate_video_overview"),
+    ("I want a narrated video summarizing these sources.", "generate_video_overview"),
+    ("Turn this into a short explainer video.", "generate_video_overview"),
+    ("Give me a video walkthrough of this material.", "generate_video_overview"),
+    ("Generate a narrated video summary of my notes.", "generate_video_overview"),
 
     # --- no-match / edge cases ---
-  #  ("What should I do next?", None),                         # ambiguous -- should clarify, not guess
-  #  ("What's the weather like today?", None),                  # unrelated to the app
+    ("What should I do next?", None),                         # ambiguous -- should clarify, not guess
+    ("What's the weather like today?", None),                  # unrelated to the app
     # REGRESSION CHECK, step 2.6 fallout: these two phrasings were
     # generate_workflow's coverage cases back in the 2.3/2.4 fixture,
     # where workflow was a live tool. In the REAL manifest workflow is
@@ -223,7 +267,6 @@ TEST_CASES: List[tuple] = [
 
 MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 2
-REPEATS = int(__import__("os").environ.get("TOOL_TEST_REPEATS", "3"))
 
 
 def _classify_with_retries(message: str, tools: list) -> Dict[str, Any]:
@@ -250,19 +293,33 @@ def _classify_with_retries(message: str, tools: list) -> Dict[str, Any]:
     return last_result
 
 
-def main() -> None:
+@pytest.mark.skipif(
+    not (os.getenv("GROQ_API_KEY") or _cassette_exists()),
+    reason="GROQ_API_KEY not set and no recorded cassette found -- see tests/manual/cassettes/README.md",
+)
+@my_vcr.use_cassette(CASSETTE_NAME)
+def test_capability_coverage_classification(monkeypatch):
+    # classify_tool_intent() -> _get_groq() reads GROQ_API_KEY directly
+    # and bails out early with an "error" result if it's unset, before
+    # ever reaching the (vcrpy-intercepted) HTTP call -- so replay needs
+    # a syntactically-valid key present even though it's never actually
+    # sent anywhere once vcrpy intercepts the request.
+    if not os.getenv("GROQ_API_KEY"):
+        monkeypatch.setenv("GROQ_API_KEY", "sk-cassette-replay-placeholder")
+    repeats = int(os.environ.get("TOOL_TEST_REPEATS", "3"))
+
     tools = manifest_to_tools(REAL_MANIFEST)
     enabled_names = [t["function"]["name"] for t in tools]
     print(f"Built {len(tools)} tools from REAL_MANIFEST: {enabled_names}")
-    # CHANGED — Phase 5 step 5.7: "generate_podcast"/"generate_video_overview"
-    # dropped from this check -- both are enabled, real tools as of this
-    # step, so their presence here is now expected, not a leak.
-    # "generate_workflow" is the one still-disabled stub left to guard
-    # against (endpoint: None in REAL_MANIFEST above).
-    if "generate_workflow" in enabled_names:
-        print("!! disabled capability leaked into the tools array -- see "
-              "utils/capability_tools.py's _is_enabled() fix (step 2.5)")
-    print(f"Repeats per message: {REPEATS} (set TOOL_TEST_REPEATS to change)\n")
+    # "generate_podcast"/"generate_video_overview" are enabled, real
+    # tools as of Phase 5 step 5.7, so their presence here is expected,
+    # not a leak. "generate_workflow" is the one still-disabled stub
+    # left to guard against (endpoint: None in REAL_MANIFEST above).
+    assert "generate_workflow" not in enabled_names, (
+        "disabled capability leaked into the tools array -- see "
+        "utils/capability_tools.py's _is_enabled()"
+    )
+    print(f"Repeats per message: {repeats} (set TOOL_TEST_REPEATS to change)\n")
 
     results: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -271,7 +328,7 @@ def main() -> None:
         print("=" * 70)
         print(f"USER: {message}  (expected: {expected or 'no tool call'})")
 
-        for run in range(1, REPEATS + 1):
+        for run in range(1, repeats + 1):
             result = _classify_with_retries(message, tools)
 
             if result.get("error"):
@@ -298,7 +355,7 @@ def main() -> None:
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    any_issue = False
+    failing_messages = []
     for message, expected in TEST_CASES:
         runs = results[message]
         clean_runs = [r for r in runs if not r["error"]]
@@ -315,26 +372,19 @@ def main() -> None:
         if not matches_expected:
             flags.append(f"MISFIRE (expected {expected or 'no tool call'}, got {got or 'no tool call'})")
         if ambiguous_count:
-            flags.append(f"ambiguous x{ambiguous_count}/{REPEATS}")
+            flags.append(f"ambiguous x{ambiguous_count}/{repeats}")
         if error_count:
-            flags.append(f"ERROR x{error_count}/{REPEATS} (after retries)")
+            flags.append(f"ERROR x{error_count}/{repeats} (after retries)")
 
         status = "OK" if not flags else " / ".join(flags)
         if any(k in status for k in ("INCONSISTENT", "MISFIRE", "ERROR")):
-            any_issue = True
+            failing_messages.append(f"{message!r}: {status}")
 
         print(f"- {message!r}")
         print(f"    runs: {outcomes}")
         print(f"    status: {status}")
 
     print("=" * 70)
-    if any_issue:
-        print("Misfire(s) or instability found above -- do not consider "
-              "step 2.8 coverage clean yet.")
-    else:
-        print(f"All {len(TEST_CASES)} phrasings consistent and matched "
-              f"expectations across {REPEATS} runs each.")
-
-
-if __name__ == "__main__":
-    main()
+    assert not failing_messages, (
+        "Misfire(s) or instability found:\n" + "\n".join(failing_messages)
+    )

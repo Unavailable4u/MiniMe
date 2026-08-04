@@ -1,8 +1,19 @@
 """
-Parallel-execution work, Step 6: end-to-end mocked verification.
+tests/integration/test_parallel_execution.py — migrated from
+scripts/test_parallel_execution.py (B1 manual/scripts sector migration).
 
-Exercises Steps 1-5 together, real logic under test everywhere except the
-network-facing edges each layer genuinely has:
+Moved to tests/integration/, NOT tests/manual/, because this file was
+already fully mocked at every network-facing edge before the move (see
+the per-layer breakdown below) — it needs no live credentials and no
+real Postgres/Redis/Pusher/LLM connection, so there's no reason for it
+to sit in the "hits real infra, run by hand" tier. Letting it run in CI
+is a strict improvement: it's a genuine regression test for the
+Panel-synthesis consensus rule, the hard gatekeeper, and the executor's
+concurrent-dispatch logic.
+
+Exercises Steps 1-5 of the parallel-execution work together, real logic
+under test everywhere except the network-facing edges each layer
+genuinely has:
 
   - eo/panel.py's run_panel()/_merge_parallel_groups() (Step 2): the 3
     Panel LLM calls are mocked (utils.llm_client.generate_text, patched
@@ -26,7 +37,10 @@ network-facing edges each layer genuinely has:
     Pusher being configured, and captures every event fired for
     assertions. memory.bus.write/get_current_app_slug are mocked for
     the one scenario that pauses (the pause snapshot write is the only
-    other real I/O _run_loop() does).
+    other real I/O _run_loop() does) -- on top of, not instead of, the
+    autouse fake_bus fixture in tests/conftest.py, since that fixture
+    only swaps the underlying Redis client and these two scenarios want
+    the calls themselves to no-op.
 
 SCOPE NOTE, same posture scripts/test_proactive_suggestions.py already
 documents for its own boundary: eo/executor.py's own import chain pulls
@@ -35,25 +49,15 @@ cerebras_cloud_sdk, openai, e2b, upstash_redis, psycopg2, pusher, ...),
 because REAL_ACTION_ROLES/REGISTRY are built at module-load time from
 every agent module, not lazily. That's an unavoidable cost of importing
 eo.executor at all (there's no way to test Steps 4/5 without it) --
-this script pays that cost once, at import time, rather than trying to
+this module pays that cost once, at import time, rather than trying to
 stub the whole agents/ package out module-by-module. It does NOT stand
 up a real Postgres/Redis/Pusher/LLM-provider connection anywhere below:
-every actual network-reaching call this script's own scenarios would
-otherwise make is mocked at the call site, per function above.
-
-Usage (bash):
-    python scripts/test_parallel_execution.py
-
-Usage (PowerShell):
-    python scripts/test_parallel_execution.py
+every actual network-reaching call these scenarios would otherwise make
+is mocked at the call site, per layer above.
 """
-import sys
-import time
 import json
-from pathlib import Path
+import time
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import eo.panel as panel
 import eo.executor as executor
@@ -61,17 +65,6 @@ import eo.dispatcher as dispatcher
 import memory.bus as bus
 from eo.panel import run_panel
 from eo.router import sanitize_parallel_groups, build_execution_graph_from_hires, MAX_PARALLEL_GROUP_SIZE
-
-
-_any_issue = False
-
-
-def check(label, cond):
-    global _any_issue
-    status = "OK" if cond else "FAIL"
-    if not cond:
-        _any_issue = True
-    print(f"  [{status}] {label}")
 
 
 # ---------------------------------------------------------------------------
@@ -115,20 +108,16 @@ def _make_fakes(sleep_seconds: float = 0.0):
     return fake_resolve, fake_next_step, fake_emit_event, call_log, start_times, events
 
 
-def main() -> None:
-    # =======================================================================
-    # SCENARIO 1 (Step 2): run_panel() end-to-end with mocked LLM calls --
-    # 2-of-3 consensus survives (exact + superset agreement), a lone-voice
-    # guess (member C) is dropped, and a genuinely malformed group inside
-    # member C's own raw JSON (a role never in ITS OWN suggested_agents)
-    # is already gone before synthesis even runs, per eo/inspector.py
-    # Step 1's own loose-validate discipline.
-    # =======================================================================
-    print("=" * 70)
-    print("SCENARIO 1: Panel synthesis -- 2-of-3 consensus, lone voice dropped,")
-    print("malformed member-C group filtered at the Inspector-schema layer")
-    print("=" * 70)
+# =============================================================================
+# SCENARIO 1 (Step 2): run_panel() end-to-end with mocked LLM calls --
+# 2-of-3 consensus survives (exact + superset agreement), a lone-voice
+# guess (member C) is dropped, and a genuinely malformed group inside
+# member C's own raw JSON (a role never in ITS OWN suggested_agents)
+# is already gone before synthesis even runs, per eo/inspector.py
+# Step 1's own loose-validate discipline.
+# =============================================================================
 
+def test_panel_synthesis_two_of_three_consensus():
     draft = {
         "path": "adaptive", "tier": 3, "directed_task_type": None, "confidence": 0.7,
         "suggested_agents": ["worker_a", "worker_b", "worker_c", "reviewer"],
@@ -178,27 +167,23 @@ def main() -> None:
     with patch.object(panel, "generate_text", fake_generate_text):
         synthesized = run_panel("build 3 independent workers, then review", draft)
 
-    print("synthesized parallel_groups:", synthesized["parallel_groups"])
-    check("worker_a+worker_b survives (2-of-3, exact+superset agreement)",
-          synthesized["parallel_groups"] == [["worker_a", "worker_b"]])
-    check("member C's lone-voice [reviewer, worker_c] did NOT survive",
-          ["reviewer", "worker_c"] not in synthesized["parallel_groups"])
-    check("synthesized execution_order is still the plain flat union (Step 2 doesn't touch it)",
-          synthesized["execution_order"] == ["worker_a", "worker_b", "worker_c", "reviewer"])
-    check("panel_votes carries all 3 members' own (pre-merge) parallel_groups untouched",
-          synthesized["panel_votes"][2]["parallel_groups"] ==
-          [["reviewer", "worker_c"]])  # member C's own vote, post-inspector-validate
+    assert synthesized["parallel_groups"] == [["worker_a", "worker_b"]], \
+        "worker_a+worker_b should survive (2-of-3, exact+superset agreement)"
+    assert ["reviewer", "worker_c"] not in synthesized["parallel_groups"], \
+        "member C's lone-voice [reviewer, worker_c] should not survive"
+    assert synthesized["execution_order"] == ["worker_a", "worker_b", "worker_c", "reviewer"], \
+        "synthesized execution_order should still be the plain flat union (Step 2 doesn't touch it)"
+    assert synthesized["panel_votes"][2]["parallel_groups"] == [["reviewer", "worker_c"]], \
+        "panel_votes should carry all 3 members' own (pre-merge) parallel_groups untouched"
 
-    # =======================================================================
-    # SCENARIO 2 (Step 3): sanitize_parallel_groups() -- the hard
-    # gatekeeper, called directly with a mix of legitimate and
-    # adversarial candidates in one pass.
-    # =======================================================================
-    print("\n" + "=" * 70)
-    print("SCENARIO 2: sanitize_parallel_groups() hard gatekeeper --")
-    print("adversarial and malformed candidates, all in one pass")
-    print("=" * 70)
 
+# =============================================================================
+# SCENARIO 2 (Step 3): sanitize_parallel_groups() -- the hard
+# gatekeeper, called directly with a mix of legitimate and
+# adversarial candidates in one pass.
+# =============================================================================
+
+def test_sanitize_parallel_groups_hard_gatekeeper():
     hires = [{"role": r, "agent_key": "K", "brief": "b"}
              for r in ["a", "b", "c", "d", "e", "approver", "f"]]
     execution_order = ["a", "b", "c", "d", "e", "approver", "f"]
@@ -214,26 +199,23 @@ def main() -> None:
         ["b", "b", "b"],                    # dedupes to a singleton -> dropped
     ]
     result = sanitize_parallel_groups(candidates, execution_order, ["approver"], hires)
-    print("result:", result)
-    check("legitimate group [a, b] survived as a nested list",
-          ["a", "b"] in result)
-    check("no other group survived (every remaining entry is a flat role)",
-          all(not isinstance(e, list) for e in result if e != ["a", "b"]))
-    check("every original role still accounted for, nothing dropped from the order itself",
-          sorted(x for e in result for x in (e if isinstance(e, list) else [e])) ==
-          sorted(execution_order))
-    check("MAX_PARALLEL_GROUP_SIZE is respected as the cap used above (sanity on the constant itself)",
-          MAX_PARALLEL_GROUP_SIZE == 4)
 
-    # =======================================================================
-    # SCENARIO 3 (Steps 2/4): eo/executor.py actually dispatches an
-    # independent-role group CONCURRENTLY, not sequentially, and fires
-    # exactly one parallel_group_dispatched event for it.
-    # =======================================================================
-    print("\n" + "=" * 70)
-    print("SCENARIO 3: independent roles actually dispatch concurrently")
-    print("=" * 70)
+    assert ["a", "b"] in result, "legitimate group [a, b] should survive as a nested list"
+    assert all(not isinstance(e, list) for e in result if e != ["a", "b"]), \
+        "no other group should survive (every remaining entry should be a flat role)"
+    assert sorted(x for e in result for x in (e if isinstance(e, list) else [e])) == sorted(execution_order), \
+        "every original role should still be accounted for, nothing dropped from the order itself"
+    assert MAX_PARALLEL_GROUP_SIZE == 4, \
+        "MAX_PARALLEL_GROUP_SIZE should still be the cap used above (sanity on the constant itself)"
 
+
+# =============================================================================
+# SCENARIO 3 (Steps 2/4): eo/executor.py actually dispatches an
+# independent-role group CONCURRENTLY, not sequentially, and fires
+# exactly one parallel_group_dispatched event for it.
+# =============================================================================
+
+def test_executor_dispatches_independent_roles_concurrently():
     SLEEP = 0.25
     fake_resolve, fake_next_step, fake_emit_event, call_log, start_times, events = _make_fakes(SLEEP)
 
@@ -251,41 +233,37 @@ def main() -> None:
         )
         elapsed = time.monotonic() - t0
 
-    print(f"elapsed={elapsed:.3f}s, call_log={call_log}")
     group_starts = [start_times[r] for r in ("role_a", "role_b", "role_c")]
     spread = max(group_starts) - min(group_starts)
-    print(f"group start spread={spread:.4f}s")
 
     # Sequential would be 5 dispatches * SLEEP ~= 1.25s; genuinely
     # concurrent is 3 dispatches' worth (role_x, the group as ONE slot,
     # role_y) ~= 0.75s. Give generous headroom for scheduler jitter
     # without letting a truly-sequential run slip through as a pass.
-    check("all 5 roles ran", set(call_log) == {"role_x", "role_a", "role_b", "role_c", "role_y"})
-    check("group members started within a tight window of each other (genuinely concurrent)",
-          spread < 0.15)
-    check("total wall time is close to 3 dispatches' worth, not 5 (concurrency actually saved time)",
-          elapsed < SLEEP * 4)
-    check("exactly one parallel_group_dispatched event fired",
-          sum(1 for e in events if e["type"] == "parallel_group_dispatched") == 1)
+    assert set(call_log) == {"role_x", "role_a", "role_b", "role_c", "role_y"}, "all 5 roles should run"
+    assert spread < 0.15, \
+        "group members should start within a tight window of each other (genuinely concurrent)"
+    assert elapsed < SLEEP * 4, \
+        "total wall time should be close to 3 dispatches' worth, not 5 (concurrency actually saved time)"
+    assert sum(1 for e in events if e["type"] == "parallel_group_dispatched") == 1, \
+        "exactly one parallel_group_dispatched event should fire"
     dispatched_event = next(e for e in events if e["type"] == "parallel_group_dispatched")
-    check("the event's payload names exactly the 3 group members",
-          set(dispatched_event["payload"]["roles"]) == {"role_a", "role_b", "role_c"})
-    check("execute_graph() returned real results for every role (no pause)",
-          isinstance(result3, dict) and result3.get("status") != "paused"
-          and set(result3.keys()) == {"role_x", "role_a", "role_b", "role_c", "role_y"})
+    assert set(dispatched_event["payload"]["roles"]) == {"role_a", "role_b", "role_c"}, \
+        "the event's payload should name exactly the 3 group members"
+    assert isinstance(result3, dict) and result3.get("status") != "paused" \
+        and set(result3.keys()) == {"role_x", "role_a", "role_b", "role_c", "role_y"}, \
+        "execute_graph() should return real results for every role (no pause)"
 
-    # =======================================================================
-    # SCENARIO 4 (Step 5): approval_roles member folded into a group --
-    # simulating Steps 2/3 both having a bug and letting one slip
-    # through. The executor's own backstop must degrade this to
-    # sequential and never actually concurrently dispatch the checkpoint
-    # role.
-    # =======================================================================
-    print("\n" + "=" * 70)
-    print("SCENARIO 4: approval_roles member never gets grouped, even if it")
-    print("slips past Steps 2/3 -- degrades to sequential and pauses correctly")
-    print("=" * 70)
 
+# =============================================================================
+# SCENARIO 4 (Step 5): approval_roles member folded into a group --
+# simulating Steps 2/3 both having a bug and letting one slip
+# through. The executor's own backstop must degrade this to
+# sequential and never actually concurrently dispatch the checkpoint
+# role.
+# =============================================================================
+
+def test_approval_role_never_grouped_even_if_it_slips_through():
     fake_resolve4, fake_next_step4, fake_emit_event4, call_log4, _, events4 = _make_fakes(0.0)
     role_names4 = ["role_p", ["role_q", "role_r_APPROVAL"], "role_s"]
     agent_names4 = ["generic_worker", "generic_worker", "generic_worker"]
@@ -303,31 +281,24 @@ def main() -> None:
             approval_roles={"role_r_APPROVAL"},
         )
 
-    print("result:", result4)
-    print("call_log:", call_log4)
-    print("events:", [e["type"] for e in events4])
-    check("run paused exactly at the approval_roles member",
-          result4 == {"status": "paused", "paused_at_role": "role_r_APPROVAL"})
-    check("role_p (before the group) and role_q (the group's safe member) both ran",
-          call_log4 == ["role_p", "role_q", "role_r_APPROVAL"])
-    check("role_s (after the pause point) never ran",
-          "role_s" not in call_log4)
-    check("NO parallel_group_dispatched event fired -- the group was degraded before dispatch",
-          all(e["type"] != "parallel_group_dispatched" for e in events4))
+    assert result4 == {"status": "paused", "paused_at_role": "role_r_APPROVAL"}, \
+        "run should pause exactly at the approval_roles member"
+    assert call_log4 == ["role_p", "role_q", "role_r_APPROVAL"], \
+        "role_p (before the group) and role_q (the group's safe member) should both run"
+    assert "role_s" not in call_log4, "role_s (after the pause point) should never run"
+    assert all(e["type"] != "parallel_group_dispatched" for e in events4), \
+        "NO parallel_group_dispatched event should fire -- the group should be degraded before dispatch"
 
-    # =======================================================================
-    # SCENARIO 5 (Steps 3+4 together): the full pipeline against a mixed
-    # bag of legitimate + adversarial parallel_groups -- sanitize, build
-    # the nested execution_order, then actually execute it. Malformed
-    # candidates degrade safely; the one legitimate group among them
-    # still runs concurrently.
-    # =======================================================================
-    print("\n" + "=" * 70)
-    print("SCENARIO 5: full pipeline (sanitize -> build graph -> execute) against")
-    print("adversarial model output -- degrades safely, doesn't lose or corrupt")
-    print("the legitimate group sitting alongside the garbage")
-    print("=" * 70)
 
+# =============================================================================
+# SCENARIO 5 (Steps 3+4 together): the full pipeline against a mixed
+# bag of legitimate + adversarial parallel_groups -- sanitize, build
+# the nested execution_order, then actually execute it. Malformed
+# candidates degrade safely; the one legitimate group among them
+# still runs concurrently.
+# =============================================================================
+
+def test_full_pipeline_sanitize_build_execute_against_adversarial_output():
     hires5 = [{"role": r, "agent_key": "K", "brief": "b"} for r in ["a", "b", "c", "approver"]]
     execution_order5 = ["a", "b", "c", "approver"]
     approval_roles5 = {"approver"}
@@ -340,8 +311,7 @@ def main() -> None:
     ]
 
     sanitized5 = sanitize_parallel_groups(adversarial_groups, execution_order5, approval_roles5, hires5)
-    print("sanitized execution_order:", sanitized5)
-    check("exactly one nested group survived: [a, b]", sanitized5 == [["a", "b"], "c", "approver"])
+    assert sanitized5 == [["a", "b"], "c", "approver"], "exactly one nested group should survive: [a, b]"
 
     agent_names5, role_names5, key_overrides5 = build_execution_graph_from_hires(hires5, sanitized5)
 
@@ -357,24 +327,10 @@ def main() -> None:
             session_id="sess-e2e", path="adaptive", approval_roles=approval_roles5,
         )
 
-    print("result:", result5)
-    print("call_log:", call_log5)
-    check("execution paused at 'approver' after running the group + 'c' with no errors",
-          result5 == {"status": "paused", "paused_at_role": "approver"})
-    check("every role up through the pause point ran exactly once, nothing duplicated or skipped",
-          call_log5 == ["a", "b", "c", "approver"])
-    check("the surviving [a, b] group fired its own dispatched event",
-          any(e["type"] == "parallel_group_dispatched" and set(e["payload"]["roles"]) == {"a", "b"}
-              for e in events5))
-
-    print("\n" + "=" * 70)
-    if _any_issue:
-        print("One or more checks FAILED -- see above.")
-        sys.exit(1)
-    print("All checks passed: independent roles dispatch concurrently, approval_roles")
-    print("members are never grouped (even adversarially), and malformed Panel output")
-    print("degrades safely to sequential execution end-to-end.")
-
-
-if __name__ == "__main__":
-    main()
+    assert result5 == {"status": "paused", "paused_at_role": "approver"}, \
+        "execution should pause at 'approver' after running the group + 'c' with no errors"
+    assert call_log5 == ["a", "b", "c", "approver"], \
+        "every role up through the pause point should run exactly once, nothing duplicated or skipped"
+    assert any(e["type"] == "parallel_group_dispatched" and set(e["payload"]["roles"]) == {"a", "b"}
+               for e in events5), \
+        "the surviving [a, b] group should fire its own dispatched event"
