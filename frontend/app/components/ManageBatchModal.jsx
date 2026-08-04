@@ -49,6 +49,8 @@ export default function ManageBatchModal({ batch, allChats, onClose }) {
             <div className="flex items-center gap-1 mb-3">
               <input
                 autoFocus
+                id="batch-name"
+                name="batchName"
                 aria-label="Batch name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -76,7 +78,13 @@ export default function ManageBatchModal({ batch, allChats, onClose }) {
           <div className="space-y-1 mb-3 max-h-52 overflow-y-auto">
             {members.map((c) => (
               <label key={c.id} className="flex items-center gap-2 text-xs py-1">
-                <input type="checkbox" checked={checked.has(c.id)} onChange={() => toggle(c.id)} />
+                <input
+                  type="checkbox"
+                  id={`batch-member-${c.id}`}
+                  name={`batch-member-${c.id}`}
+                  checked={checked.has(c.id)}
+                  onChange={() => toggle(c.id)}
+                />
                 {c.title}
               </label>
             ))}

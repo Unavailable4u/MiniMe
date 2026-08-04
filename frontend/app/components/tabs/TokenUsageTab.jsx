@@ -365,6 +365,8 @@ function ProjectSectionUsagePanel({ apiUrl }) {
     >
       <div className="flex flex-wrap gap-2 mb-3">
         <select
+          id="token-usage-domain"
+          name="tokenUsageDomain"
           value={domain}
           onChange={(e) => setDomain(e.target.value)}
           className="bg-black/40 border border-cyber-border rounded px-2 py-1 text-xs text-cyber-text"
@@ -375,6 +377,8 @@ function ProjectSectionUsagePanel({ apiUrl }) {
           ))}
         </select>
         <input
+          id="token-usage-workspace-id"
+          name="tokenUsageWorkspaceId"
           value={workspaceId}
           onChange={(e) => setWorkspaceId(e.target.value)}
           aria-label="Filter by workspace ID"

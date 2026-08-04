@@ -62,6 +62,8 @@ export default function CreateWorkspaceModal({ onClose, initialName = "", source
         )}
         <input
           autoFocus
+          id="project-name"
+          name="projectName"
           aria-label="Project name"
           value={name}
           onChange={(e) => setName(e.target.value)}

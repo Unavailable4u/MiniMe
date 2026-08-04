@@ -444,6 +444,8 @@ function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, 
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          id={`chat-title-${chat.id}`}
+                          name="chatTitle"
                           aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
@@ -709,8 +711,10 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
     <div className="space-y-4">
       <div className="border border-[var(--neutral-800)] rounded-lg p-3 space-y-3">
         <div>
-          <label className="text-[11px] text-[var(--neutral-500)]">Simulation type</label>
+          <label htmlFor="test-sim-type" className="text-[11px] text-[var(--neutral-500)]">Simulation type</label>
           <select
+            id="test-sim-type"
+            name="testSimType"
             value={simType}
             onChange={(e) => setSimType(e.target.value)}
             className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-violet)]"
@@ -722,10 +726,12 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
         </div>
 
         <div>
-          <label className="text-[11px] text-[var(--neutral-500)]">
+          <label htmlFor="test-target" className="text-[11px] text-[var(--neutral-500)]">
             What's being tested
           </label>
           <textarea
+            id="test-target"
+            name="testTarget"
             value={target}
             onChange={(e) => setTarget(e.target.value)}
             placeholder="Describe the feature, pricing, PRD excerpt, or app being tested — e.g. 'the new $12/mo Pro tier with unlimited exports'"
@@ -738,7 +744,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
         </div>
 
         <label className="flex items-center gap-1.5 text-[11px] text-[var(--neutral-500)] cursor-pointer">
-          <input type="checkbox" checked={thorough} onChange={(e) => setThorough(e.target.checked)} />
+          <input type="checkbox" id="test-thorough" name="testThorough" checked={thorough} onChange={(e) => setThorough(e.target.checked)} />
           N workers, parallel (more personas, slower)
         </label>
 
@@ -1007,6 +1013,8 @@ function PersonasPanel({ fetchRoles, updateRolePrompt, setRolePinned }) {
               {isEditing && (
                 <div className="mt-2 space-y-2">
                   <textarea
+                    id={`test-draft-brief-${role}`}
+                    name={`test-draft-brief-${role}`}
                     value={draftBrief}
                     onChange={(e) => setDraftBrief(e.target.value)}
                     rows={4}

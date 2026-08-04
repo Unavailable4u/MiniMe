@@ -168,6 +168,8 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
         </div>
         <input
           ref={inputRef}
+          id="ingestion-upload-files"
+          name="ingestionUploadFiles"
           type="file"
           multiple
           aria-label="Upload files"
@@ -179,6 +181,8 @@ export default function IngestionDropzone({ workspaceId, onIngested }) {
       <form onSubmit={handleUrlSubmit} className="flex items-center gap-2">
         <Link2 size={14} className="text-[var(--neutral-500)] shrink-0" />
         <input
+          id="ingestion-url-draft"
+          name="ingestionUrlDraft"
           value={urlDraft}
           onChange={(e) => setUrlDraft(e.target.value)}
           aria-label="Paste a web page or YouTube URL"

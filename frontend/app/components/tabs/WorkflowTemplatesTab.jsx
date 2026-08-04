@@ -211,6 +211,8 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues
       <label className="block text-xs text-[var(--neutral-500)]">
         Name
         <input
+          id="workflow-template-name"
+          name="workflowTemplateName"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Blog post pipeline"
@@ -221,6 +223,8 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues
       <label className="block text-xs text-[var(--neutral-500)]">
         Description (optional)
         <input
+          id="workflow-template-description"
+          name="workflowTemplateDescription"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           className="mt-1 w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)]"
@@ -243,6 +247,8 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues
       <label className="block text-xs text-[var(--neutral-500)]">
         Domain hint (optional)
         <input
+          id="workflow-template-domain-hint"
+          name="workflowTemplateDomainHint"
           value={domainHint}
           onChange={(e) => setDomainHint(e.target.value)}
           placeholder="e.g. creative_writing"
@@ -364,6 +370,8 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onSta
 
       <div className="flex gap-2 pt-1">
         <input
+          id="workflow-task-text"
+          name="workflowTaskText"
           value={taskText}
           onChange={(e) => setTaskText(e.target.value)}
           aria-label="Task text"

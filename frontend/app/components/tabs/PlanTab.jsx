@@ -97,10 +97,12 @@ function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
   return (
     <div className="space-y-4 max-w-lg">
       <div>
-        <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
+        <label htmlFor="plan-handoff-pasted" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
           Paste handoff_packager's chat response (optional — auto-fills the fields below)
         </label>
         <textarea
+          id="plan-handoff-pasted"
+          name="planHandoffPasted"
           value={pasted}
           onChange={(e) => parsePasted(e.target.value)}
           placeholder='Handoff ready for "..." — 4 feature(s), first cycle target: "Auth". Scoped to app_slug "my-app_ab12cd34"...'
@@ -119,8 +121,10 @@ function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
         />
       </div>
       <div>
-        <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">First task / cycle goal</label>
+        <label htmlFor="plan-cycle-goal" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">First task / cycle goal</label>
         <textarea
+          id="plan-cycle-goal"
+          name="planCycleGoal"
           value={cycleGoal}
           onChange={(e) => setCycleGoal(e.target.value)}
           placeholder="Implement Auth as scoped in the PRD's first cycle."
@@ -461,6 +465,8 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                       <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
                         <input
                           autoFocus
+                          id={`chat-title-${chat.id}`}
+                          name="chatTitle"
                           aria-label="Chat title"
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
@@ -808,6 +814,8 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
         {paste_hint && <> {paste_hint}</>}
       </p>
       <textarea
+        id="plan-markdown-paste-raw"
+        name="planMarkdownPasteRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         placeholder="Paste the role's markdown output here…"
@@ -885,6 +893,8 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
         <code className="mx-1 text-[var(--neutral-400)]">```mermaid</code> block copied from a chat message.
       </p>
       <textarea
+        id="plan-diagram-paste-raw"
+        name="planDiagramPasteRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         placeholder={"graph TD\n  A[Client] --> B[API]\n  B --> C[(Database)]"}
@@ -963,6 +973,8 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
         real follow-up wireframe if that's the same chat that generated this one (§5.5/§5.7).
       </p>
       <textarea
+        id="plan-wireframe-paste-raw"
+        name="planWireframePasteRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         placeholder="<!doctype html>..."

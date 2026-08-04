@@ -67,6 +67,8 @@ export default function HireReviewScreen({ hires, onConfirm, onCancel }) {
               </div>
 
               <textarea
+                id={`hire-brief-${i}`}
+                name={`hire-brief-${i}`}
                 value={hire.brief}
                 onChange={(e) => updateBrief(i, e.target.value)}
                 rows={3}
