@@ -28,7 +28,12 @@ def _fake_classification():
     }
 
 
-def test_cli_and_api_call_styles_produce_the_identical_brief():
+def test_cli_and_api_call_styles_produce_the_identical_brief(mock_llm):
+    # mock_llm isn't autouse (unlike fake_bus) -- this is the one test in
+    # sector 1 that actually reaches generate_text() (staffing a brand
+    # new role, via _get_or_write_role_prompt()'s cold-start path), so it
+    # has to request the fixture explicitly.
+    mock_llm.set_response("A concise, reusable brief for this role.")
     task_text = "Write a short glossary entry explaining a new technical term."
 
     # "CLI-style" call: staff_task(decision, task_text=task_text)
@@ -47,7 +52,8 @@ def test_cli_and_api_call_styles_produce_the_identical_brief():
     assert cli_hires[0]["brief"] == api_hires[0]["brief"]
 
 
-def test_second_call_does_not_write_a_new_brief():
+def test_second_call_does_not_write_a_new_brief(mock_llm):
+    mock_llm.set_response("A concise, reusable brief for this role.")
     task_text = "Write a short glossary entry explaining a new technical term."
     staff_task(_fake_classification(), task_text=task_text)
     brief_after_first_call = get_role_prompt(NOVEL_ROLE)
