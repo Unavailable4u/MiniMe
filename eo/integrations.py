@@ -91,7 +91,7 @@ def save_credentials(user_id: str, provider: str, access_token: str,
         expires_at = _now().timestamp() + expires_in
         expires_at = datetime.fromtimestamp(expires_at, tz=timezone.utc)
 
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             """
             insert into user_integrations
@@ -116,7 +116,7 @@ def get_credentials(user_id: str, provider: str) -> dict | None:
     want refresh_if_needed() instead — this is exposed for the
     GET /api/integrations listing endpoint, which needs account_label and
     connected-since but never needs the actual decrypted token."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "select provider, account_label, access_token, refresh_token, scope, expires_at, "
             "created_at, updated_at from user_integrations where user_id = %s and provider = %s",
@@ -139,7 +139,7 @@ def get_credentials(user_id: str, provider: str) -> dict | None:
 
 def list_connected(user_id: str) -> list[dict]:
     """For the frontend's integrations panel — never includes tokens."""
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "select provider, account_label, expires_at, created_at from user_integrations "
             "where user_id = %s order by created_at",
@@ -158,7 +158,7 @@ def list_connected(user_id: str) -> list[dict]:
 
 
 def disconnect(user_id: str, provider: str) -> None:
-    with db.cursor() as cur:
+    with db.cursor(user_id=user_id) as cur:
         cur.execute(
             "delete from user_integrations where user_id = %s and provider = %s returning id",
             (user_id, provider),
