@@ -164,14 +164,20 @@ export default function CalendarEventsPanel() {
 
           <div className="flex items-center gap-2">
             <input
+              id="calendar-range-start"
+              name="calendar-range-start"
               type="datetime-local"
+              aria-label="Range start"
               value={range.timeMin}
               onChange={(e) => setRange((r) => ({ ...r, timeMin: e.target.value }))}
               className="flex-1 text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
             />
             <span className="text-[10px] text-[var(--neutral-600)]">to</span>
             <input
+              id="calendar-range-end"
+              name="calendar-range-end"
               type="datetime-local"
+              aria-label="Range end"
               value={range.timeMax}
               onChange={(e) => setRange((r) => ({ ...r, timeMax: e.target.value }))}
               className="flex-1 text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
@@ -238,36 +244,51 @@ export default function CalendarEventsPanel() {
           {showForm ? (
             <form onSubmit={handleCreate} className="space-y-1.5 border-t border-[var(--neutral-800)] pt-3">
               <input
+                id="calendar-event-title"
+                name="calendar-event-title"
                 type="text"
                 placeholder="Title"
+                aria-label="Event title"
                 value={form.summary}
                 onChange={(e) => setForm((f) => ({ ...f, summary: e.target.value }))}
                 className="w-full text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
               />
               <div className="flex items-center gap-2">
                 <input
+                  id="calendar-event-start"
+                  name="calendar-event-start"
                   type="datetime-local"
+                  aria-label="Event start"
                   value={form.start}
                   onChange={(e) => setForm((f) => ({ ...f, start: e.target.value }))}
                   className="flex-1 text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
                 />
                 <span className="text-[10px] text-[var(--neutral-600)]">to</span>
                 <input
+                  id="calendar-event-end"
+                  name="calendar-event-end"
                   type="datetime-local"
+                  aria-label="Event end"
                   value={form.end}
                   onChange={(e) => setForm((f) => ({ ...f, end: e.target.value }))}
                   className="flex-1 text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
                 />
               </div>
               <input
+                id="calendar-event-location"
+                name="calendar-event-location"
                 type="text"
                 placeholder="Location (optional)"
+                aria-label="Event location"
                 value={form.location}
                 onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))}
                 className="w-full text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
               />
               <textarea
+                id="calendar-event-description"
+                name="calendar-event-description"
                 placeholder="Description (optional)"
+                aria-label="Event description"
                 value={form.description}
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                 rows={2}

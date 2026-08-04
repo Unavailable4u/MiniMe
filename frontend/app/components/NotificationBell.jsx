@@ -36,11 +36,9 @@ export default function NotificationBell({ onOpenChat }) {
   const [open, setOpen] = useState(false);
 
   function toggle() {
-    setOpen((o) => {
-      const next = !o;
-      if (next) markNotificationsRead(); // opening the inbox IS reading it, same convention as most bell/inbox UIs
-      return next;
-    });
+    const next = !open;
+    setOpen(next);
+    if (next) markNotificationsRead(); // opening the inbox IS reading it, same convention as most bell/inbox UIs
   }
 
   return (

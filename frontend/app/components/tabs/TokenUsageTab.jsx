@@ -3,6 +3,7 @@ import { useMemo, useState, useEffect, memo } from "react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useUsageStats } from "../../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2
+import { useIsVisible } from "../../hooks/useIsVisible";   // FIX — defer chart mount until this tab is actually shown (see hook's own comment)
 
 const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
 
@@ -167,6 +168,7 @@ function UsageHistoryPanel({ apiUrl }) {
   const [historyData, setHistoryData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [chartRef, chartVisible] = useIsVisible();
 
   useEffect(() => {
     let cancelled = false;
@@ -238,7 +240,8 @@ function UsageHistoryPanel({ apiUrl }) {
       )}
       {!loading && !error && providerNames.length > 0 && (
         <>
-          <div style={{ height: 220 }}>
+          <div ref={chartRef} style={{ height: 220 }}>
+            {chartVisible && (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartRows}>
                 <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
@@ -255,6 +258,7 @@ function UsageHistoryPanel({ apiUrl }) {
                 ))}
               </BarChart>
             </ResponsiveContainer>
+            )}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3 pt-2 border-t border-cyber-border">
             {providerNames.map((p) => (
@@ -289,6 +293,7 @@ function ProjectSectionUsagePanel({ apiUrl }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [chartRef, chartVisible] = useIsVisible();
 
   useEffect(() => {
     if (!domain && !workspaceId) {
@@ -392,7 +397,8 @@ function ProjectSectionUsagePanel({ apiUrl }) {
         <p className="text-xs text-cyber-dim">No usage recorded for that scope in this window yet.</p>
       )}
       {!loading && !error && data && (data.domain || data.workspace) && (
-        <div style={{ height: 180 }}>
+        <div ref={chartRef} style={{ height: 180 }}>
+          {chartVisible && (
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={rows}>
               <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
@@ -404,6 +410,7 @@ function ProjectSectionUsagePanel({ apiUrl }) {
               {data.workspace && <Bar dataKey="workspace" name="workspace" fill="#a78bfa" radius={[2, 2, 0, 0]} />}
             </BarChart>
           </ResponsiveContainer>
+          )}
         </div>
       )}
     </Card>
@@ -518,6 +525,7 @@ function ProviderCard({ provider, keys, history }) {
   const limit = keys[0]?.daily_limit; // same static estimate for every key of a given provider
   const pct = limit ? Math.min(100, Math.round((used / (limit * keys.length)) * 100)) : null;
   const providerHistory = useMemo(() => mergeProviderHistory(keys, history), [keys, history]);
+  const [chartRef, chartVisible] = useIsVisible();
   return (
     <div className="cyber-panel p-3 space-y-2">
       <div className="flex items-center justify-between">
@@ -527,7 +535,8 @@ function ProviderCard({ provider, keys, history }) {
         </span>
       </div>
       {providerHistory.length > 1 && (
-        <div style={{ height: 90 }}>
+        <div ref={chartRef} style={{ height: 90 }}>
+          {chartVisible && (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={providerHistory}>
               <Area type="monotone" dataKey="tokens" stroke={color} fill={color} fillOpacity={0.15} strokeWidth={1.5} isAnimationActive={false} />
@@ -539,6 +548,7 @@ function ProviderCard({ provider, keys, history }) {
               />
             </AreaChart>
           </ResponsiveContainer>
+          )}
         </div>
       )}
       <div className="space-y-1 pt-1 border-t border-cyber-border">
@@ -572,8 +582,10 @@ function mergeProviderHistory(keys, history) {
 }
 
 function CombinedChart({ data, providers }) {
+  const [chartRef, chartVisible] = useIsVisible();
   return (
-    <div style={{ height: 200 }}>
+    <div ref={chartRef} style={{ height: 200 }}>
+      {chartVisible && (
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data}>
           <CartesianGrid stroke="#1a2740" strokeDasharray="3 3" />
@@ -597,6 +609,7 @@ function CombinedChart({ data, providers }) {
           ))}
         </AreaChart>
       </ResponsiveContainer>
+      )}
     </div>
   );
 }
