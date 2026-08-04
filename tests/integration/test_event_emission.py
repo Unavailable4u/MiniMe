@@ -1,19 +1,21 @@
 """
-tests/test_event_emission.py — Stage 6, step 1 of the roadmap (Part 10):
-proof-of-concept coverage for relay/emitter.py, wired so far into the
-Inspector only (eo/inspector.py).
+tests/integration/test_event_emission.py — Stage 6, step 1 of the
+roadmap (Part 10): proof-of-concept coverage for relay/emitter.py,
+wired so far into the Inspector (eo/inspector.py) and, since Part 2
+§2.4, eo/executor.py's resume_graph() (see test_resume_graph.py for the
+pause/resume-specific coverage, including the "execution_resumed" event
+this file's own baseline audit found missing from VALID_EVENT_TYPES).
 
-Mocks Pusher entirely -- no real credentials, no real network call. This
-is the "mock Pusher, assert the right event types fire in the right
-order" test from Part 11, scoped down to what's actually wired today
-(just the Inspector). Extend the FakePusher-based assertions here as
-more agents get wrapped in later steps.
+Mocks Pusher entirely -- no real credentials, no real network call.
+
+Moved from tests/test_event_emission.py (B1 audit) and updated for
+Migration Part 12/15's tier -> path rename: eo/inspector.py's classify()
+emits and returns "path" now, not "tier" -- both the fake LLM response
+JSON and the assertions below were written against the old schema and
+needed updating, or classify()'s own _validate() rejects the response
+outright (KeyError on parsed["path"] via the "path not in VALID_PATHS"
+check) before any event ever fires.
 """
-import os
-import sys
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import relay.emitter as emitter
 
 
@@ -65,6 +67,15 @@ def test_invalid_event_type_raises(monkeypatch):
         pass
 
 
+def test_execution_resumed_is_a_valid_event_type():
+    # Regression coverage for the bug this rewrite found (see module
+    # docstring / test_resume_graph.py): eo/executor.py's resume_graph()
+    # has always fired this event type, but it was missing from
+    # VALID_EVENT_TYPES, so every real resume call raised ValueError
+    # right after applying the human's decision.
+    assert "execution_resumed" in emitter.VALID_EVENT_TYPES
+
+
 def test_event_fires_with_correct_shape(monkeypatch):
     _configure_fake_env(monkeypatch)
     fake_client = _FakePusher()
@@ -73,7 +84,7 @@ def test_event_fires_with_correct_shape(monkeypatch):
 
     result = emitter.emit_event(
         "routing_decision", session_id="sess_abc123", agent="inspector",
-        tier=1, payload={"confidence": 0.9},
+        path="direct", payload={"confidence": 0.9},
     )
 
     assert result is True
@@ -84,7 +95,7 @@ def test_event_fires_with_correct_shape(monkeypatch):
     assert data["type"] == "routing_decision"
     assert data["session_id"] == "sess_abc123"
     assert data["agent"] == "inspector"
-    assert data["tier"] == 1
+    assert data["path"] == "direct"
     assert data["payload"] == {"confidence": 0.9}
     assert "timestamp" in data
 
@@ -117,52 +128,40 @@ def test_failed_trigger_is_caught_not_raised(monkeypatch):
 # ---------------------------------------------------------------------------
 # 2. Inspector wiring (proof of concept -- Stage 6 step 1)
 # ---------------------------------------------------------------------------
+#
+# These two tests mock eo.inspector.generate_text directly rather than
+# reaching down into utils/llm_client.py's provider-client layer -- what's
+# under test here is event wiring around classify(), not the Groq/Gemini
+# fallback chain itself (that's test_eo_inspector.py's job). Mocking at
+# the generate_text boundary keeps this file decoupled from CHAIN's exact
+# provider/model/key_env contents, which have already changed once
+# (GitHub Models retired, Groq model bumped) since this suite was
+# written.
 
-def test_inspector_emits_start_and_done_and_routing_decision(monkeypatch):
+GOOD_JSON = (
+    '{"path": "instant", "directed_task_type": null, "confidence": 0.95, '
+    '"suggested_agents": ["responder"], "reasoning": "trivial question"}'
+)
+
+
+def test_inspector_emits_start_and_routing_decision_and_done(monkeypatch):
     _configure_fake_env(monkeypatch)
     fake_client = _FakePusher()
     monkeypatch.setattr(emitter, "_pusher_client", fake_client)
     monkeypatch.setattr(emitter, "_pusher_unavailable", False)
 
     import eo.inspector as inspector
-
-    class _FakeResponse:
-        GOOD_JSON = (
-            '{"tier": 0, "directed_task_type": null, "confidence": 0.95, '
-            '"suggested_agents": ["responder"], "reasoning": "trivial question"}'
-        )
-
-        class choices:
-            pass
-
-    class _FakeChoice:
-        def __init__(self, content):
-            self.message = type("M", (), {"content": content})
-
-    class _FakeMsgResponse:
-        def __init__(self, content):
-            self.choices = [_FakeChoice(content)]
-
-    class _FakeWorkingClient:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kwargs):
-                    return _FakeMsgResponse(_FakeResponse.GOOD_JSON)
-
-    import utils.llm_client as llm_client
-    monkeypatch.setattr(llm_client, "_get_groq",
-                         lambda key_env, timeout=None: _FakeWorkingClient())
+    monkeypatch.setattr(inspector, "generate_text", lambda **kwargs: GOOD_JSON)
 
     result = inspector.classify("what's 2+2", session_id="sess_xyz")
 
-    assert result["tier"] == 0
+    assert result["path"] == "instant"
     event_types = [call[1] for call in fake_client.calls]
     assert event_types == ["agent_start", "routing_decision", "agent_done"]
     # routing_decision payload should be exactly the classification result
     routing_call = fake_client.calls[1][2]
-    assert routing_call["payload"]["tier"] == 0
-    assert routing_call["tier"] == 0
+    assert routing_call["payload"]["path"] == "instant"
+    assert routing_call["path"] == "instant"
 
 
 def test_inspector_without_session_id_emits_nothing(monkeypatch):
@@ -174,35 +173,7 @@ def test_inspector_without_session_id_emits_nothing(monkeypatch):
     monkeypatch.setattr(emitter, "_pusher_unavailable", False)
 
     import eo.inspector as inspector
-    import utils.llm_client as llm_client
-
-    class _FakeChoice:
-        def __init__(self, content):
-            self.message = type("M", (), {"content": content})
-
-    class _FakeMsgResponse:
-        def __init__(self, content):
-            self.choices = [_FakeChoice(content)]
-
-    GOOD_JSON = (
-        '{"tier": 0, "directed_task_type": null, "confidence": 0.95, '
-        '"suggested_agents": ["responder"], "reasoning": "trivial question"}'
-    )
-
-    class _FakeWorkingClient:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kwargs):
-                    return _FakeMsgResponse(GOOD_JSON)
-
-    monkeypatch.setattr(llm_client, "_get_groq",
-                         lambda key_env, timeout=None: _FakeWorkingClient())
+    monkeypatch.setattr(inspector, "generate_text", lambda **kwargs: GOOD_JSON)
 
     inspector.classify("what's 2+2")  # no session_id
     assert fake_client.calls == []
-
-
-if __name__ == "__main__":
-    print("Run via pytest -- this file uses monkeypatch fixtures throughout:")
-    print("  python -m pytest tests/test_event_emission.py -v")
