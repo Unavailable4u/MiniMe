@@ -99,6 +99,18 @@ VALID_EVENT_TYPES = {
     # on real traffic and evaluating whether the Panel's proposed
     # groups are actually sensible over time.
     "parallel_group_dispatched",
+    # FIX — confirmed via tests/integration/test_resume_graph.py (Part 2
+    # §2.4's human-in-the-loop pause/resume checkpoint): eo/executor.py's
+    # resume_graph() has fired emit_event("execution_resumed", ...) right
+    # after applying a human's approve/edit/reject_redo decision since
+    # that checkpoint landed, but the literal was never added here. Since
+    # resume_graph() always has a real session_id (a paused run can't
+    # exist without one), this check ran unconditionally on every real
+    # resume call and raised ValueError immediately after the human's
+    # decision was applied -- confirmed by exercising resume_graph()
+    # directly against a real paused snapshot in the test above, same
+    # class of gap as the "notification" fix a few entries up.
+    "execution_resumed",
 }
 
 _pusher_client = None

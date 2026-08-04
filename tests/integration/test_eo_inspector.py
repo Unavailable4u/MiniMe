@@ -1,6 +1,6 @@
 """
-tests/test_eo_inspector.py — Part 8.4 (fixture set) + Part 11 (testing plan)
-of the v5 Master Blueprint.
+tests/integration/test_eo_inspector.py — Part 8.4 (fixture set) + Part 11
+(testing plan) of the v5 Master Blueprint.
 
 Three layers, cheapest/most-deterministic first:
 
@@ -9,17 +9,31 @@ Three layers, cheapest/most-deterministic first:
    the primary" scenario is reproducible without needing an actually-bad
    real key or real network access. Always run.
 3. Live fixtures (Part 8.4's actual task list) — real classify() calls
-   against real providers. Skipped automatically if EO_INSPECTOR_GROQ_KEY
+   against real providers. Skipped automatically if EO_INSPECTOR_GROQ_KEY_1
    isn't set, since these need real credentials and real network access,
    and their point is calibrating against real model behavior, not CI
    hygiene. Run these yourself once your .env has real keys:
 
-    python -m pytest tests/test_eo_inspector.py -v -s
+    python -m pytest tests/integration/test_eo_inspector.py -v -s
+
+Moved from tests/test_eo_inspector.py (B1 audit) and rewritten for two
+migrations that landed since the original file was written:
+
+  - Migration Part 12 §8.2/§8.4: output schema is now {path, ...}, not
+    {tier, ...} -- "tier" is an int 0-3, "path" is one of "instant"/
+    "direct"/"fixed"/"adaptive". Every _validate() fixture and every
+    fallback-chain assertion below uses the new schema; the old
+    tier-int fixtures fail _validate() outright (KeyError on
+    parsed["path"] before the int/str question is even reached).
+
+  - Quota-reality fix §4 (2026-07-30, see eo/inspector.py's own module
+    docstring): GitHub Models retired -- utils/llm_client.py's
+    _get_github no longer exists at all. The Inspector's live CHAIN is
+    now Groq x2 (EO_INSPECTOR_GROQ_KEY_1/_2) -> Gemini x2
+    (GEMINI_API_KEY_10/_11), so the fallback-chain tests below mock
+    _get_groq and _get_gemini, not _get_groq and _get_github.
 """
 import os
-import sys
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import eo.inspector as inspector
 
@@ -27,36 +41,48 @@ import eo.inspector as inspector
 # 1. Schema validation — no network.
 # ---------------------------------------------------------------------------
 
-def test_valid_tier0_passes():
+def test_valid_instant_path_passes():
     result = inspector._validate({
-        "tier": 0, "directed_task_type": None, "confidence": 0.9,
+        "path": "instant", "directed_task_type": None, "confidence": 0.9,
         "suggested_agents": ["responder"], "reasoning": "trivial",
     })
-    assert result["tier"] == 0
+    assert result["path"] == "instant"
 
 
-def test_valid_tier2_with_directed_task_type_passes():
+def test_valid_fixed_path_with_directed_task_type_passes():
     result = inspector._validate({
-        "tier": 2, "directed_task_type": "debug", "confidence": 0.8,
+        "path": "fixed", "directed_task_type": "debug", "confidence": 0.8,
         "suggested_agents": ["reviewer", "fixer_pool"], "reasoning": "bug report",
     })
     assert result["directed_task_type"] == "debug"
 
 
-def test_invalid_tier_rejected():
+def test_invalid_path_rejected():
     try:
-        inspector._validate({"tier": 7, "directed_task_type": None,
+        inspector._validate({"path": "sga", "directed_task_type": None,
                               "confidence": 0.9, "suggested_agents": [], "reasoning": ""})
         assert False, "expected ValueError"
     except ValueError:
         pass
 
 
-def test_directed_task_type_without_tier2_rejected():
-    # This is the "tier says 1 but directed_task_type is set anyway"
-    # inconsistency — must be surfaced, not silently resolved either way.
+def test_numeric_tier_instead_of_path_rejected():
+    # The pre-migration shape must not silently pass -- "path" is a hard
+    # enum check now, same discipline the old "tier" int check had.
     try:
-        inspector._validate({"tier": 1, "directed_task_type": "debug",
+        inspector._validate({"tier": 0, "directed_task_type": None,
+                              "confidence": 0.9, "suggested_agents": [], "reasoning": ""})
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_directed_task_type_without_fixed_path_rejected():
+    # This is the "path says 'direct' but directed_task_type is set
+    # anyway" inconsistency — must be surfaced, not silently resolved
+    # either way.
+    try:
+        inspector._validate({"path": "direct", "directed_task_type": "debug",
                               "confidence": 0.9, "suggested_agents": [], "reasoning": ""})
         assert False, "expected ValueError"
     except ValueError:
@@ -65,7 +91,7 @@ def test_directed_task_type_without_tier2_rejected():
 
 def test_invalid_directed_task_type_rejected():
     try:
-        inspector._validate({"tier": 2, "directed_task_type": "make_coffee",
+        inspector._validate({"path": "fixed", "directed_task_type": "make_coffee",
                               "confidence": 0.9, "suggested_agents": [], "reasoning": ""})
         assert False, "expected ValueError"
     except ValueError:
@@ -74,7 +100,7 @@ def test_invalid_directed_task_type_rejected():
 
 def test_out_of_range_confidence_rejected():
     try:
-        inspector._validate({"tier": 0, "directed_task_type": None,
+        inspector._validate({"path": "instant", "directed_task_type": None,
                               "confidence": 1.4, "suggested_agents": [], "reasoning": ""})
         assert False, "expected ValueError"
     except ValueError:
@@ -83,11 +109,28 @@ def test_out_of_range_confidence_rejected():
 
 def test_non_list_suggested_agents_rejected():
     try:
-        inspector._validate({"tier": 0, "directed_task_type": None,
+        inspector._validate({"path": "instant", "directed_task_type": None,
                               "confidence": 0.9, "suggested_agents": "responder", "reasoning": ""})
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_unrecognized_domain_defaults_to_none_rather_than_rejecting():
+    result = inspector._validate({
+        "path": "adaptive", "directed_task_type": None, "confidence": 0.9,
+        "suggested_agents": ["writer"], "reasoning": "", "domain": "not_a_real_domain",
+    })
+    assert result["domain"] is None
+
+
+def test_execution_order_drops_roles_not_in_suggested_agents():
+    result = inspector._validate({
+        "path": "adaptive", "directed_task_type": None, "confidence": 0.9,
+        "suggested_agents": ["implementer"], "reasoning": "",
+        "execution_order": ["implementer", "a_role_never_suggested"],
+    })
+    assert result["execution_order"] == ["implementer"]
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +140,7 @@ def test_non_list_suggested_agents_rejected():
 class _FakeChoice:
     def __init__(self, content):
         self.message = type("M", (), {"content": content})
+        self.finish_reason = "stop"
 
 
 class _FakeResponse:
@@ -128,7 +172,7 @@ class _FakeFailingClient:
 class _FakeWorkingClient:
     """Simulates the fallback provider succeeding with a valid classification."""
     GOOD_JSON = (
-        '{"tier": 1, "directed_task_type": null, "confidence": 0.82, '
+        '{"path": "direct", "directed_task_type": null, "confidence": 0.82, '
         '"suggested_agents": ["prompt_writer_lean", "code_writer_1worker"], '
         '"reasoning": "small single-file script"}'
     )
@@ -140,20 +184,27 @@ class _FakeWorkingClient:
                 return _FakeResponse(_FakeWorkingClient.GOOD_JSON)
 
 
-def test_fallback_chain_engages_when_primary_provider_fails(monkeypatch):
+def test_fallback_chain_engages_when_both_groq_accounts_fail(monkeypatch):
+    """CHAIN is Groq KEY_1 -> Groq KEY_2 -> Gemini KEY_10 -> Gemini KEY_11
+    now (GitHub Models retired) -- both Groq steps must be exhausted
+    before the Gemini fallback engages."""
     import utils.llm_client as llm_client
 
     def fake_get_groq(key_env, timeout=None):
         return _FakeFailingClient()
 
-    def fake_get_github(key_env, timeout=None):
+    def fake_get_gemini(key_env, timeout=None):
         return _FakeWorkingClient()
 
     monkeypatch.setattr(llm_client, "_get_groq", fake_get_groq)
-    monkeypatch.setattr(llm_client, "_get_github", fake_get_github)
+    monkeypatch.setattr(llm_client, "_get_gemini", fake_get_gemini)
+    monkeypatch.setenv("EO_INSPECTOR_GROQ_KEY_1", "fake")
+    monkeypatch.setenv("EO_INSPECTOR_GROQ_KEY_2", "fake")
+    monkeypatch.setenv("GEMINI_API_KEY_10", "fake")
+    monkeypatch.setenv("GEMINI_API_KEY_11", "fake")
 
     result = inspector.classify("write a small script that reverses a string")
-    assert result["tier"] == 1
+    assert result["path"] == "direct"
     assert result["confidence"] == 0.82
 
 
@@ -163,11 +214,13 @@ def test_raises_when_every_provider_in_chain_fails(monkeypatch):
     def fake_get_groq(key_env, timeout=None):
         return _FakeFailingClient()
 
-    def fake_get_github(key_env, timeout=None):
+    def fake_get_gemini(key_env, timeout=None):
         return None  # simulates key_env not set at all
 
     monkeypatch.setattr(llm_client, "_get_groq", fake_get_groq)
-    monkeypatch.setattr(llm_client, "_get_github", fake_get_github)
+    monkeypatch.setattr(llm_client, "_get_gemini", fake_get_gemini)
+    monkeypatch.setenv("EO_INSPECTOR_GROQ_KEY_1", "fake")
+    monkeypatch.setenv("EO_INSPECTOR_GROQ_KEY_2", "fake")
 
     try:
         inspector.classify("anything")
@@ -181,30 +234,30 @@ def test_raises_when_every_provider_in_chain_fails(monkeypatch):
 # ---------------------------------------------------------------------------
 
 FIXTURES = [
-    # (task_text, expected_tier, note)
-    ("What's the difference between a list and a tuple in Python?", 0,
+    # (task_text, expected_path, note)
+    ("What's the difference between a list and a tuple in Python?", "instant",
      "obviously trivial — factual question"),
-    ("Write a small Python script that reverses a string from stdin", 1,
+    ("Write a small Python script that reverses a string from stdin", "direct",
      "obviously small build — single file"),
-    ("There's a bug where the login form accepts empty passwords, fix it", 2,
+    ("There's a bug where the login form accepts empty passwords, fix it", "fixed",
      "directed: debug"),
-    ("Review the auth module for issues, don't change anything", 2,
+    ("Review the auth module for issues, don't change anything", "fixed",
      "directed: review"),
-    ("Add unit tests for the payment module", 2,
+    ("Add unit tests for the payment module", "fixed",
      "directed: add_tests"),
-    ("Refactor the user service to remove duplicated validation logic", 2,
+    ("Refactor the user service to remove duplicated validation logic", "fixed",
      "directed: refactor"),
-    ("Run a security scan on the dependencies", 2,
+    ("Run a security scan on the dependencies", "fixed",
      "directed: security_scan"),
-    ("Write documentation for the API endpoints", 2,
+    ("Write documentation for the API endpoints", "fixed",
      "directed: write_docs"),
-    ("Explain what the task_repository module does", 2,
+    ("Explain what the task_repository module does", "fixed",
      "directed: explain_code"),
-    ("Just make me a todo app with users, auth, and persistence", 3,
+    ("Just make me a todo app with users, auth, and persistence", "adaptive",
      "sounds casual but implies multi-file/multi-module scope — the "
      "under-routing case Part 8.4 flags to test carefully"),
-    ("Build and keep improving a full recipe-sharing app", 3,
-     "obviously tier 3 — ongoing multi-cycle project"),
+    ("Build and keep improving a full recipe-sharing app", "adaptive",
+     "obviously adaptive — ongoing multi-cycle project"),
 ]
 
 _HAS_REAL_KEY = bool(os.getenv("EO_INSPECTOR_GROQ_KEY_1"))
@@ -217,34 +270,14 @@ def test_live_fixtures():
         return
 
     correct = 0
-    for task_text, expected_tier, note in FIXTURES:
+    for task_text, expected_path, note in FIXTURES:
         result = inspector.classify(task_text)
-        got = result["tier"]
-        status = "OK" if got == expected_tier else "MISS"
-        if got == expected_tier:
+        got = result["path"]
+        status = "OK" if got == expected_path else "MISS"
+        if got == expected_path:
             correct += 1
-        print(f"  [{status}] expected={expected_tier} got={got} "
+        print(f"  [{status}] expected={expected_path} got={got} "
               f"conf={result['confidence']:.2f} :: {note}")
-    print(f"\n  {correct}/{len(FIXTURES)} fixtures matched expected tier "
+    print(f"\n  {correct}/{len(FIXTURES)} fixtures matched expected path "
           f"(informational — use this to calibrate the 0.75 threshold per "
           f"Part 8.3, not as a pass/fail gate)")
-
-
-if __name__ == "__main__":
-    tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
-    failures = 0
-    for t in tests:
-        try:
-            # monkeypatch-dependent tests need pytest; skip them in the
-            # standalone runner rather than crashing on a missing fixture.
-            import inspect
-            if "monkeypatch" in inspect.signature(t).parameters:
-                print(f"  SKIP  {t.__name__} (needs pytest's monkeypatch — run via pytest)")
-                continue
-            t()
-            print(f"  PASS  {t.__name__}")
-        except Exception as exc:
-            failures += 1
-            print(f"  FAIL  {t.__name__}: {exc}")
-    print(f"\n{len(tests) - failures}/{len(tests)} passed")
-    sys.exit(1 if failures else 0)

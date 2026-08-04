@@ -1,15 +1,21 @@
 """
-tests/test_eo_panel.py — Part 11 of the v5 Master Blueprint's testing
-plan: "synthesis logic specifically — feed it 3 deliberately disagreeing
-draft opinions and assert the max-tier/union/avg-confidence rules hold."
+tests/integration/test_eo_panel.py — Part 11 of the v5 Master Blueprint's
+testing plan: "synthesis logic specifically — feed it 3 deliberately
+disagreeing draft opinions and assert the max-tier/union/avg-confidence
+rules hold."
 
 _synthesize() is a pure function (no network) so these run instantly, no
 skip conditions needed, unlike test_eo_inspector.py's live-fixture tier.
-"""
-import os
-import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+Moved from tests/test_eo_panel.py (B1 audit), unchanged otherwise: this
+module's internal vocabulary is deliberately still "tier", not "path" —
+eo/panel.py's own comment above _UNREACHABLE_VOTE explains why
+(_synthesize() and every draft passed into it are keyed by "tier";
+TIER_TO_PATH/PATH_TO_TIER from eo/structure.py is the boundary shim
+that translates eo/inspector.py's Part 12 "path" output back into
+"tier" for this module and eo/loop_v4.py, both not yet renamed). So
+these fixtures and assertions are still correct as written.
+"""
 import eo.panel as panel
 
 
@@ -86,17 +92,3 @@ def test_unreachable_member_votes_conservative_not_dropped():
     result = panel._synthesize(votes, votes[0])
     assert result["tier"] == 3
     assert result["confidence"] < 0.95
-
-
-if __name__ == "__main__":
-    tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
-    failures = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  PASS  {t.__name__}")
-        except Exception as exc:
-            failures += 1
-            print(f"  FAIL  {t.__name__}: {exc}")
-    print(f"\n{len(tests) - failures}/{len(tests)} passed")
-    sys.exit(1 if failures else 0)
