@@ -121,6 +121,53 @@ def fake_bus(monkeypatch):
     yield fake
 
 
+@pytest.fixture(autouse=True)
+def _reset_role_prompts_cache():
+    """Autouse: found while building B1 sector 2's brief-writer tests.
+
+    eo/registry.py's _load_prompts() keeps a per-run role-prompt cache in
+    a module-level contextvars.ContextVar (_role_prompts_cache_ctx),
+    deliberately scoped to survive repeated calls WITHIN one request/CLI
+    run (see that module's own comment above the ContextVar). pytest
+    doesn't give each test function a fresh contextvars.Context the way a
+    new incoming request does, so without this reset, the FIRST test that
+    calls add_role_prompt()/get_role_prompt() for a given role poisons
+    every later test in the same pytest process: fake_bus above already
+    swaps in a brand-new empty FakeRedis per test, but a role added in
+    test A would still resolve as a cache hit in test B even though
+    test B's fake Redis has never heard of it -- zero LLM call, and a
+    brief from a different test's fixture data. Resetting the ContextVar
+    itself (not just the bus) before every test closes that gap."""
+    import eo.registry as registry_module
+    registry_module._role_prompts_cache_ctx.set(None)
+    yield
+    registry_module._role_prompts_cache_ctx.set(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_app_slug_context():
+    """Autouse: same class of bug as _reset_role_prompts_cache above, and
+    found the same way -- writing this test suite, not by inspection.
+    memory/bus.py's _namespaced() prefixes every non-exempt bus key with
+    whatever memory.bus._app_slug_ctx currently holds (a ContextVar, "Migration
+    Part B"). write(KEYS["app_slug"], ...) and set_app_slug() both set it
+    as a SIDE EFFECT of an ordinary-looking bus call, and -- exactly like
+    _role_prompts_cache_ctx -- pytest does not give each test function a
+    fresh contextvars.Context, so a slug set in test A silently changes
+    which physical key test B's read()/write() calls land on, even though
+    fake_bus above hands test B a brand-new, empty FakeRedis. Concretely:
+    a test that seeds fixed_code, THEN sets app_slug, running right after
+    a DIFFERENT test that left some other slug active, can write
+    fixed_code under the wrong namespace and then read it back as
+    missing under the new one -- confirmed by running this suite under
+    pytest-randomly, see tests/integration/test_structure_architect.py's
+    fixture ordering fix for the specific case this caught."""
+    import memory.bus as bus_module
+    bus_module._app_slug_ctx.set(None)
+    yield
+    bus_module._app_slug_ctx.set(None)
+
+
 # ---------------------------------------------------------------------------
 # 2. generate_text — patch every module that already imported it
 # ---------------------------------------------------------------------------
