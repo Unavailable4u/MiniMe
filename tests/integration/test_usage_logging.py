@@ -1,18 +1,31 @@
 """
-tests/test_usage_logging.py — Part 11 of the v5 Master Blueprint's testing
-plan: "confirm usage:* keys get written with correct provider/key_id/date
-after a mocked LLM call."
+tests/integration/test_usage_logging.py — Part 11 of the v5 Master
+Blueprint's testing plan: "confirm usage:* keys get written with correct
+provider/key_id/date after a mocked LLM call."
 
 Covers utils/llm_client.py's log_usage() (the public logger, Part 6.7) and
 its internal adapter _log_usage(), which generate_text() calls after every
 successful chat-completion step. No real Upstash, no real Pusher, no real
 provider network calls -- everything below is mocked, same style as
-tests/test_eo_inspector.py and tests/test_event_emission.py.
+tests/integration/test_eo_inspector.py and tests/integration/test_event_emission.py.
 
 Note on key naming (see memory/bus.py's _namespaced()): usage:* keys are
 deliberately NOT app_slug-namespaced -- quota is a property of your
 accounts, not any one project -- so the keys asserted on below are exactly
 what ends up in Redis, with no prefix to account for.
+
+Moved from tests/test_usage_logging.py (B1 reorg) and updated against the
+quota-reality fix (Patch 1 of the "Full Fix & Quota-Reality Guide") and
+Migration Part 27 §1, both of which landed after this file was originally
+written and changed three things the assertions below didn't yet account
+for: (1) _log_usage() gained a `path` positional param between `tier` and
+`agent_name`; (2) log_usage()'s stored record gains a "model" key
+whenever generate_text() passes one through, so the two end-to-end
+dict-equality assertions need it added; (3) tier/path now live INSIDE
+emit_event's payload dict, not as top-level emit_event kwargs, and
+daily_limit is resolved per-model (QUOTA_CONFIG[provider][model]) rather
+than as a flat per-provider number, so it's None whenever no model was
+passed.
 
 Run standalone:
     python -m pytest tests/test_usage_logging.py -v
@@ -117,11 +130,18 @@ def test_usage_update_event_fires_with_correct_payload(monkeypatch):
     call = fake_emitter.calls[0]
     assert call["event_type"] == "usage_update"
     assert call["session_id"] == "sess_abc"
-    assert call["tier"] == 3
+    # quota-reality fix, §1: tier/path live INSIDE payload now, not as a
+    # top-level emit_event kwarg -- emit_event itself is only ever called
+    # with (event_type, session_id, agent, payload) from log_usage().
+    assert call["payload"]["tier"] == 3
     assert call["payload"]["provider"] == "groq"
     assert call["payload"]["key_id"] == "GROQ_API_KEY_6"
     assert call["payload"]["tokens_used_today"] == 150
-    assert call["payload"]["daily_limit"] == llm_client.QUOTA_CONFIG["groq"]
+    # No `model` was passed to this log_usage() call, so daily_limit can't
+    # be resolved (QUOTA_CONFIG is keyed by [provider][model], not a flat
+    # per-provider number, since the quota-reality fix) -- None is correct
+    # here, not a KeyError or a guess.
+    assert call["payload"]["daily_limit"] is None
 
 
 def test_no_session_id_still_writes_usage(monkeypatch):
@@ -159,8 +179,10 @@ def test_log_usage_adapter_extracts_from_dict_shaped_usage(monkeypatch):
     object with attributes -- _log_usage() must handle both shapes."""
     fake_bus, _ = _patch_bus_and_emitter(monkeypatch)
 
+    # Migration Part 27 §1 inserted `path` as its own positional param,
+    # between `tier` and `agent_name` -- session_id, tier, path, agent_name.
     llm_client._log_usage("cloudflare", "CLOUDFLARE_ACCOUNT_ID_2",
-                           {"total_tokens": 88}, None, None, "Reviewer")
+                           {"total_tokens": 88}, None, None, None, "Reviewer")
 
     key = f"usage:cloudflare:CLOUDFLARE_ACCOUNT_ID_2:{TODAY}"
     assert fake_bus.store[key] == {"requests": 1, "tokens": 88}
@@ -169,7 +191,7 @@ def test_log_usage_adapter_extracts_from_dict_shaped_usage(monkeypatch):
 def test_log_usage_adapter_handles_missing_usage_entirely(monkeypatch):
     fake_bus, _ = _patch_bus_and_emitter(monkeypatch)
 
-    llm_client._log_usage("cloudflare", "CLOUDFLARE_ACCOUNT_ID_2", None, None, None, "Reviewer")
+    llm_client._log_usage("cloudflare", "CLOUDFLARE_ACCOUNT_ID_2", None, None, None, None, "Reviewer")
 
     key = f"usage:cloudflare:CLOUDFLARE_ACCOUNT_ID_2:{TODAY}"
     assert fake_bus.store[key] == {"requests": 1, "tokens": 0}
@@ -228,7 +250,13 @@ def test_generate_text_logs_usage_after_mocked_chat_completion(monkeypatch):
 
     assert result == "hello world"
     key = f"usage:groq:GROQ_API_KEY:{TODAY}"
-    assert fake_bus.store[key] == {"requests": 1, "tokens": 321}
+    # quota-reality fix, §1: generate_text() now forwards the chain step's
+    # `model` through to log_usage(), which stores it on the daily record
+    # (record["model"]) so get_quota_snapshot() can resolve per-model
+    # limits -- the record has one more key than it used to.
+    assert fake_bus.store[key] == {
+        "requests": 1, "tokens": 321, "model": "llama-3.3-70b-versatile",
+    }
     assert fake_emitter.calls[0]["payload"]["tokens_used_today"] == 321
 
 
@@ -257,7 +285,9 @@ def test_generate_text_logs_zero_tokens_when_usage_object_missing(monkeypatch):
     llm_client.generate_text("sys", "user", chain, agent_name="Test Agent")
 
     key = f"usage:groq:GROQ_API_KEY:{TODAY}"
-    assert fake_bus.store[key] == {"requests": 1, "tokens": 0}
+    assert fake_bus.store[key] == {
+        "requests": 1, "tokens": 0, "model": "llama-3.3-70b-versatile",
+    }
 
 
 if __name__ == "__main__":
