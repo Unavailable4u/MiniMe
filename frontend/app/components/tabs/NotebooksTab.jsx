@@ -1650,7 +1650,7 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
         </div>
         <div>
           <div className="flex items-center justify-between">
-            <label className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Custom facts</label>
+            <div className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Custom facts</div>
             <button
               type="button"
               onClick={() => setCustomEntries((entries) => [...entries, { key: "", value: "" }])}

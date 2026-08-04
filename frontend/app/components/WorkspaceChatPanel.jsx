@@ -302,7 +302,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // into a different one when this same panel instance gets reused
   // across chats (see the Row component below for why keying by row
   // index rather than message id is fine here).
-  const ESTIMATED_ROW_HEIGHT = 88; // rough single-paragraph-message guess; only used before a row's first real measurement
+  const ESTIMATED_ROW_HEIGHT = 104; // rough single-paragraph-message guess (88px) + the pb-4 (16px) inter-message gap in MessageRow; only used before a row's first real measurement
   const dynamicRowHeight = useDynamicRowHeight({
     defaultRowHeight: ESTIMATED_ROW_HEIGHT,
     key: dock.state.sessionId,
@@ -1191,14 +1191,12 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             overscanCount={6}
             onRowsRendered={handleRowsRendered}
           />
-          {/* NOTE: the old `space-y-4` gap doesn't carry over — List rows
-              are position:absolute, so a parent `space-y-*`/gap utility is
-              a no-op on them. Gap has to move into Row's own wrapper div
-              (e.g. paddingBottom) in step 5b's Row, which also means
-              bumping ESTIMATED_ROW_HEIGHT and any measured heights to
-              include it. Left as a known gap for 5e's smoke test rather
-              than folded in here, since it touches an already-committed
-              substep. */}
+          {/* Gap fix: List rows are position:absolute, so a parent
+              `space-y-*`/gap utility is a no-op on them — the inter-message
+              gap instead lives on MessageRow's own wrapper div as
+              `pb-4` (matches the old space-y-4 amount), with
+              ESTIMATED_ROW_HEIGHT above bumped by the same 16px so the
+              pre-measurement estimate accounts for it too. */}
           {loading && (
             <div className="text-[var(--neutral-500)] text-sm animate-pulse">Working…</div>
           )}

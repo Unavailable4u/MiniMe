@@ -17,7 +17,7 @@ export default function MessageRow({
   onSendCommand,
 }) {
   return (
-    <div onClick={() => onSelect(index)}>
+    <div onClick={() => onSelect(index)} className="pb-4">
       <MessageBubble
         message={message}
         onNavigateSubTab={onNavigateSubTab}

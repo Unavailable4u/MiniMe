@@ -142,7 +142,7 @@ export default function RolePickerOverlay({
 
   return (
     <div className="relative" ref={containerRef}>
-      <label className="block text-xs text-[var(--neutral-500)] mb-1">Roles, in order</label>
+      <div className="block text-xs text-[var(--neutral-500)] mb-1">Roles, in order</div>
 
       <div className="min-h-[2.25rem] w-full bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2 py-1.5 flex flex-wrap items-center gap-1.5">
         {roles.length === 0 && (

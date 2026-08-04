@@ -679,9 +679,9 @@ function ContentView({ wsId, onDispatched }) {
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-[var(--neutral-500)] mb-2">
+        <div className="block text-xs font-medium text-[var(--neutral-500)] mb-2">
           Platforms
-        </label>
+        </div>
         <div className="flex flex-wrap gap-2">
           {CONTENT_PLATFORMS.map((p) => (
             <button
