@@ -128,7 +128,28 @@ export default function Markdown({ children, onCitationClick }) {
               const mermaidText = String(children).replace(/\n$/, "");
               return (
                 <div className="rounded-lg border border-[var(--neutral-800)] bg-black/50 overflow-hidden my-2 p-3">
-                  <MermaidDiagram mermaidText={mermaidText} />
+                  {/* BUGFIX (Maximum update depth exceeded / react-window
+                      useVirtualizer setIndices crash) — this diagram lives
+                      inside WorkspaceChatPanel's virtualized message list,
+                      which measures each row's real DOM height via
+                      react-window v2's useDynamicRowHeight (a ResizeObserver
+                      under the hood, same mechanism as
+                      @tanstack/react-virtual's measureElement). Without
+                      showControls/maxHeight, MermaidDiagram renders its SVG
+                      unconstrained (mermaid's own max-width:100% scaling
+                      against a container whose width the virtualizer itself
+                      just set) -- the row's measured height can come out
+                      slightly different on each remeasure pass, so it never
+                      converges: measure -> setIndices -> row resizes ->
+                      measure again, forever. showControls + maxHeight caps
+                      the rendered SVG at a fixed pixel height with its own
+                      internal overflow-auto scroll, so the row's height is
+                      stable from the very first measurement and the
+                      virtualizer's remeasure loop has nothing left to chase.
+                      (MindMapView already passes these same props for
+                      exactly this reason -- this was just never wired up
+                      for the plain in-chat ```mermaid fence case.) */}
+                  <MermaidDiagram mermaidText={mermaidText} showControls maxHeight={480} exportFilename="diagram" />
                 </div>
               );
             }
