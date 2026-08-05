@@ -1,9 +1,15 @@
 import "./globals.css";
+import * as Sentry from "@sentry/nextjs";
 
-export const metadata = {
-  title: "MiniMe",
-  description: "EO-gated multi-agent system — chat interface",
-};
+export function generateMetadata() {
+  return {
+    title: "MiniMe",
+    description: "EO-gated multi-agent system — chat interface",
+    other: {
+      ...Sentry.getTraceData(),
+    },
+  };
+}
 
 export default function RootLayout({ children }) {
   return (
