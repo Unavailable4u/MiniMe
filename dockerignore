@@ -1,0 +1,39 @@
+# Repo root .dockerignore — applies to both backend.Dockerfile and
+# frontend.Dockerfile since docker-compose.yml builds both with context: .
+#
+# Without this file, `docker compose build` copies your entire local
+# backend/venv (a full second copy of every installed package) and
+# frontend/node_modules into the build context on every single build —
+# that's what caused the 780MB+ / 300+s "load build context" step in the
+# failed build log. None of these ever need to leave your machine.
+
+# Version control
+.git
+.github
+.githooks
+.gitignore
+.gitleaks.toml
+
+# Backend — never ship a local venv into a container that creates its own
+backend/venv
+backend/.venv
+backend/.pytest_cache
+backend/__pycache__
+backend/**/__pycache__
+backend/data
+backend/tests
+
+# Frontend — the container installs its own deps and builds its own output
+frontend/node_modules
+frontend/.next
+frontend/.env.local
+
+# Env files with real secrets — these get loaded at runtime via
+# docker-compose's env_file:, never baked into the image itself
+backend/.env
+frontend/.env.local
+
+# Editor/OS noise
+.vscode
+.DS_Store
+*.log
