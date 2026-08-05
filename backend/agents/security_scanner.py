@@ -31,6 +31,7 @@ from relay.emitter import emit_event
 from utils.llm_client import generate_text
 from eo.registry import AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
+from agents.static_scan import run_static_scan
 
 load_dotenv()
 
@@ -92,10 +93,18 @@ def _select_workers(worker_count: int, key_override=None) -> list:
     return [_slot_for(k) for k in ranked[:worker_count]]
 
 SYSTEM_PROMPT = """You are a security auditor. You will be given one code
-module. List any security issues: injection risks, hardcoded secrets,
-unsafe deserialization, missing input validation, unsafe dependency usage,
-path traversal, or similar. Be specific. If there are none, return an
-empty findings list -- do not invent issues to have something to say.
+module PLUS the raw findings already reported by two real, deterministic
+static-analysis tools (Gitleaks for hardcoded secrets, Semgrep for broader
+issues: injection risks, unsafe deserialization, missing input validation,
+unsafe dependency usage, path traversal, and similar). The tools already
+found these issues by actually scanning the code -- your job is NOT to
+re-scan it yourself or invent additional findings beyond what they
+reported. Your job is to turn each raw tool finding into a clear,
+specific, developer-readable description: explain the actual risk and
+where it is, using the surrounding code for context. Never drop a tool
+finding just because you suspect it's a false positive -- say so within
+that finding's own description instead, don't silently omit it. If the
+tool findings list you're given is empty, return an empty findings list.
 Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly
 this shape:
 {
@@ -138,6 +147,23 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, p
                payload={"label": f"Scanner {label} — {module_name}"})
     started = time.monotonic()
 
+    # B2: real tools first (Gitleaks + Semgrep, deterministic, run inside an
+    # E2B sandbox -- see agents/static_scan.py). The LLM call below only
+    # fires if there's something to summarize; a module the tools found
+    # clean skips the LLM call entirely, same "gate it, don't run it
+    # unconditionally" reasoning CO1's output_organizer uses.
+    tool_result = run_static_scan(module_name, code)
+    tool_findings = tool_result["findings"]
+    tool_error = tool_result["tool_error"]
+
+    if not tool_findings:
+        result = {"findings": [], "error": None, "tool_error": tool_error}
+        duration_ms = int((time.monotonic() - started) * 1000)
+        summary = "no findings" if not tool_error else f"scan tools failed: {tool_error}"
+        emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
+                   payload={"summary": summary, "duration_ms": duration_ms})
+        return module_name, result
+
     chain = [
         {"provider": "cloudflare", "model": CLOUDFLARE_MODEL,
          "account_id_env": slot["account_id_env"], "token_env": slot["token_env"]},
@@ -146,7 +172,7 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, p
     try:
         raw_text = generate_text(
             SYSTEM_PROMPT,
-            json.dumps({"module": module_name, "code": code[:6000]}),
+            json.dumps({"module": module_name, "code": code[:6000], "tool_findings": tool_findings}),
             chain,
             agent_name=agent_name,
             session_id=session_id,
@@ -154,9 +180,17 @@ def _scan_one(module_name: str, code: str, slot: dict, session_id: str = None, p
             domain=domain,  # Migration Part 2 §2.6: cost-tracking gap
         )
         result = json.loads(_strip_fences(raw_text))
+        # The LLM summarizes, it doesn't invent from a blank page -- if it
+        # returns nothing usable, fall back to the tools' own raw findings
+        # rather than silently losing real, tool-confirmed issues.
+        if not result.get("findings"):
+            result["findings"] = tool_findings
     except Exception as exc:
-        result = {"findings": [], "error": str(exc)}
+        # LLM summarization failed -- the tool findings themselves are
+        # still real and still worth surfacing, so don't drop them.
+        result = {"findings": tool_findings, "error": str(exc)}
 
+    result["tool_error"] = tool_error
     duration_ms = int((time.monotonic() - started) * 1000)
     findings = result.get("findings", [])
     if result.get("error"):
