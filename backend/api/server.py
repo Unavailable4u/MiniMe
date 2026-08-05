@@ -32,6 +32,26 @@ try:
 except ImportError:
     pass  # fine if python-dotenv isn't installed; real env vars can be set directly instead
 
+# NEW — B4: Sentry. Errors + full performance tracing
+# (tracesSampleRate=1.0). Note this shares the free tier's separate
+# ~10k/month transaction quota (distinct from the ~5k/month error
+# quota) — at 1.0 every request across the agent roster is traced, so
+# watch usage and dial this down (e.g. 0.1) if the quota gets tight.
+# Silently a no-op if SENTRY_DSN isn't set, same convention as the
+# dotenv import above — local dev without a DSN configured shouldn't
+# fail loud.
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=os.getenv("ENVIRONMENT", "development"),
+        integrations=[FastApiIntegration()],
+        traces_sample_rate=1.0,
+    )
+
 import jwt
 from jwt import PyJWKClient
 
@@ -3601,6 +3621,15 @@ def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
     try:
         result = resume_graph(req.session_id, decision)
     except KeyError:
+        # NEW — B4: the one user-facing error path new since Phase CO —
+        # worth a breadcrumb even though it's handled cleanly as a 404,
+        # since a spike here usually means a client is resuming a stale/
+        # expired session_id rather than an actual server bug.
+        sentry_sdk.add_breadcrumb(
+            category="resume_graph",
+            message=f"No paused run for session_id={req.session_id!r}",
+            level="warning",
+        )
         raise HTTPException(status_code=404, detail=f"No paused run for session_id={req.session_id!r}")
     except RuntimeError as exc:
         # reject_redo hit MAX_STAGE_REVISITS — a real conflict (the run
