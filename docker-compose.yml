@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    ports:
+      - "8000:8000"
+    # Loads every var from your existing backend/.env (SUPABASE_*, SENTRY_DSN,
+    # DATABASE_URL, GROQ_API_KEY, etc.) — nothing duplicated here, so this
+    # file stays correct even as you add more keys to .env.example later.
+    env_file:
+      - backend/.env
+    volumes:
+      # Bind-mount source for live-reload during dev; remove this volume
+      # (and add --reload back to the Dockerfile's CMD) if you want the
+      # container to behave like a real prod deploy instead.
+      - ./backend:/app
+      - /app/venv  # keep the container's own venv/deps, don't shadow with host's
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - frontend/.env.local
+    environment:
+      # So the frontend can reach the backend by service name inside the
+      # Docker network, not localhost — adjust if your frontend code reads
+      # a different var name for the API base URL.
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
