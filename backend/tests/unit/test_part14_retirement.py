@@ -19,6 +19,7 @@ at the actual project root.
 """
 import os
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -126,7 +127,20 @@ def test_no_live_import_loop_anywhere():
 def test_grep_for_loop_reference_matches_pytest_scan():
     """Cross-check using the actual grep command from the guide's
     checklist, in case the pure-Python walk above missed something (e.g.
-    a non-.py file, or an unusual import form)."""
+    a non-.py file, or an unusual import form).
+
+    Skips (rather than fails) when grep isn't resolvable at all -- e.g.
+    Windows, where Git for Windows ships grep.exe under Git\\usr\\bin, not
+    the Git\\bin most PATH setups add. test_no_live_import_loop_anywhere()
+    above already covers the same check in pure Python either way, so this
+    is a cross-check, not the only source of truth for this item."""
+    if shutil.which("grep") is None:
+        pytest.skip(
+            "grep not found on PATH -- test_no_live_import_loop_anywhere() "
+            "above already covers this check. On Windows with Git for "
+            "Windows installed, add <git-install-dir>\\usr\\bin to PATH "
+            "(not just \\bin) to enable this cross-check too."
+        )
     result = subprocess.run(
         ["grep", "-rn", "--include=*.py", "--exclude-dir=tests",
          r"import loop\b\|loop\.main()", REPO_ROOT],

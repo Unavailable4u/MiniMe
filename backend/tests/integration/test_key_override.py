@@ -156,7 +156,18 @@ def test_reviewer_list_override(mock_llm):
 
 
 # --- security_scanner ---
-def test_security_scanner_none_uses_default_slots(mock_llm):
+# B2: security_scanner.run() now runs a real static scan (Gitleaks/Semgrep,
+# agents/static_scan.py) before ever calling the LLM, and skips the LLM
+# call entirely for a module the tools found clean (see security_scanner's
+# _scan_one()). mock_static_scan stands in for that step here so each of
+# these tests' modules has something to summarize -- without it, `used`
+# would be empty and the *_single_override strict-equality assertion below
+# would fail even though key-selection itself is working correctly.
+_ONE_TOOL_FINDING = [{"severity": "critical", "description": "hardcoded secret", "source": "gitleaks"}]
+
+
+def test_security_scanner_none_uses_default_slots(mock_static_scan, mock_llm):
+    mock_static_scan.set_findings(_ONE_TOOL_FINDING)
     mock_llm.mock.side_effect = _fake_generate_text
     setup_common_memory()
     security_scanner.run(key_override=None)
@@ -164,7 +175,8 @@ def test_security_scanner_none_uses_default_slots(mock_llm):
     default_tokens = {security_scanner._token_env_for(k) for k in security_scanner._eligible_pool()}
     assert used <= default_tokens, used
 
-def test_security_scanner_single_override(mock_llm):
+def test_security_scanner_single_override(mock_static_scan, mock_llm):
+    mock_static_scan.set_findings(_ONE_TOOL_FINDING)
     mock_llm.mock.side_effect = _fake_generate_text
     setup_common_memory()
     # override is an account_id_env; the resulting chain call still uses
@@ -174,7 +186,8 @@ def test_security_scanner_single_override(mock_llm):
     used = {chain_primary(c) for c in _calls(mock_llm)}
     assert used == {"CLOUDFLARE_API_KEY_4"}, used
 
-def test_security_scanner_list_override(mock_llm):
+def test_security_scanner_list_override(mock_static_scan, mock_llm):
+    mock_static_scan.set_findings(_ONE_TOOL_FINDING)
     mock_llm.mock.side_effect = _fake_generate_text
     setup_common_memory()
     security_scanner.run(key_override=["CLOUDFLARE_ACCOUNT_ID_5", "CLOUDFLARE_ACCOUNT_ID_6"])

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — Master Guide B2.
+#
+# Gitleaks only, scoped to staged changes — this needs to stay fast enough
+# to run on every commit. Semgrep is deliberately NOT here (it's slower
+# and better suited to a CI job with SARIF output into GitHub's Security
+# tab — see .github/workflows/security-scan.yml).
+#
+# Activated via: git config core.hooksPath .githooks  (already run once,
+# repo-root, per-clone — not something git tracks or enforces automatically).
+
+set -euo pipefail
+
+if ! command -v gitleaks &> /dev/null; then
+  echo "gitleaks not found on PATH — install it (winget install --id Gitleaks.Gitleaks -e"
+  echo "on Windows, 'brew install gitleaks' on macOS) or this hook can't run."
+  echo "Skipping this commit's secret scan. Fix this before your next commit."
+  exit 0
+fi
+
+echo "Running gitleaks on staged changes..."
+
+if ! gitleaks protect --staged --redact --config .gitleaks.toml; then
+  echo ""
+  echo "gitleaks found a likely secret in your staged changes — commit blocked."
+  echo "Fix the finding above, or if it's a genuine false positive, add a"
+  echo "narrow allowlist entry to .gitleaks.toml (see that file's own"
+  echo "comments) rather than committing with the secret still in place."
+  exit 1
+fi
+
+echo "gitleaks: clean."

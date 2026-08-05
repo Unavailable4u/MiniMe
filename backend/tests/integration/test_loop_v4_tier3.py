@@ -40,6 +40,17 @@ TIER3_DECISION = {
 
 def _stub_common(monkeypatch):
     monkeypatch.setattr(loop_v4, "classify", lambda task_text, context=None, session_id=None: dict(TIER3_DECISION))
+    # eo/loop_v4.py's _get_decision() escalates to the real panel whenever
+    # draft["tier"] >= 2 -- unconditionally, regardless of confidence. Every
+    # decision this file's tests use is tier 3, so that branch always
+    # fires and calls the REAL eo_panel.run_panel(task_text, draft), which
+    # makes real LLM calls unless mocked here too. Without this, whether
+    # this test asserts on the mocked TIER3_DECISION or on whatever a live
+    # panel actually returns depends entirely on whether real provider
+    # credentials happen to be configured in the environment running it.
+    monkeypatch.setattr(loop_v4.eo_panel, "run_panel", lambda task_text, draft: dict(draft))
+    monkeypatch.setattr(loop_v4, "check_cache", lambda *a, **k: None)  # see test_loop_v4_tier0.py's comment
+    monkeypatch.setattr(loop_v4, "write_cache", lambda *a, **k: None)
     monkeypatch.setattr(loop_v4.routing_memory, "retrieve_similar_outcomes", lambda *a, **k: "")
     monkeypatch.setattr(loop_v4.routing_memory, "log_outcome", lambda *a, **k: None)
     monkeypatch.setattr(loop_v4, "write", lambda *a, **k: None)

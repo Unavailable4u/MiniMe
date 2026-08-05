@@ -1,0 +1,31 @@
+# .gitleaks.toml — repo root, per Master Guide B2.
+#
+# Extends gitleaks' own built-in rule set (covers the common provider key
+# formats already: OpenAI, Groq, Cerebras, HuggingFace, generic high-
+# entropy strings, etc.) rather than replacing it — MiniMe's own env slots
+# (CLOUDFLARE_API_KEY_4..8, CF_SCANNER_RESERVE_N_API_TOKEN, and friends,
+# see backend/agents/security_scanner.py) are plain high-entropy tokens
+# gitleaks' generic-api-key rule already catches; no custom regex needed
+# for them specifically.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe placeholder/example files and generated fixtures"
+paths = [
+  '''.*env\.example$''',
+  '''.*env\.sample$''',
+  '''(^|/)tests/manual/.*''',        # real E2B/API smoke tests read keys from os.environ, never inline
+  '''(^|/)tests/fixtures/.*\.cassette\.yaml$''',  # vcrpy cassettes (B1) — recorded HTTP, not live secrets
+  '''package-lock\.json$''',
+  '''pnpm-lock\.yaml$''',
+]
+
+# One narrow regex exception: MiniMe's own account_id_env / token_env
+# NAMES (e.g. "CLOUDFLARE_API_KEY_4") appear as plain strings throughout
+# backend/agents/*.py and backend/eo/*.py as dict keys / env var lookups —
+# that's the *name* of a secret, not the secret's value, and gitleaks'
+# entropy-based rules already correctly ignore these (short, low-entropy,
+# no real key material). No allowlist regex is needed for this case; noted
+# here so a future reader doesn't add one that's broader than necessary.

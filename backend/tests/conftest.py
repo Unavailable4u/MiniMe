@@ -261,6 +261,79 @@ def mock_llm(monkeypatch):
     patcher._patch_all_now(monkeypatch)
 
 
+# ---------------------------------------------------------------------------
+# 3. run_static_scan (B2) — same sweep-and-patch shape as generate_text
+#    above, for the exact same reason: agents/security_scanner.py does
+#    `from agents.static_scan import run_static_scan`, a bound name in its
+#    own module namespace, so patching agents.static_scan.run_static_scan
+#    directly would NOT reach the copy security_scanner.py actually calls.
+#    Without this, every security_scanner test would try to spin up a real
+#    E2B sandbox (network call, needs E2B_API_KEY) on every run.
+# ---------------------------------------------------------------------------
+
+def _modules_with_bound_static_scan():
+    hits = []
+    for name, mod in list(sys.modules.items()):
+        if mod is None:
+            continue
+        if getattr(mod, "run_static_scan", None) is not None and name != "agents.static_scan":
+            hits.append(mod)
+    return hits
+
+
+class StaticScanPatcher:
+    """Patches run_static_scan in-place across every module that imported
+    it. Defaults to 'tools found nothing' (empty findings, no error) —
+    the safe default that also means the LLM summarization call doesn't
+    fire unless a test explicitly gives the tools something to find, via
+    set_findings()."""
+
+    def __init__(self):
+        self._mock = MagicMock()
+        self._patched_modules = []
+        self.set_findings([])
+
+    def set_findings(self, findings, tool_error=None):
+        result = {"findings": findings, "tool_error": tool_error}
+        self._mock.side_effect = lambda *a, **k: result
+
+    def raise_via_tool_error(self, message):
+        """Simulates a sandbox/tool failure — run_static_scan itself never
+        raises (see its own docstring), it degrades to this shape."""
+        self.set_findings([], tool_error=message)
+
+    @property
+    def mock(self):
+        return self._mock
+
+    def _patch_all_now(self, monkeypatch):
+        for mod in _modules_with_bound_static_scan():
+            monkeypatch.setattr(mod, "run_static_scan", self._mock, raising=False)
+            self._patched_modules.append(mod)
+        try:
+            import agents.static_scan as static_scan_mod
+            monkeypatch.setattr(static_scan_mod, "run_static_scan", self._mock, raising=False)
+        except ImportError:
+            pass
+
+
+@pytest.fixture
+def mock_static_scan(monkeypatch):
+    """Same usage shape/caveat as mock_llm: import the agent module under
+    test before relying on this fixture's sweep to reach it.
+
+        import agents.security_scanner
+        def test_x(mock_static_scan, mock_llm):
+            mock_static_scan.set_findings([{"severity": "critical", ...}])
+            mock_llm.set_json_response({...})
+            ...
+    """
+    patcher = StaticScanPatcher()
+    patcher._patch_all_now(monkeypatch)
+    yield patcher
+    patcher._patch_all_now(monkeypatch)
+
+
 @contextlib.contextmanager
 def patch_generate_text(return_value=None, side_effect=None):
     """Non-fixture version for tests/scripts that need a `with` block

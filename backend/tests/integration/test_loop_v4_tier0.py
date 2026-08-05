@@ -27,6 +27,16 @@ TIER0_DRAFT = {
 
 def test_tier0_task_routes_to_responder_only(monkeypatch):
     monkeypatch.setattr(loop_v4, "classify", lambda task_text, context=None, session_id=None: dict(TIER0_DRAFT))
+    # check_cache/write_cache (eo/semantic_cache.py) talk to Upstash Vector
+    # through their own client, not memory.bus -- so tests/conftest.py's
+    # autouse fake_bus fixture never touches them. Without mocking these
+    # directly, a real cache hit against a real Vector index (e.g. from
+    # this exact task text having been run for real before) short-circuits
+    # main() BEFORE it ever reaches classify()/execute_graph, which is
+    # silently environment-dependent: whether this test passes would
+    # depend on what's actually cached in whoever's real Upstash account.
+    monkeypatch.setattr(loop_v4, "check_cache", lambda *a, **k: None)
+    monkeypatch.setattr(loop_v4, "write_cache", lambda *a, **k: None)
     monkeypatch.setattr(loop_v4.routing_memory, "retrieve_similar_outcomes", lambda *a, **k: "")
     logged = {}
     monkeypatch.setattr(
@@ -66,6 +76,8 @@ def test_tier0_task_routes_to_responder_only(monkeypatch):
 
 def test_tier0_never_calls_execute_graph_with_tier3_agents(monkeypatch):
     monkeypatch.setattr(loop_v4, "classify", lambda task_text, context=None, session_id=None: dict(TIER0_DRAFT))
+    monkeypatch.setattr(loop_v4, "check_cache", lambda *a, **k: None)  # see comment above
+    monkeypatch.setattr(loop_v4, "write_cache", lambda *a, **k: None)
     monkeypatch.setattr(loop_v4.routing_memory, "retrieve_similar_outcomes", lambda *a, **k: "")
     monkeypatch.setattr(loop_v4.routing_memory, "log_outcome", lambda *a, **k: None)
     monkeypatch.setattr(loop_v4, "write", lambda *a, **k: None)
