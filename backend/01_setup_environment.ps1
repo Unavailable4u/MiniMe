@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   MiniMe - Stage 4 prep: environment + secrets scaffolding ONLY.
   Safe to run on top of your existing (partial) v3 repo - every step
@@ -34,7 +34,7 @@ function Write-Ok($msg) {
 # 0. Confirm we're in a project root (has .git OR we initialize one)
 # ---------------------------------------------------------------------------
 Write-Step "Checking repo root"
-if (-not (Test-Path ".git")) {
+if (-not ((Test-Path ".git") -or (Test-Path "..\.git"))) {
     Write-Host "    No .git found here. This should be run from your project root."
     $confirm = Read-Host "    Initialize a new git repo here? (y/n)"
     if ($confirm -eq "y") {
