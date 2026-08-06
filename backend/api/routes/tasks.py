@@ -11,6 +11,8 @@ CO5's new GET /api/task/{session_id}/stream land next — that's the
 whole reason this piece was split out first, ahead of the rest of
 server.py's other route groups.
 """
+import json   # NEW — B6 cleanup: _parse_fenced_json (get_tasks' Part 7 §7.3 integrations parse)
+import re     # NEW — B6 cleanup: _parse_fenced_json
 import traceback
 from typing import Optional, Union
 
@@ -20,7 +22,10 @@ from pydantic import BaseModel
 
 from api.deps import require_auth, _resolve_chat_or_404
 from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template
+from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — B6 cleanup: get_tasks' Part 7 §7.5 deploy-status read
+from agents import deploy_agent as deploy_agent_module                  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
 from eo import chat_store
+from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
 from eo.executor import resume_graph
 from eo.registry import (
     list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned,
@@ -30,6 +35,7 @@ from eo.structure import (
     save_workflow_template, list_workflow_templates, delete_workflow_template,
     update_workflow_template,
 )
+from memory.bus import read_many as bus_read_many, set_app_slug, KEYS   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read
 
 router = APIRouter()
 
@@ -457,3 +463,170 @@ def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends
             decision={}, tier=-1, status="error", result=None,
             message=f"{exc.__class__.__name__}: {exc}",
         )
+
+
+# ---------------------------------------------------------------------------
+# B6 piece 6 cleanup — /api/tasks/{session_id} and /api/tasks/workspace/
+# {ws_id} were named in piece 1's original scope (they read the same
+# current_plan/feature_status/module_specs data as everything else in
+# this file) but never actually got moved out of api/server.py when
+# pieces 1-2 landed. Folded in here, alongside piece 6, rather than left
+# stranded any longer. _parse_fenced_json and _sentry_status come with
+# them since get_tasks() is their only caller inside this file;
+# _parse_marketplace_reviews stays in api/server.py (piece 7 territory —
+# it's only used by /api/workspaces/{ws_id}/simulate, which hasn't moved
+# yet) and now imports _parse_fenced_json from here instead of having
+# its own copy, since both parsers share the same strip-the-fence-then-
+# json.loads shape and there's no reason to fork it.
+# ---------------------------------------------------------------------------
+
+def _parse_fenced_json(text):
+    """integration_flagger (Part 7 §7.3) is a generic_worker role, so its
+    output lands in stage_output:* as plain text -- a strict fenced
+    ```json code block per its ROLE_PROMPTS_SEED brief, not real
+    structured output the way a REAL_ACTION_ROLES module's return value
+    would be. Same strip-the-fence approach agents/prompt_writer.py and
+    agents/idea_planner.py already use on their own raw LLM text before
+    json.loads(), just tolerant of surrounding prose since a
+    generic_worker role's brief-enforced discipline is never as airtight
+    as a dedicated module's own parsing. Returns [] (not None) on
+    anything unparseable, so the checklist UI can render "no integrations
+    flagged yet" rather than an error state for a role that hasn't run.
+    """
+    if not text:
+        return []
+    match = re.search(r"```json\s*(.*?)```", text, re.DOTALL)
+    raw = match.group(1) if match else text
+    try:
+        parsed = json.loads(raw.strip())
+        return parsed.get("integrations", []) if isinstance(parsed, dict) else []
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+
+def _sentry_status(module_specs: dict, submitted_code: dict) -> str:
+    """Part 7 §7.5. Three states, not a bare yes/no, so the monitoring
+    widget can be honest about where things stand:
+      - "not_planned"  -- integration_flagger hasn't flagged monitoring
+                          yet, or prompt_writer.py hasn't run this cycle
+      - "planned"      -- monitoring_setup is in this cycle's
+                          module_specs, but code_writers.py hasn't
+                          generated it yet
+      - "configured"   -- it's in submitted_code, i.e. real code exists
+
+    "monitoring_setup" is agents/prompt_writer.py's own
+    MONITORING_MODULE_NAME constant; matched here by the same literal
+    string rather than importing it, same "agents/ and api/ don't share
+    private internals across the layer boundary" reasoning
+    agents/deploy_config_writer.py's own docstring already gives for
+    duplicating structure_architect.py's _get_project_tree() instead of
+    importing it.
+    """
+    names = {
+        (m.get("name") or "").strip().lower()
+        for m in (module_specs.get("modules") or [])
+    }
+    if "monitoring_setup" not in names:
+        return "not_planned"
+    if "monitoring_setup" in (submitted_code or {}):
+        return "configured"
+    return "planned"
+
+
+@router.get("/api/tasks/{session_id}", dependencies=[Depends(require_auth)])
+def get_tasks(session_id: str):
+    """Part 7 §7.2 — read-only kanban view over data idea_planner.py and
+    prompt_writer.py already write every cycle. No new storage: this just
+    exposes current_plan / feature_status / module_specs as one combined
+    object.
+
+    set_app_slug(session_id) scopes the read the same way every tier-3
+    adaptive-path run already scopes its writes (see memory/bus.py's
+    set_app_slug() docstring) -- without it, read_many() would fall back
+    to whatever app_slug happens to be the persisted Redis global, which
+    is exactly the cross-session collision Migration Part B fixed on the
+    write side. This is the read-side equivalent of that same fix.
+
+    Uses read_many() -- the same batched MGET helper
+    eo/quota_sentinel.py's get_usage_history() already uses -- so this is
+    one Redis round trip, not one-per-key.
+
+    Part 7 §7.3 -- also reads integration_flagger's stage_output entry
+    (cached once per session, never re-run per cycle, per that role's own
+    seed brief) and parses its fenced ```json block into a plain
+    "integrations" list for the checklist rendered alongside the board.
+
+    Part 7 §7.5 addition -- also reads deploy_config_plan /
+    last_deploy_config_summary / last_deploy_trigger_result (so the
+    frontend's deploy button + status indicator has something to render
+    without a second round trip) and derives monitoring status: Sentry
+    from module_specs/submitted_code (see _sentry_status() above),
+    UptimeRobot verbatim from last_uptimerobot_registration. One combined
+    object, same "one call, not four" reasoning §7.2/§7.3 already used
+    when they extended this same endpoint.
+    """
+    set_app_slug(session_id)
+    data = bus_read_many(
+        [KEYS["current_plan"], KEYS["feature_status"], KEYS["module_specs"],
+         KEYS["submitted_code"],
+         f"stage_output:{session_id}:integration_flagger",
+         deploy_config_writer_agent.DEPLOY_CONFIG_PLAN_KEY,
+         deploy_agent_module.LAST_DEPLOY_CONFIG_SUMMARY_KEY,
+         "last_deploy_trigger_result",
+         deploy_agent_module.LAST_UPTIMEROBOT_REGISTRATION_KEY],
+        default=None,
+    )
+    module_specs = data[KEYS["module_specs"]] or {}
+    submitted_code = data[KEYS["submitted_code"]] or {}
+    return {
+        "current_plan": data[KEYS["current_plan"]] or {},
+        "feature_status": data[KEYS["feature_status"]] or {},
+        "module_specs": module_specs,
+        "integrations": _parse_fenced_json(data[f"stage_output:{session_id}:integration_flagger"]),
+        "deploy_config_plan": data[deploy_config_writer_agent.DEPLOY_CONFIG_PLAN_KEY],
+        "last_deploy_config_summary": data[deploy_agent_module.LAST_DEPLOY_CONFIG_SUMMARY_KEY],
+        "last_deploy_trigger_result": data["last_deploy_trigger_result"],
+        "monitoring": {
+            "sentry_status": _sentry_status(module_specs, submitted_code),
+            "uptimerobot": data[deploy_agent_module.LAST_UPTIMEROBOT_REGISTRATION_KEY],
+        },
+    }
+
+@router.get("/api/tasks/workspace/{ws_id}", dependencies=[Depends(require_auth)])
+def get_tasks_for_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
+    """§7 — Tasks scoped to a workspace instead of a raw chat session.
+    Resolves ws_id -> a chat_id using the exact same "first chat_id, or
+    create one" convention NotebooksTab/ResearchTab's handleOpenChat
+    already established, then delegates to get_tasks()'s existing
+    memory-bus read unchanged. current_plan/feature_status/etc. still
+    live in the bus keyed by app_slug=session_id -- this route only
+    changes what session_id gets resolved and passed in; nothing about
+    how idea_planner.py or any other agent writes.
+
+    Also stamps the resolved session_id back onto the response as
+    "_session_id" -- TasksTab.jsx's DeployPanel/MonitoringWidget still
+    call /api/deploy/{session_id}/... and /api/monitoring/{session_id}/...
+    directly (those routes are unchanged, still session-keyed), so the
+    frontend needs this id rather than re-deriving ws.chat_ids[0] itself,
+    which could be stale on the very first call when no chat existed yet
+    and one was just created here.
+    """
+    try:
+        ws = chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    chat_ids = ws["chat_ids"]
+    if chat_ids:
+        session_id = chat_ids[0]
+    else:
+        created = chat_workspace.create_chat_in_workspace(
+            ws_id, owner_id, title=f"{ws['name']} — Build"
+        )
+        session_id = created["chat_ids"][0]
+
+    data = get_tasks(session_id)
+    data["_session_id"] = session_id
+    return data
+
