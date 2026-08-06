@@ -45,6 +45,16 @@ VALID_EVENT_TYPES = {
     # either path crashed the whole run with a ValueError instead of
     # degrading gracefully like every other dispatcher event does.
     "hallucinated_role_rejected", "revisit_cap_reached",
+    # CO3: fired at the Human-in-the-loop pause point in eo/executor.py
+    # (both the pre-existing approval_roles trigger and the new on-demand
+    # pause_requested:{session_id} trigger) so the frontend's step list
+    # can flip the paused role's status and surface the resume affordance
+    # live, instead of the human only finding out on next reload. The
+    # frontend handler for this (WorkspaceDockContext.jsx /
+    # SessionContext.jsx, eventType === "awaiting_approval") already
+    # existed before this patch — this entry and the executor.py call
+    # site are what actually complete that wiring.
+    "awaiting_approval",
     # NEW — Part 8.4: cross-chat/cross-session notifications, fired on
     # a user-{user_id} channel (see _user_channel_name/emit_user_event
     # below) rather than the per-session channel every other event

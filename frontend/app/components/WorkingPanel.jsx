@@ -1,5 +1,6 @@
 "use client";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
+import { Pause, Loader2 } from "lucide-react";
 import { useSession } from "../context/SessionContext";
 import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import RoutingTraceCard from "./RoutingTraceCard";
@@ -36,6 +37,48 @@ import SaveRunAsTemplate from "./SaveRunAsTemplate";
 // (subTab key -> void). Every other caller of WorkingPanel leaves it
 // undefined, which is a safe no-op below — a branch node click just
 // does nothing for a dock that isn't inside Notebooks.
+// CO3: small local component rather than inlining the busy-state
+// handling into WorkingPanel's render — mirrors ArtifactRenderer.jsx's
+// PythonArtifact "Run" button pattern (local status state, spinner while
+// in flight, re-enables after). Once clicked, stays disabled/"Pausing…"
+// until the live "awaiting_approval" event actually arrives and
+// liveSteps flips (handled by the parent's conditional render, not this
+// component) — a pause is fire-and-forget server-side, so this button
+// can't itself know the moment the run really stopped, only that it
+// asked.
+function PauseButton({ onRequestPause }) {
+  const [pending, setPending] = useState(false);
+
+  async function handleClick() {
+    setPending(true);
+    try {
+      await onRequestPause();
+    } finally {
+      // Left true briefly even after the request resolves — the actual
+      // pause hasn't landed yet at that point, only the request has.
+      // The button disappears on its own once liveSteps shows
+      // awaiting_approval (parent's gate above), so there's no risk of
+      // this staying stuck in a "Pausing…" state forever if that never
+      // arrives except the genuinely-rare case the run finishes on its
+      // own first, which is also a fine outcome to just let happen.
+      setPending(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={pending}
+      title="Pause after the current step finishes"
+      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded border border-[var(--neutral-800)] text-[var(--neutral-400)] hover:bg-white/5 disabled:opacity-60 transition-colors"
+    >
+      {pending ? <Loader2 size={11} className="animate-spin" /> : <Pause size={11} />}
+      {pending ? "Pausing…" : "Pause"}
+    </button>
+  );
+}
+
 export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
   const { batches, API_URL } = useSession(); // §4 / Part 2 §2.7: app-wide, no dock equivalent
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -52,6 +95,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
   const structurePlan = dock.state.structurePlan;
   const sessionId = dock.state.sessionId; // §4
   const resumeRun = dock.resumeRun; // Part 2 §2.4/§2.7
+  const requestPause = dock.requestPause; // NEW — CO3
   // guide §5 — a Notebooks Generate command can only originate from a
   // workspace-keyed dock (NotebooksGeneratePicker.jsx always has a
   // workspaceId), so this is simply undefined for a WorkingPanel not
@@ -215,7 +259,20 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
           used to render standalone; absorbed here per Part 21 Step 5. */}
       {loading && (
         <div className="space-y-2">
-          <p className="text-xs text-[var(--neutral-500)]">Running…</p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-[var(--neutral-500)]">Running…</p>
+            {/* CO3: always available while a run is live — not gated on
+                liveDecision existing, since a pause request just sets a
+                flag eo/executor.py's loop picks up at its own next
+                checkpoint (after whichever role finishes next), so it's
+                fine to request one even during the pre-decision
+                "Classifying and routing…" moment. Hidden once a step is
+                already awaiting_approval — pausing an already-paused
+                run has nothing left to do. */}
+            {!liveSteps.some((s) => s.status === "awaiting_approval") && (
+              <PauseButton onRequestPause={requestPause} />
+            )}
+          </div>
           {!liveDecision ? (
             <div className="text-[var(--neutral-500)] text-sm animate-pulse">
               Classifying and routing...
