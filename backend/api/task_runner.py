@@ -390,6 +390,28 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     final_output = results.get(final_role) if final_role else None
     answer = render_agent_result(final_output) if final_output is not None else ""
 
+    # NEW — Phase CO, CO1 (Master Guide v2, §5): replace the "just the
+    # final role's leftover text" answer above with a real synthesis pass
+    # across every role's output, but ONLY for actual multi-role runs —
+    # a single-role tier-3 result already has nothing to organize, and
+    # running this pass there would be pure added latency for zero
+    # benefit (same condition AgentTraceDisclosure used to gate its "Show
+    # all N agent outputs" toggle on, in frontend/app/components/
+    # MessageBubble.jsx, before CO1's frontend piece removes it).
+    #
+    # Fails open, not closed: if the organizer's own LLM call errors out
+    # (exhausted chain, bad response, anything), fall back to the
+    # final_role answer already computed above rather than failing the
+    # whole run over a synthesis-pass problem — the user still gets a
+    # real answer, just not the merged one this pass would have produced.
+    if len(results) > 1:
+        try:
+            from agents.output_organizer import organize_final_answer
+            answer = organize_final_answer(results, task_text, final_role=final_role)
+        except Exception as exc:
+            print(f"  [task_runner] output_organizer synthesis failed, "
+                  f"falling back to final_role's own answer (fail-open): {exc}")
+
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
     return {
         "decision": decision,
