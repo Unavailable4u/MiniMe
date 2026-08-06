@@ -178,6 +178,16 @@ export default function ChatSidebar({ collapsed, onToggle }) {
         ) : (
           <div className="flex items-center justify-between gap-1">
             <span className="text-xs text-[var(--neutral-200)] truncate">{chat.title}</span>
+            {/* NEW — CO3 patch 3: chat.last_status comes from
+                GET /api/chats (eo/chat_store.py's list_chats(), now
+                joined against chat_messages' last row) — durable
+                across reload, unlike the old in-memory-only pausedRun
+                state. */}
+            {chat.last_status === "paused" && (
+              <span className="shrink-0 text-[9px] leading-none px-1 py-0.5 rounded border border-amber-800 text-amber-300">
+                Paused
+              </span>
+            )}
             <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
               {allowProjectActions && (
                 <>

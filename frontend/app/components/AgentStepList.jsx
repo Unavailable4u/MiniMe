@@ -19,13 +19,26 @@ import { categorize } from "./agentRoleIcons";
 // otherwise — it already renders arbitrary step objects generically;
 // a step whose status is "awaiting_approval" just renders these extra
 // actions in place of (or alongside) its existing collapsible body.
-export default function AgentStepList({ steps, onResume }) {
+// `manualPause` — NEW, CO3 patch 4. True when dock.state.pausedRun is
+// set but no step here carries status:"awaiting_approval" — i.e. the
+// run was paused by the on-demand pause_requested flag (WorkingPanel's
+// PauseButton), not by hitting an approval_roles checkpoint. Confirmed
+// by reading WorkspaceDockContext.jsx's handleDockEvent: the
+// "awaiting_approval" SSE event only ever fires for the approval_roles
+// path, so a manual pause previously left StepRow's own `isPaused`
+// check permanently false and rendered no resume affordance at all in
+// this panel — the chat bubble's Resume button (CO3 patch 3) was the
+// only way to unblock it. Rendered once, after every step, since a
+// manual pause isn't tied to any single role's output the way an
+// approval-role pause is.
+export default function AgentStepList({ steps, onResume, manualPause = false }) {
   if (!steps || steps.length === 0) return null;
   return (
     <div className="space-y-1.5">
       {steps.map((step) => (
         <StepRow key={step.id} step={step} onResume={onResume} />
       ))}
+      {manualPause && onResume && <ManualPauseActions onResume={onResume} />}
     </div>
   );
 }
@@ -290,6 +303,92 @@ function ApprovalActions({ step, onResume }) {
           >
             <Check size={12} />
             Approve
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// NEW — CO3 patch 4. Sibling to ApprovalActions above, for the manual
+// on-demand pause case (see AgentStepList's own comment on
+// `manualPause`). Deliberately its own component rather than reusing
+// ApprovalActions with `step` made optional: there's no role output to
+// seed the textarea with here (starts blank — this is a redirect for
+// what happens NEXT, not an edit of something a role already
+// produced), and "Reject & Redo" has no sensible target — resume_graph()
+// resets idx back to a specific role's position, and a manual pause
+// isn't attached to one. Only "approve" (resume as-is) and "edit"
+// (resume with new steering text) apply.
+function ManualPauseActions({ onResume }) {
+  const [redirecting, setRedirecting] = useState(false);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function act(action, payload) {
+    setBusy(true);
+    try {
+      await onResume({ action, ...(payload || {}) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-amber-700 bg-amber-950/20 text-xs px-3 py-2 space-y-2">
+      <p className="text-amber-500/90">
+        Run paused. Resume as-is, or redirect it with new instructions first.
+      </p>
+      {redirecting ? (
+        <>
+          <textarea
+            id="manual-pause-redirect"
+            name="manual-pause-redirect"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={4}
+            placeholder="New instructions to steer the run before it continues…"
+            className="w-full resize-none bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)] leading-relaxed"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setRedirecting(false)}
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] px-2 py-1"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={busy || !text.trim()}
+              onClick={() => act("edit", { text })}
+              className="flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-60"
+            >
+              <Check size={12} />
+              Redirect & Continue
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setRedirecting(true)}
+            className="flex items-center gap-1.5 text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-2 py-1"
+          >
+            <Pencil size={12} />
+            Redirect
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => act("approve")}
+            className="flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium"
+          >
+            <Check size={12} />
+            Resume
           </button>
         </div>
       )}

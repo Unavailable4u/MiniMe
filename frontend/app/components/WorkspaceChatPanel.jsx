@@ -155,7 +155,11 @@ const ATTACH_DONE_AUTOCLEAR_MS = 3000;
 // purpose anymore, so it — and the ref-setting div wrapper in
 // MessageRow.jsx — were dead weight kept alive only by being passed
 // through. Removed here, and MessageRow's ref prop dropped to match.
-function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab, onSendCommand }) {
+function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab, onSendCommand, onResume, pausedActive }) {
+  // NEW — CO3 patch 3: only the single most-recent message can be the
+  // "live" pause — everything earlier in the thread is history, even
+  // if it also happens to carry status:"paused" from a prior run.
+  const isActivePause = pausedActive && index === messages.length - 1;
   return (
     <div style={style}>
       <MessageRow
@@ -164,6 +168,8 @@ function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab,
         onSelect={onSelect}
         onNavigateSubTab={onNavigateSubTab}
         onSendCommand={onSendCommand}
+        onResume={onResume}
+        isActivePause={isActivePause}
       />
     </div>
   );
@@ -953,8 +959,10 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
       onSelect: setActiveMessageIndex,
       onNavigateSubTab,
       onSendCommand: dispatchText,
+      onResume: dock.resumeRun,               // NEW — CO3 patch 3
+      pausedActive: !!dock.state.pausedRun,    // NEW — CO3 patch 3
     }),
-    [messages, setActiveMessageIndex, onNavigateSubTab, dispatchText]
+    [messages, setActiveMessageIndex, onNavigateSubTab, dispatchText, dock.resumeRun, dock.state.pausedRun]
   );
 
   // Perf audit #3 step 8 fix — Row now lives at module scope (see

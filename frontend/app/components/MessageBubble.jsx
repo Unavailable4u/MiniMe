@@ -2,7 +2,7 @@
 import { useState, memo } from "react";
 import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
-import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — Data Layer §9d
+import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4
 import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
 import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
@@ -23,13 +23,24 @@ const TIER_STYLES = {
   3: { label: "Tier 3 · Ultimate Structure", text: "text-amber-400", dot: "bg-amber-400" },
 };
 const ERROR_STYLE = { label: "Error", text: "text-red-400", dot: "bg-red-500" };
+// NEW — CO3 patch 3: durable pause status, alongside the existing
+// "ok"/"error" handling.
+const PAUSED_STYLE = { label: "Paused", text: "text-amber-300", dot: "bg-amber-300" };
 
 function tierStyle(data) {
   if (data.status === "error") return ERROR_STYLE;
+  if (data.status === "paused") return PAUSED_STYLE;
   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
 }
 
-function MessageBubble({ message, onNavigateSubTab, onSendCommand }) {
+// NEW — CO3 patch 3: onResume/isActivePause threaded down the same
+// path onSendCommand already takes (WorkspaceChatPanel.jsx's rowProps
+// -> VirtualMessageRow -> MessageRow -> here). isActivePause is true
+// only for the single most-recent message while dock.state.pausedRun
+// is still set, so a stale paused bubble further up the thread (from a
+// run that has since been resumed) doesn't keep showing a live Resume
+// button.
+function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isActivePause }) {
   // NEW — Phase 3 step 3.7. Called unconditionally, ahead of every
   // early-return branch below (role === "generation"/"suggestion"/
   // "user") — Rules of Hooks: a hook can't be called only on the path
@@ -113,6 +124,17 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand }) {
           <span className="text-[var(--neutral-600)] font-normal">· {data.status}</span>
         </div>
         <ResultBody data={data} />
+        {/* NEW — CO3 patch 3/4: resume right from the chat bubble, not
+            only from WorkingPanel.jsx's AgentStepList affordance.
+            ResumeBubbleActions (defined below) mirrors
+            AgentStepList.jsx's ManualPauseActions — same
+            approve-or-redirect shape, since a bubble's paused message
+            is exactly the same "manual pause, no specific role's
+            output to review" case that component handles, just
+            surfaced in the chat thread instead of the Working Panel. */}
+        {data.status === "paused" && isActivePause && (
+          <ResumeBubbleActions onResume={onResume} />
+        )}
         {/* NEW — Data Layer §9d: api/task_runner.py only ever sets this
             for a status="ok" tier-0/1 chat answer (see
             _maybe_attach_prerequisite_suggestions()'s own docstring for
@@ -143,6 +165,87 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand }) {
 // (never mutated in place), so this comparison is meaningful rather
 // than always-true.
 export default memo(MessageBubble);
+
+// NEW — CO3 patch 4. Same shape as AgentStepList.jsx's
+// ManualPauseActions — approve-as-is, or open a blank textarea and
+// resume with {action: "edit", text}. Kept as its own small component
+// (not imported from AgentStepList.jsx) since it's a chat-bubble-sized
+// version of the same affordance, not the same component reused in a
+// different container — the two files don't otherwise share UI
+// components today, and this one's button sizing is deliberately more
+// compact to fit inside a bubble rather than the wider Working Panel.
+function ResumeBubbleActions({ onResume }) {
+  const [redirecting, setRedirecting] = useState(false);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function act(action, payload) {
+    setBusy(true);
+    try {
+      await onResume?.({ action, ...(payload || {}) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (redirecting) {
+    return (
+      <div className="space-y-1.5">
+        <textarea
+          id="bubble-resume-redirect"
+          name="bubble-resume-redirect"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={3}
+          placeholder="New instructions to steer the run before it continues…"
+          className="w-full resize-none bg-[var(--neutral-950)] border border-[var(--neutral-800)] rounded-md px-2.5 py-1.5 text-xs text-[var(--neutral-300)] outline-none focus:border-[var(--neutral-600)] leading-relaxed"
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setRedirecting(false)}
+            className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-300)] px-2 py-1"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy || !text.trim()}
+            onClick={() => act("edit", { text })}
+            className="flex items-center gap-1.5 text-xs px-2 py-1 rounded bg-[var(--accent)] text-[var(--accent-text)] font-medium disabled:opacity-60"
+          >
+            <Check size={12} />
+            Redirect & Continue
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex gap-2">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setRedirecting(true)}
+        className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-[var(--neutral-700)] text-[var(--neutral-400)] hover:bg-white/5 transition-colors"
+      >
+        <Pencil size={11} />
+        Redirect
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => act("approve")}
+        className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-amber-800 text-amber-300 hover:bg-amber-950/40 transition-colors"
+      >
+        <Check size={11} />
+        Resume
+      </button>
+    </div>
+  );
+}
 
 // NEW — Data Layer §9d: chat proactive suggestions, rendered directly
 // under a tier 0/1 chat answer whenever eo/prerequisite_suggestions.py's
