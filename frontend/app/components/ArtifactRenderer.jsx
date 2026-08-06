@@ -2,6 +2,7 @@
 import { useMemo, useState, memo } from "react";
 import { Maximize2, Minimize2, Code2, ExternalLink, Play, Loader2 } from "lucide-react";
 import { usePyodideWorker } from "../hooks/usePyodideWorker";
+import { SandpackProvider, SandpackPreview } from "@codesandbox/sandpack-react";
 
 // Phase CO, CO2 (Master Guide v2, §5) — interactive chat output beyond
 // markdown/Mermaid. Renders one artifact ({ type, title, code }) from
@@ -10,18 +11,26 @@ import { usePyodideWorker } from "../hooks/usePyodideWorker";
 // MermaidDiagram.jsx already applies to its own failure case.
 //
 // Build order (CO2's own, cheapest setup first): html/svg iframe landed
-// first. python/Pyodide (this patch) runs real CPython-via-WebAssembly in
+// first, then python/Pyodide, which runs real CPython-via-WebAssembly in
 // a Web Worker (usePyodideWorker.js) so a long-running script never
 // freezes the chat UI -- loaded on-demand via Run, not on render, so an
-// unused python artifact costs nothing. react/Sandpack is still a
-// separate follow-up patch; unknown/unimplemented types still fall back
-// to a read-only source card instead of crashing.
+// unused python artifact costs nothing. react/Sandpack (this patch,
+// final in the sequence) is the heaviest of the three -- it ships its own
+// bundler/transpiler and mounts its own internal iframe, so it's mounted
+// directly rather than routed through wrapAsHtmlDoc like html/svg.
+// Unknown/unimplemented types still fall back to a read-only source card
+// instead of crashing.
 //
-// Security, per CO2's own note: html/svg run inside
-// sandbox="allow-scripts" ONLY — no allow-same-origin, so model-authored
-// code never shares an origin with the app (can't read cookies/
-// localStorage, can't call same-origin APIs) and can't navigate the
-// parent window, open new windows, or submit forms. This is entirely
+// Security: html/svg run inside sandbox="allow-scripts" ONLY — no
+// allow-same-origin, so model-authored code never shares an origin with
+// the app (can't read cookies/localStorage, can't call same-origin APIs)
+// and can't navigate the parent window, open new windows, or submit
+// forms. Sandpack manages its own internal iframe's sandbox attribute
+// (it needs allow-same-origin there so its bundler can write the
+// transpiled module graph into that iframe's document) -- that iframe is
+// still a distinct, cross-origin context from this app's origin
+// (Sandpack's bundler runtime is CDN-hosted by default), so it still
+// can't read this app's cookies/localStorage. This is entirely
 // client-side rendering — nothing here is ever sent to the backend to
 // execute.
 const TYPE_LABELS = {
@@ -117,11 +126,47 @@ function PythonArtifact({ code }) {
   );
 }
 
+// Sandpack needs an entry file, not a bare component body — the model's
+// `code` is expected to be a full App.jsx that default-exports a
+// component (same convention artifact-authoring prompts already use for
+// "react" type). If code doesn't include an export default, Sandpack
+// will fail to bundle and show its own inline compile error, which is an
+// acceptable degrade — it's still contained inside the card, not a page
+// crash.
+function ReactArtifact({ code, expanded }) {
+  const files = useMemo(
+    () => ({
+      "/App.js": code || "export default function App() { return null; }",
+    }),
+    [code]
+  );
+
+  return (
+    <SandpackProvider template="react" files={files} theme="dark">
+      {/* Preview-only, no editor pane — this card's existing "Show
+          source" toggle (same one html/svg/python use) already covers
+          reading the code, so we don't need Sandpack's own editor/tabs
+          UI duplicating that inside a chat-width card. */}
+      <SandpackPreview
+        showOpenInCodeSandbox={false}
+        showRefreshButton
+        style={{ height: expanded ? "70vh" : "320px" }}
+      />
+    </SandpackProvider>
+  );
+}
+
 function ArtifactRenderer({ artifact }) {
   const { type, title, code } = artifact || {};
   const [expanded, setExpanded] = useState(false);
   const [showSource, setShowSource] = useState(false);
   const live = type === "html" || type === "svg";
+  const isReact = type === "react";
+  // Show source / Expand apply to any type with a real live preview;
+  // Open in new tab stays iframe-srcDoc-only below, since Sandpack
+  // manages its own separate preview surface rather than a srcDoc we
+  // can hand to window.open as a static blob.
+  const hasToolbar = live || isReact;
 
   const srcDoc = useMemo(() => (live ? wrapAsHtmlDoc(type, code || "") : null), [live, type, code]);
 
@@ -130,6 +175,9 @@ function ArtifactRenderer({ artifact }) {
     // patch — a real full-page view, just outside the chat layout rather
     // than inline within it. CO4 is what wires an inline full-width mode
     // into the Working Panel; this is a working stand-in until then.
+    // React/Sandpack doesn't get this button (see hasToolbar) since
+    // there's no static srcDoc to hand off — Sandpack's own preview is
+    // itself a live iframe, not a blob URL this app owns.
     if (!live || !srcDoc) return;
     const blob = new Blob([srcDoc], { type: "text/html" });
     const url = URL.createObjectURL(blob);
@@ -150,7 +198,7 @@ function ArtifactRenderer({ artifact }) {
             <span className="text-[11px] text-[var(--neutral-300)] truncate">{title}</span>
           )}
         </div>
-        {live && (
+        {hasToolbar && (
           <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
@@ -160,14 +208,16 @@ function ArtifactRenderer({ artifact }) {
             >
               <Code2 size={13} />
             </button>
-            <button
-              type="button"
-              onClick={openInNewTab}
-              title="Open in new tab"
-              className="p-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-300)] hover:bg-white/5 transition-colors"
-            >
-              <ExternalLink size={13} />
-            </button>
+            {live && (
+              <button
+                type="button"
+                onClick={openInNewTab}
+                title="Open in new tab"
+                className="p-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-300)] hover:bg-white/5 transition-colors"
+              >
+                <ExternalLink size={13} />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setExpanded((e) => !e)}
@@ -196,9 +246,17 @@ function ArtifactRenderer({ artifact }) {
         )
       ) : type === "python" ? (
         <PythonArtifact code={code} />
+      ) : type === "react" ? (
+        showSource ? (
+          <pre className="overflow-x-auto p-3 text-xs text-[var(--neutral-300)] bg-black/50 max-h-[480px]">
+            <code>{code}</code>
+          </pre>
+        ) : (
+          <ReactArtifact code={code} expanded={expanded} />
+        )
       ) : (
-        // react (or any future type) before its own live-preview patch
-        // lands — readable code, no execution, no crash.
+        // any future/unimplemented type — readable code, no execution,
+        // no crash.
         <div className="p-2.5 space-y-1.5">
           <div className="text-[11px] text-[var(--neutral-500)]">
             Live preview for {TYPE_LABELS[type] || type} artifacts isn't wired up yet — showing source.

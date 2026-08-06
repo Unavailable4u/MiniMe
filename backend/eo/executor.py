@@ -689,8 +689,36 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # Human-in-the-loop pause point. See this function's own
         # docstring above for exactly what state has and hasn't advanced
         # by this point.
-        if role in approval_roles:
+        #
+        # CO3: widened from the original approval_roles-only check to
+        # also fire on an on-demand pause_requested:{session_id} flag —
+        # someone hitting "Pause" mid-run, rather than a role pre-listed
+        # at task start. Same checkpoint, same snapshot shape, same
+        # return value either way, so resume_graph() below needs no
+        # changes at all to handle either trigger.
+        from memory.bus import read as bus_read, delete as bus_delete
+        pause_requested = bus_read(f"pause_requested:{session_id}", default=False) if session_id else False
+        if role in approval_roles or pause_requested:
             from memory.bus import write, get_current_app_slug
+            if pause_requested:
+                # Consume the flag now, same lifecycle as the snapshot
+                # itself: a one-shot trigger, not a sticky state that
+                # would otherwise re-pause every subsequent role once a
+                # resumed run reaches this checkpoint again.
+                bus_delete(f"pause_requested:{session_id}")
+            # Bug fix, found while wiring CO3: this event type existed on
+            # the frontend (WorkspaceDockContext.jsx's eventType ===
+            # "awaiting_approval" handler) but was never in
+            # VALID_EVENT_TYPES and never emitted here — so the "resume
+            # affordance already wired" step list never actually lit up
+            # live for EITHER trigger, approval_roles or on-demand. This
+            # call is what completes it. `reason` lets the frontend show
+            # different copy for "this role needs sign-off" vs "someone
+            # hit pause" without needing a second event type.
+            emit_event(
+                "awaiting_approval", session_id=session_id, agent=current_name, path=path,
+                payload={"role": role, "reason": "approval" if role in approval_roles else "manual_pause"},
+            )
             snapshot = {
                 "agent_names": agent_names,
                 "role_names": role_names,

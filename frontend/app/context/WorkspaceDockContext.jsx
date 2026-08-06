@@ -1041,9 +1041,37 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       return chat.id;
     };
 
+    // CO3: on-demand pause for whatever's running right now, as opposed
+    // to resumeRun above (which continues a run already paused). Fires
+    // the sessionId this dock is actually tracking — same `dockSessionId`
+    // sendTask/resumeRun above key off of, so a pause request always
+    // targets the run this panel is showing, not a stale id. Genuinely
+    // fire-and-forget: the pause_requested:{session_id} flag it sets is
+    // picked up by eo/executor.py's loop on its own; there's nothing to
+    // await here beyond the request landing. The UI finds out the pause
+    // actually took effect the same way it already finds out about an
+    // approval_roles pause — the "awaiting_approval" live event flips
+    // the paused step's status (see handleDockEvent above).
+    const requestPause = async (key) => {
+      const dockSessionId = states.get(key)?.sessionId;
+      if (!dockSessionId) return;
+      try {
+        await fetch(`${API_URL}/api/task/${dockSessionId}/pause`, {
+          method: "POST",
+          headers: await authHeaders({ json: true }),
+        });
+      } catch (err) {
+        // Fire-and-forget by design (matches the backend endpoint's own
+        // contract, see tasks.py's request_pause docstring) — a failed
+        // pause request just means the run keeps going, which is a safe
+        // failure mode, so this only needs to not crash the UI.
+        console.error("requestPause failed:", err);
+      }
+    };
+
     storeRef.current = {
       getState, subscribe, setState, remove, removeWorkspace,   // CHANGED — bug #1 fix, added removeWorkspace
-      persistMessage, sendTask, resumeRun, confirmHireReview, cancelHireReview,
+      persistMessage, sendTask, resumeRun, requestPause, confirmHireReview, cancelHireReview,
       switchChat, createNewChat, renameChat, deleteChat, linkChats, openScopedSubChat, createWorkspaceChat, loadOlderMessages,
       getLastActiveChatId, setLastActiveChatId, subscribeLastActiveChatId,
     };
@@ -1116,6 +1144,10 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
     (decision) => (key ? store.resumeRun(key, decision) : Promise.resolve()),
     [store, key]
   );
+  const requestPause = useCallback(
+    () => (key ? store.requestPause(key) : Promise.resolve()),
+    [store, key]
+  );
   const confirmHireReview = useCallback(
     (editedHires, opts) => (key ? store.confirmHireReview(key, editedHires, opts) : Promise.resolve()),
     [store, key]
@@ -1139,7 +1171,7 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
     [store, workspaceId]
   );
 
-  return { key, state, setDockState, sendTask, resumeRun, confirmHireReview, cancelHireReview, openScopedSubChat };
+  return { key, state, setDockState, sendTask, resumeRun, requestPause, confirmHireReview, cancelHireReview, openScopedSubChat };
 }
 
 /**

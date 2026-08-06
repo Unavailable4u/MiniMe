@@ -35,7 +35,7 @@ from eo.structure import (
     save_workflow_template, list_workflow_templates, delete_workflow_template,
     update_workflow_template,
 )
-from memory.bus import read_many as bus_read_many, set_app_slug, KEYS   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read
+from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag
 
 router = APIRouter()
 
@@ -217,6 +217,37 @@ def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_a
             decision=req.decision or {}, tier=-1, status="error", result=None,
             message=f"{exc.__class__.__name__}: {exc}",
         )
+
+
+class PauseResponse(BaseModel):
+    session_id: str
+    status: str  # "pause_requested"
+
+
+@router.post("/api/task/{session_id}/pause", response_model=PauseResponse)
+def request_pause(session_id: str, owner_id: str = Depends(require_auth)):
+    """CO3: on-demand pause for whatever's running right now, as opposed
+    to the pre-existing approval_roles path (a role pre-listed at task
+    start). Sets pause_requested:{session_id}; eo/executor.py's
+    Human-in-the-loop pause point (widened this same patch) checks it at
+    the SAME checkpoint it already checks approval_roles membership —
+    after every role's agent_done, never mid-LLM-call — so this gives the
+    identical clean-pause guarantee the existing path does, just on
+    demand instead of pre-planned.
+
+    Same access check as post_resume below: pausing is a write action
+    against someone's run, so it needs owner/edit-collaborator auth, not
+    just any authenticated user who happens to know the session_id.
+
+    Fire-and-forget by design — this only sets a flag for a loop that's
+    already running elsewhere to notice; it doesn't wait for the pause to
+    actually land, so a 200 here means "requested," not "paused yet."
+    The frontend should treat this as pending until it sees the run's
+    status flip to "paused" (see MessageBubble.jsx / ChatSidebar.jsx).
+    """
+    _resolve_chat_or_404(session_id, owner_id, require_edit=True)
+    write(f"pause_requested:{session_id}", True)
+    return PauseResponse(session_id=session_id, status="pause_requested")
 
 
 class ResumeRequest(BaseModel):
