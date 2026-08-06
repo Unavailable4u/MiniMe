@@ -1,0 +1,13 @@
+NEXT_PUBLIC_PUSHER_KEY=[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]
+NEXT_PUBLIC_PUSHER_CLUSTER=ap2
+NEXT_PUBLIC_GRAFANA_QUOTA_URL=[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]
+NEXT_PUBLIC_SUPABASE_URL=[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]
+NEXT_PUBLIC_SUPABASE_ANON_KEY=[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]
+
+NEXT_PUBLIC_SENTRY_DSN=[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]
+
+
+NEXT_PUBLIC_ENVIRONMENT=development[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]
+SENTRY_ORG=minime-qj
+SENTRY_PROJECT=minime-frontend
+SENTRY_AUTH_TOKEN=[they just shpwn here blank due to security purpose, but my actual env.local(frontend) file is filled with the real values]

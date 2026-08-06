@@ -1,7 +1,7 @@
 
 // frontend/app/context/AuthContext.jsx
 //
-// Part 8.9: real per-user auth, replacing the single shared NEXT_PUBLIC_API_KEY.
+// Part 8.9: real per-user auth, replacing the single shared static API key.
 //
 // Deliberately a SEPARATE context/provider from SessionContext.jsx, not a
 // merge into it — SessionContext's "session" already means something else

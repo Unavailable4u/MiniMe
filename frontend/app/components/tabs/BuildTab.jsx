@@ -9,7 +9,7 @@ import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-c
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
 import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, MessageSquare, Plus, Pencil, Check, X, Trash2 } from "lucide-react";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
-// Part 8.9: replaces the old static NEXT_PUBLIC_API_KEY/x-api-key header
+// Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
 
