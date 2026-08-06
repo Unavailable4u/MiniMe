@@ -5,8 +5,6 @@ import { useSession, authHeaders } from "../../context/SessionContext";
 import { useUsageStats } from "../../context/UsageStatsContext";   // NEW — Item 2 concern split, slice 2
 import { useIsVisible } from "../../hooks/useIsVisible";   // FIX — defer chart mount until this tab is actually shown (see hook's own comment)
 
-const GRAFANA_QUOTA_URL = process.env.NEXT_PUBLIC_GRAFANA_QUOTA_URL || null;
-
 // Kept as distinct, saturated per-provider colors on purpose — these
 // identify DATA series in charts, not chrome, so they stay separate from
 // the cyan/magenta UI accent palette rather than being folded into it.
@@ -439,7 +437,6 @@ function TokenUsageTab() {
         <QuotaPanel apiUrl={API_URL} />
         <UsageHistoryPanel apiUrl={API_URL} />
         <ProjectSectionUsagePanel apiUrl={API_URL} />
-        <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
       </div>
     );
   }
@@ -465,7 +462,6 @@ function TokenUsageTab() {
       </div>
       <UsageHistoryPanel apiUrl={API_URL} />
       <ProjectSectionUsagePanel apiUrl={API_URL} />
-      <GrafanaQuotaPanel url={GRAFANA_QUOTA_URL} />
     </div>
   );
 }
@@ -628,26 +624,6 @@ function Card({ title, action, children }) {
       </div>
       {children}
     </div>
-  );
-}
-
-function GrafanaQuotaPanel({ url }) {
-  // Unchanged from Part 16 — this is the one thing here that DOES show
-  // real cross-session, persisted usage (Part 4 §5.1's Grafana embed
-  // reading eo/quota_sentinel.py's actual stored data), complementing
-  // rather than duplicating the live-only charts above.
-  if (!url) return null;
-  return (
-    <Card title="Grafana (cross-session)">
-      <iframe
-        src={url}
-        width="100%"
-        height="1280"
-        style={{ minHeight: 600, border: "none" }}
-        frameBorder="0"
-        title="Grafana quota dashboard"
-      />
-    </Card>
   );
 }
 
