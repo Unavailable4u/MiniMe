@@ -4,8 +4,10 @@
 
 import * as Sentry from "@sentry/nextjs";
 
+// Leave NEXT_PUBLIC_SENTRY_DSN unset to disable Sentry entirely (safe
+// default for local dev) -- same convention as backend/api/server.py.
 Sentry.init({
-  dsn: "https://0a6c8d79214574a5f68d34e7bd425a2d@o4511859595935744.ingest.us.sentry.io/4511859650592768",
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN || undefined,
 
   // Define how likely traces are sampled. Adjust this value in production, or use tracesSampler for greater control.
   tracesSampleRate: 1,
