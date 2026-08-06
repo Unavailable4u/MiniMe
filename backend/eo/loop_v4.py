@@ -438,7 +438,7 @@ def main():
     # kept symmetric with api/task_runner.py's run_task().
     if opts["tier"] is None and opts["mode"] != "beast":
         conv_context = conversation_memory.get_full_context(session_id)  # NEW
-        cached = check_cache(task_text, app_slug=opts["app"], context_text=conv_context)
+        cached = check_cache(task_text, app_slug=opts["app"], context_text=conv_context, session_id=session_id)
         if cached:
             print(f"\n[Cache]\n{cached}\n")
             return

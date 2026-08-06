@@ -22,6 +22,7 @@ import hashlib
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import vector_index
 from utils.llm_client import embed_text, generate_text
+from relay.emitter import emit_event  # NEW — CO4 patch 3
 
 SIMILARITY_THRESHOLD = 0.93
 INVALIDATION_THRESHOLD = 0.90
@@ -80,10 +81,18 @@ def _verify_still_accurate(task_text: str, cached_answer: str, context_text: str
 
 
 def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,
-                 context_text: str = "") -> dict | None:
+                 context_text: str = "", session_id: str = None) -> dict | None:
     """Pass EXACTLY ONE of app_slug/workspace_id for a real scope, or
     neither for the legacy global bucket (existing callers not yet
-    migrated keep working, just without scoping — same as before)."""
+    migrated keep working, just without scoping — same as before).
+
+    session_id: NEW — CO4 patch 3, optional. Purely for the "cache_hit"
+    event emitted below on an actual hit — emit_event() is already a
+    documented no-op when session_id is None (see relay/emitter.py), so
+    every existing caller that doesn't pass this (eo/loop_v4.py's CLI
+    path never has a real session_id at all) keeps behaving exactly as
+    before.
+    """
     scope_type = "app" if app_slug else ("workspace" if workspace_id else None)
     scope_id = app_slug or workspace_id
 
@@ -113,9 +122,13 @@ def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,
     stored_fingerprint = meta.get("context_fingerprint", "")
     current_fingerprint = _fingerprint(context_text)
     if stored_fingerprint and stored_fingerprint == current_fingerprint:
+        emit_event("cache_hit", session_id=session_id, agent="semantic_cache",
+                   payload={"verified": False, "similarity": top.score})
         return answer
 
     if _verify_still_accurate(task_text, answer, context_text):
+        emit_event("cache_hit", session_id=session_id, agent="semantic_cache",
+                   payload={"verified": True, "similarity": top.score})
         return answer
     return None
 

@@ -64,7 +64,7 @@ MODELS = [
 ROLE_TAG = "implementer"
 
 
-def _select_workers(worker_count: int, key_override=None) -> list:
+def _select_workers(worker_count: int, key_override=None, session_id: str = None) -> list:
     """Thin wrapper over eo/worker_pool.py's shared, role_tag-parameterized
     selection (Part 6 §6.2 extraction). Byte-for-byte the same fairness
     rotation this module always had — _eligible_pool()/_select_workers()
@@ -73,8 +73,14 @@ def _select_workers(worker_count: int, key_override=None) -> list:
     instead of a copy-pasted second implementation. Kept as a local
     wrapper (rather than rewriting every call site below to import
     _select_workers_for_role directly) so this file's own run() doesn't
-    need to change at all."""
-    return _select_workers_for_role(ROLE_TAG, worker_count, key_override)
+    need to change at all.
+
+    session_id: NEW — CO4 patch 3, optional passthrough to the shared
+    selector's own "worker_pool_selection" event — see that function's
+    docstring. agent_name is fixed to ROLE_TAG here since that's the
+    only role this wrapper ever selects for."""
+    return _select_workers_for_role(ROLE_TAG, worker_count, key_override,
+                                     session_id=session_id, agent_name=ROLE_TAG)
 
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
 for the module described below. Follow the spec exactly. Include basic input validation.
@@ -294,7 +300,7 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
     design_approach = read(f"stage_output:{session_id}:logic_architect", default=None) if session_id else None
 
     worker_count = 8 if expanded else 5
-    key_envs = _select_workers(worker_count, key_override)
+    key_envs = _select_workers(worker_count, key_override, session_id=session_id)
 
     with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
         futures = {

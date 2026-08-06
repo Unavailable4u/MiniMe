@@ -181,6 +181,15 @@ function makeInitialDockState() {
     // shape rather than introducing a non-serializable field type this
     // file doesn't otherwise use anywhere in dock state.
     shownSuggestionPairs: [],
+    // NEW — CO4 patch 3: raw feed of the new "cache_hit"/
+    // "worker_pool_selection" events (see handleDockEvent's new branch
+    // below and relay/emitter.py's own comment on both event types).
+    // Plain array of {type, agent, payload, timestamp}, same "array of
+    // plain values" shape as liveSteps/routeTrace above — no rendering
+    // yet (CO4 patch 4 is what turns this into timeline nodes); this
+    // patch is only responsible for the data existing and reaching the
+    // frontend.
+    decisionEvents: [],
   };
 }
 
@@ -347,6 +356,22 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           macroLoopDecisions: [
             ...prev.macroLoopDecisions,
             { action: payload?.decision, loop: payload?.loop, cause: payload?.cause },
+          ],
+        }));
+        return;
+      }
+      // NEW — CO4 patch 3: both new event types land in the same
+      // `decisionEvents` array — they're the same kind of thing from
+      // the frontend's point of view (a decision point that happened
+      // mid-run, outside the normal agent_start/agent_done sequence),
+      // just distinguished by `type` for whatever CO4 patch 4 renders
+      // per type. No rendering here — see decisionEvents' own comment
+      // in makeInitialDockState above.
+      if (eventType === "cache_hit" || eventType === "worker_pool_selection") {
+        setState(key, (prev) => ({
+          decisionEvents: [
+            ...prev.decisionEvents,
+            { type: eventType, agent, payload, timestamp: data.timestamp || null },
           ],
         }));
         return;
@@ -704,6 +729,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         roleRequests: s.roleRequests,
         dependencyMap: s.dependencyMap,
         structurePlan: s.structurePlan,
+        decisionEvents: s.decisionEvents, // NEW — CO4 patch 3
       };
     };
 
@@ -716,6 +742,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         dependencyMap: {},
         structurePlan: null,
         macroLoopDecisions: [],
+        decisionEvents: [], // NEW — CO4 patch 3
       });
       openStepStacks.set(key, []); // stepSeqs is NOT reset — matches original: it only ever counts up, for React key uniqueness across the whole session
     };

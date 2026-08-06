@@ -433,7 +433,8 @@ def _run_parallel_passes(chunks: list[list[tuple[str, dict]]], title: str,
     same way it catches _run_sequential_pass()'s failures.
     """
     worker_count = min(len(chunks), MODE_A_MAX_PARALLEL_WORKERS)
-    key_envs = _select_workers("source_manager", worker_count, key_override)
+    key_envs = _select_workers("source_manager", worker_count, key_override,
+                               session_id=session_id, agent_name="source_manager")
 
     contexts = [_build_context(chunk, title) for chunk in chunks]
 
