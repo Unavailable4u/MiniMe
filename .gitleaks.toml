@@ -8,20 +8,20 @@
 # gitleaks' generic-api-key rule already catches; no custom regex needed
 # for them specifically.
 
+title = "gitleaks config"
+
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Known-safe placeholder/example files and generated fixtures"
+description = "Global allowlist"
 paths = [
-  '''.*env\.example$''',
-  '''.*env\.sample$''',
-  '''(^|/)tests/manual/.*''',        # real E2B/API smoke tests read keys from os.environ, never inline
-  '''(^|/)tests/fixtures/.*\.cassette\.yaml$''',  # vcrpy cassettes (B1) — recorded HTTP, not live secrets
-  '''package-lock\.json$''',
-  '''pnpm-lock\.yaml$''',
+  '''\.next/''',
+  '''node_modules/''',
 ]
-
+regexes = [
+  '''^[A-Z][A-Z0-9_]*_KEY_\d+=?$''',
+]
 # One narrow regex exception: MiniMe's own account_id_env / token_env
 # NAMES (e.g. "CLOUDFLARE_API_KEY_4") appear as plain strings throughout
 # backend/agents/*.py and backend/eo/*.py as dict keys / env var lookups —
