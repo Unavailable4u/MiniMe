@@ -1,0 +1,139 @@
+EO_INSPECTOR_GROQ_KEY_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+EO_INSPECTOR_GROQ_KEY_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+EO_PANEL_CEREBRAS_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+EO_PANEL_CLOUDFLARE_ACCOUNT_ID=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+EO_PANEL_CLOUDFLARE_API_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+
+GROQ_API_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+GROQ_API_KEY_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_API_KEY_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_API_KEY_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+GROQ_API_KEY_9=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+CEREBRAS_API_KEY_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_4=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_5=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_API_KEY_9=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_4=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_4=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_5=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_5=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_ACCOUNT_ID_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CLOUDFLARE_API_KEY_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+UPSTASH_REDIS_REST_URL=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+UPSTASH_REDIS_REST_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+UPSTASH_VECTOR_REST_URL=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+UPSTASH_VECTOR_REST_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+E2B_API_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+PUSHER_APP_ID=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+PUSHER_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+PUSHER_SECRET=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+PUSHER_CLUSTER=ap2
+
+GROQ_API_KEY_10=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_API_KEY_11=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_API_KEY_12=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_API_KEY_13=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_API_KEY_14=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SGA_GROQ_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SGA_GROQ_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SGA_GROQ_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+UPSTASH_REDIS_CACHE_URL=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+UPSTASH_REDIS_CACHE_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_RESERVE_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_RESERVE_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CEREBRAS_RESERVE_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CF_SCANNER_RESERVE_1_ACCOUNT_ID=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CF_SCANNER_RESERVE_1_API_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CF_SCANNER_RESERVE_2_ACCOUNT_ID=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CF_SCANNER_RESERVE_2_API_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CF_SCANNER_RESERVE_3_ACCOUNT_ID=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+CF_SCANNER_RESERVE_3_API_TOKEN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_RESERVE_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GROQ_RESERVE_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_1=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_4=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_5=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_9=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_10=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_11=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_12=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_13=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_14=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_15=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_16=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_17=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+GEMINI_API_KEY_18=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_4=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_5=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_9=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+MISTRAL_API_KEY_10=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+HUGGINGFACE_API_KEY_2=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_3=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_4=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_5=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+HUGGINGFACE_API_KEY_6=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_7=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_8=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_9=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+HUGGINGFACE_API_KEY_10=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+
+API_AUTH_MODE=api_key
+API_AUTH_SECRET=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+ALLOWED_ORIGINS=http://localhost:3000
+# perf audit §4.6 / priority #9: ThreadedConnectionPool sizing —
+# defaults to DB_POOL_MIN=1 / DB_POOL_MAX=20 in eo/db.py if left unset
+# here. Raise DB_POOL_MAX for a deployment expecting real concurrent
+# load; bound it by your actual Postgres connection limit (Supabase's
+# pooler has its own cap, separate from this pool).
+# DB_POOL_MIN=1
+# DB_POOL_MAX=20
+
+DATABASE_URL=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+
+SUPABASE_URL=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SUPABASE_ANON_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SUPABASE_SERVICE_ROLE_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SUPABASE_JWT_SECRET=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+# API_AUTH_SECRET=...        <- this one gets RETIRED once 8.2 lands, don't delete yet, just don't rely on it going forward
+# ALLOWED_ORIGINS=http://localhost:3000
+#<script defer src="https://cloud.umami.is/script.js" data-website-id="71f591d2-5a25-4727-afdb-8f0ecbe09369"></script>
+TAVILY_API_KEY=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+SENTRY_DSN=[they are kept here blank due to security reason, but i have my actual .env(backend) file filled with the real values]
+ENVIRONMENT=development

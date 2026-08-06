@@ -15,7 +15,7 @@ const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — persists which cha
 // this file. The backend's require_auth() (api/server.py) now verifies a
 // real per-user Supabase JWT via `Authorization: Bearer <token>`, not a
 // shared secret — every fetch() call below was updated to call this
-// instead of sending process.env.NEXT_PUBLIC_API_KEY. Pulls the current
+// instead of sending a static shared API key. Pulls the current
 // access_token fresh on every call rather than caching it, since
 // supabase-js's client already keeps the in-memory session current
 // (including silent refresh) — reading it live here means a call made
