@@ -52,7 +52,13 @@ from eo.result_render import render_agent_result
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
-    {"provider": "mistral", "model": "mistral-large-latest", "key_env": "MISTRAL_API_KEY_1"},#gitleaks:allow
+    # Env-audit fix: the account is named MISTRAL_API_KEY (bare, "account 1"
+    # per .env.example's own comment), not MISTRAL_API_KEY_1 -- that name
+    # was never provisioned, so this third fallback step always resolved
+    # to None and silently failed. Harmless today only because this
+    # module isn't wired into api/task_runner.py yet (see docstring); the
+    # bug was caught here before that wiring landed.
+    {"provider": "mistral", "model": "mistral-large-latest", "key_env": "MISTRAL_API_KEY"},#gitleaks:allow
 ]
 
 SYSTEM_PROMPT = """You are the final-answer organizer for an autonomous multi-agent
