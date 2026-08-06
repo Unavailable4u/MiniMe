@@ -96,6 +96,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
   const sessionId = dock.state.sessionId; // §4
   const resumeRun = dock.resumeRun; // Part 2 §2.4/§2.7
   const requestPause = dock.requestPause; // NEW — CO3
+  const pausedRun = dock.state.pausedRun; // NEW — CO3 patch 4
   // guide §5 — a Notebooks Generate command can only originate from a
   // workspace-keyed dock (NotebooksGeneratePicker.jsx always has a
   // workspaceId), so this is simply undefined for a WorkingPanel not
@@ -268,8 +269,14 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 fine to request one even during the pre-decision
                 "Classifying and routing…" moment. Hidden once a step is
                 already awaiting_approval — pausing an already-paused
-                run has nothing left to do. */}
-            {!liveSteps.some((s) => s.status === "awaiting_approval") && (
+                run has nothing left to do.
+                CHANGED — CO3 patch 4: also hidden once pausedRun is set.
+                Previously only the awaiting_approval case was checked,
+                so a manual pause (which never sets any step's status —
+                see AgentStepList's own comment on `manualPause`) left
+                this button visible and clickable on an already-paused
+                run. */}
+            {!liveSteps.some((s) => s.status === "awaiting_approval") && !pausedRun && (
               <PauseButton onRequestPause={requestPause} />
             )}
           </div>
@@ -299,7 +306,11 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 <DependencyGraph map={dependencyMap} />
               )}
               {structurePlan && <MermaidDiagram mermaidText={structurePlan} />}
-              <AgentStepList steps={liveSteps} onResume={resumeRun} />
+              <AgentStepList
+                steps={liveSteps}
+                onResume={resumeRun}
+                manualPause={!liveSteps.some((s) => s.status === "awaiting_approval") && !!pausedRun}
+              />
             </>
           )}
         </div>

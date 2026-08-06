@@ -777,8 +777,18 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         });
         const data = await res.json();
         if (data.status === "paused") {
+          // CO3 patch 3: previously this only set in-memory pausedRun
+          // state and returned — nothing was ever appended to
+          // `messages` or persisted, so MessageBubble.jsx never saw a
+          // status:"paused" message and a reload lost the pause
+          // entirely. Now it's appended/persisted like every other
+          // result, loading stays true (matching SessionContext.jsx's
+          // sendTask()) since the run itself hasn't finished.
           setState(key, { pausedRun: { taskText, sessionId: data.session_id || dockSessionId } });
-          return; // loading stays true, matching SessionContext.jsx's sendTask()
+          const assistantMessage = buildAssistantMessage(key, taskText, data);
+          setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage] }));
+          persistMessage(key, assistantMessage);
+          return;
         }
         const assistantMessage = buildAssistantMessage(key, taskText, data);
         setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false }));
@@ -801,7 +811,18 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         });
         const data = await res.json();
         setState(key, { pausedApproval: null });
-        if (data.status === "paused") return;
+        if (data.status === "paused") {
+          // CO3 patch 3: same gap as sendTask() above — a resume that
+          // immediately hits another approval role re-paused silently,
+          // with nothing appended/persisted. Refresh pausedRun to the
+          // new session_id (if any) and append/persist the same as a
+          // first-time pause.
+          setState(key, { pausedRun: { taskText: pausedRun.taskText, sessionId: data.session_id || pausedRun.sessionId } });
+          const assistantMessage = buildAssistantMessage(key, pausedRun.taskText, data);
+          setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage] }));
+          persistMessage(key, assistantMessage);
+          return;
+        }
         const assistantMessage = buildAssistantMessage(key, pausedRun.taskText, data);
         setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false, pausedRun: null }));
         persistMessage(key, assistantMessage);

@@ -15,6 +15,8 @@ export default function MessageRow({
   onSelect,
   onNavigateSubTab,
   onSendCommand,
+  onResume,       // NEW — CO3 patch 3
+  isActivePause,  // NEW — CO3 patch 3
 }) {
   return (
     <div onClick={() => onSelect(index)} className="pb-4">
@@ -22,6 +24,8 @@ export default function MessageRow({
         message={message}
         onNavigateSubTab={onNavigateSubTab}
         onSendCommand={onSendCommand}
+        onResume={onResume}
+        isActivePause={isActivePause}
       />
     </div>
   );

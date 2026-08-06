@@ -92,6 +92,8 @@ def _row_to_chat(row: dict, include_messages: bool = True) -> dict:
         out["messages"] = row.get("messages") or []
     if "message_count" in row:
         out["message_count"] = row["message_count"]
+    if "last_status" in row:
+        out["last_status"] = row["last_status"]
     return out
 
 
@@ -241,15 +243,29 @@ def find_chat_for_template(owner_id: str, template_id: str) -> dict | None:
 
 
 def list_chats(owner_id: str) -> list:
-    """Sidebar listing — most recently updated first."""
+    """Sidebar listing — most recently updated first.
+
+    CO3 patch 3: also pulls the last message's data.status via a
+    lateral join on chat_messages (ordered by seq desc, limit 1) so
+    the sidebar can show a "Paused" badge. No schema change needed —
+    chat_messages already stores the full message payload per
+    Migration 0002."""
     with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             """
-            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
-                   jsonb_array_length(messages) as message_count
-            from chats
-            where owner_id = %s
-            order by updated_at desc
+            select c.id, c.title, c.created_at, c.updated_at, c.linked_chat_ids,
+                   c.tags, c.template_id,
+                   jsonb_array_length(c.messages) as message_count,
+                   lm.payload -> 'data' ->> 'status' as last_status
+            from chats c
+            left join lateral (
+                select payload from chat_messages cm
+                where cm.chat_id = c.id
+                order by cm.seq desc
+                limit 1
+            ) lm on true
+            where c.owner_id = %s
+            order by c.updated_at desc
             """,
             (owner_id,),
         )
