@@ -1,0 +1,245 @@
+"""
+api/routes/chats.py
+
+B6, piece 3 — projects, persistent chats (see eo/chat_store.py), and
+memory batches (see eo/memory_batch.py). Pulled out of api/server.py
+verbatim (same functions, same error handling, same docstrings) —
+nothing here changes behavior, this is a pure move.
+
+Grouped as one module rather than three separate files because chats
+belong to batches/projects — splitting them apart would just create
+cross-file imports for no benefit.
+
+Includes both /api/projects routes (POST register + GET list), even
+though they lived far apart in the original server.py (the GET sat
+down near the deploy routes) — same domain, so they move together
+rather than leaving one half behind.
+"""
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+from api.deps import require_auth, _resolve_chat_or_404
+from eo.project_registry import list_projects, generate_control_unit, register_project
+from eo import chat_store
+from eo import memory_batch
+from eo import chat_workspace
+
+router = APIRouter()
+
+
+class RegisterProjectRequest(BaseModel):
+    path: str
+    display_name: str
+
+
+class CreateChatRequest(BaseModel):
+    title: Optional[str] = "New Chat"
+    template_id: Optional[str] = None   # NEW — one chat per template
+
+
+class RenameChatRequest(BaseModel):
+    title: str
+
+
+class LinkChatsRequest(BaseModel):
+    linked_chat_ids: list[str]
+
+
+class CreateBatchRequest(BaseModel):
+    name: str
+    member_chat_ids: list[str]
+
+
+class EstimateBatchRequest(BaseModel):
+    chat_ids: list[str]
+
+
+class RenameBatchRequest(BaseModel):
+    name: str
+
+
+class BatchMembersRequest(BaseModel):
+    chat_ids: list[str]
+
+
+class AppendMessageRequest(BaseModel):
+    message: dict
+
+
+@router.post("/api/projects", dependencies=[Depends(require_auth)])
+def register_project_endpoint(req: RegisterProjectRequest):
+    unit = generate_control_unit(req.display_name)
+    register_project(unit["unique_name"], req.path)
+    return {"unique_name": unit["unique_name"], "root_path": req.path}
+
+
+@router.get("/api/projects", dependencies=[Depends(require_auth)])
+def projects():
+    return list_projects()
+
+
+# --- persistent chats (see eo/chat_store.py) ------------------------------
+# chat_id and session_id are the same string everywhere in this system —
+# the sidebar creates a chat_id via POST /api/chats, and that value is
+# passed straight through as session_id on /api/task.
+# _resolve_chat_or_404 itself now lives in api/deps.py (imported at the
+# top of this file) — every route below still calls it exactly the same
+# way, this is a pure move.
+
+@router.get("/api/chats")
+def get_chats(owner_id: str = Depends(require_auth)):
+    return chat_store.list_chats(owner_id)
+
+
+@router.post("/api/chats")
+def create_chat(req: CreateChatRequest, owner_id: str = Depends(require_auth)):
+    return chat_store.create_chat(owner_id, title=req.title or "New Chat", template_id=req.template_id)
+
+
+@router.get("/api/chats/{chat_id}")
+def get_chat(
+    chat_id: str,
+    owner_id: str = Depends(require_auth),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    before_seq: Optional[int] = Query(default=None, ge=0),
+):
+    real_owner_id = _resolve_chat_or_404(chat_id, owner_id)
+    try:
+        # Perf audit item #3: limit/before_seq pass straight through to
+        # chat_store.get_chat() (already supported it — see that
+        # function's docstring — this is the "wire it into a route"
+        # step). Both default to None, so a plain GET with no query
+        # params is byte-for-byte the same unpaginated call every
+        # existing caller (including this route, before this change)
+        # already relies on.
+        chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit, before_seq=before_seq)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+    # Part 8.4: strip author_id from each message if this requester's
+    # role/workspace setting says they shouldn't see who-wrote-what.
+    # `owner_id` here is the ACTUAL caller (pre-resolution) — the right
+    # identity to check attribution visibility against, not real_owner_id.
+    ws_id = chat.get("workspace_id")
+    if ws_id and not chat_workspace.can_see_attribution(ws_id, owner_id):
+        chat["messages"] = [
+            {k: v for k, v in m.items() if k != "author_id"} for m in chat.get("messages", [])
+        ]
+    return chat
+
+
+@router.patch("/api/chats/{chat_id}/rename")
+def rename_chat(chat_id: str, req: RenameChatRequest, owner_id: str = Depends(require_auth)):
+    real_owner_id = _resolve_chat_or_404(chat_id, owner_id, require_edit=True)
+    try:
+        return chat_store.rename_chat(chat_id, real_owner_id, req.title)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+
+@router.patch("/api/chats/{chat_id}/links")
+def link_chats(chat_id: str, req: LinkChatsRequest, owner_id: str = Depends(require_auth)):
+    real_owner_id = _resolve_chat_or_404(chat_id, owner_id, require_edit=True)
+    try:
+        return chat_store.set_linked_chats(chat_id, real_owner_id, req.linked_chat_ids)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+
+
+@router.post("/api/chats/{chat_id}/messages")
+def append_message(chat_id: str, req: AppendMessageRequest, owner_id: str = Depends(require_auth)):
+    # append_message historically auto-creates the chat row on first
+    # use (a brand-new chat_id with no row yet) — that path stays
+    # owner_id-scoped to the caller, since it's genuinely their new
+    # chat. Only route through the collaborator resolver when the
+    # chat_id already belongs to someone else.
+    if chat_store.chat_exists(chat_id, owner_id):
+        real_owner_id = owner_id
+    else:
+        resolved = chat_store.resolve_chat_access(chat_id, owner_id)
+        if resolved is None:
+            real_owner_id = owner_id  # genuinely new chat_id — caller becomes its owner
+        else:
+            real_owner_id, role = resolved
+            if role == "viewer":
+                raise HTTPException(status_code=403, detail="Viewer access does not permit this action")
+
+    # Part 8.4: stamp the ACTUAL acting user (owner_id, pre-resolution) as
+    # author_id — never real_owner_id, which is the chat's owner and may be
+    # a different person than whoever is actually typing this message.
+    message = dict(req.message)
+    message["author_id"] = owner_id
+    return chat_store.append_message(chat_id, real_owner_id, message)
+
+
+@router.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str, owner_id: str = Depends(require_auth)):
+    # Deliberately NOT routed through the collaborator resolver — outright
+    # deletion stays owner-only, same discipline as workspace deletion. An
+    # editor can remove a chat from the workspace grouping (see
+    # chat_workspace.remove_chat) but cannot delete someone else's chat.
+    chat_store.delete_chat(chat_id, owner_id)
+    return {"status": "deleted", "id": chat_id}
+
+
+# --- memory batches: mutual-membership groups (see eo/memory_batch.py) ---
+
+@router.get("/api/batches")
+def get_batches(owner_id: str = Depends(require_auth)):
+    return memory_batch.list_batches(owner_id)
+
+
+@router.post("/api/batches/estimate")
+def estimate_batch(req: EstimateBatchRequest, owner_id: str = Depends(require_auth)):
+    """Called live from the create-batch modal as the user checks/unchecks
+    chats — NOT tied to an existing batch_id, since the whole point is to
+    show the cost BEFORE creating one. See chat_store.estimate_batch_context_tokens."""
+    return chat_store.estimate_batch_context_tokens(owner_id, req.chat_ids)
+
+
+@router.post("/api/batches")
+def create_batch(req: CreateBatchRequest, owner_id: str = Depends(require_auth)):
+    try:
+        return memory_batch.create_batch(owner_id, req.name, req.member_chat_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/api/batches/{batch_id}/rename")
+def rename_batch(batch_id: str, req: RenameBatchRequest, owner_id: str = Depends(require_auth)):
+    try:
+        return memory_batch.rename_batch(batch_id, owner_id, req.name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+
+
+@router.post("/api/batches/{batch_id}/unlink")
+def unlink_batch_members(batch_id: str, req: BatchMembersRequest, owner_id: str = Depends(require_auth)):
+    """Returns {"dissolved": true} if removing these members collapsed the
+    batch to <=1, otherwise returns the updated batch."""
+    try:
+        result = memory_batch.unlink_members(batch_id, owner_id, req.chat_ids)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+    return result if result else {"dissolved": True, "id": batch_id}
+
+
+@router.post("/api/batches/{batch_id}/members")
+def add_batch_member(batch_id: str, req: BatchMembersRequest, owner_id: str = Depends(require_auth)):
+    try:
+        for cid in req.chat_ids:
+            memory_batch.add_member(batch_id, owner_id, cid)
+        return memory_batch.get_batch(batch_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+
+
+@router.delete("/api/batches/{batch_id}")
+def delete_batch(batch_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        memory_batch.delete_batch(batch_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown batch_id")
+    return {"status": "deleted", "id": batch_id}
