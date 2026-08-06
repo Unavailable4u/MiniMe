@@ -43,6 +43,31 @@ from utils.llm_client import generate_text
 
 MEMBER_B_CHAIN = [
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
+    # Env-audit follow-up: EO_PANEL_CLOUDFLARE_ACCOUNT_ID/API_TOKEN were
+    # provisioned back when the blueprint's original Member B plan was
+    # Cloudflare Workers AI (@cf/meta/llama-3.1-8b-instruct — see this
+    # module's own docstring for why Cerebras was substituted in as the
+    # primary instead). The Cloudflare account was never decommissioned
+    # and the credentials are real, so rather than let them sit idle
+    # they're wired in here as Member B's fallback -- this also closes a
+    # real single-point-of-failure gap the chain had (one step, one
+    # account, no fallback at all for an escalation-only vote that's
+    # supposed to represent a genuinely distinct model lineage).
+    {"provider": "cloudflare", "model": "@cf/meta/llama-3.1-8b-instruct",
+     "account_id_env": "EO_PANEL_CLOUDFLARE_ACCOUNT_ID", "token_env": "EO_PANEL_CLOUDFLARE_API_TOKEN"},
+    # GEMINI_API_KEY_7 was reserved in the .env.example Part 2 migration
+    # comments for exactly this slot ("-> EO_PANEL_CEREBRAS_KEY
+    # (panel_member_b): distinct model lineage, Gemini Pro") but never
+    # actually got wired into any chain -- confirmed zero other
+    # references in the codebase. Added here as the second fallback, per
+    # that original intent, EXCEPT for the model: utils/llm_client.py's
+    # own QUOTA_CONFIG deliberately omits gemini-3.1-pro/gemini-2.5-pro
+    # ("0/0 on the free tier (paid-only) ... will fail every time, not
+    # just on exhaustion") -- so "Gemini Pro" as originally planned would
+    # have been a guaranteed-broken fallback step. gemini-3.6-flash is
+    # the free-tier model every other Gemini chain in this codebase
+    # actually uses.
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_7"},
 ]
 # Quota-reality fix, §4: GitHub Models retired in full (2026-07-30) --
 # this chain was two GitHub steps on the SAME key (EO_PANEL_GITHUB_PAT),
@@ -55,6 +80,15 @@ MEMBER_B_CHAIN = [
 # vote.
 MEMBER_C_CHAIN = [
     {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY_7"},
+    # MISTRAL_API_KEY_6 was reserved by the same .env.example Part 2
+    # comment block as MISTRAL_API_KEY_7 above ("-> panel sibling:
+    # researcher / fact_checker (distinct lineage, alongside Gemini)")
+    # but MISTRAL_API_KEY_7 was the only one of the pair actually wired
+    # in -- confirmed zero other references to _6 anywhere in the repo.
+    # Added here as a same-provider fallback before dropping to the
+    # cross-provider Gemini step below, closing the gap flagged in the
+    # env audit.
+    {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY_6"},
     {"provider": "gemini", "model": "gemini-3.1-flash-lite", "key_env": "GEMINI_API_KEY_9"},
 ]
 # Migration Part 26 §4c: PATH_TO_TIER / TIER_TO_PATH now come from
