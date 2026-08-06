@@ -52,21 +52,15 @@ if SENTRY_DSN:
         traces_sample_rate=1.0,
     )
 
-import jwt
-from jwt import PyJWKClient
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # only used as a fallback for
-                                                          # projects still on the legacy
-                                                          # shared HS256 secret — most
-                                                          # current Supabase projects sign
-                                                          # with an asymmetric key instead
-                                                          # (see require_auth() below).
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # NEW — Part 8.3: admin
-                                                          # key, used ONLY to resolve an
-                                                          # invited collaborator's email to
-                                                          # their user_id. Never sent to a
-                                                          # client, never used for auth.
+# B6 — auth/JWT verification (SUPABASE_URL, require_auth,
+# _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
+# so api/routes/* modules can import it without a circular import back
+# into this file. See api/deps.py's module docstring for why.
+from api.deps import (
+    SUPABASE_URL, SUPABASE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY,
+    require_auth, _verify_supabase_jwt, _lookup_user_id_by_email,
+    _lookup_users_by_ids, _resolve_chat_or_404,
+)
 
 # NEW — Part 8.5: Google Calendar OAuth. Same "read from env, fail loud at
 # the point of use if missing" convention as the Supabase vars above.
@@ -76,25 +70,6 @@ GOOGLE_OAUTH_REDIRECT_URI = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
 # e.g. "https://your-api-host/api/integrations/google_calendar/callback"
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Lazily-built JWKS client — fetches and caches Supabase's public signing
-# keys from its well-known endpoint. This is what verifies the asymmetric
-# (ES256/RS256) tokens that current Supabase projects issue by default.
-# No secret involved on this path: these are public keys, safe to fetch
-# over the network on every cold start.
-_jwk_client: PyJWKClient | None = None
-
-
-def _get_jwk_client() -> PyJWKClient:
-    global _jwk_client
-    if _jwk_client is None:
-        if not SUPABASE_URL:
-            raise HTTPException(
-                status_code=500,
-                detail="Server misconfigured: SUPABASE_URL is not set.",
-            )
-        _jwk_client = PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json")
-    return _jwk_client
 
 import asyncio  # NEW — Data Layer architecture §9b: capturing the running
                  # event loop at startup for eo/ws_registry.py's thread-safe push
@@ -110,14 +85,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Union, Any
 
-from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template   # preview/confirm NEW — Part 2 §2.5, run_task_from_template NEW — Part 2 §2.7
-from eo.executor import resume_graph   # NEW — Part 2 §2.4
-from eo.registry import list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned, list_role_metadata   # NEW — Part 2 §2.7: Role Library panel; set_role_pinned NEW — pinned roles; list_role_metadata NEW — bulk read, fixes N+1
-from eo.structure import (   # NEW — Part 2 §2.7: Workflow Template builder
-    save_workflow_template, list_workflow_templates, delete_workflow_template, update_workflow_template,
-    STRUCTURE_TEMPLATES,   # NEW — Test tab: /simulate reads the "simulate" domain's own role list
-)
-from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
+# B6 — run_task/preview_task/confirm_task/run_task_from_template,
+# resume_graph, the eo.registry role-library functions, and the
+# eo.structure workflow-template functions moved to api/routes/tasks.py
+# along with the routes that used them. get_quota_snapshot/
+# get_usage_history/get_usage_history_scoped moved to api/routes/
+# system.py the same way. STRUCTURE_TEMPLATES is kept here — /simulate
+# (still in this file) reads it directly.
+from eo.structure import STRUCTURE_TEMPLATES   # NEW — Test tab: /simulate reads the "simulate" domain's own role list
 from memory.bus import read_many as bus_read_many, set_app_slug, KEYS   # NEW — Part 7 §7.2: GET /api/tasks/{session_id}
 from eo.errors import MissingDependencyError   # NEW — Part 7 §7.4: deploy endpoints' 409 handling
 from eo import chat_store
@@ -186,159 +161,6 @@ NOTES_EXPORTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "exports",
 )
 
-def _verify_supabase_jwt(token: str) -> str:
-    """The actual decode-and-verify logic behind require_auth() below.
-    Pulled out to a bare token->user_id function (NEW — §9b) so the
-    WebSocket handshake can share it: a browser's WebSocket API has no
-    way to set an Authorization header on the handshake request, so
-    the §9b route below takes the token as a query param instead of
-    going through require_auth()'s Request-shaped dependency. Raises
-    HTTPException on any failure, same as before this split — the
-    WebSocket route catches that itself and translates it into a
-    close code, since a socket has no response body to attach an HTTP
-    error detail to."""
-    try:
-        header = jwt.get_unverified_header(token)
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    alg = header.get("alg", "")
-
-    try:
-        if alg == "HS256":
-            # Legacy shared-secret projects only.
-            if not SUPABASE_JWT_SECRET:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Server misconfigured: SUPABASE_JWT_SECRET is not set.",
-                )
-            payload = jwt.decode(
-                token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated",
-            )
-        else:
-            # Current Supabase default: asymmetric signing (ES256/RS256).
-            # get_signing_key_from_jwt looks up the right public key by the
-            # token's own `kid`, so this works whether Supabase issued
-            # ES256, RS256, or rotates keys later — nothing here is
-            # hardcoded to one algorithm except what the token itself claims.
-            signing_key = _get_jwk_client().get_signing_key_from_jwt(token)
-            payload = jwt.decode(
-                token, signing_key.key, algorithms=[alg], audience="authenticated",
-            )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Token missing subject")
-
-    return user_id
-
-
-def require_auth(request: Request) -> str:
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    token = auth_header[len("Bearer "):].strip()
-
-    user_id = _verify_supabase_jwt(token)
-    request.state.user_id = user_id  # kept for any code that reads it off the request directly
-    return user_id
-
-
-def _lookup_user_id_by_email(email: str) -> str | None:
-    """Admin-API lookup, used only by the workspace-invite endpoint to
-    turn 'alice@example.com' into a user_id. Paginates and matches
-    exactly rather than trusting the API's own email filter — it did
-    not reliably filter server-side during testing (see scripts/
-    get_test_jwt.py's find_user_by_email, which hit the same issue and
-    was fixed the same way)."""
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="Server misconfigured: SUPABASE_SERVICE_ROLE_KEY is not set.",
-        )
-    page = 1
-    per_page = 200
-    while True:
-        resp = requests.get(
-            f"{SUPABASE_URL}/auth/v1/admin/users",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            },
-            params={"page": page, "per_page": per_page},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        users = resp.json().get("users", [])
-        if not users:
-            return None
-        for u in users:
-            if (u.get("email") or "").lower() == email.lower():
-                return u["id"]
-        if len(users) < per_page:
-            return None
-        page += 1
-
-
-def _lookup_users_by_ids(user_ids: set[str]) -> dict:
-    """Admin-API lookup, the reverse of _lookup_user_id_by_email — turns a
-    set of user_ids into {id: {email, name, avatar_url}} so member rosters
-    can show a real identity instead of a raw UUID. Same single-pass,
-    early-exit-once-all-found pagination as the email lookup above; a
-    workspace roster is small (partners/moderators/etc., not a whole
-    user base), so this stays cheap even without caching.
-
-    'name' falls back through user_metadata's common shapes (Supabase
-    email/password signup doesn't set any of these — only OAuth
-    providers or an app-side profile step would — so the final fallback
-    is the local part of the email, then the raw id if even email is
-    somehow missing).
-    """
-    if not user_ids:
-        return {}
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="Server misconfigured: SUPABASE_SERVICE_ROLE_KEY is not set.",
-        )
-    remaining = set(user_ids)
-    found = {}
-    page = 1
-    per_page = 200
-    while remaining:
-        resp = requests.get(
-            f"{SUPABASE_URL}/auth/v1/admin/users",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            },
-            params={"page": page, "per_page": per_page},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        users = resp.json().get("users", [])
-        if not users:
-            break
-        for u in users:
-            if u["id"] in remaining:
-                meta = u.get("user_metadata") or {}
-                email = u.get("email")
-                found[u["id"]] = {
-                    "email": email,
-                    "name": meta.get("full_name") or meta.get("name")
-                            or (email.split("@")[0] if email else u["id"]),
-                    "avatar_url": meta.get("avatar_url") or meta.get("picture"),
-                }
-                remaining.discard(u["id"])
-        if len(users) < per_page:
-            break
-        page += 1
-    return found
-
-
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -346,6 +168,16 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# B6 — routers split out of this file. tasks_router owns /api/task*,
+# /api/resume, /api/roles*, /api/workflow-templates* (piece 1);
+# system_router owns /api/health, /api/quota, /api/usage/history
+# (piece 2). This is also where CO3's /api/task/{id}/pause and CO5's
+# /api/task/{id}/stream will register once built, inside tasks_router.
+from api.routes.tasks import router as tasks_router
+from api.routes.system import router as system_router
+app.include_router(tasks_router)
+app.include_router(system_router)
 
 
 # NEW — Data Layer architecture §9b: the real transport behind
@@ -612,23 +444,9 @@ def register_project_endpoint(req: RegisterProjectRequest):
 # chat_id and session_id are the same string everywhere in this system —
 # the sidebar creates a chat_id via POST /api/chats, and that value is
 # passed straight through as session_id on /api/task.
-
-def _resolve_chat_or_404(chat_id: str, user_id: str, require_edit: bool = False) -> str:
-    """Confirms user_id has access to chat_id — as its owner, or as a
-    workspace collaborator — and returns the chat's REAL owner_id, which
-    every chat_store function below must be called with (never the
-    requester's own id, unless they happen to be the same person).
-    Raises 404 for no access at all (never distinguishes 'doesn't
-    exist' from 'exists but isn't shared with you'), and 403 if the
-    requester has viewer-only access but the route needs edit rights."""
-    resolved = chat_store.resolve_chat_access(chat_id, user_id)
-    if resolved is None:
-        raise HTTPException(status_code=404, detail="Unknown chat_id")
-    real_owner_id, role = resolved
-    if require_edit and role == "viewer":
-        raise HTTPException(status_code=403, detail="Viewer access does not permit this action")
-    return real_owner_id
-
+# _resolve_chat_or_404 itself now lives in api/deps.py (imported at the
+# top of this file) — every route below still calls it exactly the same
+# way, this is a pure move.
 
 @app.get("/api/chats")
 def get_chats(owner_id: str = Depends(require_auth)):
@@ -3402,462 +3220,11 @@ def missed_quiz_questions_endpoint(workspace_id: str = Query(...),
                                     quiz_node_id: str = Query(...)):
     return quiz_progress.get_missed_questions(workspace_id, quiz_node_id)
 
-class AttachmentIn(BaseModel):
-    # NEW — Data Layer §4a. Mirrors process_upload()'s own required
-    # args (agents/source_manager.py) plus the two optional ingest_kwargs
-    # "import" can take; every other kind ignores fmt/default_title, same
-    # as process_upload() itself does.
-    kind: str            # one of source_manager._INGEST_DISPATCH's keys:
-                          # "pdf" | "import" | "voice" | "video" | "web_clip"
-    payload: str          # local file path (already saved to disk by this
-                          # request) or a url, depending on kind
-    fmt: Optional[str] = None
-    default_title: Optional[str] = None
 
-
-class TaskRequest(BaseModel):
-    task_text: str
-    tier_override: Optional[int] = None
-    directed_task_type: Optional[str] = None
-    app_slug: Optional[str] = None
-    run_tests: bool = False
-    session_id: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-    approval_roles: Optional[list[str]] = None   # NEW — Part 2 §2.4: role
-    # names that require a human approval pause after they finish
-    # (tier-3 hires-driven path only). None/empty = full-auto, unchanged
-    # default behavior.
-    attachment: Optional[AttachmentIn] = None   # NEW — Data Layer §4a: a
-    # file/url attached to THIS chat turn. Its mere presence bypasses
-    # Inspector classification entirely and hires Source Manager (which,
-    # per §3a, hires the Backlink Detector right after itself) — see
-    # api/task_runner.py's _resolve_decision_and_hires() docstring.
-    topic_id: Optional[str] = None   # Step 6.11.c/6.11.f: the Notebooks
-    # topic (if any) this chat turn is scoped to, e.g. from a "Work
-    # through: <step title>" click on a per-topic workflow step. As of
-    # 6.11.f, forwarded to run_task() -> task_runner.py's
-    # _grounded_task_text(), which splices that topic's own covered
-    # sources + related notes into the turn's context — deterministic,
-    # same "presence is the signal" posture `attachment` above uses,
-    # but without short-circuiting routing/cache/SGA/classification the
-    # way attachment does.
-
-
-class TaskResponse(BaseModel):
-    # tier is int for tiers 0-3, or the literal string "sga" when the
-    # Starter General Agents resolved the task before classification —
-    # loosened from `int` to fix a latent validation bug that would have
-    # 500'd on every real SGA-resolved HTTP request.
-    decision: dict
-    tier: Union[int, str]
-    session_id: Optional[str] = None
-    # status values: "ok" | "error" | "needs_app" | "needs_directed_task_type"
-    # | "not_wired_yet" | "needs_beast_mode_confirmation" | "needs_beast_mode_choice"
-    # | "paused" (Part 2 §2.4 — a role in approval_roles just finished;
-    #   POST /api/resume with the same session_id to continue)
-    # | "preview_ready" (Part 2 §2.5 — only ever returned by
-    #   POST /api/task/preview, never by this endpoint; a real, editable
-    #   hires list is sitting in result.hires. POST /api/task/confirm
-    #   with this same session_id, decision, and hires to dispatch.)
-    status: str
-    result: Optional[dict] = None
-    message: Optional[str] = None
-
-
-@app.post("/api/task", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXED — capture owner_id
-    try:
-        return run_task(
-            task_text=req.task_text,
-            tier_override=req.tier_override,
-            directed_task_type_override=req.directed_task_type,
-            app_slug=req.app_slug,
-            run_tests=req.run_tests,
-            session_id=req.session_id,
-            mode=req.mode,
-            project_unique_name=req.project_unique_name,
-            approval_roles=set(req.approval_roles) if req.approval_roles else None,
-            owner_id=owner_id,   # FIXED — thread it down to run_task()
-            attachment=req.attachment.dict() if req.attachment else None,   # NEW — Data Layer §4a
-            topic_id=req.topic_id,   # NEW — Step 6.11.f: now actually consulted, not just logged
-        )
-    except Exception as exc:
-        traceback.print_exc()
-        return TaskResponse(
-            decision={},
-            tier=-1,
-            status="error",
-            result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
-        )
-
-
-class PreviewTaskRequest(BaseModel):
-    # Same shape as TaskRequest, minus approval_roles — approval_roles is
-    # only meaningful once a run actually dispatches (confirm_task()/
-    # run_task()), not at the preview stage.
-    task_text: str
-    tier_override: Optional[int] = None
-    directed_task_type: Optional[str] = None
-    app_slug: Optional[str] = None
-    run_tests: bool = False
-    session_id: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-
-
-class HireEdit(BaseModel):
-    # Part 2 §2.5 — one entry from a preview_task() response's
-    # result.hires, echoed back (possibly edited) to /api/task/confirm.
-    role: str
-    agent_key: str
-    brief: str
-    update_library: Optional[bool] = False   # "just this once" (default)
-    # vs "update the library" (True — calls eo/registry.py's
-    # update_role_prompt(), making this edit the new stored default for
-    # every future hire of this role).
-
-
-class ConfirmTaskRequest(BaseModel):
-    task_text: str
-    decision: dict          # the unmodified `decision` object from the
-                             # matching preview_task() response
-    hires: list[HireEdit]   # possibly user-edited hires from that same response
-    session_id: str
-    app_slug: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-    approval_roles: Optional[list[str]] = None   # same meaning as on /api/task
-
-
-@app.post("/api/task/preview", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_auth)):   # FIXED
-    """... docstring unchanged ..."""
-    try:
-        return preview_task(
-            task_text=req.task_text,
-            tier_override=req.tier_override,
-            directed_task_type_override=req.directed_task_type,
-            app_slug=req.app_slug,
-            run_tests=req.run_tests,
-            session_id=req.session_id,
-            mode=req.mode,
-            project_unique_name=req.project_unique_name,
-            owner_id=owner_id,   # FIXED
-        )
-    except Exception as exc:
-        traceback.print_exc()
-        return TaskResponse(
-            decision={}, tier=-1, status="error", result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
-        )
-
-
-@app.post("/api/task/confirm", response_model=TaskResponse)
-def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_auth)):
-    """Part 2 §2.5 — dispatches a (possibly user-edited) hires list from
-    a prior POST /api/task/preview response, without calling staff_task()
-    again. Each hire's `update_library` flag controls whether an edited
-    brief is a one-off override or becomes the new stored default via
-    eo/registry.py's update_role_prompt() (2.2)."""
-    try:
-        return confirm_task(
-            task_text=req.task_text,
-            decision=req.decision,
-            hires=[h.dict() for h in req.hires],
-            session_id=req.session_id,
-            app_slug=req.app_slug,
-            mode=req.mode,
-            project_unique_name=req.project_unique_name,
-            approval_roles=set(req.approval_roles) if req.approval_roles else None,
-            owner_id=owner_id,   
-        )
-    except Exception as exc:
-        traceback.print_exc()
-        return TaskResponse(
-            decision=req.decision or {}, tier=-1, status="error", result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
-        )
-
-
-class ResumeRequest(BaseModel):
-    # Part 2 §2.4
-    session_id: str
-    action: str          # "approve" | "edit" | "reject_redo"
-    text: Optional[str] = None   # required when action == "edit"
-
-
-class ResumeResponse(BaseModel):
-    session_id: str
-    # status values: "ok" | "paused" | "error"
-    status: str
-    result: Optional[dict] = None
-    message: Optional[str] = None
-
-
-@app.post("/api/resume", response_model=ResumeResponse)
-def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
-    """Part 2 §2.4: resumes a run paused at an approval_roles checkpoint.
-    Mirrors post_task()'s error-handling shape (clean JSON on unexpected
-    failure, real HTTP status codes for the specific, anticipated
-    failure modes resume_graph() raises).
-
-    Part 8.8 regression fix: session_id and chat_id are the same string
-    everywhere in this system (see the comment above _resolve_chat_or_404),
-    so the resuming caller's access is checked exactly the same way every
-    other chat route checks it — owner or workspace collaborator, edit-tier
-    required (approving/editing/rejecting a paused run is not a read-only
-    action). Without this, any authenticated user who knew or guessed
-    another user's session_id could resume/approve/edit their paused run;
-    resume_graph() itself has no identity concept at all, so this check
-    has to happen here, before it's ever called."""
-    _resolve_chat_or_404(req.session_id, owner_id, require_edit=True)
-
-    decision = {"action": req.action}
-    if req.action == "edit":
-        decision["text"] = req.text or ""
-
-    try:
-        result = resume_graph(req.session_id, decision)
-    except KeyError:
-        # NEW — B4: the one user-facing error path new since Phase CO —
-        # worth a breadcrumb even though it's handled cleanly as a 404,
-        # since a spike here usually means a client is resuming a stale/
-        # expired session_id rather than an actual server bug.
-        sentry_sdk.add_breadcrumb(
-            category="resume_graph",
-            message=f"No paused run for session_id={req.session_id!r}",
-            level="warning",
-        )
-        raise HTTPException(status_code=404, detail=f"No paused run for session_id={req.session_id!r}")
-    except RuntimeError as exc:
-        # reject_redo hit MAX_STAGE_REVISITS — a real conflict (the run
-        # cannot resume as requested), not a client input error.
-        raise HTTPException(status_code=409, detail=str(exc))
-    except ValueError as exc:
-        # unknown action string
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        traceback.print_exc()
-        return ResumeResponse(
-            session_id=req.session_id,
-            status="error",
-            result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
-        )
-
-    if isinstance(result, dict) and result.get("status") == "paused":
-        return ResumeResponse(
-            session_id=req.session_id,
-            status="paused",
-            result={"paused_at_role": result["paused_at_role"]},
-            message=(f"Run paused again for approval at role "
-                     f"'{result['paused_at_role']}'. POST to /api/resume again to continue."),
-        )
-
-    # Finished — result here is the same role-keyed results dict
-    # execute_graph()/_run_loop() always returns. Mirrors
-    # api/task_runner.py's _run_tier3_hires() rendering of the final
-    # role's output, so a resumed run's answer looks the same as one
-    # that never paused.
-    from eo.result_render import render_agent_result
-    final_role = list(result.keys())[-1] if result else None
-    final_output = result.get(final_role) if final_role else None
-    answer = render_agent_result(final_output) if final_output is not None else ""
-
-    return ResumeResponse(
-        session_id=req.session_id,
-        status="ok",
-        result={"output": result, "answer": answer, "final_role": final_role},
-        message=None,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Part 2 §2.7 — thin HTTP layer over eo/registry.py's Role Library (§2.2)
-# and eo/structure.py's Workflow Templates (§2.3/§2.6). Both backing
-# stores and their functions already existed; these five routes are the
-# only thing that was actually missing before the frontend panels below
-# could read or write real data.
-# ---------------------------------------------------------------------------
-
-@app.get("/api/roles")
-def get_roles(owner_id: str = Depends(require_auth)):
-    """Every role the system has ever briefed, metadata included — the
-    Role Library panel's one data source. Shape: [{role, brief, source,
-    updated_at, times_hired}, ...]. Uses list_role_metadata() for a
-    single bulk read instead of list_known_roles()+get_role_metadata()
-    per role, which was doing N+1 round-trips against the memory bus.
-
-    owner_id (Part 8.3): always passed through to eo.registry now — it's
-    only actually USED to select a per-user store if this deployment set
-    ROLE_LIBRARY_SCOPE=per_user; with the default "global" scope every
-    caller's owner_id is accepted but ignored (see eo/registry.py's
-    _role_prompts_key()), so this route's behavior is unchanged for the
-    common case."""
-    return list_role_metadata(owner_id)
-
-
-class UpdateRoleRequest(BaseModel):
-    brief: str
-
-
-@app.put("/api/roles/{role_name}")
-def put_role(role_name: str, req: UpdateRoleRequest, owner_id: str = Depends(require_auth)):
-    """Saves an inline Role Library edit. Always source="user_edited" —
-    this is the one path that's allowed to claim that (see
-    eo/registry.py's update_role_prompt() docstring)."""
-    update_role_prompt(role_name, req.brief, source="user_edited", user_id=owner_id)
-    return {"role": role_name, **(get_role_metadata(role_name, owner_id) or {})}
-
-
-class SetRolePinnedRequest(BaseModel):
-    pinned: bool
-
-
-@app.patch("/api/roles/{role_name}/pin")
-def patch_role_pinned(role_name: str, req: SetRolePinnedRequest, owner_id: str = Depends(require_auth)):
-    """Pinned-roles feature — server-persisted so it syncs across
-    devices, same store as everything else in the Role Library. Doesn't
-    require the role to already have a brief; a role can be pinned from
-    a picker before it's ever been hired."""
-    entry = set_role_pinned(role_name, req.pinned, user_id=owner_id)
-    return {"role": role_name, **entry}
-
-
-class SaveWorkflowTemplateRequest(BaseModel):
-    name: str
-    roles: list   # role-name strings, or nested lists of them for a
-                  # concurrent group (eo/structure.py §2.6) — validated
-                  # by save_workflow_template() itself.
-    description: str = ""
-    domain_hint: Optional[str] = None
-    approval_roles: Optional[list[str]] = None
-    no_conversation_context_roles: Optional[list[str]] = None
-    created_by: Optional[str] = None
-
-
-@app.get("/api/workflow-templates", dependencies=[Depends(require_auth)])
-def get_workflow_templates():
-    """Every saved template, newest first — for the template picker and
-    the Workflow Template builder's own list view."""
-    return list_workflow_templates()
-
-
-@app.get("/api/workflow-templates/{template_id}/chat")
-def get_template_chat(template_id: str, owner_id: str = Depends(require_auth)):
-    """The one chat this template already owns, if any — lets the
-    frontend reuse it instead of minting a new chat on every run."""
-    chat = chat_store.find_chat_for_template(owner_id, template_id)
-    return chat or {}
-
-
-@app.post("/api/workflow-templates", dependencies=[Depends(require_auth)])
-def post_workflow_template(req: SaveWorkflowTemplateRequest):
-    """Covers both write paths the design calls for: "save from a
-    finished run" (caller passes that run's own execution_order as
-    `roles`) and "build from scratch" (caller passes a list assembled in
-    the Role Library UI) — both are just a plain roles list here."""
-    try:
-        return save_workflow_template(
-            name=req.name,
-            roles=req.roles,
-            description=req.description,
-            domain_hint=req.domain_hint,
-            approval_roles=req.approval_roles,
-            no_conversation_context_roles=req.no_conversation_context_roles,
-            created_by=req.created_by,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.put("/api/workflow-templates/{template_id}", dependencies=[Depends(require_auth)])
-def put_workflow_template(template_id: str, req: SaveWorkflowTemplateRequest):
-    """Template editing — there was previously no update path at all,
-    only save (create) and delete."""
-    updated = update_workflow_template(
-        template_id, name=req.name, roles=req.roles, description=req.description,
-        domain_hint=req.domain_hint, approval_roles=req.approval_roles,
-        no_conversation_context_roles=req.no_conversation_context_roles,
-    )
-    if updated is None:
-        raise HTTPException(status_code=404, detail=f"Unknown template_id={template_id!r}")
-    return updated
-
-
-@app.delete("/api/workflow-templates/{template_id}", dependencies=[Depends(require_auth)])
-def delete_workflow_template_endpoint(template_id: str):
-    deleted = delete_workflow_template(template_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Unknown template_id={template_id!r}")
-    return {"status": "deleted", "template_id": template_id}
-
-
-class RunFromTemplateRequest(BaseModel):
-    template_id: str
-    task_text: str
-    session_id: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-
-
-@app.post("/api/task/from-template", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends(require_auth)):
-    """Part 2 §2.3/§2.6 — starts a new task from a saved workflow
-    template instead of running Inspector/Panel classification.
-    Mirrors post_task()'s exact error-handling shape."""
-    try:
-        return run_task_from_template(
-            template_id=req.template_id,
-            task_text=req.task_text,
-            session_id=req.session_id,
-            mode=req.mode,
-            project_unique_name=req.project_unique_name,
-            owner_id=owner_id,   
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        traceback.print_exc()
-        return TaskResponse(
-            decision={}, tier=-1, status="error", result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
-        )
-
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/api/quota", dependencies=[Depends(require_auth)])
-def quota():
-    return get_quota_snapshot()
-
-
-@app.get("/api/usage/history", dependencies=[Depends(require_auth)])
-def usage_history(
-    days: int = Query(7, ge=1, le=90),
-    domain: Optional[str] = Query(None),
-    workspace_id: Optional[str] = Query(None),
-):
-    # Cross-session, persisted day-by-day usage -- reads the same
-    # usage:{provider}:{key_id}:{date} records /api/quota already reads
-    # for today, just repeated across the last `days` calendar dates.
-    # See eo/quota_sentinel.py's get_usage_history() docstring for the
-    # exact response shape.
-    #
-    # Part 2 §2.6 -- when domain and/or workspace_id is given, this
-    # branches to get_usage_history_scoped() instead, returning
-    # {dates, domain, workspace} (see that function's docstring) rather
-    # than {dates, providers, accounts}. Same route, response shape
-    # depends on query params -- exactly the way `days` already changes
-    # this endpoint's window without becoming a separate route.
-    if domain or workspace_id:
-        return get_usage_history_scoped(days=days, domain=domain, workspace_id=workspace_id)
-    return get_usage_history(days=days)
+# B6 — /api/task*, /api/resume, /api/roles*, /api/workflow-templates*
+# moved to api/routes/tasks.py; /api/health, /api/quota, /api/usage/history
+# moved to api/routes/system.py. Both wired in via app.include_router()
+# near the CORS setup above. See those files for the actual route code.
 
 
 def _parse_fenced_json(text):
