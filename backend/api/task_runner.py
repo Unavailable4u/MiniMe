@@ -412,13 +412,25 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
             print(f"  [task_runner] output_organizer synthesis failed, "
                   f"falling back to final_role's own answer (fail-open): {exc}")
 
+    # NEW — Phase CO, CO2 (Master Guide v2, §5): pull any interactive
+    # artifacts a role attached to its own output into a flat top-level
+    # list, alongside `answer` — same "extend the result payload with an
+    # optional array" shape the guide specifies. No role emits one yet
+    # (this patch only adds the plumbing + the html/svg frontend
+    # renderer, per CO2's own cheapest-first build order), so this is
+    # normally an empty list; harmless either way since
+    # MessageBubble.jsx only renders anything when the array is
+    # non-empty.
+    from eo.result_render import collect_artifacts
+    artifacts = collect_artifacts(results)
+
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
     return {
         "decision": decision,
         "tier": 3,
         "session_id": session_id,
         "status": "ok",
-        "result": {"output": results, "answer": answer, "final_role": final_role},
+        "result": {"output": results, "answer": answer, "final_role": final_role, "artifacts": artifacts},
         "message": None,
     }
 

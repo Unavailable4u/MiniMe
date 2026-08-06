@@ -6,6 +6,7 @@ import { Sparkles, X, Loader2, CheckCircle2 } from "lucide-react";   // NEW — 
 import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
 import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
+import ArtifactRenderer from "./ArtifactRenderer";   // NEW — Phase CO, CO2
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));   // NEW — Phase 3 step 3.2
 
@@ -488,13 +489,12 @@ function answerTextOf(result, role) {
   }
 
   if (isPlatformContentMap(result, role)) {
-    // Part 6 §6.2 — handled as JSX (PlatformVariantCards) at the
-    // AgentTraceDisclosure call site below, not here: answerTextOf only
-    // ever returns markdown text, and a per-platform card grid needs
-    // real layout, not a markdown string. This branch exists so any
-    // OTHER caller of answerTextOf (e.g. a future plain-text export)
-    // still gets a readable fallback instead of being mistaken for code
-    // modules by looksLikeModuleMap() just below.
+    // Part 6 §6.2 — answerTextOf only ever returns markdown text, so a
+    // per-platform card grid (real JSX layout) isn't rendered from here.
+    // This branch is the plain-text fallback for any caller that needs
+    // one (e.g. the older-cached-response path below, or a future
+    // plain-text export) instead of being mistaken for code modules by
+    // looksLikeModuleMap() just below.
     return Object.entries(result)
       .map(([platform, content]) => `**${platform.replaceAll("_", " ")}**\n\n${content}`)
       .join("\n\n---\n\n");
@@ -522,41 +522,6 @@ function answerTextOf(result, role) {
   } catch {
     return String(result);
   }
-}
-
-// Part 6 §6.2/§6.7 — one card per platform variant instead of joined
-// markdown text: these are N independent, unrelated outputs from one
-// brief (Part 6 §6.2's fan-out), so concatenating them into a single
-// markdown blob makes it hard to tell where one platform's copy ends
-// and the next begins. Ships as plain stacked/grid cards, no carousel or
-// tabs — same "build a comparison view only if scanning plain text
-// proves genuinely hard" discipline Part 6 §6.7 calls for; a labeled
-// grid is already enough to scan side by side.
-const PLATFORM_LABELS = {
-  twitter: "Twitter / X",
-  linkedin: "LinkedIn",
-  instagram_caption: "Instagram Caption",
-  press_release: "Press Release",
-};
-
-function PlatformVariantCards({ data }) {
-  const platforms = Object.keys(data || {});
-  if (platforms.length === 0) return <Markdown>{"_(no platform variants)_"}</Markdown>;
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-      {platforms.map((platform) => (
-        <div
-          key={platform}
-          className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-2.5 space-y-1.5"
-        >
-          <div className="text-[11px] font-medium text-[var(--neutral-400)] uppercase tracking-wide">
-            {PLATFORM_LABELS[platform] || platform.replaceAll("_", " ")}
-          </div>
-          <Markdown>{String(data[platform] ?? "")}</Markdown>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function ResultBody({ data }) {
@@ -593,19 +558,31 @@ function ResultBody({ data }) {
     );
   }
   if (data.tier === 3) {
-    // NEW — bug fix: api/task_runner.py now returns a clean
-    // result.answer (the final role's own text) alongside the full
-    // role-keyed result.output tree. Render just the answer as markdown,
-    // with the full multi-agent trace tucked behind an optional toggle
-    // instead of dumped inline as raw JSON.
+    // Phase CO, CO1 (Master Guide v2, §5): api/task_runner.py's
+    // result.answer is now a real synthesis across every role's output
+    // (agents/output_organizer.py), not just the final role's leftover
+    // text — so it's rendered directly as the whole answer, with no
+    // per-role trace toggle competing for space in the bubble. The full
+    // unorganized per-role breakdown isn't gone, it just isn't rendered
+    // here anymore: it already streams live into WorkingPanel's
+    // AgentStepList during the run, and is what CO4 makes the Working
+    // Panel show in more detail after the fact too.
     const answer = data.result?.answer;
+    // NEW — Phase CO, CO2 (Master Guide v2, §5): any interactive
+    // artifacts a role attached (currently only ever populated once a
+    // role starts emitting them — see api/task_runner.py's
+    // collect_artifacts() call) render as their own bordered cards right
+    // under the answer, same "extra structured content sits below the
+    // prose, never replaces it" pattern the old per-role trace used.
+    const artifacts = data.result?.artifacts;
     if (answer) {
       return (
         <>
           <Markdown>{answer}</Markdown>
-          {data.result?.output && Object.keys(data.result.output).length > 1 && (
-            <AgentTraceDisclosure output={data.result.output} finalRole={data.result?.final_role} />
-          )}
+          {Array.isArray(artifacts) && artifacts.length > 0 &&
+            artifacts.map((artifact, i) => (
+              <ArtifactRenderer key={i} artifact={artifact} />
+            ))}
         </>
       );
     }
@@ -632,46 +609,10 @@ function ResultBody({ data }) {
   );
 }
 
-// Collapsed by default — the full per-role breakdown (writer, reviewer,
-// editor, ...) is useful for inspecting the pipeline but shouldn't
-// compete with the actual answer for attention. The live per-agent
-// steps already stream into WorkingPanel's AgentStepList as the task
-// runs; this is just a static after-the-fact version scoped to this one
-// message, for whoever wants to double check what each role produced.
-function AgentTraceDisclosure({ output, finalRole }) {
-  const [open, setOpen] = useState(false);
-  const roles = Object.keys(output);
-  return (
-    <div className="pt-1 border-t border-[var(--neutral-800-a70)]">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="text-[11px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)] transition-colors flex items-center gap-1"
-      >
-        <span>{open ? "▾" : "▸"}</span>
-        {open ? "Hide" : "Show"} all {roles.length} agent outputs
-      </button>
-      {open && (
-        <div className="mt-2 space-y-2">
-          {roles.map((role) => (
-            <div key={role} className="rounded-lg border border-[var(--neutral-800)] bg-black/30 p-2">
-              <div
-                className={`text-[11px] font-medium mb-1 ${
-                  role === finalRole ? "text-amber-400" : "text-[var(--neutral-500)]"
-                }`}
-              >
-                {role}
-                {role === finalRole ? " · final" : ""}
-              </div>
-              {isPlatformContentMap(output[role], role) ? (
-                <PlatformVariantCards data={output[role]} />
-              ) : (
-                <Markdown>{answerTextOf(output[role], role)}</Markdown>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+// Phase CO, CO1 (Master Guide v2, §5): the AgentTraceDisclosure "Show/Hide
+// all N agent outputs" toggle that used to live here is removed — that raw
+// per-role dump was the wrong place for it. The full per-role breakdown
+// still exists and isn't lost: it streams live into WorkingPanel's
+// AgentStepList during the run, and CO4 is where the Working Panel gains a
+// proper after-the-fact detailed view of it. This file only renders the
+// organized answer now.
