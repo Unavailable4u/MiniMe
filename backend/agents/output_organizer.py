@@ -35,7 +35,21 @@ piece): called whenever a finished run produced more than one role's
 output, fails open to the final_role's own text if the synthesis call
 itself errors. See task_runner.py's own comment at that call site for
 the exact gating condition.
+
+CHANGED — CO4 patch 2: organize_final_answer() now returns
+{"answer": str, "dedup_notes": dict} instead of a bare string. The
+model is asked to report, alongside the merged answer, which roles'
+content got folded into another role's section rather than kept as its
+own — e.g. a role whose "one more thing" restated an earlier role's
+point and was dropped as a duplicate. dedup_notes maps
+{role_name: short plain-language note} for exactly those roles;
+a role that kept fully distinct content simply has no entry. This is
+what lets the frontend's AgentStepList answer "why didn't role 4 show
+up separately in the final answer" inline on that role's own step,
+instead of leaving it a silent gap between the per-role step list and
+the merged answer.
 """
+import json
 import os
 import sys
 
@@ -82,12 +96,29 @@ Rules:
 - Preserve any fenced code block or Mermaid diagram byte-for-byte, exactly as
   its originating role wrote it. You are reorganizing prose around code, never
   rewriting code or diagram syntax yourself.
-- Respond with ONLY the final organized markdown answer -- no preamble like
-  "Here is the organized answer", no meta-commentary about what you merged.
+
+Output format -- respond with ONLY these two parts, nothing else (no preamble
+like "Here is the organized answer", no meta-commentary):
+
+1. The final organized markdown answer.
+2. On its own line, the exact marker ---DEDUP_NOTES--- followed by a single
+   line of JSON: an object mapping each role name whose content you folded
+   into another role's section (rather than keeping as its own distinct
+   contribution) to a short, plain-language note on what happened to it, e.g.
+   {"reviewer": "its point about input validation was already covered by
+   implementer's section, so it was merged in rather than repeated"}. Only
+   include roles that lost a distinct voice this way -- a role whose content
+   stayed genuinely unique does not need an entry. If no role's content was
+   folded away, output an empty object: {}.
 """
 
+# NEW — CO4 patch 2: matches the exact marker SYSTEM_PROMPT instructs the
+# model to emit between the markdown answer and the trailing dedup-notes
+# JSON line.
+DEDUP_NOTES_MARKER = "---DEDUP_NOTES---"
 
-def organize_final_answer(role_outputs: dict, user_request: str, final_role: str = None) -> str:
+
+def organize_final_answer(role_outputs: dict, user_request: str, final_role: str = None) -> dict:
     """
     role_outputs: {role_name: raw_output} -- the full per-role result tree
         a finished tier-3 run produced (api/task_runner.py's `results`).
@@ -103,22 +134,28 @@ def organize_final_answer(role_outputs: dict, user_request: str, final_role: str
         from, and so a future revision can weight the final role's own
         phrasing more heavily without a signature change.
 
-    Returns the organized markdown answer as a plain string.
+    Returns {"answer": str, "dedup_notes": dict} -- CHANGED, CO4 patch 2
+    (previously a bare string). dedup_notes maps {role_name: note} for
+    exactly the roles whose content got folded into another role's
+    section rather than kept distinct; a role with no entry either kept
+    its own visible section or wasn't merged away.
 
     Defensive guard: if role_outputs has 0 or 1 entries, there's nothing
     to merge -- return that one role's rendered text directly (or an
     empty string for 0) rather than spending an LLM call reorganizing a
-    single voice. The real call site (api/task_runner.py, CO1's second
-    piece) already gates on `len(results) > 1` before calling this at
-    all; this guard just keeps the function itself safe to call directly,
-    the same defensive spirit agents/review_aggregator.py's own
-    aggregate_reviews() applies to an empty/single-review list.
+    single voice, with an empty dedup_notes either way (there is no
+    second role for anything to have been folded into). The real call
+    site (api/task_runner.py, CO1's second piece) already gates on
+    `len(results) > 1` before calling this at all; this guard just keeps
+    the function itself safe to call directly, the same defensive spirit
+    agents/review_aggregator.py's own aggregate_reviews() applies to an
+    empty/single-review list.
     """
     if not role_outputs:
-        return ""
+        return {"answer": "", "dedup_notes": {}}
     if len(role_outputs) == 1:
         only_role, only_output = next(iter(role_outputs.items()))
-        return render_agent_result(only_output, role=only_role)
+        return {"answer": render_agent_result(only_output, role=only_role), "dedup_notes": {}}
 
     sections = []
     for role, raw_output in role_outputs.items():
@@ -133,13 +170,39 @@ def organize_final_answer(role_outputs: dict, user_request: str, final_role: str
         + "\n\n".join(sections)
     )
 
-    organized = generate_text(
+    raw_response = generate_text(
         system_prompt=SYSTEM_PROMPT,
         user_content=user_content,
         chain=CHAIN,
         agent_name="output_organizer",
     )
-    return organized.strip()
+    return _parse_organizer_response(raw_response)
+
+
+def _parse_organizer_response(raw_response: str) -> dict:
+    """
+    Splits SYSTEM_PROMPT's two-part response (markdown answer, then
+    DEDUP_NOTES_MARKER, then one line of JSON) into the {"answer",
+    "dedup_notes"} shape organize_final_answer() returns.
+
+    Deliberately tolerant of the model dropping or malforming the second
+    part -- the merged answer is the part that actually matters to the
+    user, so a missing/invalid dedup-notes line degrades to an empty
+    dict rather than losing the answer itself (same fail-open spirit as
+    task_runner.py's own try/except around this whole call).
+    """
+    if DEDUP_NOTES_MARKER not in raw_response:
+        return {"answer": raw_response.strip(), "dedup_notes": {}}
+
+    answer_part, _, notes_part = raw_response.partition(DEDUP_NOTES_MARKER)
+    dedup_notes = {}
+    try:
+        parsed = json.loads(notes_part.strip())
+        if isinstance(parsed, dict):
+            dedup_notes = parsed
+    except (ValueError, TypeError):
+        pass
+    return {"answer": answer_part.strip(), "dedup_notes": dedup_notes}
 
 
 if __name__ == "__main__":
@@ -150,8 +213,11 @@ if __name__ == "__main__":
         "fact_checker": {"text": "Confirmed: semantic versioning, major.minor.patch. No breaking changes outside major bumps."},
         "writer": {"text": "In short, you can safely pin to a minor version range without fear of breaking changes."},
     }
-    print(organize_final_answer(
+    result = organize_final_answer(
         example,
         user_request="Is it safe to auto-update this library on minor version bumps?",
         final_role="writer",
-    ))
+    )
+    print(result["answer"])
+    print(DEDUP_NOTES_MARKER)
+    print(result["dedup_notes"])

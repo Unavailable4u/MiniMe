@@ -12,7 +12,7 @@ import { List, useDynamicRowHeight } from "react-window"; // Perf audit #3 step 
 import GenerationNotificationRow from "./notebooks/GenerationNotificationRow";   // NEW — Phase 4 step 4.6
 import WorkingPanel from "./WorkingPanel";
 import HireReviewScreen from "./HireReviewScreen";
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, PanelLeftOpen, PanelLeftClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import { ingestFileByExtension } from "../lib/ingestDispatch";
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 
@@ -92,6 +92,15 @@ const WORKING_PANEL_WIDTH_KEY = "minime_working_panel_width";
 const WORKING_PANEL_DEFAULT_WIDTH = 420;
 const WORKING_PANEL_MIN_WIDTH = 280;
 const WORKING_PANEL_MAX_WIDTH = 720;
+
+// NEW — CO4 patch 1: a second, independent collapse, scoped to just the
+// "Chat Box" half of the split (as opposed to `collapsed`/`onToggleCollapse`
+// above, which folds the *whole* docked panel — chat + Working Panel
+// together — away entirely, see the DUAL MODE header comment). This one
+// mirrors WORKING_PANEL_KEY's own pattern (persisted rail toggle) but for
+// the opposite side of the split, so a user can tuck the conversation away
+// and leave the Working Panel visible on its own, or vice versa.
+const CHAT_BOX_KEY = "minime_chat_box_collapsed";
 
 // NEW — stacked (top/bottom) layout: used instead of the width constants
 // above when a caller passes `stacked` (every domain-tab dock — Build/
@@ -325,6 +334,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+  const [chatBoxCollapsed, setChatBoxCollapsed] = useState(false); // NEW — CO4 patch 1
   const [workingPanelWidth, setWorkingPanelWidth] = useState(WORKING_PANEL_DEFAULT_WIDTH);
   const [workingPanelHeight, setWorkingPanelHeight] = useState(WORKING_PANEL_DEFAULT_HEIGHT); // NEW — stacked layout's counterpart to workingPanelWidth
   const resizeCleanupRef = useRef(null); // holds the active mousemove/mouseup remover, if a drag is in progress
@@ -385,6 +395,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
 
   useEffect(() => {
     setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
+    setChatBoxCollapsed(localStorage.getItem(CHAT_BOX_KEY) === "1"); // NEW — CO4 patch 1
     const savedWidth = parseInt(localStorage.getItem(WORKING_PANEL_WIDTH_KEY), 10);
     if (!Number.isNaN(savedWidth)) setWorkingPanelWidth(clampWorkingPanelWidth(savedWidth));
     const savedHeight = parseInt(localStorage.getItem(WORKING_PANEL_HEIGHT_KEY), 10);
@@ -397,6 +408,14 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   function toggleWorkingPanel() {
     setWorkingPanelCollapsed((prev) => {
       localStorage.setItem(WORKING_PANEL_KEY, !prev ? "1" : "0");
+      return !prev;
+    });
+  }
+  // NEW — CO4 patch 1: same persisted-toggle shape as toggleWorkingPanel
+  // above, independent state/key, folds only the Chat Box side.
+  function toggleChatBox() {
+    setChatBoxCollapsed((prev) => {
+      localStorage.setItem(CHAT_BOX_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
@@ -1028,8 +1047,46 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     <div className={stacked ? "flex flex-col h-full" : "flex h-full max-w-6xl mx-auto"}>
       {/* LEFT (or BOTTOM, when stacked) — Chat Box. `order-2` only takes
           effect in stacked mode (flex-col), putting this below the
-          Working Panel without needing to reorder the JSX itself. */}
-      <div className={`flex flex-col flex-1 ${stacked ? "min-h-0 order-2 border-t" : "min-w-0 border-r"} border-[var(--neutral-800)]`}>
+          Working Panel without needing to reorder the JSX itself.
+          NEW — CO4 patch 1: `chatBoxCollapsed` folds just this half to a
+          slim rail (same idea as the Working Panel's own collapsed rail
+          below), independent of `collapsed`/`onToggleCollapse` above,
+          which folds the whole docked panel instead. */}
+      <div
+        className={
+          stacked
+            ? chatBoxCollapsed
+              ? "flex flex-col shrink-0 order-2 w-full"
+              : "flex flex-col flex-1 min-h-0 order-2 border-t border-[var(--neutral-800)]"
+            : chatBoxCollapsed
+            ? "flex flex-col shrink-0"
+            : "flex flex-col flex-1 min-w-0 border-r border-[var(--neutral-800)]"
+        }
+      >
+        {chatBoxCollapsed ? (
+          stacked ? (
+            <div className="h-10 w-full flex flex-row items-center border-t border-[var(--neutral-800)] px-2">
+              <button
+                onClick={toggleChatBox}
+                title="Show chat"
+                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
+              >
+                <PanelLeftOpen size={16} />
+              </button>
+            </div>
+          ) : (
+            <div className="w-10 h-full flex flex-col items-center border-r border-[var(--neutral-800)] pt-2">
+              <button
+                onClick={toggleChatBox}
+                title="Show chat"
+                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
+              >
+                <PanelLeftOpen size={16} />
+              </button>
+            </div>
+          )
+        ) : (
+        <>
         <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)]">Chat Box</span>
           <div className="flex items-center gap-3">
@@ -1049,6 +1106,17 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             >
               <ClipboardCheck size={12} />
               Review hires
+            </button>
+            {/* NEW — CO4 patch 1: collapses just this Chat Box half,
+                always available (unlike onToggleCollapse below, which
+                only exists when a parent docks this whole component). */}
+            <button
+              type="button"
+              onClick={toggleChatBox}
+              title="Collapse chat"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            >
+              <PanelLeftClose size={14} />
             </button>
             {/* NEW — §6: only rendered when embedded in a docked context
                 (a parent passed onToggleCollapse). The standalone Chat
@@ -1397,6 +1465,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             Send
           </button>
         </form>
+        </>
+        )}
         </>
         )}
       </div>

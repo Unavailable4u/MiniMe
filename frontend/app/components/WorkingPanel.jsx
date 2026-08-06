@@ -227,7 +227,15 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
               domainHint={m.data.decision.domain}
             />
           )}
-          {m.steps?.length > 0 && <AgentStepList steps={m.steps} />}
+          {/* NEW — CO4 patch 2: only ever populated on a finished
+              snapshot (m.data.result.dedup_notes) — the live `steps`
+              call further down never passes this, since the organizer
+              synthesis pass that produces it only runs once a whole
+              run has finished (see task_runner.py's own comment at
+              that call site). */}
+          {m.steps?.length > 0 && (
+            <AgentStepList steps={m.steps} dedupNotes={m.data?.result?.dedup_notes} />
+          )}
           {/*
             FIX: this used to require `m.routeTrace?.length > 1` before
             the graph would even mount -- a dispatch_event only fires

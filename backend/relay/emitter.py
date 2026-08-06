@@ -121,6 +121,22 @@ VALID_EVENT_TYPES = {
     # directly against a real paused snapshot in the test above, same
     # class of gap as the "notification" fix a few entries up.
     "execution_resumed",
+    # NEW — CO4 patch 3: real instrumentation at two decision points that
+    # previously emitted nothing at all (confirmed by reading both files
+    # directly before this patch — eo/quota_sentinel.py only ever fires
+    # the threshold "quota_alert" above, never a per-request signal, and
+    # eo/semantic_cache.py/eo/worker_pool.py called emit_event() zero
+    # times between them). "cache_hit" fires from
+    # eo/semantic_cache.py's check_cache() whenever a cached answer is
+    # actually returned (trusted-fingerprint or LLM-verified). "worker_
+    # pool_selection" fires from eo/worker_pool.py's _select_workers()
+    # whenever the quota-ranked fairness rotation actually picks a
+    # worker pool (not the Panel's own key_override path — that's an
+    # explicit hire, not a rotation decision). Both are consumed by
+    # WorkspaceDockContext.jsx's handleDockEvent (this same patch) into
+    # a new `decisionEvents` array; CO4 patch 4 is what actually renders
+    # them on the timeline.
+    "cache_hit", "worker_pool_selection",
 }
 
 _pusher_client = None

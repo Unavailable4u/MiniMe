@@ -404,10 +404,21 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # final_role answer already computed above rather than failing the
     # whole run over a synthesis-pass problem — the user still gets a
     # real answer, just not the merged one this pass would have produced.
+    #
+    # CHANGED — CO4 patch 2: organize_final_answer() now returns
+    # {"answer", "dedup_notes"} instead of a bare string — dedup_notes
+    # defaults to {} here so the fail-open exception path (and any
+    # single-role run that never reaches this branch) always has
+    # something safe to put in the result payload below, rather than
+    # the frontend needing its own None-guard on a key that may not
+    # exist.
+    dedup_notes = {}
     if len(results) > 1:
         try:
             from agents.output_organizer import organize_final_answer
-            answer = organize_final_answer(results, task_text, final_role=final_role)
+            organized = organize_final_answer(results, task_text, final_role=final_role)
+            answer = organized["answer"]
+            dedup_notes = organized["dedup_notes"]
         except Exception as exc:
             print(f"  [task_runner] output_organizer synthesis failed, "
                   f"falling back to final_role's own answer (fail-open): {exc}")
@@ -430,7 +441,13 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         "tier": 3,
         "session_id": session_id,
         "status": "ok",
-        "result": {"output": results, "answer": answer, "final_role": final_role, "artifacts": artifacts},
+        "result": {
+            "output": results,
+            "answer": answer,
+            "final_role": final_role,
+            "artifacts": artifacts,
+            "dedup_notes": dedup_notes,  # NEW — CO4 patch 2
+        },
         "message": None,
     }
 
@@ -940,7 +957,8 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
         workspace_id, task_text, session_id=session_id, topic_id=topic_id)   # topic_id NEW — Step 6.11.f
 
     if tier_override is None and mode != "beast":
-        cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
+        cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id,
+                             context_text=conv_context, session_id=session_id)
         if cached:
             _record_routing_fact(workspace_id, "cache", task_text, session_id)   # NEW — D1
             return {"resolved": False, "response": {

@@ -243,7 +243,8 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
     # platform), matching code_writers.py's own documented behavior for
     # more-than-5 modules.
     worker_count = 8 if expanded else 5
-    key_envs = _select_workers_for_role(ROLE_TAG, worker_count, key_override)
+    key_envs = _select_workers_for_role(ROLE_TAG, worker_count, key_override,
+                                        session_id=session_id, agent_name=ROLE_TAG)
 
     with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
         futures = {

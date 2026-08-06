@@ -31,12 +31,22 @@ import { categorize } from "./agentRoleIcons";
 // only way to unblock it. Rendered once, after every step, since a
 // manual pause isn't tied to any single role's output the way an
 // approval-role pause is.
-export default function AgentStepList({ steps, onResume, manualPause = false }) {
+// `dedupNotes` — NEW, CO4 patch 2. {role_name: note}, straight off the
+// finished result payload's `result.dedup_notes` (agents/
+// output_organizer.py) — only ever populated for a finished multi-role
+// snapshot, never for the live `steps` list (the organizer only runs
+// once a whole run has finished, see task_runner.py's own comment at
+// that call site), so callers of the live/in-progress list simply don't
+// pass this and every step's note stays undefined. Answers "why didn't
+// this role's output show up as its own section in the final answer"
+// directly on that role's own step, instead of leaving the reader to
+// notice the gap between the per-role trace and the merged answer.
+export default function AgentStepList({ steps, onResume, manualPause = false, dedupNotes = null }) {
   if (!steps || steps.length === 0) return null;
   return (
     <div className="space-y-1.5">
       {steps.map((step) => (
-        <StepRow key={step.id} step={step} onResume={onResume} />
+        <StepRow key={step.id} step={step} onResume={onResume} dedupNote={dedupNotes?.[step.role]} />
       ))}
       {manualPause && onResume && <ManualPauseActions onResume={onResume} />}
     </div>
@@ -99,7 +109,7 @@ const REASON_LABELS = {
   escalate: "escalated to",
 };
 
-function StepRow({ step, onResume }) {
+function StepRow({ step, onResume, dedupNote }) {
   // Part 2 §2.4/§2.7: a step paused for human approval auto-opens (the
   // whole point is to show the output for review, not make the user
   // discover it's hidden), and stays open while the approval card is
@@ -108,7 +118,11 @@ function StepRow({ step, onResume }) {
   const [open, setOpen] = useState(isPaused);
   const hasGiven = Boolean(step.givenRoles?.length);
   const hasCalledOutTo = Boolean(step.calledOutTo?.destination);
-  const hasBody = Boolean(step.text || step.summary || step.image || hasGiven || hasCalledOutTo);
+  // NEW — CO4 patch 2: a dedup note counts as body content on its own —
+  // without this, a step whose whole output got folded into another
+  // role's section (and so has nothing else worth showing) would render
+  // as non-expandable and silently drop the note that explains why.
+  const hasBody = Boolean(step.text || step.summary || step.image || hasGiven || hasCalledOutTo || dedupNote);
   const wasTruncated = !step.text && step.summary && TRUNCATED_SUFFIX.test(step.summary);
   const color = step.status === "error" ? "text-red-400" : roleColor(step.role);
   const category = categorize(step.role);
@@ -167,6 +181,17 @@ function StepRow({ step, onResume }) {
           {hasGiven && (
             <p className="text-[var(--neutral-500)] mb-2">
               Given: {step.givenRoles.join(", ")}
+            </p>
+          )}
+          {/* NEW — CO4 patch 2: why this role's content isn't its own
+              section in the final answer above — see AgentStepList's
+              own `dedupNotes` comment. Rendered ahead of the step's own
+              output, same placement reasoning as the "Given:" line
+              above it (describes context around the result, not part
+              of the result itself). */}
+          {dedupNote && (
+            <p className="text-[var(--neutral-500)] italic mb-2">
+              Merged into the final answer: {dedupNote}
             </p>
           )}
           {step.status === "error" ? (
