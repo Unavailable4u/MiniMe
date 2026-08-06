@@ -30,13 +30,15 @@ providers on a transient failure via generate_text()'s own chain-walk,
 same free-tier rotation everything else in this codebase relies on, it's
 just not quota-ranked per-call the way a pool selection is.
 
-NOT wired into api/task_runner.py yet — that's CO1's second piece. This
-piece only adds the standalone function; nothing calls it in production
-until that wiring lands.
+Wired into api/task_runner.py's tier-3 result packaging (CO1's second
+piece): called whenever a finished run produced more than one role's
+output, fails open to the final_role's own text if the synthesis call
+itself errors. See task_runner.py's own comment at that call site for
+the exact gating condition.
 """
 import os
 import sys
-import json
+
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text

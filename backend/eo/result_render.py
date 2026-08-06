@@ -245,3 +245,46 @@ def render_agent_result(result, role: str = None, limit: int = 9000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n\n... [truncated, {len(text)} chars total]"
+
+
+def collect_artifacts(role_outputs: dict) -> list:
+    """Phase CO, CO2 (Master Guide v2, §5) — pulls any {"artifacts": [...]}
+    a role's raw_output chose to attach (the same opt-in pattern
+    structure_architect.py already uses for its Mermaid string today,
+    just a dedicated field instead of embedding it in `text`) into one
+    flat list for the final chat response.
+
+    Each entry is expected to look like {"type": "html"|"svg"|"python"|
+    "react", "title": str, "code": str} — validated defensively here
+    (skip anything missing "type"/"code" rather than erroring the whole
+    run over one malformed entry from one role), tagged with which role
+    produced it so a future caller (e.g. CO4's Working Panel) can group
+    by origin if it wants to.
+
+    No REAL_ACTION_ROLES module emits "artifacts" yet as of this patch —
+    this is the shared collection point CO2's follow-up patches
+    (Pyodide, Sandpack) and any role wired up after them will feed into,
+    the same "one place that knows the shape" reasoning this module's
+    own docstring already applies to every other result shape.
+    """
+    collected = []
+    if not role_outputs:
+        return collected
+    for role, raw_output in role_outputs.items():
+        if not isinstance(raw_output, dict):
+            continue
+        entries = raw_output.get("artifacts")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("type") or not entry.get("code"):
+                continue
+            collected.append({
+                "type": entry["type"],
+                "title": entry.get("title", ""),
+                "code": entry["code"],
+                "role": role,
+            })
+    return collected
