@@ -8,7 +8,7 @@ import ForceGraphBase from "./ForceGraphBase";
 // it can grow without bloating this file. "Writing a new role brief: X"
 // (eo/panel.py's panel_brief_writer step) is matched there too, first,
 // so it doesn't fall through to the generic default.
-import { categorize, INPUT_CATEGORY, OUTPUT_CATEGORY } from "./agentRoleIcons";
+import { categorize, categorizeDecision, INPUT_CATEGORY, OUTPUT_CATEGORY } from "./agentRoleIcons";
 
 const REASON_COLORS = {
   plan: "#6b7280",
@@ -17,7 +17,29 @@ const REASON_COLORS = {
   skip: "#8b5cf6",
   escalate: "#ec4899",
   requested: "#22d3ee",   // agent_requested_role edges
+  decision: "#64748b",    // NEW — CO4 patch 4, decisionEvents edges (dashed, see linkWidth/nodeCanvasObject below)
 };
+
+// NEW — CO4 patch 4. One-line label/tooltip text for a decisionEvents
+// entry ({type, agent, payload, timestamp} — see WorkspaceDockContext.jsx's
+// handleDockEvent). Payload shapes straight from the two emit_event()
+// call sites (confirmed by reading both directly): eo/semantic_cache.py's
+// check_cache() for cache_hit ({verified, similarity}), eo/worker_pool.py's
+// _select_workers() for worker_pool_selection ({role_tag, worker_count,
+// pool_size, selected}).
+function decisionLabel(event) {
+  if (event.type === "cache_hit") {
+    const { verified, similarity } = event.payload || {};
+    const pct = typeof similarity === "number" ? `${Math.round(similarity * 100)}% match` : null;
+    return ["Cache hit", verified ? "verified" : "fingerprint match", pct].filter(Boolean).join(" · ");
+  }
+  if (event.type === "worker_pool_selection") {
+    const { role_tag, worker_count, pool_size, selected } = event.payload || {};
+    const picked = selected?.length ?? worker_count ?? "?";
+    return `Worker pool: ${role_tag || event.agent || "?"} (${picked}/${pool_size ?? "?"} picked)`;
+  }
+  return event.type;
+}
 
 // Matches eo/agents/code_writers.py's "Code Writer {worker_id} — {name}"
 // and agents/reviewer.py's "Reviewer {worker_index}" -- both fire their
@@ -96,6 +118,13 @@ function escapeHtml(s) {
 // `runStatus`: "running" | "done" | "error" -- drives the Output node's
 // status ring so it visibly flips from pending -> done/error.
 //
+// `decisionEvents` -- NEW, CO4 patch 4. WorkspaceDockContext.jsx's
+// `decisionEvents` array (cache_hit / worker_pool_selection, CO4 patch
+// 3). Each becomes its own small node, anchored off the step it relates
+// to when one exists, or __input__ when it doesn't (cache_hit fires
+// before any step ever runs) -- see the overlay loop and decisionLabel()
+// below for the full reasoning.
+//
 // `branches` -- NEW, Notebooks integration guide §5. When passed, this
 // component draws a completely different shape from everything above:
 // a Notebooks "Generate" command (api/server.py's notebooks_generate)
@@ -125,7 +154,7 @@ function escapeHtml(s) {
 // ForceGraph2D wiring (sizing, dynamic import, zoom-to-fit) lives in the
 // generic ForceGraphBase, shared with KnowledgeGraphView.jsx (Part 0
 // Section 0.2). Nothing about the graph SHAPE below changed.
-export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus, branches, onBranchClick }) {
+export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus, branches, onBranchClick, decisionEvents }) {
   const [hoveredNode, setHoveredNode] = useState(null);
 
   // FIX (graph reflows/jumps on every single event instead of growing
@@ -303,13 +332,50 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       addLink(sourceId, req.requestedRole, "requested");
     }
 
+    // NEW — CO4 patch 4. decisionEvents overlay: WorkspaceDockContext.jsx's
+    // `decisionEvents` array (cache_hit / worker_pool_selection — CO4
+    // patch 3's real new instrumentation, see decisionLabel's own
+    // comment above). Each event becomes its own small terminal node
+    // (isDecision: true, sized/styled distinctly in nodeCanvasObject
+    // below) rather than a raw log line, same "reuse the node-and-edge
+    // language" approach agent_requested_role's overlay above already
+    // takes for a different kind of runtime event.
+    //
+    // Anchor: worker_pool_selection's `agent` is the ROLE_TAG the
+    // selection ran for (e.g. "implementer" — see
+    // agents/code_writers.py's _select_workers() wrapper), which is
+    // also that role's own dispatcher-level step id, so it anchors
+    // directly off that step when it's present in this run's steps.
+    // cache_hit fires from api/task_runner.py BEFORE any dispatch even
+    // happens (a cache tier short-circuits the whole run) -- there is
+    // no step for it to anchor to, so it always hangs off __input__
+    // instead. Any other event whose `agent` doesn't match a step id
+    // falls back to __input__ for the same reason.
+    for (let i = 0; i < (decisionEvents || []).length; i++) {
+      const event = decisionEvents[i];
+      const id = `decision:${i}`;
+      const anchorId = event.agent && stepByRole[event.agent] ? event.agent : "__input__";
+      usedIds.add(id);
+      const label = decisionLabel(event);
+      upsert(id, {
+        category: categorizeDecision(event.type),
+        status: "done",
+        display: label,
+        fullName: label,
+        isDecision: true,
+        decisionType: event.type,
+        decisionPayload: event.payload,
+      });
+      addLink(anchorId, id, "decision");
+    }
+
     // Only surface nodes actually referenced this render (a fresh
     // component instance's nodeObjectsRef starts empty anyway, but this
     // keeps things correct if this ever gets reused across messages).
     const nodes = Array.from(usedIds).map((id) => nodeObjectsRef.current.get(id)).filter(Boolean);
 
     return { nodes, links };
-  }, [trace, suggestedAgents, roleRequests, steps, stepByRole, runStatus, branches]);
+  }, [trace, suggestedAgents, roleRequests, steps, stepByRole, runStatus, branches, decisionEvents]);
 
   const legend = (
     <>
@@ -319,6 +385,8 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border-2 border-yellow-500" style={{ borderStyle: "dashed" }} /> awaiting approval</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full border border-[var(--neutral-500)]" style={{ borderStyle: "dashed" }} /> pending</span>
       <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-cyan-400" /> requested</span>
+      {/* NEW — CO4 patch 4 */}
+      <span className="flex items-center gap-1"><span className="inline-block w-2 h-0.5 bg-[var(--neutral-500)]" /> decision</span>
     </>
   );
 
@@ -359,7 +427,11 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
         // diamond/hexagon/triangle geometry competing with the glyph.
         // Endpoint nodes (Input/Output) get a slightly larger badge so
         // they read as the start/end of the flow, not just another step.
-        const r = node.isEndpoint ? 13 : 11;
+        // NEW — CO4 patch 4: decisionEvents nodes get a smaller badge —
+        // "small labeled nodes," not another full-size step — so they
+        // read as a side annotation on the flow rather than a role that
+        // actually ran.
+        const r = node.isEndpoint ? 13 : node.isDecision ? 7 : 11;
         // Part 2 §2.4/§2.7 — "awaiting_approval" gets its own distinct
         // ring color (not just amber's "running" — a paused run needs to
         // read as visibly DIFFERENT from one still actively working, not
@@ -405,8 +477,9 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
         ctx.textBaseline = "middle";
         ctx.fillText(icon, node.x, node.y);
 
-        // Label below.
-        const fontSize = 11 / globalScale;
+        // Label below. NEW — CO4 patch 4: decisionEvents nodes use a
+        // slightly smaller label to match their smaller badge.
+        const fontSize = (node.isDecision ? 9 : 11) / globalScale;
         ctx.font = `${node.isEndpoint ? "700 " : ""}${fontSize}px sans-serif`;
         ctx.textBaseline = "alphabetic";
         ctx.fillStyle = node.isEndpoint ? "#e5e5e5" : "#a3a3a3";
@@ -415,7 +488,11 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       nodePointerAreaPaint={(node, color, ctx) => {
         ctx.fillStyle = color;
         ctx.beginPath();
-        ctx.arc(node.x, node.y, node.isEndpoint ? 15 : 13, 0, 2 * Math.PI);
+        // NEW — CO4 patch 4: decisionEvents nodes get a hit-test radius
+        // a bit larger than their visual badge (7px) so a small node is
+        // still easy to hover/click, same "bigger tap target than the
+        // drawn size" allowance the endpoint/role nodes already get.
+        ctx.arc(node.x, node.y, node.isEndpoint ? 15 : node.isDecision ? 10 : 13, 0, 2 * Math.PI);
         ctx.fill();
       }}
       legend={legend}

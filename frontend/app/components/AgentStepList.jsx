@@ -2,7 +2,7 @@
 import { useState } from "react";
 import Markdown from "./Markdown";
 import { Check, Pencil, RotateCcw } from "lucide-react";
-import { categorize } from "./agentRoleIcons";
+import { categorize, categorizeDecision } from "./agentRoleIcons";
 
 // Each `step` is one agent_start/agent_done pair pushed by
 // SessionContext.jsx's Pusher handler, in arrival order. Safe to render
@@ -41,11 +41,71 @@ import { categorize } from "./agentRoleIcons";
 // this role's output show up as its own section in the final answer"
 // directly on that role's own step, instead of leaving the reader to
 // notice the gap between the per-role trace and the merged answer.
-export default function AgentStepList({ steps, onResume, manualPause = false, dedupNotes = null }) {
-  if (!steps || steps.length === 0) return null;
+// `decisionEvents` — NEW, CO4 patch 4. WorkspaceDockContext.jsx's
+// `decisionEvents` array (cache_hit / worker_pool_selection — CO4 patch
+// 3's real new instrumentation; see that file's own comment). Rendered
+// as a small row of labeled chips ABOVE the step list — reusing the same
+// small-badge language RoutingTraceGraph.jsx's decisionEvents nodes use
+// (same categorizeDecision() icon/color lookup), not a raw event log.
+// Deliberately not gated on `steps` having any entries: a cache-tier hit
+// (api/task_runner.py's check_cache() short-circuit) never runs a single
+// agent, so `steps` is empty for that snapshot, but the cache_hit event
+// itself is exactly the thing worth surfacing there — see this
+// component's own early-return below, which now checks decisionEvents
+// too so that case doesn't just render nothing.
+function DecisionEventChips({ events }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {events.map((event, i) => {
+        const category = categorizeDecision(event.type);
+        return (
+          <span
+            key={i}
+            title={decisionDetail(event)}
+            className="inline-flex items-center gap-1 rounded-full border border-[var(--neutral-800)] bg-[var(--neutral-900-a50)] px-2 py-1 text-[var(--neutral-400)]"
+          >
+            <span style={{ color: category.color }} aria-hidden="true">{category.icon}</span>
+            {decisionLabel(event)}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// Short chip text — full detail (including payload numbers) lives in the
+// chip's `title` tooltip instead (decisionDetail below), same "short on
+// canvas, full on hover" split RoutingTraceGraph.jsx's node label/tooltip
+// pair already uses.
+function decisionLabel(event) {
+  if (event.type === "cache_hit") return "Cache hit";
+  if (event.type === "worker_pool_selection") {
+    return `Worker pool: ${event.payload?.role_tag || event.agent || "?"}`;
+  }
+  return event.type;
+}
+
+function decisionDetail(event) {
+  if (event.type === "cache_hit") {
+    const { verified, similarity } = event.payload || {};
+    const pct = typeof similarity === "number" ? `${Math.round(similarity * 100)}% match` : null;
+    return ["Cache hit", verified ? "verified" : "fingerprint match", pct].filter(Boolean).join(" · ");
+  }
+  if (event.type === "worker_pool_selection") {
+    const { role_tag, worker_count, pool_size, selected } = event.payload || {};
+    const picked = selected?.length ?? worker_count ?? "?";
+    return `${role_tag || event.agent || "?"}: ${picked}/${pool_size ?? "?"} accounts picked`;
+  }
+  return event.type;
+}
+
+export default function AgentStepList({ steps, onResume, manualPause = false, dedupNotes = null, decisionEvents = null }) {
+  const hasDecisionEvents = Boolean(decisionEvents && decisionEvents.length > 0);
+  if ((!steps || steps.length === 0) && !hasDecisionEvents) return null;
   return (
     <div className="space-y-1.5">
-      {steps.map((step) => (
+      {hasDecisionEvents && <DecisionEventChips events={decisionEvents} />}
+      {steps?.map((step) => (
         <StepRow key={step.id} step={step} onResume={onResume} dedupNote={dedupNotes?.[step.role]} />
       ))}
       {manualPause && onResume && <ManualPauseActions onResume={onResume} />}

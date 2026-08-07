@@ -195,3 +195,21 @@ export function categorize(label) {
   if (!label) return DEFAULT_CATEGORY;
   return ROLE_CATEGORIES.find((c) => c.test.test(label)) || DEFAULT_CATEGORY;
 }
+
+// NEW — CO4 patch 4. Category lookup for WorkspaceDockContext.jsx's
+// `decisionEvents` (cache_hit / worker_pool_selection — see that file's
+// own CO4 patch 3 comment), the same {icon, color} shape as every
+// ROLE_CATEGORIES entry above so RoutingTraceGraph.jsx's node-drawing
+// code doesn't need a second branch for "is this a role node or a
+// decision node" -- it just reads node.category either way. Kept as its
+// own small map rather than folded into ROLE_CATEGORIES: these aren't
+// role names being matched by regex against a label, they're a fixed,
+// closed set of relay/emitter.py event types.
+export const DECISION_CATEGORIES = {
+  cache_hit: { key: "cache-hit", icon: "\u26A1", color: "#facc15" }, // ⚡
+  worker_pool_selection: { key: "worker-pool", icon: "\u{1F500}", color: "#38bdf8" }, // 🔀
+};
+
+export function categorizeDecision(type) {
+  return DECISION_CATEGORIES[type] || DEFAULT_CATEGORY;
+}
