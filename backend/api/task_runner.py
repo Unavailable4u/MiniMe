@@ -412,11 +412,11 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # something safe to put in the result payload below, rather than
     # the frontend needing its own None-guard on a key that may not
     # exist.
-    # NEW — CO5 Finding A: snapshot exactly what organize_final_answer()
-    # is about to be called with, so a LATER, separate HTTP request
-    # (GET /api/task/{session_id}/stream, Step 3) has something to read.
+    # NEW — CO5 Finding A: snapshot the RESULT of organize_final_answer()
+    # (not its inputs) so a LATER, separate HTTP request (GET
+    # /api/task/{session_id}/stream, Step 3) has something to read.
     # Today role execution + synthesis happen inside this one POST
-    # request -- `results`/`final_role` are local variables here and
+    # request -- `answer`/`dedup_notes` are local variables here and
     # vanish when this function returns, same problem
     # paused_execution:{session_id} was introduced to solve for the
     # pause/resume split. Written under the identical bus-key exemption
@@ -425,9 +425,28 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # set_app_slug() either, so this key must not be app_slug-namespaced
     # or that later read would land in the wrong (or default) namespace.
     #
+    # CHANGED — CO5 gap fix (post-audit): this used to snapshot
+    # role_outputs/user_request/final_role BEFORE calling
+    # organize_final_answer(), so that GET /stream could call
+    # organize_final_answer_stream() and run the exact same synthesis a
+    # second time. That bought nothing (this POST already blocks on the
+    # synthesis below before the frontend can even open the
+    # EventSource -- there's no "silent wait" left to eliminate) and
+    # risked the streamed text diverging from this response's own
+    # `answer` (two independent, non-deterministic LLM calls over the
+    # same inputs). Snapshotting the already-computed answer instead
+    # means the stream route has nothing left to generate -- it just
+    # replays this exact string as chunks -- so what the user watches
+    # stream in is guaranteed to be byte-for-byte what
+    # conversation_memory.append_turn() below persists as this turn's
+    # answer, and the LLM is called exactly once per request either way.
+    #
     # Gated on the same len(results) > 1 condition as the synthesis call
     # below -- a single-role run has nothing to stream-synthesize either,
     # so writing a snapshot for it would just be a key nothing ever reads.
+    # Written after the try/except below (fail-open included) so the
+    # snapshot always matches whatever `answer`/`dedup_notes` this
+    # response actually ships, even on the fallback path.
     # CO5 Step 7 follow-up: api/routes/tasks.py's stream_answer() now
     # deletes this key itself once it's done reading it, the same
     # "consumer deletes on its way out" pattern paused_execution already
@@ -440,14 +459,6 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # One hour comfortably covers "user's tab is just slow to open the
     # stream" while still bounding the leak for the "never comes back"
     # case.
-    if len(results) > 1:
-        from memory.bus import write as bus_write
-        bus_write(f"pending_synthesis:{session_id}", {
-            "role_outputs": results,
-            "user_request": task_text,
-            "final_role": final_role,
-        }, ex=3600)
-
     dedup_notes = {}
     if len(results) > 1:
         try:
@@ -458,6 +469,12 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         except Exception as exc:
             print(f"  [task_runner] output_organizer synthesis failed, "
                   f"falling back to final_role's own answer (fail-open): {exc}")
+
+        from memory.bus import write as bus_write
+        bus_write(f"pending_synthesis:{session_id}", {
+            "answer": answer,
+            "dedup_notes": dedup_notes,
+        }, ex=3600)
 
     # NEW — Phase CO, CO2 (Master Guide v2, §5): pull any interactive
     # artifacts a role attached to its own output into a flat top-level

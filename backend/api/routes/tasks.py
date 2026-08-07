@@ -11,6 +11,7 @@ CO5's new GET /api/task/{session_id}/stream land next — that's the
 whole reason this piece was split out first, ahead of the rest of
 server.py's other route groups.
 """
+import asyncio  # NEW — CO5 gap fix: paced replay of the already-synthesized answer in stream_answer()
 import json   # NEW — B6 cleanup: _parse_fenced_json (get_tasks' Part 7 §7.3 integrations parse)
 import re     # NEW — B6 cleanup: _parse_fenced_json
 import traceback
@@ -25,7 +26,7 @@ from api.deps import require_auth, _resolve_chat_or_404, _verify_supabase_jwt   
 from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — B6 cleanup: get_tasks' Part 7 §7.5 deploy-status read
 from agents import deploy_agent as deploy_agent_module                  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
-from agents.output_organizer import organize_final_answer_stream, DEDUP_NOTES_MARKER   # NEW — CO5 Finding B; DEDUP_NOTES_MARKER is Finding C's
+
 from eo import chat_store
 from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
 from eo import timeline_node_blurbs   # NEW — CO4 patch 5
@@ -250,9 +251,8 @@ def request_pause(session_id: str, owner_id: str = Depends(require_auth)):
 
     CO5 Step 7 fix: eo/executor.py's pause checkpoint only exists inside
     run_with_looping()'s role loop (see the "after every role's
-    agent_done" note above) — it's never consulted by the /stream route
-    or by organize_final_answer_stream(). By the time
-    pending_synthesis:{session_id} exists, task_runner.py's
+    agent_done" note above) — it's never consulted by the /stream route.
+    By the time pending_synthesis:{session_id} exists, task_runner.py's
     _run_tier3_hires() has already returned a non-paused `looped` result,
     which means every role has finished and there is no loop left
     running anywhere to notice pause_requested:{session_id}. Writing the
@@ -302,23 +302,33 @@ async def stream_answer(session_id: str, token: str = Query(None)):
     above, which mutate a run's state and correctly require edit access.
 
     Reads the pending_synthesis:{session_id} snapshot Finding A's patch
-    now writes in api/task_runner.py's _run_tier3_hires(), right where
-    organize_final_answer() is called synchronously today. 404 if it's
-    missing — either a bad/stale session_id, or a real one that never
-    reached the multi-role synthesis branch (single-role tier-3 runs
-    never write this key; see task_runner.py's own len(results) > 1
-    gate).
+    writes in api/task_runner.py's _run_tier3_hires(), right after
+    organize_final_answer() is called there. 404 if it's missing —
+    either a bad/stale session_id, or a real one that never reached the
+    multi-role synthesis branch (single-role tier-3 runs never write
+    this key; see task_runner.py's own len(results) > 1 gate).
 
-    Finding C: organize_final_answer_stream() yields raw LLM text, which
-    still ends with the DEDUP_NOTES_MARKER + one line of JSON that
-    SYSTEM_PROMPT asks the model to emit (see output_organizer.py). This
-    route buffers just enough of the tail to catch that marker even if
-    it straddles a chunk boundary, holds everything from the marker
-    onward out of the visible stream, and emits it as its own SSE
-    "dedup_notes" event right before [DONE] — mirroring
-    _parse_organizer_response()'s fail-open behavior (a missing/invalid
-    notes line degrades to {} rather than losing the answer text
-    already streamed).
+    CHANGED — CO5 gap fix (post-audit): this route used to call
+    organize_final_answer_stream() itself, re-running the exact same
+    synthesis prompt a second time against the exact same inputs
+    task_runner.py's synchronous organize_final_answer() call had
+    already run moments earlier to populate the POST response's
+    `answer`/`dedup_notes`. Two problems with that: (1) it never bought
+    the latency win CO5 was for, since the POST response already blocks
+    on the full synthesis before the frontend can even open this
+    EventSource — there's no "silent wait" left to eliminate by the
+    time this route runs; (2) the two LLM calls aren't guaranteed to
+    produce identical wording, so the text the user watched stream in
+    could diverge from whatever `data.result.answer` persisted to chat
+    history/export/copy.
+    task_runner.py's snapshot now holds the already-computed
+    `answer`/`dedup_notes` instead of the raw role_outputs, so there is
+    nothing left to generate here — this route just replays that exact
+    string as chunks, at a fixed pace, purely so the frontend's existing
+    typewriter UI still has something to animate. One LLM call per
+    request, and the streamed text is byte-for-byte identical to what
+    got persisted, by construction (same string, not a second
+    generation of it).
     """
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
@@ -333,79 +343,38 @@ async def stream_answer(session_id: str, token: str = Query(None)):
                    "or a single-role run with nothing to stream-synthesize).",
         )
 
+    # NEW — CO5 gap fix: chunk size / pacing for the simulated stream.
+    # Word-sized chunks (rather than char-by-char) keep the SSE frame
+    # count reasonable for a long answer while still reading as a live
+    # typewriter effect in the frontend; the short sleep is what makes
+    # it visibly incremental instead of one giant flush.
+    _CHUNK_WORDS = 6
+    _CHUNK_DELAY_SECONDS = 0.05
+
     async def event_generator():
-        # Finding C: buffer just enough trailing text to detect
-        # DEDUP_NOTES_MARKER even if a provider splits it across two
-        # chunks. `hold_back` mirrors _parse_organizer_response()'s
-        # marker length exactly, so the marker can never be half-flushed
-        # before we've seen the rest of it arrive.
-        hold_back = len(DEDUP_NOTES_MARKER) - 1
-        buffer = ""
-        marker_seen = False
-        notes_buffer = ""
+        answer = snapshot.get("answer") or ""
+        dedup_notes = snapshot.get("dedup_notes") or {}
 
-        async for chunk in organize_final_answer_stream(
-            snapshot["role_outputs"], snapshot["user_request"], snapshot["final_role"],
-        ):
-            if marker_seen:
-                # Structured JSON tail — never forwarded as a visible
-                # chunk, just accumulated until the stream ends.
-                notes_buffer += chunk
-                continue
+        words = answer.split(" ")
+        for i in range(0, len(words), _CHUNK_WORDS):
+            piece = " ".join(words[i:i + _CHUNK_WORDS])
+            # Re-attach the separating space except before the very
+            # first piece, so the reassembled text matches `answer`
+            # exactly (join()ing chunks back together must reproduce
+            # the original string byte-for-byte).
+            chunk = piece if i == 0 else " " + piece
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            await asyncio.sleep(_CHUNK_DELAY_SECONDS)
 
-            buffer += chunk
-            if DEDUP_NOTES_MARKER in buffer:
-                marker_seen = True
-                answer_part, _, notes_part = buffer.partition(DEDUP_NOTES_MARKER)
-                if answer_part:
-                    yield f"data: {json.dumps({'chunk': answer_part})}\n\n"
-                notes_buffer = notes_part
-                buffer = ""
-                continue
-
-            # No marker yet: flush everything except the last
-            # `hold_back` chars, in case they're the marker's opening
-            # bytes and the rest lands in the next chunk.
-            if len(buffer) > hold_back:
-                if hold_back:
-                    flush, buffer = buffer[:-hold_back], buffer[-hold_back:]
-                else:
-                    flush, buffer = buffer, ""
-                if flush:
-                    yield f"data: {json.dumps({'chunk': flush})}\n\n"
-
-        if not marker_seen:
-            # Stream ended without ever emitting the marker (model
-            # dropped it, or this chain never produces one) — flush
-            # whatever's left in the hold-back buffer as real answer
-            # text rather than silently swallowing the tail.
-            if buffer:
-                yield f"data: {json.dumps({'chunk': buffer})}\n\n"
-            dedup_notes = {}
-        else:
-            # Same fail-open parsing as _parse_organizer_response(): a
-            # missing/invalid JSON line degrades to {} rather than
-            # erroring the whole stream out after the answer already
-            # rendered.
-            dedup_notes = {}
-            try:
-                parsed = json.loads(notes_buffer.strip())
-                if isinstance(parsed, dict):
-                    dedup_notes = parsed
-            except (ValueError, TypeError):
-                pass
-
-        # NEW — CO5 Step 7 follow-up: organize_final_answer_stream() has
-        # now fully run (the `async for` above only exits once its
-        # generator is exhausted), so this snapshot has been consumed
-        # exactly the way it was going to be. Delete it here, same
-        # "consumer deletes on its way out" pattern resume_graph() uses
-        # for paused_execution:{session_id} -- otherwise this key just
-        # sits in the bus until task_runner.py's ex=3600 backstop
-        # eventually expires it. A dropped connection mid-stream skips
-        # this line (the `async for` above never finishes, so execution
-        # never reaches here) and falls back to that same TTL, rather
-        # than deleting a snapshot a retried request might still want.
+        # NEW — CO5 Step 7 follow-up: the snapshot has now been fully
+        # consumed. Delete it here, same "consumer deletes on its way
+        # out" pattern resume_graph() uses for
+        # paused_execution:{session_id} -- otherwise this key just sits
+        # in the bus until task_runner.py's ex=3600 backstop eventually
+        # expires it. A dropped connection mid-stream skips this line
+        # (the loop above never finishes, so execution never reaches
+        # here) and falls back to that same TTL, rather than deleting a
+        # snapshot a retried request might still want.
         bus_delete(f"pending_synthesis:{session_id}")
 
         yield f"data: {json.dumps({'dedup_notes': dedup_notes})}\n\n"
