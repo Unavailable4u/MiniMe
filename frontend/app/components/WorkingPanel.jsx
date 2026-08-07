@@ -91,6 +91,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
   const liveSteps = dock.state.liveSteps;
   const routeTrace = dock.state.routeTrace;
   const roleRequests = dock.state.roleRequests;
+  const decisionEvents = dock.state.decisionEvents; // NEW — CO4 patch 4
   const dependencyMap = dock.state.dependencyMap;
   const structurePlan = dock.state.structurePlan;
   const sessionId = dock.state.sessionId; // §4
@@ -158,7 +159,14 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
         (m.steps?.length > 0 ||
           m.routeTrace?.length > 0 ||
           (m.dependencyMap && Object.keys(m.dependencyMap).length > 0) ||
-          m.structurePlan)
+          m.structurePlan ||
+          // NEW — CO4 patch 4: a cache-tier hit (api/task_runner.py's
+          // check_cache() short-circuit) never runs a single agent, so
+          // m.steps is empty for it -- without this, that snapshot had
+          // nothing here to qualify it for the panel at all, and its
+          // cache_hit decisionEvents entry (CO4 patch 3) would never be
+          // reachable to render.
+          m.decisionEvents?.length > 0)
     );
 
   return (
@@ -233,8 +241,16 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
               synthesis pass that produces it only runs once a whole
               run has finished (see task_runner.py's own comment at
               that call site). */}
-          {m.steps?.length > 0 && (
-            <AgentStepList steps={m.steps} dedupNotes={m.data?.result?.dedup_notes} />
+          {/* NEW — CO4 patch 4: also render for a decisionEvents-only
+              snapshot (cache-tier hit, m.steps empty) — see
+              snapshotMessages' own comment above and AgentStepList's
+              early-return, which now checks decisionEvents too. */}
+          {(m.steps?.length > 0 || m.decisionEvents?.length > 0) && (
+            <AgentStepList
+              steps={m.steps}
+              dedupNotes={m.data?.result?.dedup_notes}
+              decisionEvents={m.decisionEvents}
+            />
           )}
           {/*
             FIX: this used to require `m.routeTrace?.length > 1` before
@@ -247,14 +263,17 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
             from `steps` (every real agent_start/agent_done, in order),
             so it no longer needs routeTrace to have anything in it at
             all -- render it whenever there's ANY real activity to show.
+            CHANGED — CO4 patch 4: also render for a decisionEvents-only
+            snapshot, same reasoning as AgentStepList just above.
           */}
-          {(m.steps?.length > 0 || m.routeTrace?.length > 0) && (
+          {(m.steps?.length > 0 || m.routeTrace?.length > 0 || m.decisionEvents?.length > 0) && (
             <RoutingTraceGraph
               trace={m.routeTrace}
               suggestedAgents={m.data?.decision?.suggested_agents}
               steps={m.steps}
               roleRequests={m.roleRequests}
               runStatus={m.data?.status === "error" ? "error" : "done"}
+              decisionEvents={m.decisionEvents}
             />
           )}
           {m.dependencyMap && Object.keys(m.dependencyMap).length > 0 && (
@@ -309,6 +328,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 steps={liveSteps}
                 roleRequests={roleRequests}
                 runStatus="running"
+                decisionEvents={decisionEvents}
               />
               {Object.keys(dependencyMap).length > 0 && (
                 <DependencyGraph map={dependencyMap} />
@@ -318,6 +338,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 steps={liveSteps}
                 onResume={resumeRun}
                 manualPause={!liveSteps.some((s) => s.status === "awaiting_approval") && !!pausedRun}
+                decisionEvents={decisionEvents}
               />
             </>
           )}
