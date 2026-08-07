@@ -428,18 +428,25 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # Gated on the same len(results) > 1 condition as the synthesis call
     # below -- a single-role run has nothing to stream-synthesize either,
     # so writing a snapshot for it would just be a key nothing ever reads.
-    # Deliberately NOT deleted here: unlike paused_execution (deleted by
-    # the resume call that consumes it), this snapshot is read-only for
-    # the stream endpoint -- it doesn't mutate or advance any run state,
-    # so there's no single "consumption" point to delete it at. Left as
-    # an explicit gap for whoever adds eviction/TTL later.
+    # CO5 Step 7 follow-up: api/routes/tasks.py's stream_answer() now
+    # deletes this key itself once it's done reading it, the same
+    # "consumer deletes on its way out" pattern paused_execution already
+    # uses -- so the normal, happy-path lifetime of this key is just the
+    # gap between this write and that route being hit. The ex= here is
+    # only a backstop for the *ab*normal path: a client that never opens
+    # the SSE connection at all (tab closed, network dropped, browser
+    # never got past the POST /api/task response) leaves nothing to run
+    # that delete, so this key would otherwise sit in the bus forever.
+    # One hour comfortably covers "user's tab is just slow to open the
+    # stream" while still bounding the leak for the "never comes back"
+    # case.
     if len(results) > 1:
         from memory.bus import write as bus_write
         bus_write(f"pending_synthesis:{session_id}", {
             "role_outputs": results,
             "user_request": task_text,
             "final_role": final_role,
-        })
+        }, ex=3600)
 
     dedup_notes = {}
     if len(results) > 1:

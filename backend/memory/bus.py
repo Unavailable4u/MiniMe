@@ -132,9 +132,19 @@ def vector_index() -> Index:
             )
         _vector_index = Index(url=url, token=token)
     return _vector_index
-def write(key: str, value):
-    """Write any JSON-serializable value to memory."""
-    redis.set(_namespaced(key), json.dumps(value))
+def write(key: str, value, ex: int = None):
+    """Write any JSON-serializable value to memory.
+
+    ex: optional TTL in seconds. NEW — CO5 Step 7 follow-up: a safety
+    net for keys like pending_synthesis:{session_id} that are meant to
+    be short-lived and explicitly deleted by whatever consumes them
+    (see api/routes/tasks.py's stream_answer()), but would otherwise
+    accumulate in the bus forever if that consumer never runs (client
+    never opens the SSE connection, tab closed mid-request, etc.).
+    Omitted (None) preserves every existing caller's behavior exactly
+    -- a plain, non-expiring SET, same as before this param existed.
+    """
+    redis.set(_namespaced(key), json.dumps(value), ex=ex)
     if key == "app_slug":
         # Keeps the context-local value in sync with an explicit
         # write(KEYS["app_slug"], ...) call within the SAME

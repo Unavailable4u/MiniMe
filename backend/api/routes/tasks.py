@@ -38,7 +38,7 @@ from eo.structure import (
     save_workflow_template, list_workflow_templates, delete_workflow_template,
     update_workflow_template,
 )
-from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write, read   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup
+from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write, read, delete as bus_delete   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup; bus_delete is CO5 Step 7 follow-up's cleanup of that same key
 
 router = APIRouter()
 
@@ -247,8 +247,32 @@ def request_pause(session_id: str, owner_id: str = Depends(require_auth)):
     actually land, so a 200 here means "requested," not "paused yet."
     The frontend should treat this as pending until it sees the run's
     status flip to "paused" (see MessageBubble.jsx / ChatSidebar.jsx).
+
+    CO5 Step 7 fix: eo/executor.py's pause checkpoint only exists inside
+    run_with_looping()'s role loop (see the "after every role's
+    agent_done" note above) — it's never consulted by the /stream route
+    or by organize_final_answer_stream(). By the time
+    pending_synthesis:{session_id} exists, task_runner.py's
+    _run_tier3_hires() has already returned a non-paused `looped` result,
+    which means every role has finished and there is no loop left
+    running anywhere to notice pause_requested:{session_id}. Writing the
+    flag at that point wouldn't pause anything currently in flight; it
+    would just sit on the bus (nothing consumes/deletes it the way the
+    executor's checkpoint does) until this same session_id is reused for
+    a *later* task, which would then pause on its very first role for a
+    request nobody made. Reject the call instead of accepting a flag
+    that can't do what its caller asked.
     """
     _resolve_chat_or_404(session_id, owner_id, require_edit=True)
+    if read(f"pending_synthesis:{session_id}", default=None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This run already finished role execution and is streaming "
+                "its synthesized answer — there is no active role loop left "
+                "to pause."
+            ),
+        )
     write(f"pause_requested:{session_id}", True)
     return PauseResponse(session_id=session_id, status="pause_requested")
 
@@ -370,6 +394,19 @@ async def stream_answer(session_id: str, token: str = Query(None)):
                     dedup_notes = parsed
             except (ValueError, TypeError):
                 pass
+
+        # NEW — CO5 Step 7 follow-up: organize_final_answer_stream() has
+        # now fully run (the `async for` above only exits once its
+        # generator is exhausted), so this snapshot has been consumed
+        # exactly the way it was going to be. Delete it here, same
+        # "consumer deletes on its way out" pattern resume_graph() uses
+        # for paused_execution:{session_id} -- otherwise this key just
+        # sits in the bus until task_runner.py's ex=3600 backstop
+        # eventually expires it. A dropped connection mid-stream skips
+        # this line (the `async for` above never finishes, so execution
+        # never reaches here) and falls back to that same TTL, rather
+        # than deleting a snapshot a retried request might still want.
+        bus_delete(f"pending_synthesis:{session_id}")
 
         yield f"data: {json.dumps({'dedup_notes': dedup_notes})}\n\n"
         yield "data: [DONE]\n\n"
