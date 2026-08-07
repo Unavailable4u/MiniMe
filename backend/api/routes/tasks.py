@@ -26,6 +26,7 @@ from agents import deploy_config_writer as deploy_config_writer_agent   # NEW �
 from agents import deploy_agent as deploy_agent_module                  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
 from eo import chat_store
 from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
+from eo import timeline_node_blurbs   # NEW — CO4 patch 5
 from eo.executor import resume_graph
 from eo.registry import (
     list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned,
@@ -660,4 +661,17 @@ def get_tasks_for_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
     data = get_tasks(session_id)
     data["_session_id"] = session_id
     return data
+
+
+# NEW — CO4 patch 5: short plain-language blurbs for the routing-trace
+# timeline's node-click detail panel (RoutingTraceGraph.jsx). Global,
+# not workspace-scoped -- see eo/timeline_node_blurbs.py's own
+# docstring for why this isn't the same shape as
+# get_node_summaries()/graph_and_notes.py's per-workspace store. Still
+# behind require_auth like every other route here, purely so an
+# unauthenticated caller can't hit it -- the content itself has
+# nothing user- or workspace-specific in it.
+@router.get("/api/timeline/node_blurbs", dependencies=[Depends(require_auth)])
+def get_timeline_node_blurbs():
+    return timeline_node_blurbs.get_blurbs()
 

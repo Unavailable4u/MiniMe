@@ -1,7 +1,7 @@
 "use client";
 import { useRef, useEffect, useState } from "react";
 import { Pause, Loader2 } from "lucide-react";
-import { useSession } from "../context/SessionContext";
+import { useSession, authHeaders } from "../context/SessionContext";
 import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import RoutingTraceCard from "./RoutingTraceCard";
 import AgentStepList from "./AgentStepList";
@@ -82,6 +82,31 @@ function PauseButton({ onRequestPause }) {
 export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId = null, onNavigateSubTab = null }) {
   const { batches, API_URL } = useSession(); // §4 / Part 2 §2.7: app-wide, no dock equivalent
   const dock = useWorkspaceDock(workspaceId, chatId);
+
+  // NEW — CO4 patch 5: {kind: blurb} map for RoutingTraceGraph.jsx's
+  // node-click detail panel (eo/timeline_node_blurbs.py). Global,
+  // read-only content -- not scoped to this dock/workspace -- so it's
+  // fetched once here and handed to every RoutingTraceGraph instance
+  // below, rather than living on the per-dock state like
+  // liveDecision/liveSteps/etc. A fetch failure just leaves this {}
+  // (RoutingTraceGraph's blurbFor() already has a generic per-category
+  // fallback for a missing/empty map, so there's nothing else to
+  // guard here).
+  const [nodeBlurbs, setNodeBlurbs] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/timeline/node_blurbs`, { headers: await authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setNodeBlurbs(data);
+      } catch {
+        // fire-and-forget: blurbFor()'s fallback covers an empty map
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [API_URL]);
 
   const messages = dock.state.messages;
   const activeMessageIndex = dock.state.activeMessageIndex;
@@ -274,6 +299,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
               roleRequests={m.roleRequests}
               runStatus={m.data?.status === "error" ? "error" : "done"}
               decisionEvents={m.decisionEvents}
+              blurbs={nodeBlurbs}
             />
           )}
           {m.dependencyMap && Object.keys(m.dependencyMap).length > 0 && (
@@ -329,6 +355,7 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 roleRequests={roleRequests}
                 runStatus="running"
                 decisionEvents={decisionEvents}
+                blurbs={nodeBlurbs}
               />
               {Object.keys(dependencyMap).length > 0 && (
                 <DependencyGraph map={dependencyMap} />

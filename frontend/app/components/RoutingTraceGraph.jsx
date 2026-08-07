@@ -1,5 +1,6 @@
 "use client";
 import { useMemo, useRef, useState } from "react";
+import { X } from "lucide-react";
 import ForceGraphBase from "./ForceGraphBase";
 
 // The full icon table (role name -> {icon, color}, spanning coding,
@@ -27,6 +28,34 @@ const REASON_COLORS = {
 // check_cache() for cache_hit ({verified, similarity}), eo/worker_pool.py's
 // _select_workers() for worker_pool_selection ({role_tag, worker_count,
 // pool_size, selected}).
+// NEW — CO4 patch 5. The key a clicked node's blurb is stored/looked
+// up under in the `blurbs` prop (eo/timeline_node_blurbs.py, via
+// GET /api/timeline/node_blurbs -- see WorkingPanel.jsx's fetch). A
+// decision node's kind is its event type (cache_hit/worker_pool_
+// selection, same string decisionLabel/decisionType already use); any
+// other node's kind is just its id -- the two endpoints (__input__/
+// __output__) and every role/step id line up with
+// timeline_node_blurbs.DEFAULT_BLURBS' keys directly for the ids that
+// have entries there, and fall through to blurbFor()'s generic
+// category line below for the many role ids that don't (the role
+// catalog is too large to enumerate one blurb per entry by hand).
+function blurbKindOf(node) {
+  if (!node) return null;
+  return node.isDecision ? node.decisionType : node.id;
+}
+
+// Exact per-kind blurb when the store has one; otherwise a generic
+// line built from the node's own category, so every node shows
+// SOMETHING plain-language even for the many specific role ids
+// timeline_node_blurbs.py doesn't enumerate individually.
+function blurbFor(node, blurbs) {
+  const exact = blurbs?.[blurbKindOf(node)];
+  if (exact) return exact;
+  if (node.isDecision) return "A decision the system made mid-run, recorded here as its own timeline event.";
+  const kind = (node.category?.key || "pipeline").replace(/-/g, " ");
+  return `A ${kind} step that ran as part of this task.`;
+}
+
 function decisionLabel(event) {
   if (event.type === "cache_hit") {
     const { verified, similarity } = event.payload || {};
@@ -154,8 +183,19 @@ function escapeHtml(s) {
 // ForceGraph2D wiring (sizing, dynamic import, zoom-to-fit) lives in the
 // generic ForceGraphBase, shared with KnowledgeGraphView.jsx (Part 0
 // Section 0.2). Nothing about the graph SHAPE below changed.
-export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus, branches, onBranchClick, decisionEvents }) {
+// `blurbs` -- NEW, CO4 patch 5. {kind: text} map from
+// GET /api/timeline/node_blurbs (eo/timeline_node_blurbs.py), fetched
+// once by WorkingPanel.jsx and handed to every RoutingTraceGraph
+// instance it renders. Clicking any node that isn't a branch node
+// (see onNodeClick below -- branches mode keeps its existing
+// onBranchClick navigation unchanged) opens an inline detail panel
+// with that node's blurb, reusing eo/node_summaries.py's
+// click-to-see-detail pattern (KnowledgeGraphView.jsx's rationaleNode
+// panel) rather than inventing a new interaction.
+export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleRequests, runStatus, branches, onBranchClick, decisionEvents, blurbs }) {
   const [hoveredNode, setHoveredNode] = useState(null);
+  // NEW — CO4 patch 5: which node's inline detail panel is open.
+  const [selectedNode, setSelectedNode] = useState(null);
 
   // FIX (graph reflows/jumps on every single event instead of growing
   // smoothly): react-force-graph keys physics state off object identity,
@@ -391,6 +431,7 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
   );
 
   return (
+    <div className="relative h-full w-full">
     <ForceGraphBase
       nodes={graphData.nodes}
       links={graphData.links}
@@ -398,10 +439,16 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       linkWidth={(link) => (link.reason === "requested" ? 2 : 1)}
       linkLabel={(link) => link.reason}
       onNodeClick={(node) => {
-        // Only branch nodes (guide §5's per-target terminal nodes) are
-        // navigable -- the single-chain graph's Input/Output/role nodes
-        // have never had a click action and shouldn't gain one here.
-        if (node.isBranch) onBranchClick?.(node.id);
+        // Branch nodes (guide §5's per-target terminal nodes) keep
+        // their existing navigate-to-subtab behavior unchanged.
+        if (node.isBranch) {
+          onBranchClick?.(node.id);
+          return;
+        }
+        // NEW — CO4 patch 5: every other node -- a role step, a
+        // decisionEvents node (cache_hit/worker_pool_selection), or
+        // either endpoint -- opens the detail panel below instead.
+        setSelectedNode(node);
       }}
       onNodeHover={setHoveredNode}
       nodeLabel={(node) => {
@@ -497,5 +544,38 @@ export default function RoutingTraceGraph({ trace, suggestedAgents, steps, roleR
       }}
       legend={legend}
     />
+
+    {/* NEW — CO4 patch 5 detail panel. Same positioning/markup as
+        KnowledgeGraphView.jsx's rationaleNode panel (top-right corner,
+        clear of the legend's bottom-right slot) -- reusing that
+        established click-to-see-detail affordance rather than a new
+        one. Never rendered in branches mode (see onNodeClick above --
+        a branch click never calls setSelectedNode), so this stays a
+        no-op for the Notebooks Generate graph. */}
+    {selectedNode && (
+      <div className="absolute top-2 right-2 z-20 w-64 max-h-[calc(100%-1rem)] overflow-y-auto rounded-lg border border-[var(--neutral-700)] bg-[var(--neutral-900)]/95 p-3 text-xs shadow-lg">
+        <div className="flex items-start justify-between gap-2 mb-1.5">
+          <h4 className="font-medium text-[var(--neutral-200)] leading-snug flex items-center gap-1.5">
+            <span aria-hidden="true">{selectedNode.category?.icon}</span>
+            {selectedNode.fullName || selectedNode.display || selectedNode.id}
+          </h4>
+          <button
+            onClick={() => setSelectedNode(null)}
+            className="shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+          >
+            <X size={13} />
+          </button>
+        </div>
+        <p className="text-[var(--neutral-400)] leading-relaxed">
+          {blurbFor(selectedNode, blurbs)}
+        </p>
+        {selectedNode.summary && (
+          <p className="text-[var(--neutral-500)] leading-relaxed mt-2 border-t border-[var(--neutral-800)] pt-2">
+            {selectedNode.summary}
+          </p>
+        )}
+      </div>
+    )}
+    </div>
   );
 }
