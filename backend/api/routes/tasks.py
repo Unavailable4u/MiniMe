@@ -17,13 +17,15 @@ import traceback
 from typing import Optional, Union
 
 import sentry_sdk
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from api.deps import require_auth, _resolve_chat_or_404
+from api.deps import require_auth, _resolve_chat_or_404, _verify_supabase_jwt   # NEW — CO5 Finding B
 from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — B6 cleanup: get_tasks' Part 7 §7.5 deploy-status read
 from agents import deploy_agent as deploy_agent_module                  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
+from agents.output_organizer import organize_final_answer_stream   # NEW — CO5 Finding B
 from eo import chat_store
 from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
 from eo import timeline_node_blurbs   # NEW — CO4 patch 5
@@ -36,7 +38,7 @@ from eo.structure import (
     save_workflow_template, list_workflow_templates, delete_workflow_template,
     update_workflow_template,
 )
-from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag
+from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write, read   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup
 
 router = APIRouter()
 
@@ -249,6 +251,76 @@ def request_pause(session_id: str, owner_id: str = Depends(require_auth)):
     _resolve_chat_or_404(session_id, owner_id, require_edit=True)
     write(f"pause_requested:{session_id}", True)
     return PauseResponse(session_id=session_id, status="pause_requested")
+
+
+@router.get("/api/task/{session_id}/stream")
+async def stream_answer(session_id: str, token: str = Query(None)):
+    """CO5 Finding B: auth for this route can't go through the usual
+    Depends(require_auth) — that dependency reads the Authorization
+    header off the request (api/deps.py), but the browser's EventSource
+    API (Step 4's frontend hook) has no way to set custom headers on the
+    request it makes. Same structural problem api/server.py's
+    /ws/{session_id} WebSocket route already hit and solved: take the
+    token as a query param instead, and verify it manually with the same
+    _verify_supabase_jwt() the header path uses under the hood. Frontend
+    implication (flagged for Step 4): the EventSource URL needs
+    `?token=...` appended, not an Authorization header.
+
+    401 is a real HTTP response here (unlike the WS route, which has no
+    response body and has to fake a 401 via a 4401 close code) — this is
+    a plain GET, so HTTPException works normally.
+
+    Read access, not edit: require_edit=False, same reasoning as any
+    other "just show me a result" GET in this file — a workspace
+    viewer-tier collaborator should be able to watch an answer stream
+    in, same as they could already read it once finished via the
+    ordinary task-result routes. Contrast with request_pause/post_resume
+    above, which mutate a run's state and correctly require edit access.
+
+    Reads the pending_synthesis:{session_id} snapshot Finding A's patch
+    now writes in api/task_runner.py's _run_tier3_hires(), right where
+    organize_final_answer() is called synchronously today. 404 if it's
+    missing — either a bad/stale session_id, or a real one that never
+    reached the multi-role synthesis branch (single-role tier-3 runs
+    never write this key; see task_runner.py's own len(results) > 1
+    gate).
+
+    Scope note (Finding C, not yet handled here): organize_final_answer_
+    stream() yields raw LLM text, which still ends with the
+    ---DEDUP_NOTES---\\n<json> marker + payload SYSTEM_PROMPT asks the
+    model to emit. This first pass forwards every chunk verbatim as it
+    arrives — meaning that marker and JSON WILL currently leak into the
+    visible stream. Deliberately not fixed in this patch: the marker can
+    straddle a chunk boundary, which needs a buffering pass over the
+    stream, not just a route/auth change. That buffering — and turning
+    dedup_notes into its own final SSE event before [DONE], per Step 6
+    of the build order — is Finding C's job, layered on top of this
+    endpoint next.
+    """
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    owner_id = _verify_supabase_jwt(token)
+    _resolve_chat_or_404(session_id, owner_id, require_edit=False)
+
+    snapshot = read(f"pending_synthesis:{session_id}", default=None)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No pending synthesis for this session_id (unknown session, "
+                   "or a single-role run with nothing to stream-synthesize).",
+        )
+
+    async def event_generator():
+        # TODO (Finding C): forwards organize_final_answer_stream()'s raw
+        # chunks as-is — the ---DEDUP_NOTES---/JSON tail described above
+        # is not yet stripped out here.
+        async for chunk in organize_final_answer_stream(
+            snapshot["role_outputs"], snapshot["user_request"], snapshot["final_role"],
+        ):
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 class ResumeRequest(BaseModel):

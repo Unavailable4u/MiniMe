@@ -412,6 +412,35 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     # something safe to put in the result payload below, rather than
     # the frontend needing its own None-guard on a key that may not
     # exist.
+    # NEW — CO5 Finding A: snapshot exactly what organize_final_answer()
+    # is about to be called with, so a LATER, separate HTTP request
+    # (GET /api/task/{session_id}/stream, Step 3) has something to read.
+    # Today role execution + synthesis happen inside this one POST
+    # request -- `results`/`final_role` are local variables here and
+    # vanish when this function returns, same problem
+    # paused_execution:{session_id} was introduced to solve for the
+    # pause/resume split. Written under the identical bus-key exemption
+    # (memory/bus.py's _namespaced(), "pending_synthesis:" prefix) for
+    # the identical reason: the stream endpoint's GET hasn't called
+    # set_app_slug() either, so this key must not be app_slug-namespaced
+    # or that later read would land in the wrong (or default) namespace.
+    #
+    # Gated on the same len(results) > 1 condition as the synthesis call
+    # below -- a single-role run has nothing to stream-synthesize either,
+    # so writing a snapshot for it would just be a key nothing ever reads.
+    # Deliberately NOT deleted here: unlike paused_execution (deleted by
+    # the resume call that consumes it), this snapshot is read-only for
+    # the stream endpoint -- it doesn't mutate or advance any run state,
+    # so there's no single "consumption" point to delete it at. Left as
+    # an explicit gap for whoever adds eviction/TTL later.
+    if len(results) > 1:
+        from memory.bus import write as bus_write
+        bus_write(f"pending_synthesis:{session_id}", {
+            "role_outputs": results,
+            "user_request": task_text,
+            "final_role": final_role,
+        })
+
     dedup_notes = {}
     if len(results) > 1:
         try:
