@@ -837,6 +837,76 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
               agent_name=agent_name, domain=domain, model=model)
 
 
+# CO5 follow-up -- spot-check probe for the groq/cerebras
+# stream_options={"include_usage": True} question flagged in
+# stream_completion()'s docstring point 4. This does NOT fix anything by
+# itself (there's nothing to fix without seeing a real response); it just
+# makes the spot-check loud and easy to run once live keys are flipped on,
+# instead of the shape mismatch silently resulting in tokens=None the way
+# _log_usage() above degrades by design for every other caller.
+_USAGE_SHAPE_PROVIDERS_TO_WATCH = ("groq", "cerebras")
+
+
+def _probe_usage_shape(provider: str, model: str, usage, agent_name: str) -> None:
+    """Called once per streamed step, right after a step finishes, with
+    whatever `usage` stream_completion() collected off the trailing
+    usage-only SSE chunk (see point 4). Only asserts/warns for the two
+    providers that haven't been spot-checked yet -- silent no-op for
+    mistral/gemini/huggingface, which go through the same `openai` SDK
+    client that's already confirmed to accept the kwarg.
+
+    Three loud outcomes, each printed with a distinct tag so they're easy
+    to grep for once real keys are running:
+
+      [USAGE-PROBE][MISSING]  -- usage is None. Either the TypeError
+      fallback silently dropped stream_options (SDK rejected the kwarg),
+      or the SDK accepted it but never sent a usage-only trailing chunk.
+      Both mean tokens=None is being logged for every call right now.
+
+      [USAGE-PROBE][UNKNOWN-SHAPE] -- usage came back as something that's
+      neither an object with .total_tokens nor a dict with "total_tokens".
+      _log_usage() will silently coerce this to tokens=None too; this
+      makes that visible instead so the extraction logic above can be
+      extended for the actual shape.
+
+      [USAGE-PROBE][OK] -- total_tokens was found and extracted cleanly.
+      Printed once so a successful spot-check is unambiguous in the logs,
+      not just an absence of warnings.
+
+    Never raises -- a probe that could itself break the stream would
+    defeat the point (see _log_usage's "never raises" contract, which
+    this mirrors)."""
+    if provider not in _USAGE_SHAPE_PROVIDERS_TO_WATCH:
+        return
+    try:
+        if usage is None:
+            print(f"  [{agent_name}] [USAGE-PROBE][MISSING] {provider}:{model} -- "
+                  f"no usage object came back on this streamed call. Either "
+                  f"stream_options={{'include_usage': True}} was rejected (TypeError "
+                  f"fallback path, see stream_completion() point 4) or the SDK accepted "
+                  f"it but sent no trailing usage chunk. tokens is being logged as None "
+                  f"for this call right now.")
+            return
+        tokens = getattr(usage, "total_tokens", None)
+        shape = "attr" if tokens is not None else None
+        if tokens is None and isinstance(usage, dict):
+            tokens = usage.get("total_tokens")
+            shape = "dict" if tokens is not None else None
+        if tokens is None:
+            print(f"  [{agent_name}] [USAGE-PROBE][UNKNOWN-SHAPE] {provider}:{model} -- "
+                  f"usage object came back as {type(usage).__name__!r} ({usage!r}) but "
+                  f"no .total_tokens attribute or 'total_tokens' dict key was found on "
+                  f"it. _log_usage() is silently logging tokens=None for this shape.")
+        else:
+            print(f"  [{agent_name}] [USAGE-PROBE][OK] {provider}:{model} -- "
+                  f"total_tokens={tokens} extracted via {shape} shape.")
+    except Exception as exc:
+        # The probe itself must never be the thing that breaks a live
+        # stream during the spot-check -- report and move on.
+        print(f"  [{agent_name}] [USAGE-PROBE][ERROR] {provider}:{model} -- "
+              f"probe raised {exc!r} while inspecting usage; ignoring.")
+
+
 _MAX_CONTINUATIONS = 2  # Fix C: cap how many times one call will chase a
 # "length" cutoff before just returning what it has. Bounded independently
 # of chain length: a chain can be up to MAX_CHAIN_STEPS (3) long for
@@ -1090,6 +1160,11 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
        providers; if the kwarg is rejected, the call fails BEFORE
        yielding a chunk, so it falls through to the next chain step
        via the normal Fix-A path rather than breaking the stream.
+       _probe_usage_shape() (just above _MAX_CONTINUATIONS below) logs
+       a loud [USAGE-PROBE][...] line for every groq/cerebras streamed
+       step so this can be spot-checked from real logs once live keys
+       are running, instead of a shape mismatch silently degrading to
+       tokens=None inside _log_usage() with nothing to grep for.
 
     5. Every provider client here is the same *synchronous* SDK client
        generate_text() uses -- there is no separate async SDK wired up
@@ -1204,6 +1279,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                 yield payload
             elif kind == "done":
                 usage, finish_reason = payload
+                _probe_usage_shape(provider, model, usage, agent_name)
                 _log_usage(provider, key_env, usage, session_id, tier, path, agent_name,
                            domain=domain, model=model)
                 if finish_reason == "length":
