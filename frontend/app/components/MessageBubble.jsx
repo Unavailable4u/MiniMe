@@ -1,7 +1,8 @@
 "use client";
-import { useState, memo } from "react";
+import { useState, useEffect, memo } from "react";
 import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
+import { supabase } from "../lib/supabaseClient";   // NEW — CO5 step 4: useStreamingAnswer needs a fresh access_token for the EventSource ?token= param
 import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4
 import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
@@ -31,6 +32,83 @@ function tierStyle(data) {
   if (data.status === "error") return ERROR_STYLE;
   if (data.status === "paused") return PAUSED_STYLE;
   return TIER_STYLES[data.tier] || { label: `Tier ${data.tier}`, text: "text-[var(--neutral-400)]", dot: "bg-[var(--neutral-500)]" };
+}
+
+// NEW — CO5 step 4: consumes GET /api/task/{session_id}/stream
+// (api/routes/tasks.py). EventSource has no way to attach an
+// Authorization header to the request it makes, so per that route's
+// own docstring the JWT rides along as a `?token=...` query param
+// instead of the header authHeaders() builds everywhere else in this
+// app — fetched fresh via supabase.auth.getSession(), same pattern
+// SessionContext.jsx already uses, not read off any cached value.
+//
+// Every SSE frame off that route is a plain default "message" event
+// (the backend never sets an `event:` line) whose `data` is either the
+// literal string "[DONE]", or a JSON object with exactly one of:
+//   - "chunk"       — prose text to append, streamed live
+//   - "dedup_notes" — structured JSON, sent once right before [DONE]
+//     (Finding C: not prose the user is reading live, so it's held
+//     back out of the visible stream and delivered as one final
+//     payload instead of piecemeal)
+// "[DONE]" is checked first since it isn't valid JSON and would throw
+// if handed to JSON.parse.
+function useStreamingAnswer(sessionId) {
+  const [text, setText] = useState("");
+  const [dedupNotes, setDedupNotes] = useState(null);
+  const [isStreaming, setIsStreaming] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    let eventSource;
+
+    setText("");
+    setDedupNotes(null);
+    setIsStreaming(true);
+
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;   // no token yet, or effect already torn down while we were awaiting getSession()
+
+      eventSource = new EventSource(
+        `/api/task/${sessionId}/stream?token=${encodeURIComponent(token)}`
+      );
+
+      eventSource.onmessage = (event) => {
+        if (event.data === "[DONE]") {
+          setIsStreaming(false);
+          eventSource.close();
+          return;
+        }
+        const parsed = JSON.parse(event.data);
+        if (parsed.dedup_notes !== undefined) {
+          // Structured tail payload — replaces, never appends.
+          setDedupNotes(parsed.dedup_notes);
+          return;
+        }
+        if (parsed.chunk) {
+          setText((prev) => prev + parsed.chunk);
+        }
+      };
+
+      eventSource.onerror = () => {
+        // A bad/expired token (401) and a genuine network drop both
+        // surface here — EventSource gives no way to tell them apart
+        // from onerror alone. Either way, stop the streaming indicator
+        // rather than leaving it spinning forever; whatever text
+        // already arrived stays visible in the bubble.
+        setIsStreaming(false);
+        eventSource.close();
+      };
+    })();
+
+    return () => {
+      cancelled = true;
+      eventSource?.close();
+    };
+  }, [sessionId]);
+
+  return { text, dedupNotes, isStreaming };
 }
 
 // NEW — CO3 patch 3: onResume/isActivePause threaded down the same

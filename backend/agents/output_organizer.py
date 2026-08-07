@@ -55,7 +55,7 @@ import sys
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.llm_client import generate_text
+from utils.llm_client import generate_text, stream_completion
 from eo.result_render import render_agent_result
 
 # Same reasoning-role chain shape as agents/deploy_config_writer.py /
@@ -202,11 +202,13 @@ async def organize_final_answer_stream(role_outputs: dict, user_request: str, fi
     endpoint layer, not this function, is responsible for attaching it
     after the last chunk).
 
-    Depends on utils.llm_client.stream_completion(), which does not
-    exist yet as of this patch -- generate_text() today is a single
-    blocking round-trip with no `stream=True` path. That's the next
-    patch in this sequence; this function will raise ImportError until
-    it lands.
+    Depends on utils.llm_client.stream_completion() (CO5 patch 2),
+    which wraps the same OpenAI-SDK-shaped providers generate_text()
+    uses but relays chunks back through an asyncio.Queue fed from a
+    worker thread, instead of returning one blocking round-trip. See
+    that function's docstring for the streaming contract (Cloudflare
+    steps skipped, raises rather than falls back once a chunk has
+    already gone out).
     """
     if not role_outputs:
         return
@@ -227,13 +229,6 @@ async def organize_final_answer_stream(role_outputs: dict, user_request: str, fi
         "request. Merge them into one organized answer per the system instructions.\n\n"
         + "\n\n".join(sections)
     )
-
-    # NOTE: stream_completion() does not exist in utils.llm_client yet --
-    # added by the next patch in this CO5 sequence. Imported here (rather
-    # than at module top, alongside generate_text) so this file still
-    # imports cleanly and organize_final_answer() keeps working before
-    # that patch lands.
-    from utils.llm_client import stream_completion
 
     async for chunk in stream_completion(
         system_prompt=SYSTEM_PROMPT,
