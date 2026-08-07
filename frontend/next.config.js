@@ -3,6 +3,18 @@ const { withSentryConfig } = require("@sentry/nextjs");
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  webpack: (config) => {
+    // Known upstream issue in @sentry/nextjs v10: it bundles
+    // @apm-js-collab/tracing-hooks (used by its "orchestrion" auto-instrumentation)
+    // even when the Pino integration isn't enabled, and webpack can't statically
+    // resolve that package's ESM entry. It's a harmless dev-time warning, not a
+    // build failure — see https://github.com/getsentry/sentry-javascript/issues/18199
+    config.ignoreWarnings = [
+      ...(config.ignoreWarnings || []),
+      { module: /@sentry[\\/]server-utils[\\/]build[\\/]cjs[\\/]orchestrion/ },
+    ];
+    return config;
+  },
 };
 
 // withSentryConfig wraps the Next.js config to:
@@ -19,6 +31,12 @@ module.exports = withSentryConfig(nextConfig, {
   authToken: process.env.SENTRY_AUTH_TOKEN,
   widenClientFileUpload: true,
   tunnelRoute: undefined,
-  disableLogger: true,
-  automaticVercelMonitors: false,
+  // disableLogger / automaticVercelMonitors moved under `webpack` per the
+  // v10 deprecation notice ("DEPRECATION WARNING: ... Use webpack.* instead")
+  webpack: {
+    treeshake: {
+      removeDebugLogging: true,
+    },
+    automaticVercelMonitors: false,
+  },
 });
