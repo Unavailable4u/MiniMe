@@ -179,6 +179,71 @@ def organize_final_answer(role_outputs: dict, user_request: str, final_role: str
     return _parse_organizer_response(raw_response)
 
 
+async def organize_final_answer_stream(role_outputs: dict, user_request: str, final_role: str = None):
+    """
+    CO5 (Master Guide v2, §5) -- async-generator twin of
+    organize_final_answer() above. Same synthesis prompt, same CHAIN,
+    same merge/dedupe rules; the only difference is that this yields
+    text chunks as the model generates them instead of returning once
+    at the end. Built second, wrapping CO1's already-correct,
+    already-tested non-streaming logic, per the guide's own build-order
+    note -- get organize_final_answer() right first, then stream it,
+    so a synthesis-quality bug and a streaming-plumbing bug are never
+    debugged at the same time.
+
+    role_outputs / user_request / final_role: same meaning and same
+    defensive 0/1-role short-circuit as organize_final_answer() -- see
+    that function's docstring.
+
+    Yields: str chunks of the merged markdown answer only. Deliberately
+    does NOT yield dedup_notes -- that's structured JSON, not prose the
+    user is reading live, so per CO5's scope it goes out as one final
+    non-streamed payload once the caller sees the stream close (the SSE
+    endpoint layer, not this function, is responsible for attaching it
+    after the last chunk).
+
+    Depends on utils.llm_client.stream_completion(), which does not
+    exist yet as of this patch -- generate_text() today is a single
+    blocking round-trip with no `stream=True` path. That's the next
+    patch in this sequence; this function will raise ImportError until
+    it lands.
+    """
+    if not role_outputs:
+        return
+    if len(role_outputs) == 1:
+        only_role, only_output = next(iter(role_outputs.items()))
+        yield render_agent_result(only_output, role=only_role)
+        return
+
+    sections = []
+    for role, raw_output in role_outputs.items():
+        rendered = render_agent_result(raw_output, role=role)
+        label = f"{role} (final role)" if role == final_role else role
+        sections.append(f"--- {label} ---\n{rendered}")
+
+    user_content = (
+        f"Original request: {user_request}\n\n"
+        "Each of the following sections is one agent role's own output for this "
+        "request. Merge them into one organized answer per the system instructions.\n\n"
+        + "\n\n".join(sections)
+    )
+
+    # NOTE: stream_completion() does not exist in utils.llm_client yet --
+    # added by the next patch in this CO5 sequence. Imported here (rather
+    # than at module top, alongside generate_text) so this file still
+    # imports cleanly and organize_final_answer() keeps working before
+    # that patch lands.
+    from utils.llm_client import stream_completion
+
+    async for chunk in stream_completion(
+        system_prompt=SYSTEM_PROMPT,
+        user_content=user_content,
+        chain=CHAIN,
+        agent_name="output_organizer",
+    ):
+        yield chunk
+
+
 def _parse_organizer_response(raw_response: str) -> dict:
     """
     Splits SYSTEM_PROMPT's two-part response (markdown answer, then
