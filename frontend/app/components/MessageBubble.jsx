@@ -52,12 +52,30 @@ function tierStyle(data) {
 //     payload instead of piecemeal)
 // "[DONE]" is checked first since it isn't valid JSON and would throw
 // if handed to JSON.parse.
-function useStreamingAnswer(sessionId) {
+//
+// NEW — CO5 step 5: `enabled` gates whether this hook does anything at
+// all. ResultBody (below) calls this unconditionally for every tier/
+// status a message can have (Rules of Hooks -- it's the same component
+// instance regardless of which branch a given render takes), but only
+// a tier-3 multi-role run has a pending_synthesis:{session_id} snapshot
+// for the backend route to stream from at all (task_runner.py only
+// writes one when len(results) > 1) -- every other case would just be
+// an EventSource opened purely to 404. `isStreaming`'s initial value is
+// a lazy `() => enabled` so an eligible message starts life already
+// showing the streaming/cursor state on its very first render, instead
+// of one render of the disabled-looking default before the effect
+// below has a chance to flip it.
+function useStreamingAnswer(sessionId, enabled) {
   const [text, setText] = useState("");
   const [dedupNotes, setDedupNotes] = useState(null);
-  const [isStreaming, setIsStreaming] = useState(true);
+  const [isStreaming, setIsStreaming] = useState(() => enabled);
 
   useEffect(() => {
+    if (!enabled || !sessionId) {
+      setIsStreaming(false);
+      return;
+    }
+
     let cancelled = false;
     let eventSource;
 
@@ -106,7 +124,7 @@ function useStreamingAnswer(sessionId) {
       cancelled = true;
       eventSource?.close();
     };
-  }, [sessionId]);
+  }, [sessionId, enabled]);
 
   return { text, dedupNotes, isStreaming };
 }
@@ -706,6 +724,20 @@ function answerTextOf(result, role) {
 }
 
 function ResultBody({ data }) {
+  // NEW — CO5 step 5: called unconditionally, ahead of every early-return
+  // branch below, same Rules-of-Hooks reasoning as
+  // proactiveSuggestionsEnabled up in MessageBubble -- ResultBody is one
+  // component instance reused across every tier/status a message can
+  // have, so the hook can't be called only from inside the tier===3
+  // branch further down. `streamEnabled` is what actually decides
+  // whether it does anything (see useStreamingAnswer's own comment):
+  // only a tier-3 run with more than one role in data.result.output has
+  // a pending_synthesis snapshot on the backend to stream from.
+  const streamEnabled =
+    data.tier === 3 && !!data.session_id &&
+    !!data.result?.output && Object.keys(data.result.output).length > 1;
+  const { text: streamedText, isStreaming } = useStreamingAnswer(data.session_id, streamEnabled);
+
   if (data.status === "error" || data.message) {
     return <div className="text-red-400 whitespace-pre-wrap">{data.message}</div>;
   }
@@ -748,7 +780,6 @@ function ResultBody({ data }) {
     // here anymore: it already streams live into WorkingPanel's
     // AgentStepList during the run, and is what CO4 makes the Working
     // Panel show in more detail after the fact too.
-    const answer = data.result?.answer;
     // NEW — Phase CO, CO2 (Master Guide v2, §5): any interactive
     // artifacts a role attached (currently only ever populated once a
     // role starts emitting them — see api/task_runner.py's
@@ -756,6 +787,52 @@ function ResultBody({ data }) {
     // under the answer, same "extra structured content sits below the
     // prose, never replaces it" pattern the old per-role trace used.
     const artifacts = data.result?.artifacts;
+    // NEW — CO5 step 5: while streamEnabled and the SSE hook is either
+    // still going or has produced real text, render THAT instead of the
+    // already-known static answer -- this is what actually gives the
+    // typewriter effect, since data.result.answer is already fully
+    // populated by the time this message exists (task_runner.py's
+    // synthesis is synchronous within the /api/task POST). Checked as
+    // `isStreaming || streamedText` rather than just `isStreaming` so
+    // the finished/successful case (isStreaming just flipped false,
+    // streamedText holds the full answer) keeps rendering the streamed
+    // text and cursor state cleanly, rather than falling through to a
+    // re-render off the identical static `answer` a moment later.
+    //
+    // Deliberately does NOT gate on `streamedText` being non-empty on
+    // its own while isStreaming is true — right after the connection
+    // opens, before the first `chunk` frame arrives, streamedText is
+    // still "". Rendering that (blank prose + cursor) rather than
+    // falling through to the static-answer branch below avoids a
+    // flash-then-yank: the full static answer appearing for one frame
+    // and then getting replaced by a shorter, partial streamed one.
+    if (streamEnabled && (isStreaming || streamedText)) {
+      return (
+        <>
+          <Markdown>{streamedText}</Markdown>
+          {isStreaming && (
+            // Streaming cursor/pulse indicator — a thin blinking bar,
+            // same visual language as a terminal caret, so it reads as
+            // "more is coming" without competing with the prose itself.
+            <span
+              className="inline-block w-1.5 h-4 align-middle bg-[var(--neutral-400)] animate-pulse ml-0.5"
+              aria-hidden="true"
+            />
+          )}
+          {Array.isArray(artifacts) && artifacts.length > 0 &&
+            artifacts.map((artifact, i) => (
+              <ArtifactRenderer key={i} artifact={artifact} />
+            ))}
+        </>
+      );
+    }
+    // Non-streamed path — either streaming was never eligible for this
+    // message (single-role tier-3 run, no session_id), or it was
+    // eligible but the stream ended (isStreaming false) without ever
+    // producing any text (404/network error/connection dropped before
+    // the first chunk) -- falls back to the exact answer this bubble
+    // would always have shown before step 5.
+    const answer = data.result?.answer;
     if (answer) {
       return (
         <>
