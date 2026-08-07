@@ -25,7 +25,7 @@ from api.deps import require_auth, _resolve_chat_or_404, _verify_supabase_jwt   
 from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template
 from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — B6 cleanup: get_tasks' Part 7 §7.5 deploy-status read
 from agents import deploy_agent as deploy_agent_module                  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
-from agents.output_organizer import organize_final_answer_stream   # NEW — CO5 Finding B
+from agents.output_organizer import organize_final_answer_stream, DEDUP_NOTES_MARKER   # NEW — CO5 Finding B; DEDUP_NOTES_MARKER is Finding C's
 from eo import chat_store
 from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
 from eo import timeline_node_blurbs   # NEW — CO4 patch 5
@@ -285,17 +285,16 @@ async def stream_answer(session_id: str, token: str = Query(None)):
     never write this key; see task_runner.py's own len(results) > 1
     gate).
 
-    Scope note (Finding C, not yet handled here): organize_final_answer_
-    stream() yields raw LLM text, which still ends with the
-    ---DEDUP_NOTES---\\n<json> marker + payload SYSTEM_PROMPT asks the
-    model to emit. This first pass forwards every chunk verbatim as it
-    arrives — meaning that marker and JSON WILL currently leak into the
-    visible stream. Deliberately not fixed in this patch: the marker can
-    straddle a chunk boundary, which needs a buffering pass over the
-    stream, not just a route/auth change. That buffering — and turning
-    dedup_notes into its own final SSE event before [DONE], per Step 6
-    of the build order — is Finding C's job, layered on top of this
-    endpoint next.
+    Finding C: organize_final_answer_stream() yields raw LLM text, which
+    still ends with the DEDUP_NOTES_MARKER + one line of JSON that
+    SYSTEM_PROMPT asks the model to emit (see output_organizer.py). This
+    route buffers just enough of the tail to catch that marker even if
+    it straddles a chunk boundary, holds everything from the marker
+    onward out of the visible stream, and emits it as its own SSE
+    "dedup_notes" event right before [DONE] — mirroring
+    _parse_organizer_response()'s fail-open behavior (a missing/invalid
+    notes line degrades to {} rather than losing the answer text
+    already streamed).
     """
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
@@ -311,13 +310,68 @@ async def stream_answer(session_id: str, token: str = Query(None)):
         )
 
     async def event_generator():
-        # TODO (Finding C): forwards organize_final_answer_stream()'s raw
-        # chunks as-is — the ---DEDUP_NOTES---/JSON tail described above
-        # is not yet stripped out here.
+        # Finding C: buffer just enough trailing text to detect
+        # DEDUP_NOTES_MARKER even if a provider splits it across two
+        # chunks. `hold_back` mirrors _parse_organizer_response()'s
+        # marker length exactly, so the marker can never be half-flushed
+        # before we've seen the rest of it arrive.
+        hold_back = len(DEDUP_NOTES_MARKER) - 1
+        buffer = ""
+        marker_seen = False
+        notes_buffer = ""
+
         async for chunk in organize_final_answer_stream(
             snapshot["role_outputs"], snapshot["user_request"], snapshot["final_role"],
         ):
-            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            if marker_seen:
+                # Structured JSON tail — never forwarded as a visible
+                # chunk, just accumulated until the stream ends.
+                notes_buffer += chunk
+                continue
+
+            buffer += chunk
+            if DEDUP_NOTES_MARKER in buffer:
+                marker_seen = True
+                answer_part, _, notes_part = buffer.partition(DEDUP_NOTES_MARKER)
+                if answer_part:
+                    yield f"data: {json.dumps({'chunk': answer_part})}\n\n"
+                notes_buffer = notes_part
+                buffer = ""
+                continue
+
+            # No marker yet: flush everything except the last
+            # `hold_back` chars, in case they're the marker's opening
+            # bytes and the rest lands in the next chunk.
+            if len(buffer) > hold_back:
+                if hold_back:
+                    flush, buffer = buffer[:-hold_back], buffer[-hold_back:]
+                else:
+                    flush, buffer = buffer, ""
+                if flush:
+                    yield f"data: {json.dumps({'chunk': flush})}\n\n"
+
+        if not marker_seen:
+            # Stream ended without ever emitting the marker (model
+            # dropped it, or this chain never produces one) — flush
+            # whatever's left in the hold-back buffer as real answer
+            # text rather than silently swallowing the tail.
+            if buffer:
+                yield f"data: {json.dumps({'chunk': buffer})}\n\n"
+            dedup_notes = {}
+        else:
+            # Same fail-open parsing as _parse_organizer_response(): a
+            # missing/invalid JSON line degrades to {} rather than
+            # erroring the whole stream out after the answer already
+            # rendered.
+            dedup_notes = {}
+            try:
+                parsed = json.loads(notes_buffer.strip())
+                if isinstance(parsed, dict):
+                    dedup_notes = parsed
+            except (ValueError, TypeError):
+                pass
+
+        yield f"data: {json.dumps({'dedup_notes': dedup_notes})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
