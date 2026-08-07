@@ -90,16 +90,25 @@ def _namespaced(key: str) -> str:
             # whatever app_slug happens to be active. eo/panel.py's
             # _best_match() needs to see the same cooldown regardless of
             # which project/app triggered the 429 that set it.
-            or key.startswith("paused_execution:")):   # NEW — Part 2 §2.4:
-        # a paused run's snapshot is a property of the SESSION, exactly the
-        # same reasoning as conversation: above -- and it HAS to be exempt,
-        # for a structural reason conversation: doesn't share: the snapshot
-        # itself is what tells resume_graph() which app_slug the original
-        # run used. If this key were namespaced, reading it back on a fresh
-        # POST /api/resume request (which hasn't called set_app_slug() yet
-        # -- that's literally the value this key is about to supply) would
-        # look in the wrong namespace, or the default/global one, and
-        # silently miss.
+            or key.startswith("paused_execution:")   # NEW — Part 2 §2.4:
+            # a paused run's snapshot is a property of the SESSION, exactly the
+            # same reasoning as conversation: above -- and it HAS to be exempt,
+            # for a structural reason conversation: doesn't share: the snapshot
+            # itself is what tells resume_graph() which app_slug the original
+            # run used. If this key were namespaced, reading it back on a fresh
+            # POST /api/resume request (which hasn't called set_app_slug() yet
+            # -- that's literally the value this key is about to supply) would
+            # look in the wrong namespace, or the default/global one, and
+            # silently miss.
+            or key.startswith("pending_synthesis:")):   # NEW — CO5 Finding A:
+        # same exemption, same reasoning as paused_execution: above. This
+        # key is written mid-_run_tier3_hires() (still inside the
+        # POST /api/task request, before set_app_slug() context is torn
+        # down) and read back later from GET /api/task/{session_id}/stream
+        # -- a fresh request that hasn't called set_app_slug() either. If
+        # this were namespaced, the stream endpoint's read() would land in
+        # the wrong (or default/global) namespace and silently miss, same
+        # failure mode paused_execution: was exempted to avoid.
         return key
     slug = _current_app_slug()
     return f"{slug}:{key}" if slug else key

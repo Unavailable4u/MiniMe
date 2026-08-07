@@ -5,8 +5,8 @@ print-and-eyeball script; see the old tests/test_namespacing.py).
 Covers memory/bus.py's _namespaced() contract: ordinary keys are scoped
 per app_slug so two "projects" never see each other's data, while the
 documented exempt prefixes (app_slug itself, project_registry, usage:*,
-registry:*, conversation:*, cooldown_until:*, paused_execution:*) are
-deliberately shared across every app_slug.
+registry:*, conversation:*, cooldown_until:*, paused_execution:*,
+pending_synthesis:*) are deliberately shared across every app_slug.
 """
 import pytest
 
@@ -33,6 +33,7 @@ def test_ordinary_key_is_isolated_per_app_slug():
     "conversation:abc123",
     "cooldown_until:groq_key_1",
     "paused_execution:session-xyz",
+    "pending_synthesis:session-xyz",
 ])
 def test_exempt_prefixes_are_shared_across_app_slugs(key):
     write(KEYS["app_slug"], "project_a")
