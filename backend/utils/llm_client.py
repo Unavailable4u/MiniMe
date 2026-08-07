@@ -93,6 +93,7 @@ in this module:
      tool_calls handling at all.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -1032,6 +1033,207 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         f"[{agent_name}] All providers in fallback chain exhausted or unavailable. "
         f"Last error: {last_exc}"
     )
+
+async def stream_completion(system_prompt: str, user_content: str, chain: list,
+                             agent_name: str = "Agent", session_id: str = None,
+                             tier=None, path=None, domain=None):
+    """
+    CO5 patch 2 -- streaming twin of generate_text() above. Built for
+    agents/output_organizer.py's organize_final_answer_stream(), which
+    imports this by name; see that function's docstring for the caller
+    side of this contract.
+
+    SCOPE -- read before wiring another chain into this:
+
+    1. OpenAI-SDK-shaped providers only (groq/cerebras/mistral/gemini/
+       huggingface). Cloudflare Workers AI's step shape is a plain,
+       non-streaming REST call (_call_cloudflare_step) -- a cloudflare
+       step in `chain` is skipped here with a log line, same pattern
+       _call_step()'s callers use for a missing key_env, not attempted
+       as a hard error. output_organizer.CHAIN never includes
+       cloudflare, so this doesn't block CO5 itself; a future caller
+       that DOES need Cloudflare in its chain will silently lose that
+       fallback step here until someone adds SSE support to the REST
+       path.
+
+    2. Fix A (fallback-on-transient-error) only applies BEFORE the
+       first chunk of a given step has been yielded to the caller.
+       Once one chunk has gone out, the caller (the SSE endpoint,
+       ultimately the browser) has already started rendering partial
+       text -- silently restarting the same answer on a different
+       provider at that point would mean either duplicating or
+       discarding visible text, so this stops and raises instead.
+       generate_text()'s "retry the same logical answer on a later
+       step" semantics only make sense before anything has been shown.
+
+    3. Fix C (truncation-continuation-handoff) is NOT implemented here.
+       generate_text() handles finish_reason == "length" by re-prompting
+       the next chain step with a continuation prompt and stitching the
+       text together server-side before the caller ever sees it -- doing
+       that mid-stream means the caller would see a pause/gap while a
+       second provider is prompted, which is a real UX decision, not a
+       one-line port of Fix C's non-streaming version. Left as an
+       explicit gap for a later patch; finish_reason is still checked
+       and logged if a step ends "length" so the gap is visible in logs
+       rather than silently dropped.
+
+    4. stream_options={"include_usage": True} is an OpenAI-API
+       convention for getting a final usage-only chunk out of a
+       streamed response. Passed here so _log_usage() still gets real
+       numbers instead of silently logging nothing for every streamed
+       call -- confirmed accepted by the `openai` SDK (mistral/gemini/
+       huggingface steps go through that client). NOT independently
+       confirmed against the `groq` / `cerebras` SDKs' own stream
+       kwargs as of this patch -- both are OpenAI-compatible but that
+       specific kwarg needs checking against their current SDK
+       versions before relying on usage numbers for those two
+       providers; if the kwarg is rejected, the call fails BEFORE
+       yielding a chunk, so it falls through to the next chain step
+       via the normal Fix-A path rather than breaking the stream.
+
+    5. Every provider client here is the same *synchronous* SDK client
+       generate_text() uses -- there is no separate async SDK wired up
+       anywhere in this module. To make this a real async generator
+       (so FastAPI's StreamingResponse doesn't block the event loop for
+       other in-flight requests during a long synthesis stream), the
+       blocking iteration over the SDK's stream object runs in a worker
+       thread via asyncio.to_thread, and chunks are handed back across
+       an asyncio.Queue.
+
+    Yields: str delta-text chunks only (not raw SSE payloads/JSON --
+    api/routes/tasks.py's endpoint layer, CO5 step 3, is what wraps each
+    chunk in its own `data: {...}` envelope).
+
+    Raises RuntimeError if every attempted step fails before yielding
+    anything, mirroring generate_text()'s all-exhausted failure mode.
+    Raises mid-stream (see point 2) if a step fails after it already
+    yielded real text -- callers should treat that as "the answer the
+    user is already seeing stopped early," not as a clean failure they
+    can silently retry.
+    """
+    loop = asyncio.get_event_loop()
+    last_exc = None
+
+    for i, step in enumerate(chain):
+        provider = step["provider"]
+        model = step["model"]
+
+        if provider == "cloudflare":
+            print(f"  [{agent_name}] cloudflare:{model} skipped in stream_completion — "
+                  f"Cloudflare's REST path doesn't support streaming yet (see docstring).")
+            continue
+
+        key_env = step["key_env"]
+        timeout = step.get("timeout")
+        getter = {
+            "groq": _get_groq, "cerebras": _get_cerebras,
+            "mistral": _get_mistral, "gemini": _get_gemini,
+            "huggingface": _get_huggingface,
+        }.get(provider)
+        if getter is None:
+            raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
+
+        client = getter(key_env, timeout)
+        if client is None:
+            print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
+            continue
+
+        label = f"{provider}:{model}"
+        chunk_queue: asyncio.Queue = asyncio.Queue()
+
+        def _run_stream_sync(client=client, model=model):
+            """Runs in a worker thread (blocking SDK iteration). Pushes
+            ("chunk", text) / ("done", (usage, finish_reason)) /
+            ("error", exc) onto chunk_queue via call_soon_threadsafe so
+            the async side above can await it safely."""
+            try:
+                try:
+                    response_stream = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        stream=True,
+                        stream_options={"include_usage": True},
+                    )
+                except TypeError:
+                    # See point 4 -- some SDK versions may reject
+                    # stream_options. Retry once without it rather than
+                    # losing the whole step over a usage-tracking extra;
+                    # usage will just be None for this call in that case.
+                    response_stream = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        stream=True,
+                    )
+                usage = None
+                finish_reason = None
+                for event in response_stream:
+                    if not event.choices:
+                        # Usage-only trailing chunk (stream_options path).
+                        usage = getattr(event, "usage", None) or usage
+                        continue
+                    choice = event.choices[0]
+                    fr = getattr(choice, "finish_reason", None)
+                    if fr:
+                        finish_reason = fr
+                    text = getattr(choice.delta, "content", None)
+                    if text:
+                        loop.call_soon_threadsafe(chunk_queue.put_nowait, ("chunk", text))
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("done", (usage, finish_reason)))
+            except _TRANSIENT_ERRORS as exc:
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("error", exc))
+            except Exception as exc:
+                # Non-transient (prompt/parsing/auth-shape) error -- still
+                # surfaced through the queue rather than left to hang it,
+                # but NOT retried on the next chain step (matches
+                # generate_text()'s "don't mask real bugs" rule).
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("error", exc))
+
+        stream_task = asyncio.ensure_future(asyncio.to_thread(_run_stream_sync))
+        started = False
+
+        while True:
+            kind, payload = await chunk_queue.get()
+            if kind == "chunk":
+                started = True
+                yield payload
+            elif kind == "done":
+                usage, finish_reason = payload
+                _log_usage(provider, key_env, usage, session_id, tier, path, agent_name,
+                           domain=domain, model=model)
+                if finish_reason == "length":
+                    print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
+                          f"mid-stream -- Fix C continuation is NOT implemented for "
+                          f"streaming (see docstring point 3); stream ends here.")
+                await stream_task
+                return
+            else:  # "error"
+                last_exc = payload
+                await stream_task
+                if started:
+                    raise RuntimeError(
+                        f"[{agent_name}] {label} failed mid-stream after partial output "
+                        f"was already sent to the caller: {last_exc}"
+                    ) from last_exc
+                if isinstance(payload, _TRANSIENT_ERRORS):
+                    _set_cooldown(provider, key_env, payload)  # Fix B
+                    print(f"  [{agent_name}] {label} failed before first chunk "
+                          f"({payload.__class__.__name__}), falling back to next in chain...")
+                    break
+                # Non-transient and nothing streamed yet for this step --
+                # still a real bug, don't mask it by falling through.
+                raise RuntimeError(f"[{agent_name}] {label} failed: {last_exc}") from last_exc
+
+    raise RuntimeError(
+        f"[{agent_name}] All providers in fallback chain exhausted or unavailable "
+        f"before any streamed output. Last error: {last_exc}"
+    )
+
 
 # HuggingFace Inference — sentence embeddings for Upstash Vector (DB4).
 # Used by agents/memory_search.py (cyclemem embeddings), eo/semantic_cache.py
