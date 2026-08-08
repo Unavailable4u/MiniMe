@@ -102,6 +102,10 @@ from datetime import date, datetime, timezone
 import requests
 from groq import Groq, RateLimitError as GroqRateLimitError, APIStatusError as GroqAPIStatusError
 from cerebras.cloud.sdk import Cerebras
+from cerebras.cloud.sdk import (
+    RateLimitError as CerebrasRateLimitError,
+    APIStatusError as CerebrasAPIStatusError,
+)
 from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusError as OpenAIAPIStatusError
 
 from memory.bus import read as bus_read, write as bus_write
@@ -216,6 +220,7 @@ HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 _TRANSIENT_SDK_ERRORS = (
     GroqRateLimitError, GroqAPIStatusError,
     OpenAIRateLimitError, OpenAIAPIStatusError,
+    CerebrasRateLimitError, CerebrasAPIStatusError,
 )
 
 
@@ -254,6 +259,38 @@ _RETRY_AFTER_TEXT_PATTERN = re.compile(
 # guess, not a provider-stated number -- keep it short.
 _DEFAULT_COOLDOWN_SECONDS = 60.0
 
+# Fix 3 (reliability audit): a 401/403 means the key/project is
+# genuinely revoked, suspended, or denied -- not overloaded. It will
+# not resolve itself in the ~60s _DEFAULT_COOLDOWN_SECONDS gives every
+# other transient error. Before this fix, a broken key like this got
+# the exact same short cooldown as a normal 429, came back into
+# _best_match()'s candidate pool a minute later, and failed the same
+# way again -- silently burning a chain slot on every call that
+# happened to land on it. Giving these a much longer cooldown instead
+# means a genuinely dead key stops being retried until someone's
+# actually fixed it (or this cooldown expires and it gets one more
+# chance), rather than every ~60 seconds.
+_PERMANENT_ERROR_STATUS_CODES = {401, 403}
+_PERMANENT_ERROR_COOLDOWN_SECONDS = 6 * 60 * 60.0  # 6 hours
+
+
+def _status_code_from_exc(exc):
+    """Best-effort extraction of the HTTP status code an SDK exception
+    carries. Groq/Cerebras/OpenAI's APIStatusError subclasses all expose
+    this directly as exc.status_code (confirmed against all three SDKs'
+    own _exceptions.py source); fall back to exc.response.status_code
+    for anything that only carries it on the underlying response object.
+    Returns None if neither is present -- e.g. _CloudflareTransientError,
+    which is only ever raised for an already-confirmed-transient case
+    (429/5xx/timeout; see _call_cloudflare_step()), so it has no status
+    code of its own to check here and correctly falls through to the
+    existing Retry-After / default-cooldown handling below."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        return status_code
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) if response is not None else None
+
 
 def _seconds_from_retry_after_text(message: str):
     """Parses a Groq-style "Please try again in 8m5.568s." (or "5.568s",
@@ -279,6 +316,11 @@ def _retry_after_seconds(exc) -> float:
     """Best-effort: how many seconds until it's worth retrying THIS
     account, from whichever signal the failed call actually gave us.
     Tries, in order:
+      0. Fix 3 -- if the error's status code is 401/403, skip every
+         signal below entirely and return _PERMANENT_ERROR_COOLDOWN_SECONDS.
+         A Retry-After header or "try again in Xs" text answers "how
+         long until quota resets," which isn't the question a bad/
+         revoked key is asking.
       1. A real `Retry-After` response header -- standard for 429s, and
          what the Groq/OpenAI SDKs expose via exc.response.headers when
          the provider sends one.
@@ -286,6 +328,9 @@ def _retry_after_seconds(exc) -> float:
          exception's message text (see module note above).
       3. _DEFAULT_COOLDOWN_SECONDS, if neither signal is present.
     """
+    if _status_code_from_exc(exc) in _PERMANENT_ERROR_STATUS_CODES:
+        return _PERMANENT_ERROR_COOLDOWN_SECONDS
+
     response = getattr(exc, "response", None)
     if response is not None:
         headers = getattr(response, "headers", None)

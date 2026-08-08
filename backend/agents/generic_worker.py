@@ -303,6 +303,36 @@ def _chain_step_for(agent_key: str) -> dict:
 # fourth hop; raise it later if that ever isn't enough in practice.
 MAX_CHAIN_STEPS = 3
 
+# Fix 4a (reliability audit, follow-up to Fix A): MAX_CHAIN_STEPS above
+# was a flat constant -- always exactly 3 accounts tried, no matter how
+# many working keys are actually configured across however many
+# providers. If those first 3 picks happen to all be unavailable (rate-
+# limited, quota-exhausted, or on a Fix-3 permanent cooldown) the whole
+# call fails even when a 4th/5th/6th configured account would have
+# worked fine.
+#
+# _dynamic_max_chain_steps() below computes the chain length at call
+# time instead: count how many DISTINCT providers currently have at
+# least one non-cooling-down account anywhere in AGENT_CAPABILITIES (a
+# cheap proxy for "how many genuinely different fallback options exist
+# right now"), and use that -- floored at the old MAX_CHAIN_STEPS so
+# behavior never gets WORSE than before this fix, and capped at
+# MAX_CHAIN_STEPS_CEILING so a large multi-provider roster doesn't turn
+# one failed call into a dozen sequential HTTP round-trips before
+# finally giving up.
+MAX_CHAIN_STEPS_CEILING = 6
+
+
+def _dynamic_max_chain_steps(quota_status: dict) -> int:
+    from eo.panel import _is_cooling_down   # deferred — see module-level note above
+
+    live_providers = {
+        info.get("provider")
+        for key, info in AGENT_CAPABILITIES.items()
+        if not _is_cooling_down(key, quota_status)
+    }
+    return max(MAX_CHAIN_STEPS, min(MAX_CHAIN_STEPS_CEILING, len(live_providers)))
+
 
 def _build_fallback_chain(role: str, quota_status: dict, max_steps: int = MAX_CHAIN_STEPS) -> list:
     """
@@ -425,16 +455,54 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     else:
         # Fix A: real multi-step, multi-provider fallback chain instead of
         # a single _best_match() pick wrapped in a length-1 chain.
-        chain_keys = _build_fallback_chain(role, get_quota_snapshot())
+        # Fix 4a: chain length is now computed from live account/provider
+        # health at call time instead of the old flat MAX_CHAIN_STEPS.
+        quota_status = get_quota_snapshot()
+        chain_keys = _build_fallback_chain(role, quota_status,
+                                            max_steps=_dynamic_max_chain_steps(quota_status))
         chain = [_chain_step_for(k) for k in chain_keys]
-    raw = generate_text(
-        system_prompt=(brief or "") + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION,
-        user_content=context,
-        chain=chain,
-        agent_name=f"generic:{role}",
-        session_id=session_id,
-        domain=domain,
-    )
+
+    system_prompt = (brief or "") + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION
+    try:
+        raw = generate_text(
+            system_prompt=system_prompt,
+            user_content=context,
+            chain=chain,
+            agent_name=f"generic:{role}",
+            session_id=session_id,
+            domain=domain,
+        )
+    except RuntimeError:
+        # Fix 4b (additive, on top of 4a above): the chain we just tried
+        # exhausted end to end. Every step's own failure already wrote a
+        # fresh cooldown_until entry to the bus as it happened (Fix B /
+        # utils/llm_client.py's _set_cooldown()), so a BRAND NEW quota
+        # snapshot fetched right now already reflects those cooldowns --
+        # rebuilding the chain once more here can reach candidates this
+        # attempt's chain never tried (accounts the provider-spreading
+        # order in _build_fallback_chain() skipped past this round, or
+        # ones outside this attempt's dynamic chain length). One retry
+        # only: an explicit key_override never retries (the caller picked
+        # that exact account on purpose), and if this second attempt's
+        # freshly-built chain is empty or also exhausts, the RuntimeError
+        # propagates for real -- this is one more honest attempt, not a
+        # way to paper over an actually-down provider indefinitely.
+        if key_override:
+            raise
+        retry_quota_status = get_quota_snapshot()
+        retry_chain_keys = _build_fallback_chain(
+            role, retry_quota_status, max_steps=_dynamic_max_chain_steps(retry_quota_status))
+        retry_chain = [_chain_step_for(k) for k in retry_chain_keys]
+        if not retry_chain:
+            raise
+        raw = generate_text(
+            system_prompt=system_prompt,
+            user_content=context,
+            chain=retry_chain,
+            agent_name=f"generic:{role}",
+            session_id=session_id,
+            domain=domain,
+        )
     body, next_destination = parse_next_tag(raw)
     if session_id:
         bus_write(f"stage_output:{session_id}:{role}", body)
