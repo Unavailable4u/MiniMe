@@ -82,6 +82,45 @@ def _select_workers(worker_count: int, key_override=None, session_id: str = None
     return _select_workers_for_role(ROLE_TAG, worker_count, key_override,
                                      session_id=session_id, agent_name=ROLE_TAG)
 
+
+# Fix 2 (reliability audit, follow-up to Fix 1): the chain built in
+# _write_one_module() below only ever rotates MODELS on ONE fixed
+# Cerebras key -- it never tries a different key, let alone a different
+# provider. If that one Cerebras account is rate-limited/exhausted (even
+# with Fix 1 making generate_text() correctly treat that as transient),
+# there was nothing else in the chain to fall through to.
+#
+# This appends up to EXTRA_FALLBACK_STEPS more chain steps drawn from
+# OTHER accounts -- any provider -- using the exact same ranked-by-quota
+# selection eo/panel.py's _best_match() already does for ordinary
+# hiring, so a Cerebras-wide outage no longer fails this worker outright.
+#
+# Imports are deferred inside the function, not at module level, on
+# purpose: eo/registry.py imports agents.code_writers at load time (same
+# as agents.generic_worker), and eo.panel/agents.generic_worker each
+# import back from eo.registry -- an module-level import here would
+# close that same circular loop agents/generic_worker.py's own docstring
+# already flags and avoids the same way.
+EXTRA_FALLBACK_STEPS = 2
+
+
+def _extra_fallback_chain_steps(primary_key_env: str) -> list:
+    from eo.panel import _best_match
+    from eo.quota_sentinel import get_quota_snapshot
+    from agents.generic_worker import _chain_step_for
+
+    quota_status = get_quota_snapshot()
+    exclude = {primary_key_env}
+    steps = []
+    for _ in range(EXTRA_FALLBACK_STEPS):
+        candidate = _best_match(ROLE_TAG, quota_status, exclude=exclude)
+        if candidate is None:
+            break
+        exclude.add(candidate)
+        steps.append(_chain_step_for(candidate))
+    return steps
+
+
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
 for the module described below. Follow the spec exactly. Include basic input validation.
 Do not invent features outside the spec. Output ONLY the code, no explanation, no markdown
@@ -146,6 +185,11 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
         return name, code
 
     chain = [{"provider": "cerebras", "model": m, "key_env": key_env} for m in MODELS]
+    # Fix 2: extend past the primary key's own model rotation with a few
+    # steps on OTHER accounts/providers (see _extra_fallback_chain_steps()
+    # above), instead of failing as soon as this one Cerebras key is
+    # exhausted across all of MODELS.
+    chain += _extra_fallback_chain_steps(key_env)
     spec_for_prompt = dict(module_spec)
     if design_approach:
         # Patch 8 — folded into the SAME per-module JSON prompt payload
