@@ -38,7 +38,7 @@ VALID_EVENT_TYPES = {
     "agent_start", "agent_token_chunk", "agent_done",
     "routing_decision", "usage_update", "cycle_update", "error",
     "dispatch_event", "quota_alert", "dependency_map", "structure_plan",
-    "macro_loop_decision",
+    "macro_loop_decision", "agent_requested_role",
     # eo/dispatcher.py's next_step() emits these two on the rejection/cap
     # paths (hallucinated "next_destination" values, and the
     # MAX_STAGE_REVISITS ceiling) -- both were missing here, which meant
