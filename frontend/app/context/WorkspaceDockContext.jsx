@@ -747,6 +747,70 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       openStepStacks.set(key, []); // stepSeqs is NOT reset — matches original: it only ever counts up, for React key uniqueness across the whole session
     };
 
+    // FIX — "task looks like it stopped when I switch chats" bug:
+    // switchChat() (below) reassigns a dock key's `sessionId` to
+    // whatever chat the user just clicked into, unconditionally — and
+    // setState()'s sessionId-changed branch (above) immediately unbinds
+    // that key's Pusher channel and binds a new one for the new chat.
+    // If a run dispatched by sendTask()/resumeRun()/confirmHireReview()
+    // is still in flight for the OLD chat at that moment, its live
+    // events (agent_start/agent_done/decision/etc, still arriving on
+    // the old chat's channel) now have nothing listening for them — the
+    // run keeps executing normally server-side, but the UI has nothing
+    // left tracking it, which is exactly what makes it look stopped.
+    // Worse, the run's own completion handler used to look the dock's
+    // *current* sessionId up fresh from the store instead of using the
+    // one it was actually dispatched for — so when that fetch finally
+    // resolved, it would persist its result onto whatever chat the user
+    // had switched TO (wrong chat's history gets someone else's
+    // message), append that message into the wrong chat's on-screen
+    // list, and flip the wrong chat's `loading` flag off even if that
+    // chat has its own run going.
+    //
+    // The fix: every run function captures `dockSessionId` once, at
+    // dispatch time, and uses that fixed value for persistence
+    // (persistMessageToSession bypasses the key->session store lookup
+    // entirely) and for deciding whether it's still safe to touch this
+    // dock key's on-screen state (isStaleRun). A run that finishes after
+    // its dock slot moved on to a different chat still gets its result
+    // correctly saved to ITS chat's history (so switching back to it
+    // shows the real outcome, no data lost) — it just no longer
+    // clobbers whatever chat is on screen now.
+    const persistMessageToSession = async (sessionId, message) => {
+      if (!sessionId) return;
+      try {
+        await fetch(`${API_URL}/api/chats/${sessionId}/messages`, {
+          method: "POST",
+          headers: await authHeaders({ json: true }),
+          body: JSON.stringify({ message }),
+        });
+      } catch (err) {
+        console.error("Failed to persist message:", err);
+      }
+    };
+
+    const isStaleRun = (key, dockSessionId) => states.get(key)?.sessionId !== dockSessionId;
+
+    // Persists `data` as an assistant message against the session this
+    // run was actually dispatched for (dockSessionId), always. Only
+    // touches this dock key's live `messages`/extra state (loading,
+    // pausedRun, etc.) when that key still belongs to the same session
+    // — i.e. the user hasn't switched this dock to a different chat
+    // while the run was in flight.
+    const finishRun = (key, dockSessionId, taskText, data, extraStateWhenFresh = {}) => {
+      const assistantMessage = buildAssistantMessage(key, taskText, data);
+      persistMessageToSession(dockSessionId, assistantMessage);
+      if (isStaleRun(key, dockSessionId)) {
+        console.warn(
+          `[dock:${key}] a run dispatched for session ${dockSessionId} finished after this ` +
+          `dock switched to a different chat — its result was still saved to the right chat's ` +
+          `history, but isn't shown live here.`
+        );
+        return;
+      }
+      setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], ...extraStateWhenFresh }));
+    };
+
     // `mode`/`reviewBeforeDispatch` aren't in the doc's per-dock field
     // list, and aren't obviously app-wide either — they're dispatch
     // preferences read only by the functions being moved here. Rather
@@ -757,11 +821,19 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // up in 3d/3e passes its own current values through unchanged —
     // this keeps that as an explicit decision for whoever does the
     // wiring, not one buried in here.
-    const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false } = {}) => {
+    // `topicId`/`scope` (FIX — parity with SessionContext.jsx's
+    // sendTask): the dock's own sendTask never accepted either, so any
+    // caller that needed them (ResearchTab.jsx's Sources scope selector,
+    // Notebooks' "Work through" topic hand-off) had no choice but to
+    // dispatch through the legacy, non-dock sendTask instead — which is
+    // exactly how ResearchTab.jsx ended up bypassing WorkingPanel.jsx's
+    // live view entirely (see that file's own fix). Both are optional
+    // and default to null/omitted, so every existing caller is unaffected.
+    const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false, topicId = null, scope = null } = {}) => {
       const dockSessionId = states.get(key)?.sessionId;
       const userMessage = { role: "user", text: taskText };
       setState(key, (prev) => ({ messages: [...prev.messages, userMessage] }));
-      persistMessage(key, userMessage);
+      persistMessageToSession(dockSessionId, userMessage);
       setState(key, { loading: true });
       resetLiveRunState(key);
 
@@ -774,6 +846,10 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           });
           const data = await res.json();
           if (data.status === "preview_ready") {
+            if (isStaleRun(key, dockSessionId)) {
+              console.warn(`[dock:${key}] preview for session ${dockSessionId} arrived after this dock switched chats — dropped.`);
+              return;
+            }
             setState(key, {
               pendingHireReview: {
                 taskText,
@@ -785,13 +861,9 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
             });
             return;
           }
-          const assistantMessage = buildAssistantMessage(key, taskText, data);
-          setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false }));
-          persistMessage(key, assistantMessage);
+          finishRun(key, dockSessionId, taskText, data, { loading: false });
         } catch (err) {
-          const assistantMessage = buildAssistantMessage(key, taskText, { status: "error", message: String(err) });
-          setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false }));
-          persistMessage(key, assistantMessage);
+          finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, { loading: false });
         }
         return;
       }
@@ -800,7 +872,13 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         const res = await fetch(`${API_URL}/api/task`, {
           method: "POST",
           headers: await authHeaders({ json: true }),
-          body: JSON.stringify({ task_text: taskText, session_id: dockSessionId, mode }),
+          body: JSON.stringify({
+            task_text: taskText,
+            session_id: dockSessionId,
+            mode,
+            ...(topicId ? { topic_id: topicId } : {}),
+            ...(scope ? { scope } : {}),
+          }),
         });
         const data = await res.json();
         if (data.status === "paused") {
@@ -811,25 +889,22 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           // entirely. Now it's appended/persisted like every other
           // result, loading stays true (matching SessionContext.jsx's
           // sendTask()) since the run itself hasn't finished.
-          setState(key, { pausedRun: { taskText, sessionId: data.session_id || dockSessionId } });
-          const assistantMessage = buildAssistantMessage(key, taskText, data);
-          setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage] }));
-          persistMessage(key, assistantMessage);
+          if (!isStaleRun(key, dockSessionId)) {
+            setState(key, { pausedRun: { taskText, sessionId: data.session_id || dockSessionId } });
+          }
+          finishRun(key, dockSessionId, taskText, data);
           return;
         }
-        const assistantMessage = buildAssistantMessage(key, taskText, data);
-        setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false }));
-        persistMessage(key, assistantMessage);
+        finishRun(key, dockSessionId, taskText, data, { loading: false });
       } catch (err) {
-        const assistantMessage = buildAssistantMessage(key, taskText, { status: "error", message: String(err) });
-        setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false }));
-        persistMessage(key, assistantMessage);
+        finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, { loading: false });
       }
     };
 
     const resumeRun = async (key, decision) => {
       const pausedRun = states.get(key)?.pausedRun;
       if (!pausedRun) return;
+      const dockSessionId = pausedRun.sessionId;   // FIX — captured once, see sendTask's note above
       try {
         const res = await fetch(`${API_URL}/api/resume`, {
           method: "POST",
@@ -837,28 +912,23 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           body: JSON.stringify({ session_id: pausedRun.sessionId, ...decision }),
         });
         const data = await res.json();
-        setState(key, { pausedApproval: null });
+        if (!isStaleRun(key, dockSessionId)) setState(key, { pausedApproval: null });
         if (data.status === "paused") {
           // CO3 patch 3: same gap as sendTask() above — a resume that
           // immediately hits another approval role re-paused silently,
           // with nothing appended/persisted. Refresh pausedRun to the
           // new session_id (if any) and append/persist the same as a
           // first-time pause.
-          setState(key, { pausedRun: { taskText: pausedRun.taskText, sessionId: data.session_id || pausedRun.sessionId } });
-          const assistantMessage = buildAssistantMessage(key, pausedRun.taskText, data);
-          setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage] }));
-          persistMessage(key, assistantMessage);
+          if (!isStaleRun(key, dockSessionId)) {
+            setState(key, { pausedRun: { taskText: pausedRun.taskText, sessionId: data.session_id || pausedRun.sessionId } });
+          }
+          finishRun(key, dockSessionId, pausedRun.taskText, data);
           return;
         }
-        const assistantMessage = buildAssistantMessage(key, pausedRun.taskText, data);
-        setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage], loading: false, pausedRun: null }));
-        persistMessage(key, assistantMessage);
+        finishRun(key, dockSessionId, pausedRun.taskText, data, { loading: false, pausedRun: null });
       } catch (err) {
-        const assistantMessage = buildAssistantMessage(key, pausedRun.taskText, { status: "error", message: String(err) });
-        setState(key, (prev) => ({
-          messages: [...prev.messages, assistantMessage], loading: false, pausedRun: null, pausedApproval: null,
-        }));
-        persistMessage(key, assistantMessage);
+        finishRun(key, dockSessionId, pausedRun.taskText, { status: "error", message: String(err) },
+          { loading: false, pausedRun: null, pausedApproval: null });
       }
     };
 
@@ -866,6 +936,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       const pendingHireReview = states.get(key)?.pendingHireReview;
       if (!pendingHireReview) return;
       const { taskText, sessionId: reviewSessionId, decision } = pendingHireReview;
+      const dockSessionId = reviewSessionId;   // FIX — captured once, see sendTask's note above
       setState(key, { loading: true });
       resetLiveRunState(key);
       try {
@@ -875,15 +946,11 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           body: JSON.stringify({ task_text: taskText, decision, hires: editedHires, session_id: reviewSessionId, mode }),
         });
         const data = await res.json();
-        const assistantMessage = buildAssistantMessage(key, taskText, data);
-        setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage] }));
-        persistMessage(key, assistantMessage);
+        finishRun(key, dockSessionId, taskText, data);
       } catch (err) {
-        const assistantMessage = buildAssistantMessage(key, taskText, { status: "error", message: String(err) });
-        setState(key, (prev) => ({ messages: [...prev.messages, assistantMessage] }));
-        persistMessage(key, assistantMessage);
+        finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) });
       } finally {
-        setState(key, { loading: false, pendingHireReview: null });
+        if (!isStaleRun(key, dockSessionId)) setState(key, { loading: false, pendingHireReview: null });
       }
     };
 
@@ -1044,7 +1111,19 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // a specific tab's specific project, so there's no "which dock does
     // this belong to" ambiguity to resolve at call time the way those two
     // have.
-    const openScopedSubChat = async (workspaceId, taskText) => {
+    // `topicId`/`scope` (FIX — parity with SessionContext.jsx's
+    // openScopedSubChat): previously accepted only (workspaceId,
+    // taskText), so ResearchTab.jsx's Sources tab — which needs `scope`
+    // to steer web_researcher at a specific domain preset (task 13e) —
+    // couldn't use this dock-native version and fell back to the
+    // legacy, non-dock openScopedSubChat instead. That legacy path
+    // writes into SessionContext's own global sessionId/messages/
+    // liveSteps state, which WorkingPanel.jsx never reads (it's dock-
+    // only) — so a Sources search dispatched that way ran for real on
+    // the backend but never showed up as live progress here. Both
+    // params are optional and default to null, so every existing
+    // caller (which passes neither) is unaffected.
+    const openScopedSubChat = async (workspaceId, taskText, topicId = null, scope = null) => {
       const key = normalizeDockKey(workspaceId, null);
       const res = await fetch(`${API_URL}/api/workspaces/${workspaceId}/chats/create`, {
         method: "POST",
@@ -1058,7 +1137,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       const { fetchWorkspaces, refreshChatList } = callbacksRef.current;
       await fetchWorkspaces?.(); // membership changed server-side — same as SessionContext.jsx's createWorkspaceChat
       await refreshChatList?.();
-      await sendTask(key, taskText);
+      await sendTask(key, taskText, { topicId, scope });
       return chat.id;
     };
 
@@ -1211,10 +1290,13 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
   // specifically — a scoped sub-chat always originates from a workspace,
   // never a bare chatId — so it rejects rather than silently resolving
   // to a chat:${chatId} slot if only a chatId was passed to this hook.
+  // FIX — topicId/scope now accepted and forwarded (see store-level
+  // openScopedSubChat's own comment); every existing caller passes
+  // neither and behaves exactly as before.
   const openScopedSubChat = useCallback(
-    (taskText) =>
+    (taskText, topicId = null, scope = null) =>
       workspaceId
-        ? store.openScopedSubChat(workspaceId, taskText)
+        ? store.openScopedSubChat(workspaceId, taskText, topicId, scope)
         : Promise.reject(new Error("openScopedSubChat requires a workspaceId")),
     [store, workspaceId]
   );
