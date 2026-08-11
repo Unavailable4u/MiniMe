@@ -213,11 +213,28 @@ NEXT_TAG_INSTRUCTION = (
 # KEYS["extraction_table"], never a stage_output:* entry. Without this
 # bridge, any generic_worker role hired after it (consensus_meter,
 # contradiction_detector, researcher, writer, editor...) would list it in
-# input_keys but find nothing there. Other Part 3 real-action roles don't
-# need an entry: academic_search's output isn't read by name downstream,
-# and contradiction_prefilter/source_quality_flagger already write their
-# own stage_output entry directly.
+# input_keys but find nothing there. academic_search/web_researcher need
+# the exact same bridge (see BUGFIX note on the map below) --
+# contradiction_prefilter/source_quality_flagger are the only Part 3
+# real-action roles that don't, since they already write their own
+# stage_output entry directly.
 LEGACY_BUS_KEY_MAP = {
+    # BUGFIX (bug audit): academic_search/web_researcher are
+    # REAL_ACTION_ROLES modules dispatched directly by eo/executor.py, so
+    # -- same as handoff_packager below -- they never get a
+    # stage_output:{session_id}:{role} entry the way a generic_worker
+    # role's own output automatically does. The old comment here claimed
+    # "academic_search's output isn't read by name downstream," but
+    # researcher/writer/fact_checker/editor DO list "academic_search" (or
+    # "web_researcher") in their input_keys for the "research" domain
+    # (eo/structure.py) expecting to see what was actually found. Without
+    # this bridge that lookup always silently resolved to None, so those
+    # roles wrote a confident-sounding response with zero visibility into
+    # whether academic_search/web_researcher found real papers, found
+    # nothing, or hit API errors -- indistinguishable from never having
+    # been hired at all.
+    "academic_search": KEYS["academic_search_report"],
+    "web_researcher": KEYS["web_researcher_report"],
     "extraction_table_builder": KEYS["extraction_table"],
     # Part 6 §6.4 — handoff_packager is a REAL_ACTION_ROLES module
     # (dispatched directly by eo/executor.py, not through this file), so
@@ -237,6 +254,37 @@ LEGACY_BUS_KEY_MAP = {
     # plan" case this bridge exists for.
     "handoff_packager": PLAN_HANDOFF_PACKAGE_KEY,
 }
+
+# BUGFIX (bug audit, patch 4) — the result-count field to check per real-
+# action role bridged above, so a genuinely-empty report gets flagged
+# instead of silently blending into the rest of the context. Keyed by
+# the SAME name a role lists in input_keys (i.e. LEGACY_BUS_KEY_MAP's
+# keys), not the bus key itself.
+_RESULT_LIST_FIELD = {
+    "academic_search": "papers",
+    "web_researcher": "sources",
+}
+
+
+def _zero_results_notice(role_key: str, prior) -> str | None:
+    """None for anything that isn't a tracked real-action role, or that
+    role genuinely found results. Otherwise an explicit instruction --
+    not just a data point -- telling the model not to paper over an
+    empty search with its own general knowledge presented as findings."""
+    field = _RESULT_LIST_FIELD.get(role_key)
+    if field is None or not isinstance(prior, dict):
+        return None
+    if len(prior.get(field) or []) > 0:
+        return None
+    return (
+        f"IMPORTANT: '{role_key}' found ZERO real results (see \"{field}\": [] "
+        f"above) -- likely a source API failure or rate limit, not an "
+        f"absence of literature on the topic. Do not write a literature "
+        f"review, cite paper titles/authors, or otherwise present "
+        f"specific sources as if '{role_key}' had found them. State "
+        f"plainly that the search returned no results and, if useful, "
+        f"answer from general knowledge WITHOUT inventing citations."
+    )
 
 
 def _cloudflare_token_env_for(account_id_env: str) -> str:
@@ -444,6 +492,19 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
             prior = bus_read(LEGACY_BUS_KEY_MAP[k], default=None)
         if prior:
             context_parts.append(f"--- Output from '{k}' ---\n{prior}")
+            # BUGFIX (bug audit, patch 4): getting the real report into
+            # context (patch 2's LEGACY_BUS_KEY_MAP bridge) fixed the
+            # blind spot, but a raw {"papers": [], "summary": "0 paper(s)
+            # found..."} dict buried in a wall of context is easy for the
+            # model to skim past and fill the gap from its own
+            # parametric knowledge anyway -- exactly the "confident
+            # literature review, zero real sources" failure mode that
+            # started this audit. Spell it out as an explicit, unmissable
+            # instruction instead of trusting the model to notice a
+            # count field on its own.
+            zero_results_notice = _zero_results_notice(k, prior)
+            if zero_results_notice:
+                context_parts.append(zero_results_notice)
     context = "\n\n".join(context_parts)
 
     if key_override:
