@@ -1,0 +1,172 @@
+diff --git a/backend/api/routes/tasks.py b/backend/api/routes/tasks.py
+index bc59e4d..b8b04f3 100644
+--- a/backend/api/routes/tasks.py
++++ b/backend/api/routes/tasks.py
+@@ -802,7 +802,14 @@ def get_tasks_for_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
+         created = chat_workspace.create_chat_in_workspace(
+             ws_id, owner_id, title=f"{ws['name']} — Build"
+         )
+-        session_id = created["chat_ids"][0]
++        # FIX — create_chat_in_workspace() now correctly returns the
++        # newly-created CHAT dict (see its own docstring for why), not
++        # the workspace dict it used to return. `created["id"]` is that
++        # chat's own id — equivalent to the old `created["chat_ids"][0]`
++        # read (a freshly-created chat is always ws.chat_ids[0] the
++        # moment it's added), but no longer depends on the workspace
++        # dict shape this call site was never supposed to need.
++        session_id = created["id"]
+ 
+     data = get_tasks(session_id)
+     data["_session_id"] = session_id
+diff --git a/backend/eo/chat_workspace.py b/backend/eo/chat_workspace.py
+index 1b3c382..ff81f9d 100644
+--- a/backend/eo/chat_workspace.py
++++ b/backend/eo/chat_workspace.py
+@@ -637,10 +637,31 @@ def add_chat(ws_id: str, user_id: str, chat_id: str) -> dict:
+ 
+ def create_chat_in_workspace(ws_id: str, user_id: str, title: str = "New Chat") -> dict:
+     """One-step create+attach — see add_chat's docstring for the access
+-    rules this reuses unchanged."""
++    rules this reuses unchanged.
++
++    FIX — was `return add_chat(ws_id, user_id, chat["id"])`, which returns
++    add_chat()'s own return value: the WORKSPACE dict (see add_chat's own
++    `return ws` below), not the chat that was just created. Every caller
++    of this endpoint (frontend's createWorkspaceChat() in
++    SessionContext.jsx) reads the response as `chat.id` expecting the
++    new chat's own id — instead it silently got the workspace's id
++    (e.g. "ws_...") and used THAT as session_id for every subsequent
++    /api/task dispatch and /api/chats/{id}/messages persist call. Tasks
++    still ran (session_id doesn't have to reference a real chat for
++    /api/task to work), but every message got persisted against a
++    workspace id that no chat row matches, so the real, freshly-created
++    chat visible in the sidebar stayed permanently empty — same
++    symptom as the sessionId race fixed in SessionContext.jsx, different
++    root cause, one layer further down.
++
++    Re-fetching via get_chat() (rather than returning the pre-add_chat
++    `chat` dict directly) so the response reflects the now-set
++    workspace_id, same as any other read of a workspace-attached chat
++    would show."""
+     _require_edit_access(ws_id, user_id)
+     chat = chat_store.create_chat(user_id, title=title)
+-    return add_chat(ws_id, user_id, chat["id"])
++    add_chat(ws_id, user_id, chat["id"])
++    return chat_store.get_chat(chat["id"], user_id)
+ 
+ 
+ def remove_chat(ws_id: str, user_id: str, chat_id: str, delete_chat: bool = False) -> dict:
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index e0998dd..f9f2ecd 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -2105,10 +2105,29 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   // server-side as of 13d, only web_researcher's dispatch branch reads
+   // it). Every existing call site keeps working unchanged since this
+   // param defaults to null.
+-  const sendTask = useCallback(async (taskText, topicId = null, scope = null) => {
++  // sessionOverride (FIX — dispatched-task-lands-in-wrong-chat bug):
++  // setSessionId() inside createWorkspaceChat() is an async state update
++  // — it does NOT change the `sessionId` this very closure captured at
++  // its last render. openScopedSubChat() used to call
++  // sendTask(taskText, topicId, scope) right after createWorkspaceChat()
++  // resolved, so the POST below fired with the STALE sessionId (null, or
++  // whatever chat was previously active) instead of the chat.id that was
++  // just created and switched into — the task genuinely ran on the
++  // backend, but against a session the visible (just-created) chat had
++  // no knowledge of, so its Chat Box/Working Panel stayed empty forever.
++  // Passing the known-correct id explicitly, rather than trusting
++  // `sessionId` state to have propagated, closes that race. Optional and
++  // defaults to null so every other call site (which already has a
++  // correctly up-to-date `sessionId` by the time it calls sendTask)
++  // behaves exactly as before.
++  const sendTask = useCallback(async (taskText, topicId = null, scope = null, sessionOverride = null) => {
++    const effectiveSessionId = sessionOverride || sessionId;   // FIX — see param doc above
+     const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
+     setMessages((prev) => [...prev, userMessage]);
+-    persistMessage(userMessage);   // NEW
++    persistMessageTo(effectiveSessionId, userMessage);   // FIX — was persistMessage(userMessage),
++    // which reads the same stale `sessionId` state as the request body
++    // did (see param doc above) — a message persisted against the wrong
++    // chat is just as invisible as a task dispatched against it.
+     setLoading(true);
+     _resetLiveRunState();
+ 
+@@ -2121,7 +2140,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+         const res = await fetch(`${API_URL}/api/task/preview`, {
+           method: "POST",
+           headers: await authHeaders({ json: true }),
+-          body: JSON.stringify({ task_text: taskText, session_id: sessionId, mode }),
++          body: JSON.stringify({ task_text: taskText, session_id: effectiveSessionId, mode }),
+         });
+         const data = await res.json();
+         if (data.status === "preview_ready") {
+@@ -2144,12 +2163,12 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+         // the non-preview path below.
+         const assistantMessage = _buildAssistantMessage(taskText, data);
+         setMessages((prev) => [...prev, assistantMessage]);
+-        persistMessage(assistantMessage);
++        persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
+         setLoading(false);
+       } catch (err) {
+         const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+         setMessages((prev) => [...prev, assistantMessage]);
+-        persistMessage(assistantMessage);
++        persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
+         setLoading(false);
+       }
+       return;
+@@ -2161,7 +2180,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+         headers: await authHeaders({ json: true }),
+         body: JSON.stringify({
+           task_text: taskText,
+-          session_id: sessionId,
++          session_id: effectiveSessionId,
+           mode,
+           ...(topicId ? { topic_id: topicId } : {}),   // NEW — Step 6.11.c
+           ...(scope ? { scope } : {}),   // NEW — task 13e
+@@ -2176,20 +2195,20 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+       // finalize the message once resumeRun() eventually finishes it,
+       // and leave `loading` true (the run genuinely isn't done).
+       if (data.status === "paused") {
+-        setPausedRun({ taskText, sessionId: data.session_id || sessionId });
++        setPausedRun({ taskText, sessionId: data.session_id || effectiveSessionId });
+         return;
+       }
+       const assistantMessage = _buildAssistantMessage(taskText, data);
+       setMessages((prev) => [...prev, assistantMessage]);
+-      persistMessage(assistantMessage);   // NEW
++      persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
+       setLoading(false);
+     } catch (err) {
+       const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+       setMessages((prev) => [...prev, assistantMessage]);
+-      persistMessage(assistantMessage);   // NEW
++      persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
+       setLoading(false);
+     }
+-  }, [sessionId, mode, reviewBeforeDispatch, persistMessage, _resetLiveRunState, _buildAssistantMessage]);
++  }, [sessionId, mode, reviewBeforeDispatch, persistMessageTo, _resetLiveRunState, _buildAssistantMessage]);
+ 
+   // CHANGED — step 6.11.b: topicId is a new optional 3rd param, threaded
+   // down from NotebooksTab.jsx's WorkflowCard "Work through" button via
+@@ -2210,8 +2229,18 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+     // sub-tab to steer the Panel toward web_researcher with a domain
+     // scope instead of academic_search — see that file for the phrasing
+     // this pairs with.
++    // FIX — dispatched-task-lands-in-wrong-chat bug: sendTask() used to
++    // be called bare here, which meant it read `sessionId` from state —
++    // but createWorkspaceChat()'s setSessionId(chat.id) hadn't actually
++    // propagated to this closure yet (React state updates are async, and
++    // this async function body doesn't re-render mid-flight). The task
++    // dispatched against a STALE session_id while the UI switched into
++    // (and the sidebar showed) the real new `chatId` — so the run
++    // genuinely executed on the backend, but its Chat Box/Working Panel
++    // stayed empty forever, because they were watching the wrong chat.
++    // Passing chatId through explicitly closes that race.
+     const chatId = await createWorkspaceChat(wsId);
+-    await sendTask(taskText, topicId, scope);
++    await sendTask(taskText, topicId, scope, chatId);
+     return chatId;
+   }, [createWorkspaceChat, sendTask]);
+ 
