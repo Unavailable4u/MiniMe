@@ -18,16 +18,11 @@ same rather than relying on a "default" that doesn't exist.
 """
 import os
 import sys
-import requests
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
+from utils.web_search import search as web_search
 from eo.price_cache import get_cached_price, set_cached_price
-from utils.llm_client import generate_text, log_usage
-
-TAVILY_URL = "https://api.tavily.com/search"
-BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
-REQUEST_TIMEOUT = 12
 
 BD_VENDOR_DOMAINS = [
     "startech.com.bd", "ryanscomputers.com", "techlandbd.com",
@@ -60,52 +55,6 @@ If nothing relevant was found, return {"found": false, "listings": []}.
 """
 
 
-def _search_tavily(query: str, domain: str = None) -> list[dict]:
-    """domain, if given, is passed as Tavily's own include_domains param —
-    NOT baked into the query string as `site:domain`. Confirmed against
-    Tavily's actual /search API: it has no query-operator parsing at all,
-    so a `site:` prefix in `query` is just treated as literal search
-    terms and silently ignored, which is why the first debug run
-    returned generic web results instead of domain-scoped ones."""
-    key = os.environ.get("TAVILY_API_KEY")
-    if not key:
-        return []
-    try:
-        payload = {
-            "api_key": key, "query": query, "max_results": 3,
-            "include_raw_content": False,
-        }
-        if domain:
-            payload["include_domains"] = [domain]
-        resp = requests.post(TAVILY_URL, json=payload, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        log_usage("tavily", "TAVILY_API_KEY", tokens=None, agent_name="part_price_finder")
-        return [{"url": r["url"], "snippet": r.get("content", "")}
-                for r in resp.json().get("results", [])]
-        return [{"url": r["url"], "snippet": r.get("content", "")}
-                for r in resp.json().get("results", [])]
-    except Exception as exc:
-        print(f"  [Part Price Finder] Tavily failed: {exc}")
-        return []
-
-
-def _search_brave(query: str) -> list[dict]:
-    key = os.environ.get("BRAVE_API_KEY")
-    if not key:
-        return []
-    try:
-        resp = requests.get(BRAVE_URL, params={"q": query, "count": 3},
-                             headers={"X-Subscription-Token": key},
-                             timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        results = resp.json().get("web", {}).get("results", [])
-        return [{"url": r["url"], "snippet": r.get("description", "")}
-                for r in results]
-    except Exception as exc:
-        print(f"  [Part Price Finder] Brave failed: {exc}")
-        return []
-
-
 def find_price(part_name: str, force_refresh: bool = False) -> dict:
     """Returns {"part_name", "listings": [...], "checked_at", "cached": bool}."""
     if not force_refresh:
@@ -116,12 +65,14 @@ def find_price(part_name: str, force_refresh: bool = False) -> dict:
     snippets = []
     for domain in BD_VENDOR_DOMAINS:
         query = f"{part_name} price"
-        # Tavily: domain scoping via include_domains (see _search_tavily).
-        # Brave: kept as a site: prefix — Brave's API does parse standard
-        # search operators in the query string, unlike Tavily, so this
-        # one is left as-is for now. Worth re-verifying with its own
-        # debug run once Brave is actually wired in as the fallback.
-        results = _search_tavily(query, domain=domain) or _search_brave(f"site:{domain} {query}")
+        # One domain per call, on purpose: BD_VENDOR_DOMAINS is a fixed
+        # vendor allowlist and results need to stay traceable to a
+        # specific vendor, so this loops web_search(domains=[domain])
+        # rather than passing the whole list in one call. General
+        # research callers with a fixed *scope* (not per-item vendor
+        # tracking) should pass their whole domain list in one call
+        # instead -- see utils/web_search.py's own docstring.
+        results = web_search(query, domains=[domain], agent_name="part_price_finder")
         snippets.extend(results)
 
     if not snippets:
