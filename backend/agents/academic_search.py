@@ -21,6 +21,7 @@ Result written to KEYS["academic_search_report"]:
 }
 """
 import os
+import re
 import sys
 import json
 import xml.etree.ElementTree as ET
@@ -49,6 +50,27 @@ def _workspace_id() -> str:
     # Same session-isolation reasoning as duplication_checker.py's
     # _app_slug() -- the graph is scoped per-workspace, not global.
     return get_current_app_slug() or read(KEYS["original_idea"], default="untitled")
+
+
+# BUGFIX — task_text is the whole natural-language instruction the Panel
+# was hired with (e.g. "Find recent papers about: sparse attention
+# transformers"), not a bare query. Every SOURCE_FNS caller below was
+# sending that full sentence straight to Semantic Scholar/arXiv/CrossRef/
+# OpenAlex as a literal search string, which tanks match quality (or
+# returns nothing) even on the APIs that don't error out. This strips the
+# leading instruction phrasing so only the actual topic goes out as the
+# query. Conservative on purpose: only strips a known instruction lead-in
+# up to the first colon (SourcesPanel's RESEARCH_SCOPE_OPTIONS.academic
+# phrasing, "Find recent papers about: X"); anything without that shape
+# is left exactly as-is rather than guessing.
+_INSTRUCTION_PREFIX_RE = re.compile(
+    r"^\s*(find|search( for)?|look up|get|show me)\b.*?:\s*", re.IGNORECASE
+)
+
+
+def _clean_query(task_text: str) -> str:
+    stripped = _INSTRUCTION_PREFIX_RE.sub("", task_text or "", count=1).strip()
+    return stripped or (task_text or "").strip()
 
 
 def _search_semantic_scholar(query: str, limit: int) -> list:
@@ -176,7 +198,9 @@ def run(task_text: str = None, session_id: str = None, tier: int = None,
         domain: str = None, sources: list = None) -> dict:
     """sources defaults to all four; a task can narrow it (e.g. only
     "arxiv" for recent preprints)."""
-    query = (task_text or "").strip()
+    # BUGFIX: use the cleaned topic, not the raw instruction sentence, as
+    # the actual query sent to every source below.
+    query = _clean_query(task_text)
     if not query:
         report = {"papers": [], "edges_written": 0, "summary": "No search query provided."}
         write(KEYS["academic_search_report"], report)

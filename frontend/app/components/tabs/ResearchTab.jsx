@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, memo } from "react";
+import { useState, useEffect, useMemo, memo, useRef } from "react";
 import { useSession } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
@@ -654,6 +654,27 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
 
   useEffect(() => { load(); }, [wsId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // BUGFIX — live-panel bug, part 2: this panel's own `load()` only ever
+  // ran once, on mount/wsId-change. A search dispatched via
+  // dock.openScopedSubChat() below runs for real on the backend and
+  // does write source nodes (once academic_search actually finds
+  // papers) -- but nothing here ever re-fetched to pick them up, so the
+  // list stayed on whatever it looked like at mount until the user
+  // navigated away and back (a remount). dock.state.loading is the
+  // same flag WorkspaceDockContext flips true->false around a run
+  // (see sendTask/openScopedSubChat's finishRun calls), so watching it
+  // land on false is the correct "a run belonging to this panel's dock
+  // just finished" signal -- reload right then instead of waiting on a
+  // remount that may never happen.
+  const dockLoading = dock.state.loading;
+  const prevDockLoadingRef = useRef(dockLoading);
+  useEffect(() => {
+    if (prevDockLoadingRef.current && !dockLoading) {
+      load();
+    }
+    prevDockLoadingRef.current = dockLoading;
+  }, [dockLoading]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function runSearch() {
     if (!query.trim()) return;
     setSearching(true);
@@ -780,6 +801,13 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
 // KnowledgeGraphView.jsx every other domain's node/edge graph uses,
 // filtered to this project's section: "research" nodes/edges.
 function CitationGraphPanel({ wsId, fetchWorkspaceNodes, fetchGraphEdges }) {
+  // BUGFIX — same live-panel bug as SourcesPanel above: this graph is
+  // read from the exact node/edge data academic_search/web_researcher
+  // write, but load() only ever ran once on mount, so a search
+  // dispatched from the Sources sub-tab (or straight from chat) never
+  // showed up here without a manual remount. Reuse the same
+  // "ws:${wsId}" dock slot to watch for a run finishing.
+  const dock = useWorkspaceDock(wsId);
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -802,6 +830,18 @@ function CitationGraphPanel({ wsId, fetchWorkspaceNodes, fetchGraphEdges }) {
   }
 
   useEffect(() => { load(); }, [wsId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // BUGFIX — see SourcesPanel's identical effect for the full reasoning:
+  // reload once dock.state.loading falls back to false (a run just
+  // finished), not only on mount.
+  const dockLoading = dock.state.loading;
+  const prevDockLoadingRef = useRef(dockLoading);
+  useEffect(() => {
+    if (prevDockLoadingRef.current && !dockLoading) {
+      load();
+    }
+    prevDockLoadingRef.current = dockLoading;
+  }, [dockLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="h-full flex flex-col gap-3">

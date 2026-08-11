@@ -829,7 +829,26 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // exactly how ResearchTab.jsx ended up bypassing WorkingPanel.jsx's
     // live view entirely (see that file's own fix). Both are optional
     // and default to null/omitted, so every existing caller is unaffected.
+    //
+    // BUGFIX (bug audit, patch 5) — `key` is "ws:${workspaceId}" for
+    // every workspace-scoped dock (normalizeDockKey above), so the real
+    // project id is always sitting right here in the closure. Nothing
+    // downstream ever forwarded it to the backend: /api/task's
+    // TaskRequest.app_slug (backend/api/routes/tasks.py) has stayed
+    // unset on every dock-dispatched task, which means
+    // task_runner.py's set_app_slug() always fell into its
+    // `f"{slugify(task_text)}_{session_id[:8]}"` fallback -- a
+    // different, throwaway namespace PER SEARCH, unrelated to this
+    // project's real id. agents/academic_search.py's/web_researcher.py's
+    // write_node() calls use exactly that namespace
+    // (get_current_app_slug()), while ResearchTab.jsx's Sources/Citation
+    // Graph tabs read back via GET /api/workspaces/{ws_id}/nodes, keyed
+    // by the REAL workspace id. Two different strings that never
+    // matched -- nodes got written for real, just into a bucket nothing
+    // ever reads from. Passing the real id through as app_slug (a field
+    // TaskRequest already accepts) unifies the write and read side.
     const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false, topicId = null, scope = null } = {}) => {
+      const dockWorkspaceId = key && key.startsWith("ws:") ? key.slice(3) : null;
       const dockSessionId = states.get(key)?.sessionId;
       const userMessage = { role: "user", text: taskText };
       setState(key, (prev) => ({ messages: [...prev.messages, userMessage] }));
@@ -842,7 +861,10 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           const res = await fetch(`${API_URL}/api/task/preview`, {
             method: "POST",
             headers: await authHeaders({ json: true }),
-            body: JSON.stringify({ task_text: taskText, session_id: dockSessionId, mode }),
+            body: JSON.stringify({
+              task_text: taskText, session_id: dockSessionId, mode,
+              ...(dockWorkspaceId ? { app_slug: dockWorkspaceId } : {}),
+            }),
           });
           const data = await res.json();
           if (data.status === "preview_ready") {
@@ -876,6 +898,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
             task_text: taskText,
             session_id: dockSessionId,
             mode,
+            ...(dockWorkspaceId ? { app_slug: dockWorkspaceId } : {}),
             ...(topicId ? { topic_id: topicId } : {}),
             ...(scope ? { scope } : {}),
           }),
@@ -937,13 +960,20 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       if (!pendingHireReview) return;
       const { taskText, sessionId: reviewSessionId, decision } = pendingHireReview;
       const dockSessionId = reviewSessionId;   // FIX — captured once, see sendTask's note above
+      // BUGFIX (bug audit, patch 5) — same app_slug thread-through as
+      // sendTask above; this is the "review hires first" path for the
+      // exact same dispatch, so it needs the real workspace id too.
+      const dockWorkspaceId = key && key.startsWith("ws:") ? key.slice(3) : null;
       setState(key, { loading: true });
       resetLiveRunState(key);
       try {
         const res = await fetch(`${API_URL}/api/task/confirm`, {
           method: "POST",
           headers: await authHeaders({ json: true }),
-          body: JSON.stringify({ task_text: taskText, decision, hires: editedHires, session_id: reviewSessionId, mode }),
+          body: JSON.stringify({
+            task_text: taskText, decision, hires: editedHires, session_id: reviewSessionId, mode,
+            ...(dockWorkspaceId ? { app_slug: dockWorkspaceId } : {}),
+          }),
         });
         const data = await res.json();
         finishRun(key, dockSessionId, taskText, data);
