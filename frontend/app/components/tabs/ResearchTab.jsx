@@ -593,8 +593,25 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
 // (researcher/fact_checker/writer/editor) run exactly as the Panel would
 // normally staff them. The list below reads back what that run wrote as
 // nodes -- real, persisted, live-fetched data, not a paste box.
+// NEW — task 13e: Sources sub-tab scope control. Each option pairs a
+// `scope` value (rides POST /api/task as `scope`, read only by
+// web_researcher's dispatch branch — see tasks.py's TaskRequest and
+// task_runner.py's _dispatch_resolved()) with task-text phrasing chosen
+// so the Panel reliably hires web_researcher with that scope instead of
+// academic_search. "Academic" is the one exception: it omits `scope`
+// entirely and keeps the original "Find recent papers about: X" phrasing
+// unchanged, so today's academic_search behavior is untouched.
+const RESEARCH_SCOPE_OPTIONS = [
+  { value: "academic", label: "Academic", scope: null, phrase: (q) => `Find recent papers about: ${q}` },
+  { value: "general", label: "General web", scope: "general", phrase: (q) => `Search the web for: ${q}` },
+  { value: "forum", label: "Forums", scope: "forum", phrase: (q) => `Search Reddit and forums for: ${q}` },
+  { value: "news", label: "News", scope: "news", phrase: (q) => `Search news sources for: ${q}` },
+  { value: "hackernews", label: "Hacker News", scope: "hackernews", phrase: (q) => `Search Hacker News for: ${q}` },
+];
+
 function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScopedSubChat, openInDock }) {
   const [query, setQuery] = useState("");
+  const [searchScope, setSearchScope] = useState("academic"); // NEW — task 13e
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -614,7 +631,14 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
     if (!query.trim()) return;
     setSearching(true);
     try {
-      const chatId = await openScopedSubChat(wsId, `Find recent papers about: ${query.trim()}`);
+      // NEW — task 13e: phrase + scope come from the selected option.
+      // "Academic" keeps the original phrasing and passes no scope, so
+      // that path is byte-for-byte what it was before this control
+      // existed. Every other option phrases the task so the Panel hires
+      // web_researcher, and passes its scope through so that agent's
+      // dispatch branch (task_runner.py) picks the right domain preset.
+      const opt = RESEARCH_SCOPE_OPTIONS.find((o) => o.value === searchScope) || RESEARCH_SCOPE_OPTIONS[0];
+      const chatId = await openScopedSubChat(wsId, opt.phrase(query.trim()), null, opt.scope);
       await openInDock(chatId);
     } finally {
       setSearching(false);
@@ -636,6 +660,22 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
   return (
     <div className="space-y-4">
       <div className="flex gap-2">
+        {/* NEW — task 13e: scope selector. Lives next to the query box
+            rather than replacing it — the query stays one free-text
+            field, this just picks which agent + domain preset it's
+            dispatched to. */}
+        <label className="sr-only" htmlFor="research-search-scope">Search scope</label>
+        <select
+          id="research-search-scope"
+          name="researchSearchScope"
+          value={searchScope}
+          onChange={(e) => setSearchScope(e.target.value)}
+          className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] shrink-0"
+        >
+          {RESEARCH_SCOPE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         <input
           id="research-query"
           name="researchQuery"
@@ -662,9 +702,9 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
         </button>
       </div>
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Runs academic_search (Semantic Scholar, arXiv, CrossRef, OpenAlex) plus whatever
-        writing/synthesis roles the task needs, in this project's own chat — sources found
-        get written back here as they're indexed.
+        {searchScope === "academic"
+          ? "Runs academic_search (Semantic Scholar, arXiv, CrossRef, OpenAlex) plus whatever writing/synthesis roles the task needs, in this project's own chat — sources found get written back here as they're indexed."
+          : "Runs web_researcher against this scope's domain preset, in this project's own chat — sources found get written back here as they're indexed, same as academic_search."}
       </p>
 
       {sources.length === 0 && !loading && (
