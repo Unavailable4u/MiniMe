@@ -50,6 +50,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import get_role_prompt, AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
 from eo import conversation_memory   # NEW — Part 23
+from eo.skill_library import get_relevant_skill   # NEW — Part 6 §E2, task 14
 from utils.llm_client import generate_text
 from memory.bus import read as bus_read, write as bus_write, KEYS
 # Part 6 §6.4 bridge — see LEGACY_BUS_KEY_MAP below. No circularity risk:
@@ -523,7 +524,23 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
                                             max_steps=_dynamic_max_chain_steps(quota_status))
         chain = [_chain_step_for(k) for k in chain_keys]
 
-    system_prompt = (brief or "") + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION
+    # NEW — Part 6 §E2, task 14: "agents read [a skill doc] before
+    # attempting an unfamiliar task type." get_relevant_skill() already
+    # degrades to "" on any retrieval failure or genuine no-match (see
+    # its own docstring) -- that empty case just means no addition
+    # here, same as brief being None for a role that's never been
+    # briefed. Deliberately placed BEFORE MARKDOWN_INSTRUCTION/
+    # NEXT_TAG_INSTRUCTION (both fixed, role-agnostic formatting rules
+    # that apply regardless of task type) and framed as guidance, not
+    # as part of the role's own identity/brief, so a role with a skill
+    # match doesn't read as if the skill doc IS its brief.
+    skill_doc = get_relevant_skill(task_text)
+    skill_addition = (
+        f"\n\nGuidance from a similar task type you've handled before:\n{skill_doc}"
+        if skill_doc else ""
+    )
+
+    system_prompt = (brief or "") + skill_addition + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION
     try:
         raw = generate_text(
             system_prompt=system_prompt,
