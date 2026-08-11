@@ -225,6 +225,7 @@ KEYS = {
     "dependency_map": "dependency_map",               # #4 Module Dependency Mapper
     "duplication_report": "duplication_report",         # #7 Duplication/Similarity Checker
     "academic_search_report": "academic_search_report",  # Part 3 §3.3
+    "web_researcher_report": "web_researcher_report",     # task 13c
     "extraction_table": "extraction_table",              # Part 3 §3.5
     "contradiction_candidates": "contradiction_candidates",  # Part 3 §3.6
     "dataset_analysis": "dataset_analysis",              # Part 3 §3.7
