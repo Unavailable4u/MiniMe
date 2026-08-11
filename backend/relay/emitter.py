@@ -25,6 +25,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from enum import Enum
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,110 +35,162 @@ try:
 except ImportError:
     pass
 
-VALID_EVENT_TYPES = {
-    "agent_start", "agent_token_chunk", "agent_done",
-    "routing_decision", "usage_update", "cycle_update", "error",
-    "dispatch_event", "quota_alert", "dependency_map", "structure_plan",
-    "macro_loop_decision", "agent_requested_role",
+class EventType(str, Enum):
+    """Single source of truth for every event type this module will
+    accept, on either channel (session or per-user). Was previously a
+    bare `VALID_EVENT_TYPES` string set with no structural link to the
+    ~20+ emit_event()/emit_user_event() call sites across agents/ and
+    eo/ -- callers passed raw string literals, so a typo'd or newly
+    added literal only surfaced as a runtime ValueError, mid-task,
+    whenever that code path first executed (see this module's git
+    history / PATCH-A for the incident that prompted this rewrite:
+    nine literals -- architecture_diagram, plan_handoff, schema_diagram,
+    device_spec, deploy_config_proposed, deploy_config_written,
+    deploy_confirmed, deploy_declined, uptimerobot_registered,
+    uptimerobot_registration_failed -- were in real use but never made
+    it into the old set).
+
+    Being an Enum instead of a set means:
+      - Call sites should reference members (EventType.AGENT_START) so
+        a typo is an AttributeError / static-type-checker error, not a
+        thing that only fails once that branch runs in production.
+      - `VALID_EVENT_TYPES` below is now *derived* from this enum
+        (`{e.value for e in EventType}`) instead of being hand-copied,
+        so the two can never drift apart from each other again.
+      - eo/notify.py's own VALID_KINDS (a second, separately
+        hand-maintained closed set that mirrors a subset of this one)
+        is repointed at this same enum in the follow-up patch, closing
+        the other half of the drift.
+
+    str, Enum) mixin: members compare equal to, and hash the same as,
+    their plain string value, so `"agent_start" == EventType.AGENT_START`
+    and `"agent_start" in {EventType.AGENT_START, ...}` both hold --
+    existing code/tests that compare against plain strings keep working
+    unchanged.
+    """
+    AGENT_START = "agent_start"
+    AGENT_TOKEN_CHUNK = "agent_token_chunk"
+    AGENT_DONE = "agent_done"
+    ROUTING_DECISION = "routing_decision"
+    USAGE_UPDATE = "usage_update"
+    CYCLE_UPDATE = "cycle_update"
+    ERROR = "error"
+    DISPATCH_EVENT = "dispatch_event"
+    QUOTA_ALERT = "quota_alert"
+    DEPENDENCY_MAP = "dependency_map"
+    STRUCTURE_PLAN = "structure_plan"
+    MACRO_LOOP_DECISION = "macro_loop_decision"
+    AGENT_REQUESTED_ROLE = "agent_requested_role"
+
     # eo/dispatcher.py's next_step() emits these two on the rejection/cap
     # paths (hallucinated "next_destination" values, and the
-    # MAX_STAGE_REVISITS ceiling) -- both were missing here, which meant
-    # either path crashed the whole run with a ValueError instead of
-    # degrading gracefully like every other dispatcher event does.
-    "hallucinated_role_rejected", "revisit_cap_reached",
+    # MAX_STAGE_REVISITS ceiling).
+    HALLUCINATED_ROLE_REJECTED = "hallucinated_role_rejected"
+    REVISIT_CAP_REACHED = "revisit_cap_reached"
+
     # CO3: fired at the Human-in-the-loop pause point in eo/executor.py
-    # (both the pre-existing approval_roles trigger and the new on-demand
+    # (both the pre-existing approval_roles trigger and the on-demand
     # pause_requested:{session_id} trigger) so the frontend's step list
     # can flip the paused role's status and surface the resume affordance
-    # live, instead of the human only finding out on next reload. The
-    # frontend handler for this (WorkspaceDockContext.jsx /
-    # SessionContext.jsx, eventType === "awaiting_approval") already
-    # existed before this patch — this entry and the executor.py call
-    # site are what actually complete that wiring.
-    "awaiting_approval",
-    # NEW — Part 8.4: cross-chat/cross-session notifications, fired on
-    # a user-{user_id} channel (see _user_channel_name/emit_user_event
-    # below) rather than the per-session channel every other event
+    # live. Frontend handler: WorkspaceDockContext.jsx / SessionContext.jsx,
+    # eventType === "awaiting_approval".
+    AWAITING_APPROVAL = "awaiting_approval"
+
+    # Part 8.4: cross-chat/cross-session notifications, fired on a
+    # user-{user_id} channel (see _user_channel_name/emit_user_event
+    # below) rather than the per-session channel every other member
     # above uses. One event type covers every notification "kind"
-    # (note_proposed today, workspace_shared/etc. later) — the kind
+    # (note_proposed today, workspace_shared/etc. later) -- the kind
     # lives in payload, same as every other event's payload already
     # carries type-specific fields.
-    # NEW — Phase 4 step 4.2 (Notebooks Chat-First refinement): the
-    # transport decision (step 4.1, see decisions/step-4.1-notification-
-    # transport.md) is for eo/notify.py's _deliver() to ALSO mirror every
-    # event onto this Pusher channel, not just eo/ws_registry.py's
-    # self-hosted socket -- see that file's own comment on why "also",
-    # not "only" (SessionContext.jsx's real, working /ws/{session_id}
-    # consumer stays on the old transport unchanged; this is additive).
-    # _deliver() passes eo/notify.py's `kind` straight through as this
-    # module's `event_type` (no wrapping "notification" envelope --
-    # that one's reserved for Part 8.4's per-USER channel, a different
-    # scope than these session-scoped kinds), so every kind in
-    # eo/notify.py's own VALID_KINDS needs a matching literal entry
-    # here or emit_event() raises on it. The two sets are meant to be
-    # kept in lockstep by hand -- whoever next adds a kind to
-    # eo/notify.py's VALID_KINDS (step 4.3 will, for
-    # generation_started/generation_done/generation_error) must add the
-    # same string here too.
-    "upload_processed", "backlinks_updated", "workspace_promoted",
-    "topic_added", "topic_merged", "connection_added",
-    # NEW — step 4.3 (see the comment block above): matching literals for
-    # eo/notify.py's own new VALID_KINDS entries of the same names. Payload
-    # shape: {panel_key, workspace_id, label}. Step 4.4 fires these from the
-    # generate flow itself; this step just makes _deliver()'s Pusher mirror
-    # stop raising on them.
-    "generation_started", "generation_done", "generation_error",
-    # FIX — confirmed 2026-08-01: Part 8.4's own design comment above
-    # (see "NEW — Part 8.4" block) says per-user notifications use the
-    # literal event_type "notification" as an envelope, with the actual
-    # kind (note_proposed, etc.) living in payload["kind"] -- exactly
-    # what eo/note_candidates.py's propose_note() already calls
-    # (emit_user_event("notification", ..., payload={"kind": "note_proposed", ...})).
-    # That literal was never actually added to this set, so every such
-    # call has been raising inside emit_user_event()'s try/except and
-    # silently failing (caught and printed by the caller, never
-    # crashing, but never delivering the notification either) since
-    # Part 8.4 landed. Confirmed via scripts/seed_test_note.py:
-    # "[note_candidates] notification emit failed: [relay] Unknown
-    # event type 'notification'."
-    "notification",
-    # NEW — Step 7 of the parallel-execution work: fired from
+    NOTIFICATION = "notification"
+
+    # Phase 4 steps 4.1-4.3 (Notebooks Chat-First refinement): eo/notify.py's
+    # _deliver() mirrors every notify() call onto this Pusher channel too,
+    # in addition to eo/ws_registry.py's self-hosted socket. Every kind in
+    # eo/notify.py's VALID_KINDS needs a matching member here -- that file
+    # now derives its set from this enum instead of hand-copying, so this
+    # is the only place new session-scoped notify() kinds need to be added.
+    UPLOAD_PROCESSED = "upload_processed"
+    BACKLINKS_UPDATED = "backlinks_updated"
+    WORKSPACE_PROMOTED = "workspace_promoted"
+    TOPIC_ADDED = "topic_added"
+    TOPIC_MERGED = "topic_merged"
+    CONNECTION_ADDED = "connection_added"
+    # Payload shape: {panel_key, workspace_id, label}.
+    GENERATION_STARTED = "generation_started"
+    GENERATION_DONE = "generation_done"
+    GENERATION_ERROR = "generation_error"
+
+    # Step 7 of the parallel-execution work: fired from
     # eo/executor.py's _run_concurrent_group() whenever a Panel-agreed
-    # parallel group actually dispatches (i.e. it already cleared Step
-    # 3's sanitize_parallel_groups() and Step 5's approval_roles
-    # backstop) — the observability point for seeing this feature fire
-    # on real traffic and evaluating whether the Panel's proposed
-    # groups are actually sensible over time.
-    "parallel_group_dispatched",
-    # FIX — confirmed via tests/integration/test_resume_graph.py (Part 2
-    # §2.4's human-in-the-loop pause/resume checkpoint): eo/executor.py's
-    # resume_graph() has fired emit_event("execution_resumed", ...) right
-    # after applying a human's approve/edit/reject_redo decision since
-    # that checkpoint landed, but the literal was never added here. Since
-    # resume_graph() always has a real session_id (a paused run can't
-    # exist without one), this check ran unconditionally on every real
-    # resume call and raised ValueError immediately after the human's
-    # decision was applied -- confirmed by exercising resume_graph()
-    # directly against a real paused snapshot in the test above, same
-    # class of gap as the "notification" fix a few entries up.
-    "execution_resumed",
-    # NEW — CO4 patch 3: real instrumentation at two decision points that
-    # previously emitted nothing at all (confirmed by reading both files
-    # directly before this patch — eo/quota_sentinel.py only ever fires
-    # the threshold "quota_alert" above, never a per-request signal, and
-    # eo/semantic_cache.py/eo/worker_pool.py called emit_event() zero
-    # times between them). "cache_hit" fires from
-    # eo/semantic_cache.py's check_cache() whenever a cached answer is
-    # actually returned (trusted-fingerprint or LLM-verified). "worker_
-    # pool_selection" fires from eo/worker_pool.py's _select_workers()
-    # whenever the quota-ranked fairness rotation actually picks a
-    # worker pool (not the Panel's own key_override path — that's an
-    # explicit hire, not a rotation decision). Both are consumed by
-    # WorkspaceDockContext.jsx's handleDockEvent (this same patch) into
-    # a new `decisionEvents` array; CO4 patch 4 is what actually renders
-    # them on the timeline.
-    "cache_hit", "worker_pool_selection",
-}
+    # parallel group actually dispatches.
+    PARALLEL_GROUP_DISPATCHED = "parallel_group_dispatched"
+
+    # Part 2 §2.4's human-in-the-loop pause/resume checkpoint:
+    # eo/executor.py's resume_graph() fires this right after applying a
+    # human's approve/edit/reject_redo decision.
+    EXECUTION_RESUMED = "execution_resumed"
+
+    # CO4 patch 3: "cache_hit" fires from eo/semantic_cache.py's
+    # check_cache() whenever a cached answer is actually returned
+    # (trusted-fingerprint or LLM-verified). "worker_pool_selection"
+    # fires from eo/worker_pool.py's _select_workers() whenever the
+    # quota-ranked fairness rotation actually picks a worker pool (not
+    # the Panel's own key_override path -- that's an explicit hire, not
+    # a rotation decision).
+    CACHE_HIT = "cache_hit"
+    WORKER_POOL_SELECTION = "worker_pool_selection"
+
+    # PATCH-A additions: real call sites (agents/*.py) that were firing
+    # these literals all along but had no matching entry, so every one
+    # of them raised ValueError the first time that code path executed
+    # in production -- same class of gap as the "notification" and
+    # "execution_resumed" fixes above, just never caught until now.
+    ARCHITECTURE_DIAGRAM = "architecture_diagram"       # agents/architecture_diagrammer.py
+    PLAN_HANDOFF = "plan_handoff"                        # agents/handoff_packager.py
+    SCHEMA_DIAGRAM = "schema_diagram"                    # agents/schema_diagrammer.py
+    DEVICE_SPEC = "device_spec"                          # agents/hardware_speccer.py
+    DEPLOY_CONFIG_PROPOSED = "deploy_config_proposed"    # agents/deploy_config_writer.py
+    DEPLOY_CONFIG_WRITTEN = "deploy_config_written"      # agents/deploy_agent.py
+    DEPLOY_CONFIRMED = "deploy_confirmed"                # agents/deploy_agent.py
+    DEPLOY_DECLINED = "deploy_declined"                  # agents/deploy_agent.py
+    UPTIMEROBOT_REGISTERED = "uptimerobot_registered"    # agents/deploy_agent.py
+    UPTIMEROBOT_REGISTRATION_FAILED = "uptimerobot_registration_failed"  # agents/deploy_agent.py
+
+
+# Backward-compat view: existing code/tests that do
+# `"foo" in emitter.VALID_EVENT_TYPES` or iterate/sort it as plain
+# strings keep working unchanged. This is now *derived*, never
+# hand-edited -- add new event types to the EventType enum above, not
+# here.
+VALID_EVENT_TYPES = {e.value for e in EventType}
+
+# The session-scoped subset that eo/notify.py's notify() accepts as a
+# `kind`. Previously eo/notify.py kept its own separately hand-typed
+# VALID_KINDS string set that was meant to mirror this one -- the two
+# were expected to be "kept in lockstep by hand" (that file's own old
+# comment), which is exactly the kind of manual-sync requirement that
+# let the original bug happen in the first place. eo/notify.py now
+# imports this constant and derives its VALID_KINDS from it instead of
+# retyping the strings, so adding/renaming a notify()-eligible event
+# type only ever needs to happen in one place: here, by adding the
+# EventType member above AND listing it below. A member left out of
+# this set simply isn't notify()-eligible (e.g. AGENT_START is a valid
+# EventType for emit_event() but was never meant to be a notify() kind)
+# -- that's a deliberate, visible choice made in this file, not silent
+# drift discovered later in a traceback.
+NOTIFY_KINDS = frozenset({
+    EventType.UPLOAD_PROCESSED,
+    EventType.BACKLINKS_UPDATED,
+    EventType.WORKSPACE_PROMOTED,
+    EventType.TOPIC_ADDED,
+    EventType.TOPIC_MERGED,
+    EventType.CONNECTION_ADDED,
+    EventType.GENERATION_STARTED,
+    EventType.GENERATION_DONE,
+    EventType.GENERATION_ERROR,
+})
 
 _pusher_client = None
 _pusher_unavailable = False  # sticky: don't retry client construction every call
@@ -197,7 +250,7 @@ def _get_client():
 
 
 def emit_event(
-    event_type: str,
+    event_type: "EventType | str",
     session_id: str = None,
     agent: str = None,
     path: str = None,
@@ -207,21 +260,46 @@ def emit_event(
     Fires one event on session_id's channel. Part 6.3 schema:
         {type, session_id, agent, path, timestamp, payload}
 
+    event_type may be an EventType member (preferred -- a typo becomes
+    an AttributeError at the call site, before this function is ever
+    reached) or a plain string (kept for backward compat with existing
+    call sites and tests). Either way it's normalized to a plain str
+    below, so the event actually sent over the wire always has a plain
+    string `type`, never an Enum instance.
+
     Returns True if the event was sent, False if it was skipped (no
-    session_id, Pusher not configured) or failed. Callers should NOT
-    branch on this return value for control flow -- it exists for
-    tests and optional logging only. An agent's real work must never
-    depend on whether its event emission succeeded (Part 1's whole
-    point: the relay is a side channel, never the source of truth).
+    session_id, Pusher not configured, or an unrecognized event_type)
+    or failed. Callers should NOT branch on this return value for
+    control flow -- it exists for tests and optional logging only. An
+    agent's real work must never depend on whether its event emission
+    succeeded (Part 1's whole point: the relay is a side channel, never
+    the source of truth).
+
+    An unrecognized event_type is logged and skipped, never raised --
+    this used to raise ValueError, which meant a single orphaned string
+    literal (missing from VALID_EVENT_TYPES, or a plain typo) could
+    take down an entire task run mid-execution, well after real agent
+    work had already happened. That directly contradicted this module's
+    own design rule above ("an event-emission failure must NEVER take
+    down the actual agent work riding alongside it") -- the raise was
+    the one place this function didn't actually follow that rule. Every
+    other failure mode here (no session_id, Pusher unconfigured, Pusher
+    trigger() throwing) already degrades to a logged False instead of
+    propagating; this makes unknown-event-type consistent with those,
+    the same way a lint rule catches inconsistent error handling.
     """
     if session_id is None:
         return False  # no-op path: no channel to publish on
 
+    if isinstance(event_type, EventType):
+        event_type = event_type.value
+
     if event_type not in VALID_EVENT_TYPES:
-        raise ValueError(
-            f"[relay] Unknown event type {event_type!r}. "
-            f"Must be one of {sorted(VALID_EVENT_TYPES)}."
-        )
+        print(f"  [relay] emit_event(): unknown event type {event_type!r}, skipping "
+              f"(not one of {len(VALID_EVENT_TYPES)} known EventType values). "
+              f"This event was NOT sent -- add it to EventType in relay/emitter.py "
+              f"if it's a real, intentional event.")
+        return False
 
     client = _get_client()
     if client is None:
@@ -247,7 +325,7 @@ def emit_event(
 
 
 def emit_user_event(
-    event_type: str,
+    event_type: "EventType | str",
     user_id: str = None,
     agent: str = None,
     payload: dict = None,
@@ -261,15 +339,24 @@ def emit_user_event(
     eo/note_candidates.py), so collapsing them into one function with
     branching behavior would make both call sites harder to read than
     two small functions.
+
+    event_type accepts an EventType member or plain string, same as
+    emit_event() -- see that function's docstring for why, including
+    why an unrecognized event_type is now logged and skipped rather
+    than raised.
     """
     if user_id is None:
         return False  # no-op path: no channel to publish on
 
+    if isinstance(event_type, EventType):
+        event_type = event_type.value
+
     if event_type not in VALID_EVENT_TYPES:
-        raise ValueError(
-            f"[relay] Unknown event type {event_type!r}. "
-            f"Must be one of {sorted(VALID_EVENT_TYPES)}."
-        )
+        print(f"  [relay] emit_user_event(): unknown event type {event_type!r}, "
+              f"skipping (not one of {len(VALID_EVENT_TYPES)} known EventType "
+              f"values). This event was NOT sent -- add it to EventType in "
+              f"relay/emitter.py if it's a real, intentional event.")
+        return False
 
     client = _get_client()
     if client is None:

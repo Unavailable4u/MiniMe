@@ -47,7 +47,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read
 from utils.llm_client import generate_text
-from relay.emitter import emit_event
+from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
 from eo import workspace_facts
 from agents.structure_architect import _strip_fences  # reuse, don't reimplement
@@ -309,7 +309,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
       event="instruction_steps",
     )
 
-    emit_event("device_spec", session_id, agent="hardware_speccer",
+    emit_event(EventType.DEVICE_SPEC, session_id, agent="hardware_speccer",
                payload={"part_count": len(spec.get("parts", []))})
     return {"text": json.dumps(spec), "spec": spec}
 

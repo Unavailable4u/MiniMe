@@ -42,7 +42,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, set_app_slug, slugify
-from relay.emitter import emit_event
+from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
 # Reuse, don't reimplement — same bus keys architecture_diagrammer.py/
 # schema_diagrammer.py already write their rendered Mermaid to.
@@ -259,7 +259,7 @@ def run_handoff_packager(session_id: str = None, tier: int = None,
             f'"Start building this" to kick off cycle 1.'
         ),
     }
-    emit_event("plan_handoff", session_id, agent="handoff_packager",
+    emit_event(EventType.PLAN_HANDOFF, session_id, agent="handoff_packager",
                payload={"app_slug": app_slug, "target_feature": target_feature,
                         "feature_count": len(features)})
     return result

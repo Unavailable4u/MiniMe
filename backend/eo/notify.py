@@ -47,67 +47,61 @@ from datetime import datetime, timezone
 
 from eo.ws_registry import push as _ws_push
 from relay.emitter import emit_event as _emit_pusher_event   # NEW — Phase 4 step 4.2
+from relay.emitter import NOTIFY_KINDS  # PATCH-B: single source of truth, see relay/emitter.py
 
 logger = logging.getLogger(__name__)
 
-# Every event kind a §9a call site fires today. Same closed-set
-# validation posture relay/emitter.py:VALID_EVENT_TYPES already uses --
-# a typo'd kind should fail loud in dev, not silently vanish into a
-# channel nobody's listening on yet. Grows as later steps wire their
-# own call sites (§9c's Generate-button loading state watches these
-# same two rather than needing a new kind of its own -- see module
-# docstring above; §9d's chat proactive suggestions reads
-# "backlinks_updated" payloads for prerequisite topics).
-VALID_KINDS = {
-    "upload_processed",    # agents/source_manager.py:process_upload() finished
-    "backlinks_updated",   # agents/backlink_detector.py:run_after_source_manager() finished
-    "workspace_promoted",  # NEW — §10d: eo/chat_workspace.py:chat_triggered_partial_promote()
-                            # fired an actual promote
-    "topic_added",         # NEW — Overlap/Live-Viz guide §5: agents/source_manager.py's
-                            # Mode A pass wrote a genuinely new topic node.
-                            # payload: {topic_id, name, parent}
-    "topic_merged",        # NEW — same guide, §5: a "duplicate"-tagged topic got folded
-                            # into an existing one's `instances` instead of its own node.
-                            # payload: {topic_id, target_topic_id, tag}
-    "connection_added",    # NEW — same guide, §5: a connection op landed (Backlink
-                            # Detector's normal reparent/connect pass, or its §4
-                            # same_fact_as merge short-circuit). payload:
-                            # {from_topic, to_topic, relation}
-
-    # NEW — Notebooks Chat-First refinement, Phase 4 step 4.3: chat-native
-    # generation notifications (step 4.4 wires the actual call sites in the
-    # generate flow; this step only registers the kinds). All three share
-    # the same payload shape: {panel_key, workspace_id, label}.
-    "generation_started",  # a chat-triggered (or picker-triggered) generation
-                            # kicked off for panel_key in workspace_id
-    "generation_done",     # that generation finished and panel content is
-                            # ready to render/hydrate
-    "generation_error",    # that generation failed; label carries a
-                            # user-facing message
-}
+# Every event kind a §9a call site fires today. Derived from
+# relay/emitter.py's NOTIFY_KINDS (itself a curated subset of the
+# EventType enum) rather than hand-typed here -- this set and
+# relay/emitter.py's VALID_EVENT_TYPES used to be two independently
+# maintained string sets that were only "meant to" stay in lockstep by
+# hand, which is exactly how event types like "notification" ended up
+# silently unrecognized on one side for a period after Part 8.4 landed.
+# To add a new notify()-eligible kind: add the member to EventType in
+# relay/emitter.py, then add it to NOTIFY_KINDS there too. Nothing
+# changes here.
+VALID_KINDS = {k.value for k in NOTIFY_KINDS}
 
 
 def notify(session_id: str, kind: str, payload: dict = None) -> dict | None:
     """The one boundary every call site below fires through.
 
     Returns the event dict that was pushed (§9b), or None on the
-    no-op path (no session_id) -- same "return value is for
-    tests/logging only, never control flow" contract
-    relay/emitter.py:emit_event() already documents for its own
-    callers. Raises on an unrecognized kind (a caller bug, not a
-    runtime condition to degrade past) rather than staying silent the
-    way the no-session_id path does.
+    no-op path (no session_id, or an unrecognized kind -- see below)
+    -- same "return value is for tests/logging only, never control
+    flow" contract relay/emitter.py:emit_event() already documents for
+    its own callers.
 
     session_id=None is a no-op, not an error -- same reasoning
     relay/emitter.py gives for its own no-channel case: this keeps it
     safe to call notify() from a code path that sometimes runs without
     a session (CLI usage, background jobs) without every caller having
     to guard for that itself.
+
+    An unrecognized kind is logged and skipped, never raised. This used
+    to raise ValueError on the theory that an unknown kind is "a caller
+    bug, not a runtime condition to degrade past" -- but relay/emitter.py's
+    own module docstring states the actual design rule for this whole
+    subsystem: "an event-emission failure must NEVER take down the
+    actual agent work riding alongside it." A caller bug is still an
+    event-emission failure from the perspective of whatever real work
+    called notify() and didn't expect a notification side-channel to be
+    able to kill it. Every other failure mode in this module (both
+    _deliver() transports) already degrades to a logged, swallowed
+    exception instead of propagating; this makes the validation step
+    consistent with that.
     """
     if session_id is None:
         return None
     if kind not in VALID_KINDS:
-        raise ValueError(f"[notify] Unknown kind {kind!r}. Must be one of {sorted(VALID_KINDS)}.")
+        logger.warning(
+            "[notify] unknown kind %r, skipping (not one of %d known kinds). "
+            "This notification was NOT sent -- add it to NOTIFY_KINDS in "
+            "relay/emitter.py if it's a real, intentional kind.",
+            kind, len(VALID_KINDS),
+        )
+        return None
 
     event = {
         "kind": kind,

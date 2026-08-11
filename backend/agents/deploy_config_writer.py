@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS, get_current_app_slug
 from utils.llm_client import generate_text
-from relay.emitter import emit_event
+from relay.emitter import emit_event, EventType
 
 load_dotenv()
 
@@ -139,7 +139,7 @@ def run_deploy_config_writer(session_id: str = None, tier: int = None,
         }
 
     write(DEPLOY_CONFIG_PLAN_KEY, plan)
-    emit_event("deploy_config_proposed", session_id, agent="deploy_config_writer",
+    emit_event(EventType.DEPLOY_CONFIG_PROPOSED, session_id, agent="deploy_config_writer",
                payload={"platform": plan.get("platform"), "config_filename": plan.get("config_filename")})
     return plan
 
