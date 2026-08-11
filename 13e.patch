@@ -1,0 +1,194 @@
+diff --git a/backend/api/routes/tasks.py b/backend/api/routes/tasks.py
+index 486f223..bc59e4d 100644
+--- a/backend/api/routes/tasks.py
++++ b/backend/api/routes/tasks.py
+@@ -610,6 +610,12 @@ class RunFromTemplateRequest(BaseModel):
+     session_id: Optional[str] = None
+     mode: Optional[str] = "auto"
+     project_unique_name: Optional[str] = None
++    scope: Optional[str] = None   # NEW — task 13e: closes the gap flagged
++    # in 13d — without this, a template built around web_researcher
++    # silently fell back to "general" on every dispatch through this
++    # path. Same semantics as TaskRequest.scope above: forwarded
++    # unchanged to run_task_from_template() -> _dispatch_resolved(),
++    # None for every existing template/caller.
+ 
+ 
+ @router.post("/api/task/from-template", response_model=TaskResponse, dependencies=[Depends(require_auth)])
+@@ -625,6 +631,7 @@ def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends
+             mode=req.mode,
+             project_unique_name=req.project_unique_name,
+             owner_id=owner_id,
++            scope=req.scope,   # NEW — task 13e
+         )
+     except KeyError as exc:
+         raise HTTPException(status_code=404, detail=str(exc))
+diff --git a/backend/api/task_runner.py b/backend/api/task_runner.py
+index bb6dd75..c361f67 100644
+--- a/backend/api/task_runner.py
++++ b/backend/api/task_runner.py
+@@ -671,7 +671,7 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
+ 
+ def run_task_from_template(template_id: str, task_text: str, session_id: str = None,
+                             mode: str = "auto", project_unique_name: str = None,
+-                            owner_id: str = None) -> dict:   
++                            owner_id: str = None, scope: str = None) -> dict:   
+     """Part 2 §2.3/§2.6 — the entrypoint eo/structure.py's
+     save_workflow_template()/classification_from_template() were built
+     for but, until now, had nothing on the API side actually calling
+@@ -707,7 +707,17 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
+     loop_v4._get_decision()'s classification path, which this entrypoint
+     deliberately bypasses. Worth factoring into one shared helper if a
+     third caller ever needs the same gating — not done here to keep this
+-    change to exactly what §2.6 needs."""
++    change to exactly what §2.6 needs.
++
++    scope: NEW — task 13e. Closes the gap flagged when 13d landed:
++    _dispatch_resolved()'s scope param was only ever reached from
++    run_task() -> _run_task_inner(), so a template built around
++    web_researcher would silently fall back to "general" once dispatched
++    from here. Forwarded unchanged to _dispatch_resolved() below, same
++    "tier-3 hires-driven branch only, no-op otherwise" scoping scope
++    already has everywhere else. Still None for every template that
++    doesn't hire web_researcher, and for every caller that doesn't pass
++    it — no behavior change for existing templates."""
+     template = get_workflow_template(template_id)
+     if template is None:
+         raise KeyError(f"No workflow template found for template_id={template_id!r}")
+@@ -760,6 +770,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
+         project_unique_name=project_unique_name,
+         approval_roles=approval_roles,
+         no_conversation_context_roles=no_conversation_context_roles,
++        scope=scope,   # NEW — task 13e
+     )
+     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
+     return response
+diff --git a/frontend/app/components/tabs/ResearchTab.jsx b/frontend/app/components/tabs/ResearchTab.jsx
+index a272e1c..50af41c 100644
+--- a/frontend/app/components/tabs/ResearchTab.jsx
++++ b/frontend/app/components/tabs/ResearchTab.jsx
+@@ -593,8 +593,25 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
+ // (researcher/fact_checker/writer/editor) run exactly as the Panel would
+ // normally staff them. The list below reads back what that run wrote as
+ // nodes -- real, persisted, live-fetched data, not a paste box.
++// NEW — task 13e: Sources sub-tab scope control. Each option pairs a
++// `scope` value (rides POST /api/task as `scope`, read only by
++// web_researcher's dispatch branch — see tasks.py's TaskRequest and
++// task_runner.py's _dispatch_resolved()) with task-text phrasing chosen
++// so the Panel reliably hires web_researcher with that scope instead of
++// academic_search. "Academic" is the one exception: it omits `scope`
++// entirely and keeps the original "Find recent papers about: X" phrasing
++// unchanged, so today's academic_search behavior is untouched.
++const RESEARCH_SCOPE_OPTIONS = [
++  { value: "academic", label: "Academic", scope: null, phrase: (q) => `Find recent papers about: ${q}` },
++  { value: "general", label: "General web", scope: "general", phrase: (q) => `Search the web for: ${q}` },
++  { value: "forum", label: "Forums", scope: "forum", phrase: (q) => `Search Reddit and forums for: ${q}` },
++  { value: "news", label: "News", scope: "news", phrase: (q) => `Search news sources for: ${q}` },
++  { value: "hackernews", label: "Hacker News", scope: "hackernews", phrase: (q) => `Search Hacker News for: ${q}` },
++];
++
+ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScopedSubChat, openInDock }) {
+   const [query, setQuery] = useState("");
++  const [searchScope, setSearchScope] = useState("academic"); // NEW — task 13e
+   const [sources, setSources] = useState([]);
+   const [loading, setLoading] = useState(false);
+   const [searching, setSearching] = useState(false);
+@@ -614,7 +631,14 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
+     if (!query.trim()) return;
+     setSearching(true);
+     try {
+-      const chatId = await openScopedSubChat(wsId, `Find recent papers about: ${query.trim()}`);
++      // NEW — task 13e: phrase + scope come from the selected option.
++      // "Academic" keeps the original phrasing and passes no scope, so
++      // that path is byte-for-byte what it was before this control
++      // existed. Every other option phrases the task so the Panel hires
++      // web_researcher, and passes its scope through so that agent's
++      // dispatch branch (task_runner.py) picks the right domain preset.
++      const opt = RESEARCH_SCOPE_OPTIONS.find((o) => o.value === searchScope) || RESEARCH_SCOPE_OPTIONS[0];
++      const chatId = await openScopedSubChat(wsId, opt.phrase(query.trim()), null, opt.scope);
+       await openInDock(chatId);
+     } finally {
+       setSearching(false);
+@@ -636,6 +660,22 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
+   return (
+     <div className="space-y-4">
+       <div className="flex gap-2">
++        {/* NEW — task 13e: scope selector. Lives next to the query box
++            rather than replacing it — the query stays one free-text
++            field, this just picks which agent + domain preset it's
++            dispatched to. */}
++        <label className="sr-only" htmlFor="research-search-scope">Search scope</label>
++        <select
++          id="research-search-scope"
++          name="researchSearchScope"
++          value={searchScope}
++          onChange={(e) => setSearchScope(e.target.value)}
++          className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] shrink-0"
++        >
++          {RESEARCH_SCOPE_OPTIONS.map((o) => (
++            <option key={o.value} value={o.value}>{o.label}</option>
++          ))}
++        </select>
+         <input
+           id="research-query"
+           name="researchQuery"
+@@ -662,9 +702,9 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
+         </button>
+       </div>
+       <p className="text-[11px] text-[var(--neutral-600)]">
+-        Runs academic_search (Semantic Scholar, arXiv, CrossRef, OpenAlex) plus whatever
+-        writing/synthesis roles the task needs, in this project's own chat — sources found
+-        get written back here as they're indexed.
++        {searchScope === "academic"
++          ? "Runs academic_search (Semantic Scholar, arXiv, CrossRef, OpenAlex) plus whatever writing/synthesis roles the task needs, in this project's own chat — sources found get written back here as they're indexed."
++          : "Runs web_researcher against this scope's domain preset, in this project's own chat — sources found get written back here as they're indexed, same as academic_search."}
+       </p>
+ 
+       {sources.length === 0 && !loading && (
+diff --git a/frontend/app/context/SessionContext.jsx b/frontend/app/context/SessionContext.jsx
+index 4698be0..e0998dd 100644
+--- a/frontend/app/context/SessionContext.jsx
++++ b/frontend/app/context/SessionContext.jsx
+@@ -2100,7 +2100,12 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   // 6.11.f is what makes the backend actually act on it. Every existing
+   // call site (dock.sendTask, PlanTab's WireframesPanel, etc.) keeps
+   // working unchanged since this param defaults to null.
+-  const sendTask = useCallback(async (taskText, topicId = null) => {
++  // scope (NEW — task 13e) is likewise optional and passed through
++  // unchanged to POST /api/task's `scope` field (already consulted
++  // server-side as of 13d, only web_researcher's dispatch branch reads
++  // it). Every existing call site keeps working unchanged since this
++  // param defaults to null.
++  const sendTask = useCallback(async (taskText, topicId = null, scope = null) => {
+     const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
+     setMessages((prev) => [...prev, userMessage]);
+     persistMessage(userMessage);   // NEW
+@@ -2159,6 +2164,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+           session_id: sessionId,
+           mode,
+           ...(topicId ? { topic_id: topicId } : {}),   // NEW — Step 6.11.c
++          ...(scope ? { scope } : {}),   // NEW — task 13e
+         }),
+       });
+       const data = await res.json();
+@@ -2194,13 +2200,18 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
+   // that lands this value goes nowhere past this console.debug.
+   // (Relocated here in 2.3k, right after sendTask's own declaration — see
+   // the note left in its old spot near createWorkspaceChat for why.)
+-  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null) => {
++  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null, scope = null) => {
+     // Step 6.11.c: topicId now actually reaches sendTask() and rides the
+     // /api/task POST body as topic_id. The server still only logs it
+     // (see api/server.py's post_task()) — 6.11.f is what makes routing
+     // consult it — so this is still safe to land ahead of that.
++    // scope (NEW — task 13e): same pass-through shape as topicId above,
++    // rides the POST body as `scope`. Used by ResearchTab.jsx's Sources
++    // sub-tab to steer the Panel toward web_researcher with a domain
++    // scope instead of academic_search — see that file for the phrasing
++    // this pairs with.
+     const chatId = await createWorkspaceChat(wsId);
+-    await sendTask(taskText, topicId);
++    await sendTask(taskText, topicId, scope);
+     return chatId;
+   }, [createWorkspaceChat, sendTask]);
+ 

@@ -610,6 +610,12 @@ class RunFromTemplateRequest(BaseModel):
     session_id: Optional[str] = None
     mode: Optional[str] = "auto"
     project_unique_name: Optional[str] = None
+    scope: Optional[str] = None   # NEW — task 13e: closes the gap flagged
+    # in 13d — without this, a template built around web_researcher
+    # silently fell back to "general" on every dispatch through this
+    # path. Same semantics as TaskRequest.scope above: forwarded
+    # unchanged to run_task_from_template() -> _dispatch_resolved(),
+    # None for every existing template/caller.
 
 
 @router.post("/api/task/from-template", response_model=TaskResponse, dependencies=[Depends(require_auth)])
@@ -625,6 +631,7 @@ def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends
             mode=req.mode,
             project_unique_name=req.project_unique_name,
             owner_id=owner_id,
+            scope=req.scope,   # NEW — task 13e
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

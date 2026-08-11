@@ -671,7 +671,7 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
 
 def run_task_from_template(template_id: str, task_text: str, session_id: str = None,
                             mode: str = "auto", project_unique_name: str = None,
-                            owner_id: str = None) -> dict:   
+                            owner_id: str = None, scope: str = None) -> dict:   
     """Part 2 §2.3/§2.6 — the entrypoint eo/structure.py's
     save_workflow_template()/classification_from_template() were built
     for but, until now, had nothing on the API side actually calling
@@ -707,7 +707,17 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     loop_v4._get_decision()'s classification path, which this entrypoint
     deliberately bypasses. Worth factoring into one shared helper if a
     third caller ever needs the same gating — not done here to keep this
-    change to exactly what §2.6 needs."""
+    change to exactly what §2.6 needs.
+
+    scope: NEW — task 13e. Closes the gap flagged when 13d landed:
+    _dispatch_resolved()'s scope param was only ever reached from
+    run_task() -> _run_task_inner(), so a template built around
+    web_researcher would silently fall back to "general" once dispatched
+    from here. Forwarded unchanged to _dispatch_resolved() below, same
+    "tier-3 hires-driven branch only, no-op otherwise" scoping scope
+    already has everywhere else. Still None for every template that
+    doesn't hire web_researcher, and for every caller that doesn't pass
+    it — no behavior change for existing templates."""
     template = get_workflow_template(template_id)
     if template is None:
         raise KeyError(f"No workflow template found for template_id={template_id!r}")
@@ -760,6 +770,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
         project_unique_name=project_unique_name,
         approval_roles=approval_roles,
         no_conversation_context_roles=no_conversation_context_roles,
+        scope=scope,   # NEW — task 13e
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response

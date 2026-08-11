@@ -2100,7 +2100,12 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // 6.11.f is what makes the backend actually act on it. Every existing
   // call site (dock.sendTask, PlanTab's WireframesPanel, etc.) keeps
   // working unchanged since this param defaults to null.
-  const sendTask = useCallback(async (taskText, topicId = null) => {
+  // scope (NEW — task 13e) is likewise optional and passed through
+  // unchanged to POST /api/task's `scope` field (already consulted
+  // server-side as of 13d, only web_researcher's dispatch branch reads
+  // it). Every existing call site keeps working unchanged since this
+  // param defaults to null.
+  const sendTask = useCallback(async (taskText, topicId = null, scope = null) => {
     const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
     setMessages((prev) => [...prev, userMessage]);
     persistMessage(userMessage);   // NEW
@@ -2159,6 +2164,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
           session_id: sessionId,
           mode,
           ...(topicId ? { topic_id: topicId } : {}),   // NEW — Step 6.11.c
+          ...(scope ? { scope } : {}),   // NEW — task 13e
         }),
       });
       const data = await res.json();
@@ -2194,13 +2200,18 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // that lands this value goes nowhere past this console.debug.
   // (Relocated here in 2.3k, right after sendTask's own declaration — see
   // the note left in its old spot near createWorkspaceChat for why.)
-  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null) => {
+  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null, scope = null) => {
     // Step 6.11.c: topicId now actually reaches sendTask() and rides the
     // /api/task POST body as topic_id. The server still only logs it
     // (see api/server.py's post_task()) — 6.11.f is what makes routing
     // consult it — so this is still safe to land ahead of that.
+    // scope (NEW — task 13e): same pass-through shape as topicId above,
+    // rides the POST body as `scope`. Used by ResearchTab.jsx's Sources
+    // sub-tab to steer the Panel toward web_researcher with a domain
+    // scope instead of academic_search — see that file for the phrasing
+    // this pairs with.
     const chatId = await createWorkspaceChat(wsId);
-    await sendTask(taskText, topicId);
+    await sendTask(taskText, topicId, scope);
     return chatId;
   }, [createWorkspaceChat, sendTask]);
 
