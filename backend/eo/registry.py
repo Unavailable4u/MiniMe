@@ -481,6 +481,28 @@ ROLE_PROMPTS_SEED = {
     "implementer": "You are a focused implementer. Write clean, working code for exactly the scope you were briefed on — do not expand scope on your own.",
     "verifier": "You are a verifier. Check the given output against its stated goal and report pass/fail with specific reasons — do not fix issues yourself, only report them.",
     "researcher": "You gather and synthesize information on a topic from provided sources or general knowledge. Flag anything you're unsure of rather than stating it as fact.",
+    # Task 13c/13d — hand-written up front, same reasoning as every other
+    # seed brief in this dict: a bad first-draft brief becomes permanent
+    # once a cold-start hire writes it. The specific failure mode worth
+    # heading off here is the Panel defaulting to "academic_search" for
+    # every research-shaped request out of habit -- this brief exists
+    # specifically to give the Panel a second real option and state when
+    # each one is the right call, not just describe what web_researcher
+    # does in isolation.
+    "web_researcher": (
+        "You run a real web search (general web, Reddit/forums, a "
+        "curated news allowlist, or Hacker News, depending on scope) and "
+        "return the actual sources found -- you make zero LLM calls "
+        "yourself. Hire this role instead of academic_search when the "
+        "task is asking about current events, product/community "
+        "opinion, discussion threads, or anything that plainly isn't "
+        "academic literature -- academic_search is for peer-reviewed "
+        "papers and citations specifically, and returns nothing useful "
+        "for a 'what are people saying about X' or 'latest news on X' "
+        "request. Do not invent or paraphrase a source you didn't "
+        "actually retrieve; every source in your output has to be a "
+        "real URL that came back from the search."
+    ),
     "writer": "You draft prose to a specified tone, length, and format from a brief or outline.",
     "fact_checker": "You review a draft against source material or general knowledge and flag unsupported claims. You do not rewrite — only annotate.",
 
@@ -1522,6 +1544,13 @@ REAL_ACTION_ROLES = {
     # deliberately absent from this map — both require genuine judgment
     # and resolve to "generic_worker" like any reasoning role.
     "academic_search": "academic_search",
+    # Task 13 (E1 research role) — same real-action category as
+    # academic_search directly above: zero LLM calls, writes each result
+    # straight to the graph via eo/knowledge_graph.write_node (see
+    # agents/web_researcher.py's own docstring). Distinct from
+    # academic_search: scoped to general/forum/news/hackernews web
+    # search (utils/web_search.py, task 13a) rather than paper indexes.
+    "web_researcher": "web_researcher",
     "source_quality_flagger": "source_quality_flagger",
     "citation_graph_builder": "citation_graph_builder",
     "extraction_table_builder": "extraction_table_builder",
@@ -1593,6 +1622,7 @@ from agents import (
     reviewer_fixer_lean,
     generic_worker,
     academic_search,  # Part 3 §3.3 — was missing from this block, see fix note
+    web_researcher,  # Task 13c — E1 research role, general/forum/news/hackernews scopes
     extraction_table_builder,  # Part 3 §3.5
     contradiction_prefilter,  # Part 3 §3.6
     dataset_analyst,  # Part 3 §3.7
@@ -1672,6 +1702,20 @@ REGISTRY = {
     # dispatched by name in executor.py, but had no REGISTRY entry until
     # this line — resolve("academic_search") was a guaranteed KeyError.
     "academic_search":        {"callable": academic_search.run,               "needs_cycle_num": False},
+    # Task 13d/13e — web_researcher.run() takes an extra scope= kwarg
+    # ("general"/"forum"/"news"/"hackernews"). Threaded explicitly end
+    # to end from api/routes/tasks.py's TaskRequest.scope, through
+    # run_task()/_dispatch_resolved()/_run_tier3_hires()/
+    # run_with_looping()/execute_graph(), down to eo/executor.py's own
+    # web_researcher dispatch branch -- not inferred from task_text, so
+    # a UI scope selector is authoritative rather than best-effort. This
+    # is a deliberately DIFFERENT choice than academic_search's own
+    # `sources` param one line above, which genuinely is never threaded
+    # (always None/all four) -- picking the wrong academic index is
+    # mostly-harmless breadth, picking the wrong web_researcher scope
+    # (e.g. silently returning general web results instead of the
+    # Hacker News the person selected) is a real, visible bug.
+    "web_researcher":         {"callable": web_researcher.run,                "needs_cycle_num": False},
     "extraction_table_builder": {"callable": extraction_table_builder.run,    "needs_cycle_num": False},
     # contradiction_prefilter (§3.6) is the deterministic pre-filter half
     # of the contradiction/gap detector; "contradiction_detector" itself

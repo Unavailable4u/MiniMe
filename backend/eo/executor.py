@@ -333,7 +333,8 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                    cycle_num: int = None, session_id: str = None, path: str = None,
                    mode: str = None, key_overrides: dict = None,
                    project_unique_name: str = None, approval_roles: set = None,
-                   no_conversation_context_roles: set = None, domain: str = None) -> dict:
+                   no_conversation_context_roles: set = None, domain: str = None,
+                   scope: str = None) -> dict:
     """Fresh-start entry point. `approval_roles` defaults to None (today's
     full-auto behavior) — every existing call site that doesn't pass it is
     unaffected.
@@ -353,6 +354,18 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
     concurrent-group) so utils/llm_client.py's log_usage() can tag each
     call for the per-project/per-section usage breakdown. Defaults to
     None — unaffected for every call site that doesn't pass one.
+
+    `scope` (task 13d/13e — Sources sub-tab's scope selector): the ONE
+    caller-controlled value this pipeline forwards to web_researcher.run()
+    ("general"/"forum"/"news"/"hackernews"). Threaded the same depth as
+    domain above (all the way from api/routes/tasks.py's TaskRequest,
+    through run_task()/_run_tier3_hires()/run_with_looping(), down to
+    here), rather than inferred from task_text phrasing -- the UI already
+    knows the scope with certainty once the person picks it, so there's
+    nothing to re-derive downstream. Ignored by every role except
+    web_researcher; defaults to None, which _run_loop()'s own
+    web_researcher branch below then substitutes "general" for, matching
+    agents/web_researcher.py's own run() default.
 
     Returns either the finished {role: output} results dict, or, if
     execution pauses at a role in approval_roles,
@@ -385,14 +398,14 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
         project_unique_name=project_unique_name, expanded=expanded,
         approval_roles=approval_roles, next_step=next_step,
         no_conversation_context_roles=no_conversation_context_roles,
-        domain=domain,
+        domain=domain, scope=scope,
     )
 
 
 def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisits,
               task_text, session_id, path, mode, key_overrides, project_unique_name,
               expanded, approval_roles, next_step, no_conversation_context_roles=None,
-              domain=None) -> dict:
+              domain=None, scope=None) -> dict:
     """The actual step-dispatch loop, factored out of execute_graph() so
     resume_graph() below can re-enter it from a persisted mid-run
     snapshot instead of duplicating every dispatch case, the
@@ -576,6 +589,23 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # and tier for write_node()'s usage logging.
                 result = fn(task_text=task_text, session_id=session_id,
                             tier=PATH_TO_TIER.get(path), domain=domain)
+            elif current_name == "web_researcher":
+                # Same call shape as academic_search directly above --
+                # task_text as the search query, tier for write_node()'s
+                # usage logging. `scope` comes from _run_loop()'s own
+                # param (see execute_graph()'s docstring for the full
+                # path it's threaded through, all the way from
+                # api/routes/tasks.py's TaskRequest.scope) -- explicit
+                # end-to-end plumbing rather than parsed out of
+                # task_text, so a UI scope selector is authoritative
+                # instead of best-effort. `or "general"` only matters
+                # for callers that never pass one (e.g. the CLI
+                # __main__ smoke test below) -- web_researcher.run()'s
+                # own default is "general" too, this just makes that
+                # explicit at the call site rather than relying on
+                # run()'s signature to quietly supply it.
+                result = fn(task_text=task_text, session_id=session_id,
+                            tier=PATH_TO_TIER.get(path), scope=scope or "general")
             elif current_name == "dataset_analyst":
                 # Needs task_text as the analysis request, same reasoning
                 # as academic_search above. No key_override/expanded —
@@ -743,6 +773,12 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # after a resume still attributes to the same domain the
                 # run started with, instead of silently losing that tag.
                 "domain": domain,
+                # Task 13d/13e: same carry-through reasoning as domain
+                # directly above, so a resumed run's web_researcher step
+                # (if that's what it pauses/resumes at) still uses the
+                # scope the original dispatch was given, instead of
+                # silently falling back to "general" on resume.
+                "scope": scope,
                 # Captured so resume_graph() can restore the exact bus
                 # namespace this run was writing under before touching
                 # anything else.
@@ -846,6 +882,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     # Part 2 §2.6 — see _run_loop()'s snapshot-write comment above.
     no_conversation_context_roles = set(snapshot.get("no_conversation_context_roles") or [])
     domain = snapshot.get("domain")
+    scope = snapshot.get("scope")
     expanded = (mode or "auto").lower() in ("expert", "beast")
 
     # Macro-loop state (eo/loop_controller.py's run_with_looping()) —
@@ -859,6 +896,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     macro_hires = snapshot.get("macro_hires")
     macro_execution_order = snapshot.get("macro_execution_order")
     macro_domain = snapshot.get("macro_domain")
+    macro_scope = snapshot.get("macro_scope")
     macro_project_unique_name = snapshot.get("macro_project_unique_name")
 
     role = role_names[idx]
@@ -934,6 +972,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         new_snapshot["macro_hires"] = macro_hires
         new_snapshot["macro_execution_order"] = macro_execution_order
         new_snapshot["macro_domain"] = macro_domain
+        new_snapshot["macro_scope"] = macro_scope
         new_snapshot["macro_project_unique_name"] = macro_project_unique_name
         write(f"paused_execution:{session_id}", new_snapshot)
 
@@ -944,7 +983,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         project_unique_name=project_unique_name, expanded=expanded,
         approval_roles=approval_roles, next_step=next_step,
         no_conversation_context_roles=no_conversation_context_roles,
-        domain=domain,
+        domain=domain, scope=scope,
     )
 
     if isinstance(result, dict) and result.get("status") == "paused":
@@ -994,7 +1033,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
             project_unique_name=macro_project_unique_name, mode=effective_mode,
             approval_roles=approval_roles,
             no_conversation_context_roles=no_conversation_context_roles,
-            domain=macro_domain,
+            domain=macro_domain, scope=macro_scope,
         )
 
         if isinstance(pass_results, dict) and pass_results.get("status") == "paused":

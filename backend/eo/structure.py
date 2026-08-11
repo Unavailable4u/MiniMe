@@ -88,8 +88,14 @@ STRUCTURE_TEMPLATES = {
     # input_keys mechanism), so hiring one without the other ahead of it
     # in the order leaves contradiction_detector with no candidates to
     # judge.
+    # web_researcher (task 13c) sits directly beside academic_search --
+    # both are discovery-first, real-data-before-reasoning roles (same
+    # "the real data has to exist before anything downstream can reason
+    # about it" placement this comment block already calls out for
+    # academic_search below), just scoped to general/forum/news/
+    # hackernews web search instead of paper indexes.
     "research": [
-        "academic_search", "source_quality_flagger", "citation_graph_builder",
+        "academic_search", "web_researcher", "source_quality_flagger", "citation_graph_builder",
         "extraction_table_builder", "contradiction_prefilter", "contradiction_detector",
         "consensus_meter", "researcher", "fact_checker", "analyst", "writer", "editor",
     ],
