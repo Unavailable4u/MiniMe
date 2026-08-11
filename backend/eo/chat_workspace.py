@@ -637,10 +637,21 @@ def add_chat(ws_id: str, user_id: str, chat_id: str) -> dict:
 
 def create_chat_in_workspace(ws_id: str, user_id: str, title: str = "New Chat") -> dict:
     """One-step create+attach — see add_chat's docstring for the access
-    rules this reuses unchanged."""
+    rules this reuses unchanged.
+
+    Returns the newly created CHAT dict, not the workspace. add_chat()
+    itself returns the workspace (by design — see its own call sites),
+    so calling it here for its side effect only and re-fetching the
+    chat via chat_store.get_chat() is deliberate, not redundant: every
+    caller of create_chat_in_workspace (api/routes/workspaces.py's
+    POST /api/workspaces/{ws_id}/chats/create, api/routes/tasks.py's
+    session-bootstrap path) wants the id of the chat it just asked for,
+    not the workspace it already had ws_id for.
+    """
     _require_edit_access(ws_id, user_id)
     chat = chat_store.create_chat(user_id, title=title)
-    return add_chat(ws_id, user_id, chat["id"])
+    add_chat(ws_id, user_id, chat["id"])
+    return chat_store.get_chat(chat["id"], user_id)
 
 
 def remove_chat(ws_id: str, user_id: str, chat_id: str, delete_chat: bool = False) -> dict:

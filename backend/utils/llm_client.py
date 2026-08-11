@@ -364,6 +364,38 @@ def _set_cooldown(provider: str, key_id: str, exc) -> None:
         print(f"  [llm_client] cooldown write failed (non-fatal): {write_exc}")
 
 
+def _is_cooling_down(provider: str, key_id: str) -> bool:
+    """Reads cooldown_until:{provider}:{key_id} straight off the bus --
+    the same key _set_cooldown() above writes on every transient/
+    permanent-error failure, and the same key eo/panel.py's
+    _is_cooling_down() already reads for the tag-driven worker pool.
+    That pool checks it before picking an account; the hardcoded CHAIN
+    walked by generate_text()/stream_completion() below never did, so a
+    step whose key had already earned a 6-hour cooldown (e.g. a 403
+    PERMISSION_DENIED -- see _PERMANENT_ERROR_STATUS_CODES above) was
+    retried on every single call anyway, burning a real request (and
+    the latency of waiting for it to fail) before falling through to
+    the next step, every time, until the cooldown happened to be
+    checked by some other code path.
+
+    Fails toward "treat it as available" on a bad/missing read (no
+    recorded cooldown, or a bus error) -- same posture
+    eo/panel.py's own _is_cooling_down() takes, and the same "never let
+    quota/cooldown bookkeeping take down the real call" contract
+    _set_cooldown() itself follows above. A key genuinely still broken
+    will just fail again and re-extend its own cooldown, so failing
+    open here costs at most one wasted attempt, never a false skip of
+    a key that's actually fine.
+    """
+    try:
+        cooldown_until = bus_read(f"cooldown_until:{provider}:{key_id}", default=None)
+    except Exception:
+        return False
+    if not cooldown_until:
+        return False
+    return cooldown_until > datetime.now(timezone.utc).timestamp()
+
+
 _client_cache = {}
 
 
@@ -1065,6 +1097,10 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 continue
             key_id = account_id_env  # what identifies this "account" in the usage dashboard
             label = f"cloudflare:{model}"
+            if _is_cooling_down(provider, key_id):
+                print(f"  [{agent_name}] {label} skipped — still cooling down "
+                      f"(see cooldown_until:{provider}:{key_id}).")
+                continue
             json_mode = step.get("json_mode", False)
             try:
                 text, usage, finish_reason = _call_cloudflare_step(
@@ -1101,12 +1137,17 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         if getter is None:
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
 
+        label = f"{provider}:{model}"
+        if _is_cooling_down(provider, key_env):
+            print(f"  [{agent_name}] {label} skipped — still cooling down "
+                  f"(see cooldown_until:{provider}:{key_env}).")
+            continue
+
         client = getter(key_env, timeout)
         if client is None:
             print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
             continue
 
-        label = f"{provider}:{model}"
         try:
             text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
             _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
@@ -1253,12 +1294,17 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
         if getter is None:
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
 
+        label = f"{provider}:{model}"
+        if _is_cooling_down(provider, key_env):
+            print(f"  [{agent_name}] {label} skipped — still cooling down "
+                  f"(see cooldown_until:{provider}:{key_env}).")
+            continue
+
         client = getter(key_env, timeout)
         if client is None:
             print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
             continue
 
-        label = f"{provider}:{model}"
         chunk_queue: asyncio.Queue = asyncio.Queue()
 
         def _run_stream_sync(client=client, model=model):
