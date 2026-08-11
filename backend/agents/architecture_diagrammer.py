@@ -39,7 +39,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read
 from utils.llm_client import generate_text
-from relay.emitter import emit_event
+from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
 from agents.structure_architect import _mermaid_id, _strip_fences  # reuse, don't reimplement
 
@@ -206,7 +206,7 @@ def run_architecture_diagrammer(session_id: str = None, tier: int = None,
     plan["mermaid"] = _build_architecture_mermaid(plan)
     from memory.bus import write
     write(ARCHITECTURE_DIAGRAM_KEY, plan)
-    emit_event("architecture_diagram", session_id, agent="architecture_diagrammer",
+    emit_event(EventType.ARCHITECTURE_DIAGRAM, session_id, agent="architecture_diagrammer",
                payload={"mermaid": plan["mermaid"]})
     return {"text": plan["mermaid"], "mermaid": plan["mermaid"], "plan": plan}
 

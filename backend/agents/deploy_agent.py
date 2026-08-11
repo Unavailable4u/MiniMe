@@ -74,7 +74,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, get_current_app_slug
 from eo.project_registry import resolve_project_root
 from eo.errors import MissingDependencyError
-from relay.emitter import emit_event
+from relay.emitter import emit_event, EventType
 # Reuse, don't reimplement -- same root-confinement/path-safety functions
 # file_manager.py already enforces for every other write in this system.
 # A deploy config file is still a file write, same risk class as any
@@ -148,7 +148,7 @@ def write_deploy_config(project_unique_name: str = None, session_id: str = None)
         "written": [config_filename],
     }
     write(LAST_DEPLOY_CONFIG_SUMMARY_KEY, summary)
-    emit_event("deploy_config_written", session_id, agent="deploy_agent", payload=summary)
+    emit_event(EventType.DEPLOY_CONFIG_WRITTEN, session_id, agent="deploy_agent", payload=summary)
     return summary
 
 
@@ -173,7 +173,7 @@ def trigger_live_deploy(project_unique_name: str = None, session_id: str = None)
 
     if not _confirm_deploy(f"deploy '{app_slug}' live to {platform}"):
         result = {"status": "declined", "platform": platform, "app_slug": app_slug}
-        emit_event("deploy_declined", session_id, agent="deploy_agent", payload=result)
+        emit_event(EventType.DEPLOY_DECLINED, session_id, agent="deploy_agent", payload=result)
         return result
 
     # Honest stub past the confirmation gate -- see module docstring.
@@ -192,7 +192,7 @@ def trigger_live_deploy(project_unique_name: str = None, session_id: str = None)
         ),
     }
     write("last_deploy_trigger_result", result)
-    emit_event("deploy_confirmed", session_id, agent="deploy_agent", payload=result)
+    emit_event(EventType.DEPLOY_CONFIRMED, session_id, agent="deploy_agent", payload=result)
     return result
 
 
@@ -291,11 +291,11 @@ def register_uptimerobot_monitor(url: str, session_id: str = None,
         data = response.json()
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
         result = {"status": "error", "url": url, "message": f"UptimeRobot request failed: {exc}"}
-        emit_event("uptimerobot_registration_failed", session_id, agent="deploy_agent", payload=result)
+        emit_event(EventType.UPTIMEROBOT_REGISTRATION_FAILED, session_id, agent="deploy_agent", payload=result)
         return result
     except requests.exceptions.HTTPError as exc:
         result = {"status": "error", "url": url, "message": f"UptimeRobot HTTP error: {exc}"}
-        emit_event("uptimerobot_registration_failed", session_id, agent="deploy_agent", payload=result)
+        emit_event(EventType.UPTIMEROBOT_REGISTRATION_FAILED, session_id, agent="deploy_agent", payload=result)
         return result
 
     # UptimeRobot's v2 API returns HTTP 200 even on a logical failure
@@ -303,7 +303,7 @@ def register_uptimerobot_monitor(url: str, session_id: str = None,
     if data.get("stat") != "ok":
         error_msg = (data.get("error") or {}).get("message", "unknown error")
         result = {"status": "error", "url": url, "message": f"UptimeRobot rejected the request: {error_msg}"}
-        emit_event("uptimerobot_registration_failed", session_id, agent="deploy_agent", payload=result)
+        emit_event(EventType.UPTIMEROBOT_REGISTRATION_FAILED, session_id, agent="deploy_agent", payload=result)
         return result
 
     monitor = data.get("monitor", {})
@@ -314,7 +314,7 @@ def register_uptimerobot_monitor(url: str, session_id: str = None,
         "friendly_name": payload["friendly_name"],
     }
     write(LAST_UPTIMEROBOT_REGISTRATION_KEY, result)
-    emit_event("uptimerobot_registered", session_id, agent="deploy_agent", payload=result)
+    emit_event(EventType.UPTIMEROBOT_REGISTERED, session_id, agent="deploy_agent", payload=result)
     return result
 
 
