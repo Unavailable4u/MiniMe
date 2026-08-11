@@ -283,7 +283,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
                       project_unique_name: str = None, mode: str = "auto",
                       approval_roles: set = None,
                       no_conversation_context_roles: set = None,
-                      app_slug: str = None) -> dict:
+                      app_slug: str = None, scope: str = None) -> dict:
     """
     Routes through eo/loop_controller.py's run_with_looping() rather than
     calling execute_graph() directly, so the adaptive-looping machinery
@@ -311,6 +311,13 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     to run_with_looping() -> execute_graph() the same way approval_roles
     is, on every macro-loop pass. None/empty means every role sees the
     full conversation-memory transcript, today's exact default.
+
+    scope: task 13d/13e — the Sources sub-tab's scope selector value
+    ("general"/"forum"/"news"/"hackernews"), passed straight through to
+    run_with_looping() -> execute_graph(), same treatment as domain
+    below. Only web_researcher reads it; every other role in `hires`
+    ignores it. None (no scope selector used, or a non-research task)
+    matches today's behavior exactly.
 
     parallel_groups (Step 4 of the parallel-execution work): decision may
     now also carry a Panel-synthesized "parallel_groups" list (see
@@ -355,6 +362,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         path="adaptive",
         approval_roles=approval_roles,
         no_conversation_context_roles=no_conversation_context_roles,
+        scope=scope,
     )
 
     # run_with_looping() returns a paused sentinel instead of
@@ -532,7 +540,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
              mode: str = "auto", project_unique_name: str = None,
              approval_roles: set = None,
              no_conversation_context_roles: set = None, owner_id: str = None,
-             attachment: dict = None, topic_id: str = None) -> dict:
+             attachment: dict = None, topic_id: str = None, scope: str = None) -> dict:
     """
     ...docstring unchanged, plus:
 
@@ -553,6 +561,14 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     _run_task_inner(), where it's consulted by _grounded_task_text()'s
     exact-topic path before falling back to similarity search. None for
     every non-Notebooks caller — identical behavior to today.
+
+    scope: NEW — task 13d/13e. The Sources sub-tab's scope selector
+    value ("general"/"forum"/"news"/"hackernews"), forwarded unchanged
+    through _run_task_inner() -> _dispatch_resolved() ->
+    _run_tier3_hires() -> run_with_looping() -> execute_graph(), where
+    only web_researcher's dispatch branch actually reads it. None for
+    every caller that doesn't set it (every existing caller, plus any
+    non-research task) — identical behavior to today.
     """
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)
@@ -565,6 +581,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         owner_id=owner_id,   # FIXED
         attachment=attachment,   # NEW — Data Layer §4a
         topic_id=topic_id,   # NEW — Step 6.11.f
+        scope=scope,   # NEW — task 13d/13e
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
@@ -1075,7 +1092,8 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
 
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
                         run_tests: bool, session_id: str, mode: str, project_unique_name: str,
-                        approval_roles: set, no_conversation_context_roles: set = None) -> dict:
+                        approval_roles: set, no_conversation_context_roles: set = None,
+                        scope: str = None) -> dict:
     """The tier-branch dispatch that runs once classification + hiring
     are resolved — shared by _run_task_inner() (auto, one-shot path),
     confirm_task() (Part 2 §2.5's post-review path, where `hires` may
@@ -1086,7 +1104,11 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
     the tier-3 hires-driven branch below — tiers 0/1/2 never dispatch
     through generic_worker with a Panel/template-assigned role set the
     same way, so this is a no-op for them, same as approval_roles
-    already is."""
+    already is.
+
+    scope (task 13d/13e) has the same "tier-3 hires-driven branch only"
+    scoping as no_conversation_context_roles above — tiers 0/1/2 have no
+    web_researcher dispatch path for it to reach."""
     if tier == 0:
         return _run_tier0(task_text, decision, session_id)
     elif tier == 1:
@@ -1105,7 +1127,7 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
                                      project_unique_name=project_unique_name, mode=mode,
                                      approval_roles=approval_roles,
                                      no_conversation_context_roles=no_conversation_context_roles,
-                                     app_slug=app_slug)
+                                     app_slug=app_slug, scope=scope)
         return {
             "decision": decision, "tier": 3, "session_id": session_id,
             "status": "not_wired_yet", "result": None,
@@ -1125,7 +1147,7 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                      mode: str = "auto", project_unique_name: str = None,
                      approval_roles: set = None,
                      no_conversation_context_roles: set = None, owner_id: str = None,
-                     attachment: dict = None, topic_id: str = None) -> dict:
+                     attachment: dict = None, topic_id: str = None, scope: str = None) -> dict:
     """The actual routing/execution body — split out of run_task() so
     that wrapper can do turn-recording on either side without every
     early-return point needing to do it individually. session_id is
@@ -1133,7 +1155,10 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
 
     owner_id: NEW — passed through to _resolve_decision_and_hires().
     attachment: NEW — Data Layer §4a, passed through unchanged.
-    topic_id: NEW — Step 6.11.f, passed through unchanged."""
+    topic_id: NEW — Step 6.11.f, passed through unchanged.
+    scope: task 13d/13e — Sources sub-tab's scope selector value, passed
+    through unchanged to _dispatch_resolved() -> _run_tier3_hires(). Only
+    web_researcher reads it; a no-op for every other role/tier."""
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
                                             app_slug, session_id, mode, owner_id=owner_id,
                                             attachment=attachment, topic_id=topic_id)   # FIXED / 6.11.f
@@ -1144,7 +1169,8 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
     # generation actually sees notebook source content, not just task_text.
     response = _dispatch_resolved(resolved.get("task_text", task_text), resolved["decision"], resolved["tier"],
                                    resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
-                                   approval_roles, no_conversation_context_roles=no_conversation_context_roles)
+                                   approval_roles, no_conversation_context_roles=no_conversation_context_roles,
+                                   scope=scope)
     _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response)   # NEW — Part 2
     _maybe_attach_prerequisite_suggestions(resolved, response, session_id)   # NEW — Data Layer §9d
     return response

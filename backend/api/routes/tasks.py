@@ -84,6 +84,12 @@ class TaskRequest(BaseModel):
     # same "presence is the signal" posture `attachment` above uses,
     # but without short-circuiting routing/cache/SGA/classification the
     # way attachment does.
+    scope: Optional[str] = None   # NEW — task 13d/13e: Sources sub-tab's
+    # scope selector ("general" | "forum" | "news" | "hackernews").
+    # Forwarded unchanged to run_task() -> ... -> execute_graph(), where
+    # only web_researcher's dispatch branch reads it. None (the default
+    # for every existing caller, and any non-research task) matches
+    # today's behavior exactly.
 
 
 class TaskResponse(BaseModel):
@@ -123,6 +129,7 @@ def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXE
             owner_id=owner_id,   # FIXED — thread it down to run_task()
             attachment=req.attachment.dict() if req.attachment else None,   # NEW — Data Layer §4a
             topic_id=req.topic_id,   # NEW — Step 6.11.f: now actually consulted, not just logged
+            scope=req.scope,   # NEW — task 13d/13e
         )
     except Exception as exc:
         traceback.print_exc()

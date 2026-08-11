@@ -113,7 +113,8 @@ def _run_gatekeeper(results: dict, task_text: str, session_id: str, loop_num: in
 def run_with_looping(hires, execution_order, task_text, session_id, mode,
                       domain=None, project_unique_name=None, path=None,
                       approval_roles: set = None,
-                      no_conversation_context_roles: set = None) -> dict:
+                      no_conversation_context_roles: set = None,
+                      scope: str = None) -> dict:
     """
     `domain` is not branched on anywhere in this module — every domain
     takes the same path through _run_gatekeeper(). Part 2 §2.6: it IS now
@@ -135,6 +136,13 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
     conversation transcript just because it's a later macro-loop pass.
     Defaults to None, matching execute_graph()'s own default.
 
+    `scope` (task 13d/13e): same "not branched on here, just forwarded"
+    treatment as domain above — the only role that reads it is
+    web_researcher, several layers down inside execute_graph()'s own
+    dispatch. Forwarded on every pass (a redo pass still means the same
+    scope the person picked in the UI), and persisted into the pause
+    snapshot below as macro_scope, same as domain is as macro_domain.
+
     Return shape: {"results": {role: output, ...}, "final_role": str | None}
     on a normal completion — a caller can't rely on "last key in the dict"
     to know which role's output is "the" answer (the execution order can
@@ -155,11 +163,11 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
     macro-loop's OWN state — macro_loop_num, macro_current_order,
     macro_results (everything accumulated before this pass),
     macro_hires, macro_execution_order, macro_mode, macro_domain,
-    macro_project_unique_name — under keys namespaced so they can't
-    collide with any of _run_loop()'s own snapshot fields. Without
-    this, a pause during macro-loop pass 2+ would lose which pass this
-    is, what the previous gatekeeper redo decision was, and everything
-    earlier passes already produced — see eo/executor.py's
+    macro_scope, macro_project_unique_name — under keys namespaced so
+    they can't collide with any of _run_loop()'s own snapshot fields.
+    Without this, a pause during macro-loop pass 2+ would lose which
+    pass this is, what the previous gatekeeper redo decision was, and
+    everything earlier passes already produced — see eo/executor.py's
     resume_graph() for the matching read side that re-enters this loop
     from that state.
     """
@@ -175,7 +183,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                                        project_unique_name=project_unique_name, mode=mode,
                                        approval_roles=approval_roles,
                                        no_conversation_context_roles=no_conversation_context_roles,
-                                       domain=domain)
+                                       domain=domain, scope=scope)
 
         # execute_graph() returns {"status": "paused", "paused_at_role": role}
         # instead of a finished {role: output} dict when execution hits a
@@ -200,6 +208,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                 snapshot["macro_hires"] = hires
                 snapshot["macro_execution_order"] = execution_order
                 snapshot["macro_domain"] = domain
+                snapshot["macro_scope"] = scope
                 snapshot["macro_project_unique_name"] = project_unique_name
                 write(f"paused_execution:{session_id}", snapshot)
             return {
