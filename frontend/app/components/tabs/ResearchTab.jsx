@@ -8,7 +8,7 @@ import Markdown from "../Markdown";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import ConfirmDialog from "../ConfirmDialog";   // NEW — §2 fix: same delete affordance as Notebooks' Sources tab
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2b: embedded chat + WorkingPanel dock, same as Notebooks
-import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
+import { useWorkspaceDockActions, useLastActiveChatId, useWorkspaceDock } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight; useWorkspaceDock added for the Sources/Dataset live-panel fix
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B2: native "create project" for this tab
 import {
   Search, Share2, Table2, GitCompare, FlaskConical,
@@ -78,7 +78,13 @@ const PROMOTE_LABELS = {
 };
 
 function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
-  const { promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, openScopedSubChat, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
+  // FIX — `openScopedSubChat` no longer destructured from useSession()
+  // here: that's SessionContext's legacy, non-dock copy, which wrote
+  // into global sessionId/messages/liveSteps state that WorkingPanel.jsx
+  // (dock-only) never reads. SourcesPanel/DatasetPanel below now get
+  // their own dock-native openScopedSubChat via useWorkspaceDock(wsId)
+  // instead — see those components' own comments.
+  const { promoteWorkspace, fetchWorkspaceNodes, deleteWorkspaceNode, fetchGraphEdges, buildExtractionTable, fetchPanelContent, savePanelContent } = useSession();
   const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
@@ -153,6 +159,17 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
   // NEW — same "switch + expand, no tab jump" helper as NotebooksTab.
   async function openInDock(chatId) {
     await switchChat(chatId);
+    if (chatDockCollapsed) toggleChatDock();
+  }
+
+  // NEW — FIX (live-panel bug): SourcesPanel/DatasetPanel now dispatch
+  // straight into this project's own dock (useWorkspaceDock(wsId)),
+  // which is the SAME `ws:${wsId}` slot the embedded WorkspaceChatPanel
+  // below already reads — so there's no separate "switch into it" step
+  // needed the way openInDock's switchChat() call was for. This just
+  // expands the dock if it was collapsed, same UX as openInDock's own
+  // expand-only behavior above.
+  function maybeExpandChatDock() {
     if (chatDockCollapsed) toggleChatDock();
   }
 
@@ -503,7 +520,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
             SUB_TABS.filter((t) => visitedSubTabs.has(t.id)).map((t) => (
               <div key={t.id} style={{ display: subTab === t.id ? "contents" : "none" }}>
                 {t.id === "sources" && (
-                  <SourcesPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} deleteWorkspaceNode={deleteWorkspaceNode} openScopedSubChat={openScopedSubChat} openInDock={openInDock} />
+                  <SourcesPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} deleteWorkspaceNode={deleteWorkspaceNode} onDispatched={maybeExpandChatDock} />
                 )}
                 {t.id === "graph" && (
                   <CitationGraphPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} fetchGraphEdges={fetchGraphEdges} />
@@ -524,7 +541,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
                   />
                 )}
                 {t.id === "dataset" && (
-                  <DatasetPanel wsId={activeWs.id} openScopedSubChat={openScopedSubChat} openInDock={openInDock} />
+                  <DatasetPanel wsId={activeWs.id} onDispatched={maybeExpandChatDock} />
                 )}
               </div>
             ))
@@ -609,7 +626,17 @@ const RESEARCH_SCOPE_OPTIONS = [
   { value: "hackernews", label: "Hacker News", scope: "hackernews", phrase: (q) => `Search Hacker News for: ${q}` },
 ];
 
-function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScopedSubChat, openInDock }) {
+function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispatched }) {
+  // FIX — live-panel bug: this dock is the SAME `ws:${wsId}` slot the
+  // embedded WorkspaceChatPanel/WorkingPanel below is already showing
+  // for this project, so a search dispatched through it shows up there
+  // live, in real time, exactly like a task typed straight into that
+  // chat box would — no separate "switch into it" step needed. Compare
+  // to the old `openScopedSubChat` prop (SessionContext's legacy,
+  // non-dock copy), which wrote into global state WorkingPanel.jsx never
+  // reads, so a search ran for real on the backend but its progress
+  // never appeared in this project's Working Panel.
+  const dock = useWorkspaceDock(wsId);
   const [query, setQuery] = useState("");
   const [searchScope, setSearchScope] = useState("academic"); // NEW — task 13e
   const [sources, setSources] = useState([]);
@@ -638,8 +665,8 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, openScop
       // web_researcher, and passes its scope through so that agent's
       // dispatch branch (task_runner.py) picks the right domain preset.
       const opt = RESEARCH_SCOPE_OPTIONS.find((o) => o.value === searchScope) || RESEARCH_SCOPE_OPTIONS[0];
-      const chatId = await openScopedSubChat(wsId, opt.phrase(query.trim()), null, opt.scope);
-      await openInDock(chatId);
+      await dock.openScopedSubChat(opt.phrase(query.trim()), null, opt.scope);
+      onDispatched?.();
     } finally {
       setSearching(false);
     }
@@ -1105,7 +1132,11 @@ function ContradictionsPanel({ workspaceId, fetchPanelContent, savePanelContent 
 // off to a scoped sub-chat exactly like Sources' search does. Any chart
 // the sandbox generates renders inline in that chat's AgentStepList step,
 // not a second time here.
-function DatasetPanel({ wsId, openScopedSubChat, openInDock }) {
+function DatasetPanel({ wsId, onDispatched }) {
+  // FIX — same live-panel fix as SourcesPanel above: dispatch through
+  // this project's own dock instead of the legacy, non-dock
+  // openScopedSubChat, so the run shows up live in the Working Panel.
+  const dock = useWorkspaceDock(wsId);
   const [task, setTask] = useState("");
   const [running, setRunning] = useState(false);
 
@@ -1113,8 +1144,8 @@ function DatasetPanel({ wsId, openScopedSubChat, openInDock }) {
     if (!task.trim()) return;
     setRunning(true);
     try {
-      const chatId = await openScopedSubChat(wsId, task.trim());
-      await openInDock(chatId);
+      await dock.openScopedSubChat(task.trim());
+      onDispatched?.();
     } finally {
       setRunning(false);
     }

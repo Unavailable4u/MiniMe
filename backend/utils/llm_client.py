@@ -1014,7 +1014,7 @@ def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
 
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
                    session_id: str = None, tier: int = None, path: str = None,
-                   domain: str = None) -> str:
+                   domain: str = None, allow_continuation: bool = True) -> str:
     """
     Walks `chain` in order. Each step is a dict. For groq/cerebras/mistral/gemini:
         {"provider": "groq"|"cerebras"|"mistral"|"gemini", "model": "...", "key_env": "..."}
@@ -1072,6 +1072,22 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     produced. If at least one step produced partial (truncated) output
     before the chain ran out, that partial text is returned instead of
     raising -- see Fix C note above.
+
+    `allow_continuation` (default True, preserves prior behavior): set
+    this False for single-shot structured-output calls (e.g. a "respond
+    with ONLY JSON" classifier) where Fix C's continuation prompt is the
+    wrong tool. Fix C's "continue exactly where the partial answer left
+    off" instruction is written for prose/code -- a reasoning model
+    (e.g. groq's qwen/qwen3.6-27b) that gets truncated mid-<think> and is
+    then told to "continue seamlessly" will just finish its train of
+    thought and stop, never emitting the JSON it was originally asked
+    for. _strip_fences() then strips the now-closed, empty <think> block,
+    leaving "" for json.loads() to choke on with "Expecting value: line 1
+    column 1 (char 0)". With allow_continuation=False, a "length"
+    truncation is treated the same as a transient error: the partial
+    text is discarded and the *original* prompt (not a continuation
+    prompt) is retried fresh, with a full token budget, on the next chain
+    step -- rather than being spliced together.
     """
     last_exc = None
     accumulated_text = ""   # Fix C: partial output carried across a
@@ -1108,13 +1124,22 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
                 full_text = accumulated_text + text
                 is_last = i == len(chain) - 1
-                if (finish_reason == "length" and continuations_used < _MAX_CONTINUATIONS
-                        and not is_last):
+                if (finish_reason == "length" and allow_continuation
+                        and continuations_used < _MAX_CONTINUATIONS and not is_last):
                     # Fix C: real partial output, hand it to the next step.
                     accumulated_text = full_text
                     continuations_used += 1
                     print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
                           f"continuing on next chain step...")
+                    continue
+                if finish_reason == "length" and not allow_continuation and not is_last:
+                    # Caller opted out of continuation (e.g. single-shot
+                    # JSON classifier) -- discard the partial text and
+                    # retry the *original* prompt fresh on the next step
+                    # instead of splicing a continuation onto it.
+                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                          f"continuation disabled for this call -- discarding partial "
+                          f"output and retrying original prompt on next chain step...")
                     continue
                 return full_text
             except _TRANSIENT_ERRORS as exc:
@@ -1153,8 +1178,8 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
             full_text = accumulated_text + text
             is_last = i == len(chain) - 1
-            if (finish_reason == "length" and continuations_used < _MAX_CONTINUATIONS
-                    and not is_last):
+            if (finish_reason == "length" and allow_continuation
+                    and continuations_used < _MAX_CONTINUATIONS and not is_last):
                 # Fix C: real partial output, hand it to the next step
                 # instead of returning a silently-truncated answer or
                 # discarding it on a later failure.
@@ -1162,6 +1187,15 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 continuations_used += 1
                 print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
                       f"continuing on next chain step...")
+                continue
+            if finish_reason == "length" and not allow_continuation and not is_last:
+                # Caller opted out of continuation (e.g. single-shot JSON
+                # classifier) -- discard the partial text and retry the
+                # *original* prompt fresh on the next step instead of
+                # splicing a continuation onto it.
+                print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                      f"continuation disabled for this call -- discarding partial "
+                      f"output and retrying original prompt on next chain step...")
                 continue
             return full_text
         except _TRANSIENT_ERRORS as exc:

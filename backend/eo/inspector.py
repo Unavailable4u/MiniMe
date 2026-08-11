@@ -292,6 +292,15 @@ def classify(task_text: str, context: str = None, session_id: str = None) -> dic
             user_content=user_content,
             chain=CHAIN,
             agent_name="Inspector",
+            # Fix C's continuation handoff is built for prose/code -- a
+            # reasoning model truncated mid-<think> just finishes its
+            # thought when told to "continue seamlessly" and never emits
+            # the JSON this call actually needs, which _strip_fences()
+            # then reduces to "" (see utils.llm_client.generate_text's
+            # allow_continuation docstring). This is a single-shot JSON
+            # classifier, so a truncation should discard the partial text
+            # and retry fresh on the next chain step instead.
+            allow_continuation=False,
         )
         parsed = _validate(json.loads(_strip_fences(raw)))
     except Exception as exc:
