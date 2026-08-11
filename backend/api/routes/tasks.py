@@ -802,7 +802,7 @@ def get_tasks_for_workspace(ws_id: str, owner_id: str = Depends(require_auth)):
         created = chat_workspace.create_chat_in_workspace(
             ws_id, owner_id, title=f"{ws['name']} — Build"
         )
-        session_id = created["chat_ids"][0]
+        session_id = created["id"]
 
     data = get_tasks(session_id)
     data["_session_id"] = session_id

@@ -231,6 +231,15 @@ def _get_client():
     cluster = os.getenv("PUSHER_CLUSTER")
 
     if not all([app_id, key, secret, cluster]):
+        missing = [name for name, val in (
+            ("PUSHER_APP_ID", app_id), ("PUSHER_KEY", key),
+            ("PUSHER_SECRET", secret), ("PUSHER_CLUSTER", cluster),
+        ) if not val]
+        print(f"  [relay] Pusher not configured -- missing env var(s): {', '.join(missing)}. "
+              f"emit_event() will silently no-op for every call this session (agent_start/"
+              f"agent_done/routing_decision/etc. included), so the Working Panel will show "
+              f"nothing live and only populate from the final HTTP response. Set these in "
+              f"backend/.env (see backend/.env.example) to enable live updates.")
         _pusher_unavailable = True
         return None
 
