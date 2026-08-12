@@ -93,13 +93,14 @@ def _maybe_add_monitoring_module(specs: dict, session_id: str) -> dict:
         modules.append(dict(MONITORING_MODULE_SPEC))
     return specs
 
-# Part 4, agent #2 — Groq primary. Same chain shape as the rest of the
-# roster now that this goes through generate_text() instead of a
-# hand-rolled Groq client (this is what makes usage logging work for
-# this agent, per Stage 6 cleanup).
-# Quota-reality fix, §4 (2026-07-30): the GitHub Models fallback step is
-# removed here, not replaced -- GitHub Models retired in full today.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
+# all (every registered account excluded/cooling down at once -- should
+# be very rare). This used to be the ONLY chain this module ever tried
+# (module-level CHAIN, one entry, GROQ_API_KEY, shared with every other
+# agent hardcoded onto that same key) -- see run()'s real call below,
+# which now builds a live, quota-ranked, multi-provider chain instead.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
 ]
 
@@ -120,10 +121,21 @@ def run(session_id: str = None, tier: int = None, domain: str = None):
     plan = read(KEYS["current_plan"])
     cycle_goal = plan["cycle_goal"]
 
+    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- replaces the old single-entry CHAIN
+    # that had nothing to fall back to when its one key (shared with
+    # prompt_writer_lean.py) rate-limited.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("prompt_writer") or FALLBACK_CHAIN
+
     raw_text = generate_text(
         SYSTEM_PROMPT,
         f"cycle_goal: {cycle_goal}",
-        CHAIN,
+        chain,
         agent_name="Prompt Writer",
         session_id=session_id,
         tier=tier,

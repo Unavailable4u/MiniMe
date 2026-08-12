@@ -22,9 +22,16 @@ from agents.structure_architect import _mermaid_id, _sanitize_mermaid_label, _st
 
 load_dotenv()
 
-# Same reasoning as architecture_diagrammer.py's CHAIN: no isolated
-# account allocated for this role yet, shared GROQ_API_KEY quota.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
+# all (every registered account excluded/cooling down at once -- should
+# be very rare). This used to be the ONLY chain this module ever tried
+# (module-level CHAIN, one entry, GROQ_API_KEY -- "same reasoning as
+# architecture_diagrammer.py's CHAIN", i.e. the exact same known bug,
+# just never actually fixed here) -- see run_schema_diagrammer()'s real
+# call below, which now builds a live, quota-ranked, multi-provider
+# chain instead.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
 ]
 
@@ -133,7 +140,15 @@ def run_schema_diagrammer(session_id: str = None, tier: int = None,
     if task_text:
         user_prompt += f"\n\nOriginal task: {task_text}"
 
-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Schema Diagrammer",
+    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import.
+    # Quota-ranked, cooldown-aware, spread across providers -- replaces
+    # the old single-entry CHAIN that had nothing to fall back to when
+    # its one key rate-limited.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("schema_diagrammer") or FALLBACK_CHAIN
+
+    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Schema Diagrammer",
                          session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 

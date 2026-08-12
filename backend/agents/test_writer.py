@@ -41,7 +41,14 @@ load_dotenv()
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
 # its fallback step is removed here, not replaced. This agent keeps
 # whatever redundancy already sat in front of it (nothing else changes).
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
+# all (every registered account excluded/cooling down at once -- should
+# be very rare). This used to be the ONLY chain this module ever tried
+# (module-level CHAIN, one entry, GROQ_API_KEY) -- see run()'s real call
+# below, which now builds a live, quota-ranked, multi-provider chain
+# instead.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
 ]
 
@@ -131,7 +138,16 @@ def run(session_id: str = None, domain: str = None):
     # real sleeps (1/2/4/8s) in between, on top of generate_text() already
     # having walked every step in CHAIN once per attempt. generate_text()
     # is the single source of retry/fallback behavior now.
-    raw_text = generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Test Writer",
+    #
+    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import.
+    # Quota-ranked, cooldown-aware, spread across providers -- replaces
+    # the old single-entry CHAIN that had nothing to fall back to when
+    # its one key rate-limited.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("test_writer") or FALLBACK_CHAIN
+
+    raw_text = generate_text(SYSTEM_PROMPT, user_content, chain, agent_name="Test Writer",
                               session_id=session_id, domain=domain)
     
     cleaned = _strip_fences(raw_text)

@@ -30,11 +30,14 @@ import re
 import sys
 import time
 import json
+import logging
 import itertools
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
 from relay.emitter import emit_event
 from eo import conversation_memory   # NEW — Part 23 fix, see _call_one() below
+
+logger = logging.getLogger(__name__)
 
 SGA_CHAINS = {
     "sga_1": [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "SGA_GROQ_1"}],
@@ -164,6 +167,30 @@ def _rotate_start():
 
 _VALID_CATEGORIES = {"preference", "decision", "idea", "context"}
 
+# Bug fix (Test tab audit, Bug 2): when JSON parsing fails, the raw text
+# still sometimes *looks* like a JSON object (model emitted `{...}` that
+# didn't quite parse — trailing comma, unescaped quote, etc.) rather than
+# genuine prose. Dumping that straight to the user reads as a broken app.
+# This strips a wrapper that's clearly JSON-shaped (starts with `{`, ends
+# with `}`) so the fallback degrades to *something* readable instead of
+# raw braces; anything that isn't brace-wrapped is left untouched.
+_STRAY_JSON_WRAPPER = re.compile(r"^\{.*\}$", re.DOTALL)
+
+
+def _strip_stray_json_wrapper(text: str) -> str:
+    text = (text or "").strip()
+    if _STRAY_JSON_WRAPPER.match(text):
+        # Best-effort: pull an "answer" value out if present, otherwise
+        # just drop the wrapper so we're not showing bare braces.
+        m = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(f'"{m.group(1)}"')
+            except (json.JSONDecodeError, ValueError):
+                return m.group(1)
+        return ""
+    return text
+
 
 def _parse_structured_response(raw: str) -> dict:
     """Part 5 — SGA now asks each model for a JSON object shaped like
@@ -191,15 +218,32 @@ def _parse_structured_response(raw: str) -> dict:
 
     try:
         parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return {"answer": raw.strip() if raw else "", "memorable": False, "category": None}
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "SGA _parse_structured_response: malformed JSON from model, "
+            "falling back to raw text (%s): %r",
+            exc, text[:200],
+        )
+        return {
+            "answer": _strip_stray_json_wrapper(raw),
+            "memorable": False,
+            "category": None,
+        }
 
     if not isinstance(parsed, dict) or "answer" not in parsed:
-        return {"answer": raw.strip() if raw else "", "memorable": False, "category": None}
+        return {
+            "answer": _strip_stray_json_wrapper(raw),
+            "memorable": False,
+            "category": None,
+        }
 
     answer = parsed.get("answer")
     if not isinstance(answer, str):
-        return {"answer": raw.strip() if raw else "", "memorable": False, "category": None}
+        return {
+            "answer": _strip_stray_json_wrapper(raw),
+            "memorable": False,
+            "category": None,
+        }
 
     memorable = bool(parsed.get("memorable")) and "ESCALATE" not in answer.upper()
     category = parsed.get("category")
