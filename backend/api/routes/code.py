@@ -17,7 +17,10 @@ see this workspace via chat_workspace.get_workspace() before touching
 eo/workspace_code_files.py at all, so a stranger's ws_id guess 404s
 before it ever reaches the file-content query.
 """
+import io
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import require_auth
@@ -70,3 +73,23 @@ def put_code_file(ws_id: str, file_path: str, req: CodeFileWriteRequest, owner_i
         return workspace_code_files.write_file(ws_id, file_path, req.content, owner_id, language=req.language)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Patch 11: server-side ZIP of the current file set --------------------
+
+@router.get("/api/workspaces/{ws_id}/code/zip", dependencies=[Depends(require_auth)])
+def download_code_zip(ws_id: str, owner_id: str = Depends(require_auth)):
+    """Streams the workspace's saved files back as one .zip — built
+    in-memory by workspace_code_files.build_zip_archive(), see that
+    function's own docstring for why this doesn't touch disk. 404 (not
+    an empty zip) when nothing's been saved yet, same "nothing to
+    export" posture as workspace_data.export_workspace_files()."""
+    _require_workspace(ws_id, owner_id)
+    data = workspace_code_files.build_zip_archive(ws_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="No code files saved for this workspace yet")
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{ws_id}_code.zip"'},
+    )

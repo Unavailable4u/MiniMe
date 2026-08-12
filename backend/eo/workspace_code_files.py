@@ -41,8 +41,10 @@ Schema (see migrations/0006_add_workspace_code_files.sql):
         primary key (workspace_id, file_path)
     )
 """
+import io
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 
 from eo import db
@@ -214,6 +216,41 @@ def write_file(ws_id: str, file_path: str, content: str, user_id: str, language:
         row = cur.fetchone()
     write_audit(user_id, "code_file.write", "workspace", ws_id, {"file_path": file_path})
     return _row_to_file(row)
+
+
+def build_zip_archive(ws_id: str) -> bytes | None:
+    """Patch 11: zips the current file set for a workspace, in memory —
+    returns None when there are zero saved files (route layer turns that
+    into a 404, same "nothing to export" convention
+    workspace_data.export_workspace_files() uses for zero chats).
+
+    Deliberately doesn't reuse list_files()+get_file()-per-file: this is
+    one query for content across every row instead of N+1 round trips,
+    since (unlike patch 10's tree, which only needs metadata up front)
+    a zip needs every file's content anyway. Built with io.BytesIO
+    rather than writing to a temp path on disk the way
+    workspace_data.py's NOTES_EXPORTS_DIR export does — that route zips
+    files that already exist on disk from export_artifact(); this data
+    only ever lives in the workspace_code_files table, so there's no
+    on-disk source to zip from and no reason to create one just to
+    stream it back out.
+
+    arcname is the file's own file_path, unmodified — _validate_file_path()
+    already guarantees it's relative with no '..' segments, so the
+    directory structure inside the zip matches the file tree exactly."""
+    with db.cursor(trusted=True) as cur:
+        cur.execute(
+            "select file_path, content from workspace_code_files where workspace_id = %s",
+            (ws_id,),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for row in rows:
+            zf.writestr(row["file_path"], row["content"] or "")
+    return buf.getvalue()
 
 
 def delete_file(ws_id: str, file_path: str, user_id: str) -> None:
