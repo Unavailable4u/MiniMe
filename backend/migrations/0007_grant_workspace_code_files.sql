@@ -1,0 +1,33 @@
+-- 0007_grant_workspace_code_files.sql
+--
+-- Fixes: psycopg2.errors.InsufficientPrivilege: permission denied for
+-- table workspace_code_files, hit on the Code sub-tab's very first
+-- GET .../code/files call.
+--
+-- Root cause: migration 0003 (A1 -- real per-user RLS) is what creates
+-- `minime_app`, the low-privilege role DATABASE_URL actually connects
+-- as, and grants it select/insert/update/delete on a fixed list of
+-- tables. workspace_code_files didn't exist yet at that point -- it
+-- was added later by migration 0006 (patch 8). 0006 copied the RLS
+-- *policy* half of workspace_panel_content's pattern (correctly -- see
+-- that file's own header) but not the GRANT half, since the GRANT
+-- lives in 0003, a different file, and nothing added
+-- workspace_code_files to it. Net effect: `postgres` still owns the
+-- table, `minime_app` has zero privileges on it at all, and Postgres
+-- rejects every query at the privilege check -- before RLS is ever
+-- evaluated. The policy 0006 created is correct and doesn't need to
+-- change; this migration only adds the missing grant.
+--
+-- Same "exactly the DML it needs, nothing else" posture as 0003's own
+-- grant list -- no DDL rights, no ownership change, no BYPASSRLS.
+--
+-- HOW TO APPLY: run as the `postgres` role (Supabase SQL Editor, or a
+-- `postgres`-role DATABASE_URL) -- same as every migration before this
+-- one. `minime_app` itself can't grant privileges on a table it
+-- doesn't own. Safe to run more than once; GRANT is idempotent.
+--
+-- No app restart needed -- Postgres checks privileges per-query, not
+-- per-connection, so this takes effect on the very next request even
+-- against an already-open connection pool.
+
+grant select, insert, update, delete on workspace_code_files to minime_app;

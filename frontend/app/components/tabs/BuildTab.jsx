@@ -7,7 +7,7 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
-import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, MessageSquare, Plus, Pencil, Check, X, Trash2 } from "lucide-react";
+import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, Pencil, Check, X, Trash2, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
 // Part 8.9: replaces the old static shared-secret x-api-key header
@@ -57,9 +57,12 @@ const COLUMNS = [
 // NEW — patch 7 (T2/T3 Plan/Build split): Build now has two sub-views for
 // a selected project instead of just the kanban board. Same small
 // nested-tab-bar pattern PlanTab.jsx's own BLUEPRINT_VIEWS uses.
+// UPDATED — patch 10: third sub-view, Code, added alongside Tasks/
+// Instructions. Same nav bar, no new pattern.
 const BUILD_VIEWS = [
   { id: "tasks", label: "Tasks" },
   { id: "instructions", label: "Instructions" },
+  { id: "code", label: "Code" },
 ];
 
 function statusFor(featureStatus, featureName) {
@@ -213,6 +216,365 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep 
   }
 
   return <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />;
+}
+
+// NEW — patch 10 (T3, step 16): Code sub-tab frontend. File-tree view +
+// click-to-open + inline edit, wired to patch 8's GET/PUT
+// .../code/files endpoints (api/routes/code.py). list_files() returns
+// metadata only, keyed by flat file_path -- workspace_code_files.py's
+// own docstring calls this the "flat map of paths, no separate
+// directory rows" shape and says patch 10 should build its tree
+// client-side from it, so that's what buildFileTree() does below.
+// get_file() is only called on click-to-open, per that module's
+// size/many-files reasoning for keeping list_files() content-free.
+function buildFileTree(filesMeta) {
+  const root = { type: "dir", name: "", path: "", children: {} };
+  for (const path of Object.keys(filesMeta).sort()) {
+    const parts = path.split("/");
+    let node = root;
+    let acc = "";
+    parts.forEach((part, i) => {
+      acc = acc ? `${acc}/${part}` : part;
+      if (i === parts.length - 1) {
+        node.children[part] = { type: "file", name: part, path: acc, meta: filesMeta[path] };
+      } else {
+        if (!node.children[part]) {
+          node.children[part] = { type: "dir", name: part, path: acc, children: {} };
+        }
+        node = node.children[part];
+      }
+    });
+  }
+  return root;
+}
+
+// Directories first (alphabetical), then files (alphabetical) -- same
+// ordering convention as most file-tree UIs, so generated folders like
+// `src/`/`tests/` don't get interleaved with loose root files.
+function TreeNode({ node, depth, expandedDirs, onToggleDir, selectedPath, onSelectFile }) {
+  const entries = Object.values(node.children).sort((a, b) => {
+    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return (
+    <>
+      {entries.map((entry) => {
+        if (entry.type === "dir") {
+          const isOpen = expandedDirs.has(entry.path);
+          return (
+            <div key={entry.path}>
+              <button
+                type="button"
+                onClick={() => onToggleDir(entry.path)}
+                className="w-full flex items-center gap-1 text-xs text-[var(--neutral-300)] hover:text-[var(--neutral-100)] py-0.5 rounded"
+                style={{ paddingLeft: `${depth * 14}px` }}
+              >
+                {isOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+                {isOpen ? <FolderOpen size={12} className="shrink-0" /> : <Folder size={12} className="shrink-0" />}
+                <span className="truncate">{entry.name}</span>
+              </button>
+              {isOpen && (
+                <TreeNode
+                  node={entry}
+                  depth={depth + 1}
+                  expandedDirs={expandedDirs}
+                  onToggleDir={onToggleDir}
+                  selectedPath={selectedPath}
+                  onSelectFile={onSelectFile}
+                />
+              )}
+            </div>
+          );
+        }
+        const isSelected = entry.path === selectedPath;
+        return (
+          <button
+            key={entry.path}
+            type="button"
+            onClick={() => onSelectFile(entry.path)}
+            title={entry.path}
+            className={`w-full flex items-center gap-1 text-xs py-0.5 rounded ${
+              isSelected
+                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                : "text-[var(--neutral-400)] hover:text-[var(--neutral-100)]"
+            }`}
+            style={{ paddingLeft: `${depth * 14 + 16}px` }}
+          >
+            <FileCode size={12} className="shrink-0" />
+            <span className="truncate">{entry.name}</span>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+function CodeView({ workspaceId, apiUrl }) {
+  const [filesMeta, setFilesMeta] = useState(null); // {file_path: meta}, from list_files()
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [expandedDirs, setExpandedDirs] = useState(() => new Set());
+  const [selectedPath, setSelectedPath] = useState(null);
+  const [fileContent, setFileContent] = useState(null); // last-saved shape, from get_file()/write_file()
+  const [editedContent, setEditedContent] = useState("");
+  const [fileLoading, setFileLoading] = useState(false);
+  const [fileError, setFileError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [downloading, setDownloading] = useState(false); // NEW — patch 11
+  const [downloadError, setDownloadError] = useState(null); // NEW — patch 11
+
+  async function loadFileList({ preserveSelection = true } = {}) {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/files`, {
+        headers: await authHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+      }
+      const meta = await res.json();
+      setFilesMeta(meta);
+      // Auto-expand top-level directories the first time files show up,
+      // so the tree isn't a single collapsed root on first load.
+      setExpandedDirs((prev) => {
+        if (prev.size > 0) return prev;
+        const next = new Set();
+        for (const path of Object.keys(meta)) {
+          if (path.includes("/")) next.add(path.split("/")[0]);
+        }
+        return next;
+      });
+      if (!preserveSelection || (selectedPath && !(selectedPath in meta))) {
+        setSelectedPath(null);
+        setFileContent(null);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (workspaceId) loadFileList({ preserveSelection: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  async function openFile(path) {
+    setSelectedPath(path);
+    setFileLoading(true);
+    setFileError(null);
+    setSaveError(null);
+    try {
+      // {file_path:path} on the backend accepts the raw slashes as-is —
+      // no encoding needed, file_path is already shape-validated server
+      // side (workspace_code_files._validate_file_path).
+      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/files/${path}`, {
+        headers: await authHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+      }
+      const file = await res.json();
+      setFileContent(file);
+      setEditedContent(file.content || "");
+    } catch (err) {
+      setFileError(err.message);
+    } finally {
+      setFileLoading(false);
+    }
+  }
+
+  function toggleDir(path) {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  const isDirty = fileContent != null && editedContent !== (fileContent.content || "");
+
+  async function saveFile() {
+    if (!selectedPath || !isDirty) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/files/${selectedPath}`, {
+        method: "PUT",
+        headers: await authHeaders({ json: true }),
+        body: JSON.stringify({ content: editedContent }),
+      });
+      if (!res.ok) {
+        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+      }
+      const saved = await res.json();
+      setFileContent(saved);
+      setEditedContent(saved.content || "");
+      // Swap just this file's tree metadata in-place rather than
+      // re-fetching the whole list — same "swap the piece that changed"
+      // approach InstructionsView takes with the toggle-step response.
+      setFilesMeta((prev) => (prev ? {
+        ...prev,
+        [selectedPath]: {
+          workspace_id: saved.workspace_id,
+          file_path: saved.file_path,
+          language: saved.language,
+          size: saved.content ? saved.content.length : 0,
+          updated_at: saved.updated_at,
+          updated_by: saved.updated_by,
+        },
+      } : prev));
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // NEW — patch 11: server-side ZIP of the current file set
+  // (GET .../code/zip). Needs authHeaders() same as every other call
+  // here, so this can't be a plain <a href> — fetch as a blob and
+  // trigger the download via a throwaway object URL, same technique
+  // any auth-gated file download needs in the browser.
+  async function downloadZip() {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/zip`, {
+        headers: await authHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${workspaceId}_code.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err.message);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const tree = filesMeta ? buildFileTree(filesMeta) : null;
+  const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
+
+  return (
+    <div className="grid grid-cols-[220px_1fr] gap-4 min-h-[360px]">
+      {/* File tree */}
+      <div className="border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto max-h-[560px]">
+        <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-[var(--neutral-800)]">
+          <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
+            Files{fileCount ? ` (${fileCount})` : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            {/* NEW — patch 11: server-side ZIP download button, disabled
+                until there's at least one saved file. */}
+            <button
+              type="button"
+              onClick={downloadZip}
+              disabled={downloading || fileCount === 0}
+              aria-label="Download all files as ZIP"
+              title="Download as ZIP"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+            >
+              {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => loadFileList()}
+              disabled={loading}
+              aria-label="Refresh file list"
+              title="Refresh"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+            >
+              <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
+            </button>
+          </div>
+        </div>
+        {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
+        {loading && !filesMeta ? (
+          <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
+            <Loader2 size={12} className="animate-spin" /> Loading…
+          </div>
+        ) : error ? (
+          <p className="text-xs text-red-400 px-1">{error}</p>
+        ) : fileCount === 0 ? (
+          <p className="text-xs text-[var(--neutral-600)] px-1">
+            No files yet — ask this project's chat to build something and generated files will show up here.
+          </p>
+        ) : (
+          <TreeNode
+            node={tree}
+            depth={0}
+            expandedDirs={expandedDirs}
+            onToggleDir={toggleDir}
+            selectedPath={selectedPath}
+            onSelectFile={openFile}
+          />
+        )}
+      </div>
+
+      {/* Editor */}
+      <div className="border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col min-h-[360px]">
+        {!selectedPath ? (
+          <p className="text-xs text-[var(--neutral-600)] m-auto">Select a file to view or edit it.</p>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--neutral-800)]">
+              <div className="min-w-0">
+                <p className="text-xs text-[var(--neutral-200)] font-medium truncate">{selectedPath}</p>
+                {fileContent && (
+                  <p className="text-[10px] text-[var(--neutral-600)]">
+                    {fileContent.language || "text"}
+                    {fileContent.updated_at
+                      ? ` · saved ${new Date(fileContent.updated_at).toLocaleString()}`
+                      : " · not saved yet"}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={saveFile}
+                disabled={!isDirty || saving}
+                className="shrink-0 flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2.5 py-1.5 font-medium disabled:opacity-50"
+              >
+                {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                {saving ? "Saving…" : isDirty ? "Save" : "Saved"}
+              </button>
+            </div>
+            {saveError && <p className="text-xs text-red-400 pb-2">{saveError}</p>}
+            {fileLoading ? (
+              <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 m-auto">
+                <Loader2 size={12} className="animate-spin" /> Loading…
+              </div>
+            ) : fileError ? (
+              <p className="text-xs text-red-400">{fileError}</p>
+            ) : (
+              <textarea
+                value={editedContent}
+                onChange={(e) => setEditedContent(e.target.value)}
+                spellCheck={false}
+                aria-label={`Editing ${selectedPath}`}
+                className="flex-1 w-full min-h-[300px] bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
+              />
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // Part 7 §7.6 -- deploy action button + status indicator, three separate
@@ -1054,6 +1416,10 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                 fetchDeviceSpec={fetchDeviceSpec}
                 toggleInstructionStep={toggleInstructionStep}
               />
+            ) : buildView === "code" ? (
+              // NEW — patch 10: Code sub-tab, file tree + inline editor,
+              // wired to patch 8's GET/PUT .../code/files endpoints.
+              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
             ) : (
               <>
                 {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
