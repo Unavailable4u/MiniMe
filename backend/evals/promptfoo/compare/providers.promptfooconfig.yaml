@@ -1,0 +1,77 @@
+# D2 patch 5 — provider head-to-head comparison config.
+#
+# Separate from promptfooconfig.yaml on purpose (same reasoning as the
+# Role Library / output_organizer split -- see this package's README's
+# "Two configs, not one"): this config's whole point is running the
+# SAME role_name/task_text against MULTIPLE providers side by side,
+# which is a completely different matrix shape than promptfooconfig
+# .yaml's one-provider role regression. Opt-in only -- NOT wired into
+# CI (patch 6), run this by hand when you actually want to compare.
+#
+# How the comparison works: four `providers:` entries below all point
+# at the SAME providers/role_provider.py script, each with a different
+# `provider_override` in its config. promptfoo's normal test-case x
+# provider matrix runs every case in `tests:` against every provider
+# entry automatically -- that's the whole comparison, no special
+# machinery needed beyond role_provider.py honoring provider_override
+# (see that file's own "D2 patch 5" comment block for exactly how).
+#
+# Reuses whichever case file(s) you're actively iterating on -- starts
+# with tests/contradiction_detector.yaml (patch 4's example) since
+# that's the only real case file that exists as of this patch. Add
+# more roles' case files to `tests:` below as you write them (same
+# generic_worker-routing check as _template.yaml describes still
+# applies -- provider_override doesn't change which roles this
+# provider can run, only which provider a given role's chain uses).
+description: "D2 patch 5 — provider comparison (opt-in, not run in CI)"
+
+# Same fix promptfooconfig.yaml needed (see that file's own comment):
+# role_provider.py is a Python subprocess with its own .env-loaded
+# environment, but promptfoo's Node-side llm-rubric grading calls read
+# straight from the OS process environment. Path is relative to THIS
+# file's directory (backend/evals/promptfoo/compare/), three levels up
+# to backend/.env.
+commandLineOptions:
+  envPath: ../../../.env
+
+providers:
+  - id: "file://../providers/role_provider.py"
+    label: "groq"
+    config:
+      provider_override: "groq"
+  - id: "file://../providers/role_provider.py"
+    label: "cerebras"
+    config:
+      provider_override: "cerebras"
+  - id: "file://../providers/role_provider.py"
+    label: "mistral"
+    config:
+      provider_override: "mistral"
+  - id: "file://../providers/role_provider.py"
+    label: "gemini"
+    config:
+      provider_override: "gemini"
+
+prompts:
+  - "{{task_text}}"
+
+# Same grading-provider fix promptfooconfig.yaml needed -- llm-rubric
+# asserts need their own LLM call, and promptfoo defaults that to
+# OpenAI (not used anywhere in this stack). Reuses the same Groq
+# grader promptfooconfig.yaml uses, for consistency -- worth knowing
+# this is NOT a fully independent judge here: Groq is also one of the
+# four providers being compared below, so Groq-generated output is
+# being graded by a same-family model. If that ever seems to be
+# skewing results (Groq's own outputs scoring suspiciously well), swap
+# the grader to Mistral or Cerebras instead -- same `provider:` shape,
+# different `id`/`apiKeyEnvar`. Left as Groq for now purely for
+# consistency with the main config, not because it's provably neutral.
+defaultTest:
+  options:
+    provider:
+      id: groq:llama-3.3-70b-versatile
+      config:
+        apiKeyEnvar: GROQ_API_KEY
+
+tests:
+  - file://../tests/contradiction_detector.yaml

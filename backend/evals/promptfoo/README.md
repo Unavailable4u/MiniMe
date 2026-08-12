@@ -72,6 +72,49 @@ npm run eval:organizer   # output_organizer synthesis (output_organizer.promptfo
 See `providers/output_organizer_provider.py`'s module docstring for the
 full reasoning.
 
+## Provider comparison (patch 5, opt-in, not run in CI)
+
+A third config, `compare/providers.promptfooconfig.yaml`, runs the
+Role Library's case files against Groq, Cerebras, Mistral, and Gemini
+side by side, using the same `providers/role_provider.py` -- not a
+separate/reimplemented provider script. It works by declaring four
+`providers:` entries that all point at `role_provider.py`, each with a
+different `provider_override` in its `config:`; `role_provider.py`
+honors that by building a single forced one-step chain for that
+provider instead of its normal quota-ranked live chain (see that
+file's own "D2 patch 5" comment for the mechanism). promptfoo's
+ordinary test-case x provider matrix does the actual side-by-side
+comparison automatically once multiple `providers:` entries exist --
+nothing else needed.
+
+```bash
+npm run compare        # runs tests/contradiction_detector.yaml (or
+                        # whatever's wired into compare/providers
+                        # .promptfooconfig.yaml's tests:) against all
+                        # four providers, one column per provider
+```
+
+Deliberately **not** wired into CI (patch 6) -- this quadruples LLM
+spend per run (one call per provider per case) for a comparison you'd
+actually want to read and think about, not a pass/fail gate. Run it by
+hand when you're deciding which provider handles a role best, not on
+every push.
+
+Add a role to the comparison by adding its case file to that config's
+`tests:` list -- same generic_worker-routing rule as everywhere else in
+this package applies (`provider_override` changes which provider a
+role's chain uses, not whether role_provider.py can run that role at
+all -- see `providers/role_provider.py`'s module docstring / this
+package's `tests/_template.yaml`).
+
+Only Groq/Cerebras/Mistral/Gemini are wired up (all four are
+OpenAI-SDK-shaped in `utils/llm_client.py`, so they share the same
+step shape). Cloudflare and HuggingFace aren't included -- Cloudflare
+in particular needs a different step shape (`account_id_env` +
+`token_env` instead of a single `key_env`). See
+`providers/role_provider.py`'s `PROVIDER_OVERRIDE_DEFAULTS` comment for
+how to add either.
+
 ## Layout (filled in by later patches in this series)
 
 ```

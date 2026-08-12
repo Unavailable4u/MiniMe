@@ -1,14 +1,34 @@
 # D2 patch 2b — main promptfoo config.
 #
-# Deliberately minimal: no cases live here yet (patch 3 adds
-# tests/output_organizer.yaml, patch 4 adds tests/_template.yaml + one
-# filled-in example). This just wires the provider so those patches have
-# something to attach to.
+# tests/output_organizer.yaml runs under its own config
+# (output_organizer.promptfooconfig.yaml), not this one -- see that
+# file's header comment. tests/_template.yaml is a copy-paste skeleton
+# only, never wired here directly -- copy it to tests/<role_name>.yaml
+# first (see that file's own header for the generic_worker-routing
+# check to run before picking a role_name).
 #
 # Every case's role_name must be a generic_worker-routed role (in
 # eo.registry.ROLE_PROMPTS_SEED and NOT in eo.registry.REAL_ACTION_ROLES)
 # -- see providers/role_provider.py's module docstring for why.
 description: "Role Library regression tests (D2)"
+
+# role_provider.py (a Python subprocess) and promptfoo itself (a Node
+# process) each need GROQ_API_KEY, but only get it independently --
+# there's no shared environment between them. role_provider.py reads
+# it because the backend's own Python code calls load_dotenv() against
+# backend/.env somewhere in its import chain (confirmed: real
+# generation succeeds even with nothing exported in the shell).
+# promptfoo's own Node-side providers (used below for llm-rubric
+# grading) read GROQ_API_KEY from the OS process environment only --
+# they have no visibility into that Python-side .env load, and
+# promptfoo does NOT auto-load .env files on its own (a known gap,
+# still an open feature request upstream as of this writing). Fixed
+# here rather than by asking you to `$env:GROQ_API_KEY = "..."` by hand
+# every session -- that's easy to forget and won't carry into CI later
+# (patch 6) anyway. Path is relative to THIS file's directory (backend/
+# evals/promptfoo/), two levels up to backend/.env.
+commandLineOptions:
+  envPath: ../../.env
 
 providers:
   - id: "file://providers/role_provider.py"
@@ -27,4 +47,23 @@ providers:
 prompts:
   - "{{task_text}}"
 
-tests: []
+# llm-rubric asserts (used by tests/contradiction_detector.yaml and any
+# future case file) need their own grading LLM call -- separate from
+# role_provider.py's call, which only produces the output being graded.
+# promptfoo defaults this grader to OpenAI, which this project doesn't
+# use (see utils/llm_client.py's provider roster: groq/cerebras/mistral/
+# gemini/huggingface, no OpenAI key anywhere in the stack) -- left
+# unset, every llm-rubric assert errors with "OPENAI_API_KEY is not
+# set" even though the actual role_provider.py output generation
+# succeeded. Pointed at the same Groq model/key utils/llm_client.py's
+# own PROVIDER_CHAIN_DEFAULT already uses (line ~18) so this needs no
+# new key beyond what generating the output already required.
+defaultTest:
+  options:
+    provider:
+      id: groq:llama-3.3-70b-versatile
+      config:
+        apiKeyEnvar: GROQ_API_KEY
+
+tests:
+  - file://tests/contradiction_detector.yaml
