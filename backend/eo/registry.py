@@ -1155,6 +1155,19 @@ ROLE_PROMPTS_SEED = {
         "ONLY to hardware BOM/wiring/enclosure/assembly detail -- every "
         "other PRD section is written exactly as instructed above "
         "regardless of whether the task involves hardware."
+        "\n\nBug fix (2026-08-12, follow-up): that one-line pointer must "
+        "stay prose -- do NOT add a 'Wiring Overview'/'Wiring Diagram' (or "
+        "similarly named) heading, and do NOT emit a ```mermaid fenced "
+        "code block anywhere in this document, for wiring or any other "
+        "hardware detail. A second, freehand wiring diagram written here "
+        "duplicates what Blueprint's Wiring tab now renders from real "
+        "structured data (hardware_speccer's wiring.nodes/edges, pin-"
+        "labeled, kept in sync whenever a part or connection changes) --  "
+        "this role has no such structure to draw from, so anything it "
+        "free-writes as Mermaid can only drift out of sync with the real "
+        "one and has no validation before reaching the page. State once, "
+        "in prose, that the wiring diagram is in the Blueprint tab's "
+        "Wiring view, and stop there."
     ),
 
     # Part 6 §6.3 — Growth domain. Hand-written up front, same reasoning

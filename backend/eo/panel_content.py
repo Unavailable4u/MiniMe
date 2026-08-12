@@ -47,9 +47,11 @@ added by migrations/0005_add_panel_content_source.sql):
         primary key (workspace_id, panel_key)
     )
 """
+import re
 from datetime import datetime, timezone
 from eo import db
 from eo.audit_log import write_audit
+from utils.mermaid_lint import looks_valid_mermaid
 
 # Explicit allowlist rather than accepting any string for panel_key — a
 # frontend typo (e.g. "mind_map" vs "mindmap") should fail loudly at the
@@ -317,6 +319,63 @@ PLAN_ROLE_PANEL_MAP = {
 }
 
 
+# Bug fix (2026-08-12, wiring-diagram audit, Bugs 9/10/11): prd_writer's
+# brief (eo/registry.py's "prd_writer_hardware_scope") now tells the model
+# not to freehand a wiring ```mermaid block at all -- Blueprint's Wiring
+# tab (hardware_speccer.py's wiring.nodes/edges, rendered via
+# WiringGraph.jsx and, since the wiring-diagram patch, a real deterministic
+# Mermaid render too) is the one source of truth for that diagram now.
+# That's prevention, not a guarantee: this role is still a plain
+# generic_worker prose hire with no structured output and no validation
+# step before its text lands here (unlike agents/mind_mapper.py's
+# "mapper" role, which has looks_valid_mermaid() + one retry before ever
+# reaching a frontend component). A model can still ignore a prompt
+# instruction. Rather than bolt on mind_mapper's retry machinery for a
+# diagram this PRD role has no business producing in the first place, this
+# is a strip-not-repair backstop scoped ONLY to prd_writer's write path:
+# any ```mermaid fenced block that slips through anyway is validated with
+# the same cheap heuristic mind_mapper already trusts, and dropped (in
+# favor of a one-line pointer to the real diagram) if it fails. A retry
+# would just re-run the whole PRD generation for one bad diagram in an
+# otherwise-fine document -- not worth it when Blueprint already has the
+# real thing. Every other PLAN_ROLE_PANEL_MAP role keeps writing straight
+# through unchanged; architecture_diagrammer/schema_diagrammer already
+# have their own dedicated deterministic-render + sanitizer path (the
+# rendering audit's Bug 5 fix) and were never freehand text to begin with.
+_MERMAID_FENCE_RE = re.compile(r"```mermaid\s*\n?(.*?)```", re.DOTALL)
+
+_PRD_WIRING_FALLBACK_NOTE = (
+    "*(Wiring diagram omitted here -- it didn't come out as valid Mermaid, "
+    "and this section shouldn't hold a second copy of it anyway. See the "
+    "Wiring view under this project's Blueprint tab for the real, "
+    "pin-labeled diagram.)*"
+)
+
+
+def _gate_prd_mermaid(text: str) -> str:
+    """Drops any ```mermaid fenced block in prd_writer's output that
+    doesn't pass looks_valid_mermaid()'s heuristic check, replacing it
+    with a short pointer to Blueprint's Wiring tab instead. A block that
+    DOES pass is left exactly as the model wrote it -- this is a safety
+    net for the common breakage (Bug 10's unescaped-label case and
+    similar), not a ban on every fenced Mermaid block prd_writer could
+    ever legitimately write (a non-wiring diagram elsewhere in a PRD
+    isn't this bug's concern). No-op (returns text unchanged) when there
+    is no fenced Mermaid block at all, which is the expected case now
+    that the prompt asks the model not to include one.
+    """
+    if "```mermaid" not in text:
+        return text
+
+    def _replace(match: re.Match) -> str:
+        candidate = match.group(1).strip()
+        if candidate and looks_valid_mermaid(candidate):
+            return match.group(0)
+        return _PRD_WIRING_FALLBACK_NOTE
+
+    return _MERMAID_FENCE_RE.sub(_replace, text)
+
+
 def _text_from_role_result(result: dict) -> str:
     """architecture_diagrammer/schema_diagrammer return {"text", "mermaid",
     "plan"} where "text" and "mermaid" are the same string (see those two
@@ -377,6 +436,11 @@ def write_panel_from_role(ws_id: str, role: str, result: dict, user_id: str) -> 
     text = _text_from_role_result(result)
     if not text:
         return None
+    # Bug fix (2026-08-12, Bugs 9/10/11): prd_writer specifically -- see
+    # _gate_prd_mermaid()'s own comment for why this is scoped to just
+    # this one role rather than every PLAN_ROLE_PANEL_MAP entry.
+    if role == "prd_writer":
+        text = _gate_prd_mermaid(text)
     return set_content(ws_id, panel_key, text, user_id, content_source="chat")
 
 
