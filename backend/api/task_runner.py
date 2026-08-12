@@ -70,6 +70,7 @@ from eo.knowledge_graph import search_nodes, get_node   # NEW — bug #4 fix, no
 from eo.prerequisite_suggestions import find_prerequisite_suggestions   # NEW — Data Layer §9d
 from eo.source_index import get_topic_covered_sources   # NEW — Step 6.11.f (6.11.d's helper)
 from eo.note_candidates import get_topic_related_notes   # NEW — Step 6.11.f (6.11.e's helper)
+from eo.panel_content import write_panel_from_role   # NEW — chat-to-panel writes, patch 2
 
 # NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
 # ingested sources into the prompt (task_text had a workspace_id for
@@ -535,6 +536,62 @@ def _extract_answer_text(response: dict) -> str:
     return str(response.get("message") or "")
 
 
+def _write_plan_panels(response: dict, session_id: str, owner_id: str) -> None:
+    """Chat-to-panel writes, patch 2: after a tier-3 hires-driven run
+    completes, push any of the six PLAN_ROLE_PANEL_MAP roles' output
+    straight into its PlanTab panel (eo/panel_content.py's patch 1),
+    instead of leaving it sitting only in the chat answer for someone to
+    manually copy-paste.
+
+    Only tier 3's result["output"] is the full role-keyed `results` dict
+    _run_tier3_hires() hands back (see that function's own comment on
+    why "output" there is the full results dict, not just the final
+    role's output) — tier 0/1's "answer"/"code" and tier 2's
+    single-agent "output" have no role-keyed shape for
+    write_panel_from_role() to walk, so this is a deliberate no-op for
+    every tier but 3, not something that needs its own guard per tier.
+    A "paused" response (mid-run, awaiting approval) is skipped too —
+    there's nothing finished yet to write.
+
+    session_id/owner_id: the same pair run_task() already has in hand
+    for conversation_memory.append_turn() just below this call — no new
+    lookup needed to know "which chat, which caller" this response
+    belongs to. workspace_for_chat() itself already no-ops (returns
+    None) for a chat that isn't in a workspace at all, which is the
+    common case for most chats — most chat turns simply have nothing to
+    write here, not an error.
+
+    Best-effort end to end: this must never turn a real, already-
+    computed chat answer into a 500 over a panel-write hiccup. A single
+    role's write failing doesn't stop the rest of the roles in this same
+    response from being tried.
+    """
+    if response.get("status") != "ok" or response.get("tier") != 3:
+        return
+    if not session_id or not owner_id:
+        return
+    results = (response.get("result") or {}).get("output")
+    if not isinstance(results, dict):
+        return
+
+    try:
+        workspace = chat_workspace.workspace_for_chat(session_id, owner_id)
+    except Exception as exc:
+        print(f"  [task_runner] panel write-back: workspace lookup failed for "
+              f"session_id={session_id!r}, skipped (fail-open): {exc}")
+        return
+    if not workspace:
+        return
+
+    ws_id = workspace["id"]
+    for role, result in results.items():
+        try:
+            write_panel_from_role(ws_id, role, result, owner_id)
+        except Exception as exc:
+            print(f"  [task_runner] panel write-back failed for role={role!r} "
+                  f"ws_id={ws_id!r}, skipped (fail-open): {exc}")
+
+
 def run_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None,
@@ -583,6 +640,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         topic_id=topic_id,   # NEW — Step 6.11.f
         scope=scope,   # NEW — task 13d/13e
     )
+    _write_plan_panels(response, session_id, owner_id)   # NEW — chat-to-panel writes, patch 2
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
 
