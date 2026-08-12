@@ -18,7 +18,7 @@ from memory.bus import write, read_stage_output_text
 from utils.llm_client import generate_text
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
-from agents.structure_architect import _mermaid_id, _strip_fences  # reuse, don't reimplement
+from agents.structure_architect import _mermaid_id, _sanitize_mermaid_label, _strip_fences  # reuse, don't reimplement
 
 load_dotenv()
 
@@ -108,15 +108,15 @@ def _build_schema_mermaid(plan: dict) -> str:
         eid = _mermaid_id(f"e_{e.get('name', '?')}").upper()
         lines.append(f'{eid} {{')
         for f in e.get("fields", []):
-            f_type = f.get("type", "string")
-            f_name = f.get("name", "field")
+            f_type = _sanitize_mermaid_label(f.get("type", "string"), fallback="string")
+            f_name = _sanitize_mermaid_label(f.get("name", "field"), fallback="field")
             lines.append(f'    {f_type} {f_name}')
         lines.append('}')
     for r in plan.get("relationships", []):
         fid = _mermaid_id(f"e_{r.get('from', '?')}").upper()
         tid = _mermaid_id(f"e_{r.get('to', '?')}").upper()
         token = RELATIONSHIP_TOKENS.get(r.get("type"), "||--o{")
-        label = r.get("label", "relates to")
+        label = _sanitize_mermaid_label(r.get("label", "relates to"), fallback="relates to")
         lines.append(f'{fid} {token} {tid} : "{label}"')
     return "\n".join(lines)
 

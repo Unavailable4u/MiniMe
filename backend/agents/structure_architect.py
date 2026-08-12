@@ -201,6 +201,43 @@ def _mermaid_id(text: str) -> str:
     return "n" + re.sub(r"[^A-Za-z0-9_]", "_", text)
 
 
+def _sanitize_mermaid_label(text: str, fallback: str = "?") -> str:
+    """Rendering audit, Bug 5: every deterministic Mermaid builder in this
+    codebase (this file's own _build_mermaid(), architecture_diagrammer.py's
+    _build_architecture_mermaid(), schema_diagrammer.py's
+    _build_schema_mermaid()) embeds a model-proposed label straight into a
+    quoted Mermaid string -- e.g. f'{cid}["{label}"]' -- with no escaping.
+    Two real, observed failure modes that fixes:
+
+      1. A label that itself contains a double quote (e.g. a part
+         description like `0.96" OLED (SSD1306)`) closes the surrounding
+         quoted string early. Mermaid then sees the rest of the label as
+         bare, unquoted syntax -- exactly how an unrelated, unquoted
+         `ESP[ESP32 5V (Vin)]`-style node (parentheses with no enclosing
+         quotes) becomes a parse error even though this renderer always
+         *intends* to quote every label.
+      2. A label containing a real newline (e.g. a multi-line spec
+         description) splits one Mermaid statement across two lines with
+         no arrow/connector on the second -- "two diagram statements glued
+         together with no separator" from the renderer's point of view,
+         since the line-oriented builder only ever appends one logical
+         statement per list entry.
+
+    Mirrors agents/mind_mapper.py's own _sanitize_label() reasoning (strip
+    rather than try to escape -- these are short, human-readable labels,
+    not data where losing a stray quote/newline costs anything) but also
+    normalizes embedded newlines instead of just quotes, since labels here
+    (unlike mind_mapper's topic names) commonly come from multi-line part/
+    field descriptions.
+    """
+    label = (text or "").strip()
+    if not label:
+        return fallback
+    label = label.replace('"', "'")
+    label = re.sub(r"\s*\n\s*", " ", label)
+    return label.strip() or fallback
+
+
 def _build_mermaid(plan: dict) -> str:
     """Turns the operations plan into a flowchart -- there's no
     module-depends-on-module relationship here (that's dependency_mapper.py's
@@ -217,26 +254,27 @@ def _build_mermaid(plan: dict) -> str:
         action = op.get("action")
         if action == "write":
             module = op.get("module")
-            path = op.get("path", "?")
-            pid = _mermaid_id(f"path_{path}")
+            path = _sanitize_mermaid_label(op.get("path", "?"))
+            pid = _mermaid_id(f"path_{op.get('path', '?')}")
             if module:
+                module_label = _sanitize_mermaid_label(module)
                 mid = _mermaid_id(f"mod_{module}")
-                lines.append(f'{mid}["{module}"] -->|write| {pid}["{path}"]')
+                lines.append(f'{mid}["{module_label}"] -->|write| {pid}["{path}"]')
             else:
                 lines.append(f'{pid}("{path}")')
         elif action == "move":
-            old_path = op.get("old_path", "?")
-            new_path = op.get("new_path", "?")
-            oid = _mermaid_id(f"path_{old_path}")
-            nid = _mermaid_id(f"path_{new_path}")
+            old_path = _sanitize_mermaid_label(op.get("old_path", "?"))
+            new_path = _sanitize_mermaid_label(op.get("new_path", "?"))
+            oid = _mermaid_id(f"path_{op.get('old_path', '?')}")
+            nid = _mermaid_id(f"path_{op.get('new_path', '?')}")
             lines.append(f'{oid}["{old_path}"] -->|move| {nid}["{new_path}"]')
         elif action == "delete":
-            path = op.get("path", "?")
-            pid = _mermaid_id(f"path_{path}")
+            path = _sanitize_mermaid_label(op.get("path", "?"))
+            pid = _mermaid_id(f"path_{op.get('path', '?')}")
             lines.append(f'{pid}["{path}"]:::deleted')
         elif action == "mkdir":
-            path = op.get("path", "?")
-            pid = _mermaid_id(f"path_{path}")
+            path = _sanitize_mermaid_label(op.get("path", "?"))
+            pid = _mermaid_id(f"path_{op.get('path', '?')}")
             lines.append(f'{pid}[["{path}/"]]')
     lines.append("classDef deleted fill:#7f1d1d,stroke:#ef4444,color:#fca5a5")
     return "\n".join(lines)

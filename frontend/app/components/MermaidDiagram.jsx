@@ -69,6 +69,22 @@ mermaid.initialize({ startOnLoad: false, theme: "dark", suppressErrorRendering: 
 // case the guide calls out. No heavy pan/zoom library: panning is just
 // the scroll container's native scrollbars, zoom is a couple of buttons
 // that resize the rendered SVG directly.
+// Rendering audit, Bug 5: a diagram's labels can carry a literal two-
+// character `\"` or `\n` sequence (as opposed to a real quote/newline
+// character) if they passed through a JSON-encode step somewhere upstream
+// that was never fully decoded back out before landing here -- Mermaid's
+// parser has no idea what to do with a bare backslash and treats it as a
+// syntax error. This is a defensive normalization pass, not a fix for the
+// root cause (that's the server-side label sanitization in
+// agents/structure_architect.py's _sanitize_mermaid_label(), reused by
+// architecture_diagrammer.py and schema_diagrammer.py) -- it just makes
+// sure this component doesn't hand mermaid.render() something it can
+// already tell is broken, regardless of which upstream caller produced it.
+function normalizeMermaidText(text) {
+  if (!text) return text;
+  return text.replace(/\\"/g, "'").replace(/\\n/g, " ");
+}
+
 function MermaidDiagram({
   mermaidText,
   onNodeClick,
@@ -116,7 +132,7 @@ function MermaidDiagram({
     setFailed(false);
     if (ref.current && mermaidText) {
       const renderId = `mermaid-diagram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      mermaid.render(renderId, mermaidText)
+      mermaid.render(renderId, normalizeMermaidText(mermaidText))
         .then(({ svg }) => {
           if (!cancelled && ref.current) {
             ref.current.innerHTML = svg;

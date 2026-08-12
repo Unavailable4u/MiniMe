@@ -28,6 +28,21 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// Rendering fix (Bug 8 / detailed-wiring follow-up): a "which two parts
+// are connected" arrow isn't enough to actually wire something from --
+// see agents/hardware_speccer.py's SYSTEM_PROMPT for the schema change
+// this pairs with (wiring.edges now carries "from_pin"/"to_pin" when the
+// model can resolve them). Falls back gracefully for an edge that only
+// has one side resolved, or a spec generated before this schema change
+// (both fields simply absent) -- callers below already skip drawing
+// anything when this returns "".
+function pinLabel(link) {
+  if (link.fromPin && link.toPin) return `${link.fromPin} → ${link.toPin}`;
+  if (link.fromPin) return `${link.fromPin} →`;
+  if (link.toPin) return `→ ${link.toPin}`;
+  return "";
+}
+
 /**
  * WiringGraph — third caller of ForceGraphBase (after RoutingTraceGraph.jsx
  * and KnowledgeGraphView.jsx). Renders Blueprint's wiring sub-view:
@@ -36,7 +51,10 @@ function escapeHtml(s) {
  * the three it's drawing.
  *
  * `wiring`: the wiring slice of the device spec -- {nodes: [{id, label,
- * type}], edges: [{from, to, kind}]} (Blueprint design guide §0). Nodes are
+ * type}], edges: [{from, to, kind, from_pin, to_pin}]} (Blueprint design
+ * guide §0; from_pin/to_pin added alongside hardware_speccer.py's schema
+ * change -- both optional, null when the model couldn't resolve a named
+ * pin). Nodes are
  * rebuilt from device_spec on every render via useMemo, same as
  * KnowledgeGraphView.jsx -- this view is a static per-fetch snapshot (spec
  * only changes on regeneration or a price refresh, not something that
@@ -60,6 +78,16 @@ export default function WiringGraph({ wiring }) {
         source: e.from,
         target: e.to,
         kind: e.kind,
+        // Rendering fix (Bug 8 / detailed-wiring follow-up): carry the
+        // pin/terminal names hardware_speccer's schema now proposes
+        // (see agents/hardware_speccer.py's SYSTEM_PROMPT -- "from_pin"/
+        // "to_pin") through to the render layer. Both are optional --
+        // an older spec generated before that schema change, or an edge
+        // the model genuinely couldn't resolve to a named pin, simply
+        // has them as null/undefined, and every place below treats
+        // "missing" as "don't draw/show a pin label", never as an error.
+        fromPin: e.from_pin || null,
+        toPin: e.to_pin || null,
       }));
 
     return { nodes, links };
@@ -85,7 +113,45 @@ export default function WiringGraph({ wiring }) {
       height={480}
       linkColor={(link) => EDGE_COLORS[link.kind] || DEFAULT_COLOR}
       linkWidth={1.5}
-      linkLabel={(link) => link.kind}
+      linkLabel={(link) => {
+        const pin = pinLabel(link);
+        return pin ? `${link.kind} · ${pin}` : link.kind;
+      }}
+      linkCanvasObjectMode={() => "after"}
+      linkCanvasObject={(link, ctx, globalScale) => {
+        const label = pinLabel(link);
+        if (!label) return;
+        const start = link.source;
+        const end = link.target;
+        // react-force-graph mutates source/target from raw ids into the
+        // actual node objects once the sim has laid them out -- before
+        // that (first render / still settling), skip rather than draw
+        // at a bogus position.
+        if (typeof start !== "object" || typeof end !== "object"
+            || start.x == null || end.x == null) return;
+
+        const midX = (start.x + end.x) / 2;
+        const midY = (start.y + end.y) / 2;
+        const fontSize = 9 / globalScale;
+        ctx.font = `${fontSize}px sans-serif`;
+        const textWidth = ctx.measureText(label).width;
+        const pad = 2 / globalScale;
+
+        // Small dark backing box so the label stays legible over
+        // whatever link line or other label it happens to sit on top of.
+        ctx.fillStyle = "rgba(10, 10, 15, 0.75)";
+        ctx.fillRect(
+          midX - textWidth / 2 - pad,
+          midY - fontSize / 2 - pad,
+          textWidth + pad * 2,
+          fontSize + pad * 2
+        );
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = EDGE_COLORS[link.kind] || DEFAULT_COLOR;
+        ctx.fillText(label, midX, midY);
+      }}
       onNodeHover={setHoveredNode}
       nodeLabel={(node) => {
         return `<div style="background:#171717;border:1px solid #404040;border-radius:6px;padding:6px 8px;font-size:11px;color:#e5e5e5;max-width:260px;white-space:normal;word-break:break-word">

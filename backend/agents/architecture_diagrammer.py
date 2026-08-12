@@ -41,7 +41,7 @@ from memory.bus import read_stage_output_text
 from utils.llm_client import generate_text
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
-from agents.structure_architect import _mermaid_id, _strip_fences  # reuse, don't reimplement
+from agents.structure_architect import _mermaid_id, _sanitize_mermaid_label, _strip_fences  # reuse, don't reimplement
 
 load_dotenv()
 
@@ -150,12 +150,12 @@ def _build_architecture_mermaid(plan: dict) -> str:
         lines = ["sequenceDiagram"]
         for p in plan.get("participants", []):
             pid = _mermaid_id(f"p_{p.get('id', '?')}")
-            label = p.get("label", p.get("id", "?"))
+            label = _sanitize_mermaid_label(p.get("label", p.get("id", "?")))
             lines.append(f'participant {pid} as {label}')
         for m in plan.get("messages", []):
             fid = _mermaid_id(f"p_{m.get('from', '?')}")
             tid = _mermaid_id(f"p_{m.get('to', '?')}")
-            label = m.get("label", "")
+            label = _sanitize_mermaid_label(m.get("label", ""), fallback="")
             lines.append(f'{fid}->>{tid}: {label}')
         return "\n".join(lines)
 
@@ -171,13 +171,13 @@ def _build_architecture_mermaid(plan: dict) -> str:
     lines = ["graph TD"]
     for c in plan.get("components", []):
         cid = _mermaid_id(f"c_{c.get('id', '?')}")
-        label = c.get("label", c.get("id", "?"))
+        label = _sanitize_mermaid_label(c.get("label", c.get("id", "?")))
         open_b, close_b = SHAPE_BY_KIND.get(c.get("kind", "other"), ("[", "]"))
         lines.append(f'{cid}{open_b}"{label}"{close_b}')
     for e in plan.get("edges", []):
         fid = _mermaid_id(f"c_{e.get('from', '?')}")
         tid = _mermaid_id(f"c_{e.get('to', '?')}")
-        label = e.get("label", "")
+        label = _sanitize_mermaid_label(e.get("label", ""), fallback="")
         if label:
             lines.append(f'{fid} -->|{label}| {tid}')
         else:
