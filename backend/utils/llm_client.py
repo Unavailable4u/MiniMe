@@ -97,6 +97,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 from datetime import date, datetime, timezone
 
 import requests
@@ -110,6 +111,7 @@ from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusErro
 
 from memory.bus import read as bus_read, write as bus_write
 from relay.emitter import emit_event
+from eo.tracing import get_tracer
 
 # Quota-reality fix, §1 — replaces the old flat per-provider dict. Three
 # separate bugs that one flat number hid:
@@ -485,6 +487,95 @@ def _get_cloudflare_creds(account_id_env: str, token_env: str):
     if not account_id or not token:
         return None
     return account_id, token
+
+
+def _traced_generation(label: str, model: str, system_prompt: str, prompt_for_step: str,
+                        agent_name: str, session_id: str, tier, path, domain):
+    """D1 patch 2 -- returns a context manager yielding a Langfuse
+    generation observation (or None if tracing is unavailable), never
+    raising itself. Isolated as its own helper so both call sites below
+    (cloudflare's REST path and the OpenAI-SDK-shaped path) share one
+    place where a *tracing* failure is swallowed -- separately from the
+    provider call itself, which must run exactly once either way. If
+    this raises while building/entering the span, it's caught here and
+    None is returned; the caller (see _end_traced_generation()'s `if
+    traced is None: return` guard) then just runs the real LLM call
+    untraced for this one step."""
+    try:
+        cm = get_tracer().start_as_current_observation(
+            name=label, as_type="generation", model=model,
+            input=prompt_for_step,
+            metadata={
+                "system_prompt": system_prompt, "agent_name": agent_name,
+                "session_id": session_id, "tier": tier, "path": path,
+                "domain": domain,
+            },
+        )
+        gen = cm.__enter__()
+        return (cm, gen)
+    except Exception as trace_exc:
+        print(f"  [{agent_name}] Langfuse tracing failed to start for {label} "
+              f"(non-fatal): {trace_exc}")
+        return None
+
+
+def _end_traced_generation(traced, agent_name: str, label: str, text, usage,
+                            finish_reason, exc_info=(None, None, None)):
+    """D1 patch 2 -- counterpart to _traced_generation(): records the
+    result on the span (if tracing started) and closes it. `traced` is
+    whatever _traced_generation() returned -- None, or an (cm, gen)
+    pair. Any failure here (e.g. talking to Langfuse) is caught and
+    logged, never propagated -- by this point the real provider call
+    has already completed (or already failed on its own), so a
+    tracing-side error here must not look like a failed/second LLM
+    call to the rest of generate_text()."""
+    if traced is None:
+        return
+    cm, gen = traced
+    try:
+        if exc_info[0] is None:
+            gen.update(
+                output=text,
+                usage_details=_usage_details_from_usage(usage),
+                metadata={"finish_reason": finish_reason},
+            )
+        cm.__exit__(*exc_info)
+    except Exception as trace_exc:
+        print(f"  [{agent_name}] Langfuse tracing failed to close for {label} "
+              f"(non-fatal): {trace_exc}")
+
+
+def _usage_details_from_usage(usage) -> dict | None:
+    """D1 patch 2 -- same tolerant unwrap _log_usage() already does (SDK
+    object with attributes, or cloudflare's plain dict, or None), reused
+    here so Langfuse gets real prompt/completion/total numbers off the
+    *same* usage object instead of a second, separately-computed guess.
+    Returns None (not {}) when nothing usable is present, since passing
+    an empty dict to usage_details would tell Langfuse "zero tokens"
+    rather than "unknown" -- the cloudflare-often-absent case this
+    module's own docstring already calls out."""
+    if usage is None:
+        return None
+
+    def _get(key_attr, key_dict):
+        val = getattr(usage, key_attr, None)
+        if val is None and isinstance(usage, dict):
+            val = usage.get(key_dict)
+        return val
+
+    prompt = _get("prompt_tokens", "prompt_tokens")
+    completion = _get("completion_tokens", "completion_tokens")
+    total = _get("total_tokens", "total_tokens")
+    if prompt is None and completion is None and total is None:
+        return None
+    details = {}
+    if prompt is not None:
+        details["input"] = prompt
+    if completion is not None:
+        details["output"] = completion
+    if total is not None:
+        details["total"] = total
+    return details
 
 
 def _call_step(client, model: str, system_prompt: str, user_content: str):
@@ -1119,8 +1210,20 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 continue
             json_mode = step.get("json_mode", False)
             try:
-                text, usage, finish_reason = _call_cloudflare_step(
-                    creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
+                # D1 patch 2 -- tracing wraps the real network call. See
+                # _traced_generation()/_end_traced_generation() docstrings:
+                # the provider call below runs exactly once regardless of
+                # whether tracing itself succeeds.
+                _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                              agent_name, session_id, tier, path, domain)
+                try:
+                    text, usage, finish_reason = _call_cloudflare_step(
+                        creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
+                except BaseException:
+                    _end_traced_generation(_traced, agent_name, label, None, None, None,
+                                            exc_info=sys.exc_info())
+                    raise
+                _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
                 _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
                 full_text = accumulated_text + text
                 is_last = i == len(chain) - 1
@@ -1174,7 +1277,17 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             continue
 
         try:
-            text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
+            # D1 patch 2 -- same traced-call pattern as the cloudflare
+            # branch above; see _traced_generation()/_end_traced_generation().
+            _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                          agent_name, session_id, tier, path, domain)
+            try:
+                text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
+            except BaseException:
+                _end_traced_generation(_traced, agent_name, label, None, None, None,
+                                        exc_info=sys.exc_info())
+                raise
+            _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
             _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
             full_text = accumulated_text + text
             is_last = i == len(chain) - 1
