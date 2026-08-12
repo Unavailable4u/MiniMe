@@ -455,6 +455,62 @@ def _open_session_trace(session_id: str, task_text: str, domain: str, mode: str)
         yield
 
 
+@contextlib.contextmanager
+def _open_role_span(role: str, current_name: str, session_id: str, task_text: str, domain: str):
+    """D1 patch 3b -- one child span per sequential step dispatch in
+    _run_loop() below, named after the ROLE (not agent_names[idx]'s
+    resolved module name) -- role is the label _run_loop() already keys
+    `results` by everywhere else, and is what the Inspector -> Panel
+    step tree needs to read out of Langfuse. Nests under whichever
+    observation is currently open on entry purely via Langfuse's own
+    context-var nesting -- 3a's execute_graph trace span for an
+    ordinary top-level step, or 3c's per-member span for a step that
+    happens to be dispatched from inside a concurrent group -- no
+    trace_id/parent_id plumbing needed here at all. The generations
+    utils/llm_client.py's patch 2 already wraps inside fn() nest under
+    THIS span the exact same way this span nests under 3a's.
+
+    Same no-op-when-tracing-off / never-swallow-the-real-exception
+    contract as _open_session_trace() just above, and the same
+    ExitStack shape for the same reason: opening the span is the only
+    thing guarded by the try/except below. The `yield span` itself
+    sits outside that try, so an exception raised by the step body
+    running inside the `with` block (a real step failure -- including
+    the MissingDependencyError self-heal branch's `continue`, which
+    exits this `with` normally, not as an error) propagates untouched
+    and is never mistaken for a tracing failure.
+
+    Returns the span object on success so the caller can attach
+    output once the step's result is known (see _run_loop()'s
+    `_role_span.update(...)` call below), or None when tracing is off
+    or failed to open -- callers must guard on that before touching
+    the returned value, same as _traced_generation()'s `if traced is
+    None` guard in utils/llm_client.py.
+    """
+    if not TRACING_ENABLED:
+        yield None
+        return
+
+    stack = contextlib.ExitStack()
+    try:
+        tracer = get_tracer()
+        span = stack.enter_context(tracer.start_as_current_observation(
+            name=role,
+            as_type="span",
+            input=task_text,
+            metadata={"agent": current_name, "session_id": session_id, "domain": domain},
+        ))
+    except Exception as trace_exc:
+        stack.close()
+        print(f"  [executor] Langfuse role span failed to open for "
+              f"role={role!r} (non-fatal): {trace_exc}")
+        yield None
+        return
+
+    with stack:
+        yield span
+
+
 def execute_graph(agent_names: list, role_names: list = None, task_text: str = None,
                    cycle_num: int = None, session_id: str = None, path: str = None,
                    mode: str = None, key_overrides: dict = None,
@@ -653,197 +709,210 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         emit_event("agent_start", session_id=session_id, agent=current_name, path=path,
                     payload={"label": role, "given_roles": given_roles})
         started = time.monotonic()
-        try:
-            if current_name == "prompt_writer_lean" and task_text:
-                result = fn(task_text, session_id=session_id, path=path, domain=domain)
-            elif current_name in TASK_TEXT_ENTRYPOINTS and task_text:
-                # (prompt_writer_lean is also in TASK_TEXT_ENTRYPOINTS but
-                # never reaches this branch — it's caught by the dedicated
-                # `if` above, which already passes both session_id/path.)
-                result = fn(task_text, key_override=override, session_id=session_id, path=path,
-                            domain=domain)
-            elif current_name == "code_writer_lean":
-                result = fn(session_id=session_id, path=path, domain=domain)
-            elif current_name == "reviewer_fixer_lean":
-                result = fn(session_id=session_id, path=path, domain=domain)
-            elif current_name == "code_writers":
-                # Needs task_text as a fallback seed for its own
-                # module_specs synthesis when hired without
-                # "prompt_writer" ahead of it in the plan (see
-                # agents/code_writers.py's _derive_specs_from_task_text()).
-                result = fn(session_id=session_id, path=path, expanded=expanded,
-                            key_override=override, task_text=task_text, domain=domain)
-            elif current_name == "content_adapter_pool":
-                # Part 6 §6.2 — needs task_text as a fallback seed for its
-                # own content_targets synthesis when hired without an
-                # upstream generic_worker role having written a brief
-                # first (see agents/content_adapter_pool.py's
-                # _derive_brief_from_task_text()), same reasoning as
-                # code_writers' task_text handling just above.
-                result = fn(session_id=session_id, path=path, expanded=expanded,
-                            key_override=override, task_text=task_text, domain=domain)
-            elif current_name in ("reviewer", "security_scanner", "extraction_table_builder"):
-                # extraction_table_builder (§3.5): no task_text needed —
-                # its real input is KEYS["academic_search_report"], read
-                # straight off the bus. If empty, run() raises
-                # MissingDependencyError("academic_search") itself (see
-                # its own docstring), letting the self-heal branch below
-                # splice that step in first on the adaptive path.
-                result = fn(session_id=session_id, path=path, expanded=expanded,
-                            key_override=override, domain=domain)
-            elif current_name == "fixer_pool":
-                result = fn(session_id=session_id, path=path, key_override=override, domain=domain)
-            elif current_name == "sandbox_tester_lean":
-                result = fn(session_id=session_id, path=path)
-            elif current_name == "structure_architect":
-                # Needs task_text (see UNSCOPED_TIER_AGENTS comment above)
-                # — its no-code planning path uses it to plan a
-                # folder/file scaffold when there's no code to organize.
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
-                            domain=domain)
-            elif current_name == "deploy_config_writer":
-                # Part 7 §7.4 — same call shape as structure_architect
-                # just above: reads real on-disk project state itself
-                # (via get_current_app_slug()), task_text is only a minor
-                # extra signal, not a hard requirement.
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
-                            domain=domain)
-            elif current_name in ("architecture_diagrammer", "schema_diagrammer", "handoff_packager"):
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text, domain=domain)
-            elif current_name == "hardware_speccer":
-                # MiniMe Blueprint fix — same call shape as
-                # architecture_diagrammer/schema_diagrammer just above, plus
-                # workspace_id: run_hardware_speccer() hard-requires it (raises
-                # ValueError without one) since the spec is written into that
-                # workspace's workspace_facts.custom, not a bus key like its
-                # sibling diagrammers. workspace_id is threaded here all the
-                # way from api/task_runner.py's _run_task_inner(), same depth
-                # scope/domain already are.
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
-                            domain=domain, workspace_id=workspace_id)
-            elif current_name == "academic_search":
-                # Needs task_text as the search query (no other bus key
-                # holds it yet — this IS the first data-gathering step)
-                # and tier for write_node()'s usage logging.
-                result = fn(task_text=task_text, session_id=session_id,
-                            tier=PATH_TO_TIER.get(path), domain=domain)
-            elif current_name == "web_researcher":
-                # Same call shape as academic_search directly above --
-                # task_text as the search query, tier for write_node()'s
-                # usage logging. `scope` comes from _run_loop()'s own
-                # param (see execute_graph()'s docstring for the full
-                # path it's threaded through, all the way from
-                # api/routes/tasks.py's TaskRequest.scope) -- explicit
-                # end-to-end plumbing rather than parsed out of
-                # task_text, so a UI scope selector is authoritative
-                # instead of best-effort. `or "general"` only matters
-                # for callers that never pass one (e.g. the CLI
-                # __main__ smoke test below) -- web_researcher.run()'s
-                # own default is "general" too, this just makes that
-                # explicit at the call site rather than relying on
-                # run()'s signature to quietly supply it.
-                result = fn(task_text=task_text, session_id=session_id,
-                            tier=PATH_TO_TIER.get(path), scope=scope or "general")
-            elif current_name == "dataset_analyst":
-                # Needs task_text as the analysis request, same reasoning
-                # as academic_search above. No key_override/expanded —
-                # single-pass generation + sandbox execution, not a pool.
-                result = fn(task_text=task_text, session_id=session_id, path=path, domain=domain)
-            elif current_name == "performance_reviewer":
-                # Patch 8 (rollout guide §3) — no task_text needed, unlike
-                # dataset_analyst/academic_search just above: this role's
-                # real input is fixed_code/submitted_code + test_results,
-                # read straight off the bus (same convention
-                # sandbox_tester.py's own run_sandbox_tester() uses), not
-                # anything seeded from the task description itself. No
-                # key_override/expanded either — single-pass generation +
-                # sandbox execution on ONE selected module, not a worker
-                # pool.
-                result = fn(session_id=session_id, path=path, domain=domain)
-            elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
-                # Kept as a three-name case rather than a single
-                # "file_manager" case — dropping back to one name would
-                # silently drop project_unique_name for the two writeback
-                # callables.
-                result = fn(project_unique_name=project_unique_name)
-            elif current_name == "generic_worker":
-                # `role` identifies WHICH reasoning-only role this step
-                # is. input_keys is "every role earlier than this one in
-                # the (possibly runtime-escalated) plan" — role_names[:idx]
-                # is a plain slice since role_names is already in resolved
-                # execution order.
-                #
-                # Part 2 §2.6: include_conversation_context is False only
-                # for a role explicitly listed in
-                # no_conversation_context_roles — every other role keeps
-                # today's exact behavior (full conversation-memory
-                # prepend). input_keys is unaffected either way, since
-                # that's the separate, already-enforced per-stage scoping
-                # mechanism this gap sat alongside.
-                #
-                # domain (Part 2 §2.6, cost-tracking gap): forwarded so
-                # utils/llm_client.py's log_usage() can tag this call's
-                # usage for the per-project/per-section breakdown.
-                result = fn(role=role, task_text=task_text,
-                            input_keys=list(_flatten_role_names(role_names[:idx])), session_id=session_id,
-                            key_override=override,
-                            include_conversation_context=role not in no_conversation_context_roles,
-                            domain=domain)
-            elif current_name in UNSCOPED_TIER_AGENTS:
-                # tier=None if path itself is None/unrecognized — these
-                # agents already treat a None tier as "unscoped".
-                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), domain=domain)
-            elif current_name in ("idea_planner", "prompt_writer", "test_writer", "report_writer"):
-                # Migration Part 2 §2.6, cost-tracking gap's last piece:
-                # these four used to fall through to the bare `else: fn()`
-                # branch below and got NOTHING passed to them at all — not
-                # even session_id, let alone domain. Each of these four
-                # modules' own run()/run_report_writer() already accepted
-                # (or, this same Part, now accepts) session_id/domain
-                # kwargs that simply had no caller ever supplying them.
-                # tier isn't threaded here even though prompt_writer.run()
-                # accepts it — none of these four are tier-gated the way
-                # UNSCOPED_TIER_AGENTS' four are, so there's no
-                # PATH_TO_TIER lookup relevant to pass.
-                result = fn(session_id=session_id, domain=domain)
-            else:
-                result = fn()
-        except MissingDependencyError as dep_exc:
-            # An agent asked for a specific prerequisite role instead of
-            # hard-failing the task. Only attempt to self-heal on the
-            # "adaptive" path — that's the only mode where role_names is
-            # a Panel-decided vocabulary a new role can be spliced into;
-            # on instant/direct/fixed's statically-built graphs this is a
-            # real ordering bug, not a staffing gap, so it's re-raised.
-            needed_role = dep_exc.required_role
-            pair = (role, needed_role)
-            already_ran = needed_role in _flatten_role_names(role_names[:idx])
-            over_budget = auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP
-            if path != "adaptive" or already_ran or over_budget:
+        # D1 patch 3b -- one child span per step, named after `role`, so
+        # this step's own generation(s) (already wrapped by utils/llm_client.py's
+        # patch 2) nest under a labeled node instead of showing up as a
+        # flat, anonymous sibling of every other role's generations. See
+        # _open_role_span()'s own docstring above for the nesting and
+        # no-op contract.
+        with _open_role_span(role, current_name, session_id, task_text, domain) as _role_span:
+            try:
+                if current_name == "prompt_writer_lean" and task_text:
+                    result = fn(task_text, session_id=session_id, path=path, domain=domain)
+                elif current_name in TASK_TEXT_ENTRYPOINTS and task_text:
+                    # (prompt_writer_lean is also in TASK_TEXT_ENTRYPOINTS but
+                    # never reaches this branch — it's caught by the dedicated
+                    # `if` above, which already passes both session_id/path.)
+                    result = fn(task_text, key_override=override, session_id=session_id, path=path,
+                                domain=domain)
+                elif current_name == "code_writer_lean":
+                    result = fn(session_id=session_id, path=path, domain=domain)
+                elif current_name == "reviewer_fixer_lean":
+                    result = fn(session_id=session_id, path=path, domain=domain)
+                elif current_name == "code_writers":
+                    # Needs task_text as a fallback seed for its own
+                    # module_specs synthesis when hired without
+                    # "prompt_writer" ahead of it in the plan (see
+                    # agents/code_writers.py's _derive_specs_from_task_text()).
+                    result = fn(session_id=session_id, path=path, expanded=expanded,
+                                key_override=override, task_text=task_text, domain=domain)
+                elif current_name == "content_adapter_pool":
+                    # Part 6 §6.2 — needs task_text as a fallback seed for its
+                    # own content_targets synthesis when hired without an
+                    # upstream generic_worker role having written a brief
+                    # first (see agents/content_adapter_pool.py's
+                    # _derive_brief_from_task_text()), same reasoning as
+                    # code_writers' task_text handling just above.
+                    result = fn(session_id=session_id, path=path, expanded=expanded,
+                                key_override=override, task_text=task_text, domain=domain)
+                elif current_name in ("reviewer", "security_scanner", "extraction_table_builder"):
+                    # extraction_table_builder (§3.5): no task_text needed —
+                    # its real input is KEYS["academic_search_report"], read
+                    # straight off the bus. If empty, run() raises
+                    # MissingDependencyError("academic_search") itself (see
+                    # its own docstring), letting the self-heal branch below
+                    # splice that step in first on the adaptive path.
+                    result = fn(session_id=session_id, path=path, expanded=expanded,
+                                key_override=override, domain=domain)
+                elif current_name == "fixer_pool":
+                    result = fn(session_id=session_id, path=path, key_override=override, domain=domain)
+                elif current_name == "sandbox_tester_lean":
+                    result = fn(session_id=session_id, path=path)
+                elif current_name == "structure_architect":
+                    # Needs task_text (see UNSCOPED_TIER_AGENTS comment above)
+                    # — its no-code planning path uses it to plan a
+                    # folder/file scaffold when there's no code to organize.
+                    result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
+                                domain=domain)
+                elif current_name == "deploy_config_writer":
+                    # Part 7 §7.4 — same call shape as structure_architect
+                    # just above: reads real on-disk project state itself
+                    # (via get_current_app_slug()), task_text is only a minor
+                    # extra signal, not a hard requirement.
+                    result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
+                                domain=domain)
+                elif current_name in ("architecture_diagrammer", "schema_diagrammer", "handoff_packager"):
+                    result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text, domain=domain)
+                elif current_name == "hardware_speccer":
+                    # MiniMe Blueprint fix — same call shape as
+                    # architecture_diagrammer/schema_diagrammer just above, plus
+                    # workspace_id: run_hardware_speccer() hard-requires it (raises
+                    # ValueError without one) since the spec is written into that
+                    # workspace's workspace_facts.custom, not a bus key like its
+                    # sibling diagrammers. workspace_id is threaded here all the
+                    # way from api/task_runner.py's _run_task_inner(), same depth
+                    # scope/domain already are.
+                    result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
+                                domain=domain, workspace_id=workspace_id)
+                elif current_name == "academic_search":
+                    # Needs task_text as the search query (no other bus key
+                    # holds it yet — this IS the first data-gathering step)
+                    # and tier for write_node()'s usage logging.
+                    result = fn(task_text=task_text, session_id=session_id,
+                                tier=PATH_TO_TIER.get(path), domain=domain)
+                elif current_name == "web_researcher":
+                    # Same call shape as academic_search directly above --
+                    # task_text as the search query, tier for write_node()'s
+                    # usage logging. `scope` comes from _run_loop()'s own
+                    # param (see execute_graph()'s docstring for the full
+                    # path it's threaded through, all the way from
+                    # api/routes/tasks.py's TaskRequest.scope) -- explicit
+                    # end-to-end plumbing rather than parsed out of
+                    # task_text, so a UI scope selector is authoritative
+                    # instead of best-effort. `or "general"` only matters
+                    # for callers that never pass one (e.g. the CLI
+                    # __main__ smoke test below) -- web_researcher.run()'s
+                    # own default is "general" too, this just makes that
+                    # explicit at the call site rather than relying on
+                    # run()'s signature to quietly supply it.
+                    result = fn(task_text=task_text, session_id=session_id,
+                                tier=PATH_TO_TIER.get(path), scope=scope or "general")
+                elif current_name == "dataset_analyst":
+                    # Needs task_text as the analysis request, same reasoning
+                    # as academic_search above. No key_override/expanded —
+                    # single-pass generation + sandbox execution, not a pool.
+                    result = fn(task_text=task_text, session_id=session_id, path=path, domain=domain)
+                elif current_name == "performance_reviewer":
+                    # Patch 8 (rollout guide §3) — no task_text needed, unlike
+                    # dataset_analyst/academic_search just above: this role's
+                    # real input is fixed_code/submitted_code + test_results,
+                    # read straight off the bus (same convention
+                    # sandbox_tester.py's own run_sandbox_tester() uses), not
+                    # anything seeded from the task description itself. No
+                    # key_override/expanded either — single-pass generation +
+                    # sandbox execution on ONE selected module, not a worker
+                    # pool.
+                    result = fn(session_id=session_id, path=path, domain=domain)
+                elif current_name in ("file_manager", "file_manager_writeback", "file_manager_test_writeback"):
+                    # Kept as a three-name case rather than a single
+                    # "file_manager" case — dropping back to one name would
+                    # silently drop project_unique_name for the two writeback
+                    # callables.
+                    result = fn(project_unique_name=project_unique_name)
+                elif current_name == "generic_worker":
+                    # `role` identifies WHICH reasoning-only role this step
+                    # is. input_keys is "every role earlier than this one in
+                    # the (possibly runtime-escalated) plan" — role_names[:idx]
+                    # is a plain slice since role_names is already in resolved
+                    # execution order.
+                    #
+                    # Part 2 §2.6: include_conversation_context is False only
+                    # for a role explicitly listed in
+                    # no_conversation_context_roles — every other role keeps
+                    # today's exact behavior (full conversation-memory
+                    # prepend). input_keys is unaffected either way, since
+                    # that's the separate, already-enforced per-stage scoping
+                    # mechanism this gap sat alongside.
+                    #
+                    # domain (Part 2 §2.6, cost-tracking gap): forwarded so
+                    # utils/llm_client.py's log_usage() can tag this call's
+                    # usage for the per-project/per-section breakdown.
+                    result = fn(role=role, task_text=task_text,
+                                input_keys=list(_flatten_role_names(role_names[:idx])), session_id=session_id,
+                                key_override=override,
+                                include_conversation_context=role not in no_conversation_context_roles,
+                                domain=domain)
+                elif current_name in UNSCOPED_TIER_AGENTS:
+                    # tier=None if path itself is None/unrecognized — these
+                    # agents already treat a None tier as "unscoped".
+                    result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), domain=domain)
+                elif current_name in ("idea_planner", "prompt_writer", "test_writer", "report_writer"):
+                    # Migration Part 2 §2.6, cost-tracking gap's last piece:
+                    # these four used to fall through to the bare `else: fn()`
+                    # branch below and got NOTHING passed to them at all — not
+                    # even session_id, let alone domain. Each of these four
+                    # modules' own run()/run_report_writer() already accepted
+                    # (or, this same Part, now accepts) session_id/domain
+                    # kwargs that simply had no caller ever supplying them.
+                    # tier isn't threaded here even though prompt_writer.run()
+                    # accepts it — none of these four are tier-gated the way
+                    # UNSCOPED_TIER_AGENTS' four are, so there's no
+                    # PATH_TO_TIER lookup relevant to pass.
+                    result = fn(session_id=session_id, domain=domain)
+                else:
+                    result = fn()
+            except MissingDependencyError as dep_exc:
+                # An agent asked for a specific prerequisite role instead of
+                # hard-failing the task. Only attempt to self-heal on the
+                # "adaptive" path — that's the only mode where role_names is
+                # a Panel-decided vocabulary a new role can be spliced into;
+                # on instant/direct/fixed's statically-built graphs this is a
+                # real ordering bug, not a staffing gap, so it's re-raised.
+                needed_role = dep_exc.required_role
+                pair = (role, needed_role)
+                already_ran = needed_role in _flatten_role_names(role_names[:idx])
+                over_budget = auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP
+                if path != "adaptive" or already_ran or over_budget:
+                    emit_event("error", session_id=session_id, agent=current_name, path=path,
+                                payload={"message": f"{dep_exc.__class__.__name__}: {dep_exc}"})
+                    raise
+                auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
+                print(f"  [Executor] {current_name} (role={role}) requested prerequisite "
+                      f"role '{needed_role}' — inserting it and retrying.")
+                emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
+                            payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
+                                     "requested_role": needed_role})
+                role_names.insert(idx, needed_role)
+                agent_names.insert(idx, resolve_role(needed_role))
+                continue   # re-enter the loop at the same idx, now pointing at
+                           # the newly inserted prerequisite step instead of
+                           # the one that raised (which got shifted to idx+1).
+            except Exception as exc:
                 emit_event("error", session_id=session_id, agent=current_name, path=path,
-                            payload={"message": f"{dep_exc.__class__.__name__}: {dep_exc}"})
+                            payload={"message": f"{exc.__class__.__name__}: {exc}"})
                 raise
-            auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
-            print(f"  [Executor] {current_name} (role={role}) requested prerequisite "
-                  f"role '{needed_role}' — inserting it and retrying.")
-            emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
-                        payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
-                                 "requested_role": needed_role})
-            role_names.insert(idx, needed_role)
-            agent_names.insert(idx, resolve_role(needed_role))
-            continue   # re-enter the loop at the same idx, now pointing at
-                       # the newly inserted prerequisite step instead of
-                       # the one that raised (which got shifted to idx+1).
-        except Exception as exc:
-            emit_event("error", session_id=session_id, agent=current_name, path=path,
-                        payload={"message": f"{exc.__class__.__name__}: {exc}"})
-            raise
-        duration_ms = int((time.monotonic() - started) * 1000)
-        # results is keyed by ROLE, not module name — results["generic_worker"]
-        # would otherwise silently overwrite itself across multiple
-        # generic_worker hires in the same plan.
-        results[role] = result
-        print(f"  [Executor] done: {current_name}")
+            duration_ms = int((time.monotonic() - started) * 1000)
+            # results is keyed by ROLE, not module name — results["generic_worker"]
+            # would otherwise silently overwrite itself across multiple
+            # generic_worker hires in the same plan.
+            results[role] = result
+            print(f"  [Executor] done: {current_name}")
+            if _role_span is not None:
+                try:
+                    _role_span.update(output=_summarize(result, role=role))
+                except Exception as trace_exc:
+                    print(f"  [executor] Langfuse role span failed to update "
+                          f"output for role={role!r} (non-fatal): {trace_exc}")
         image = _extract_image(result)
         # Text budget shrinks when an image rides along in the same
         # event, so the two together still fit Pusher's ~10KB cap
