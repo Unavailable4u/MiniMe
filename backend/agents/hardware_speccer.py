@@ -50,7 +50,9 @@ from utils.llm_client import generate_text
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
 from eo import workspace_facts
-from agents.structure_architect import _strip_fences  # reuse, don't reimplement
+from agents.structure_architect import (
+    _strip_fences, _mermaid_id, _sanitize_mermaid_label,
+)  # reuse, don't reimplement
 
 load_dotenv()
 
@@ -70,13 +72,35 @@ FALLBACK_CHAIN = [
 SYSTEM_PROMPT = """You are a hardware bill-of-materials and assembly \
 planner. You read a finished (or in-progress) hardware PRD/feasibility \
 note and propose the parts list, a wiring graph (which part connects to \
-which, and whether that connection carries data, power, or ground), a \
-rough physical layout inside an enclosure, and a step-by-step assembly \
-sequence grouped into phases (e.g. Fabricate, Wire, Bring-up).
+which, over which specific pins/terminals, and whether that connection \
+carries data, power, or ground), a rough physical layout inside an \
+enclosure, and a step-by-step assembly sequence grouped into phases \
+(e.g. Fabricate, Wire, Bring-up).
 
 Never invent a part the PRD gives you no reason to include. Every wiring \
 edge must reference two part ids that exist in your own parts list. Every \
 instruction step's tool_ids/part_ids must reference real entries.
+
+Every electrical part in "parts" (i.e. every part whose category is \
+"mcu", "sensor", "actuator", or "power") MUST have a matching entry in \
+"wiring.nodes" and MUST appear in at least one "wiring.edges" entry \
+(as either "from" or "to") -- a part that's in the bill of materials but \
+never wired to anything is a bug, not a valid answer, even if it's a \
+support/passthrough part like a charge controller or voltage regulator. \
+The only exception is a purely mechanical, non-electrical part (e.g. \
+screws, standoffs, an enclosure shell) -- omit those from "wiring.nodes" \
+entirely rather than adding an orphaned node for them.
+
+Every wiring edge must name the actual pin or terminal on each side \
+whenever the PRD or the parts involved make that determinable -- e.g. \
+"GPIO27" on an ESP32, "SDA"/"SCL" for I2C, "+"/"-" for a battery or \
+power rail, "VCC"/"GND" for a generic supply/ground pin, "5V"/"3V3" for \
+a regulator's output. Use null for "from_pin"/"to_pin" only when the \
+connection genuinely has no single named pin to point to (e.g. an \
+abstract "data" link you can't resolve to a specific terminal) -- do not \
+leave them null just because it's easier; a wiring diagram whose edges \
+don't say which pin connects to which pin is not detailed enough to \
+build from.
 
 For the physical layout, you are worse at spatial reasoning than at \
 listing parts or wiring edges -- do not attempt precise millimeter \
@@ -100,7 +124,8 @@ exactly this shape:
   ],
   "wiring": {
     "nodes": [{"id": "mcu_1", "label": "ESP32 DevKit", "type": "mcu"}],
-    "edges": [{"from": "mcu_1", "to": "sensor_1", "kind": "data"}]
+    "edges": [{"from": "mcu_1", "to": "sensor_1", "kind": "data",
+               "from_pin": "GPIO34", "to_pin": "AOUT"}]
   },
   "mech": {
     "enclosure": {"w": 100, "h": 60, "d": 40},
@@ -120,10 +145,13 @@ exactly this shape:
 }
 "category" is one of: "mcu", "sensor", "actuator", "power", "module". \
 "type" (wiring nodes) uses the same set. "kind" (wiring edges) is one of: \
-"data", "power", "ground". Use short lowercase_with_underscores ids; every \
+"data", "power", "ground". "from_pin"/"to_pin" are short strings naming \
+the actual pin/terminal on each side (see above), or null only when \
+genuinely not resolvable. Use short lowercase_with_underscores ids; every \
 id referenced elsewhere (wiring edges, mech placements, instruction \
 tool_ids/part_ids) MUST match an id defined in "parts"/"wiring.nodes".
 """
+
 
 
 def _read_prd_context(session_id: str) -> str:
@@ -253,6 +281,135 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     return parts
 
 
+# Same color-per-kind convention WiringGraph.jsx's EDGE_COLORS already
+# uses for the force-graph view, kept identical here (via Mermaid's
+# linkStyle) so the two renderings of the same wiring data never disagree
+# about what "power" vs "ground" vs "data" looks like.
+_EDGE_COLOR_BY_KIND = {
+    "data": "#22c55e",
+    "power": "#f59e0b",
+    "ground": "#6b7280",
+}
+_DEFAULT_EDGE_COLOR = "#6b7280"
+
+# Same node-type vocabulary as WiringGraph.jsx's TYPE_COLORS / Blueprint's
+# device-spec schema (hardware_speccer.py's own SYSTEM_PROMPT above) --
+# one flowchart shape per type so the diagram is visually scannable by
+# category (MCU vs sensor vs power, etc.) without reading every label,
+# the same idea architecture_diagrammer.py's SHAPE_BY_KIND already uses
+# for software components.
+_SHAPE_BY_TYPE = {
+    "mcu": ("[", "]"),          # rectangle
+    "sensor": ("(", ")"),        # rounded
+    "actuator": ("([", "])"),    # stadium
+    "power": ("[(", ")]"),       # cylinder
+    "module": ("[[", "]]"),      # subroutine
+}
+_TYPE_TITLES = {
+    "mcu": "MCU", "sensor": "Sensors", "actuator": "Actuators",
+    "power": "Power", "module": "Modules",
+}
+
+
+def _build_wiring_mermaid(spec: dict) -> str:
+    """Deterministic renderer -- same "JSON proposes, Python renders"
+    contract as architecture_diagrammer.py's _build_architecture_mermaid()
+    and schema_diagrammer.py's _build_schema_mermaid(), and reuses their
+    exact sanitizer (_sanitize_mermaid_label(), see structure_architect.py
+    for why: Bug 5 of the rendering audit) so this inherits "always valid
+    Mermaid syntax" for free instead of needing its own validate/retry
+    pass. This is the detailed, pin-level wiring diagram Blueprint's
+    force-graph view (WiringGraph.jsx) can't express -- see that
+    component's own module docstring for why a force-graph is the right
+    tool for "what connects to what" but the wrong tool for "which
+    specific pin connects to which specific pin."
+
+    Groups nodes into one subgraph per device-spec type (mcu/sensor/
+    actuator/power/module) -- same idea the PRD's own (unvalidated,
+    Bug 9/10/11) freeform Wiring Overview mermaid block already reached
+    for on its own (ESP32/Sensor_Ports/Power subgraphs), just done here
+    deterministically off the same structured wiring.nodes/edges data
+    Blueprint already trusts, instead of the model writing Mermaid syntax
+    directly.
+
+    An edge whose from_pin/to_pin (hardware_speccer.py's SYSTEM_PROMPT,
+    step 1 of the wiring-detail fix) are present gets a
+    "kind: from_pin->to_pin" label; an edge missing one or both pins
+    (an older spec, or a connection the model couldn't resolve to a
+    named pin) falls back to just "kind", same as before that schema
+    change -- never blocks rendering on missing pin data.
+
+    An edge referencing a node id that isn't in wiring.nodes (shouldn't
+    happen per the SYSTEM_PROMPT's own contract, but a model response is
+    never fully guaranteed to honor it) is skipped rather than emitted,
+    so this never produces Mermaid that references an undeclared node.
+
+    Returns "" for an empty/missing wiring.nodes -- caller decides what
+    an empty diagram means for its own UI, this function doesn't guess.
+    """
+    wiring = spec.get("wiring") or {}
+    nodes = wiring.get("nodes") or []
+    edges = wiring.get("edges") or []
+    if not nodes:
+        return ""
+
+    node_ids = {}
+    groups = {}
+    group_order = []
+    for n in nodes:
+        node_type = n.get("type") or "module"
+        groups.setdefault(node_type, []).append(n)
+        if node_type not in group_order:
+            group_order.append(node_type)
+
+    lines = ["flowchart LR"]
+    for node_type in group_order:
+        title = _TYPE_TITLES.get(node_type, node_type.title())
+        lines.append(f'    subgraph {_mermaid_id(f"grp_{node_type}")}["{title}"]')
+        open_b, close_b = _SHAPE_BY_TYPE.get(node_type, ("[", "]"))
+        for n in groups[node_type]:
+            raw_id = n.get("id") or "?"
+            nid = _mermaid_id(f"n_{raw_id}")
+            node_ids[raw_id] = nid
+            label = _sanitize_mermaid_label(n.get("label") or raw_id)
+            lines.append(f'        {nid}{open_b}"{label}"{close_b}')
+        lines.append("    end")
+
+    style_lines = []
+    edge_index = 0
+    for e in edges:
+        from_id = node_ids.get(e.get("from"))
+        to_id = node_ids.get(e.get("to"))
+        if not from_id or not to_id:
+            continue  # references a node not in wiring.nodes -- skip, don't emit a dangling reference
+
+        kind = e.get("kind") or "link"
+        from_pin = (e.get("from_pin") or "").strip()
+        to_pin = (e.get("to_pin") or "").strip()
+        if from_pin and to_pin:
+            raw_label = f"{kind}: {from_pin}->{to_pin}"
+        elif from_pin or to_pin:
+            raw_label = f"{kind}: {from_pin or to_pin}"
+        else:
+            raw_label = kind
+        # Quoted, not bare, edge label: an unquoted Mermaid pipe-label
+        # (|...|) can't safely contain parentheses -- exactly the
+        # "ESP[ESP32 5V (Vin)]"-style parse error from the rendering
+        # audit's Bug 5, but on an edge label instead of a node label.
+        # Pin names routinely contain parens (e.g. "GPIO21 (SDA)"), so
+        # quoting is required here even though the node labels above get
+        # away without it.
+        label = _sanitize_mermaid_label(raw_label, fallback=kind)
+
+        lines.append(f'    {from_id} -->|"{label}"| {to_id}')
+        color = _EDGE_COLOR_BY_KIND.get(kind, _DEFAULT_EDGE_COLOR)
+        style_lines.append(f'    linkStyle {edge_index} stroke:{color},color:{color}')
+        edge_index += 1
+
+    lines.extend(style_lines)
+    return "\n".join(lines)
+
+
 def run_hardware_speccer(session_id: str = None, tier: int = None,
                           task_text: str = None, domain: str = None,
                           workspace_id: str = None) -> dict:
@@ -304,6 +461,21 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         }
 
     spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
+
+    # Step 3 of the wiring-detail fix: deterministically render the
+    # pin-level flowchart off spec["wiring"] (nodes/edges, now carrying
+    # from_pin/to_pin per step 1's schema change) and fold it back in as
+    # wiring.mermaid, right alongside the nodes/edges WiringGraph.jsx's
+    # force-graph view already reads -- one wiring object, two renderings
+    # of it, never two independently-generated diagrams that could
+    # disagree (that's exactly the problem with the PRD's own separate,
+    # unvalidated Wiring Overview block -- Bug 9/10/11 of the rendering
+    # audit). "" (empty wiring.nodes) is a valid, honest value here, not
+    # an error -- a caller checks for it the same way it already checks
+    # for an empty nodes/edges list.
+    if "wiring" not in spec or not isinstance(spec["wiring"], dict):
+        spec["wiring"] = {"nodes": [], "edges": []}
+    spec["wiring"]["mermaid"] = _build_wiring_mermaid(spec)
 
     # Same read-modify-write shape api/server.py's refresh-prices endpoint
     # already uses for custom["parts"] alone -- read the whole facts

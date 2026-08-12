@@ -57,6 +57,8 @@ export default function ForceGraphBase({
   linkColor,
   linkWidth,
   linkLabel,
+  linkCanvasObject,
+  linkCanvasObjectMode,
   linkCurvature = "curvature",
   linkDirectionalArrowLength = 5,
   linkDirectionalArrowRelPos = 1,
@@ -148,6 +150,8 @@ export default function ForceGraphBase({
           linkDirectionalArrowRelPos={linkDirectionalArrowRelPos}
           linkWidth={linkWidth}
           linkLabel={linkLabel}
+          linkCanvasObject={linkCanvasObject}
+          linkCanvasObjectMode={linkCanvasObjectMode}
           cooldownTicks={cooldownTicks}
           onEngineStop={() => {
             // Debounced re-frame: only nudge the view outward as new nodes
