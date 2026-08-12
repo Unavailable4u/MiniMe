@@ -1122,6 +1122,40 @@ ROLE_PROMPTS_SEED = {
         "explicitly here, since handoff_packager reads this section to scope "
         "cycle 1), "
     ),
+    # Bug fix (2026-08-12): "prd_writer_hardware_scope" is appended to
+    # "prd_writer"'s brief above via string concatenation at dict-build
+    # time (see ROLE_PROMPTS_SEED assembly below) rather than inline,
+    # since the instruction reads as a standalone rule, not a natural
+    # continuation of the paragraph above it. If the task explicitly asks
+    # for a hardware bill of materials, wiring diagram/graph, physical/
+    # enclosure layout, or step-by-step assembly instructions, prd_writer
+    # should NOT enumerate those in detail -- hardware_speccer runs right
+    # after this role specifically to produce that content as real
+    # structured data (a priced parts table, a rendered wiring graph, a
+    # physical layout, and a checkable assembly sequence) that the
+    # Blueprint tab renders interactively, not as static Markdown prose.
+    # Without this, a hardware task's raw text (all prd_writer sees when
+    # spliced in as hardware_speccer's prerequisite with no upstream
+    # intake/question context) reads as a direct instruction to write the
+    # whole parts list/wiring notes/enclosure script/assembly checklist
+    # itself -- producing an inert, duplicate "build guide" in the PRD tab
+    # while the real, usable Blueprint output is what the task actually
+    # needed.
+    "prd_writer_hardware_scope": (
+        "\n\nIf the task explicitly asks for a hardware bill of materials, "
+        "wiring diagram/graph, physical/enclosure layout, or step-by-step "
+        "assembly instructions, do NOT enumerate that detail here. Keep "
+        "'Features'/'Goals' at the product-requirements level instead -- "
+        "what the device must do and any hard constraints (e.g. "
+        "\"battery-powered, weatherproof enclosure, ESP32-based moisture + "
+        "temperature/humidity sensing, local alert on low moisture\"), not "
+        "which part number or which GPIO pin. Add one line noting that the "
+        "detailed BOM, wiring, physical layout, and assembly steps are "
+        "produced separately by the hardware speccer step. This applies "
+        "ONLY to hardware BOM/wiring/enclosure/assembly detail -- every "
+        "other PRD section is written exactly as instructed above "
+        "regardless of whether the task involves hardware."
+    ),
 
     # Part 6 §6.3 — Growth domain. Hand-written up front, same reasoning
     # as every other seed brief in this dict: a bad first-draft brief
@@ -1332,6 +1366,15 @@ ROLE_PROMPTS_SEED = {
         "produces it differently)."
     ),
 }
+
+# Bug fix (2026-08-12): fold the hardware-scope addendum into prd_writer's
+# real brief here, right after ROLE_PROMPTS_SEED is built, and drop the
+# temporary "prd_writer_hardware_scope" key -- it was only ever a staging
+# key for the concatenation above (see that entry's own comment for why
+# it isn't written inline), not a real role name. Leaving it in the dict
+# would let get_role_prompt("prd_writer_hardware_scope") resolve to a
+# nonsense brief if anything ever mis-typed a role name to that string.
+ROLE_PROMPTS_SEED["prd_writer"] += ROLE_PROMPTS_SEED.pop("prd_writer_hardware_scope")
 
 
 import datetime as _datetime

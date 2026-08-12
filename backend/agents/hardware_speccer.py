@@ -316,6 +316,8 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     custom["mech"] = spec.get("mech", {})
     custom["instructions"] = spec.get("instructions", {})
     workspace_facts.set_facts(workspace_id, {"custom": custom})
+    print(f"  [hardware_speccer] wrote device spec to workspace_id={workspace_id!r} "
+          f"(session_id={session_id!r}, {len(custom['parts'])} parts)")
 
     workspace_facts.record_section_entries(
       workspace_id,
