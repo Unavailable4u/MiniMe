@@ -1,0 +1,37 @@
+diff --git a/backend/memory/bus.py b/backend/memory/bus.py
+index a58db05..8640614 100644
+--- a/backend/memory/bus.py
++++ b/backend/memory/bus.py
+@@ -76,14 +76,30 @@ def _namespaced(key: str) -> str:
+     property of your accounts, not any one project), registry:* keys
+     (Part 7 -- the role-prompt and role-to-agent registries are also
+     properties of the SYSTEM, not any one project, same reasoning as
+-    usage:* and project_registry above), and conversation:* keys (Part 23
++    usage:* and project_registry above), conversation:* keys (Part 23
+     -- a conversation is a property of the SESSION, not whatever
+     app_slug happens to be active when a given message lands, since a
+     single session isn't reliably tied to one app_slug across its
+-    lifetime)."""
++    lifetime), and workspace_facts:* keys (Bug fix 2026-08-12: a
++    workspace is its own stable identity, not a property of whatever
++    app_slug happens to be active in the calling context -- same
++    reasoning as conversation:/paused_execution: below. Without this
++    exemption, eo/workspace_facts.py's set_facts()/get_facts() silently
++    disagree on the actual Redis key whenever the two calls run in
++    different app_slug contexts: a POST /api/task request scopes
++    app_slug to task_runner.py's per-run slug (so e.g.
++    hardware_speccer's write lands under
++    "{task_slug}:workspace_facts:{workspace_id}"), while a plain GET
++    like /api/workspaces/{ws_id}/device-spec never calls
++    set_app_slug() and falls back to the persisted GLOBAL app_slug
++    record instead -- a different key, even though workspace_id is
++    identical on both sides. The write succeeds, the read 200s with an
++    empty-but-valid shape, and nothing anywhere raises -- it just
++    silently looks like the data was never generated)."""
+     if (key == "app_slug" or key == "project_registry"
+             or key.startswith("usage:") or key.startswith("registry:")
+             or key.startswith("conversation:")   # NEW — Part 23
++            or key.startswith("workspace_facts:")   # Bug fix 2026-08-12 — see docstring above
+             or key.startswith("cooldown_until:")   # Fix B (reliability guide):
+             # same reasoning as usage: above -- a provider account's
+             # rate-limit cooldown is a property of the ACCOUNT, not
