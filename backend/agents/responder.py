@@ -32,6 +32,20 @@ prompt_writer_lean.py and generic_worker.py were wired to it, this one
 was missed. Same fix as those two: accept session_id, prepend
 get_full_context() ahead of the task text sent to the model. Only the
 text sent to the LLM changes — the returned answer is unaffected.
+
+2026-08-12 fix: this agent's sole step read EO_INSPECTOR_GROQ_KEY_1 --
+the same account eo/inspector.py uses as ITS primary step -- but
+Inspector has 4 fallback steps behind that primary and Responder had
+none, so the exact same outage that Inspector shrugs off through its own
+fallback chain took Responder down completely. Tier 0 is registry-free by
+design (Part 5.1 — no Upstash, no memory.bus state), so this can't be
+wired to eo/registry.py's build_fallback_chain() the way the four
+registered tier-2/3 agents were; it needs its own hardcoded second-
+provider step instead, same fix as prompt_writer_lean.py and
+code_writer_lean.py and the same pattern reviewer_fixer_lean.py already
+uses. That step is appended after the key_override-built primary step
+below, so key_override still only ever changes the primary account, never
+the fallback.
 """
 import os
 import sys
@@ -119,8 +133,17 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
 
     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
     # its fallback step is removed here, not replaced.
+    #
+    # 2026-08-12 fix: that left primary_key_env as the only step, with no
+    # real fallback -- and by default primary_key_env is
+    # EO_INSPECTOR_GROQ_KEY_1, shared with eo/inspector.py's own primary
+    # step. A hardcoded, genuinely different provider is appended below
+    # (own account, own infrastructure) so an outage on the shared Groq
+    # account doesn't take Responder down the way it used to; key_override
+    # (above) only ever affects the primary step, same as before.
     chain = [
         {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": primary_key_env},
+        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
     ]
 
     conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23 fix
