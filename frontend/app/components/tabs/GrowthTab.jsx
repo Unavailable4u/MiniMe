@@ -1210,6 +1210,18 @@ function ContentAuditView({ wsId }) {
           fetchPanelContent={fetchPanelContent}
           savePanelContent={savePanelContent}
         />
+        {/* T5 audit note: agents/backlink_detector.py is NOT an external/SEO
+            backlink checker -- it's the internal knowledge-graph
+            cross-reference tool already fully wired to Notebooks' Library ->
+            Backlinks sub-tab (detectBacklinks() in SessionContext.jsx hits
+            /api/workspaces/{id}/backlinks/detect). Wiring it here would be
+            a scope mismatch, not a real gap -- this pointer just stops
+            someone from re-discovering that dead end from Growth. */}
+        <p className="text-[11px] text-[var(--neutral-600)]">
+          Looking for cross-reference backlinks between your notes? That
+          lives under Notebooks → Library → Backlinks, not here -- this
+          audit covers content quality and page performance only.
+        </p>
       </section>
 
       <section className="space-y-3 border-t border-[var(--neutral-800)] pt-6">
