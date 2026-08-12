@@ -11,7 +11,22 @@ Writer, with the concurrency caveat flagged in Part 12.1 — that's honored
 here literally: GROQ_API_KEY is the same env var agents/prompt_writer.py
 reads. Unlike the production version (which calls Groq directly with no
 fallback), this one uses the full CHAIN/fallback pattern per Part 2.4's
-table: Groq llama-3.3-70b-versatile -> GitHub Models gpt-4.1-mini.
+table: originally Groq llama-3.3-70b-versatile -> GitHub Models
+gpt-4.1-mini.
+
+2026-08-12 fix: GitHub Models retired (see the §4 note below), which had
+quietly dropped this agent back down to a single Groq step with zero real
+fallback — the same "shares its one key with production, dies when it
+cools down" bug already found and fixed in prompt_writer.py, test_writer.py,
+schema_diagrammer.py, and dependency_mapper.py. Those four run through
+eo/registry.py's build_fallback_chain(), but this is the tier-1 lean
+pipeline, which deliberately bypasses the registry for speed (see
+eo/registry.py:110) — build_fallback_chain() has nothing to resolve under
+a "prompt_writer_lean" role. So the fix here is the same one
+reviewer_fixer_lean.py already uses: a real, hardcoded second-provider
+step, Cerebras on its own key/account, so a Groq-side outage or cooldown
+on GROQ_API_KEY (shared with prompt_writer.py) doesn't take this agent
+down with it.
 
 Deliberately produces ONE module, not 2-3 like the production Prompt
 Writer — Part 2.1 defines tier 1 as "a small, self-contained script or
@@ -35,8 +50,18 @@ from utils.llm_client import generate_text
 
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
 # its fallback step is removed here, not replaced.
+#
+# 2026-08-12 fix: that left a single Groq step with no real fallback,
+# sharing GROQ_API_KEY with prompt_writer.py -- one account cooldown and
+# both agents go down together. Lean-pipeline agents bypass
+# eo/registry.py's build_fallback_chain() by design (see eo/registry.py:
+# 110), so unlike prompt_writer.py's own fix this can't just call into
+# the registry -- it needs a real, hardcoded second-provider step
+# instead, same approach as reviewer_fixer_lean.py's Groq -> Cerebras
+# CHAIN.
 CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
 ]
 
 SYSTEM_PROMPT = """You are a technical spec writer for a lean, single-file build \

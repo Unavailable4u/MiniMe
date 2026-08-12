@@ -20,6 +20,22 @@ generate_text() instead of a hand-rolled Cerebras client + retry loop, so
 this agent's calls get usage-logged and fire usage_update events the same
 way prompt_writer_lean's do. session_id/tier are optional passthroughs —
 leaving them unset keeps behavior identical to before.
+
+2026-08-12 fix: the 3-step "rotation" below (gpt-oss-120b -> zai-glm-4.7
+-> gemma-4-31b) was fake redundancy — every step read the same
+CEREBRAS_API_KEY_1, so a single cooldown on that one account took out all
+three steps at once; different models, same blast radius. Like
+prompt_writer_lean.py, this is the tier-1 lean pipeline, so it bypasses
+eo/registry.py's build_fallback_chain() by design (eo/registry.py:110)
+and can't just call into the registry the way code_writer.py's own fix
+did. Two changes: each rotation step now uses its own Cerebras account
+(CEREBRAS_API_KEY_1/_2/_3, real siblings of the production 5-key pool —
+see eo/registry.py), so the three steps actually fail independently; and
+a genuine second-provider step is appended after them (Gemini, its own
+key/account/infrastructure), matching the same hardcoded-second-provider
+fix used in prompt_writer_lean.py and already present in
+reviewer_fixer_lean.py, so a Cerebras-wide outage doesn't take this agent
+down entirely.
 """
 import os
 import sys
@@ -33,11 +49,26 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
 # Same rotation as agents/code_writers.py — see that file's docstring for
 # why this list isn't the blueprint's original one (model deprecations).
 MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
-KEY_ENV = "CEREBRAS_API_KEY_1"  # first key of the production 5-key pool
 
-# Expressed as a llm_client chain: same provider and key each step, only
-# the model changes — this is what "rotation" means for this agent.
-CHAIN = [{"provider": "cerebras", "model": m, "key_env": KEY_ENV} for m in MODELS]
+# 2026-08-12 fix: was a single KEY_ENV = "CEREBRAS_API_KEY_1" shared by
+# every step above -- three models, one account, so one cooldown killed
+# the whole "rotation" at once. Now each model step gets its own real
+# Cerebras account (siblings of the production 5-key pool, see
+# eo/registry.py), so the three steps actually fail independently.
+MODEL_KEYS = ["CEREBRAS_API_KEY_1", "CEREBRAS_API_KEY_2", "CEREBRAS_API_KEY_3"]
+
+# Expressed as a llm_client chain: model AND key now both change per step
+# (see MODEL_KEYS fix above), plus a hardcoded, genuinely different
+# provider as a last resort -- same fix as prompt_writer_lean.py, since
+# this lean-pipeline agent bypasses eo/registry.py's
+# build_fallback_chain() by design (eo/registry.py:110) and can't lean on
+# the registry the way code_writer.py's own fix does.
+CHAIN = [
+    {"provider": "cerebras", "model": m, "key_env": k}
+    for m, k in zip(MODELS, MODEL_KEYS)
+] + [
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_1"},
+]
 
 # Part 8.5's simplicity constraint, verbatim from the blueprint text.
 SYSTEM_PROMPT = """You are a code generator for a lean, single-file build task. \
