@@ -334,7 +334,7 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                    mode: str = None, key_overrides: dict = None,
                    project_unique_name: str = None, approval_roles: set = None,
                    no_conversation_context_roles: set = None, domain: str = None,
-                   scope: str = None) -> dict:
+                   scope: str = None, workspace_id: str = None) -> dict:
     """Fresh-start entry point. `approval_roles` defaults to None (today's
     full-auto behavior) — every existing call site that doesn't pass it is
     unaffected.
@@ -398,14 +398,14 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
         project_unique_name=project_unique_name, expanded=expanded,
         approval_roles=approval_roles, next_step=next_step,
         no_conversation_context_roles=no_conversation_context_roles,
-        domain=domain, scope=scope,
+        domain=domain, scope=scope, workspace_id=workspace_id,
     )
 
 
 def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisits,
               task_text, session_id, path, mode, key_overrides, project_unique_name,
               expanded, approval_roles, next_step, no_conversation_context_roles=None,
-              domain=None, scope=None) -> dict:
+              domain=None, scope=None, workspace_id=None) -> dict:
     """The actual step-dispatch loop, factored out of execute_graph() so
     resume_graph() below can re-enter it from a persisted mid-run
     snapshot instead of duplicating every dispatch case, the
@@ -583,6 +583,17 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                             domain=domain)
             elif current_name in ("architecture_diagrammer", "schema_diagrammer", "handoff_packager"):
                 result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text, domain=domain)
+            elif current_name == "hardware_speccer":
+                # MiniMe Blueprint fix — same call shape as
+                # architecture_diagrammer/schema_diagrammer just above, plus
+                # workspace_id: run_hardware_speccer() hard-requires it (raises
+                # ValueError without one) since the spec is written into that
+                # workspace's workspace_facts.custom, not a bus key like its
+                # sibling diagrammers. workspace_id is threaded here all the
+                # way from api/task_runner.py's _run_task_inner(), same depth
+                # scope/domain already are.
+                result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text,
+                            domain=domain, workspace_id=workspace_id)
             elif current_name == "academic_search":
                 # Needs task_text as the search query (no other bus key
                 # holds it yet — this IS the first data-gathering step)
@@ -647,7 +658,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # utils/llm_client.py's log_usage() can tag this call's
                 # usage for the per-project/per-section breakdown.
                 result = fn(role=role, task_text=task_text,
-                            input_keys=role_names[:idx], session_id=session_id,
+                            input_keys=list(_flatten_role_names(role_names[:idx])), session_id=session_id,
                             key_override=override,
                             include_conversation_context=role not in no_conversation_context_roles,
                             domain=domain)
@@ -679,7 +690,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # real ordering bug, not a staffing gap, so it's re-raised.
             needed_role = dep_exc.required_role
             pair = (role, needed_role)
-            already_ran = needed_role in role_names[:idx]
+            already_ran = needed_role in _flatten_role_names(role_names[:idx])
             over_budget = auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP
             if path != "adaptive" or already_ran or over_budget:
                 emit_event("error", session_id=session_id, agent=current_name, path=path,
@@ -779,6 +790,12 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # scope the original dispatch was given, instead of
                 # silently falling back to "general" on resume.
                 "scope": scope,
+                # MiniMe Blueprint fix — same carry-through reasoning as
+                # scope/domain above, so a resumed run's hardware_speccer
+                # step (if that's what it pauses/resumes at) still has the
+                # workspace_id it hard-requires, instead of raising
+                # ValueError on resume.
+                "workspace_id": workspace_id,
                 # Captured so resume_graph() can restore the exact bus
                 # namespace this run was writing under before touching
                 # anything else.
@@ -883,6 +900,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     no_conversation_context_roles = set(snapshot.get("no_conversation_context_roles") or [])
     domain = snapshot.get("domain")
     scope = snapshot.get("scope")
+    workspace_id = snapshot.get("workspace_id")
     expanded = (mode or "auto").lower() in ("expert", "beast")
 
     # Macro-loop state (eo/loop_controller.py's run_with_looping()) —
@@ -897,6 +915,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     macro_execution_order = snapshot.get("macro_execution_order")
     macro_domain = snapshot.get("macro_domain")
     macro_scope = snapshot.get("macro_scope")
+    macro_workspace_id = snapshot.get("macro_workspace_id")
     macro_project_unique_name = snapshot.get("macro_project_unique_name")
 
     role = role_names[idx]
@@ -973,6 +992,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         new_snapshot["macro_execution_order"] = macro_execution_order
         new_snapshot["macro_domain"] = macro_domain
         new_snapshot["macro_scope"] = macro_scope
+        new_snapshot["macro_workspace_id"] = macro_workspace_id
         new_snapshot["macro_project_unique_name"] = macro_project_unique_name
         write(f"paused_execution:{session_id}", new_snapshot)
 
@@ -983,7 +1003,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         project_unique_name=project_unique_name, expanded=expanded,
         approval_roles=approval_roles, next_step=next_step,
         no_conversation_context_roles=no_conversation_context_roles,
-        domain=domain, scope=scope,
+        domain=domain, scope=scope, workspace_id=workspace_id,
     )
 
     if isinstance(result, dict) and result.get("status") == "paused":
@@ -1033,7 +1053,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
             project_unique_name=macro_project_unique_name, mode=effective_mode,
             approval_roles=approval_roles,
             no_conversation_context_roles=no_conversation_context_roles,
-            domain=macro_domain, scope=macro_scope,
+            domain=macro_domain, scope=macro_scope, workspace_id=macro_workspace_id,
         )
 
         if isinstance(pass_results, dict) and pass_results.get("status") == "paused":

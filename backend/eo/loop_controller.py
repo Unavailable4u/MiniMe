@@ -114,7 +114,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                       domain=None, project_unique_name=None, path=None,
                       approval_roles: set = None,
                       no_conversation_context_roles: set = None,
-                      scope: str = None) -> dict:
+                      scope: str = None, workspace_id: str = None) -> dict:
     """
     `domain` is not branched on anywhere in this module — every domain
     takes the same path through _run_gatekeeper(). Part 2 §2.6: it IS now
@@ -183,7 +183,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                                        project_unique_name=project_unique_name, mode=mode,
                                        approval_roles=approval_roles,
                                        no_conversation_context_roles=no_conversation_context_roles,
-                                       domain=domain, scope=scope)
+                                       domain=domain, scope=scope, workspace_id=workspace_id)
 
         # execute_graph() returns {"status": "paused", "paused_at_role": role}
         # instead of a finished {role: output} dict when execution hits a
@@ -209,6 +209,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                 snapshot["macro_execution_order"] = execution_order
                 snapshot["macro_domain"] = domain
                 snapshot["macro_scope"] = scope
+                snapshot["macro_workspace_id"] = workspace_id
                 snapshot["macro_project_unique_name"] = project_unique_name
                 write(f"paused_execution:{session_id}", snapshot)
             return {

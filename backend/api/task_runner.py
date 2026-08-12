@@ -286,7 +286,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
                       project_unique_name: str = None, mode: str = "auto",
                       approval_roles: set = None,
                       no_conversation_context_roles: set = None,
-                      app_slug: str = None, scope: str = None) -> dict:
+                      app_slug: str = None, scope: str = None, workspace_id: str = None) -> dict:
     """
     Routes through eo/loop_controller.py's run_with_looping() rather than
     calling execute_graph() directly, so the adaptive-looping machinery
@@ -366,6 +366,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         approval_roles=approval_roles,
         no_conversation_context_roles=no_conversation_context_roles,
         scope=scope,
+        workspace_id=workspace_id,
     )
 
     # run_with_looping() returns a paused sentinel instead of
@@ -839,11 +840,20 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                         f"never returned as 'preview_ready' by preview_task() in the first place."),
         }
     else:
+        # MiniMe Blueprint fix — same workspace_id lookup _run_task_inner()
+        # already does for the run_task() path; confirm_task() is the other
+        # real route into a tier-3 hires dispatch (preview_task() -> user
+        # edits hires -> confirm_task()), so hardware_speccer needs the same
+        # workspace_id here or it raises ValueError the moment it's hired
+        # through this path instead of the plain run_task() one.
+        workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
+        workspace_id = workspace["id"] if workspace else None
         response = _dispatch_resolved(task_text, decision, tier, cleaned_hires, app_slug,
                                        run_tests=False, session_id=session_id, mode=mode,
                                        project_unique_name=project_unique_name,
                                        approval_roles=approval_roles,
-                                       no_conversation_context_roles=no_conversation_context_roles)
+                                       no_conversation_context_roles=no_conversation_context_roles,
+                                       workspace_id=workspace_id)
 
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response), owner_id=owner_id)   
     return response
@@ -944,6 +954,14 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     approval_roles = set(decision.get("approval_roles") or [])
     no_conversation_context_roles = set(decision.get("no_conversation_context_roles") or [])
 
+    # MiniMe Blueprint fix — same workspace_id lookup _run_task_inner()/
+    # confirm_task() already do. A saved workflow template is a third real
+    # route into a tier-3 hires dispatch, so a template that hires
+    # hardware_speccer needs this too, or it raises ValueError the moment
+    # it's dispatched from here instead of the plain run_task() path.
+    workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
+    workspace_id = workspace["id"] if workspace else None
+
     response = _dispatch_resolved(
         task_text, decision, tier, mode_result["hires"], app_slug=None,
         run_tests=False, session_id=session_id, mode=mode,
@@ -951,6 +969,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
         approval_roles=approval_roles,
         no_conversation_context_roles=no_conversation_context_roles,
         scope=scope,   # NEW — task 13e
+        workspace_id=workspace_id,
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
@@ -1284,7 +1303,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
                         run_tests: bool, session_id: str, mode: str, project_unique_name: str,
                         approval_roles: set, no_conversation_context_roles: set = None,
-                        scope: str = None) -> dict:
+                        scope: str = None, workspace_id: str = None) -> dict:
     """The tier-branch dispatch that runs once classification + hiring
     are resolved — shared by _run_task_inner() (auto, one-shot path),
     confirm_task() (Part 2 §2.5's post-review path, where `hires` may
@@ -1299,7 +1318,16 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
 
     scope (task 13d/13e) has the same "tier-3 hires-driven branch only"
     scoping as no_conversation_context_roles above — tiers 0/1/2 have no
-    web_researcher dispatch path for it to reach."""
+    web_researcher dispatch path for it to reach.
+
+    workspace_id: MiniMe Blueprint fix — same "tier-3 hires-driven branch
+    only" scoping as scope/no_conversation_context_roles above. Only
+    hardware_speccer's dispatch branch (eo/executor.py) actually reads
+    it; every other role/tier is unaffected. Callers already compute this
+    (see _resolve_decision_and_hires()'s own "workspace_id" return key)
+    but it was never forwarded past this point before, so hardware_speccer
+    could never actually run even once hired -- it hard-requires
+    workspace_id and would raise ValueError without it."""
     if tier == 0:
         return _run_tier0(task_text, decision, session_id)
     elif tier == 1:
@@ -1318,7 +1346,7 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
                                      project_unique_name=project_unique_name, mode=mode,
                                      approval_roles=approval_roles,
                                      no_conversation_context_roles=no_conversation_context_roles,
-                                     app_slug=app_slug, scope=scope)
+                                     app_slug=app_slug, scope=scope, workspace_id=workspace_id)
         return {
             "decision": decision, "tier": 3, "session_id": session_id,
             "status": "not_wired_yet", "result": None,
@@ -1361,7 +1389,7 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
     response = _dispatch_resolved(resolved.get("task_text", task_text), resolved["decision"], resolved["tier"],
                                    resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
                                    approval_roles, no_conversation_context_roles=no_conversation_context_roles,
-                                   scope=scope)
+                                   scope=scope, workspace_id=resolved.get("workspace_id"))
     _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response)   # NEW — Part 2
     _maybe_attach_prerequisite_suggestions(resolved, response, session_id)   # NEW — Data Layer §9d
     return response

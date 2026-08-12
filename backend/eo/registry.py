@@ -1536,6 +1536,13 @@ REAL_ACTION_ROLES = {
     "memory_search": "memory_search",
     "architecture_diagrammer": "architecture_diagrammer",
     "schema_diagrammer": "schema_diagrammer",
+    "hardware_speccer": "hardware_speccer",    # MiniMe Blueprint — real action (writes
+    # workspace_facts.custom["parts"/"wiring"/"mech"]) via run_hardware_speccer(),
+    # same category as architecture_diagrammer/schema_diagrammer just above. Was
+    # missing entirely, so Panel could never hire it -- every suggested_agents
+    # label for a hardware task fell through resolve_role()'s "generic_worker"
+    # default instead, and the spec was never written no matter how the task
+    # was phrased or routed.
     "handoff_packager": "handoff_packager",    # Part 3 — research domain's real-action roles. Each performs a real
     # action (external HTTP calls, or writes structured data a
     # downstream role consumes as JSON, not free text) rather than pure
@@ -1631,6 +1638,8 @@ from agents import (
     content_adapter_pool,  # Part 6 §6.2
     deploy_config_writer,  # Part 7 §7.4
     performance_reviewer,  # Patch 8 (rollout guide §3)
+    hardware_speccer,  # MiniMe Blueprint — was never imported, so REGISTRY
+    # below couldn't reference it either. See REAL_ACTION_ROLES entry above.
 )
 
 # name -> {"callable": fn, "needs_cycle_num": bool}
@@ -1671,6 +1680,7 @@ REGISTRY = {
     "documentation_agent": {"callable": documentation_agent.run,          "needs_cycle_num": False},
     "architecture_diagrammer": {"callable": architecture_diagrammer.run_architecture_diagrammer, "needs_cycle_num": False},
     "schema_diagrammer": {"callable": schema_diagrammer.run_schema_diagrammer, "needs_cycle_num": False},
+    "hardware_speccer": {"callable": hardware_speccer.run_hardware_speccer, "needs_cycle_num": False},
     "handoff_packager": {"callable": handoff_packager.run_handoff_packager, "needs_cycle_num": False},
     # Migration Part 27: changelog_writer, final_qa, and gatekeeper's
     # dedicated agent modules were retired -- all three were either pure
