@@ -12,6 +12,8 @@ const CATEGORY_COLORS = {
   actuator: "text-orange-300 border-orange-500/40",
   power: "text-amber-300 border-amber-500/40",
   module: "text-purple-300 border-purple-500/40",
+  "3D_PRINT": "text-emerald-300 border-emerald-500/40",
+  MISC: "text-pink-300 border-pink-500/40",
 };
 const DEFAULT_CATEGORY_COLOR = "text-neutral-400 border-neutral-700";
 

@@ -15,6 +15,8 @@ const CATEGORY_COLORS = {
   actuator: "#fb923c",
   power: "#fbbf24",
   module: "#c084fc",
+  "3D_PRINT": "#34d399",
+  MISC: "#f472b6",
 };
 const DEFAULT_COLOR = "#999999";
 

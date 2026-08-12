@@ -6,12 +6,18 @@ import ForceGraphBase from "./ForceGraphBase";
 // KnowledgeGraphView.jsx's SECTION_COLORS -- device-spec categories are a
 // small fixed set (Blueprint §0's schema), so no lookup table shared with
 // KnowledgeGraphView's own domain vocabulary is needed.
+// "3D_PRINT"/"MISC" entries are kept here purely so this palette stays in
+// sync with PartsTable.jsx/MechView.jsx's -- those two categories are
+// always purely mechanical (never added to wiring.nodes, per
+// SYSTEM_PROMPT), so these two keys are never actually looked up here.
 const TYPE_COLORS = {
   mcu: "#22d3ee",
   sensor: "#60a5fa",
   actuator: "#fb923c",
   power: "#fbbf24",
   module: "#c084fc",
+  "3D_PRINT": "#34d399",
+  MISC: "#f472b6",
 };
 const DEFAULT_COLOR = "#6b7280";
 
