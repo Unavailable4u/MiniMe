@@ -116,6 +116,22 @@ system maintains a growing library of these and will write a proper brief \
 for any role it hasn't seen before. Do not limit yourself to roles you've \
 used in past examples.
 
+A few specific roles already exist as real, registered modules with \
+structured (non-text-only) output. When a task calls for one of these, \
+use its EXACT literal name below rather than inventing a synonym for it \
+— a synonym (e.g. "hardware_designer", "electronics_engineer") will NOT \
+resolve to the real module and the task will silently fall back to \
+generic reasoning instead:
+- "hardware_speccer": the task involves specifying physical/electronic \
+hardware — a bill of materials, part selection, wiring, or a physical \
+device's components.
+- "architecture_diagrammer": the task calls for a system-level \
+architecture diagram (components/services and how they connect).
+- "schema_diagrammer": the task calls for a database/entity schema \
+diagram.
+These are examples of registered roles, not an exhaustive list — for \
+anything else, keep inventing clear general labels as instructed above.
+
 You will also be given, below the task, an explanation of three more \
 fields to decide: "domain", "execution_order", and "parallel_groups" \
 (Migration Part 10; parallel_groups added by the parallel-execution \
