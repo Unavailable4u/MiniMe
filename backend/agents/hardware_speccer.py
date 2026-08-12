@@ -45,7 +45,7 @@ import json
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read
+from memory.bus import read_stage_output_text
 from utils.llm_client import generate_text
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
@@ -127,14 +127,24 @@ def _read_prd_context(session_id: str) -> str:
     why it raises MissingDependencyError("prd_writer") rather than
     guessing from nothing. Hardware PRDs go through the same prd_writer
     role as software PRDs -- there's no separate hardware-specific writer,
-    so this is unchanged from the schema/architecture diagrammers."""
-    prd_output = read(f"stage_output:{session_id}:prd_writer", default=None)
-    if isinstance(prd_output, dict) and prd_output.get("text"):
-        return prd_output["text"]
+    so this is unchanged from the schema/architecture diagrammers.
 
-    intake_output = read(f"stage_output:{session_id}:intake_interviewer", default=None)
-    if isinstance(intake_output, dict) and intake_output.get("text"):
-        return intake_output["text"]
+    Bug fix (2026-08-12): now goes through memory.bus.read_stage_output_text()
+    instead of re-reading the raw key and checking isinstance(..., dict)
+    inline. That inline check only ever matched an approval-edited stage
+    output -- an ordinary completed run writes a plain string (see
+    agents/generic_worker.py's own bus_write() call), which this used to
+    treat as "nothing here yet" and raise MissingDependencyError even
+    when prd_writer had just finished successfully. See
+    read_stage_output_text()'s own docstring for the full shape mismatch
+    this closes."""
+    prd_text = read_stage_output_text(session_id, "prd_writer")
+    if prd_text:
+        return prd_text
+
+    intake_text = read_stage_output_text(session_id, "intake_interviewer")
+    if intake_text:
+        return intake_text
 
     raise MissingDependencyError("prd_writer")
 

@@ -754,6 +754,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     workspaceId={activeWs.id}
                     fetchDeviceSpec={fetchDeviceSpec}
                     refreshPartPrices={refreshPartPrices}
+                    refreshSignal={planPanelRefreshSignal}
                   />
                 )}
                 {t.id === "start_building" && (
@@ -1171,7 +1172,28 @@ const BLUEPRINT_VIEWS = [
   { id: "mech", label: "Mech" },
 ];
 
-function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices }) {
+// BUG FIX (2026-08-12): BlueprintView never re-fetched after
+// hardware_speccer wrote a fresh spec mid-conversation -- its effect
+// only ever depended on [workspaceId, fetchDeviceSpec], so a person had
+// to switch workspaces (or reload the page) to see Parts/Wiring/Mech
+// actually populate after a hardware build request finished, even once
+// the routing + stage_output bugs above are fixed and hardware_speccer
+// genuinely runs and writes the spec. Every one of the six PRD-family
+// panels above already solved this exact problem via `refreshSignal`
+// (planPanelRefreshSignal, passed down from PlanTab -- see patch 3's
+// own comment on that combined counter): BlueprintView just never
+// received the prop, since Blueprint's write path (hardware_speccer's
+// own direct workspace_facts.custom write) is different from
+// eo/panel_content.py's set_content() the other six panels use, and
+// that plumbing gap was never revisited when Blueprint was added.
+// planPanelRefreshSignal already fires on ANY assistant turn finishing
+// in this workspace's chat (session-local) or ANY other
+// dock/tab/browser-tab's PANEL_CONTENT_UPDATED push for this workspace
+// (cross-tab) -- both are equally valid "a role just finished, go
+// re-check" signals, and hardware_speccer finishing is exactly that,
+// so reusing the same counter (rather than plumbing a whole second
+// Pusher subscription just for device-spec writes) is correct here too.
+function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refreshSignal }) {
   const [spec, setSpec] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("parts");
@@ -1186,7 +1208,7 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices }) {
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [workspaceId, fetchDeviceSpec]);
+  }, [workspaceId, fetchDeviceSpec, refreshSignal]);
 
   async function handleRefreshPrices() {
     setRefreshing(true);

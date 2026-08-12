@@ -14,7 +14,7 @@ import json
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write
+from memory.bus import write, read_stage_output_text
 from utils.llm_client import generate_text
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
@@ -80,14 +80,20 @@ def _read_prd_context(session_id: str) -> str:
     _read_prd_context() -- see that module's docstring for why this reads
     stage_output:{session_id}:{role} rather than a KEYS[...] entry, and
     why it raises MissingDependencyError("prd_writer") rather than
-    guessing from nothing."""
-    prd_output = read(f"stage_output:{session_id}:prd_writer", default=None)
-    if isinstance(prd_output, dict) and prd_output.get("text"):
-        return prd_output["text"]
+    guessing from nothing.
 
-    intake_output = read(f"stage_output:{session_id}:intake_interviewer", default=None)
-    if isinstance(intake_output, dict) and intake_output.get("text"):
-        return intake_output["text"]
+    Bug fix (2026-08-12): now goes through memory.bus.read_stage_output_text()
+    -- see that function's own docstring for why the old inline
+    isinstance(..., dict) check here silently treated a normal,
+    successfully-completed prd_writer run (which writes a plain string,
+    not a dict) as "not run yet"."""
+    prd_text = read_stage_output_text(session_id, "prd_writer")
+    if prd_text:
+        return prd_text
+
+    intake_text = read_stage_output_text(session_id, "intake_interviewer")
+    if intake_text:
+        return intake_text
 
     raise MissingDependencyError("prd_writer")
 

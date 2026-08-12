@@ -41,7 +41,7 @@ import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, set_app_slug, slugify
+from memory.bus import read, write, KEYS, set_app_slug, slugify, read_stage_output_text
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
 # Reuse, don't reimplement — same bus keys architecture_diagrammer.py/
@@ -170,9 +170,22 @@ def _read_stage_text(session_id: str, role: str):
     generic_worker role's output lives at (agents/generic_worker.py) —
     NOT a KEYS[...] entry, since prd_writer/api_contract_writer/
     devils_advocate/feasibility_estimator are all plain generic_worker
-    roles with no dedicated bus key of their own."""
-    body = read(f"stage_output:{session_id}:{role}", default=None)
-    return body if isinstance(body, str) and body.strip() else None
+    roles with no dedicated bus key of their own.
+
+    Bug fix (2026-08-12): now goes through memory.bus.read_stage_output_text()
+    instead of only accepting a plain string. This function's own old
+    `isinstance(body, str)` check was actually the mirror image of the
+    bug fixed in hardware_speccer.py/schema_diagrammer.py/
+    architecture_diagrammer.py (which only accepted a dict): if
+    prd_writer is ever an approval_roles checkpoint and its output gets
+    edited before being approved, eo/executor.py's own "edit" action
+    writes a {"text": ...} dict to this same bus key, not a plain
+    string -- which this old check would have silently treated as
+    "prd_writer hasn't run", even though it genuinely had (just via the
+    edit-then-approve path rather than a plain completion). See
+    read_stage_output_text()'s own docstring for the full picture of
+    both write shapes this now handles."""
+    return read_stage_output_text(session_id, role)
 
 
 def run_handoff_packager(session_id: str = None, tier: int = None,
