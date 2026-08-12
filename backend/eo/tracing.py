@@ -19,8 +19,21 @@ correctness, only to avoid wasted work when tracing is off.
 """
 import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # fine if python-dotenv isn't installed; LANGFUSE_* can come from real env vars instead
+
 from langfuse import get_client
 
+# load_dotenv() above must run before this is computed -- api/server.py also
+# calls load_dotenv(), but only once the app boots. Anything that imports
+# this module first (a bare `python -c "..."` repro, a standalone script, a
+# test) would otherwise read os.getenv() against the real OS environment,
+# find nothing, and silently compute TRACING_ENABLED = False even with a
+# real .env sitting right there. Same gap eo/db.py already closes for
+# DATABASE_URL, closed here the same way.
 TRACING_ENABLED = bool(os.getenv("LANGFUSE_PUBLIC_KEY")) and bool(
     os.getenv("LANGFUSE_SECRET_KEY")
 )
