@@ -475,7 +475,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     if len(results) > 1:
         try:
             from agents.output_organizer import organize_final_answer
-            organized = organize_final_answer(results, task_text, final_role=final_role)
+            organized = organize_final_answer(results, task_text, final_role=final_role, session_id=session_id)
             answer = organized["answer"]
             dedup_notes = organized["dedup_notes"]
         except Exception as exc:
