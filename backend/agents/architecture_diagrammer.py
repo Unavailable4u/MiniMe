@@ -45,11 +45,15 @@ from agents.structure_architect import _mermaid_id, _strip_fences  # reuse, don'
 
 load_dotenv()
 
-# No isolated account has been allocated for this role yet (unlike
-# structure_architect.py's GROQ_API_KEY_9) -- one ordinary generic-shaped
-# call, same cost category noted in Part 5 §5.8, so it draws from the
-# shared GROQ_API_KEY quota rather than inventing an unused env var.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
+# all (every registered account excluded/cooling down at once -- should
+# be very rare). This used to be the ONLY chain this module ever tried
+# (module-level CHAIN, one entry, GROQ_API_KEY), which is exactly why a
+# single rate-limited key produced a hard crash with nothing to fall
+# back to (see run_architecture_diagrammer()'s real call below, which now
+# builds a live, quota-ranked, multi-provider chain instead).
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
 ]
 
@@ -193,7 +197,17 @@ def run_architecture_diagrammer(session_id: str = None, tier: int = None,
     if task_text:
         user_prompt += f"\n\nOriginal task: {task_text}"
 
-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Architecture Diagrammer",
+    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level, so importing it here up
+    # top would close a circular loop). Quota-ranked, cooldown-aware,
+    # spread across providers -- replaces the old single-entry CHAIN
+    # that had nothing to fall back to when its one key rate-limited.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("architecture_diagrammer") or FALLBACK_CHAIN
+
+    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Architecture Diagrammer",
                          session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 

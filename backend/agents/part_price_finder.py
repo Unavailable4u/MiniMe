@@ -29,12 +29,15 @@ BD_VENDOR_DOMAINS = [
     "ultrasource.com.bd", "daraz.com.bd", "pickaboo.com",
 ]
 
-# Same three-provider free-tier chain utils/llm_client.py's own docstring
-# shows as the standard shape (OpenAI-SDK-compatible providers, each with
-# a single key_env). This is a small extraction call (a dozen short
-# snippets -> one JSON object), so 70B-class free-tier models are more
-# than enough — no need to reach for anything bigger here.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used only if find_price() is
+# called with no chain_override AND eo/dynamic_chain.py's
+# build_fallback_chain() comes back empty (every registered account
+# excluded/cooling down -- should be very rare). This used to be the
+# ONLY chain find_price() ever tried, which meant every part in
+# hardware_speccer.py's sequential price-lookup loop fought over these
+# exact same 2 accounts one at a time -- see find_price()'s own
+# chain_override parameter below, which is what actually fixes that.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
     # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
@@ -55,25 +58,47 @@ If nothing relevant was found, return {"found": false, "listings": []}.
 """
 
 
-def find_price(part_name: str, force_refresh: bool = False) -> dict:
-    """Returns {"part_name", "listings": [...], "checked_at", "cached": bool}."""
+def find_price(part_name: str, force_refresh: bool = False, chain_override: list = None,
+                agent_name: str = "part_price_finder") -> dict:
+    """Returns {"part_name", "listings": [...], "checked_at", "cached": bool}.
+
+    chain_override: Bug fix (2026-08-12) -- NEW. When a caller is running
+    many find_price() calls in parallel (e.g.
+    agents/hardware_speccer.py's _populate_prices(), now a
+    ThreadPoolExecutor pool, one worker per account), each worker thread
+    passes its OWN chain here so every parallel call uses a different
+    account instead of all of them racing for the module-level
+    FALLBACK_CHAIN's single Groq key. None (default) keeps every existing
+    caller's behavior exactly as before -- FALLBACK_CHAIN is used, same
+    as the old always-CHAIN behavior.
+
+    agent_name: NEW, purely a usage-logging label so per-worker calls
+    show up distinctly (e.g. "part_price_finder_2") instead of all N
+    parallel calls logging under the same generic name. Defaults to the
+    original "part_price_finder" -- unchanged for existing callers.
+    """
     if not force_refresh:
         cached = get_cached_price(part_name)
         if cached:
             return {**cached, "cached": True}
 
+    # Bug fix (2026-08-12): the 6 BD_VENDOR_DOMAINS lookups are plain
+    # HTTP calls (no LLM key involved), so unlike the extraction call
+    # below there's no quota to protect by keeping them sequential --
+    # they were only ever serialized because nothing had parallelized
+    # them yet. Fanning them out with a small thread pool cuts this
+    # part's latency by roughly 6x without touching any account's quota.
+    # Traceability-per-vendor (the reason this is still one domain per
+    # call, not one combined web_search() call) is unchanged.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _search_domain(domain: str) -> list:
+        return web_search(f"{part_name} price", domains=[domain], agent_name=agent_name)
+
     snippets = []
-    for domain in BD_VENDOR_DOMAINS:
-        query = f"{part_name} price"
-        # One domain per call, on purpose: BD_VENDOR_DOMAINS is a fixed
-        # vendor allowlist and results need to stay traceable to a
-        # specific vendor, so this loops web_search(domains=[domain])
-        # rather than passing the whole list in one call. General
-        # research callers with a fixed *scope* (not per-item vendor
-        # tracking) should pass their whole domain list in one call
-        # instead -- see utils/web_search.py's own docstring.
-        results = web_search(query, domains=[domain], agent_name="part_price_finder")
-        snippets.extend(results)
+    with ThreadPoolExecutor(max_workers=len(BD_VENDOR_DOMAINS)) as pool:
+        for results in pool.map(_search_domain, BD_VENDOR_DOMAINS):
+            snippets.extend(results)
 
     if not snippets:
         result = {"part_name": part_name, "listings": [], "checked_at": _now_iso()}
@@ -84,8 +109,8 @@ def find_price(part_name: str, force_refresh: bool = False) -> dict:
     raw = generate_text(
         system_prompt=EXTRACTION_PROMPT,
         user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
-        chain=CHAIN,
-        agent_name="part_price_finder",
+        chain=chain_override or FALLBACK_CHAIN,
+        agent_name=agent_name,
     )
     parsed = _safe_json(raw) or {"found": False, "listings": []}
     result = {

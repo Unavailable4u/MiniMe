@@ -54,9 +54,15 @@ from agents.structure_architect import _strip_fences  # reuse, don't reimplement
 
 load_dotenv()
 
-# Same reasoning as schema_diagrammer.py's CHAIN: no isolated account
-# allocated for this role yet, shared GROQ_API_KEY quota.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain for the spec-generation call
+# below, used ONLY if eo/dynamic_chain.py's build_fallback_chain() comes
+# back empty (every registered account excluded/cooling down at once --
+# should be very rare). This used to be the ONLY chain this module ever
+# tried (one entry, GROQ_API_KEY, shared with part_price_finder's own
+# calls and unmonitored/untagged in the registry) -- see
+# run_hardware_speccer() below, which now builds a live, quota-ranked,
+# multi-provider chain instead.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
 ]
 
@@ -149,7 +155,7 @@ def _read_prd_context(session_id: str) -> str:
     raise MissingDependencyError("prd_writer")
 
 
-def _populate_prices(parts: list) -> list:
+def _populate_prices(parts: list, session_id: str = None) -> list:
     """Looks up and merges pricing for every part via
     agents/part_price_finder.py's find_price(), so the spec returns with
     prices already populated on first generation instead of requiring a
@@ -159,25 +165,90 @@ def _populate_prices(parts: list) -> list:
     so initial pricing and a later refresh never disagree about which
     vendor a part shows. find_price() itself is cached (eo/price_cache.py,
     5-day TTL), so this is cheap on any *re*-generation of the same parts.
-    """
-    from agents.part_price_finder import find_price
 
-    for part in parts:
+    Bug fix (2026-08-12): this used to call find_price() once per part in
+    a plain sequential for-loop, every part fighting over the exact same
+    1-2 hardcoded accounts (part_price_finder.py's old module-level
+    CHAIN) -- the root cause of hardware_speccer sitting for 2-3 minutes
+    on a large parts list before finally rate-limiting itself out. Now
+    parallelized with a ThreadPoolExecutor, same pattern
+    agents/code_writers.py already uses for module writes: pick up to
+    `worker_count` distinct, quota-ranked accounts tagged
+    "part_price_finder" (eo/worker_pool.py's shared role_tag-parameterized
+    selector -- see eo/registry.py's AGENT_CAPABILITIES), and hand each
+    worker thread its OWN find_price(chain_override=...) chain (built via
+    eo/dynamic_chain.py's build_fallback_chain_excluding(), so a worker's
+    fallback steps also skip whatever its sibling workers are already
+    using) instead of every part racing for one shared key.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from agents.part_price_finder import find_price
+    from eo.worker_pool import _select_workers
+    from eo.dynamic_chain import build_fallback_chain_excluding
+
+    if not parts:
+        return parts
+
+    ROLE_TAG = "part_price_finder"
+    # Cap workers at the smaller of (parts to look up, accounts tagged for
+    # this role) -- no point spinning up more threads than there is work
+    # or more than there are distinct accounts to spread it across.
+    worker_count = min(len(parts), 8)
+    try:
+        key_envs = _select_workers(ROLE_TAG, worker_count, session_id=session_id, agent_name=ROLE_TAG)
+    except RuntimeError:
+        # No account tagged "part_price_finder" at all (e.g. registry not
+        # updated yet in this deployment) -- degrade to the single
+        # sequential fallback chain rather than crashing outright.
+        key_envs = []
+
+    def _price_one(part: dict, key_env: str, worker_id: int) -> dict:
+        name = part.get("name", "")
+        chain = None
+        if key_env:
+            # This worker's own chain: start on its assigned account,
+            # then fall back to OTHER accounts/providers this specific
+            # worker's siblings aren't already using.
+            from eo.dynamic_chain import chain_step_for
+            chain = [chain_step_for(key_env)] + build_fallback_chain_excluding(
+                ROLE_TAG, exclude_keys={key_env})
         try:
-            result = find_price(part.get("name", ""))
+            result = find_price(name, chain_override=chain,
+                                 agent_name=f"{ROLE_TAG}_{worker_id}")
         except Exception:
             # A single vendor-search failure shouldn't fail the whole
             # spec -- same "degrade, don't blow up" spirit as
             # part_price_finder.py's own per-provider try/except.
-            continue
-
+            return part
         listing = result["listings"][0] if result.get("listings") else None
         if not listing:
-            continue
+            return part
         part["estimated_price_bdt"] = listing.get("price_bdt")
         part["vendor_name"] = listing.get("vendor")
         part["vendor_url"] = listing.get("url")
         part["price_checked_at"] = result.get("checked_at")
+        return part
+
+    if not key_envs:
+        # Fallback: no tagged accounts resolved -- still parallelize the
+        # I/O (web_search fan-out inside find_price() already helps), but
+        # every worker shares find_price()'s own static FALLBACK_CHAIN
+        # (chain_override=None) since there's nothing to spread them
+        # across account-wise.
+        with ThreadPoolExecutor(max_workers=min(len(parts), 4)) as executor:
+            futures = [executor.submit(_price_one, part, None, i + 1)
+                       for i, part in enumerate(parts)]
+            for future in as_completed(futures):
+                future.result()
+        return parts
+
+    with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
+        futures = [
+            executor.submit(_price_one, part, key_envs[i % len(key_envs)], (i % len(key_envs)) + 1)
+            for i, part in enumerate(parts)
+        ]
+        for future in as_completed(futures):
+            future.result()
 
     return parts
 
@@ -204,7 +275,16 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     if task_text:
         user_prompt += f"\n\nOriginal task: {task_text}"
 
-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Hardware Speccer",
+    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import
+    # (eo.registry imports this module at load time; eo.dynamic_chain
+    # imports eo.registry at ITS module level). Quota-ranked,
+    # cooldown-aware, spread across providers -- replaces the old
+    # single-entry CHAIN that had nothing to fall back to.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("hardware_speccer") or FALLBACK_CHAIN
+
+    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Hardware Speccer",
                          session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 
@@ -223,7 +303,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
             "instructions": {"phases": []},
         }
 
-    spec["parts"] = _populate_prices(spec.get("parts", []))
+    spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
 
     # Same read-modify-write shape api/server.py's refresh-prices endpoint
     # already uses for custom["parts"] alone -- read the whole facts

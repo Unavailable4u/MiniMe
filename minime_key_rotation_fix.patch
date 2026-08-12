@@ -1,0 +1,589 @@
+diff --git a/backend/agents/architecture_diagrammer.py b/backend/agents/architecture_diagrammer.py
+index 0e95d1f..528ccde 100644
+--- a/backend/agents/architecture_diagrammer.py
++++ b/backend/agents/architecture_diagrammer.py
+@@ -45,11 +45,15 @@ from agents.structure_architect import _mermaid_id, _strip_fences  # reuse, don'
+ 
+ load_dotenv()
+ 
+-# No isolated account has been allocated for this role yet (unlike
+-# structure_architect.py's GROQ_API_KEY_9) -- one ordinary generic-shaped
+-# call, same cost category noted in Part 5 §5.8, so it draws from the
+-# shared GROQ_API_KEY quota rather than inventing an unused env var.
+-CHAIN = [
++# FALLBACK_CHAIN: last-resort static chain, used ONLY if
++# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
++# all (every registered account excluded/cooling down at once -- should
++# be very rare). This used to be the ONLY chain this module ever tried
++# (module-level CHAIN, one entry, GROQ_API_KEY), which is exactly why a
++# single rate-limited key produced a hard crash with nothing to fall
++# back to (see run_architecture_diagrammer()'s real call below, which now
++# builds a live, quota-ranked, multi-provider chain instead).
++FALLBACK_CHAIN = [
+     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+ ]
+ 
+@@ -193,7 +197,17 @@ def run_architecture_diagrammer(session_id: str = None, tier: int = None,
+     if task_text:
+         user_prompt += f"\n\nOriginal task: {task_text}"
+ 
+-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Architecture Diagrammer",
++    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
++    # module docstring for why this can't be a module-level import
++    # (eo.registry imports this module at load time; eo.dynamic_chain
++    # imports eo.registry at ITS module level, so importing it here up
++    # top would close a circular loop). Quota-ranked, cooldown-aware,
++    # spread across providers -- replaces the old single-entry CHAIN
++    # that had nothing to fall back to when its one key rate-limited.
++    from eo.dynamic_chain import build_fallback_chain
++    chain = build_fallback_chain("architecture_diagrammer") or FALLBACK_CHAIN
++
++    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Architecture Diagrammer",
+                          session_id=session_id, tier=tier, domain=domain)
+     cleaned = _strip_fences(raw)
+ 
+diff --git a/backend/agents/hardware_speccer.py b/backend/agents/hardware_speccer.py
+index 7a641b8..dac0dba 100644
+--- a/backend/agents/hardware_speccer.py
++++ b/backend/agents/hardware_speccer.py
+@@ -54,9 +54,15 @@ from agents.structure_architect import _strip_fences  # reuse, don't reimplement
+ 
+ load_dotenv()
+ 
+-# Same reasoning as schema_diagrammer.py's CHAIN: no isolated account
+-# allocated for this role yet, shared GROQ_API_KEY quota.
+-CHAIN = [
++# FALLBACK_CHAIN: last-resort static chain for the spec-generation call
++# below, used ONLY if eo/dynamic_chain.py's build_fallback_chain() comes
++# back empty (every registered account excluded/cooling down at once --
++# should be very rare). This used to be the ONLY chain this module ever
++# tried (one entry, GROQ_API_KEY, shared with part_price_finder's own
++# calls and unmonitored/untagged in the registry) -- see
++# run_hardware_speccer() below, which now builds a live, quota-ranked,
++# multi-provider chain instead.
++FALLBACK_CHAIN = [
+     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+ ]
+ 
+@@ -149,7 +155,7 @@ def _read_prd_context(session_id: str) -> str:
+     raise MissingDependencyError("prd_writer")
+ 
+ 
+-def _populate_prices(parts: list) -> list:
++def _populate_prices(parts: list, session_id: str = None) -> list:
+     """Looks up and merges pricing for every part via
+     agents/part_price_finder.py's find_price(), so the spec returns with
+     prices already populated on first generation instead of requiring a
+@@ -159,25 +165,90 @@ def _populate_prices(parts: list) -> list:
+     so initial pricing and a later refresh never disagree about which
+     vendor a part shows. find_price() itself is cached (eo/price_cache.py,
+     5-day TTL), so this is cheap on any *re*-generation of the same parts.
++
++    Bug fix (2026-08-12): this used to call find_price() once per part in
++    a plain sequential for-loop, every part fighting over the exact same
++    1-2 hardcoded accounts (part_price_finder.py's old module-level
++    CHAIN) -- the root cause of hardware_speccer sitting for 2-3 minutes
++    on a large parts list before finally rate-limiting itself out. Now
++    parallelized with a ThreadPoolExecutor, same pattern
++    agents/code_writers.py already uses for module writes: pick up to
++    `worker_count` distinct, quota-ranked accounts tagged
++    "part_price_finder" (eo/worker_pool.py's shared role_tag-parameterized
++    selector -- see eo/registry.py's AGENT_CAPABILITIES), and hand each
++    worker thread its OWN find_price(chain_override=...) chain (built via
++    eo/dynamic_chain.py's build_fallback_chain_excluding(), so a worker's
++    fallback steps also skip whatever its sibling workers are already
++    using) instead of every part racing for one shared key.
+     """
++    from concurrent.futures import ThreadPoolExecutor, as_completed
+     from agents.part_price_finder import find_price
++    from eo.worker_pool import _select_workers
++    from eo.dynamic_chain import build_fallback_chain_excluding
++
++    if not parts:
++        return parts
+ 
+-    for part in parts:
++    ROLE_TAG = "part_price_finder"
++    # Cap workers at the smaller of (parts to look up, accounts tagged for
++    # this role) -- no point spinning up more threads than there is work
++    # or more than there are distinct accounts to spread it across.
++    worker_count = min(len(parts), 8)
++    try:
++        key_envs = _select_workers(ROLE_TAG, worker_count, session_id=session_id, agent_name=ROLE_TAG)
++    except RuntimeError:
++        # No account tagged "part_price_finder" at all (e.g. registry not
++        # updated yet in this deployment) -- degrade to the single
++        # sequential fallback chain rather than crashing outright.
++        key_envs = []
++
++    def _price_one(part: dict, key_env: str, worker_id: int) -> dict:
++        name = part.get("name", "")
++        chain = None
++        if key_env:
++            # This worker's own chain: start on its assigned account,
++            # then fall back to OTHER accounts/providers this specific
++            # worker's siblings aren't already using.
++            from eo.dynamic_chain import chain_step_for
++            chain = [chain_step_for(key_env)] + build_fallback_chain_excluding(
++                ROLE_TAG, exclude_keys={key_env})
+         try:
+-            result = find_price(part.get("name", ""))
++            result = find_price(name, chain_override=chain,
++                                 agent_name=f"{ROLE_TAG}_{worker_id}")
+         except Exception:
+             # A single vendor-search failure shouldn't fail the whole
+             # spec -- same "degrade, don't blow up" spirit as
+             # part_price_finder.py's own per-provider try/except.
+-            continue
+-
++            return part
+         listing = result["listings"][0] if result.get("listings") else None
+         if not listing:
+-            continue
++            return part
+         part["estimated_price_bdt"] = listing.get("price_bdt")
+         part["vendor_name"] = listing.get("vendor")
+         part["vendor_url"] = listing.get("url")
+         part["price_checked_at"] = result.get("checked_at")
++        return part
++
++    if not key_envs:
++        # Fallback: no tagged accounts resolved -- still parallelize the
++        # I/O (web_search fan-out inside find_price() already helps), but
++        # every worker shares find_price()'s own static FALLBACK_CHAIN
++        # (chain_override=None) since there's nothing to spread them
++        # across account-wise.
++        with ThreadPoolExecutor(max_workers=min(len(parts), 4)) as executor:
++            futures = [executor.submit(_price_one, part, None, i + 1)
++                       for i, part in enumerate(parts)]
++            for future in as_completed(futures):
++                future.result()
++        return parts
++
++    with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
++        futures = [
++            executor.submit(_price_one, part, key_envs[i % len(key_envs)], (i % len(key_envs)) + 1)
++            for i, part in enumerate(parts)
++        ]
++        for future in as_completed(futures):
++            future.result()
+ 
+     return parts
+ 
+@@ -204,7 +275,16 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+     if task_text:
+         user_prompt += f"\n\nOriginal task: {task_text}"
+ 
+-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Hardware Speccer",
++    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
++    # module docstring for why this can't be a module-level import
++    # (eo.registry imports this module at load time; eo.dynamic_chain
++    # imports eo.registry at ITS module level). Quota-ranked,
++    # cooldown-aware, spread across providers -- replaces the old
++    # single-entry CHAIN that had nothing to fall back to.
++    from eo.dynamic_chain import build_fallback_chain
++    chain = build_fallback_chain("hardware_speccer") or FALLBACK_CHAIN
++
++    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Hardware Speccer",
+                          session_id=session_id, tier=tier, domain=domain)
+     cleaned = _strip_fences(raw)
+ 
+@@ -223,7 +303,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+             "instructions": {"phases": []},
+         }
+ 
+-    spec["parts"] = _populate_prices(spec.get("parts", []))
++    spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
+ 
+     # Same read-modify-write shape api/server.py's refresh-prices endpoint
+     # already uses for custom["parts"] alone -- read the whole facts
+diff --git a/backend/agents/part_price_finder.py b/backend/agents/part_price_finder.py
+index 55b4996..76f91ec 100644
+--- a/backend/agents/part_price_finder.py
++++ b/backend/agents/part_price_finder.py
+@@ -29,12 +29,15 @@ BD_VENDOR_DOMAINS = [
+     "ultrasource.com.bd", "daraz.com.bd", "pickaboo.com",
+ ]
+ 
+-# Same three-provider free-tier chain utils/llm_client.py's own docstring
+-# shows as the standard shape (OpenAI-SDK-compatible providers, each with
+-# a single key_env). This is a small extraction call (a dozen short
+-# snippets -> one JSON object), so 70B-class free-tier models are more
+-# than enough — no need to reach for anything bigger here.
+-CHAIN = [
++# FALLBACK_CHAIN: last-resort static chain, used only if find_price() is
++# called with no chain_override AND eo/dynamic_chain.py's
++# build_fallback_chain() comes back empty (every registered account
++# excluded/cooling down -- should be very rare). This used to be the
++# ONLY chain find_price() ever tried, which meant every part in
++# hardware_speccer.py's sequential price-lookup loop fought over these
++# exact same 2 accounts one at a time -- see find_price()'s own
++# chain_override parameter below, which is what actually fixes that.
++FALLBACK_CHAIN = [
+     {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
+     # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
+@@ -55,25 +58,47 @@ If nothing relevant was found, return {"found": false, "listings": []}.
+ """
+ 
+ 
+-def find_price(part_name: str, force_refresh: bool = False) -> dict:
+-    """Returns {"part_name", "listings": [...], "checked_at", "cached": bool}."""
++def find_price(part_name: str, force_refresh: bool = False, chain_override: list = None,
++                agent_name: str = "part_price_finder") -> dict:
++    """Returns {"part_name", "listings": [...], "checked_at", "cached": bool}.
++
++    chain_override: Bug fix (2026-08-12) -- NEW. When a caller is running
++    many find_price() calls in parallel (e.g.
++    agents/hardware_speccer.py's _populate_prices(), now a
++    ThreadPoolExecutor pool, one worker per account), each worker thread
++    passes its OWN chain here so every parallel call uses a different
++    account instead of all of them racing for the module-level
++    FALLBACK_CHAIN's single Groq key. None (default) keeps every existing
++    caller's behavior exactly as before -- FALLBACK_CHAIN is used, same
++    as the old always-CHAIN behavior.
++
++    agent_name: NEW, purely a usage-logging label so per-worker calls
++    show up distinctly (e.g. "part_price_finder_2") instead of all N
++    parallel calls logging under the same generic name. Defaults to the
++    original "part_price_finder" -- unchanged for existing callers.
++    """
+     if not force_refresh:
+         cached = get_cached_price(part_name)
+         if cached:
+             return {**cached, "cached": True}
+ 
++    # Bug fix (2026-08-12): the 6 BD_VENDOR_DOMAINS lookups are plain
++    # HTTP calls (no LLM key involved), so unlike the extraction call
++    # below there's no quota to protect by keeping them sequential --
++    # they were only ever serialized because nothing had parallelized
++    # them yet. Fanning them out with a small thread pool cuts this
++    # part's latency by roughly 6x without touching any account's quota.
++    # Traceability-per-vendor (the reason this is still one domain per
++    # call, not one combined web_search() call) is unchanged.
++    from concurrent.futures import ThreadPoolExecutor
++
++    def _search_domain(domain: str) -> list:
++        return web_search(f"{part_name} price", domains=[domain], agent_name=agent_name)
++
+     snippets = []
+-    for domain in BD_VENDOR_DOMAINS:
+-        query = f"{part_name} price"
+-        # One domain per call, on purpose: BD_VENDOR_DOMAINS is a fixed
+-        # vendor allowlist and results need to stay traceable to a
+-        # specific vendor, so this loops web_search(domains=[domain])
+-        # rather than passing the whole list in one call. General
+-        # research callers with a fixed *scope* (not per-item vendor
+-        # tracking) should pass their whole domain list in one call
+-        # instead -- see utils/web_search.py's own docstring.
+-        results = web_search(query, domains=[domain], agent_name="part_price_finder")
+-        snippets.extend(results)
++    with ThreadPoolExecutor(max_workers=len(BD_VENDOR_DOMAINS)) as pool:
++        for results in pool.map(_search_domain, BD_VENDOR_DOMAINS):
++            snippets.extend(results)
+ 
+     if not snippets:
+         result = {"part_name": part_name, "listings": [], "checked_at": _now_iso()}
+@@ -84,8 +109,8 @@ def find_price(part_name: str, force_refresh: bool = False) -> dict:
+     raw = generate_text(
+         system_prompt=EXTRACTION_PROMPT,
+         user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
+-        chain=CHAIN,
+-        agent_name="part_price_finder",
++        chain=chain_override or FALLBACK_CHAIN,
++        agent_name=agent_name,
+     )
+     parsed = _safe_json(raw) or {"found": False, "listings": []}
+     result = {
+diff --git a/backend/eo/dynamic_chain.py b/backend/eo/dynamic_chain.py
+new file mode 100644
+index 0000000..3f8a918
+--- /dev/null
++++ b/backend/eo/dynamic_chain.py
+@@ -0,0 +1,196 @@
++"""
++eo/dynamic_chain.py — shared quota-aware, cooldown-aware, multi-provider
++fallback-chain builder for REAL-ACTION agents.
++
++Background: agents/generic_worker.py already solved this problem for
++every role it routes (Fix A / Fix 4a in that file: _build_fallback_chain()
++/ _chain_step_for() / _dynamic_max_chain_steps()) -- it ranks candidate
++accounts by live quota, skips anything currently cooling down
++(eo/panel.py's _is_cooling_down()), and spreads the chain across
++DIFFERENT providers so one provider-wide outage/rate-limit event can't
++take out the whole chain.
++
++But three REAL_ACTION_ROLES modules never got this: agents/
++hardware_speccer.py, agents/architecture_diagrammer.py, and agents/
++part_price_finder.py each call utils.llm_client.generate_text() with
++their own hardcoded, length-1 (or length-2) module-level CHAIN pointing
++at one specific key_env. None of them are tagged in eo/registry.py's
++AGENT_CAPABILITIES either, so even if they wanted to use
++_best_match()/_build_fallback_chain(), there was nothing for those
++functions to select from. Root-caused 2026-08-12: a single exhausted
++GROQ_API_KEY took down hardware_speccer's price lookups AND
++architecture_diagrammer's own generation in the same run, back to back,
++because both were quietly sharing that one unmonitored, un-fallback-able
++key.
++
++This module is that same logic, extracted so any real-action agent can
++reuse it without duplicating (or drifting out of sync with)
++generic_worker.py's copy. generic_worker.py itself is left untouched --
++it already works -- this is additive.
++
++IMPORTANT -- import this LAZILY (inside a function, not at module level)
++from any agents/*.py file that eo/registry.py imports at load time. This
++module imports eo.registry.AGENT_CAPABILITIES at ITS OWN module level, so
++a module-level import from an eagerly-imported agent module would close
++the exact circular loop agents/generic_worker.py's own docstring already
++flags and avoids the same way:
++    eo.registry -> agents.<some_agent> -> eo.dynamic_chain -> eo.registry
++By the time an agent's run_*() function is actually CALLED (not just
++imported), eo.registry has always finished loading, so a deferred,
++inside-the-function import is safe.
++"""
++import os
++import sys
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from eo.registry import AGENT_CAPABILITIES
++
++# Kept in sync with agents/generic_worker.py's own PROVIDER_DEFAULT_MODEL
++# (see that file for the full per-provider pinning history/reasoning).
++# Duplicated on purpose, not imported -- this module has zero dependency
++# on agents/generic_worker.py in either direction, so neither file's
++# import order can ever create a cycle with the other.
++PROVIDER_DEFAULT_MODEL = {
++    "groq": "llama-3.3-70b-versatile",
++    "cerebras": "gpt-oss-120b",
++    "mistral": "mistral-large-latest",
++    "gemini": "gemini-3.1-flash-lite",
++    "huggingface": "openai/gpt-oss-120b:fastest",
++    "cloudflare": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
++}
++
++# Same reasoning as generic_worker.py's own constants: 3 accounts deep is
++# enough to survive one exhausted account plus one full provider-wide
++# outage; the dynamic ceiling avoids turning a large multi-provider
++# roster into a dozen sequential HTTP round-trips before giving up.
++MAX_CHAIN_STEPS = 3
++MAX_CHAIN_STEPS_CEILING = 6
++
++
++def _cloudflare_token_env_for(account_id_env: str) -> str:
++    """Same derivation as agents/generic_worker.py's own
++    _cloudflare_token_env_for() -- mirrored, not imported, for the same
++    lazy-import-safety reason as PROVIDER_DEFAULT_MODEL above."""
++    if account_id_env.startswith("CLOUDFLARE_ACCOUNT_ID_"):
++        n = account_id_env.rsplit("_", 1)[-1]
++        return f"CLOUDFLARE_API_KEY_{n}"
++    if account_id_env.startswith("CF_SCANNER_RESERVE_") and account_id_env.endswith("_ACCOUNT_ID"):
++        n = account_id_env[len("CF_SCANNER_RESERVE_"):-len("_ACCOUNT_ID")]
++        return f"CF_SCANNER_RESERVE_{n}_API_TOKEN"
++    raise ValueError(f"Don't know how to derive a token_env for account_id_env {account_id_env!r} "
++                     f"— add its naming pattern to _cloudflare_token_env_for().")
++
++
++def chain_step_for(agent_key: str) -> dict:
++    """agent_key (an AGENT_CAPABILITIES key) -> a ready-to-use
++    generate_text() chain step dict."""
++    info = AGENT_CAPABILITIES[agent_key]
++    provider = info["provider"]
++    step = {"provider": provider, "model": PROVIDER_DEFAULT_MODEL.get(provider, ""), "key_env": agent_key}
++    if provider == "cloudflare":
++        account_id_env = info.get("key_id", agent_key)
++        step = {"provider": provider, "model": PROVIDER_DEFAULT_MODEL.get(provider, ""),
++                 "account_id_env": account_id_env,
++                 "token_env": _cloudflare_token_env_for(account_id_env)}
++    return step
++
++
++def _dynamic_max_chain_steps(quota_status: dict) -> int:
++    from eo.panel import _is_cooling_down   # deferred — see module docstring
++
++    live_providers = {
++        info.get("provider")
++        for key, info in AGENT_CAPABILITIES.items()
++        if not _is_cooling_down(key, quota_status)
++    }
++    return max(MAX_CHAIN_STEPS, min(MAX_CHAIN_STEPS_CEILING, len(live_providers)))
++
++
++def _rank_accounts(role: str, quota_status: dict, exclude: set, max_steps: int) -> list:
++    """Shared core of build_fallback_chain()/build_fallback_chain_excluding()
++    below: same provider-spreading algorithm as agents/generic_worker.py's
++    _build_fallback_chain(), generalized over a caller-supplied starting
++    `exclude` set so a parallel worker pool can hand each of its own
++    threads a chain that also skips whichever accounts its SIBLING
++    threads already claimed (see build_fallback_chain_excluding())."""
++    from eo.panel import _best_match   # deferred — see module docstring
++
++    chain_keys = []
++    used_providers = {
++        AGENT_CAPABILITIES[k].get("provider") for k in exclude if k in AGENT_CAPABILITIES
++    }
++    exclude = set(exclude)
++
++    for _ in range(max_steps):
++        provider_exclude = exclude | {
++            key for key, info in AGENT_CAPABILITIES.items()
++            if info.get("provider") in used_providers
++        }
++        candidate = _best_match(role, quota_status, exclude=provider_exclude)
++        if candidate is None:
++            # No fresh-provider candidate left this round -- allow a
++            # repeat provider rather than leaving this chain slot empty.
++            candidate = _best_match(role, quota_status, exclude=exclude)
++        if candidate is None:
++            break  # genuinely nothing left in the whole account pool
++        chain_keys.append(candidate)
++        exclude.add(candidate)
++        used_providers.add(AGENT_CAPABILITIES[candidate].get("provider"))
++
++    return chain_keys
++
++
++def build_fallback_chain(role: str, quota_status: dict = None, max_steps: int = None) -> list:
++    """Returns a ready-to-use generate_text() chain (list of step dicts),
++    quota-ranked and spread across providers, cooldown-aware. This is the
++    fix for agents/hardware_speccer.py and agents/architecture_diagrammer.py's
++    old length-1 hardcoded CHAIN: instead of one fixed key_env, this picks
++    the least-used, not-currently-cooling-down account tagged for `role`
++    (falling back to the whole pool if nothing is tagged), then adds up
++    to `max_steps` more accounts on OTHER providers so a single exhausted
++    key or a provider-wide outage no longer ends the call.
++
++    role: the AGENT_CAPABILITIES natural_roles tag to prefer (e.g.
++        "hardware_speccer", "architecture_diagrammer"). If nothing is
++        tagged for this role yet, _best_match() already degrades
++        gracefully to the full account pool ranked by quota alone -- see
++        eo/panel.py's own docstring.
++    quota_status: pass eo.quota_sentinel.get_quota_snapshot() if you
++        already fetched it this call (saves a second snapshot fetch);
++        None fetches a fresh one.
++    max_steps: None computes it dynamically from how many providers
++        currently have a live account (see _dynamic_max_chain_steps),
++        same as generic_worker.py's own Fix 4a.
++
++    Returns [] only if literally every configured account is excluded/
++    cooling down -- callers should fall back to their own static CHAIN
++    in that case (belt-and-suspenders, should be very rare).
++    """
++    from eo.quota_sentinel import get_quota_snapshot   # deferred — see module docstring
++
++    if quota_status is None:
++        quota_status = get_quota_snapshot()
++    if max_steps is None:
++        max_steps = _dynamic_max_chain_steps(quota_status)
++
++    chain_keys = _rank_accounts(role, quota_status, exclude=set(), max_steps=max_steps)
++    return [chain_step_for(k) for k in chain_keys]
++
++
++def build_fallback_chain_excluding(role: str, exclude_keys, quota_status: dict = None) -> list:
++    """Same as build_fallback_chain(), but starting from a caller-supplied
++    `exclude_keys` set/list -- for parallel worker pools (see
++    agents/hardware_speccer.py's _populate_prices()) that already handed
++    out N distinct accounts to N worker threads and want each thread's
++    OWN fallback chain to skip the accounts its sibling threads are
++    already using (and their providers, same provider-spreading logic),
++    not just the one account that thread started on.
++    """
++    from eo.quota_sentinel import get_quota_snapshot   # deferred — see module docstring
++
++    if quota_status is None:
++        quota_status = get_quota_snapshot()
++    max_steps = _dynamic_max_chain_steps(quota_status)
++
++    chain_keys = _rank_accounts(role, quota_status, exclude=set(exclude_keys), max_steps=max_steps)
++    return [chain_step_for(k) for k in chain_keys]
+diff --git a/backend/eo/registry.py b/backend/eo/registry.py
+index a849942..5e0b81c 100644
+--- a/backend/eo/registry.py
++++ b/backend/eo/registry.py
+@@ -38,7 +38,19 @@ AGENT_CAPABILITIES = {
+         # duplicate entries in this list.
+         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                            "researcher", "writer", "analyst", "formatter",
+-                           "brainstormer", "outliner", "editor"],
++                           "brainstormer", "outliner", "editor",
++                           # Bug fix (2026-08-12): hardware_speccer/architecture_diagrammer
++                           # used to each hardcode a single-entry CHAIN pointed at this
++                           # exact key with no fallback and no registry tag at all -- when
++                           # this one account rate-limited, hardware_speccer's price loop
++                           # burned it dry and architecture_diagrammer (running right after,
++                           # same key) had nothing to fall back to and hard-crashed. Both
++                           # are single-shot, "sequential low-volume" JSON-out calls, the
++                           # exact shape this pool already exists for -- tagging them here
++                           # (plus GROQ_API_KEY_10/11/12 below) gives both real quota
++                           # ranking, cooldown-awareness, and multi-account fallback via
++                           # eo/dynamic_chain.py instead of one unmonitored key.
++                           "hardware_speccer", "architecture_diagrammer"],
+     },
+ 
+     # Quota-reality fix, §11a: three of the five newly-provisioned Groq
+@@ -50,21 +62,24 @@ AGENT_CAPABILITIES = {
+         "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
+         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                            "researcher", "writer", "analyst", "formatter",
+-                           "brainstormer", "outliner", "editor"],
++                           "brainstormer", "outliner", "editor",
++                           "hardware_speccer", "architecture_diagrammer"],  # bug fix, see GROQ_API_KEY above
+     },
+     "GROQ_API_KEY_11": {
+         "provider": "groq",
+         "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
+         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                            "researcher", "writer", "analyst", "formatter",
+-                           "brainstormer", "outliner", "editor"],
++                           "brainstormer", "outliner", "editor",
++                           "hardware_speccer", "architecture_diagrammer"],  # bug fix, see GROQ_API_KEY above
+     },
+     "GROQ_API_KEY_12": {
+         "provider": "groq",
+         "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
+         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
+                            "researcher", "writer", "analyst", "formatter",
+-                           "brainstormer", "outliner", "editor"],
++                           "brainstormer", "outliner", "editor",
++                           "hardware_speccer", "architecture_diagrammer"],  # bug fix, see GROQ_API_KEY above
+     },
+ 
+     # --- Groq: Reviewer Pool — base 3, reserve 2 (Part 3 §4.2) ---
+@@ -105,16 +120,29 @@ AGENT_CAPABILITIES = {
+     # patch-it-now precedent §5b's own note just established -- it hires
+     # through the same generic_worker.run(role=...) path as every other
+     # name in this list, nothing deferred.
+-    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+-    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+-    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+-    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+-    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
++    # Bug fix (2026-08-12): "part_price_finder" added to this pool's tags
++    # on all 7 accounts below, same reuse-not-new-pool pattern as every
++    # other addition to this list -- part_price_finder.find_price() is a
++    # short, cheap, genuinely-parallel per-part extraction call (a dozen
++    # snippets -> one JSON object), the same shape this pool already
++    # exists for. Previously part_price_finder had NO registry tag at
++    # all and hardcoded its own 2-step CHAIN (one Groq key, one Cerebras
++    # key), so agents/hardware_speccer.py's _populate_prices() had no way
++    # to fan work out across this pool -- it called find_price() once per
++    # part in a plain sequential for-loop, all N calls fighting over the
++    # same 1-2 accounts. See eo/worker_pool.py's role_tag-parameterized
++    # _select_workers(), now reused here exactly as
++    # agents/code_writers.py already reuses it for "implementer".
++    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
++    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
++    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
++    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
++    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+     # Quota-reality fix, §11a: remaining 2 of the 5 newly-provisioned Groq
+     # keys, reinforcing this 9-role extraction pool -- the secondary
+     # pressure point behind GROQ_API_KEY's catch-all pool above.
+-    "GROQ_API_KEY_13": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+-    "GROQ_API_KEY_14": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
++    "GROQ_API_KEY_13": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
++    "GROQ_API_KEY_14": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+ 
+ 
+     # --- Groq: Structure Architect (isolated single account) ---
