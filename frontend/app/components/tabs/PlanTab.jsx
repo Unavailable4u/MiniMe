@@ -329,6 +329,24 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
   // dock and the other reading a legacy sessionId nothing updates anymore.
   const dock = useWorkspaceDock(activeWs?.id);
 
+  // NEW — patch 3 (chat-to-panel writes): api/task_runner.py's
+  // _write_plan_panels() (patch 2) writes a matching role's output
+  // straight into eo/panel_content.py as a side effect of a tier-3 chat
+  // turn completing — but the six panels below only ever fetched their
+  // saved content on mount, so that write sat in the database unseen
+  // until the person happened to reload. Counting assistant turns (not
+  // dock.state.messages.length itself) means a panel's fetch effect
+  // re-fires once a run actually finishes, not the instant the user's
+  // own message is optimistically appended to `messages` — see
+  // WorkspaceDockContext.jsx's finishRun()/buildAssistantMessage() for
+  // where the "assistant" entry actually lands, well after dispatch.
+  // Cheap to recompute every render (dock.state.messages is only ever
+  // replaced, never mutated in place, and is bounded to one chat's
+  // history) and correct across a chat switch too — switchChat() reloads
+  // `messages` for the newly-active chat, which is exactly when a panel
+  // SHOULD re-check for newer saved content anyway.
+  const planPanelRefreshSignal = dock.state.messages.filter((m) => m.role === "assistant").length;
+
   // FIX — sub-tabs were a ternary chain (conditional render), which
   // unmounts whichever sub-tab you leave and destroys its local state
   // (a paste-box's contents, wireframe edits, an in-progress
@@ -619,8 +637,9 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     panelKey="prd"
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
-                    placeholder="Paste prd_writer's PRD output (from a chat message) below."
-                    paste_hint="Includes a Features/Priorities/First-cycle-scope section, per prd_writer's brief."
+                    refreshSignal={planPanelRefreshSignal}
+                    placeholder="prd_writer's output lands here automatically once it runs in this project's chat."
+                    paste_hint="Includes a Features/Priorities/First-cycle-scope section, per prd_writer's brief. You can also paste or edit it manually below."
                   />
                 )}
                 {t.id === "architecture" && (
@@ -629,6 +648,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     panelKey="architecture"
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
+                    refreshSignal={planPanelRefreshSignal}
                     roleLabel="architecture_diagrammer"
                   />
                 )}
@@ -638,6 +658,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     panelKey="schema"
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
+                    refreshSignal={planPanelRefreshSignal}
                     roleLabel="schema_diagrammer"
                   />
                 )}
@@ -647,7 +668,8 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     panelKey="api_contract"
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
-                    placeholder="Paste api_contract_writer's endpoint table output below."
+                    refreshSignal={planPanelRefreshSignal}
+                    placeholder="api_contract_writer's endpoint table lands here automatically once it runs in this project's chat."
                   />
                 )}
                 {t.id === "devils_advocate" && (
@@ -656,7 +678,8 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     panelKey="devils_advocate"
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
-                    placeholder="Paste devils_advocate's critique output below."
+                    refreshSignal={planPanelRefreshSignal}
+                    placeholder="devils_advocate's critique lands here automatically once it runs in this project's chat."
                   />
                 )}
                 {t.id === "feasibility" && (
@@ -665,7 +688,8 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     panelKey="feasibility"
                     fetchPanelContent={fetchPanelContent}
                     savePanelContent={savePanelContent}
-                    placeholder="Paste feasibility_estimator's output below."
+                    refreshSignal={planPanelRefreshSignal}
+                    placeholder="feasibility_estimator's output lands here automatically once it runs in this project's chat."
                     estimateBanner="Rough complexity signal — not a time/cost estimate (Part 5 §5.4)"
                   />
                 )}
@@ -774,7 +798,18 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
 // which plan project is active, a paste would silently keep showing on
 // screen even after switching to a *different* project — this fetches
 // fresh content on every workspaceId change instead.
-function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanelContent, placeholder, paste_hint, estimateBanner }) {
+//
+// PATCH 3 (chat-to-panel writes): `refreshSignal` is PlanTab's
+// planPanelRefreshSignal — an assistant-turn counter for this project's
+// chat dock. Previously this effect only ever ran on mount (well, on
+// workspaceId/panelKey change), so api/task_runner.py's now-automatic
+// write-back (patch 2) sat unseen until a manual reload. Adding
+// refreshSignal to the dependency array makes it re-fetch every time a
+// chat turn finishes, live, the same "stays mounted, re-fetch on a
+// changing key" idea the workspaceId dependency already established —
+// this is just a second kind of "the saved content might have changed
+// out from under us" event, not a new mechanism.
+function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanelContent, refreshSignal, placeholder, paste_hint, estimateBanner }) {
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -790,7 +825,7 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [workspaceId, panelKey, fetchPanelContent]);
+  }, [workspaceId, panelKey, fetchPanelContent, refreshSignal]);
 
   async function handleSave() {
     setSaving(true);
@@ -809,8 +844,10 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        {placeholder} Saved per project — pasting here again for the same project overwrites
-        the previous paste, same as Research's Extraction Table/Contradictions tabs.
+        {placeholder} Saved per project — the box below updates live when a matching chat
+        run finishes, or you can paste or edit it here yourself; either way, saving here
+        overwrites whatever was there before, same as Research's Extraction Table/
+        Contradictions tabs.
         {paste_hint && <> {paste_hint}</>}
       </p>
       <textarea
@@ -818,7 +855,7 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
         name="planMarkdownPasteRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
-        placeholder="Paste the role's markdown output here…"
+        placeholder="Filled automatically once the matching role runs — or paste/edit it here yourself…"
         rows={8}
         className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
       />
@@ -853,7 +890,11 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
 // renders these two roles' {"mermaid": "..."} bus-key output as in chat.
 // FIX — persists via eo/panel_content.py under panelKey ("architecture"
 // or "schema"), same reasoning as MarkdownPastePanel above.
-function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanelContent, roleLabel }) {
+//
+// PATCH 3 (chat-to-panel writes): `refreshSignal` — see
+// MarkdownPastePanel's own comment just above for what this is and why
+// it's in the fetch effect's dependency array.
+function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanelContent, refreshSignal, roleLabel }) {
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -870,7 +911,7 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [workspaceId, panelKey, fetchPanelContent]);
+  }, [workspaceId, panelKey, fetchPanelContent, refreshSignal]);
 
   async function handleSave() {
     setSaving(true);
@@ -889,15 +930,16 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste {roleLabel}'s output below — either the raw Mermaid syntax or a fenced
-        <code className="mx-1 text-[var(--neutral-400)]">```mermaid</code> block copied from a chat message.
+        {roleLabel}'s diagram lands here automatically once it runs in this project's chat.
+        You can also paste it yourself below — either the raw Mermaid syntax or a fenced
+        <code className="mx-1 text-[var(--neutral-400)]">```mermaid</code> block copied from a chat message — or edit it after the fact.
       </p>
       <textarea
         id="plan-diagram-paste-raw"
         name="planDiagramPasteRaw"
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
-        placeholder={"graph TD\n  A[Client] --> B[API]\n  B --> C[(Database)]"}
+        placeholder={"Filled automatically once " + roleLabel + " runs — or paste/edit Mermaid syntax here yourself…"}
         rows={6}
         className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
       />
