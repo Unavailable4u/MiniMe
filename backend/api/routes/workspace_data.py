@@ -430,21 +430,29 @@ def get_device_spec(ws_id: str, owner_id: str = Depends(require_auth)):
     "info" added T2b, step 19b: same empty-but-valid convention as the
     original four -- a spec generated before hardware_speccer.py's
     step 19a (_generate_info()) simply has no custom["info"] key yet,
-    so this defaults to {"summary": "", "tags": []} rather than
-    omitting the field or erroring, matching what a fresh, un-generated
-    spec's "parts"/"wiring"/etc. already do above."""
+    so this defaults to {"summary": "", "tags": [], "image_url": ""}
+    rather than omitting the field or erroring, matching what a fresh,
+    un-generated spec's "parts"/"wiring"/etc. already do above.
+    "image_url" folded into that same default at step 19d (optional
+    Pollinations.ai render) -- a spec written before 19d shipped has
+    "summary"/"tags" but no "image_url" key, so this defaults it to ""
+    the same empty-but-valid way rather than a KeyError downstream."""
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
  
     custom = workspace_facts.get_facts(ws_id).get("custom") or {}
+    info = dict(custom.get("info") or {})
+    info.setdefault("summary", "")
+    info.setdefault("tags", [])
+    info.setdefault("image_url", "")
     return {
         "parts": custom.get("parts", []),
         "wiring": custom.get("wiring", {"nodes": [], "edges": []}),
         "mech": custom.get("mech", {"enclosure": {"w": 0, "h": 0, "d": 0}, "placements": []}),
         "instructions": custom.get("instructions", {"phases": []}),
-        "info": custom.get("info", {"summary": "", "tags": []}),
+        "info": info,
     }
  
  

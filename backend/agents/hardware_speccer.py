@@ -40,6 +40,15 @@ What's different from schema/architecture_diagrammer.py:
     smaller LLM call (_generate_info()) that reuses the parts/wiring
     JSON already produced rather than re-reading the PRD. Fail-safe:
     always {"summary": "", "tags": []} at minimum, never missing.
+  - NEW (T2b, step 19d, optional stretch): custom["info"] now also
+    carries "image_url" -- a Pollinations.ai render URL built directly
+    off the summary text _generate_info() already produced. No API key,
+    no extra network round-trip at generation time: Pollinations renders
+    on request, so this is just a URL the frontend's <img> tag hits
+    directly (same pattern any other hot-linked image would use). Purely
+    cosmetic and deliberately the last/cheapest part of step 19 -- if
+    summary is empty (fail-safe path) image_url is "" too, never a URL
+    built off no content.
 
 Place this file at: agents/hardware_speccer.py
 """
@@ -47,6 +56,7 @@ Place this file at: agents/hardware_speccer.py
 import os
 import sys
 import json
+import urllib.parse
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -172,6 +182,28 @@ exactly this shape:
 """
 
 
+def _pollinations_render_url(summary: str) -> str:
+    """T2b, step 19d (optional stretch): build a Pollinations.ai image
+    URL straight off an already-generated summary paragraph -- no API
+    key, no signup, no separate generation call to make or await here.
+    Pollinations renders the image on request when the URL is actually
+    fetched (i.e. when the frontend's <img> tag loads it), so this
+    function only ever does string building, never a network call.
+
+    Prefixes the summary with a fixed photorealistic-product-photo
+    framing so the render reads as a product shot rather than a literal
+    illustration of the paragraph's wording, then URL-encodes the whole
+    prompt per Pollinations' own `/prompt/<url-encoded prompt>` contract.
+    Returns "" for empty/falsy input -- a caller should never build a
+    render URL off no summary, same fail-safe spirit as _generate_info's
+    own empty-but-valid convention.
+    """
+    if not summary:
+        return ""
+    prompt = f"photorealistic product photo, studio lighting, {summary}"
+    return "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
+
+
 def _generate_info(spec: dict, chain: list, session_id: str = None,
                     tier: int = None, domain: str = None) -> dict:
     """T2b, step 19a: Blueprint Info/summary surface -- one more small
@@ -184,12 +216,17 @@ def _generate_info(spec: dict, chain: list, session_id: str = None,
 
     Fail-safe on any error (bad JSON, empty response, provider chain
     exhausted): returns the same empty-but-valid {"summary": "",
-    "tags": []} shape a caller would see for a spec generated before
-    this feature existed, rather than raising into
+    "tags": [], "image_url": ""} shape a caller would see for a spec
+    generated before this feature existed, rather than raising into
     run_hardware_speccer()'s caller -- an Info card that's just missing
     is a much smaller problem than a partially-written device spec.
+
+    step 19d: also attaches "image_url", built off the summary via
+    _pollinations_render_url() -- no extra LLM call, just string
+    building, so it can't introduce a new failure mode beyond the
+    summary generation already above it.
     """
-    empty = {"summary": "", "tags": []}
+    empty = {"summary": "", "tags": [], "image_url": ""}
     try:
         user_prompt = (
             f"Parts:\n{json.dumps(spec.get('parts', []))}\n\n"
@@ -206,7 +243,11 @@ def _generate_info(spec: dict, chain: list, session_id: str = None,
         if not isinstance(tags, list):
             tags = []
         tags = [t for t in tags if isinstance(t, str)][:6]
-        return {"summary": summary, "tags": tags}
+        return {
+            "summary": summary,
+            "tags": tags,
+            "image_url": _pollinations_render_url(summary),
+        }
     except Exception:
         return empty
 
@@ -550,7 +591,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     custom["wiring"] = spec.get("wiring", {})
     custom["mech"] = spec.get("mech", {})
     custom["instructions"] = spec.get("instructions", {})
-    custom["info"] = spec.get("info", {"summary": "", "tags": []})
+    custom["info"] = spec.get("info", {"summary": "", "tags": [], "image_url": ""})
     workspace_facts.set_facts(workspace_id, {"custom": custom})
     print(f"  [hardware_speccer] wrote device spec to workspace_id={workspace_id!r} "
           f"(session_id={session_id!r}, {len(custom['parts'])} parts)")

@@ -23,7 +23,7 @@ import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
   LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
   Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Pencil, Check, X,
-  Trash2, Sparkles,
+  Trash2, Sparkles, ImageOff,
 } from "lucide-react";
 
 // Part 5 — Plan as a dedicated top-level section, same shape as Notebooks
@@ -1208,6 +1208,16 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
   // slice, it isn't a fourth Parts/Wiring/Mech sibling. Resets to "graph"
   // implicitly on every workspace switch since this state isn't persisted.
   const [wiringSubView, setWiringSubView] = useState("graph");
+  // NEW — T2b, step 19d (optional stretch): tracks whether the
+  // Pollinations render for the CURRENT spec.info.image_url failed to
+  // load, so the <img> below can fall back to a small note instead of a
+  // permanently broken image icon. Reset whenever the URL itself
+  // changes (new spec, or a spec with no image_url at all) rather than
+  // sticking from a previous workspace's failed load.
+  const [renderFailed, setRenderFailed] = useState(false);
+  useEffect(() => {
+    setRenderFailed(false);
+  }, [spec?.info?.image_url]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1281,6 +1291,31 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
                 </span>
               ))}
             </div>
+          )}
+          {/* NEW — T2b, step 19d (optional stretch): Pollinations.ai
+              photorealistic render off the same summary text above.
+              image_url is a plain hot-linked URL (Pollinations renders
+              on request, no key/signup) -- rendered only once it's
+              present, same "don't show an empty box" rule the whole
+              card already follows, and falls back to a small note
+              rather than a broken-image icon if the request fails
+              (slow cold start, provider hiccup, etc.) -- purely
+              cosmetic, never worth blocking the rest of the card on. */}
+          {spec.info.image_url && (
+            renderFailed ? (
+              <div className="flex items-center gap-1.5 text-[10px] text-[var(--neutral-600)] pt-0.5">
+                <ImageOff size={11} />
+                AI render unavailable
+              </div>
+            ) : (
+              <img
+                src={spec.info.image_url}
+                alt="AI-generated render of this device"
+                loading="lazy"
+                onError={() => setRenderFailed(true)}
+                className="w-full max-w-xs rounded-md border border-[var(--neutral-800)] mt-1"
+              />
+            )
           )}
         </div>
       )}
