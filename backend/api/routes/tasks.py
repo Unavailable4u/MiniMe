@@ -476,10 +476,46 @@ def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
     final_output = result.get(final_role) if final_role else None
     answer = render_agent_result(final_output) if final_output is not None else ""
 
+    # Bug fix 2026-08-12: MessageBubble.jsx's streamEnabled gate only
+    # looks at shape -- tier 3, a session_id, and
+    # Object.keys(data.result.output).length > 1 -- to decide whether to
+    # open GET /api/task/{session_id}/stream. A resumed run satisfies all
+    # three exactly the same way a run that never paused does (`result`
+    # here has the identical role-keyed shape as task_runner.py's
+    # `results`). But this code path never wrote
+    # pending_synthesis:{session_id} the way task_runner.py's own
+    # len(results) > 1 branch does after a normal run -- so stream_answer()
+    # finds no snapshot and 404s EVERY time on a resumed multi-role run,
+    # unconditionally, regardless of anything about that particular
+    # session. That's the 404 the frontend Network tab captured: not a
+    # missing/renamed route (the route resolves fine -- see its own
+    # docstring's "404 if [the snapshot is] missing" branch), just this
+    # path's write being the missing half of the pair task_runner.py's
+    # normal-run path already has.
+    #
+    # Deliberately NOT re-running task_runner.py's organize_final_answer()
+    # multi-role synthesis here: that needs the original task_text, which
+    # isn't available at this layer without reaching into resume_graph()'s
+    # internal paused_execution snapshot (and, for a macro-loop resume,
+    # resume_graph() can return a differently-shaped {"results",
+    # "final_role"} envelope rather than a flat role-keyed dict -- a
+    # separate discrepancy from this one, not safe to paper over here).
+    # Snapshotting the exact `answer` this response already computed keeps
+    # the fix minimal and keeps the stream byte-for-byte identical to
+    # what's returned/persisted, the same guarantee task_runner.py's own
+    # snapshot-write comment describes -- it just replays this route's
+    # existing answer instead of generating a different, merged one.
+    dedup_notes = {}
+    if len(result) > 1:
+        write(f"pending_synthesis:{req.session_id}", {
+            "answer": answer,
+            "dedup_notes": dedup_notes,
+        }, ex=3600)
+
     return ResumeResponse(
         session_id=req.session_id,
         status="ok",
-        result={"output": result, "answer": answer, "final_role": final_role},
+        result={"output": result, "answer": answer, "final_role": final_role, "dedup_notes": dedup_notes},
         message=None,
     )
 

@@ -251,12 +251,69 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
         emit_event("agent_start", session_id=session_id, agent=f"generic:{member_role}", path=path,
                     payload={"label": member_role, "given_roles": flat_input_keys})
 
+    # Bug fix (2026-08-12): each group member used to independently call
+    # agents/generic_worker.run() with no chain_override at all, which
+    # meant every member with no explicit key_overrides entry fell
+    # through to that function's own _build_fallback_chain() call --
+    # ranking the ENTIRE account pool by the SAME quota snapshot, all at
+    # the same instant, with no visibility into what its siblings in
+    # THIS SAME group were about to pick. Two (or more) members almost
+    # always compute a near-identical ordered candidate list from an
+    # identical snapshot, so they'd pile onto the same top-ranked
+    # account simultaneously -- tripping that one account's own
+    # concurrent-request/queue limit (a burst 429, e.g. "queue_exceeded")
+    # well before the real, much larger pool was anywhere near exhausted.
+    # Every subsequent chain step suffered the same collision in
+    # lockstep, since generate_text()'s own per-step fallback (utils/
+    # llm_client.py) only reacts AFTER a 429, by which point the sibling
+    # calls had usually already raced onto the exact same next account
+    # too. From the outside this looked like "the entire fallback chain
+    # exhausted at once" even though most of the pool was untouched.
+    #
+    # Fix: reserve each member a coordinated chain BEFORE dispatching,
+    # the same build_fallback_chain_excluding()-based pattern agents/
+    # hardware_speccer.py's _populate_prices() already uses for its own
+    # parallel worker pool (see that function's own comment) -- growing
+    # one shared `reserved` set as each member is assigned its chain, so
+    # no two members in this group ever start on the same account, and
+    # each member's own fallback steps skip every OTHER member's
+    # reservation too. Members with an explicit key_overrides entry are
+    # left untouched (that's the caller's own deliberate single-account
+    # pin, per generic_worker.run()'s key_override semantics) but still
+    # seed `reserved` up front, so an auto-reserved sibling can't
+    # double-book an account a pinned sibling is already using.
+    from eo.dynamic_chain import build_fallback_chain_excluding
+    from eo.quota_sentinel import get_quota_snapshot
+
+    quota_status = get_quota_snapshot()
+    reserved = {v for v in key_overrides.values() if isinstance(v, str) and v} | {
+        item for v in key_overrides.values() if isinstance(v, list) for item in v
+    }
+    chain_overrides = {}
+    for member_role in group_roles:
+        if key_overrides.get(member_role):
+            continue  # explicit pin — generic_worker.run() handles this itself
+        member_chain = build_fallback_chain_excluding(member_role, reserved, quota_status=quota_status)
+        if not member_chain:
+            continue  # whole pool excluded/cooling — fall through to that
+                       # member's own uncoordinated _build_fallback_chain()
+                       # call rather than dispatching with an empty chain
+        chain_overrides[member_role] = member_chain
+        # Only reserve this member's OWN starting account, not its whole
+        # fallback chain -- reserving every step would starve later
+        # members down to length-0 chains for no reason, since a sibling
+        # only actually collides with a step it's genuinely about to try
+        # at the same moment, i.e. each member's own first choice.
+        first_step = member_chain[0]
+        reserved.add(first_step.get("key_env") or first_step.get("account_id_env"))
+
     member_results = {}
     with ThreadPoolExecutor(max_workers=len(group_roles)) as pool:
         futures = {
             pool.submit(fn, role=member_role, task_text=task_text,
                         input_keys=flat_input_keys, session_id=session_id,
                         key_override=key_overrides.get(member_role),
+                        chain_override=chain_overrides.get(member_role),
                         include_conversation_context=member_role not in no_conversation_context_roles,
                         domain=domain,
                         ): member_role
