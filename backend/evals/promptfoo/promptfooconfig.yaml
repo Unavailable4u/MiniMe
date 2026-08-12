@@ -1,0 +1,30 @@
+# D2 patch 2b — main promptfoo config.
+#
+# Deliberately minimal: no cases live here yet (patch 3 adds
+# tests/output_organizer.yaml, patch 4 adds tests/_template.yaml + one
+# filled-in example). This just wires the provider so those patches have
+# something to attach to.
+#
+# Every case's role_name must be a generic_worker-routed role (in
+# eo.registry.ROLE_PROMPTS_SEED and NOT in eo.registry.REAL_ACTION_ROLES)
+# -- see providers/role_provider.py's module docstring for why.
+description: "Role Library regression tests (D2)"
+
+providers:
+  - id: "file://providers/role_provider.py"
+    config:
+      # pythonExecutable: point this at the backend venv's python if
+      # `python3` on PATH isn't the one with backend/requirements.txt
+      # installed, e.g.:
+      # pythonExecutable: ../../venv/bin/python3
+      {}
+
+# Placeholder default prompt: role_provider.py's call_api() reads
+# task_text from each case's `vars:` (falling back to this rendered
+# string only if a case omits task_text entirely). Real per-role case
+# files (patch 3+) should set task_text explicitly instead of relying on
+# this template.
+prompts:
+  - "{{task_text}}"
+
+tests: []
