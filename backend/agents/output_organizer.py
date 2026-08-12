@@ -49,6 +49,7 @@ up separately in the final answer" inline on that role's own step,
 instead of leaving it a silent gap between the per-role step list and
 the merged answer.
 """
+import contextlib
 import json
 import os
 import sys
@@ -57,6 +58,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text, stream_completion
 from eo.result_render import render_agent_result
+from eo.tracing import get_tracer, TRACING_ENABLED
 
 # Same reasoning-role chain shape as agents/deploy_config_writer.py /
 # agents/prompt_writer.py -- a planning/reasoning call, not a tight,
@@ -118,7 +120,64 @@ like "Here is the organized answer", no meta-commentary):
 DEDUP_NOTES_MARKER = "---DEDUP_NOTES---"
 
 
-def organize_final_answer(role_outputs: dict, user_request: str, final_role: str = None) -> dict:
+@contextlib.contextmanager
+def _open_organizer_span(session_id: str, user_content: str):
+    """
+    CO5 patch 4 -- one span labeled "output_organizer" per synthesis
+    call, nested under D1 patch 3a's session trace (eo/executor.py's
+    _open_session_trace()) so this call shows up as its own labeled
+    node in Langfuse instead of an anonymous generation. The inner LLM
+    call itself is already covered by D1 patch 2's wrapping inside
+    utils/llm_client.py's generate_text()/stream_completion() -- this
+    span exists purely to label the CALL SITE, the same "step span
+    wraps the generation(s) inside it" shape eo/executor.py's
+    _open_role_span() establishes for every other step in the graph.
+
+    Reattaches to the SAME trace 3a opened for this session_id, even
+    though that `with` block has already closed by the time this runs
+    -- organize_final_answer()/organize_final_answer_stream() are
+    called from api/task_runner.py AFTER run_with_looping() returns,
+    not from inside execute_graph() itself. Uses the identical
+    deterministic tracer.create_trace_id(seed=session_id) 3a uses for
+    exactly that reason (see _open_session_trace()'s own docstring),
+    so no new lookup table is needed and a paused/resumed run's
+    synthesis still lands on the same trace as its role spans.
+
+    Same no-op-when-tracing-off / never-swallow-the-real-exception
+    contract as _open_role_span() -- see that function's docstring.
+    Returns the span object on success (so the caller can attach
+    output once the answer text is known) or None when tracing is
+    off, session_id is missing, or the span failed to open --
+    callers must guard on that before touching the returned value.
+    """
+    if not TRACING_ENABLED or not session_id:
+        yield None
+        return
+
+    stack = contextlib.ExitStack()
+    try:
+        tracer = get_tracer()
+        trace_id = tracer.create_trace_id(seed=session_id)
+        span = stack.enter_context(tracer.start_as_current_observation(
+            name="output_organizer",
+            as_type="span",
+            trace_context={"trace_id": trace_id},
+            input=user_content,
+            metadata={"session_id": session_id},
+        ))
+    except Exception as trace_exc:
+        stack.close()
+        print(f"  [output_organizer] Langfuse span failed to open for "
+              f"session_id={session_id!r} (non-fatal): {trace_exc}")
+        yield None
+        return
+
+    with stack:
+        yield span
+
+
+def organize_final_answer(role_outputs: dict, user_request: str, final_role: str = None,
+                           session_id: str = None) -> dict:
     """
     role_outputs: {role_name: raw_output} -- the full per-role result tree
         a finished tier-3 run produced (api/task_runner.py's `results`).
@@ -133,6 +192,11 @@ def organize_final_answer(role_outputs: dict, user_request: str, final_role: str
         on hand from the same `looped` result task_runner.py reads it
         from, and so a future revision can weight the final role's own
         phrasing more heavily without a signature change.
+    session_id: NEW -- CO5 patch 4. Optional purely so the 0/1-role
+        short-circuit paths below (and any direct/test call, e.g. this
+        module's own __main__ block) don't have to pass one. When given,
+        used only to open a "output_organizer" tracing span (see
+        _open_organizer_span() below) -- never touches merge behavior.
 
     Returns {"answer": str, "dedup_notes": dict} -- CHANGED, CO4 patch 2
     (previously a bare string). dedup_notes maps {role_name: note} for
@@ -170,16 +234,21 @@ def organize_final_answer(role_outputs: dict, user_request: str, final_role: str
         + "\n\n".join(sections)
     )
 
-    raw_response = generate_text(
-        system_prompt=SYSTEM_PROMPT,
-        user_content=user_content,
-        chain=CHAIN,
-        agent_name="output_organizer",
-    )
-    return _parse_organizer_response(raw_response)
+    with _open_organizer_span(session_id, user_content) as _span:
+        raw_response = generate_text(
+            system_prompt=SYSTEM_PROMPT,
+            user_content=user_content,
+            chain=CHAIN,
+            agent_name="output_organizer",
+        )
+        result = _parse_organizer_response(raw_response)
+        if _span is not None:
+            _span.update(output=result["answer"])
+    return result
 
 
-async def organize_final_answer_stream(role_outputs: dict, user_request: str, final_role: str = None):
+async def organize_final_answer_stream(role_outputs: dict, user_request: str, final_role: str = None,
+                                        session_id: str = None):
     """
     CO5 (Master Guide v2, §5) -- async-generator twin of
     organize_final_answer() above. Same synthesis prompt, same CHAIN,
@@ -191,9 +260,11 @@ async def organize_final_answer_stream(role_outputs: dict, user_request: str, fi
     so a synthesis-quality bug and a streaming-plumbing bug are never
     debugged at the same time.
 
-    role_outputs / user_request / final_role: same meaning and same
-    defensive 0/1-role short-circuit as organize_final_answer() -- see
-    that function's docstring.
+    role_outputs / user_request / final_role / session_id: same meaning
+    and same defensive 0/1-role short-circuit as organize_final_answer()
+    -- see that function's docstring. session_id (CO5 patch 4) is used
+    only to open the same "output_organizer" tracing span, same as the
+    non-streaming twin.
 
     Yields: str chunks of the merged markdown answer only. Deliberately
     does NOT yield dedup_notes -- that's structured JSON, not prose the
@@ -230,13 +301,19 @@ async def organize_final_answer_stream(role_outputs: dict, user_request: str, fi
         + "\n\n".join(sections)
     )
 
-    async for chunk in stream_completion(
-        system_prompt=SYSTEM_PROMPT,
-        user_content=user_content,
-        chain=CHAIN,
-        agent_name="output_organizer",
-    ):
-        yield chunk
+    with _open_organizer_span(session_id, user_content) as _span:
+        _chunks = [] if _span is not None else None
+        async for chunk in stream_completion(
+            system_prompt=SYSTEM_PROMPT,
+            user_content=user_content,
+            chain=CHAIN,
+            agent_name="output_organizer",
+        ):
+            if _chunks is not None:
+                _chunks.append(chunk)
+            yield chunk
+        if _span is not None:
+            _span.update(output="".join(_chunks))
 
 
 def _parse_organizer_response(raw_response: str) -> dict:
