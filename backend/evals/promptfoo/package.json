@@ -7,6 +7,7 @@
     "eval": "promptfoo eval --config promptfooconfig.yaml",
     "eval:ci": "promptfoo eval --config promptfooconfig.yaml --no-cache --share=false",
     "eval:organizer": "promptfoo eval --config output_organizer.promptfooconfig.yaml",
+    "compare": "promptfoo eval --config compare/providers.promptfooconfig.yaml",
     "view": "promptfoo view"
   },
   "devDependencies": {

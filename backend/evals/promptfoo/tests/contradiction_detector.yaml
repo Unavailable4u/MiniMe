@@ -1,0 +1,110 @@
+# evals/promptfoo/tests/contradiction_detector.yaml — D2 patch 4.
+#
+# Filled-in example role case file (patch 4's second deliverable,
+# alongside _template.yaml). Picked contradiction_detector specifically
+# because it's confirmed generic_worker-routed:
+#   - present in eo.registry.ROLE_PROMPTS_SEED (hand-written brief,
+#     Part 3 §3.6)
+#   - explicitly NOT in eo.registry.REGISTRY -- see that file's own
+#     comment above the "content_adapter_pool" entry: "'contradiction_
+#     detector' itself has no entry here -- it's a genuine generic_worker
+#     judgment role."
+# So role_provider.py's _reject_real_action_role() will not bounce it,
+# unlike prompt_writer or reviewer (both dedicated REAL_ACTION_ROLES
+# modules -- see that provider's module docstring for why those two
+# don't work here).
+#
+# The brief's own stated failure mode (ROLE_PROMPTS_SEED, Part 3 §3.6):
+# rubber-stamping the pre-filter's candidates instead of actually
+# judging them against real paper content. Both cases below test
+# directly against that failure mode -- one candidate that should be
+# CONFIRMED, one that should be DISMISSED as noisy wording -- rather
+# than just checking "did it say something plausible."
+
+- description: "Genuine contradiction confirmed, noisy near-duplicate wording dismissed"
+  vars:
+    role_name: "contradiction_detector"
+    context: >-
+      Research extraction table (2 papers on intermittent fasting and
+      insulin sensitivity):
+
+      Paper A (Chen et al.): "16:8 time-restricted eating improved
+      fasting insulin sensitivity by 19% over 8 weeks in overweight
+      adults (n=32)."
+
+      Paper B (Okafor et al.): "Time-restricted eating showed no
+      significant effect on insulin sensitivity over 8 weeks (n=29,
+      p=0.41) in a comparable overweight adult cohort."
+
+      Paper C (Reyes et al.): "Participants following a 16:8 eating
+      window saw meaningful improvement in insulin sensitivity markers
+      over the study period."
+
+      Pre-filter candidate pairs (cheap keyword/counting heuristic, NOT
+      a verdict -- your job is to actually judge these):
+      1. Paper A vs Paper B -- both discuss "time-restricted eating" and
+         "insulin sensitivity" over "8 weeks" but report opposite
+         directional findings (improvement vs. no significant effect).
+      2. Paper A vs Paper C -- both mention "16:8" and "insulin
+         sensitivity improvement," flagged for word overlap.
+    task_text: >-
+      Review the two pre-filter candidate pairs above against the
+      extraction table. For each, state whether you're confirming it as
+      a genuine contradiction/gap or dismissing it as noisy overlap that
+      doesn't really conflict, and say why. Note any real contradiction
+      or gap the pre-filter missed.
+  assert:
+    - type: llm-rubric
+      value: >-
+        The output explicitly confirms candidate 1 (Paper A vs Paper B)
+        as a genuine contradiction -- it correctly identifies these as
+        reporting opposite directional findings (A shows improvement, B
+        shows no significant effect) on comparable populations, not
+        merely noisy wording overlap. The output explicitly dismisses
+        candidate 2 (Paper A vs Paper C) as NOT a genuine contradiction
+        -- both papers actually agree (both report improvement), so
+        flagging them as conflicting would be a false positive from the
+        pre-filter's keyword overlap, and the output says so plainly
+        rather than treating word-overlap as evidence of disagreement.
+        The output does not simply restate or rubber-stamp both
+        pre-filter candidates as confirmed without this judgment.
+    - type: not-contains
+      value: "Candidate 1 and Candidate 2 are both confirmed"
+
+- description: "Both pre-filter candidates are noisy wording, not real disagreement -- tests rubber-stamping failure mode directly"
+  vars:
+    role_name: "contradiction_detector"
+    context: >-
+      Research extraction table (2 papers on remote work and reported
+      productivity):
+
+      Paper D (Singh et al.): "Survey respondents working remotely
+      reported a self-assessed productivity increase of roughly 10-15%
+      compared to their pre-remote baseline."
+
+      Paper E (Larsen et al.): "Self-reported productivity gains from
+      remote work arrangements clustered around 12%, consistent with
+      prior survey-based estimates."
+
+      Pre-filter candidate pairs (cheap keyword/counting heuristic, NOT
+      a verdict):
+      1. Paper D vs Paper E -- flagged for shared terms "self-reported,"
+         "productivity," and "remote work," with differing exact
+         percentage figures (10-15% vs 12%).
+    task_text: >-
+      Review the pre-filter candidate pair above against the extraction
+      table. State whether you're confirming it as a genuine
+      contradiction/gap or dismissing it as noisy overlap, and say why.
+  assert:
+    - type: llm-rubric
+      value: >-
+        The output dismisses the candidate pair as NOT a genuine
+        contradiction -- it recognizes that a 10-15% range and a 12%
+        point estimate are consistent with each other (12% falls within
+        10-15%), not a real disagreement, and explains this rather than
+        treating the pre-filter's flag (differing exact figures) as
+        sufficient evidence of conflict on its own. The output does not
+        rubber-stamp the pre-filter's candidate as a confirmed
+        contradiction just because it was flagged.
+    - type: not-contains
+      value: "confirmed as a genuine contradiction"

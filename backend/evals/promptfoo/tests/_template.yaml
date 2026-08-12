@@ -1,0 +1,82 @@
+# evals/promptfoo/tests/_template.yaml — D2 patch 4.
+#
+# Copy this file to tests/<role_name>.yaml when adding a new role's case
+# set, then:
+#   1. Rename it (`cp _template.yaml <role_name>.yaml`).
+#   2. Fill in role_name/task_text/context below for real cases.
+#   3. Add the file to promptfooconfig.yaml's `tests:` list (it is NOT
+#      picked up automatically -- see that file's comment).
+#   4. Run `npm run eval` and confirm the new case actually executes
+#      (not just "looks right on paper").
+#
+# BEFORE YOU PICK A role_name -- read this:
+# --------------------------------------------------------------------
+# This provider (providers/role_provider.py) can only test roles that
+# are Role-Library-driven: fetched from eo.registry.get_role_prompt()
+# and run through generic_worker's fallback chain. A role qualifies
+# ONLY if it is:
+#   - present in eo.registry.ROLE_PROMPTS_SEED, AND
+#   - either absent from eo.registry.REGISTRY entirely, or mapped
+#     there to generic_worker.run (not a dedicated module).
+#
+# Do NOT trust eo.registry.REAL_ACTION_ROLES for this check -- its keys
+# are classifier-vocabulary labels ("verifier", "implementer", ...),
+# not literal role_name strings. Check eo.registry.REGISTRY directly
+# (it's the actual name -> callable dispatch table). If a role resolves
+# to a dedicated module (e.g. "reviewer" -> reviewer.run_reviewer,
+# "prompt_writer" -> prompt_writer.run), role_provider.py's
+# _reject_real_action_role() will bounce it with an error explaining
+# why -- that error is doing its job, it's not a bug to route around.
+#
+# Quick check before writing a real case file:
+#   python3 -c "
+#   from eo.registry import REGISTRY, ROLE_PROMPTS_SEED
+#   from agents.generic_worker import run as gw
+#   name = '<role_name>'
+#   print('in seed:', name in ROLE_PROMPTS_SEED)
+#   entry = REGISTRY.get(name)
+#   print('routes to generic_worker:', entry is None or entry['callable'] is gw)
+#   "
+# Both lines must print True for role_provider.py to be able to test it.
+# --------------------------------------------------------------------
+#
+# vars reference (see providers/role_provider.py's call_api() docstring):
+#   role_name           required. Must pass the check above.
+#   task_text            required in practice (falls back to the rendered
+#                        `prompt` template otherwise, which is rarely
+#                        what you want -- always set this explicitly).
+#   context              optional. Static stand-in for a live session's
+#                        stitched prior-stage output -- prepended ahead
+#                        of "TASK: {task_text}" the same way
+#                        generic_worker.run() prepends real prior-stage
+#                        output. Omit for cases with no prior stage.
+#   allow_continuation   optional, defaults true. Set false only if the
+#                        case is specifically testing single-shot output.
+#
+# assert reference:
+#   - Every case needs at least one assert block or it isn't testing
+#     anything, just spending a live LLM call for no signal.
+#   - `llm-rubric` is the usual choice for a reasoning-only role's
+#     output (there's rarely one exact-string right answer) -- state
+#     what the output MUST do and MUST NOT do, matching the brief's
+#     own stated failure mode if it has one (see the seed brief in
+#     eo/registry.py's ROLE_PROMPTS_SEED for what to check against).
+#   - `contains` / `not-contains` / `icontains` for a hard, literal
+#     requirement (e.g. a specific term must or must not appear).
+#   - `type: python` with a `file://tests/asserts/<file>.py:<fn>` for
+#     anything needing real parsing/structure checks rather than a
+#     rubric -- see tests/asserts/output_organizer_asserts.py for the
+#     pattern (function takes (output, context) and returns
+#     True/False or a GradingResult).
+
+- description: "REPLACE ME -- one line describing what this case checks"
+  vars:
+    role_name: "REPLACE_ME"
+    task_text: "REPLACE ME -- the actual task this role would be given"
+    # context: "REPLACE ME or delete -- optional prior-stage output"
+  assert:
+    - type: llm-rubric
+      value: >-
+        REPLACE ME -- state plainly what the output must do and must not
+        do. Ground this in the role's actual brief (ROLE_PROMPTS_SEED)
+        and its known failure mode, not a generic "is this good" check.

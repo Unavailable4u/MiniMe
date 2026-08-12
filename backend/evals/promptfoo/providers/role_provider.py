@@ -160,6 +160,44 @@ def _build_live_chain(role_name: str) -> list:
     return [_chain_step_for(k) for k in candidates[:MAX_CHAIN_STEPS]]
 
 
+# --------------------------------------------------------------------
+# D2 patch 5 -- provider head-to-head comparison support.
+#
+# compare/providers.promptfooconfig.yaml configures one `providers:`
+# entry per candidate LLM provider, each pointing at THIS SAME file
+# with a different `provider_override` in its config. When set,
+# call_api() below builds a single forced one-step chain instead of
+# calling _build_live_chain()'s quota-ranked live chain -- that's what
+# lets the identical role/task run against Groq vs Cerebras vs Mistral
+# vs Gemini side by side in one promptfoo run (promptfoo's normal
+# test-case x provider matrix does the actual comparison automatically
+# once multiple `providers:` entries exist; nothing special needed on
+# that side).
+#
+# Model/key_env pairs below are copied directly from real production
+# chains already in this codebase, not guessed -- utils/llm_client.py's
+# own module docstring for groq; agents/documentation_agent.py for
+# mistral; agents/code_writer_lean.py for gemini; agents/dataset_analyst
+# .py / agents/report_writer.py / agents/idea_planner.py (among others)
+# for cerebras -- so a comparison run exercises models this codebase
+# actually calls in production, not a placeholder that might not even
+# be enabled on your account.
+#
+# Cloudflare and HuggingFace are deliberately NOT included here: both
+# need a different step shape than the other four (Cloudflare needs
+# "account_id_env" + "token_env" instead of a single "key_env" -- see
+# utils/llm_client.py's own module docstring). Add either the same way
+# if you want them in the comparison, using their real step shape
+# rather than forcing them through this key_env-only dict.
+PROVIDER_OVERRIDE_DEFAULTS = {
+    "groq":     {"provider": "groq",     "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    "cerebras": {"provider": "cerebras", "model": "gpt-oss-120b",            "key_env": "CEREBRAS_API_KEY_1"},
+    "mistral":  {"provider": "mistral",  "model": "mistral-medium-latest",   "key_env": "MISTRAL_API_KEY"},
+    "gemini":   {"provider": "gemini",   "model": "gemini-3.6-flash",        "key_env": "GEMINI_API_KEY_1"},
+}
+# --------------------------------------------------------------------
+
+
 def call_api(prompt: str, options: dict, context: dict) -> dict:
     """promptfoo entry point. `context["vars"]` carries each test case's
     `vars:` block from the YAML. Required var: role_name. task_text
@@ -201,7 +239,23 @@ def call_api(prompt: str, options: dict, context: dict) -> dict:
         return {"error": f"role_provider: '{role_name}' has no brief in either the "
                           f"live store or ROLE_PROMPTS_SEED -- check the role_name."}
 
-    chain = _build_live_chain(role_name)
+    # D2 patch 5: an explicit provider_override (test var or provider
+    # config) bypasses the quota-ranked live chain entirely in favor of
+    # a single forced step -- see PROVIDER_OVERRIDE_DEFAULTS above.
+    # Ordinary role-regression cases (patch 3/4, promptfooconfig.yaml)
+    # never set this, so their behavior is completely unchanged.
+    provider_override = test_vars.get("provider_override") or provider_config.get("provider_override")
+    if provider_override:
+        forced_step = PROVIDER_OVERRIDE_DEFAULTS.get(provider_override)
+        if forced_step is None:
+            return {"error": f"role_provider: unknown provider_override "
+                              f"'{provider_override}' -- must be one of "
+                              f"{sorted(PROVIDER_OVERRIDE_DEFAULTS)} (see this file's "
+                              f"PROVIDER_OVERRIDE_DEFAULTS dict to add another)."}
+        chain = [forced_step]
+    else:
+        chain = _build_live_chain(role_name)
+
     if not chain:
         return {"error": f"role_provider: no usable account found in AGENT_CAPABILITIES "
                           f"for role '{role_name}' (live and degraded-fallback chain "
@@ -237,6 +291,7 @@ def call_api(prompt: str, options: dict, context: dict) -> dict:
             "role_name": role_name,
             "brief_source": brief_source,   # "live" or "seed" -- surfaces in promptfoo's UI
             "chain_providers": [step.get("provider") for step in chain],
+            "provider_override": provider_override,  # None for ordinary role-regression runs
         },
     }
 
