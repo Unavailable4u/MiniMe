@@ -17,11 +17,21 @@ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NE
 // whatever chat happens to be open. Same left-hand picker pattern as
 // NotebooksTab.jsx (localStorage-persisted selection, auto-select first
 // item once loaded), filtered to workspace.stage === "build" instead of
-// "note". Requires the backend's SELECTs in eo/chat_workspace.py's
-// list_workspaces()/get_workspace() to actually return w.stage --
-// right now they don't, so every workspace reads as stage "note" and
-// this filter would show nothing. That's a pre-existing bug, not
-// something introduced here, but it blocks this feature until fixed.
+// "note".
+//
+// UPDATED — step 16 (T3) audit: this comment used to warn that
+// eo/chat_workspace.py's list_workspaces()/get_workspace() didn't
+// SELECT/return w.stage, which would make every workspace read as stage
+// "note" and leave this filter showing nothing. Re-checked against the
+// current backend: both functions' queries already select w.stage, and
+// _row_to_workspace() already returns it (`"stage": row.get("stage",
+// "note")`) — confirmed by reading eo/chat_workspace.py directly, plus
+// WorkspacesContext.jsx's fetchWorkspaces(), which passes the backend's
+// JSON straight through with nothing stripped. That bug is already
+// fixed; this comment was just never updated to say so, which risked
+// someone re-diagnosing a problem that no longer exists. Left as a
+// dated note rather than deleted outright, so anyone reading this file's
+// history understands why the filter below was once expected to be broken.
 const SELECTED_BUILD_WS_KEY = "minime_tasks_selected_ws_id";
 const CHAT_DOCK_KEY = "minime_build_chatdock_collapsed";
 // NEW — collapsible project-picker sidebar, same pattern as the chat
