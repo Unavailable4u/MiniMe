@@ -242,9 +242,27 @@ def render_agent_result(result, role: str = None, limit: int = 9000) -> str:
         text = str(result)
 
     text = (text or "").strip()
-    if len(text) <= limit:
+    # Bug fix 2026-08-12: `limit` exists to keep this string (plus the
+    # rest of the agent_done envelope) under Pusher's hard ~10KB-per-event
+    # cap -- but Pusher's cap is a BYTE limit, and this used to compare
+    # len(text) (a character count) against it directly. Pure-ASCII text
+    # has 1 byte per char, so the two numbers happened to match there --
+    # but hardware_speccer/assembler-style output is full of multi-byte
+    # UTF-8 symbols (Ω, µF, °C, →, ✓, ...), where a single character can
+    # be 2-3 bytes on the wire. A spec that measured under `limit`
+    # characters could still encode to well over 10240 bytes, so
+    # relay/emitter.py's client.trigger() call would still 413 even
+    # though this function's own truncation check had just "passed" it.
+    # Truncating on encoded bytes (not characters) is what the limit was
+    # actually meant to bound.
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
         return text
-    return text[:limit] + f"\n\n... [truncated, {len(text)} chars total]"
+    # Slice on the byte boundary, then decode with errors="ignore" to
+    # drop any multi-byte character left dangling half-cut at the cut
+    # point, rather than raising or emitting invalid UTF-8.
+    truncated = encoded[:limit].decode("utf-8", errors="ignore")
+    return truncated + f"\n\n... [truncated, {len(encoded)} bytes total]"
 
 
 def collect_artifacts(role_outputs: dict) -> list:

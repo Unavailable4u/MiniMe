@@ -449,7 +449,7 @@ def parse_next_tag(raw_text: str) -> tuple:
 
 def run(role: str, task_text: str, input_keys: list = None, session_id: str = None,
         key_override=None, include_conversation_context: bool = True,
-        domain: str = None) -> dict:
+        domain: str = None, chain_override: list = None) -> dict:
     """
     role: the exact role name the Panel/registry assigned (e.g.
         "brainstormer", "fact_checker") — also used as this call's own
@@ -468,6 +468,27 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     domain: Part 2 §2.6, cost-tracking gap. Purely forwarded to
         generate_text() below so utils/llm_client.py's log_usage() can
         tag this call's usage for the per-project/per-section breakdown.
+    chain_override: Bug fix (2026-08-12) — NEW. A ready-to-use, already
+        multi-step generate_text() chain (list of step dicts), used
+        AS-IS in place of this function's own key_override/
+        _build_fallback_chain() logic below. Same shape and purpose as
+        agents/part_price_finder.py's own chain_override parameter:
+        for a caller that's about to dispatch several roles concurrently
+        (eo/executor.py's _run_concurrent_group()) and has already
+        reserved each of them a DISTINCT starting account (plus its own
+        spread-across-providers fallback chain excluding every sibling's
+        reservation) up front, via eo/dynamic_chain.py's
+        build_fallback_chain_excluding() -- see that call site's own
+        comment for why this is necessary: key_override below collapses
+        to a length-1, no-fallback chain by design (an explicit single-
+        account pin), which can't carry a multi-step reserved chain, and
+        letting each concurrently-dispatched role independently call
+        _build_fallback_chain() from the same quota snapshot means
+        sibling roles firing at the same instant compute near-identical
+        top-ranked chains and pile onto the same accounts in lockstep --
+        exactly the failure mode multi-account fallback was supposed to
+        prevent. None (default) leaves every other caller (the plain
+        sequential path, key_override callers) completely unaffected.
         Defaults to None — no other effect on this function's behavior.
         eo/executor.py's dispatch (both the single-role and the
         concurrent-group branch) already passes this through.
@@ -508,7 +529,15 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
                 context_parts.append(zero_results_notice)
     context = "\n\n".join(context_parts)
 
-    if key_override:
+    if chain_override is not None:
+        # Bug fix (2026-08-12): a caller-reserved, already multi-step
+        # chain (see this parameter's own docstring above) — used
+        # exactly as given, bypassing both key_override's collapse-to-
+        # one-step behavior and this function's own _build_fallback_chain()
+        # call, since the whole point is that the CALLER already did that
+        # ranking itself, coordinated across a group of sibling roles.
+        chain = chain_override
+    elif key_override:
         # Explicit override — the caller picked this exact account on
         # purpose (e.g. a targeted retry), so it stays a single-step chain
         # rather than being expanded automatically.
@@ -584,7 +613,18 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
         # freshly-built chain is empty or also exhausts, the RuntimeError
         # propagates for real -- this is one more honest attempt, not a
         # way to paper over an actually-down provider indefinitely.
-        if key_override:
+        #
+        # Bug fix (2026-08-12): chain_override never retries here either,
+        # for a different reason than key_override -- rebuilding via the
+        # plain _build_fallback_chain() call below would be exactly the
+        # uncoordinated, no-visibility-into-siblings chain this parameter
+        # exists to avoid (see its docstring). A caller that reserved a
+        # coordinated chain across a group of concurrent roles is
+        # responsible for deciding what a real exhaustion means for that
+        # group -- silently falling back to an every-role-for-itself
+        # retry here would reintroduce the same lockstep-collision this
+        # fix is for, just one level deeper.
+        if key_override or chain_override is not None:
             raise
         retry_quota_status = get_quota_snapshot()
         retry_chain_keys = _build_fallback_chain(
