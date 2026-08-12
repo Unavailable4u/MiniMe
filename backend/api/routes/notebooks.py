@@ -43,7 +43,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from api.deps import require_auth
+from api.deps import require_auth, _resolve_chat_or_404
 from agents.concept_linker import link_concepts
 from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FORMATS
 from agents.fact_detector import detect_facts
@@ -1290,6 +1290,17 @@ def get_simulation_results(ws_id: str, req: SimulateRequest, owner_id: str = Dep
         chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    # SECURITY FIX (Bug 3 / IDOR): req.session_id was previously trusted
+    # straight from the request body with no check that it belongs to
+    # ws_id or to this user at all -- any authenticated user who owned
+    # *some* workspace could read back another user's persona reactions
+    # by pairing their own ws_id with a guessed/leaked session_id, since
+    # the memory-bus keys below are built from session_id alone. Same
+    # guard api/routes/tasks.py already uses on every session-scoped
+    # endpoint, imported from api.deps for the same "stop just any
+    # authenticated user who happens to know the session_id" reason.
+    _resolve_chat_or_404(req.session_id, owner_id, require_edit=False)
 
     session_id = req.session_id
     persona_roles = [r for r in STRUCTURE_TEMPLATES["simulate"] if r != "simulation_synthesizer"]
