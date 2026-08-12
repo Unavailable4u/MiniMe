@@ -59,3 +59,154 @@ jobs:
       - uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
+
+  promptfoo:
+    # D2 patch 6 — Role Library regression evals (backend/evals/promptfoo).
+    #
+    # Two runtimes this job needs that no other job here does yet:
+    #   - Node: promptfoo itself, plus the Node-side llm-rubric grading
+    #     call. Verified directly against the pinned version's own
+    #     installed package.json (backend/evals/promptfoo/package.json's
+    #     devDependencies: promptfoo 0.122.0) rather than trusting memory:
+    #     engines.node is ">=22.22.0". There is no separate ^20.20.0 path
+    #     for THIS version -- that floor may hold for some other promptfoo
+    #     release, but 0.122.0's own package.json only states the one
+    #     constraint. Pinned to the exact floor version below (not a
+    #     floating "22" tag) so a future runner-image default bump can't
+    #     silently drop under it.
+    #   - Python 3.11: role_provider.py is a promptfoo Python provider
+    #     that imports eo/agents/utils from backend/ -- same pin and same
+    #     requirements.txt install as the `test`/`lint` jobs above, so
+    #     imports resolve identically to what those jobs already verify.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    # First-pass tradeoff, called out rather than silently accepted: as
+    # configured today this can't tell "a role's prompt actually
+    # regressed" apart from "grading/chain infra was misconfigured" (a
+    # missing secret, an unreachable Upstash instance, etc.) -- both land
+    # as the same non-blocking red at the job level. Acceptable for a
+    # first pass per the agreed plan; revisit (e.g. a follow-up that
+    # greps the JSON output for the two error shapes role_provider.py and
+    # promptfoo's own OPENAI/GROQ-key errors produce, and only lets a
+    # real generation failure block the build) once there's enough real
+    # CI history to know how often that distinction actually matters.
+    defaults:
+      run:
+        working-directory: backend/evals/promptfoo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install backend Python deps (role_provider.py imports eo/agents/utils)
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.0"  # exact floor from promptfoo 0.122.0's own engines.node — see job comment above
+          cache: "npm"
+          cache-dependency-path: backend/evals/promptfoo/package-lock.json
+      - run: npm ci
+
+      - name: Run Role Library promptfoo evals
+        run: npm run eval:ci
+        env:
+          # --- envPath is a local-only convenience, not usable here ---
+          # promptfooconfig.yaml's commandLineOptions.envPath points at
+          # ../../.env (backend/.env), which simply doesn't exist in a CI
+          # checkout. Rather than special-casing that config file for CI,
+          # every var it would have loaded is exported directly below
+          # instead. Confirmed non-conflicting by reading promptfoo's own
+          # setupEnv() (wraps `dotenv.config`, which no-ops harmlessly
+          # against a missing path and never overrides a var already set
+          # in the process env) -- so this doesn't need a placeholder
+          # backend/.env file or a config edit to coexist with envPath.
+
+          # --- UPSTASH secrets: confirmed NOT optional for this suite,
+          # narrower than the package README's "Running in CI" section
+          # implies ---
+          # That section is right about the BRIEF lookup only:
+          # _get_brief_live_or_seed() falls back to ROLE_PROMPTS_SEED
+          # fine with no reachable Redis. It does NOT hold for CHAIN
+          # BUILDING, and this is the part worth flagging explicitly:
+          # traced _build_live_chain()'s degraded fallback (the path
+          # taken when get_quota_snapshot() raises, i.e. no reachable
+          # Redis) and confirmed it filters AGENT_CAPABILITIES by literal
+          # natural_roles membership -- then confirmed "contradiction_detector"
+          # (the only case file wired into promptfooconfig.yaml as of
+          # patch 4) isn't tagged in ANY account's natural_roles list in
+          # backend/eo/registry.py. So with no UPSTASH secrets, every
+          # case in this suite would error with "no usable account
+          # found" -- not a real prompt regression, just a gap between
+          # this eval provider's degraded fallback and production's own
+          # eo/panel.py::_best_match(), which DOES fall through to the
+          # full account pool when nothing is natural-role-tagged (see
+          # that function's docstring). Real UPSTASH secrets sidestep
+          # this by letting get_quota_snapshot() succeed so the LIVE
+          # chain path runs instead. Worth bringing role_provider.py's
+          # degraded fallback in line with _best_match's behavior in a
+          # follow-up -- out of scope for a CI-wiring-only patch.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+
+          # --- grading provider ---
+          # promptfooconfig.yaml's defaultTest.options.provider points
+          # llm-rubric grading at groq:llama-3.3-70b-versatile /
+          # apiKeyEnvar GROQ_API_KEY. That's a Node-side promptfoo
+          # provider call -- reads process.env directly, no dotenv
+          # involved on that side at all. Without this secret, every
+          # llm-rubric assert hard-fails with "GROQ_API_KEY is not set"
+          # even when role generation itself succeeded fine on seed --
+          # exactly the false-negative this job's own continue-on-error
+          # comment above flags as not yet distinguishable from a real
+          # regression.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+          # --- quota/cost decision (already made; wired in here) ---
+          # Same account pool production uses, not CI-only reserved keys
+          # -- role-prompt evals are early/cheap enough to land before a
+          # longer-running task in the same pool has a chance to exhaust
+          # it. Scoped to the pool an untagged reasoning role can
+          # actually be routed to once chain-building falls through to
+          # quota-only ranking (see the UPSTASH comment above) --
+          # Cloudflare/HuggingFace omitted: nothing in the current case
+          # set routes to them, and their step shape needs an
+          # account_id+token pair rather than a single key anyway (see
+          # role_provider.py's PROVIDER_OVERRIDE_DEFAULTS comment).
+          GROQ_API_KEY_6: ${{ secrets.GROQ_API_KEY_6 }}
+          GROQ_API_KEY_7: ${{ secrets.GROQ_API_KEY_7 }}
+          GROQ_API_KEY_8: ${{ secrets.GROQ_API_KEY_8 }}
+          GROQ_API_KEY_9: ${{ secrets.GROQ_API_KEY_9 }}
+          GROQ_API_KEY_10: ${{ secrets.GROQ_API_KEY_10 }}
+          GROQ_API_KEY_11: ${{ secrets.GROQ_API_KEY_11 }}
+          GROQ_API_KEY_12: ${{ secrets.GROQ_API_KEY_12 }}
+          GROQ_API_KEY_13: ${{ secrets.GROQ_API_KEY_13 }}
+          GROQ_API_KEY_14: ${{ secrets.GROQ_API_KEY_14 }}
+          GROQ_RESERVE_1: ${{ secrets.GROQ_RESERVE_1 }}
+          GROQ_RESERVE_2: ${{ secrets.GROQ_RESERVE_2 }}
+          SGA_GROQ_1: ${{ secrets.SGA_GROQ_1 }}
+          SGA_GROQ_2: ${{ secrets.SGA_GROQ_2 }}
+          SGA_GROQ_3: ${{ secrets.SGA_GROQ_3 }}
+          CEREBRAS_API_KEY_1: ${{ secrets.CEREBRAS_API_KEY_1 }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+
+          # --- per-test timeout (this patch's new addition) ---
+          # generate_text() can walk up to MAX_CHAIN_STEPS_CEILING (6)
+          # live chain steps before giving up on a single role_provider.py
+          # call. Verified PROMPTFOO_EVAL_TIMEOUT_MS against promptfoo
+          # 0.122.0's own installed source
+          # (node_modules/promptfoo/dist/src/evaluator-*.js:
+          # `context.options.timeoutMs || getEvalTimeoutMs()`, where
+          # getEvalTimeoutMs() reads exactly this env var) rather than
+          # guessing a config key from docs/memory -- it's real and
+          # currently supported in this pinned version. 120s/test leaves
+          # room for a multi-step chain walk without one hung case
+          # stalling the whole job. PROMPTFOO_MAX_EVAL_TIME_MS is the
+          # same package's whole-run cap (same source file), set here as
+          # a second backstop underneath this job's own timeout-minutes
+          # above.
+          PROMPTFOO_EVAL_TIMEOUT_MS: "120000"
+          PROMPTFOO_MAX_EVAL_TIME_MS: "600000"

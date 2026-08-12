@@ -28,7 +28,13 @@
 # _reject_real_action_role() will bounce it with an error explaining
 # why -- that error is doing its job, it's not a bug to route around.
 #
-# Quick check before writing a real case file:
+# Quick check before writing a real case file (D2 patch 7):
+#   npm run check-role -- <role_name>
+# Exits 0 and tells you what to do next if the role is testable; exits
+# 1 and explains why if not (same two conditions as before, just run
+# for you instead of retyped by hand). See scripts/check_role.py.
+#
+# Equivalent by hand, if the script isn't available for some reason:
 #   python3 -c "
 #   from eo.registry import REGISTRY, ROLE_PROMPTS_SEED
 #   from agents.generic_worker import run as gw

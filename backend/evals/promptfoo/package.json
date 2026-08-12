@@ -8,7 +8,8 @@
     "eval:ci": "promptfoo eval --config promptfooconfig.yaml --no-cache --share=false",
     "eval:organizer": "promptfoo eval --config output_organizer.promptfooconfig.yaml",
     "compare": "promptfoo eval --config compare/providers.promptfooconfig.yaml",
-    "view": "promptfoo view"
+    "view": "promptfoo view",
+    "check-role": "python3 scripts/check_role.py"
   },
   "devDependencies": {
     "promptfoo": "0.122.0"

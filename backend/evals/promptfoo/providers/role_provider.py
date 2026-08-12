@@ -149,14 +149,40 @@ def _build_live_chain(role_name: str) -> list:
             "unranked account pool instead of quota/cooldown-ranked chain.",
             type(exc).__name__, exc)
 
-    # Degraded fallback: every account whose natural_roles/strengths tag
-    # this role, in AGENT_CAPABILITIES dict order, capped the same as
-    # the live path's MAX_CHAIN_STEPS default (3). No quota ranking, no
-    # cooldown-awareness, no provider-spreading -- just enough to make
-    # the case runnable without a reachable Redis.
+    # Degraded fallback: prefers accounts whose natural_roles/strengths
+    # tag this role, in AGENT_CAPABILITIES dict order, capped the same
+    # as the live path's MAX_CHAIN_STEPS default (3). No quota ranking,
+    # no cooldown-awareness, no provider-spreading -- just enough to
+    # make the case runnable without a reachable Redis.
+    #
+    # D2 patch 7: falls through to the FULL account pool when NO
+    # account tags this role at all, mirroring eo/panel.py::
+    # _best_match()'s own fallback ("No natural match at all ... choose
+    # from every provisioned account"). This fallthrough was previously
+    # missing here -- confirmed while wiring CI (patch 6): any role
+    # nobody has gotten around to natural_roles-tagging (e.g.
+    # "contradiction_detector", a genuine generic_worker judgment role
+    # -- see eo/registry.py's comment on its deliberate REAL_ACTION_ROLES
+    # omission) returned an EMPTY chain here whenever Redis wasn't
+    # reachable, even though production's own _best_match() would have
+    # happily picked from the general pool for the exact same role. In
+    # CI that surfaced as every case for an untagged role erroring with
+    # "no usable account found" -- indistinguishable at a glance from a
+    # real prompt regression. Still deliberately NOT raising/tightening
+    # on an empty pool overall: an eval run without a reachable Redis
+    # should degrade, not crash outright; see the call_api() empty-chain
+    # error path below for what happens if AGENT_CAPABILITIES itself is
+    # empty (a configuration problem, not a role-name problem).
     from agents.generic_worker import MAX_CHAIN_STEPS
     candidates = [key for key, info in AGENT_CAPABILITIES.items()
                   if role_name in info.get("natural_roles", [])]
+    if not candidates:
+        logger.warning(
+            "No account's natural_roles tags '%s'; falling through to the full "
+            "AGENT_CAPABILITIES pool (unranked) instead of returning an empty "
+            "chain -- same fallthrough eo/panel.py::_best_match() uses in "
+            "production for an untagged role.", role_name)
+        candidates = list(AGENT_CAPABILITIES.keys())
     return [_chain_step_for(k) for k in candidates[:MAX_CHAIN_STEPS]]
 
 
@@ -308,15 +334,25 @@ def call_api(prompt: str, options: dict, context: dict) -> dict:
 #      prior-stage output; see call_api()'s comment for why it can't be
 #      a full replay).
 #
-# Still left, now for patch 6 (CI wiring) rather than a provider-code
-# patch -- both are config/ops decisions, not something role_provider.py
-# itself needs to change for:
-#   4. Cost/quota interaction -- eval runs share real provider accounts
-#      and quota pools with production traffic (get_quota_snapshot()).
-#      Decide whether CI carries its own reserved keys before this runs
-#      on a schedule rather than on-demand.
-#   5. Per-test timeout -- generate_text() can walk up to 6 live chain
-#      steps (MAX_CHAIN_STEPS_CEILING) before giving up. Set an explicit
-#      `timeout` in promptfooconfig.yaml once real latency numbers are
-#      in from a first run.
+# Patch 6 (CI wiring, .github/workflows/ci.yml) resolved the two items
+# that used to be listed here as "left for patch 6":
+#   4. Cost/quota interaction -- CI reuses the same production account
+#      pool (GROQ_API_KEY_6-14, GROQ_RESERVE_1/2, SGA_GROQ_1-3, etc.),
+#      wired in as job-level secrets rather than separate CI-only keys.
+#   5. Per-test timeout -- PROMPTFOO_EVAL_TIMEOUT_MS (120s) /
+#      PROMPTFOO_MAX_EVAL_TIME_MS (600s), verified against promptfoo
+#      0.122.0's own installed source rather than assumed. Set as job
+#      env in ci.yml, not in this file or promptfooconfig.yaml.
+#
+# Patch 6 also surfaced a real gap that patch 7 (this revision) fixes
+# directly in this file, not in CI config: _build_live_chain()'s
+# degraded fallback used to return an EMPTY chain for any role with no
+# natural_roles tag at all (e.g. contradiction_detector) whenever Redis
+# was unreachable -- even though production's _best_match() falls
+# through to the full account pool for the exact same case. See the
+# comment on that fallthrough in _build_live_chain() above for the full
+# story; CI's own UPSTASH-secrets requirement (ci.yml's comment on that
+# job) was the workaround before this fix landed, and can now be
+# relaxed to the seed-only path the package README originally described
+# once this fix has run clean in CI.
 # --------------------------------------------------------------------
