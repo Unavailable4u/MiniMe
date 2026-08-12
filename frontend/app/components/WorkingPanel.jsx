@@ -6,6 +6,7 @@ import { useWorkspaceDock } from "../context/WorkspaceDockContext";
 import RoutingTraceCard from "./RoutingTraceCard";
 import AgentStepList from "./AgentStepList";
 import RoutingTraceGraph from "./RoutingTraceGraph";
+import TracesPanel from "./TracesPanel"; // NEW — D1 patch 5
 import DependencyGraph from "./DependencyGraph";
 import MermaidDiagram from "./MermaidDiagram";
 import SaveRunAsTemplate from "./SaveRunAsTemplate";
@@ -206,6 +207,14 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
           Sharing memory with {activeBatch.member_chat_ids.length - 1} other chat(s) in &quot;{activeBatch.name}&quot;
         </div>
       )}
+      {/* NEW — D1 patch 5. One link for the whole dock, not one per
+          snapshot message — _open_session_trace() (backend/eo/
+          executor.py, patch 3a) opens a single Langfuse trace per
+          session_id that every message/run in this chat nests under,
+          so a single deep link here covers all of them. Renders
+          nothing until NEXT_PUBLIC_LANGFUSE_PROJECT_ID is set and a
+          trace_id has been derived (see TracesPanel.jsx). */}
+      <TracesPanel sessionId={sessionId} />
       <div
         ref={containerRef}
         onScroll={handleScroll}
