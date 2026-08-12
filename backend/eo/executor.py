@@ -1276,15 +1276,29 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         new_snapshot["macro_project_unique_name"] = macro_project_unique_name
         write(f"paused_execution:{session_id}", new_snapshot)
 
-    result = _run_loop(
-        agent_names=agent_names, role_names=role_names, idx=idx, results=results,
-        auto_inserted=auto_inserted, stage_revisits=stage_revisits, task_text=task_text,
-        session_id=session_id, path=path, mode=mode, key_overrides=key_overrides,
-        project_unique_name=project_unique_name, expanded=expanded,
-        approval_roles=approval_roles, next_step=next_step,
-        no_conversation_context_roles=no_conversation_context_roles,
-        domain=domain, scope=scope, workspace_id=workspace_id,
-    )
+    # D1 patch 3d — execute_graph() (line 660) always wraps _run_loop() in
+    # _open_session_trace(), which is what makes patch 3b's role spans
+    # and patch 3c's member spans nest under the session's trace instead
+    # of each opening their own orphan trace via start_as_current_observation.
+    # This function calls _run_loop() directly, on a fresh call
+    # stack/time from the original execute_graph() call, so there is no
+    # "current" Langfuse observation for those child spans to nest under
+    # unless we open one here too. _open_session_trace() derives its
+    # trace_id deterministically from session_id (tracer.create_trace_id
+    # (seed=session_id)), so calling it again here with the same
+    # session_id reattaches to the exact same trace rather than minting a
+    # second one — a paused-and-resumed run shows up in Langfuse as one
+    # continuous tree with a gap in it, not two separate traces.
+    with _open_session_trace(session_id, task_text, domain, mode):
+        result = _run_loop(
+            agent_names=agent_names, role_names=role_names, idx=idx, results=results,
+            auto_inserted=auto_inserted, stage_revisits=stage_revisits, task_text=task_text,
+            session_id=session_id, path=path, mode=mode, key_overrides=key_overrides,
+            project_unique_name=project_unique_name, expanded=expanded,
+            approval_roles=approval_roles, next_step=next_step,
+            no_conversation_context_roles=no_conversation_context_roles,
+            domain=domain, scope=scope, workspace_id=workspace_id,
+        )
 
     if isinstance(result, dict) and result.get("status") == "paused":
         if macro_loop_num is not None:
