@@ -55,7 +55,9 @@ import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
 from relay.emitter import emit_event
-from eo.structure import STRUCTURE_TEMPLATES, build_reference_structure_addition
+from eo.structure import (
+    STRUCTURE_TEMPLATES, build_reference_structure_addition, _rough_domain_guess,
+)
 VALID_DIRECTED_TASK_TYPES = {
     "debug", "review", "add_tests", "refactor",
     "security_scan", "write_docs", "explain_code", None,
@@ -105,6 +107,42 @@ def _requests_hardware_speccer(task_text: str) -> bool:
     actually produce, regardless of how simple any accompanying
     firmware/software portion of the task reads."""
     return bool(_HARDWARE_SPECCER_REQUEST_RE.search(task_text or ""))
+
+
+# Bug fix (2026-08-12): same failure shape as the hardware-speccer bug
+# above, different domain. Test tab's "Run Simulation" panel
+# (frontend/app/components/tabs/TestTab.jsx's SIMULATION_TYPES) dispatches
+# plain natural-language task text like "Simulate how real customers
+# would react -- both an enthusiastic-but-realistic customer persona and
+# a skeptical, hard-to-convince one -- to: <target>." eo/structure.py's
+# _rough_domain_guess() already recognizes this shape of text and tags it
+# domain "simulate" -- but that tag is only ever shown to the LLM
+# classifier as a non-binding bias (see build_reference_structure_addition
+# and its own docstring). The classifier's separate "path" judgment keeps
+# scoring these tasks "direct" (small single-file build) instead of
+# "adaptive", because a single persona-reaction prompt reads, on its own,
+# like something buildable in one pass -- the same qualitative-judgment
+# blind spot _requests_hardware_speccer() was added to route around for
+# hardware requests. A "direct" classification sends the task to the
+# tier-1 prompt_writer_lean -> code_writer_lean -> reviewer_fixer_lean
+# pipeline, whose only job is producing source code -- so instead of two
+# persona reactions in prose, the user gets back a Python function that
+# templates fake reactions. Only "adaptive" reaches the panel, which is
+# what actually hires STRUCTURE_TEMPLATES["simulate"]'s real persona
+# roles (persona_customer, persona_skeptic, etc.) and gets genuine
+# LLM-authored prose back.
+#
+# Fix follows the exact same shape as the hardware short-circuit: reuse
+# the already-correct domain guess deterministically, rather than leaving
+# the "direct" vs "adaptive" call to the model's judgment for this
+# specific shape of task.
+def _requests_simulate_domain(task_text: str) -> bool:
+    """True if the task text reads as a persona/simulation request --
+    i.e. eo/structure.py's own domain guesser would tag it "simulate" --
+    which only the panel's "adaptive" path can actually staff with real
+    persona roles, regardless of how small a single-persona prompt reads
+    in isolation."""
+    return _rough_domain_guess(task_text) == "simulate"
 
 
 CHAIN = [
@@ -360,6 +398,38 @@ def classify(task_text: str, context: str = None, session_id: str = None) -> dic
             ),
             "domain": None,
             "execution_order": ["hardware_speccer"],
+            "parallel_groups": [],
+        }
+        emit_event("routing_decision", session_id, agent="inspector",
+                    path=parsed["path"], payload=parsed)
+        emit_event("agent_done", session_id, agent="inspector",
+                    path=parsed["path"],
+                    payload={"summary": parsed["reasoning"]})
+        return parsed
+
+    # Deterministic pre-check, same shape and same reasoning as the
+    # hardware_speccer short-circuit just above -- see
+    # _requests_simulate_domain()'s own docstring. Forces "adaptive" so
+    # loop_v4.py's should_escalate always sends this to the panel
+    # (tier >= 2 alone is sufficient, regardless of confidence), and the
+    # panel's own hires pass is what actually staffs the real persona
+    # roles -- this short-circuit only needs to guarantee escalation
+    # happens, not replicate the panel's full reasoning.
+    if _requests_simulate_domain(task_text):
+        parsed = {
+            "path": "adaptive",
+            "directed_task_type": None,
+            "confidence": 1.0,
+            "suggested_agents": list(STRUCTURE_TEMPLATES["simulate"]),
+            "reasoning": (
+                "Deterministic override: task text reads as a persona/"
+                "simulation request (eo/structure.py's own domain guesser "
+                "agrees), which only the panel's 'adaptive' path can staff "
+                "with real persona roles -- forced to 'adaptive' regardless "
+                "of how small a single-persona prompt reads in isolation."
+            ),
+            "domain": "simulate",
+            "execution_order": list(STRUCTURE_TEMPLATES["simulate"]),
             "parallel_groups": [],
         }
         emit_event("routing_decision", session_id, agent="inspector",
