@@ -1,0 +1,9 @@
+# D2 promptfoo evals -- force LF regardless of local core.autocrlf, so a
+# Windows checkout (autocrlf=true) doesn't silently reintroduce CRLF into
+# files git itself stores as LF. Scoped to this directory rather than
+# repo-wide since that's the only place this was observed.
+backend/evals/promptfoo/**/*.py text eol=lf
+backend/evals/promptfoo/**/*.yaml text eol=lf
+backend/evals/promptfoo/**/*.yml text eol=lf
+backend/evals/promptfoo/**/*.json text eol=lf
+backend/evals/promptfoo/**/*.md text eol=lf
