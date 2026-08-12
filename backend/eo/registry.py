@@ -38,7 +38,19 @@ AGENT_CAPABILITIES = {
         # duplicate entries in this list.
         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
                            "researcher", "writer", "analyst", "formatter",
-                           "brainstormer", "outliner", "editor"],
+                           "brainstormer", "outliner", "editor",
+                           # Bug fix (2026-08-12): hardware_speccer/architecture_diagrammer
+                           # used to each hardcode a single-entry CHAIN pointed at this
+                           # exact key with no fallback and no registry tag at all -- when
+                           # this one account rate-limited, hardware_speccer's price loop
+                           # burned it dry and architecture_diagrammer (running right after,
+                           # same key) had nothing to fall back to and hard-crashed. Both
+                           # are single-shot, "sequential low-volume" JSON-out calls, the
+                           # exact shape this pool already exists for -- tagging them here
+                           # (plus GROQ_API_KEY_10/11/12 below) gives both real quota
+                           # ranking, cooldown-awareness, and multi-account fallback via
+                           # eo/dynamic_chain.py instead of one unmonitored key.
+                           "hardware_speccer", "architecture_diagrammer"],
     },
 
     # Quota-reality fix, §11a: three of the five newly-provisioned Groq
@@ -50,21 +62,24 @@ AGENT_CAPABILITIES = {
         "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
                            "researcher", "writer", "analyst", "formatter",
-                           "brainstormer", "outliner", "editor"],
+                           "brainstormer", "outliner", "editor",
+                           "hardware_speccer", "architecture_diagrammer"],  # bug fix, see GROQ_API_KEY above
     },
     "GROQ_API_KEY_11": {
         "provider": "groq",
         "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
                            "researcher", "writer", "analyst", "formatter",
-                           "brainstormer", "outliner", "editor"],
+                           "brainstormer", "outliner", "editor",
+                           "hardware_speccer", "architecture_diagrammer"],  # bug fix, see GROQ_API_KEY above
     },
     "GROQ_API_KEY_12": {
         "provider": "groq",
         "strengths": ["general reasoning", "fast, reliable for sequential low-volume roles"],
         "natural_roles": ["idea_planner", "prompt_writer", "test_writer", "report_writer", "gatekeeper",
                            "researcher", "writer", "analyst", "formatter",
-                           "brainstormer", "outliner", "editor"],
+                           "brainstormer", "outliner", "editor",
+                           "hardware_speccer", "architecture_diagrammer"],  # bug fix, see GROQ_API_KEY above
     },
 
     # --- Groq: Reviewer Pool — base 3, reserve 2 (Part 3 §4.2) ---
@@ -105,16 +120,29 @@ AGENT_CAPABILITIES = {
     # patch-it-now precedent §5b's own note just established -- it hires
     # through the same generic_worker.run(role=...) path as every other
     # name in this list, nothing deferred.
-    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
-    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
-    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
-    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
-    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+    # Bug fix (2026-08-12): "part_price_finder" added to this pool's tags
+    # on all 7 accounts below, same reuse-not-new-pool pattern as every
+    # other addition to this list -- part_price_finder.find_price() is a
+    # short, cheap, genuinely-parallel per-part extraction call (a dozen
+    # snippets -> one JSON object), the same shape this pool already
+    # exists for. Previously part_price_finder had NO registry tag at
+    # all and hardcoded its own 2-step CHAIN (one Groq key, one Cerebras
+    # key), so agents/hardware_speccer.py's _populate_prices() had no way
+    # to fan work out across this pool -- it called find_price() once per
+    # part in a plain sequential for-loop, all N calls fighting over the
+    # same 1-2 accounts. See eo/worker_pool.py's role_tag-parameterized
+    # _select_workers(), now reused here exactly as
+    # agents/code_writers.py already reuses it for "implementer".
+    "GROQ_API_KEY_6": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+    "GROQ_API_KEY_7": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+    "GROQ_API_KEY_8": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+    "GROQ_RESERVE_1": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+    "GROQ_RESERVE_2": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
     # Quota-reality fix, §11a: remaining 2 of the 5 newly-provisioned Groq
     # keys, reinforcing this 9-role extraction pool -- the secondary
     # pressure point behind GROQ_API_KEY's catch-all pool above.
-    "GROQ_API_KEY_13": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
-    "GROQ_API_KEY_14": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator"]},
+    "GROQ_API_KEY_13": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
+    "GROQ_API_KEY_14": {"provider": "groq", "strengths": ["code review"], "natural_roles": ["verifier", "fact_checker", "editor", "extraction_table_builder", "note_table_builder", "source_manager", "backlink_detector", "source_planner_lean", "correction_locator", "part_price_finder"]},
 
 
     # --- Groq: Structure Architect (isolated single account) ---
