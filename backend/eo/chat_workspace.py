@@ -439,9 +439,25 @@ def _row_to_workspace(row: dict) -> dict:
 def _chat_ids_sql():
     """A workspace's chat_ids: every chat pointing at it, EXCEPT another
     user's private chat. %s placeholders (in order): viewer_id, viewer_id
-    again."""
+    again.
+
+    T3 Tasks audit fix: array_agg with no ORDER BY has undefined,
+    non-stable ordering in Postgres -- it follows scan order, which isn't
+    guaranteed to match insertion order and isn't guaranteed to be the
+    same across repeated calls as the table changes. That matters here
+    because chat ids are random gen_random_uuid() values (no incidental
+    time correlation) and api/routes/tasks.py's get_tasks_for_workspace()
+    resolves a workspace's task board via chat_ids[0], treating it as
+    "the" build chat for that workspace. With more than one chat in a
+    build-stage workspace, an unordered aggregate means the Tasks board
+    can silently resolve to a different chat's feature_status/module_specs
+    on a later load than it did before, showing what looks like a
+    different or reverted board with no user action to explain it.
+    Ordering by created_at makes chat_ids[0] deterministically "the first
+    chat created in this workspace" every time.
+    """
     return """
-        coalesce(array_agg(c.id) filter (
+        coalesce(array_agg(c.id order by c.created_at asc) filter (
             where c.id is not null
               and (c.is_private = false or c.owner_id = %s)
         ), '{}') as chat_ids

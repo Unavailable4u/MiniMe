@@ -71,6 +71,7 @@ from eo.prerequisite_suggestions import find_prerequisite_suggestions   # NEW �
 from eo.source_index import get_topic_covered_sources   # NEW — Step 6.11.f (6.11.d's helper)
 from eo.note_candidates import get_topic_related_notes   # NEW — Step 6.11.f (6.11.e's helper)
 from eo.panel_content import write_panel_from_role   # NEW — chat-to-panel writes, patch 2
+from eo.workspace_code_files import write_file as write_code_file   # NEW — Code sub-tab write-back, patch 9
 from relay.emitter import emit_workspace_event, EventType   # NEW — live-refetch fix, patch 3 follow-up
 
 # NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
@@ -612,6 +613,106 @@ def _write_plan_panels(response: dict, session_id: str, owner_id: str) -> None:
                   f"role={role!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
 
 
+def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
+    """Code sub-tab write-back, patch 9: after a tier-3 hires-driven run
+    completes, push whatever code_writers.py's Code Writer Pool (and, if
+    it ran this cycle, the Fixer Pool on top of it) actually produced
+    into patch 8's workspace_code_files store — same "the tab keeps a
+    persisted copy of what chat already produced" pattern
+    _write_plan_panels() established for the six Plan panels above,
+    applied to Build's Code sub-tab instead.
+
+    Reads the same three bus keys agents/file_manager.py's own
+    run_file_manager() reads — fixed_code, submitted_code, file_map —
+    with the identical fixed_code-over-submitted_code preference order
+    (see that function's own comment: "prefer fixed_code (Fixer Pool's
+    cleaned-up output) over submitted_code (Code Writers' raw output)
+    when both exist"). This hook runs AFTER _run_task_inner() has
+    already returned, i.e. after file_manager.py (if it ran this cycle)
+    has already written file_map, so file_map is the authoritative
+    module_name -> relative-path mapping for whatever actually landed on
+    disk under apps/{app_slug}/ — reading it here instead of guessing a
+    path from the module name keeps this write-back from ever
+    disagreeing with what patch 11's "Download as ZIP" of that same
+    app_slug's apps/ directory would contain, and with what a person
+    would see if they opened the file directly on disk.
+
+    Unlike file_manager.py's own _get_module_code() (which defaults an
+    unrecognized shape to "python" because it has no file path to fall
+    back on), a bare-string code value here is written with
+    language=None — write_file() already infers the language from the
+    file extension in file_path (see workspace_code_files._infer_language()),
+    and file_map always gives us that path, so there's no need to guess.
+
+    Only tier 3, status "ok" — tiers 0/1 never run the Code Writer Pool
+    at all, and tier 2 loads an EXISTING app via code_loader.py instead,
+    a deliberately separate concern per that module's own docstring (see
+    its header: "NOT invoked by loop.py -- this only exists for
+    eo/loop_v4.py's tier-2 path"); write-back for that path isn't part
+    of this patch. A "paused" response has nothing finished yet to
+    write, same as _write_plan_panels()'s own guard.
+
+    Same fail-open posture as _write_plan_panels() throughout: a single
+    file's write failing doesn't stop the rest of file_map's entries
+    from being tried, and this must never turn an already-computed chat
+    answer into a 500 over a persistence hiccup.
+    """
+    if response.get("status") != "ok" or response.get("tier") != 3:
+        return
+    if not session_id or not owner_id:
+        return
+
+    from memory.bus import read_many, KEYS
+    _vals = read_many([KEYS["fixed_code"], KEYS["submitted_code"], "file_map"], default=None)
+    code_source = _vals[KEYS["fixed_code"]] or _vals[KEYS["submitted_code"]]
+    file_map = _vals["file_map"]
+    if not code_source or not file_map:
+        return
+
+    try:
+        workspace = chat_workspace.workspace_for_chat(session_id, owner_id)
+    except Exception as exc:
+        print(f"  [task_runner] code write-back: workspace lookup failed for "
+              f"session_id={session_id!r}, skipped (fail-open): {exc}")
+        return
+    if not workspace:
+        return
+
+    ws_id = workspace["id"]
+    for module_name, rel_path in file_map.items():
+        data = code_source.get(module_name)
+        if data is None:
+            continue
+        if isinstance(data, dict):
+            code = data.get("code", "")
+            language = data.get("language")   # None falls through to write_file()'s own extension guess
+        else:
+            code = data if isinstance(data, str) else ""
+            language = None
+        if not code:
+            continue
+        try:
+            saved = write_code_file(ws_id, rel_path, code, owner_id, language=language)
+        except Exception as exc:
+            print(f"  [task_runner] code write-back failed for module={module_name!r} "
+                  f"path={rel_path!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
+            continue
+        # NEW — same live-refetch pattern as _write_plan_panels()'s
+        # PANEL_CONTENT_UPDATED emission: tell every dock/tab that has
+        # this workspace open to re-fetch the Code sub-tab now, instead
+        # of leaving it to sit unseen until the next full page reload.
+        try:
+            emit_workspace_event(
+                EventType.CODE_FILE_UPDATED,
+                workspace_id=ws_id,
+                agent="code_writers",
+                payload={"file_path": saved.get("file_path"), "workspace_id": ws_id},
+            )
+        except Exception as exc:
+            print(f"  [task_runner] code-file-updated event emission failed for "
+                  f"path={rel_path!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
+
+
 def run_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None,
@@ -661,6 +762,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         scope=scope,   # NEW — task 13d/13e
     )
     _write_plan_panels(response, session_id, owner_id)   # NEW — chat-to-panel writes, patch 2
+    _write_code_files(response, session_id, owner_id)   # NEW — Code sub-tab write-back, patch 9
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
 
