@@ -16,6 +16,7 @@ Stage 4 steps 2-4 of the roadmap), are all wired up here.
 import sys
 import os
 import contextvars
+import difflib
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 
@@ -1592,14 +1593,129 @@ REAL_ACTION_ROLES = {
     "performance_reviewer": "performance_reviewer",
 }
 
+# Robustness fix (2026-08): Inspector/Panel classifiers freely invent
+# suggested_agents labels in natural English (that's by design — see
+# inspector.py's own SYSTEM_PROMPT). For MOST roles that's fine, because
+# everything not in REAL_ACTION_ROLES safely falls through to
+# generic_worker and still gets the task done via plain reasoning.
+#
+# But a handful of REAL_ACTION_ROLES entries perform an action
+# generic_worker categorically CANNOT do on its own — hardware_speccer
+# writes a structured BOM to workspace_facts.custom, architecture/schema
+# diagrammer render real Mermaid to a dedicated bus key, etc. For exactly
+# these, resolve_role()'s old plain dict lookup meant a classifier that
+# said "hardware_designer" instead of "hardware_speccer" silently got
+# routed to generic_worker's free-text reasoning instead — no error, no
+# log, just a task that quietly never produces the real artifact it was
+# supposed to. That's the bug this section closes.
+#
+# Two layers, cheapest/safest first:
+#   1. ROLE_ALIASES — a curated, hand-reviewed list of synonyms per
+#      canonical role. Exact match only (after normalization). This is
+#      the trusted path — add new synonyms here as they're observed in
+#      real routing_decision logs.
+#   2. A conservative fuzzy fallback (difflib) over the canonical names
+#      + all aliases, for a synonym nobody's added yet. High cutoff on
+#      purpose — a false POSITIVE here silently sends a task to the
+#      wrong dedicated module, which is worse than the false NEGATIVE of
+#      just falling through to generic_worker like before. When in
+#      doubt, this stays conservative and lets generic_worker take it.
+#
+# Scope is intentionally narrow: only roles that need a real, non-text
+# action belong in ROLE_ALIASES. Plain reasoning roles (reviewer,
+# researcher, etc.) should keep falling through to generic_worker — do
+# NOT add aliases for those here, that's not what this table is for.
+ROLE_ALIASES = {
+    "hardware_speccer": [
+        "hardware_designer", "hardware_engineer", "hardware_specifier",
+        "electronics_designer", "electronics_engineer", "electronics_speccer",
+        "component_selector", "parts_speccer", "bom_writer",
+        "bill_of_materials_writer", "device_speccer",
+    ],
+    "architecture_diagrammer": [
+        "architecture_designer", "system_architect", "system_diagrammer",
+        "architecture_diagram_writer", "architecture_designer_agent",
+    ],
+    "schema_diagrammer": [
+        "database_designer", "db_schema_designer", "schema_designer",
+        "entity_diagrammer", "erd_designer", "database_schema_designer",
+    ],
+}
+
+# Any real-action role NOT listed as a key above (e.g. code_writers,
+# fixer_pool, file_manager) keeps its old exact-match-only behavior —
+# those roles are hired directly by their own canonical name in
+# practice, so they don't need synonym coverage, and giving every
+# real-action role a wide alias net would raise the odds of an
+# unrelated reasoning label accidentally matching one of them.
+
+_FUZZY_MATCH_CUTOFF = 0.82   # conservative on purpose — see docstring above
+
+
+def _normalize_role_label(name: str) -> str:
+    return name.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _build_alias_lookup() -> dict:
+    """Flattens ROLE_ALIASES into {normalized_alias: canonical_name},
+    including each canonical name mapping to itself, so alias lookup and
+    fuzzy-match candidate generation share one source of truth."""
+    lookup = {}
+    for canonical, synonyms in ROLE_ALIASES.items():
+        lookup[_normalize_role_label(canonical)] = canonical
+        for synonym in synonyms:
+            lookup[_normalize_role_label(synonym)] = canonical
+    return lookup
+
+
+_ALIAS_LOOKUP = _build_alias_lookup()
+
+
+def _fuzzy_resolve_specialized_role(role_name: str) -> str | None:
+    """Conservative last resort for a synonym not yet in ROLE_ALIASES.
+    Only ever matches against the specialized-role alias pool built
+    above (never the full REAL_ACTION_ROLES set) — a role like
+    "code_writers" has no synonym list here on purpose, so it's never a
+    fuzzy-match candidate and can't be accidentally hijacked."""
+    normalized = _normalize_role_label(role_name)
+    close = difflib.get_close_matches(
+        normalized, _ALIAS_LOOKUP.keys(), n=1, cutoff=_FUZZY_MATCH_CUTOFF,
+    )
+    if not close:
+        return None
+    canonical = _ALIAS_LOOKUP[close[0]]
+    print(f"  [registry] resolve_role: fuzzy-matched '{role_name}' -> "
+          f"'{canonical}' (nearest known label '{close[0]}', "
+          f"cutoff={_FUZZY_MATCH_CUTOFF}). Consider adding '{role_name}' "
+          f"to ROLE_ALIASES['{canonical}'] if this keeps recurring.")
+    return canonical
+
 
 def resolve_role(role_name: str) -> str:
-    """Real-action roles resolve to their dedicated module name, exactly
-    as before. Everything else resolves to the literal string
-    'generic_worker' — execute_graph's dispatch (Part 10 §4) is what
-    actually routes that to agents.generic_worker.run(role=role_name,
-    ...)."""
-    return REAL_ACTION_ROLES.get(role_name, "generic_worker")
+    """Real-action roles resolve to their dedicated module name.
+    Resolution order:
+      1. Exact match in REAL_ACTION_ROLES (unchanged original behavior).
+      2. Exact match (post-normalization) against ROLE_ALIASES for the
+         handful of roles where a generic_worker fallback would mean the
+         task's real output never gets produced at all.
+      3. A conservative fuzzy match against that same alias pool, for a
+         synonym nobody's curated yet.
+    Everything else resolves to the literal string 'generic_worker' —
+    execute_graph's dispatch (Part 10 §4) is what actually routes that to
+    agents.generic_worker.run(role=role_name, ...)."""
+    if role_name in REAL_ACTION_ROLES:
+        return REAL_ACTION_ROLES[role_name]
+
+    normalized = _normalize_role_label(role_name)
+    aliased = _ALIAS_LOOKUP.get(normalized)
+    if aliased and aliased in REAL_ACTION_ROLES:
+        return REAL_ACTION_ROLES[aliased]
+
+    fuzzy = _fuzzy_resolve_specialized_role(role_name)
+    if fuzzy and fuzzy in REAL_ACTION_ROLES:
+        return REAL_ACTION_ROLES[fuzzy]
+
+    return "generic_worker"
 
 from agents import (
     memory_search,
