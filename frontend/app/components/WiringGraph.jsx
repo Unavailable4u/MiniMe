@@ -130,8 +130,40 @@ export default function WiringGraph({ wiring }) {
         if (typeof start !== "object" || typeof end !== "object"
             || start.x == null || end.x == null) return;
 
-        const midX = (start.x + end.x) / 2;
-        const midY = (start.y + end.y) / 2;
+        // Bug fix (T2b, step 18a): the label used to sit exactly on the
+        // raw link midpoint every time, which put it directly on top of
+        // whatever node circle happened to be there. Nudge it a few
+        // pixels along the perpendicular (normal) of the link's
+        // direction vector instead of drawing right on the line.
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const offset = 6 / globalScale;
+        const nx = -dy / len;
+        const ny = dx / len;
+        const baseMidX = (start.x + end.x) / 2;
+        const baseMidY = (start.y + end.y) / 2;
+
+        // T2b, step 18b: don't always offset to the same fixed side --
+        // check both candidate positions against the graph's own node
+        // list (already in scope via graphData) and pick whichever side
+        // has fewer nodes nearby, so the label actually dodges node
+        // circles instead of just moving a fixed distance off the line.
+        const DENSITY_RADIUS = 40 / globalScale;
+        const countNearby = (cx, cy) => {
+          let count = 0;
+          for (const n of graphData.nodes) {
+            if (n.x == null || n.y == null) continue;
+            if (Math.hypot(n.x - cx, n.y - cy) < DENSITY_RADIUS) count++;
+          }
+          return count;
+        };
+        const posCount = countNearby(baseMidX + nx * offset, baseMidY + ny * offset);
+        const negCount = countNearby(baseMidX - nx * offset, baseMidY - ny * offset);
+        const side = posCount <= negCount ? 1 : -1;
+
+        const midX = baseMidX + nx * offset * side;
+        const midY = baseMidY + ny * offset * side;
         const fontSize = 9 / globalScale;
         ctx.font = `${fontSize}px sans-serif`;
         const textWidth = ctx.measureText(label).width;

@@ -29,6 +29,13 @@ BD_VENDOR_DOMAINS = [
     "ultrasource.com.bd", "daraz.com.bd", "pickaboo.com",
 ]
 
+# INTL_VENDOR_DOMAINS: NEW (T2b, step 17) -- second-tier fallback used
+# only when every BD_VENDOR_DOMAINS lookup comes back with nothing for a
+# part. The BD-only scope was the single biggest lever on the actual
+# found-rate: most parts that showed "not found" here priced cleanly on
+# these two sites instead. See _find_international_fallback() below.
+INTL_VENDOR_DOMAINS = ["aliexpress.com", "ebay.com"]
+
 # FALLBACK_CHAIN: last-resort static chain, used only if find_price() is
 # called with no chain_override AND eo/dynamic_chain.py's
 # build_fallback_chain() comes back empty (every registered account
@@ -52,10 +59,32 @@ FALLBACK_CHAIN = [
 EXTRACTION_PROMPT = """You are given raw search snippets about a hardware
 part from Bangladeshi electronics retailers. Extract ONLY what's directly
 stated in the snippets — never invent a price or product name that isn't
-present. Return strict JSON:
+present. "price_bdt" MUST be a plain number with no currency symbol, no
+thousands separators, and no text like "N/A" or "contact for price" — if
+the snippet doesn't state a clear numeric price, use JSON null instead of
+a string. Return strict JSON:
 {"found": true|false, "listings": [{"vendor","product_name","price_bdt","url"}]}
 If nothing relevant was found, return {"found": false, "listings": []}.
 """
+
+
+def _sanitize_listings(listings: list) -> list:
+    """Bug fix (T2b, step 17): the prompt above tells the LLM to return
+    price_bdt as a plain number or null, but nothing enforced that
+    before this — a stray "1,200" or "contact for price" string could
+    survive straight into a part's estimated_price_bdt field, which is
+    exactly what turns PartsTable.jsx's BOM total into NaN. Same
+    "validate the LLM's JSON after parsing" pattern hardware_speccer.py
+    already uses for its own strict-JSON contract: coerce anything that
+    isn't int/float (or is a bool, which is technically an int subclass
+    in Python) to None rather than writing a poisoning value into the
+    part.
+    """
+    for listing in listings:
+        price = listing.get("price_bdt")
+        if isinstance(price, bool) or not isinstance(price, (int, float)):
+            listing["price_bdt"] = None
+    return listings
 
 
 def find_price(part_name: str, force_refresh: bool = False, chain_override: list = None,
@@ -101,8 +130,53 @@ def find_price(part_name: str, force_refresh: bool = False, chain_override: list
             snippets.extend(results)
 
     if not snippets:
+        # NEW (T2b, step 17): all six BD vendor domains came back empty
+        # -- try AliExpress/eBay before giving up and marking the part
+        # unpriced, instead of stopping here as before.
+        return _find_international_fallback(part_name, chain_override, agent_name)
+
+    snippet_text = "\n\n".join(f"{s['url']}\n{s['snippet']}" for s in snippets[:12])
+    raw = generate_text(
+        system_prompt=EXTRACTION_PROMPT,
+        user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
+        chain=chain_override or FALLBACK_CHAIN,
+        agent_name=agent_name,
+    )
+    parsed = _safe_json(raw) or {"found": False, "listings": []}
+    result = {
+        "part_name": part_name,
+        "listings": _sanitize_listings(parsed.get("listings", [])),
+        "checked_at": _now_iso(),
+    }
+    set_cached_price(part_name, result)
+    return {**result, "cached": False}
+
+
+def _find_international_fallback(part_name: str, chain_override: list, agent_name: str) -> dict:
+    """T2b, step 17: second-tier search scoped to INTL_VENDOR_DOMAINS,
+    called only when every BD_VENDOR_DOMAINS lookup came back empty.
+    Same fan-out / extraction / sanitize shape as the BD path above,
+    just a second domain list and a second extraction call -- cached
+    under tier="intl" so a later BD listing, if one ever appears, can
+    still take priority over a cached international one.
+    """
+    cached = get_cached_price(part_name, tier="intl")
+    if cached:
+        return {**cached, "cached": True}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _search_domain(domain: str) -> list:
+        return web_search(f"{part_name} price", domains=[domain], agent_name=agent_name)
+
+    snippets = []
+    with ThreadPoolExecutor(max_workers=len(INTL_VENDOR_DOMAINS)) as pool:
+        for results in pool.map(_search_domain, INTL_VENDOR_DOMAINS):
+            snippets.extend(results)
+
+    if not snippets:
         result = {"part_name": part_name, "listings": [], "checked_at": _now_iso()}
-        set_cached_price(part_name, result)
+        set_cached_price(part_name, result, tier="intl")
         return {**result, "cached": False}
 
     snippet_text = "\n\n".join(f"{s['url']}\n{s['snippet']}" for s in snippets[:12])
@@ -115,10 +189,10 @@ def find_price(part_name: str, force_refresh: bool = False, chain_override: list
     parsed = _safe_json(raw) or {"found": False, "listings": []}
     result = {
         "part_name": part_name,
-        "listings": parsed.get("listings", []),
+        "listings": _sanitize_listings(parsed.get("listings", [])),
         "checked_at": _now_iso(),
     }
-    set_cached_price(part_name, result)
+    set_cached_price(part_name, result, tier="intl")
     return {**result, "cached": False}
 
 

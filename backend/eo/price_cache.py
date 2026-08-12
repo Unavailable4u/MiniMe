@@ -10,17 +10,22 @@ from memory.bus import read, write
 
 TTL_SECONDS = 60 * 60 * 24 * 5  # 5 days — parts pricing is slow-moving
 
-def _key(part_name: str) -> str:
+def _key(part_name: str, tier: str = "bd") -> str:
+    # tier: NEW (T2b, step 17) -- "bd" (default, unchanged prefix) or
+    # "intl" for the AliExpress/eBay fallback tier. Kept as a distinct
+    # key prefix, not a shared one, so a later BD listing (if one ever
+    # appears) can still take priority over a cached international one.
     slug = re.sub(r"[^a-z0-9]+", "_", part_name.strip().lower())
-    return f"price_cache:{slug}"
+    prefix = "price_cache" if tier == "bd" else f"price_cache_{tier}"
+    return f"{prefix}:{slug}"
 
-def get_cached_price(part_name: str) -> dict | None:
-    entry = read(_key(part_name), default=None)
+def get_cached_price(part_name: str, tier: str = "bd") -> dict | None:
+    entry = read(_key(part_name, tier), default=None)
     if not entry:
         return None
     if time.time() - entry.get("_cached_at", 0) > TTL_SECONDS:
         return None
     return entry
 
-def set_cached_price(part_name: str, result: dict) -> None:
-    write(_key(part_name), {**result, "_cached_at": time.time()})
+def set_cached_price(part_name: str, result: dict, tier: str = "bd") -> None:
+    write(_key(part_name, tier), {**result, "_cached_at": time.time()})

@@ -35,6 +35,11 @@ What's different from schema/architecture_diagrammer.py:
     shape that endpoint uses (get_facts -> merge custom -> set_facts),
     so a full spec write here and a parts-only write from that endpoint
     never clobber each other's keys.
+  - NEW (T2b, step 19a): a fifth key, custom["info"] -- {"summary",
+    "tags"} -- written the same read-modify-write way, from a second,
+    smaller LLM call (_generate_info()) that reuses the parts/wiring
+    JSON already produced rather than re-reading the PRD. Fail-safe:
+    always {"summary": "", "tags": []} at minimum, never missing.
 
 Place this file at: agents/hardware_speccer.py
 """
@@ -152,6 +157,58 @@ id referenced elsewhere (wiring edges, mech placements, instruction \
 tool_ids/part_ids) MUST match an id defined in "parts"/"wiring.nodes".
 """
 
+
+
+INFO_PROMPT = """You are given a hardware bill-of-materials and wiring \
+graph already generated for a project. Write a short one-paragraph \
+plain-language summary of what the device is and does, plus 4 to 6 \
+short descriptive tags (e.g. "Battery Powered", "Weatherproof \
+Enclosure"). Never invent parts or capabilities the parts/wiring JSON \
+doesn't support -- describe only what's actually there.
+
+Respond with ONLY valid JSON, no markdown fences, no explanation, in \
+exactly this shape:
+{"summary": "one paragraph, plain language", "tags": ["Tag One", "Tag Two"]}
+"""
+
+
+def _generate_info(spec: dict, chain: list, session_id: str = None,
+                    tier: int = None, domain: str = None) -> dict:
+    """T2b, step 19a: Blueprint Info/summary surface -- one more small
+    LLM call, same shape as the main spec-generation call in
+    run_hardware_speccer() below, reusing the parts/wiring JSON already
+    produced as context instead of re-reading the PRD. Reuses that same
+    call's already-built `chain` rather than deriving a second one --
+    this is still the "hardware_speccer" role, just a second, smaller
+    call within it.
+
+    Fail-safe on any error (bad JSON, empty response, provider chain
+    exhausted): returns the same empty-but-valid {"summary": "",
+    "tags": []} shape a caller would see for a spec generated before
+    this feature existed, rather than raising into
+    run_hardware_speccer()'s caller -- an Info card that's just missing
+    is a much smaller problem than a partially-written device spec.
+    """
+    empty = {"summary": "", "tags": []}
+    try:
+        user_prompt = (
+            f"Parts:\n{json.dumps(spec.get('parts', []))}\n\n"
+            f"Wiring:\n{json.dumps(spec.get('wiring', {}))}"
+        )
+        raw = generate_text(INFO_PROMPT, user_prompt, chain,
+                             agent_name="Hardware Speccer Info",
+                             session_id=session_id, tier=tier, domain=domain)
+        parsed = json.loads(_strip_fences(raw))
+        summary = parsed.get("summary")
+        tags = parsed.get("tags")
+        if not isinstance(summary, str):
+            summary = ""
+        if not isinstance(tags, list):
+            tags = []
+        tags = [t for t in tags if isinstance(t, str)][:6]
+        return {"summary": summary, "tags": tags}
+    except Exception:
+        return empty
 
 
 def _read_prd_context(session_id: str) -> str:
@@ -477,6 +534,12 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         spec["wiring"] = {"nodes": [], "edges": []}
     spec["wiring"]["mermaid"] = _build_wiring_mermaid(spec)
 
+    # T2b, step 19a: Blueprint Info/summary surface -- one more small
+    # LLM call reusing the parts/wiring JSON already produced above,
+    # same chain as the main generation call. See _generate_info()'s own
+    # docstring for why this never raises.
+    spec["info"] = _generate_info(spec, chain, session_id=session_id, tier=tier, domain=domain)
+
     # Same read-modify-write shape api/server.py's refresh-prices endpoint
     # already uses for custom["parts"] alone -- read the whole facts
     # object, update only this spec's four custom keys, write it back, so
@@ -487,6 +550,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     custom["wiring"] = spec.get("wiring", {})
     custom["mech"] = spec.get("mech", {})
     custom["instructions"] = spec.get("instructions", {})
+    custom["info"] = spec.get("info", {"summary": "", "tags": []})
     workspace_facts.set_facts(workspace_id, {"custom": custom})
     print(f"  [hardware_speccer] wrote device spec to workspace_id={workspace_id!r} "
           f"(session_id={session_id!r}, {len(custom['parts'])} parts)")
