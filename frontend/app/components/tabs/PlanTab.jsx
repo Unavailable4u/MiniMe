@@ -1198,6 +1198,16 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("parts");
   const [refreshing, setRefreshing] = useState(false);
+  // NEW — step 4 (wiring diagram UI surface): which of the two wiring
+  // sub-views is showing -- the existing force-graph ("graph", WiringGraph.jsx,
+  // Bugs 6-8's pin-labeled arrows) or the new deterministic Mermaid diagram
+  // ("diagram", hardware_speccer.py's _build_wiring_mermaid() from step 3,
+  // rendered via the same MermaidDiagram.jsx every other Blueprint/PRD
+  // diagram already uses). Kept local to BlueprintView rather than a third
+  // top-level BLUEPRINT_VIEWS entry -- this toggles *within* the Wiring
+  // slice, it isn't a fourth Parts/Wiring/Mech sibling. Resets to "graph"
+  // implicitly on every workspace switch since this state isn't persisted.
+  const [wiringSubView, setWiringSubView] = useState("graph");
 
   useEffect(() => {
     let cancelled = false;
@@ -1264,7 +1274,46 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
       {view === "parts" && (
         <PartsTable parts={spec.parts} refreshing={refreshing} onRefreshPrices={handleRefreshPrices} />
       )}
-      {view === "wiring" && <WiringGraph wiring={spec.wiring} />}
+      {view === "wiring" && (
+        <div className="space-y-2">
+          {/* NEW — step 4: only shown once a spec actually carries a
+              wiring.mermaid string -- step 3's _build_wiring_mermaid()
+              always sets this key going forward, but a spec generated
+              before that patch (or one whose wiring has no edges to
+              diagram at all) simply won't have it. Falling back to
+              graph-only in that case rather than showing a toggle to a
+              blank/broken second view. */}
+          {spec.wiring?.mermaid && (
+            <div className="flex gap-1">
+              {[
+                { id: "graph", label: "Graph" },
+                { id: "diagram", label: "Diagram" },
+              ].map((sv) => (
+                <button
+                  key={sv.id}
+                  onClick={() => setWiringSubView(sv.id)}
+                  className={`text-[11px] rounded px-2 py-0.5 border ${
+                    wiringSubView === sv.id
+                      ? "bg-[var(--accent)] text-[var(--accent-text)] border-[var(--accent)] font-medium"
+                      : "text-[var(--neutral-500)] border-[var(--neutral-800)] hover:text-[var(--neutral-300)]"
+                  }`}
+                >
+                  {sv.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {wiringSubView === "diagram" && spec.wiring?.mermaid ? (
+            <MermaidDiagram
+              mermaidText={spec.wiring.mermaid}
+              showControls
+              exportFilename="wiring-diagram"
+            />
+          ) : (
+            <WiringGraph wiring={spec.wiring} />
+          )}
+        </div>
+      )}
       {view === "mech" && <MechView mech={spec.mech} parts={spec.parts} />}
     </div>
   );
