@@ -161,6 +161,53 @@ def read(key: str, default=None):
     if key == "app_slug":
         _app_slug_ctx.set(value)
     return value
+def read_stage_output_text(session_id: str, role: str) -> str | None:
+    """Bug fix (2026-08-12): reads a stage_output:{session_id}:{role} key
+    and returns its text content regardless of which of the two shapes
+    that key legitimately holds -- the two write sites had silently
+    drifted apart, and every one of the four existing readers only
+    handled ONE of the two shapes, not both:
+
+      1. A plain string -- what agents/generic_worker.py's own run()
+         writes on an ordinary (non-paused) completion
+         (bus_write(f"stage_output:{{session_id}}:{{role}}", body), body
+         being a str). agents/hardware_speccer.py, agents/
+         schema_diagrammer.py, and agents/architecture_diagrammer.py's
+         near-identical _read_prd_context() helpers only checked
+         isinstance(..., dict), so this shape -- the NORMAL case for an
+         ordinary, non-approval-gated run -- always fell through to
+         MissingDependencyError even when prd_writer had just finished
+         successfully. This is what surfaced as hardware_speccer
+         raising MissingDependencyError("prd_writer") immediately after
+         the executor's own self-heal branch had already run prd_writer
+         and confirmed it "done".
+      2. A dict shaped like {"text": ..., ...}. -- what
+         eo/executor.py's own approval-pause "edit" action writes
+         (write(f"stage_output:{{session_id}}:{{role}}", edited)) when a
+         role sits in approval_roles and a person edits its output
+         before approving it. agents/handoff_packager.py's own
+         _read_stage_text() only checked isinstance(..., str), so THIS
+         shape -- an approval-edited prd_writer -- would have hit the
+         mirror-image bug there instead: MissingDependencyError raised
+         even though prd_writer had genuinely run, just via the
+         edit-then-approve path rather than a plain completion.
+
+    Single shared helper so both shapes are handled in exactly one
+    place, rather than four independent copies that can each drift out
+    of sync with the two real write sites again. Returns None (not "")
+    for "nothing usable yet" either way, matching every existing
+    caller's own `if not prd_text: raise MissingDependencyError(...)`
+    (or equivalent) convention.
+    """
+    stage_output = read(f"stage_output:{session_id}:{role}", default=None)
+    if isinstance(stage_output, dict):
+        text = stage_output.get("text")
+        return text if isinstance(text, str) and text.strip() else None
+    if isinstance(stage_output, str):
+        return stage_output if stage_output.strip() else None
+    return None
+
+
 def read_many(keys: list, default=None) -> dict:
     """Batch-read multiple keys in a SINGLE Redis round trip via MGET,
     instead of one request per key. Since bus.py talks to Upstash Redis

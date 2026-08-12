@@ -60,6 +60,53 @@ VALID_DIRECTED_TASK_TYPES = {
     "debug", "review", "add_tests", "refactor",
     "security_scan", "write_docs", "explain_code", None,
 }
+
+# Bug fix (2026-08-12): hardware BOM/wiring/enclosure requests were being
+# under-routed. A task like "design a battery-powered sensor... give me
+# the full parts list, wiring, physical layout, and assembly steps" reads
+# to the LLM classifier as a small single-file build (the ESP32 firmware
+# part is genuinely simple), so it was scored "direct" (tier 1, high
+# confidence) and never escalated to the panel. hardware_speccer -- the
+# only role that writes to Blueprint's Parts/Wiring/Mech panels (see
+# eo/panel_content.py's own comment on this split) -- is exclusively
+# staffed through the tier-3 hires-driven path, so a "direct"
+# classification silently drops the entire Blueprint deliverable: the
+# firmware code still gets written and shown in chat, but nothing ever
+# reaches the Blueprint tab.
+#
+# Same fix shape as eo/sga.py's _requests_verification(): a fast,
+# deterministic keyword pre-check that short-circuits straight to the
+# right routing outcome for a request the model structurally cannot
+# satisfy at a lower path, rather than trusting a qualitative judgment
+# call ("does this sound like a big build?") the LLM classifier keeps
+# getting wrong for this specific shape of task. Not exhaustive by
+# design -- SYSTEM_PROMPT's "hardware_speccer" callout below is the
+# fallback for phrasings this list doesn't catch.
+HARDWARE_SPECCER_REQUEST_PATTERNS = [
+    r"parts? list",
+    r"bill of materials\b|\bBOM\b",
+    r"wiring (?:diagram|graph|layout)",
+    r"which (?:pin|part)s? connects? to",
+    r"physical layout",
+    r"enclosure",
+    r"assembly (?:steps|instructions|sequence)",
+    r"breadboard",
+    r"schematic",
+]
+_HARDWARE_SPECCER_REQUEST_RE = re.compile(
+    "|".join(HARDWARE_SPECCER_REQUEST_PATTERNS), re.IGNORECASE
+)
+
+
+def _requests_hardware_speccer(task_text: str) -> bool:
+    """True if the task text explicitly asks for a hardware bill of
+    materials, wiring, physical layout, or assembly instructions --
+    something only hardware_speccer (tier 3 / "adaptive" only) can
+    actually produce, regardless of how simple any accompanying
+    firmware/software portion of the task reads."""
+    return bool(_HARDWARE_SPECCER_REQUEST_RE.search(task_text or ""))
+
+
 CHAIN = [
     # Quota-reality fix, §3: qwen/qwen3-32b -> qwen/qwen3.6-27b (the old
     # model isn't in Groq's current live free-tier model table, confirmed
@@ -289,6 +336,38 @@ def classify(task_text: str, context: str = None, session_id: str = None) -> dic
     """
     emit_event("agent_start", session_id, agent="inspector",
                 payload={"label": "Inspector — classifying task"})
+
+    # Deterministic pre-check, tried before any LLM call -- see
+    # _requests_hardware_speccer()'s own docstring above for why this
+    # can't be left to the model's judgment alone. Forces "adaptive" so
+    # loop_v4.py's should_escalate always sends this to the panel
+    # (tier >= 2 alone is sufficient, regardless of confidence), and the
+    # panel's own hires pass is what actually staffs hardware_speccer --
+    # this short-circuit only needs to guarantee escalation happens, not
+    # replicate the panel's full reasoning.
+    if _requests_hardware_speccer(task_text):
+        parsed = {
+            "path": "adaptive",
+            "directed_task_type": None,
+            "confidence": 1.0,
+            "suggested_agents": ["hardware_speccer"],
+            "reasoning": (
+                "Deterministic override: task text asks for a hardware "
+                "bill of materials, wiring, physical layout, or assembly "
+                "instructions, which only hardware_speccer (tier 3) can "
+                "produce -- forced to 'adaptive' regardless of how simple "
+                "any accompanying firmware/software portion reads."
+            ),
+            "domain": None,
+            "execution_order": ["hardware_speccer"],
+            "parallel_groups": [],
+        }
+        emit_event("routing_decision", session_id, agent="inspector",
+                    path=parsed["path"], payload=parsed)
+        emit_event("agent_done", session_id, agent="inspector",
+                    path=parsed["path"],
+                    payload={"summary": parsed["reasoning"]})
+        return parsed
 
     user_content = f"Task: {task_text}"
     if context:
