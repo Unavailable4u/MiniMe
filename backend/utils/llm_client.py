@@ -1399,6 +1399,20 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
        are running, instead of a shape mismatch silently degrading to
        tokens=None inside _log_usage() with nothing to grep for.
 
+    5b. D1 patch 2 part B -- tracing. One Langfuse generation span per
+       chain step attempt (not per chunk): opened via _traced_generation()
+       right after this step's client is resolved, kept open across the
+       whole token-by-token stream, and closed exactly once via
+       _end_traced_generation() -- either in the "done" branch with the
+       full accumulated text + real usage_details (usage only exists once
+       the trailing usage-only chunk lands, see point 4), or in the
+       "error" branch with exc_info set, whether that error is about to
+       raise mid-stream or just fall through to the next chain step. A
+       tracing failure inside either helper is caught and logged there,
+       same non-fatal posture as generate_text()'s spans -- it never skips
+       or double-fires the real provider call, and never blocks a chunk
+       from reaching the caller.
+
     5. Every provider client here is the same *synchronous* SDK client
        generate_text() uses -- there is no separate async SDK wired up
        anywhere in this module. To make this a real async generator
@@ -1451,6 +1465,17 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
         if client is None:
             print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
             continue
+
+        # D1 patch 2 part B -- same traced-call pattern as generate_text()'s
+        # two branches (see _traced_generation()/_end_traced_generation()
+        # docstrings), adapted for streaming: the span opens here, before
+        # the first chunk, and stays open for the life of this step's
+        # attempt -- it's closed exactly once below, either in the "done"
+        # branch (success) or the "error" branch (failure), never both and
+        # never left dangling on a `continue`/`break` to the next chain step.
+        _traced = _traced_generation(label, model, system_prompt, user_content,
+                                      agent_name, session_id, tier, path, domain)
+        _stream_text_parts = []  # accumulates chunks so the span gets the full output, not just the last delta
 
         chunk_queue: asyncio.Queue = asyncio.Queue()
 
@@ -1514,9 +1539,17 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
             kind, payload = await chunk_queue.get()
             if kind == "chunk":
                 started = True
+                _stream_text_parts.append(payload)
                 yield payload
             elif kind == "done":
                 usage, finish_reason = payload
+                # D1 patch 2 part B -- usage only exists once the trailing
+                # usage-only SSE chunk lands (see docstring point 4), which
+                # is exactly this "done" branch, so the span can only be
+                # updated with real usage_details here -- never right after
+                # the call returns, since at that point usage isn't known yet.
+                _end_traced_generation(_traced, agent_name, label,
+                                        "".join(_stream_text_parts), usage, finish_reason)
                 _probe_usage_shape(provider, model, usage, agent_name)
                 _log_usage(provider, key_env, usage, session_id, tier, path, agent_name,
                            domain=domain, model=model)
@@ -1528,6 +1561,18 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                 return
             else:  # "error"
                 last_exc = payload
+                # D1 patch 2 part B -- close the span on every failure exit
+                # from this step's attempt, whether it's about to raise
+                # (mid-stream failure) or just fall through to the next
+                # chain step (pre-first-chunk transient failure). Mirrors
+                # generate_text()'s `except BaseException: _end_traced_generation(...,
+                # exc_info=sys.exc_info()); raise` pattern -- text/usage/
+                # finish_reason are ignored by _end_traced_generation
+                # whenever exc_info is set, so None/None/None here is fine.
+                _end_traced_generation(
+                    _traced, agent_name, label, None, None, None,
+                    exc_info=(type(last_exc), last_exc, last_exc.__traceback__),
+                )
                 await stream_task
                 if started:
                     raise RuntimeError(
