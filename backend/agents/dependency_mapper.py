@@ -35,7 +35,18 @@ load_dotenv()
 # _call_cloudflare_step() docstring. Routed through generate_text() instead
 # of a hand-rolled request so this call actually gets usage-logged --
 # previously it logged nothing.
-CHAIN = [
+#
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
+# all (every registered account excluded/cooling down at once -- should
+# be very rare). This used to be the ONLY chain this module ever tried
+# (module-level CHAIN, one entry, one Cloudflare key/account with no
+# fallback) -- see run()'s real call below, which now builds a live,
+# quota-ranked, multi-provider chain instead (eo/registry.py tags
+# CLOUDFLARE_ACCOUNT_ID_4 for "dependency_mapper", so this has a real
+# sibling account to fall back to, not just this pool's whole-account
+# quota-ranked degradation).
+FALLBACK_CHAIN = [
     {"provider": "cloudflare", "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
      "account_id_env": "CLOUDFLARE_ACCOUNT_ID_1", "token_env": "CLOUDFLARE_API_KEY_1",
      "json_mode": True},
@@ -81,7 +92,16 @@ def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
     # real sleeps (1/2/4/8s) in between, on top of generate_text() already
     # having walked every step in CHAIN once per attempt. generate_text()
     # is the single source of retry/fallback behavior now.
-    raw_text = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Dependency Mapper",
+    #
+    # Bug fix (2026-08-12): deferred import -- see eo/dynamic_chain.py's
+    # module docstring for why this can't be a module-level import.
+    # Quota-ranked, cooldown-aware, spread across providers -- replaces
+    # the old single-entry CHAIN that had nothing to fall back to when
+    # its one Cloudflare account rate-limited.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("dependency_mapper") or FALLBACK_CHAIN
+
+    raw_text = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Dependency Mapper",
                               session_id=session_id, tier=tier, domain=domain)
     dep_map = json.loads(_strip_fences(raw_text))
     write(KEYS["dependency_map"], dep_map)

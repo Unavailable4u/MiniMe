@@ -610,6 +610,7 @@ function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, 
                   <ReportsPanel
                     wsId={activeWs.id}
                     sessionId={viewedSessionId}
+                    lastSessionId={lastSessionId}
                     fetchSimulationResults={fetchSimulationResults}
                   />
                 )}
@@ -745,7 +746,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
 
         <label className="flex items-center gap-1.5 text-[11px] text-[var(--neutral-500)] cursor-pointer">
           <input type="checkbox" id="test-thorough" name="testThorough" checked={thorough} onChange={(e) => setThorough(e.target.checked)} />
-          N workers, parallel (more personas, slower)
+          Use more personas/workers for a thorough pass
         </label>
 
         <button
@@ -785,7 +786,7 @@ const PERSONA_LABELS = {
   simulation_synthesizer: "Synthesis (cross-persona summary)",
 };
 
-function ReportsPanel({ wsId, sessionId, fetchSimulationResults }) {
+function ReportsPanel({ wsId, sessionId, lastSessionId, fetchSimulationResults }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
@@ -816,7 +817,11 @@ function ReportsPanel({ wsId, sessionId, fetchSimulationResults }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] text-[var(--neutral-600)]">Showing the most recently dispatched run.</p>
+        <p className="text-[11px] text-[var(--neutral-600)]">
+          {sessionId === lastSessionId
+            ? "Showing the most recently dispatched run."
+            : "Showing results for the selected run."}
+        </p>
         <button
           onClick={() => fetchSimulationResults(wsId, sessionId).then(setData).catch((e) => setError(e.message))}
           className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1"
