@@ -49,6 +49,27 @@ What's different from schema/architecture_diagrammer.py:
     cosmetic and deliberately the last/cheapest part of step 19 -- if
     summary is empty (fail-safe path) image_url is "" too, never a URL
     built off no content.
+  - NEW (T2c, step 20a): SYSTEM_PROMPT now forbids emitting an enclosure
+    as a single lump "parts" entry. The model must instead decompose it
+    into discrete parts -- housing + lid shell, one mount per subsystem
+    that needs standoff/bracket mounting (MCU, display, any part with
+    exposed leads), a realistic fastener count, and (only when the PRD
+    says weatherproof/outdoor) a gasket/seal line. Two new categories,
+    "3D_PRINT" and "MISC", back this: both are purely mechanical, so
+    per the existing wiring-completeness rule above they're never added
+    to "wiring.nodes" (same treatment screws/standoffs already got).
+    Placement of these new discrete parts in "mech.placements" and
+    nesting them into an assembled enclosure is step 20b, not this one --
+    this step only changes what shows up in "parts".
+  - NEW (T2c, step 20b): SYSTEM_PROMPT's "mech.placements" guidance now
+    covers step 20a's new discrete parts explicitly -- housing, lid, and
+    each mount each get their own placement entry, with rough nesting
+    rules (lid's z sits atop housing's own d; mounts nest inside the
+    housing footprint near the subsystem they mount) so MechView.jsx
+    renders an assembled enclosure instead of unrelated floating boxes.
+    Fasteners are deliberately excluded from "mech.placements" -- too
+    numerous/small to place individually. Depends on 20a's part ids
+    (housing_1, lid_1, mount_*) existing to reference.
 
 Place this file at: agents/hardware_speccer.py
 """
@@ -117,12 +138,42 @@ leave them null just because it's easier; a wiring diagram whose edges \
 don't say which pin connects to which pin is not detailed enough to \
 build from.
 
+Never emit an enclosure as a single lump "parts" entry (e.g. one \
+"Enclosure" or "Case" part covering housing, lid, mounting, and \
+fasteners all at once). Decompose it into discrete parts instead: \
+a housing part and a lid part (category "3D_PRINT"); one mount part \
+per subsystem that needs standoff/bracket mounting -- the MCU, any \
+display, and any other part with exposed leads (category "3D_PRINT", \
+one mount per such subsystem, not one mount for the whole board); a \
+realistic fastener count -- screws and heat-set inserts, as a \
+quantity on one or a few "MISC" parts, not a single "screws" line with \
+qty 1; and, only when the PRD explicitly states a weatherproof or \
+outdoor requirement, a gasket/seal line (category "MISC"). Do not add \
+a gasket/seal part when the PRD gives no weatherproofing requirement. \
+"3D_PRINT" and "MISC" parts are purely mechanical -- per the wiring \
+rule above, never add them to "wiring.nodes" or wire them to anything.
+
 For the physical layout, you are worse at spatial reasoning than at \
 listing parts or wiring edges -- do not attempt precise millimeter \
 placement. Propose a rough grid layout only: order parts front-to-back by \
 category, with power/MCU parts placed near the enclosure's center and \
 sensors placed near the hull edges they would realistically mount at. \
 Treat this as "which part roughly goes where," not engineering-grade CAD.
+
+Every part from step 20a's enclosure decomposition needs its own \
+"mech.placements" entry -- the housing, the lid, and each mount -- so \
+the layout draws an assembled enclosure instead of floating unrelated \
+cubes. The housing's placement should span the full enclosure \
+footprint starting at "z": 0 (it's the shell everything else sits \
+inside, not a part-sized box). The lid's placement goes directly atop \
+the housing -- same x/y footprint, "z" equal to the housing's own "d" \
+(depth/height), so it reads as a lid resting on top of the housing \
+rather than a second box floating beside it. Each mount's placement \
+goes inside the housing's footprint, positioned near whichever \
+subsystem part it mounts (e.g. the MCU's mount sits right under or \
+beside the MCU's own placement). Fasteners are numerous and too small \
+to meaningfully place individually -- do not give fastener parts a \
+"mech.placements" entry at all.
 
 Leave "estimated_price_bdt", "vendor_name", "vendor_url", and \
 "price_checked_at" as null for every part -- pricing is looked up \
@@ -135,6 +186,22 @@ exactly this shape:
     {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
      "description": "Main microcontroller", "qty": 1,
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "housing_1", "name": "Enclosure housing", "category": "3D_PRINT",
+     "description": "Bottom shell", "qty": 1,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "lid_1", "name": "Enclosure lid", "category": "3D_PRINT",
+     "description": "Top shell", "qty": 1,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "mount_mcu_1", "name": "MCU standoff mount", "category": "3D_PRINT",
+     "description": "Standoff bracket for mcu_1", "qty": 1,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "fastener_1", "name": "M3 heat-set insert + screw", "category": "MISC",
+     "description": "Housing/lid fastening", "qty": 4,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null}
   ],
   "wiring": {
@@ -145,7 +212,10 @@ exactly this shape:
   "mech": {
     "enclosure": {"w": 100, "h": 60, "d": 40},
     "placements": [
-      {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 25, "h": 25, "d": 5}
+      {"part_id": "housing_1", "x": 0, "y": 0, "z": 0, "w": 100, "h": 60, "d": 30},
+      {"part_id": "lid_1", "x": 0, "y": 0, "z": 30, "w": 100, "h": 60, "d": 10},
+      {"part_id": "mcu_1", "x": 10, "y": 10, "z": 5, "w": 25, "h": 25, "d": 5},
+      {"part_id": "mount_mcu_1", "x": 8, "y": 8, "z": 0, "w": 29, "h": 29, "d": 5}
     ]
   },
   "instructions": {
@@ -158,8 +228,11 @@ exactly this shape:
     ]
   }
 }
-"category" is one of: "mcu", "sensor", "actuator", "power", "module". \
-"type" (wiring nodes) uses the same set. "kind" (wiring edges) is one of: \
+"category" is one of: "mcu", "sensor", "actuator", "power", "module", \
+"3D_PRINT", "MISC". "type" (wiring nodes) uses the same electrical \
+subset -- "mcu", "sensor", "actuator", "power", "module" -- never \
+"3D_PRINT"/"MISC", since those are always purely mechanical and are \
+never wired. "kind" (wiring edges) is one of: \
 "data", "power", "ground". "from_pin"/"to_pin" are short strings naming \
 the actual pin/terminal on each side (see above), or null only when \
 genuinely not resolvable. Use short lowercase_with_underscores ids; every \
@@ -549,6 +622,11 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # Fail safe, same spirit as schema/architecture_diagrammer.py's
         # fallbacks: a minimal valid shape naming the failure, rather than
         # nothing at all -- keeps all four Blueprint sub-views renderable.
+        # Step 20a note: this single placeholder part intentionally stays
+        # category "module" (still a valid value in the extended enum)
+        # rather than being decomposed -- decomposition is a property of
+        # a real enclosure the model reasoned about, and there's nothing
+        # to decompose when generation failed outright.
         spec = {
             "parts": [{"id": "unavailable", "name": "Spec unavailable", "category": "module",
                        "description": "", "qty": 1, "estimated_price_bdt": None,
