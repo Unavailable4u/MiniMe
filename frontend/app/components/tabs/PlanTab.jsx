@@ -1255,6 +1255,36 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
 
   return (
     <div className="space-y-3">
+      {/* NEW — T2b, step 19c: Blueprint Info/summary card. Rendered above
+          the Parts/Wiring/Mech nav (not as a fourth sibling tab) since
+          it's relevant regardless of which sub-view is showing. spec.info
+          is always present as at least {"summary": "", "tags": []} per
+          GET .../device-spec's own empty-but-valid convention (step 19b)
+          -- only actually render the card once there's real content, so
+          a spec generated before step 19a shipped just shows nothing
+          here instead of an empty box. */}
+      {spec.info?.summary && (
+        <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)]/40 px-3 py-2.5 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
+            <Sparkles size={11} />
+            AI Summary
+          </div>
+          <p className="text-xs text-[var(--neutral-300)] leading-relaxed">{spec.info.summary}</p>
+          {spec.info.tags?.length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {spec.info.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="text-[9px] uppercase border border-[var(--neutral-700)] text-[var(--neutral-400)] rounded px-1.5 py-0.5"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <nav className="flex gap-1">
         {BLUEPRINT_VIEWS.map((v) => (
           <button

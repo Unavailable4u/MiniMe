@@ -37,7 +37,15 @@ const DEFAULT_CATEGORY_COLOR = "text-neutral-400 border-neutral-700";
  * `refreshing`: bool, disables the button and spins its icon mid-request.
  */
 export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
-  const total = parts.reduce((sum, p) => sum + (p.estimated_price_bdt || 0) * p.qty, 0);
+  // Bug fix (T2b, step 17): the old `|| 0` guard only caught falsy
+  // values (null/0/undefined) — a stray non-numeric price_bdt (e.g. a
+  // string that slipped past the backend) turned the whole total into
+  // NaN. Number.isFinite() treats anything non-numeric the same as
+  // "unpriced", same as null already is.
+  const total = parts.reduce((sum, p) => {
+    const price = Number(p.estimated_price_bdt);
+    return sum + (Number.isFinite(price) ? price : 0) * p.qty;
+  }, 0);
   const uncheckedCount = parts.filter((p) => !p.estimated_price_bdt).length;
 
   return (

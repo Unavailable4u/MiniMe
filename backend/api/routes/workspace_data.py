@@ -417,15 +417,22 @@ def refresh_part_prices(ws_id: str, req: RefreshPricesRequest,
 
 @router.get("/api/workspaces/{ws_id}/device-spec")
 def get_device_spec(ws_id: str, owner_id: str = Depends(require_auth)):
-    """Assembles agents/hardware_speccer.py's four sub-view slices back
-    into one response -- they're stored as four separate
-    workspace_facts.custom keys (parts/wiring/mech/instructions), not one
-    blob, so BlueprintView's single fetch-per-workspace-select needs this
-    endpoint to stitch them together rather than reading facts.custom
-    directly and hoping all four keys exist. Returns empty-but-valid
-    shapes for any key nothing has written yet (no device spec generated
-    == every sub-view renders its own empty state, not a 404 for the
-    whole page)."""
+    """Assembles agents/hardware_speccer.py's five sub-view slices back
+    into one response -- they're stored as five separate
+    workspace_facts.custom keys (parts/wiring/mech/instructions/info),
+    not one blob, so BlueprintView's single fetch-per-workspace-select
+    needs this endpoint to stitch them together rather than reading
+    facts.custom directly and hoping all five keys exist. Returns
+    empty-but-valid shapes for any key nothing has written yet (no
+    device spec generated == every sub-view renders its own empty
+    state, not a 404 for the whole page).
+
+    "info" added T2b, step 19b: same empty-but-valid convention as the
+    original four -- a spec generated before hardware_speccer.py's
+    step 19a (_generate_info()) simply has no custom["info"] key yet,
+    so this defaults to {"summary": "", "tags": []} rather than
+    omitting the field or erroring, matching what a fresh, un-generated
+    spec's "parts"/"wiring"/etc. already do above."""
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
     except FileNotFoundError:
@@ -437,6 +444,7 @@ def get_device_spec(ws_id: str, owner_id: str = Depends(require_auth)):
         "wiring": custom.get("wiring", {"nodes": [], "edges": []}),
         "mech": custom.get("mech", {"enclosure": {"w": 0, "h": 0, "d": 0}, "placements": []}),
         "instructions": custom.get("instructions", {"phases": []}),
+        "info": custom.get("info", {"summary": "", "tags": []}),
     }
  
  
