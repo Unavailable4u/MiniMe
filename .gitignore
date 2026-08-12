@@ -12,6 +12,10 @@ frontend/.env.local
 frontend/node_modules/
 frontend/.next/
 
+# promptfoo evals (D2) — dev/CI tooling, not shipped
+backend/evals/promptfoo/node_modules/
+backend/evals/promptfoo/.promptfoo/
+
 # Editor
 .vscode/
 

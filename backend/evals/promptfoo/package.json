@@ -1,0 +1,14 @@
+{
+  "name": "minime-promptfoo-evals",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Master Guide D2 — promptfoo eval suite for MiniMe's Role Library prompts. Not part of the running app; dev/CI tooling only.",
+  "scripts": {
+    "eval": "promptfoo eval --config promptfooconfig.yaml",
+    "eval:ci": "promptfoo eval --config promptfooconfig.yaml --no-cache --share=false",
+    "view": "promptfoo view"
+  },
+  "devDependencies": {
+    "promptfoo": "0.122.0"
+  }
+}

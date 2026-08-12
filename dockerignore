@@ -18,6 +18,10 @@
 backend/venv
 backend/.venv
 backend/.pytest_cache
+
+# D2 promptfoo evals — dev/CI tooling only, never needed at runtime
+backend/evals/promptfoo/node_modules
+backend/evals/promptfoo/.promptfoo
 backend/__pycache__
 backend/**/__pycache__
 backend/data
