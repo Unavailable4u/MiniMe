@@ -9,6 +9,7 @@ import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-c
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
 import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, MessageSquare, Plus, Pencil, Check, X, Trash2 } from "lucide-react";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
 // Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -51,6 +52,14 @@ const COLUMNS = [
   { status: "missing", label: "Missing" },
   { status: "in_progress", label: "In Progress" },
   { status: "done", label: "Done" },
+];
+
+// NEW — patch 7 (T2/T3 Plan/Build split): Build now has two sub-views for
+// a selected project instead of just the kanban board. Same small
+// nested-tab-bar pattern PlanTab.jsx's own BLUEPRINT_VIEWS uses.
+const BUILD_VIEWS = [
+  { id: "tasks", label: "Tasks" },
+  { id: "instructions", label: "Instructions" },
 ];
 
 function statusFor(featureStatus, featureName) {
@@ -151,6 +160,59 @@ function IntegrationChecklist({ integrations }) {
       </ul>
     </Card>
   );
+}
+
+// NEW — patch 7 (T2/T3 Plan/Build split): InstructionChecklist relocated
+// here from PlanTab.jsx's BlueprintView. Same fetch/toggle plumbing that
+// lived in BlueprintView -- fetchDeviceSpec/toggleInstructionStep are
+// global SessionContext functions, not Plan-tab-owned, so this is a
+// straight copy of that logic, scoped to instructions only (Parts/
+// Wiring/Mech stay in Plan as design specs, see PlanTab.jsx's own
+// comment on BLUEPRINT_VIEWS).
+function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep }) {
+  const [spec, setSpec] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchDeviceSpec(workspaceId).then((data) => {
+      if (cancelled) return;
+      setSpec(data);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchDeviceSpec]);
+
+  async function handleToggleStep(phaseId, stepId, done) {
+    const result = await toggleInstructionStep(workspaceId, stepId, done);
+    // toggle endpoint returns the full updated `instructions` object
+    // (api/server.py's toggle_instruction_step) -- swap it in directly
+    // rather than re-fetching the whole device spec for a one-step change.
+    if (result?.instructions) {
+      setSpec((prev) => ({ ...prev, instructions: result.instructions }));
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+        <Loader2 size={12} className="animate-spin" /> Loading…
+      </div>
+    );
+  }
+
+  const hasPhases = spec?.instructions?.phases?.length > 0;
+
+  if (!hasPhases) {
+    return (
+      <p className="text-xs text-[var(--neutral-600)]">
+        No build instructions generated yet — run hardware_speccer from this project's chat once a PRD exists.
+      </p>
+    );
+  }
+
+  return <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />;
 }
 
 // Part 7 §7.6 -- deploy action button + status indicator, three separate
@@ -537,7 +599,11 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.
-  const { promoteWorkspace, API_URL } = useSession();
+  // NEW — patch 7: fetchDeviceSpec/toggleInstructionStep pulled from the
+  // same global SessionContext PlanTab.jsx's BlueprintView already used
+  // for these -- confirmed workspace-scoped, not Plan-tab-scoped, so no
+  // new plumbing needed here.
+  const { promoteWorkspace, API_URL, fetchDeviceSpec, toggleInstructionStep } = useSession();
   const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
@@ -555,6 +621,9 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expandedFeature, setExpandedFeature] = useState(null);
+  // NEW — patch 7: which of BUILD_VIEWS is showing for the selected
+  // project. Same pattern as PlanTab's BlueprintView `view` state.
+  const [buildView, setBuildView] = useState("tasks");
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [promoteTargetStage, setPromoteTargetStage] = useState("test");
@@ -960,52 +1029,81 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                 })()}
               </div>
             </div>
-            {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
 
-            {features.length === 0 ? (
-              <p className="text-cyber-dim text-sm">
-                No plan yet for this project. Once a coding-domain build cycle runs, its features
-                and status will show up here.
-              </p>
+            {/* NEW — patch 7: Tasks / Instructions sub-nav, same small
+                tab-bar pattern as PlanTab's BlueprintView. */}
+            <nav className="flex gap-1">
+              {BUILD_VIEWS.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => setBuildView(v.id)}
+                  className={`text-xs rounded px-2.5 py-1 ${
+                    buildView === v.id
+                      ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                      : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                  }`}
+                >
+                  {v.label}
+                </button>
+              ))}
+            </nav>
+
+            {buildView === "instructions" ? (
+              <InstructionsView
+                workspaceId={selected.id}
+                fetchDeviceSpec={fetchDeviceSpec}
+                toggleInstructionStep={toggleInstructionStep}
+              />
             ) : (
               <>
-                <div className="grid gap-4 sm:grid-cols-3">
-                  {byColumn.map((col) => (
-                    <Card key={col.status} title={`${col.label} (${col.features.length})`}>
-                      <div className="space-y-2">
-                        {col.features.length === 0 && (
-                          <p className="text-[11px] text-cyber-dim">Nothing here.</p>
-                        )}
-                        {col.features.map((name) => (
-                          <FeatureCard
-                            key={name}
-                            name={name}
-                            isTarget={name === targetFeature}
-                            targetModules={name === targetFeature ? targetModules : null}
-                            expanded={expandedFeature === name}
-                            onToggle={() => setExpandedFeature(expandedFeature === name ? null : name)}
-                          />
-                        ))}
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-                <IntegrationChecklist integrations={data?.integrations} />
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <DeployPanel
-                    sessionId={resolvedSessionId}
-                    apiUrl={API_URL}
-                    deployConfigPlan={data?.deploy_config_plan}
-                    lastDeployConfigSummary={data?.last_deploy_config_summary}
-                    onRefresh={refresh}
-                  />
-                  <MonitoringWidget
-                    sessionId={resolvedSessionId}
-                    apiUrl={API_URL}
-                    monitoring={data?.monitoring}
-                    onRefresh={refresh}
-                  />
-                </div>
+                {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}
+
+                {features.length === 0 ? (
+                  <p className="text-cyber-dim text-sm">
+                    No plan yet for this project. Once a coding-domain build cycle runs, its features
+                    and status will show up here.
+                  </p>
+                ) : (
+                  <>
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      {byColumn.map((col) => (
+                        <Card key={col.status} title={`${col.label} (${col.features.length})`}>
+                          <div className="space-y-2">
+                            {col.features.length === 0 && (
+                              <p className="text-[11px] text-cyber-dim">Nothing here.</p>
+                            )}
+                            {col.features.map((name) => (
+                              <FeatureCard
+                                key={name}
+                                name={name}
+                                isTarget={name === targetFeature}
+                                targetModules={name === targetFeature ? targetModules : null}
+                                expanded={expandedFeature === name}
+                                onToggle={() => setExpandedFeature(expandedFeature === name ? null : name)}
+                              />
+                            ))}
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+                    <IntegrationChecklist integrations={data?.integrations} />
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <DeployPanel
+                        sessionId={resolvedSessionId}
+                        apiUrl={API_URL}
+                        deployConfigPlan={data?.deploy_config_plan}
+                        lastDeployConfigSummary={data?.last_deploy_config_summary}
+                        onRefresh={refresh}
+                      />
+                      <MonitoringWidget
+                        sessionId={resolvedSessionId}
+                        apiUrl={API_URL}
+                        monitoring={data?.monitoring}
+                        onRefresh={refresh}
+                      />
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>

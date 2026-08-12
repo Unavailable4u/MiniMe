@@ -16,7 +16,9 @@ import { getPusherClient } from "../../lib/pusherClient"; // NEW — live-refetc
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
 import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
 import MechView from "../MechView";                           // NEW — Blueprint sub-tab
-import InstructionChecklist from "../InstructionChecklist";   // NEW — Blueprint sub-tab
+// InstructionChecklist import removed — patch 7 (T2/T3 Plan/Build split):
+// the checklist relocated to BuildTab.jsx. See BuildTab.jsx for the
+// equivalent import and render block.
 import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
   LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
@@ -166,7 +168,9 @@ function unfenceMermaid(text) {
 function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { promoteWorkspace, openScopedSubChat,
     fetchPanelContent, savePanelContent,
-    fetchDeviceSpec, refreshPartPrices, toggleInstructionStep } = useSession();
+    // toggleInstructionStep removed — patch 7: only BlueprintView's
+    // Instructions view used it, and that view moved to BuildTab.jsx.
+    fetchDeviceSpec, refreshPartPrices } = useSession();
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // FIX — was destructured off useSession(), which no longer serves it; this call site was missed at the time
   const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   // NEW — step 3e follow-up fix: the embedded WorkspaceChatPanel below was
@@ -750,7 +754,6 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     workspaceId={activeWs.id}
                     fetchDeviceSpec={fetchDeviceSpec}
                     refreshPartPrices={refreshPartPrices}
-                    toggleInstructionStep={toggleInstructionStep}
                   />
                 )}
                 {t.id === "start_building" && (
@@ -1156,14 +1159,19 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
 // string and this has real per-part/per-step structure. A nested small-
 // tab-bar picks which of the four slices to render, same pattern
 // NotebooksTab.jsx already uses for its own seven sub-views.
+// patch 7 (T2/T3 Plan/Build split): "instructions" removed from this list
+// — InstructionChecklist now renders in BuildTab.jsx instead. Parts/
+// Wiring/Mech stay here as design specs; the checklist was the one
+// during-the-work progress tracker among the four, so it moved to sit
+// with Build's other progress tracking (the Missing/In Progress/Done
+// kanban) instead.
 const BLUEPRINT_VIEWS = [
   { id: "parts", label: "Parts" },
   { id: "wiring", label: "Wiring" },
   { id: "mech", label: "Mech" },
-  { id: "instructions", label: "Instructions" },
 ];
 
-function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggleInstructionStep }) {
+function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices }) {
   const [spec, setSpec] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("parts");
@@ -1190,16 +1198,6 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggle
     }
   }
 
-  async function handleToggleStep(phaseId, stepId, done) {
-    const result = await toggleInstructionStep(workspaceId, stepId, done);
-    // toggle endpoint returns the full updated `instructions` object
-    // (api/server.py's toggle_instruction_step) -- swap it in directly
-    // rather than re-fetching the whole device spec for a one-step change.
-    if (result?.instructions) {
-      setSpec((prev) => ({ ...prev, instructions: result.instructions }));
-    }
-  }
-
   if (loading) {
     return (
       <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
@@ -1208,7 +1206,12 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggle
     );
   }
 
-  const hasSpec = spec && (spec.parts?.length || spec.wiring?.nodes?.length || spec.instructions?.phases?.length);
+  // patch 7: instructions.phases dropped from this check — Blueprint no
+  // longer renders an Instructions view, so a spec that has only
+  // instructions (no parts/wiring yet) shouldn't count as "hasSpec" here,
+  // or the nav below would show tabs with nothing in any of them. (Mech
+  // was never part of this check pre-patch either — left as-is.)
+  const hasSpec = spec && (spec.parts?.length || spec.wiring?.nodes?.length);
 
   if (!hasSpec) {
     return (
@@ -1241,9 +1244,6 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, toggle
       )}
       {view === "wiring" && <WiringGraph wiring={spec.wiring} />}
       {view === "mech" && <MechView mech={spec.mech} parts={spec.parts} />}
-      {view === "instructions" && (
-        <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />
-      )}
     </div>
   );
 }

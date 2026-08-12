@@ -133,7 +133,10 @@ app.add_middleware(
 # CO3's /api/task/{id}/pause and CO5's /api/task/{id}/stream will
 # register once built, inside tasks_router. deploy_router (piece 8, the
 # last piece of the B6 split) owns the deploy propose/write/go-live
-# trio and the two UptimeRobot monitoring routes.
+# trio and the two UptimeRobot monitoring routes. code_router (patch 8)
+# owns the Build tab's Code sub-tab file persistence -- list/get/write
+# per workspace file path, see api/routes/code.py's own docstring for
+# why it's a separate file rather than folded into workspace_data.py.
 from api.routes.tasks import router as tasks_router
 from api.routes.system import router as system_router
 from api.routes.chats import router as chats_router
@@ -142,6 +145,7 @@ from api.routes.workspace_data import router as workspace_data_router
 from api.routes.graph_and_notes import router as graph_and_notes_router
 from api.routes.notebooks import router as notebooks_router
 from api.routes.deploy import router as deploy_router
+from api.routes.code import router as code_router
 app.include_router(tasks_router)
 app.include_router(system_router)
 app.include_router(chats_router)
@@ -150,6 +154,7 @@ app.include_router(workspace_data_router)
 app.include_router(graph_and_notes_router)
 app.include_router(notebooks_router)
 app.include_router(deploy_router)
+app.include_router(code_router)
 
 
 # NEW — Data Layer architecture §9b: the real transport behind
