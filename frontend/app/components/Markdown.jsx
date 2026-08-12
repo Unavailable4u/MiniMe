@@ -69,9 +69,23 @@ export default function Markdown({ children, onCitationClick }) {
           // §citation_graph_builder's SVG) could overflow the panel with
           // no visual boundary. Matches the code/mermaid blocks' framing
           // (rounded border, contained) for visual consistency.
+          // BUGFIX (Maximum update depth exceeded / useVirtualizer setIndices
+          // crash, same class as the ```mermaid fix below): an <img> with
+          // only max-width/h-auto has no height until it finishes loading --
+          // inside a virtualized row, that's the identical "row's measured
+          // height depends on the container width the virtualizer itself
+          // just set" feedback shape that caused the Mermaid loop. `aspect-
+          // ratio: 16/9` (a reasonable default for an unknown image) plus
+          // `object-fit: contain` reserves the row's height BEFORE the image
+          // loads, so there's nothing left for the virtualizer to remeasure
+          // once it does. Real intrinsic dimensions, if react-markdown ever
+          // passes them through as width/height attrs, still win via {...p}
+          // spread order (after the style default) -- this is only a
+          // fallback for the common no-dimensions case.
           img: (p) => (
             <img
-              className="max-w-full h-auto rounded-lg border border-[var(--neutral-800)] my-2"
+              className="max-w-full max-h-[480px] rounded-lg border border-[var(--neutral-800)] my-2"
+              style={{ aspectRatio: p.width && p.height ? `${p.width}/${p.height}` : "16/9", objectFit: "contain" }}
               loading="lazy"
               {...p}
               alt={p.alt || ""}
