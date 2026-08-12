@@ -53,6 +53,7 @@ iniconfig==2.3.0
 jiter==0.16.0
 joblib==1.5.3
 jusText==3.0.2
+langfuse==4.14.3
 lxml==6.1.1
 lxml_html_clean==0.4.5
 markdown-it-py==4.2.0
