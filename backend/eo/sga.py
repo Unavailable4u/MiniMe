@@ -96,6 +96,57 @@ def _requests_verification(task_text: str) -> bool:
     underlying content is."""
     return bool(_VERIFICATION_REQUEST_RE.search(task_text or ""))
 
+
+# Bug fix (Test tab audit, Bug 1): same shape as _requests_verification()
+# above, for the same underlying reason — SGA's own escalation judgment
+# only ever weighs "can I answer this content confidently," never "did
+# this structurally need more than one independently-hired agent."
+# RunSimulationPanel.run() in TestTab.jsx always dispatches one of a
+# fixed, small set of task strings built from SIMULATION_TYPES[*].taskLead
+# (e.g. "Simulate a focus group — an enthusiastic customer, a skeptical
+# customer, and a professional critic, each reacting independently —
+# to: ..."). Every one of those maps to eo/structure.py's
+# STRUCTURE_TEMPLATES["simulate"] domain, which always hires the full
+# persona roster (persona_customer, persona_skeptic, critic_reviewer,
+# usability_walkthrough, red_team, pricing_sensitivity,
+# support_ticket_predictor, competitor_response,
+# marketplace_review_batch, simulation_synthesizer) so simulation_
+# synthesizer has independent per-persona output to actually synthesize
+# — see notebooks.py's get_simulation_results() comment. A plain-text
+# SGA answer blends all of that into one paragraph and none of those
+# roles ever run, so Friction Reports has nothing to read back. Because
+# the frontend only ever sends one of these nine fixed prefixes for
+# this tab (never arbitrary free text), matching them literally is as
+# reliable as a real structural tag would be, without needing to add
+# one — same "closed set, so deterministic is safe" reasoning as
+# VERIFICATION_REQUEST_PATTERNS being a fixed list rather than a
+# generic NLP classifier.
+SIMULATION_DISPATCH_PATTERNS = [
+    r"^simulate how real customers would react",
+    r"^simulate an experienced, opinionated professional critic'?s published review",
+    r"^generate a realistic distribution of marketplace-style reviews",
+    r"^simulate a focus group",
+    r"^simulate a first-time user'?s usability walkthrough",
+    r"^simulate how a real prospective buyer would react to the pricing",
+    r"^predict the concrete support tickets and confused-user questions",
+    r"^run a red-team pass looking for ways to break, misuse, or exploit",
+    r"^predict how a rational competitor would respond",
+]
+_SIMULATION_DISPATCH_RE = re.compile("|".join(SIMULATION_DISPATCH_PATTERNS), re.IGNORECASE)
+
+
+def _requests_simulation_domain(task_text: str) -> bool:
+    """True if this is one of the Test tab's fixed simulation dispatch
+    strings, which always needs the multi-persona STRUCTURE_TEMPLATES
+    "simulate" pipeline — a single SGA answer would silently blend
+    every persona's reaction into one paragraph and skip the actual
+    persona roles entirely, breaking Friction Reports for that run.
+    Anchored at the start of the (stripped) text since the frontend
+    always puts the taskLead phrase first — this deliberately does NOT
+    try to detect the same intent in general free-form chat text, only
+    this tab's own known dispatch shape."""
+    return bool(_SIMULATION_DISPATCH_RE.match((task_text or "").strip()))
+
 # Tuning defaults — not measured yet, see Part 1's note on calibrating
 # these against real latency data once live.
 STAGE_TIMEOUTS = {1: 1.0, 2: 2.0, 3: 3.0}
@@ -213,12 +264,18 @@ def attempt(task_text: str, session_id: str = None) -> dict:
     Callers that only care about "answer" (the only key this function
     returned before Part 5) are unaffected.
     """
+    skip_reason = None
     if _requests_verification(task_text):
+        skip_reason = "task explicitly requires review/approval SGA can't provide alone"
+    elif _requests_simulation_domain(task_text):
+        skip_reason = ("Test tab simulation dispatch — requires the multi-persona "
+                        "simulate pipeline, not a single blended SGA answer")
+
+    if skip_reason:
         emit_event("agent_start", session_id, agent="sga_relay",
                    payload={"label": "SGA — attempting direct answer"})
         emit_event("agent_done", session_id, agent="sga_relay",
-                   payload={"summary": "escalated to Inspector — task explicitly "
-                                        "requires review/approval SGA can't provide alone"})
+                   payload={"summary": f"escalated to Inspector — {skip_reason}"})
         return {"resolved": False}
 
     order = _rotate_start()
@@ -274,4 +331,16 @@ if __name__ == "__main__":
                           "and don't stop until a reviewer explicitly approves it.")
     result2 = attempt(verification_task, session_id="sga_smoke_test_verification")
     print(json.dumps(result2, indent=2))
+
+    # Simulation-dispatch smoke test — should escalate with zero SGA
+    # calls, same as the verification-request case above (Bug 1 fix).
+    simulation_task = ("Simulate a focus group — an enthusiastic customer, a skeptical "
+                        "customer, and a professional critic, each reacting independently — "
+                        "to: the new $12/mo Pro tier with unlimited exports.")
+    result3 = attempt(simulation_task, session_id="sga_smoke_test_simulation")
+    print(json.dumps(result3, indent=2))
+    assert result3["resolved"] is False, (
+        "Bug 1 fix: Test tab simulation dispatches must escalate past SGA, "
+        "never be answered as a single blended paragraph"
+    )
     assert result2["resolved"] is False, "verification-request task should have escalated"
