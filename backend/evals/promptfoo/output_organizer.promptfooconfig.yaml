@@ -1,0 +1,24 @@
+# D2 patch 3 — output_organizer's own promptfoo config.
+#
+# Separate from promptfooconfig.yaml on purpose: output_organizer_provider.py
+# takes (role_outputs, user_request) and returns a structured
+# {answer, dedup_notes} JSON blob -- a completely different shape from
+# role_provider.py's (role_name, task_text) -> str. Mixing both providers
+# into one config would run every test case's vars against both provider
+# shapes (promptfoo's default matrix behavior), which is wrong here. See
+# providers/output_organizer_provider.py's module docstring.
+description: "output_organizer synthesis regression tests (D2, CO1)"
+
+providers:
+  - id: "file://providers/output_organizer_provider.py"
+    config: {}
+
+# Unused by output_organizer_provider.py (it builds its own user_content
+# from role_outputs/user_request internally, same as organize_final_answer()
+# does in production) -- present only because promptfoo requires at least
+# one prompts: entry.
+prompts:
+  - "{{user_request}}"
+
+tests:
+  - file://tests/output_organizer.yaml

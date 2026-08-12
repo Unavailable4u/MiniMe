@@ -54,18 +54,40 @@ still runs, just against seed briefs instead of whatever's live. Wiring
 real secrets in is a deliberate opt-in, covered in the CI patch, not
 assumed here.
 
+## Two configs, not one
+
+`role_provider.py` and `output_organizer_provider.py` take incompatible
+shapes -- (role_name, task_text) -> str for one, (role_outputs,
+user_request) -> {answer, dedup_notes} for the other. promptfoo runs
+every test case's vars against every configured provider, so mixing both
+into one `providers:` list would run Role Library cases through the
+organizer provider (and vice versa) and fail confusingly. They get their
+own configs and their own npm scripts instead:
+
+```bash
+npm run eval             # Role Library prompts (promptfooconfig.yaml)
+npm run eval:organizer   # output_organizer synthesis (output_organizer.promptfooconfig.yaml)
+```
+
+See `providers/output_organizer_provider.py`'s module docstring for the
+full reasoning.
+
 ## Layout (filled in by later patches in this series)
 
 ```
 backend/evals/promptfoo/
   package.json
-  README.md                  (this file)
-  promptfooconfig.yaml        # main config: providers + prompts + tests
+  README.md                            (this file)
+  promptfooconfig.yaml                 # Role Library config: role_provider.py + tests/<role_name>.yaml
+  output_organizer.promptfooconfig.yaml   # output_organizer's own config, see "Two configs" above
   providers/
-    role_provider.py          # bridges promptfoo -> live Role Library + llm_client
+    role_provider.py                   # bridges promptfoo -> live Role Library + llm_client
+    output_organizer_provider.py       # bridges promptfoo -> agents/output_organizer.py directly
   tests/
-    output_organizer.yaml     # CO1's dedicated case set (Guide's explicit call-out)
-    <role_name>.yaml           # one file per actively-iterated role
+    output_organizer.yaml              # CO1's dedicated case set (Guide's explicit call-out)
+    asserts/
+      output_organizer_asserts.py      # custom python asserts for the {answer, dedup_notes} contract
+    <role_name>.yaml                    # one file per actively-iterated role (Role Library config)
   compare/
-    providers.promptfooconfig.yaml   # head-to-head provider comparison config
+    providers.promptfooconfig.yaml     # head-to-head provider comparison config
 ```

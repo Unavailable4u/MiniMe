@@ -6,6 +6,7 @@
   "scripts": {
     "eval": "promptfoo eval --config promptfooconfig.yaml",
     "eval:ci": "promptfoo eval --config promptfooconfig.yaml --no-cache --share=false",
+    "eval:organizer": "promptfoo eval --config output_organizer.promptfooconfig.yaml",
     "view": "promptfoo view"
   },
   "devDependencies": {

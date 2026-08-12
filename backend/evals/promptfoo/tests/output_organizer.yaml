@@ -1,0 +1,151 @@
+# evals/promptfoo/tests/output_organizer.yaml — D2 patch 3.
+#
+# CO1's dedicated case set (Master Guide explicitly calls this one out:
+# it shapes what every multi-agent user sees). Run via
+# output_organizer.promptfooconfig.yaml, NOT the main promptfooconfig.yaml
+# -- see providers/output_organizer_provider.py's module docstring for
+# why this needs its own provider/config.
+#
+# role_outputs fixtures use the real shapes eo/result_render.py already
+# knows how to render (plain str, {"text": ...}, {module: code}) -- see
+# that module's own docstring for the full shape list.
+
+- description: "Genuine duplicate: two roles restate the same point, one should be folded"
+  vars:
+    user_request: "Review this login form's input validation and suggest improvements."
+    role_outputs:
+      implementer:
+        text: >-
+          Added a validate_email() helper that checks for an @ and a
+          domain before submitting the form. Also added a min-length
+          check on the password field (8 characters).
+      reviewer:
+        text: >-
+          One issue: the email field has no real validation before
+          submit -- worth adding a check for an @ symbol and a domain
+          part, same as most login forms. Password length looks fine.
+    expected_dedup_roles: ["reviewer"]
+  assert:
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:get_assert
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:dedup_notes_cover_expected_roles
+    - type: llm-rubric
+      value: >-
+        The answer merges the implementer's and reviewer's email-validation
+        points into ONE mention, not two separate restatements of "add an
+        @+domain check for email." The password-length note from the
+        implementer is still present. The answer does not simply repeat
+        both roles' text back to back.
+
+- description: "Genuinely distinct content across three roles, no overlap"
+  vars:
+    user_request: "Plan a short blog post about async/await in Python."
+    role_outputs:
+      idea_planner:
+        text: >-
+          Structure: (1) the callback-hell problem async/await solves,
+          (2) a minimal asyncio.gather() example, (3) one common
+          footgun -- forgetting to await a coroutine.
+      writer:
+        text: >-
+          Draft intro: "If you've ever nested three callbacks deep just
+          to fetch two URLs, async/await is the fix." Keep the tone
+          conversational, aim for ~600 words.
+      fact_checker:
+        text: >-
+          Confirmed accurate: asyncio.gather() does run coroutines
+          concurrently, not in parallel (still single-threaded) --
+          worth a one-line clarification in the draft since that's a
+          common misconception.
+    expected_dedup_roles: []
+  assert:
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:get_assert
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:no_unexpected_dedup
+    - type: llm-rubric
+      value: >-
+        The answer preserves all three distinct contributions: the
+        3-part structure, the draft intro line, and the
+        concurrent-vs-parallel clarification. Nothing is dropped or
+        merged away just to shorten the answer.
+
+- description: "Fenced code block must survive byte-for-byte"
+  vars:
+    user_request: "Write a Python function to deduplicate a list while preserving order."
+    role_outputs:
+      implementer:
+        dedupe_list.py: |-
+          def dedupe(items):
+              seen = set()
+              out = []
+              for x in items:
+                  if x not in seen:
+                      seen.add(x)
+                      out.append(x)
+              return out
+      reviewer:
+        text: >-
+          Looks correct and O(n). One nitpick: rename `x` to `item` for
+          readability, but functionally this is fine as-is.
+    expected_verbatim_blocks:
+      - |-
+        def dedupe(items):
+            seen = set()
+            out = []
+            for x in items:
+                if x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+  assert:
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:get_assert
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:code_blocks_preserved
+
+- description: "Mermaid diagram must survive byte-for-byte alongside prose from another role"
+  vars:
+    user_request: "Sketch the request flow for a simple login endpoint."
+    role_outputs:
+      architecture_diagrammer:
+        text: |-
+          ```mermaid
+          sequenceDiagram
+              Client->>API: POST /login
+              API->>DB: check credentials
+              DB-->>API: valid
+              API-->>Client: 200 + session token
+          ```
+      reviewer:
+        text: >-
+          Flow looks right for a basic case -- consider adding a
+          rate-limit check between Client and API for brute-force
+          protection.
+    expected_verbatim_blocks:
+      - |-
+        ```mermaid
+        sequenceDiagram
+            Client->>API: POST /login
+            API->>DB: check credentials
+            DB-->>API: valid
+            API-->>Client: 200 + session token
+        ```
+  assert:
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:get_assert
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:code_blocks_preserved
+
+- description: "Defensive guard: single role_output short-circuits with no LLM call"
+  vars:
+    user_request: "Summarize the current state of the auth module."
+    role_outputs:
+      writer:
+        text: "Auth module uses JWT with a 15-minute access token and a 7-day refresh token."
+  assert:
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:get_assert
+    - type: python
+      value: file://tests/asserts/output_organizer_asserts.py:no_unexpected_dedup
