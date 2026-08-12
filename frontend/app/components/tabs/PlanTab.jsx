@@ -12,6 +12,7 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity f
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+import { getPusherClient } from "../../lib/pusherClient"; // NEW — live-refetch fix (patch 3 follow-up): workspace-${id} panel-update subscription
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
 import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
 import MechView from "../MechView";                           // NEW — Blueprint sub-tab
@@ -20,7 +21,7 @@ import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
   LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
   Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Pencil, Check, X,
-  Trash2,
+  Trash2, Sparkles,
 } from "lucide-react";
 
 // Part 5 — Plan as a dedicated top-level section, same shape as Notebooks
@@ -345,7 +346,49 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
   // history) and correct across a chat switch too — switchChat() reloads
   // `messages` for the newly-active chat, which is exactly when a panel
   // SHOULD re-check for newer saved content anyway.
-  const planPanelRefreshSignal = dock.state.messages.filter((m) => m.role === "assistant").length;
+  const assistantTurnSignal = dock.state.messages.filter((m) => m.role === "assistant").length;
+
+  // NEW — live-refetch fix (patch 3 follow-up): assistantTurnSignal
+  // above only advances for the dock/tab that actually dispatched the
+  // run. api/task_runner.py's _write_plan_panels() now fires
+  // PANEL_CONTENT_UPDATED on the workspace's own Pusher channel (not
+  // the per-session channel) after each successful panel write, so a
+  // panel write started from one chat/tab/dock is seen by every other
+  // one that has this same workspace open too — e.g. a second browser
+  // tab, or a different sub-tab's chat dock, sitting on the same
+  // project. Subscribes only while a workspace is actually active;
+  // re-subscribes on workspace switch, same lifecycle as `dock` above.
+  const [wsPanelPushSignal, setWsPanelPushSignal] = useState(0);
+  useEffect(() => {
+    if (!activeWs?.id) return undefined;
+    const pusher = getPusherClient();
+    if (!pusher) return undefined; // Pusher env vars not set — live refresh disabled, falls back to per-mount fetch
+
+    const channelName = `workspace-${activeWs.id.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
+    const channel = pusher.subscribe(channelName);
+    const handler = (eventType) => {
+      if (eventType !== "panel_content_updated") return;
+      setWsPanelPushSignal((n) => n + 1);
+    };
+    channel.bind_global(handler);
+
+    return () => {
+      channel.unbind_global(handler);
+      pusher.unsubscribe(channelName);
+    };
+  }, [activeWs?.id]);
+
+  // NEW — patch 3 (chat-to-panel writes) + live-refetch fix (patch 3
+  // follow-up): combines the local assistant-turn counter (fires for
+  // the dock/tab/chat that actually dispatched the run, the instant its
+  // own run finishes — no Pusher round-trip needed) with the workspace
+  // push counter above (fires for every OTHER dock/tab/chat watching
+  // this same workspace, via the PANEL_CONTENT_UPDATED event). Either
+  // one advancing is a real, independent reason for the six panels
+  // below to re-fetch, so a simple sum is enough — the six panel
+  // components below only care that this number changed since their
+  // last fetch, never by how much or which source moved it.
+  const planPanelRefreshSignal = assistantTurnSignal + wsPanelPushSignal;
 
   // FIX — sub-tabs were a ternary chain (conditional render), which
   // unmounts whichever sub-tab you leave and destroys its local state
@@ -783,6 +826,35 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
   );
 }
 
+// NEW — patch 4 (frontend): distinguishes "chat auto-filled this panel"
+// from "a person typed/edited this panel," per eo/panel_content.py's
+// content_source column (migration 0005, patch 4 backend). contentSource
+// is null for a panel with nothing saved yet (fetchPanelContent's own
+// empty-content shape) — renders nothing in that case, since an empty
+// panel has no source to label. Shared across MarkdownPastePanel and
+// DiagramPastePanel below rather than duplicated per-component, same as
+// unfenceMermaid() just above.
+function PanelSourceBadge({ contentSource, updatedAt }) {
+  if (!contentSource) return null;
+  const isChat = contentSource === "chat";
+  const label = isChat ? "Auto-filled from chat" : "Manually edited";
+  const title = updatedAt ? new Date(updatedAt).toLocaleString() : undefined;
+  return (
+    <span
+      title={title}
+      className={
+        "inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border " +
+        (isChat
+          ? "border-[var(--cyber-amber)]/40 bg-[var(--cyber-amber)]/10 text-[var(--cyber-amber)]"
+          : "border-[var(--neutral-700)] bg-[var(--neutral-900)]/60 text-[var(--neutral-500)]")
+      }
+    >
+      {isChat && <Sparkles size={10} />}
+      {label}
+    </span>
+  );
+}
+
 // --- Shared paste-pattern panel for PRD / API Contract / Devil's
 // Advocate / Feasibility — all plain generic_worker roles with no
 // per-run history store, same textarea-then-Markdown shape ResearchTab's
@@ -814,6 +886,10 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  // NEW — patch 4 (frontend): mirrors eo/panel_content.py's content_source
+  // column (migration 0005) so PanelSourceBadge below can render it.
+  const [contentSource, setContentSource] = useState(null);
+  const [contentUpdatedAt, setContentUpdatedAt] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -822,6 +898,8 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
     fetchPanelContent(workspaceId, panelKey).then((saved) => {
       if (cancelled) return;
       setRaw(saved?.content || "");
+      setContentSource(saved?.content_source || null);
+      setContentUpdatedAt(saved?.updated_at || null);
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -829,9 +907,16 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
 
   async function handleSave() {
     setSaving(true);
+    // Optimistic — api/routes/workspace_data.py's put_workspace_panel_content
+    // always writes content_source="manual" (eo/panel_content.py's
+    // set_content() default), so this is never actually wrong; flipping it
+    // immediately means the badge doesn't lag a full round trip behind the
+    // Save button's own "Saving…" state.
+    setContentSource("manual");
     try {
-      await savePanelContent(workspaceId, panelKey, raw);
+      const saved = await savePanelContent(workspaceId, panelKey, raw);
       setSavedAt(Date.now());
+      setContentUpdatedAt(saved?.updated_at || new Date().toISOString());
     } finally {
       setSaving(false);
     }
@@ -868,6 +953,7 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
           {saving ? "Saving…" : "Save"}
         </button>
         {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+        <PanelSourceBadge contentSource={contentSource} updatedAt={contentUpdatedAt} />
       </div>
       {raw.trim() && (
         <div className={estimateBanner ? "border border-[var(--cyber-amber)]/40 bg-[var(--cyber-amber)]/5 rounded-lg p-3" : ""}>
@@ -899,6 +985,11 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  // NEW — patch 4 (frontend): same content_source wiring as
+  // MarkdownPastePanel above — see that component's own comments for
+  // the reasoning, identical here.
+  const [contentSource, setContentSource] = useState(null);
+  const [contentUpdatedAt, setContentUpdatedAt] = useState(null);
   const mermaidText = unfenceMermaid(raw);
 
   useEffect(() => {
@@ -908,6 +999,8 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
     fetchPanelContent(workspaceId, panelKey).then((saved) => {
       if (cancelled) return;
       setRaw(saved?.content || "");
+      setContentSource(saved?.content_source || null);
+      setContentUpdatedAt(saved?.updated_at || null);
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -915,9 +1008,11 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
 
   async function handleSave() {
     setSaving(true);
+    setContentSource("manual"); // optimistic — see MarkdownPastePanel's handleSave for why this is always correct
     try {
-      await savePanelContent(workspaceId, panelKey, raw);
+      const saved = await savePanelContent(workspaceId, panelKey, raw);
       setSavedAt(Date.now());
+      setContentUpdatedAt(saved?.updated_at || new Date().toISOString());
     } finally {
       setSaving(false);
     }
@@ -952,6 +1047,7 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
           {saving ? "Saving…" : "Save"}
         </button>
         {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
+        <PanelSourceBadge contentSource={contentSource} updatedAt={contentUpdatedAt} />
       </div>
       {mermaidText && (
         <div className="border border-[var(--neutral-800)] rounded-lg overflow-hidden p-3 bg-[var(--neutral-950-a50)]">
@@ -973,6 +1069,14 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
 // panelKey "wireframes". The live edit-round-trip (sendTask, scoped to
 // the currently open chat) is unchanged and still session-scoped, not
 // something this store can fix — only the paste itself survives reload now.
+//
+// NOT wired to PanelSourceBadge (patch 4, decided this pass) — "wireframes"
+// was never one of PLAN_ROLE_PANEL_MAP's six roles (see eo/panel_content.py's
+// own comment on that map), so write_panel_from_role() never writes this
+// panel_key and content_source would read "manual" unconditionally, every
+// time, for every workspace — a badge that can only ever show one static
+// label isn't telling the person anything a badge is for. Revisit only if
+// wireframe_sketcher ever gets a direct-write path of its own.
 function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, sessionId, sendTask }) {
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(true);

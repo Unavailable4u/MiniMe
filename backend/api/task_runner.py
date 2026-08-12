@@ -71,6 +71,7 @@ from eo.prerequisite_suggestions import find_prerequisite_suggestions   # NEW �
 from eo.source_index import get_topic_covered_sources   # NEW — Step 6.11.f (6.11.d's helper)
 from eo.note_candidates import get_topic_related_notes   # NEW — Step 6.11.f (6.11.e's helper)
 from eo.panel_content import write_panel_from_role   # NEW — chat-to-panel writes, patch 2
+from relay.emitter import emit_workspace_event, EventType   # NEW — live-refetch fix, patch 3 follow-up
 
 # NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
 # ingested sources into the prompt (task_text had a workspace_id for
@@ -586,10 +587,29 @@ def _write_plan_panels(response: dict, session_id: str, owner_id: str) -> None:
     ws_id = workspace["id"]
     for role, result in results.items():
         try:
-            write_panel_from_role(ws_id, role, result, owner_id)
+            saved = write_panel_from_role(ws_id, role, result, owner_id)
         except Exception as exc:
             print(f"  [task_runner] panel write-back failed for role={role!r} "
                   f"ws_id={ws_id!r}, skipped (fail-open): {exc}")
+            continue
+        if not saved:
+            continue
+        # NEW — live-refetch fix (patch 3 follow-up): tell every dock/tab
+        # that has this workspace open to re-fetch this panel now,
+        # instead of leaving it to sit unseen until the next full page
+        # reload. Fire-and-forget, same as every other emit_*_event()
+        # call site — a relay hiccup here must never turn an
+        # already-successful panel write into a failed chat turn.
+        try:
+            emit_workspace_event(
+                EventType.PANEL_CONTENT_UPDATED,
+                workspace_id=ws_id,
+                agent=role,
+                payload={"panel_key": saved.get("panel_key"), "workspace_id": ws_id},
+            )
+        except Exception as exc:
+            print(f"  [task_runner] panel-updated event emission failed for "
+                  f"role={role!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
 
 
 def run_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,

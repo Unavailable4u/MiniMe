@@ -21,7 +21,8 @@ silently decided.
 
 Schema (see migrations/0001_add_panel_content_source_node_ids.sql, the
 first tracked migration in this repo — earlier columns on this table
-predate migration tracking and were applied by hand):
+predate migration tracking and were applied by hand; content_source
+added by migrations/0005_add_panel_content_source.sql):
     workspace_panel_content(
         workspace_id     text references workspaces(id) on delete cascade,
         panel_key        text,
@@ -35,6 +36,14 @@ predate migration tracking and were applied by hand):
                                    -- the whole notebook," a non-null array
                                    -- means "scoped to exactly these nodes,"
                                    -- and manual-paste panels never set it.
+        content_source   text,     -- NEW, migration 0005 — 'manual' (the
+                                   -- paste-and-Load path, the default) or
+                                   -- 'chat' (write_panel_from_role()'s
+                                   -- direct-write path). See that
+                                   -- migration's own comment for why this
+                                   -- is the piece updated_by alone can't
+                                   -- answer — both paths stamp the same
+                                   -- owner_id there.
         primary key (workspace_id, panel_key)
     )
 """
@@ -176,6 +185,7 @@ def _row_to_content(row: dict) -> dict:
         "updated_at": _iso(row["updated_at"]),
         "updated_by": row.get("updated_by"),
         "source_node_ids": row.get("source_node_ids"),
+        "content_source": row.get("content_source") or "manual",
     }
 
 
@@ -187,6 +197,7 @@ def _empty_content(ws_id: str, panel_key: str) -> dict:
         "updated_at": None,
         "updated_by": None,
         "source_node_ids": None,
+        "content_source": None,
     }
 
 
@@ -197,7 +208,7 @@ def get_content(ws_id: str, panel_key: str) -> dict:
         raise ValueError(f"unknown panel_key {panel_key!r}")
     with db.cursor(trusted=True) as cur:
         cur.execute(
-            "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids "
+            "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids, content_source "
             "from workspace_panel_content where workspace_id = %s and panel_key = %s",
             (ws_id, panel_key),
         )
@@ -211,7 +222,7 @@ def list_content(ws_id: str) -> dict:
     dict — callers fall back to empty-string same as get_content."""
     with db.cursor(trusted=True) as cur:
         cur.execute(
-            "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids "
+            "select workspace_id, panel_key, content, updated_at, updated_by, source_node_ids, content_source "
             "from workspace_panel_content where workspace_id = %s",
             (ws_id,),
         )
@@ -219,7 +230,8 @@ def list_content(ws_id: str) -> dict:
     return {r["panel_key"]: _row_to_content(r) for r in rows}
 
 
-def set_content(ws_id: str, panel_key: str, content: str, user_id: str, source_node_ids=None) -> dict:
+def set_content(ws_id: str, panel_key: str, content: str, user_id: str, source_node_ids=None,
+                 content_source: str = "manual") -> dict:
     """source_node_ids: pass the scope's source_node_ids list when this
     write comes from a Generate/Regenerate run (see api/server.py's
     _generate_mindmap, _make_study_generate, _generate_workflows), so
@@ -229,20 +241,33 @@ def set_content(ws_id: str, panel_key: str, content: str, user_id: str, source_n
     pass, since "no source_node_ids" and "used everything" happen to
     need the same invalidate-on-any-delete behavior; see
     GENERATED_PANEL_KEYS / invalidate_for_nodes() for how the two cases
-    are actually told apart (by panel_key, not by this value)."""
+    are actually told apart (by panel_key, not by this value).
+
+    content_source: NEW, migration 0005. 'manual' (the default) for the
+    paste-and-Load path — put_workspace_panel_content calls this without
+    passing the param, so a manual save always defaults correctly with
+    no call-site change needed there. 'chat' is passed explicitly by
+    write_panel_from_role() below, the only other caller of this
+    function, for its automatic direct-write path. updated_by alone
+    can't distinguish the two — both paths stamp the same owner_id —
+    this column is what actually answers "was this typed by a person or
+    written by chat.\""""
     if panel_key not in VALID_PANEL_KEYS:
         raise ValueError(f"unknown panel_key {panel_key!r}")
+    if content_source not in ("manual", "chat"):
+        raise ValueError(f"unknown content_source {content_source!r}")
     with db.cursor(user_id=user_id) as cur:
         cur.execute(
             """
-            insert into workspace_panel_content (workspace_id, panel_key, content, updated_at, updated_by, source_node_ids)
-            values (%s, %s, %s, %s, %s, %s)
+            insert into workspace_panel_content (workspace_id, panel_key, content, updated_at, updated_by, source_node_ids, content_source)
+            values (%s, %s, %s, %s, %s, %s, %s)
             on conflict (workspace_id, panel_key)
             do update set content = excluded.content, updated_at = excluded.updated_at,
-                          updated_by = excluded.updated_by, source_node_ids = excluded.source_node_ids
-            returning workspace_id, panel_key, content, updated_at, updated_by, source_node_ids
+                          updated_by = excluded.updated_by, source_node_ids = excluded.source_node_ids,
+                          content_source = excluded.content_source
+            returning workspace_id, panel_key, content, updated_at, updated_by, source_node_ids, content_source
             """,
-            (ws_id, panel_key, content, _now(), user_id, source_node_ids),
+            (ws_id, panel_key, content, _now(), user_id, source_node_ids, content_source),
         )
         row = cur.fetchone()
     write_audit(user_id, "panel_content.save", "workspace", ws_id, {"panel_key": panel_key})
@@ -338,6 +363,13 @@ def write_panel_from_role(ws_id: str, role: str, result: dict, user_id: str) -> 
     source-scoped, chat-triggered or not; this call is just a different
     way of arriving at the same paste-box row, not a new "generated from
     these notebook sources" concept.
+
+    DOES pass content_source="chat" (migration 0005) — this write and a
+    person's own manual paste-and-Load save both stamp the same
+    updated_by (owner_id either way), so content_source is the only
+    field that actually distinguishes "chat wrote this" from "a person
+    typed this," e.g. for a future "auto-filled by chat, save to keep
+    your edits" UI hint before a manual edit silently overwrites it.
     """
     panel_key = PLAN_ROLE_PANEL_MAP.get(role)
     if panel_key is None:
@@ -345,7 +377,7 @@ def write_panel_from_role(ws_id: str, role: str, result: dict, user_id: str) -> 
     text = _text_from_role_result(result)
     if not text:
         return None
-    return set_content(ws_id, panel_key, text, user_id)
+    return set_content(ws_id, panel_key, text, user_id, content_source="chat")
 
 
 # CHANGED — bug audit §2 real fix (migration 0001). This used to be the

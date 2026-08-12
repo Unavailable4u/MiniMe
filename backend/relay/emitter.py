@@ -142,6 +142,17 @@ class EventType(str, Enum):
     CACHE_HIT = "cache_hit"
     WORKER_POOL_SELECTION = "worker_pool_selection"
 
+    # Live-refetch fix (patch 3 follow-up): fired from
+    # api/task_runner.py's _write_plan_panels() after each successful
+    # write_panel_from_role() call, on the workspace's own channel (see
+    # _workspace_channel_name/emit_workspace_event below) rather than the
+    # per-session channel every member above uses -- a panel write needs
+    # to reach every dock/tab/chat that has that WORKSPACE open, not just
+    # the one session whose chat turn happened to trigger the write.
+    # Payload shape: {panel_key, workspace_id}. Frontend handler:
+    # PlanTab.jsx's workspace-${activeWs.id} subscription.
+    PANEL_CONTENT_UPDATED = "panel_content_updated"
+
     # PATCH-A additions: real call sites (agents/*.py) that were firing
     # these literals all along but had no matching entry, so every one
     # of them raised ValueError the first time that code path executed
@@ -211,6 +222,19 @@ def _user_channel_name(user_id: str) -> str:
     defensive against that ever changing."""
     safe = re.sub(r"[^A-Za-z0-9_=@,.;-]", "-", user_id)
     return f"user-{safe}"
+
+
+def _workspace_channel_name(workspace_id: str) -> str:
+    """Live-refetch fix (patch 3 follow-up): the third channel scheme —
+    one per WORKSPACE rather than one per running task (_channel_name)
+    or one per person (_user_channel_name). A panel write-back needs to
+    reach every dock/tab/chat currently looking at that workspace, not
+    just the single session whose chat turn triggered the write, which
+    is exactly the gap the session-scoped channel can't cover. Same
+    sanitization as the other two channel helpers, since workspace_id is
+    a generated id today but this is defensive against that changing."""
+    safe = re.sub(r"[^A-Za-z0-9_=@,.;-]", "-", workspace_id)
+    return f"workspace-{safe}"
 
 
 def _get_client():
@@ -384,4 +408,58 @@ def emit_user_event(
         return True
     except Exception as exc:
         print(f"  [relay] emit_user_event({event_type!r}) failed: {exc}")
+        return False
+
+
+def emit_workspace_event(
+    event_type: "EventType | str",
+    workspace_id: str = None,
+    agent: str = None,
+    payload: dict = None,
+) -> bool:
+    """Live-refetch fix (patch 3 follow-up): same fire-and-forget
+    contract as emit_event()/emit_user_event() above, just publishing on
+    a workspace's own channel instead of a session's or a person's. Kept
+    as its own function for the same reason emit_user_event() is its own
+    function rather than a branch on emit_event() — a different "no-op
+    if missing" key (workspace_id) and a different intended call site
+    (api/task_runner.py's _write_plan_panels(), a background write-back
+    step, not a mid-run agent) would make one branchy function harder to
+    read than three small ones.
+
+    event_type accepts an EventType member or plain string, same as
+    emit_event()/emit_user_event() -- see emit_event()'s docstring for
+    why, including why an unrecognized event_type is logged and skipped
+    rather than raised.
+    """
+    if workspace_id is None:
+        return False  # no-op path: no channel to publish on
+
+    if isinstance(event_type, EventType):
+        event_type = event_type.value
+
+    if event_type not in VALID_EVENT_TYPES:
+        print(f"  [relay] emit_workspace_event(): unknown event type {event_type!r}, "
+              f"skipping (not one of {len(VALID_EVENT_TYPES)} known EventType "
+              f"values). This event was NOT sent -- add it to EventType in "
+              f"relay/emitter.py if it's a real, intentional event.")
+        return False
+
+    client = _get_client()
+    if client is None:
+        return False
+
+    event = {
+        "type": event_type,
+        "workspace_id": workspace_id,
+        "agent": agent,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": payload or {},
+    }
+
+    try:
+        client.trigger(_workspace_channel_name(workspace_id), event_type, event)
+        return True
+    except Exception as exc:
+        print(f"  [relay] emit_workspace_event({event_type!r}) failed: {exc}")
         return False
