@@ -35,6 +35,7 @@ from eo.registry import (
     list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned,
     list_role_metadata,
 )
+from eo.skill_library import list_skills   # NEW — Part 6 §E2, task 14, patch 4
 from eo.structure import (
     save_workflow_template, list_workflow_templates, delete_workflow_template,
     update_workflow_template,
@@ -533,6 +534,36 @@ def patch_role_pinned(role_name: str, req: SetRolePinnedRequest, owner_id: str =
     a picker before it's ever been hired."""
     entry = set_role_pinned(role_name, req.pinned, user_id=owner_id)
     return {"role": role_name, **entry}
+
+
+# Part 6 §E2, task 14, patch 4 (optional/nice-to-have per that patch's
+# own note — E2's own description is agent-facing, not human-facing;
+# this exists for browsing what the self-improvement loop has learned,
+# not because any panel currently reads it). Thin read-only mirror of
+# the Role Library's own GET /api/roles immediately above, over
+# eo/skill_library.py's store instead of eo/registry.py's.
+@router.get("/api/skills")
+def get_skills(owner_id: str = Depends(require_auth)):
+    """Every skill in the library — hand-written SKILL_SEED entries and
+    anything eo/skill_library.py's ensure_skill_for_task() has since
+    written via the self-improvement loop. Shape: [{skill_id, title,
+    doc, source, updated_at, times_matched}, ...], sorted by title —
+    same "one bulk read, not N+1" shape list_role_metadata() already
+    uses for /api/roles.
+
+    owner_id: accepted for parity with require_auth on every other
+    route in this file, but unused here — unlike Role Library's
+    optional ROLE_LIBRARY_SCOPE=per_user mode, eo/skill_library.py's
+    registry:skill_library key is always a single global store (skills
+    are a property of the system, not any one user or project — same
+    reasoning eo/skill_library.py's own module docstring gives for its
+    `registry:` key prefix).
+    """
+    skills = list_skills()
+    return sorted(
+        ({"skill_id": skill_id, **entry} for skill_id, entry in skills.items()),
+        key=lambda s: s["title"],
+    )
 
 
 class SaveWorkflowTemplateRequest(BaseModel):

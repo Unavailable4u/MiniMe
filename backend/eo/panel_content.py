@@ -262,6 +262,92 @@ def delete_content(ws_id: str, panel_key: str, user_id: str) -> None:
     write_audit(user_id, "panel_content.delete", "workspace", ws_id, {"panel_key": panel_key})
 
 
+# NEW — Master Guide V2 step 15 (T2), patch 1: Plan tab's chat-to-panel
+# direct-write feature. Six of Plan's panels (PRD/Architecture/Schema/
+# API Contract/Devil's Advocate/Feasibility) are produced by a role
+# running through eo/executor.py's execute_graph(), but until now
+# nothing connected that role's output back to THIS module's store —
+# the panel only ever got filled by a person manually copy-pasting the
+# chat's own answer into the panel's paste box (see the six
+# MarkdownPastePanel/DiagramPastePanel FIX comments in PlanTab.jsx for
+# the paste-box side of that gap). Blueprint's three panels
+# (parts/wiring/mech, plus instructions) are NOT part of this map —
+# hardware_speccer.py already has its own direct-write path (see that
+# module's own docstring) through eo/workspace_facts.py's custom dict,
+# a different mechanism for a different (structured, multi-sub-view)
+# shape than this module's single opaque `content` string.
+#
+# Deliberately just a role -> panel_key lookup plus one small extraction
+# function here — self-contained and independently testable, same
+# incremental order eo/skill_library.py's own patch 1 already followed
+# (data-layer piece correct and tested on its own before any call site
+# is wired to depend on it; that wiring is patch 2, a later piece).
+PLAN_ROLE_PANEL_MAP = {
+    "prd_writer": "prd",
+    "architecture_diagrammer": "architecture",
+    "schema_diagrammer": "schema",
+    "api_contract_writer": "api_contract",
+    "devils_advocate": "devils_advocate",
+    "feasibility_estimator": "feasibility",
+}
+
+
+def _text_from_role_result(result: dict) -> str:
+    """architecture_diagrammer/schema_diagrammer return {"text", "mermaid",
+    "plan"} where "text" and "mermaid" are the same string (see those two
+    modules' own run_*() — both set `plan["mermaid"] = ...` then return
+    `{"text": plan["mermaid"], "mermaid": plan["mermaid"], ...}`); the
+    other four roles are plain agents/generic_worker.py hires returning
+    {"role", "text", "next_destination"} — free-form prose, no "mermaid"
+    key at all. Checking "mermaid" first therefore never picks the wrong
+    field for either shape; it's just an explicit statement of which key
+    each of the two shapes actually wants written into the panel, rather
+    than relying on both shapes happening to agree on "text" forever.
+    """
+    if not isinstance(result, dict):
+        return ""
+    return (result.get("mermaid") or result.get("text") or "").strip()
+
+
+def write_panel_from_role(ws_id: str, role: str, result: dict, user_id: str) -> dict | None:
+    """The actual direct-write: given a role that just finished (as
+    eo/executor.py's execute_graph() hands back in its own `results`
+    dict, keyed by role) and the workspace its owning chat belongs to,
+    writes that role's output straight into the matching panel via
+    set_content() — no paste box round-trip.
+
+    Returns the saved content dict (set_content()'s own return shape) on
+    an actual write, or None for anything that isn't a genuine write:
+    `role` not in PLAN_ROLE_PANEL_MAP (most roles — this is the expected,
+    common case, not an error), or a mapped role whose result carried no
+    non-empty text (e.g. a role that itself failed over to a fallback
+    apology string an earlier step already surfaced as an error — writing
+    that into the panel would silently blank out whatever a person may
+    have manually saved there before). Never raises: set_content()'s own
+    ValueError on an unknown panel_key can't actually fire here since
+    every PLAN_ROLE_PANEL_MAP value is one of VALID_PANEL_KEYS by
+    construction, but this stays a plain return rather than an assert so
+    a future edit to either constant fails as a silent no-op, not a
+    crash mid-turn, on the same "a bug here shouldn't take down the
+    actual task" posture patch 3's own wiring (a later piece) needs to
+    lean on to justify calling this best-effort.
+
+    Deliberately does NOT set source_node_ids — these six panels are
+    manual-paste-family panels (VALID_PANEL_KEYS but not
+    GENERATED_PANEL_KEYS, see that set's own comment above), never
+    source-scoped, chat-triggered or not; this call is just a different
+    way of arriving at the same paste-box row, not a new "generated from
+    these notebook sources" concept.
+    """
+    panel_key = PLAN_ROLE_PANEL_MAP.get(role)
+    if panel_key is None:
+        return None
+    text = _text_from_role_result(result)
+    if not text:
+        return None
+    return set_content(ws_id, panel_key, text, user_id)
+
+
 # CHANGED — bug audit §2 real fix (migration 0001). This used to be the
 # "clear every panel in the workspace" cheap fix, called unconditionally
 # from the delete-source cascade. Now that generated panels record their

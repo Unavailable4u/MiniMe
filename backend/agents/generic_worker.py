@@ -50,7 +50,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import get_role_prompt, AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
 from eo import conversation_memory   # NEW — Part 23
-from eo.skill_library import get_relevant_skill   # NEW — Part 6 §E2, task 14
+from eo.skill_library import get_relevant_skill, ensure_skill_for_task   # Part 6 §E2, task 14
 from utils.llm_client import generate_text
 from memory.bus import read as bus_read, write as bus_write, KEYS
 # Part 6 §6.4 bridge — see LEGACY_BUS_KEY_MAP below. No circularity risk:
@@ -535,6 +535,25 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     # as part of the role's own identity/brief, so a role with a skill
     # match doesn't read as if the skill doc IS its brief.
     skill_doc = get_relevant_skill(task_text)
+    if not skill_doc:
+        # NEW — Part 6 §E2, task 14, self-improvement loop: "" here is
+        # the load-bearing "no skill matches this task type yet" signal
+        # get_relevant_skill()'s own docstring describes, not just
+        # "nothing to add" — worth researching and writing one for.
+        # ensure_skill_for_task() already swallows its own failures
+        # (network, LLM provider, embedding) and never raises, but this
+        # try/except is kept anyway, same belt-and-suspenders posture
+        # eo/routing_memory.py's own log_outcome() embed step earns just
+        # by being a best-effort side-channel: the skill this writes (if
+        # it writes one) benefits a FUTURE task of a similar kind, not
+        # this one, so nothing about it may ever cost this request more
+        # than the one research pass + one cheap condensation call it
+        # takes on the way to a plain "no skill found" outcome.
+        try:
+            ensure_skill_for_task(task_text)
+        except Exception as exc:
+            print(f"  [Generic Worker] skill self-improvement loop skipped "
+                  f"({exc.__class__.__name__}: {exc}).")
     skill_addition = (
         f"\n\nGuidance from a similar task type you've handled before:\n{skill_doc}"
         if skill_doc else ""

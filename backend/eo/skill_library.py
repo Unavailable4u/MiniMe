@@ -64,6 +64,7 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, vector_index
 from utils.embedding import embed_text
+from utils.llm_client import generate_text
 
 # Own id-prefix namespace, same reasoning eo/routing_memory.py's own
 # ID_PREFIX comment gives: never collide with routing_memory.py's
@@ -334,6 +335,114 @@ def _ensure_seed_embedded() -> None:
         except Exception as exc:
             print(f"  [Skill Library] seed embed skipped for {skill_id!r} "
                   f"({exc.__class__.__name__}: {exc}).")
+
+
+# Same "single-pass generation, no worker pool, just try each provider
+# in order until one answers" shape agents/dataset_analyst.py's own
+# CHAIN comment gives -- this condensation call is a one-shot summarize
+# job, not something that needs the full multi-provider/quota-aware
+# fallback machinery agents/generic_worker.py builds per-role. Kept as
+# a short hardcoded chain here rather than importing generic_worker's
+# _build_fallback_chain()/_chain_step_for() -- those are keyed off
+# AGENT_CAPABILITIES role tags this module has no role identity to
+# supply, and importing agents.generic_worker from here would also
+# invert the dependency direction generic_worker.py's own module
+# docstring already establishes (it imports FROM eo.skill_library, not
+# the other way around).
+CONDENSE_CHAIN = [
+    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+]
+
+CONDENSE_SYSTEM_PROMPT = (
+    "You are writing a short, reusable \"how to\" skill doc for another AI "
+    "agent that will read it before attempting a task of this same kind in "
+    "the future. Given a task type and a handful of web research sources "
+    "about it, write 3-6 sentences of concrete, actionable guidance: what "
+    "approach to take, what pitfalls to avoid, and what a correct result "
+    "looks like for this KIND of task -- not a summary of this one task's "
+    "specific answer. Write only the guidance itself, no preamble, no "
+    "headers, no \"Here's a skill doc:\" framing. If the sources are too "
+    "thin or off-topic to say anything genuinely useful, respond with "
+    "exactly: NONE"
+)
+
+# How many of web_researcher's sources to actually feed the condensation
+# call -- MAX_RESULTS in agents/web_researcher.py can return up to 8;
+# this stays well short of that so the condensation prompt stays a single
+# small, cheap call rather than growing with however many sources a given
+# scope happened to return.
+MAX_RESEARCH_SOURCES = 5
+
+
+def ensure_skill_for_task(task_text: str) -> str:
+    """The self-improvement loop half of task 14 (patch 1's docstring
+    calls this out as "a later patch" -- this is that patch): on a
+    retrieval miss, research this task TYPE on the open web, condense
+    the results into a short skill doc with one cheap LLM call, and
+    write_skill() it so a future get_relevant_skill() call for a
+    similar task hits instead of missing.
+
+    Re-checks get_relevant_skill(task_text) itself first rather than
+    trusting a caller's own earlier miss -- keeps this function correct
+    and independently callable/testable on its own, the same "usable
+    and independently testable on its own" posture this module's own
+    docstring already commits to for patch 1, not just safe when called
+    from agents/generic_worker.run() immediately after that module's
+    own miss.
+
+    Best-effort end to end and NEVER raises: a web-research miss, a
+    condensation call that comes back empty or says "NONE", or any
+    outright exception (network, LLM provider, embedding) all just
+    return "" -- same "a hiccup here is a degradation, not a failure
+    worth crashing the caller over" posture eo/routing_memory.py's own
+    log_outcome() embed step and this module's own write_skill() already
+    take. Returns the new skill_id on an actual write, "" otherwise.
+    """
+    task_text = (task_text or "").strip()
+    if not task_text:
+        return ""
+
+    try:
+        if get_relevant_skill(task_text):
+            # Already covered -- e.g. a concurrent call (or a human)
+            # wrote a matching skill since the caller's own miss.
+            return ""
+
+        from agents import web_researcher   # deferred -- agents/ modules
+        # commonly import FROM eo/, so importing an agents/ module at
+        # this eo/ module's own top level risks inverting/looping that
+        # dependency direction the way agents/generic_worker.py's own
+        # module docstring already warns about for a different pair of
+        # modules; deferring to inside the function, which only runs
+        # well after both modules have finished loading, sidesteps that
+        # risk entirely rather than requiring proof it's actually safe.
+        report = web_researcher.run(task_text=f"how to {task_text}", scope="general")
+        sources = (report or {}).get("sources") or []
+        if not sources:
+            return ""
+
+        source_text = "\n\n".join(
+            f"{s.get('title', '')}\n{s.get('snippet', '')}"
+            for s in sources[:MAX_RESEARCH_SOURCES]
+        )[:6000]
+
+        raw = generate_text(
+            system_prompt=CONDENSE_SYSTEM_PROMPT,
+            user_content=f"Task type: {task_text}\n\nResearch sources:\n{source_text}",
+            chain=CONDENSE_CHAIN,
+            agent_name="skill_library:condense",
+        )
+        doc_text = raw.strip()
+        if not doc_text or doc_text.upper() == "NONE":
+            return ""
+
+        title = f"How to: {task_text}"[:120]
+        return write_skill(title, doc_text, source="self_improvement_loop")
+    except Exception as exc:
+        print(f"  [Skill Library] self-improvement loop skipped for "
+              f"{task_text[:60]!r} ({exc.__class__.__name__}: {exc}).")
+        return ""
 
 
 if __name__ == "__main__":
