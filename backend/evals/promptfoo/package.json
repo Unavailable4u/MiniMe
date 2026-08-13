@@ -5,7 +5,7 @@
   "description": "Master Guide D2 — promptfoo eval suite for MiniMe's Role Library prompts. Not part of the running app; dev/CI tooling only.",
   "scripts": {
     "eval": "promptfoo eval --config promptfooconfig.yaml",
-    "eval:ci": "promptfoo eval --config promptfooconfig.yaml --no-cache --share=false",
+    "eval:ci": "promptfoo eval --config promptfooconfig.yaml --no-cache --no-share",
     "eval:organizer": "promptfoo eval --config output_organizer.promptfooconfig.yaml",
     "compare": "promptfoo eval --config compare/providers.promptfooconfig.yaml",
     "view": "promptfoo view",

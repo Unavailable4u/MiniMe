@@ -41,7 +41,7 @@ S2_FIELDS = (
     "title,authors,year,abstract,externalIds,venue,citationCount,"
     "references.title,references.externalIds,citations.title,citations.externalIds"
 )
-ARXIV_URL = "http://export.arxiv.org/api/query"
+ARXIV_URL = "https://export.arxiv.org/api/query"
 CROSSREF_URL = "https://api.crossref.org/works"
 OPENALEX_URL = "https://api.openalex.org/works"
 

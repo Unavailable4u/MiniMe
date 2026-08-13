@@ -267,7 +267,7 @@ export function SessionProvider({ children }) {
       // No behavior change in this step — every existing branch below
       // is untouched; this only adds visibility for 8.2-8.5 to build on.
       if (["routing_decision", "agent_start", "agent_done", "dispatch_event"].includes(eventType)) {
-        console.log(`[Phase 8 / 8.1 payload check] ${eventType}`, data);
+        console.log("[Phase 8 / 8.1 payload check]", eventType, data);
       }
       const { agent, payload } = data;
       if (eventType === "routing_decision") {

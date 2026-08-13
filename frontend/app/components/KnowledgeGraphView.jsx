@@ -210,8 +210,8 @@ export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSum
     // of silently hiding it, so the underlying gap doesn't go unnoticed.
     if (droppedEdges.length && typeof window !== "undefined") {
       console.warn(
-        `[KnowledgeGraphView] dropped ${droppedEdges.length} edge(s) referencing ` +
-        `a node not present in this workspace's node list:`,
+        "[KnowledgeGraphView] dropped %d edge(s) referencing a node not present in this workspace's node list:",
+        droppedEdges.length,
         droppedEdges
       );
     }

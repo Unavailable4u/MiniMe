@@ -90,7 +90,7 @@ def _connections_signature(connections: list[dict]) -> str:
         f"{c.get('from_topic')}->{c.get('to_topic')}:{c.get('relation')}"
         for c in connections
     ))
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def _needs_regeneration(workspace_id: str, connections: list[dict]) -> bool:
