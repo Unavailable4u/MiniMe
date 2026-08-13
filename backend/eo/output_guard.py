@@ -69,11 +69,50 @@ Part 2's line-number/shape corrections above.
 Place this file at: eo/output_guard.py
 """
 
+import asyncio
 import importlib.metadata
 
 from guardrails import Guard
 from guardrails.types import OnFailAction
 from guardrails.validator_base import FailResult, PassResult, Validator, register_validator
+
+
+def _ensure_event_loop() -> None:
+    """Guardrails' validator_service dispatches through asyncio internally
+    and calls asyncio.get_event_loop() to find one to run on. That's fine
+    on the main thread (which gets an implicit loop), but every caller of
+    validate_module_code() / validate_final_answer() / validate_artifact_entry()
+    below runs on a worker thread instead: eo/executor.py's
+    _run_concurrent_group() dispatches each role (hardware_speccer,
+    code_writers, ...) onto its own concurrent.futures.ThreadPoolExecutor
+    thread, and agents/code_writers.py's run() -- where validate_module_code()
+    is actually called from, inside its as_completed() loop -- is itself
+    running on one of those role-worker threads, not the process's main
+    thread.
+
+    A plain worker thread never has an event loop bound to it, so
+    asyncio.get_event_loop() raises there (Python 3.10+: "There is no
+    current event loop in thread ..."), guardrails' validator_service
+    catches that and silently falls back to synchronous validation --
+    which is where the repeated "Could not obtain an event loop. Falling
+    back to synchronous validation." UserWarning in the logs comes from.
+    The fallback is functionally harmless here (every validator above is
+    plain sync code, OnFailAction.NOOP never reasks), but it's a warning
+    fired once per module/answer/artifact for no real reason, and relying
+    on an undocumented fallback path is fragile if guardrails ever changes
+    that behavior.
+
+    Binding a fresh event loop to the current thread before validate() is
+    called removes the need for that fallback entirely, without changing
+    any actual validation behavior or touching the caller's own threading
+    model (executor.py / code_writers.py keep using
+    concurrent.futures.ThreadPoolExecutor exactly as before -- this just
+    gives whichever thread happens to call into this module something for
+    asyncio.get_event_loop() to find)."""
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 @register_validator(name="module-code-nonempty", data_type="string")
@@ -123,6 +162,7 @@ def validate_module_code(code: str) -> tuple[bool, str]:
     fail-open pattern (swap in a "# CODE WRITER FAILED: ..." placeholder
     and keep going) is what Part 2 wires this into -- not a new pattern.
     """
+    _ensure_event_loop()
     outcome = get_code_guard().validate(code)
     if outcome.validation_passed:
         return True, ""
@@ -198,6 +238,7 @@ def validate_final_answer(answer: str) -> tuple[bool, str]:
     what Part 3 wires this into, rather than inventing a new fallback
     shape.
     """
+    _ensure_event_loop()
     outcome = get_answer_guard().validate(answer)
     if outcome.validation_passed:
         return True, ""
@@ -292,6 +333,7 @@ def validate_artifact_entry(entry) -> tuple[bool, str]:
     Part 4 wires this into; it just replaces the old truthiness-only
     check with a real shape check.
     """
+    _ensure_event_loop()
     outcome = get_artifact_guard().validate(entry)
     if outcome.validation_passed:
         return True, ""
