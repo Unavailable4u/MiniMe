@@ -158,8 +158,9 @@ a gasket/seal part when the PRD gives no weatherproofing requirement.
 
 For every electrical part (category "mcu", "sensor", "actuator", or \
 "power"), fill in "part_number" with a real, specific manufacturer \
-part number when you know one with confidence -- e.g. "ESP32-WROOM-32" \
-for an ESP32 dev module, "DS18B20" for a common 1-Wire temperature \
+part number when you know one with confidence -- e.g. a specific \
+Espressif module SKU/variant for an ESP32 dev module (not just the \
+bare chip family name), "DS18B20" for a common 1-Wire temperature \
 sensor. This is looked up against real distributor data after you \
 respond, so it must be an actual part number, never a plausible-\
 looking guess -- leave it null whenever you're not confident, and \
@@ -177,7 +178,7 @@ exactly this shape:
   "parts": [
     {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
      "description": "Main microcontroller", "qty": 1,
-     "part_number": "ESP32-WROOM-32",
+     "part_number": "ESP32-WROOM-32U-N4",
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null},
     {"id": "housing_1", "name": "Enclosure housing", "category": "3D_PRINT",

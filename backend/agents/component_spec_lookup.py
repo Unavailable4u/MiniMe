@@ -69,7 +69,22 @@ REQUEST_TIMEOUT = 15
 DATASHEET_REQUEST_TIMEOUT = 30
 
 DIGIKEY_TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
-DIGIKEY_PRODUCT_DETAILS_URL = "https://api.digikey.com/products/v4/search/{part_number}/productdetails"
+# Permanent fix (real-bug follow-up, 2026-08-13): the old
+# `/products/v4/search/{part_number}/productdetails` endpoint is a
+# single-SKU EXACT resolver -- it only succeeds when part_number maps
+# to exactly one DigiKey catalog product. Every part_number this
+# module is actually called with (see hardware_speccer.py's prompt:
+# "ESP32-WROOM-32", "DS18B20", etc.) is a manufacturer/family
+# designator that legitimately matches several catalog variants, so
+# productdetails 404s on essentially all real input -- confirmed live
+# (ESP32-WROOM-32, XL6009, DHT22, SSD1306 all 404'd in the same run).
+# Switched to the Keyword Search endpoint, which is DigiKey's
+# many-candidates search (same shape Product Information V4 exposes
+# for keyword queries) instead of an exact-match lookup -- see
+# _lookup_digikey() below for how candidates are scanned, same
+# "prefer the first hit with real dimensions, else first with a
+# datasheet" pattern _lookup_mouser() already used.
+DIGIKEY_KEYWORD_SEARCH_URL = "https://api.digikey.com/products/v4/search/keyword"
 
 # Part 2 -- Mouser Search API v1. No OAuth: a single API key issued via
 # the Search API Request Form (see module docstring), passed as a query
@@ -208,39 +223,45 @@ def _mouser_size_text(product: dict) -> str | None:
 
 
 def _lookup_digikey(part_number: str) -> dict | None:
+    """Keyword Search (not the old single-SKU productdetails exact
+    lookup -- see DIGIKEY_KEYWORD_SEARCH_URL's comment for why that
+    was the actual bug). Returns a ranked list of candidate products
+    for a free-text/part-number query, so a manufacturer/family
+    designator that matches several DigiKey catalog variants (the
+    normal case for everything this module is actually called with)
+    gets real candidates instead of an automatic 404.
+
+    Same "don't trust the first candidate blindly" scan _lookup_mouser()
+    already uses below: prefer the first candidate that yields parsed
+    dimensions_mm, else fall back to the first with at least a
+    datasheet_url.
+    """
     token = _get_digikey_token()
     client_id = os.getenv("DIGIKEY_CLIENT_ID")
     if not token or not client_id:
         return None
 
     try:
-        resp = requests.get(
-            DIGIKEY_PRODUCT_DETAILS_URL.format(part_number=part_number),
+        resp = requests.post(
+            DIGIKEY_KEYWORD_SEARCH_URL,
             headers={
                 "Authorization": f"Bearer {token}",
                 "X-DIGIKEY-Client-Id": client_id,
                 **DIGIKEY_LOCALE_HEADERS,
             },
+            json={
+                "Keywords": part_number,
+                "Limit": 10,
+                "Offset": 0,
+            },
             timeout=REQUEST_TIMEOUT,
         )
         if resp.status_code == 404:
-            # Was previously a silent `return None` -- same shape as
-            # every other found/not-found path in this file (see
-            # Mouser's "Errors" print, or its own "no parts found"
-            # fallthrough) except this one, which left a genuine miss
-            # indistinguishable from "creds unset" or "network fine,
-            # just nothing there" with zero output. DigiKey's
-            # productdetails endpoint expects an exact, unambiguous
-            # catalog lookup (a specific DigiKey SKU like
-            # "296-6501-1-ND", or a manufacturer part number DigiKey
-            # can resolve to exactly one product) -- a manufacturer
-            # part number that maps to several vendors' variants (e.g.
-            # "NA555": Diodes Inc. + 6 different TI package options,
-            # confirmed via the Mouser side of this same lookup) is a
-            # plausible, expected 404 here, not a bug -- but it should
-            # say so rather than look identical to every other reason
-            # for returning None.
-            print(f"  [component_spec_lookup] DigiKey: no exact match for "
+            # A genuine "nothing on DigiKey matches this at all" --
+            # still a plausible, expected outcome for an obscure or
+            # misspelled part, kept distinguishable from creds-unset/
+            # network-fine-nothing-there the same way the old code did.
+            print(f"  [component_spec_lookup] DigiKey: no matches for "
                   f"'{part_number}' (404)")
             return None
         resp.raise_for_status()
@@ -250,49 +271,82 @@ def _lookup_digikey(part_number: str) -> dict | None:
               f"'{part_number}': {e}")
         return None
 
-    product = payload.get("Product")
-    if not product:
+    products = payload.get("Products") or []
+    if not products:
+        print(f"  [component_spec_lookup] DigiKey: no matches for "
+              f"'{part_number}' (empty result set)")
         return None
 
-    dimensions_mm = _parse_dimensions_mm_from_text(_digikey_size_text(product))
-    datasheet_url = product.get("DatasheetUrl")
+    first_with_datasheet = None
+    for product in products:
+        dimensions_mm = _parse_dimensions_mm_from_text(_digikey_size_text(product))
+        datasheet_url = product.get("DatasheetUrl")
 
-    if not dimensions_mm and not datasheet_url:
-        return None
+        if dimensions_mm:
+            return {
+                "dimensions_mm": dimensions_mm,
+                "datasheet_url": datasheet_url,
+                "source": "digikey",
+            }
+        if first_with_datasheet is None and datasheet_url:
+            first_with_datasheet = {
+                "dimensions_mm": None,
+                "datasheet_url": datasheet_url,
+                "source": "digikey",
+            }
 
-    return {
-        "dimensions_mm": dimensions_mm,
-        "datasheet_url": datasheet_url,
-        "source": "digikey",
-    }
+    return first_with_datasheet
 
 
 def _lookup_mouser(part_number: str) -> dict | None:
     """Part 2. Mouser Search API v1, "search by part number" method --
     no OAuth, just an API key on the query string. Tried only when
     DigiKey (above) returns None.
+
+    Permanent fix (real-bug follow-up, 2026-08-13): this used to send
+    partSearchOptions: "Exact" unconditionally. That's the same
+    exact-match assumption that was breaking DigiKey -- for a
+    manufacturer/family designator (the normal input here, e.g.
+    "ESP32-WROOM-32"), an exact-only search commonly returns zero
+    results even though Mouser carries several matching products,
+    which is exactly why this fallback wasn't rescuing any of
+    DigiKey's misses in practice. Now tries Exact first (fast path,
+    keeps existing exact-catalog-number callers unchanged), and only
+    if that comes back empty, retries once with a plain keyword search
+    (no partSearchOptions) so family-style queries actually get
+    candidates instead of silently falling through to LLM estimation.
     """
     api_key = os.getenv("MOUSER_API_KEY")
     if not api_key:
         return None
 
+    result = _lookup_mouser_with_options(part_number, api_key, exact=True)
+    if result is not None:
+        return result
+    return _lookup_mouser_with_options(part_number, api_key, exact=False)
+
+
+def _lookup_mouser_with_options(part_number: str, api_key: str, exact: bool) -> dict | None:
+    request_body = {
+        "SearchByPartRequest": {
+            "mouserPartNumber": part_number,
+        }
+    }
+    if exact:
+        request_body["SearchByPartRequest"]["partSearchOptions"] = "Exact"
+
     try:
         resp = requests.post(
             MOUSER_SEARCH_PART_NUMBER_URL,
             params={"apiKey": api_key},
-            json={
-                "SearchByPartRequest": {
-                    "mouserPartNumber": part_number,
-                    "partSearchOptions": "Exact",
-                }
-            },
+            json=request_body,
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
         payload = resp.json()
     except Exception as e:
         print(f"  [component_spec_lookup] Mouser product lookup failed for "
-              f"'{part_number}': {e}")
+              f"'{part_number}' (exact={exact}): {e}")
         return None
 
     # Mouser returns 200 with an "Errors" array on the payload itself

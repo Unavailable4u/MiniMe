@@ -44,7 +44,14 @@ export default function RoutingTraceCard({ decision }) {
   // "confidence 0.00" noise for no reason.
   if (!decision || !decision.reasoning) return null;
 
-  const isPanel = decision.panel_reviewed && Array.isArray(decision.panel_votes);
+  // Bug fix: this used to gate on `panel_reviewed`, so as soon as the
+  // backend correctly started reporting panel_reviewed:false for a
+  // member that crashed and fell back to the conservative vote, the
+  // whole per-member breakdown disappeared right when it was most
+  // useful (i.e. exactly when someone would want to see which member
+  // fell back and why). panel_votes is populated whenever the panel
+  // ran at all, real votes or not, so key off that instead.
+  const isPanel = Array.isArray(decision.panel_votes) && decision.panel_votes.length > 0;
   const pct = (c) => (typeof c === "number" ? c.toFixed(2) : "0.00");
 
   return (

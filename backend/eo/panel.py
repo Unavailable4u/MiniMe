@@ -135,11 +135,14 @@ def _get_member_vote(label: str, task_text: str, chain: list) -> dict:
         parsed = json.loads(_strip_fences(raw))
         validated = _validate(parsed)
         validated["tier"] = PATH_TO_TIER[validated["path"]]   # NEW — same fix as loop_v4.py's draft
+        validated["_reachable"] = True
         return validated
     except Exception as exc:
         print(f"  [EO Panel] member {label} unreachable ({exc.__class__.__name__}: {exc}), "
               f"voting conservative (tier 3, confidence 0.0).")
-        return dict(_UNREACHABLE_VOTE)
+        vote = dict(_UNREACHABLE_VOTE)
+        vote["_reachable"] = False
+        return vote
 
 
 def _merge_execution_order(votes: list, all_agents_sorted: list) -> list:
@@ -294,10 +297,24 @@ def _synthesize(votes: list, draft: dict) -> dict:
     # breaks). This is what lets a frontend trace card show "all 3 panel
     # opinions" (Part 6.6) as structured data instead of re-parsing the
     # joined string.
+    # `_reachable` (set by _get_member_vote, defaulting True for member A
+    # since the draft is always a real Inspector classification, never a
+    # fallback) is bookkeeping only -- popped off each vote before it
+    # goes into panel_votes so it doesn't leak into the API/frontend
+    # payload as if it were part of the panel's own schema.
+    reachable = [v.pop("_reachable", True) for v in votes]
     panel_votes = [
         {"member": label, **v}
         for label, v in zip("ABC", votes)
     ]
+    # Bug fix: this used to be hardcoded True unconditionally, so a
+    # member that crashed and fell back to _UNREACHABLE_VOTE (e.g. the
+    # Cloudflare dict/str crash above, or any other chain exhaustion)
+    # still produced a "Panel reviewed" header on the frontend even
+    # though that member never actually reviewed anything. Only claim a
+    # real review happened when every member's own chain produced a
+    # genuine vote.
+    panel_reviewed = all(reachable)
     return {
         "tier": max_tier,
         "path": TIER_TO_PATH.get(max_tier),
@@ -305,7 +322,7 @@ def _synthesize(votes: list, draft: dict) -> dict:
         "confidence": round(avg_confidence, 4),
         "suggested_agents": all_agents_sorted,
         "reasoning": reasoning,
-        "panel_reviewed": True,
+        "panel_reviewed": panel_reviewed,
         "panel_votes": panel_votes,
         "domain": domain,
         "execution_order": execution_order,
