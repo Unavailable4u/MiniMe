@@ -1815,6 +1815,18 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # clamp it depends on.
     _apply_primitive_composition(spec, spec["parts"])
 
+    # G3b: LLM primitive pool for whatever G3a's deterministic path above
+    # left uncovered -- an electrical part with no dimensions_mm at all
+    # (no G1a curated-table hit, no G1b DigiKey/Mouser hit), fanned out
+    # via eo/worker_pool.py the same way the Code Writer Pool is. Deferred
+    # import: agents/mech_primitive_pool.py is invoked from here, so a
+    # module-level import would be circular (same fix as
+    # eo/dynamic_chain.py's own deferred import above, just the reverse
+    # direction). No-op, no worker-pool call at all, when G3a already
+    # covered everything -- see mech_primitive_pool.run()'s own docstring.
+    from agents.mech_primitive_pool import run as run_mech_primitive_pool
+    run_mech_primitive_pool(spec, spec["parts"], session_id=session_id, domain=domain)
+
 
     # Step 3 of the wiring-detail fix: deterministically render the
     # pin-level flowchart off spec["wiring"] (nodes/edges, now carrying
