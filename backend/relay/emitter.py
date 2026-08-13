@@ -291,6 +291,51 @@ def _workspace_channel_name(workspace_id: str) -> str:
     return f"workspace-{safe}"
 
 
+def _patch_pusher_double_escaping(pusher_module) -> None:
+    """Works around a bug in the third-party `pusher` package itself
+    (pusher/http.py's Request.__init__), not our code -- so it can't be
+    fixed by editing anything else in this repo.
+
+    Request.__init__ builds the outer HTTP body with a plain
+    `json.dumps(params)`, which defaults to ensure_ascii=True. But
+    `params["data"]` was already serialized upstream by
+    pusher/util.py's data_to_string() WITH ensure_ascii=False (so that
+    non-ASCII bytes count as 1-4 UTF-8 bytes each). Wrapping that
+    already-serialized string in a second, ascii-only json.dumps()
+    re-escapes every non-ASCII character into a 6-byte \\uXXXX sequence,
+    silently inflating the real wire size Pusher measures against its
+    10,240-byte event cap -- well past whatever budget our own
+    truncation upstream (see eo/executor.py's render_agent_result() /
+    _summarize()) correctly enforced against the raw UTF-8 string. This
+    is exactly why symbol-dense payloads (e.g. hardware_speccer's specs,
+    full of Ω/µF/°C/etc.) can trip the 413 even though they measured
+    in-budget before being handed to Pusher.
+
+    Scoped to pusher.http.Request only (not a global json.dumps
+    monkeypatch) so it can't change JSON encoding behavior anywhere else
+    in the app. Idempotent -- safe to call every time _get_client()
+    builds (or would build) a client.
+    """
+    import json as _json
+
+    request_cls = pusher_module.http.Request
+    if getattr(request_cls, "_minime_ascii_patch_applied", False):
+        return
+    _orig_init = request_cls.__init__
+
+    def _patched_init(self, client, method, path, params=None):
+        _orig_init(self, client, method, path, params)
+        if method == pusher_module.http.POST and params is not None:
+            # Re-encode with ensure_ascii=False and re-run auth signing,
+            # since body_md5/auth_signature were computed off the
+            # (wrong) ascii-escaped body by _orig_init above.
+            self.body = _json.dumps(params, ensure_ascii=False).encode("utf8")
+            self._generate_auth()
+
+    request_cls.__init__ = _patched_init
+    request_cls._minime_ascii_patch_applied = True
+
+
 def _get_client():
     """Lazy singleton. Returns None (and stays None) if PUSHER_* env vars
     aren't set, so this module imports cleanly and emit_event() becomes a
@@ -329,6 +374,8 @@ def _get_client():
               "Events will be skipped.")
         _pusher_unavailable = True
         return None
+
+    _patch_pusher_double_escaping(pusher)
 
     _pusher_client = pusher.Pusher(
         app_id=app_id, key=key, secret=secret, cluster=cluster, ssl=True,
