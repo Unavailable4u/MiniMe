@@ -112,6 +112,16 @@ from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusErro
 from memory.bus import read as bus_read, write as bus_write
 from relay.emitter import emit_event
 from eo.tracing import get_tracer
+# Part 26 §4 re-export: embed_text() used to be defined directly in this
+# module, but eo/routing_memory.py wanted it without the heavy groq/
+# cerebras/openai SDK imports above, so it now lives in
+# utils/embedding.py (zero heavy imports) and this is just a re-export
+# so existing callers can keep doing `from utils.llm_client import
+# embed_text` / `embed_text_with_fallback` (agents/memory_search.py,
+# agents/duplication_checker.py, agents/source_quality_flagger.py,
+# eo/knowledge_graph.py, eo/semantic_cache.py). Not used directly in
+# this file, hence the noqa.
+from utils.embedding import embed_text, embed_text_with_fallback  # noqa: F401
 
 # Quota-reality fix, §1 — replaces the old flat per-provider dict. Three
 # separate bugs that one flat number hid:
@@ -1605,16 +1615,5 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
 # only needs os/requests, while this module also imports groq/cerebras/
 # openai at load time. eo/routing_memory.py wanted embed_text() without
 # that SDK weight, so the function now lives in utils/embedding.py (zero
-# heavy imports) and this is just a re-export for existing callers that
-# already do `from utils.llm_client import embed_text`.
-#
-# Patch 7 adds embed_text_with_fallback()/HF_EMBEDDING_KEY_ENVS to that
-# same re-export -- agents/memory_search.py and
-# agents/duplication_checker.py already import their HF helpers from
-# here rather than utils.embedding directly, so this is what makes
-# `from utils.llm_client import embed_text_with_fallback` work for them
-# without changing their existing import style.
-from utils.embedding import (
-    embed_text, embed_text_with_fallback, HF_EMBEDDING_KEY_ENVS,
-    EMBEDDING_MODEL, HF_FEATURE_EXTRACTION_URL,
-)
+# heavy imports); the re-export itself now lives at the top of this
+# file, alongside the other imports.

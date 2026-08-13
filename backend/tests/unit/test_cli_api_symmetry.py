@@ -13,7 +13,7 @@ gets written.
 """
 from eo.panel import staff_task
 from eo.registry import get_role_prompt, ROLE_PROMPTS_KEY
-from memory.bus import read, write
+from memory.bus import read
 
 NOVEL_ROLE = "cli_api_symmetry_test_role"
 

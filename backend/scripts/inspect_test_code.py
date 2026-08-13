@@ -13,7 +13,9 @@ same category of tool.
 Run from the project root, same venv as eo/loop_v4.py:
     python scripts/inspect_test_code.py
 """
-import sys, os, json
+import sys
+import os
+import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, KEYS
 

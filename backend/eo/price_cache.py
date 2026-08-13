@@ -4,7 +4,10 @@ page load would blow through the free search-API quota for no reason.
 Same memory.bus read/write mechanism the rest of the system already uses
 for persistence — no new storage layer.
 """
-import os, sys, re, time
+import os
+import sys
+import re
+import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 

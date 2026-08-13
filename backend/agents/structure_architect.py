@@ -49,7 +49,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
 from relay.emitter import emit_event
-from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 

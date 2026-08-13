@@ -17,7 +17,6 @@ Master Guide's B1 sector-2 list groups with the other agent-backed
 integration tests since it's the one role-resolution path that makes its
 own LLM call.
 """
-import json
 
 from memory.bus import read
 from eo.registry import get_role_prompt, ROLE_PROMPTS_KEY

@@ -61,7 +61,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.modes import apply_mode
 from eo.inspector import classify
-from eo.router import build_execution_graph, build_execution_graph_from_hires, DIRECTED_TASK_MAP, EXPLAIN_CODE_ROUTE
+from eo.router import build_execution_graph, build_execution_graph_from_hires, EXPLAIN_CODE_ROUTE
 from eo.executor import execute_graph
 from eo.loop_controller import run_with_looping
 from eo import panel as eo_panel
@@ -324,7 +324,7 @@ def _run_tier3_hires(task_text: str, decision: dict, hires: list,
     if isinstance(final_output, dict) and final_output.get("text"):
         print(f"\n[Tier 3 — hires-driven] final answer (from '{final_role}'):")
         print(final_output["text"])
-    print(f"\n[Tier 3 — hires-driven] full results (every role):")
+    print("\n[Tier 3 — hires-driven] full results (every role):")
     print(json.dumps(results, indent=2, default=str))
     routing_memory.log_outcome(task_text, decision, outcome="tier-3 hires-driven pipeline completed")
 

@@ -17,6 +17,7 @@ import sys
 import os
 import contextvars
 import difflib
+import datetime as _datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 
@@ -1390,9 +1391,6 @@ ROLE_PROMPTS_SEED = {
 ROLE_PROMPTS_SEED["prd_writer"] += ROLE_PROMPTS_SEED.pop("prd_writer_hardware_scope")
 
 
-import datetime as _datetime
-
-
 def _utcnow_iso() -> str:
     return _datetime.datetime.now(_datetime.timezone.utc).isoformat()
 
@@ -1801,7 +1799,16 @@ def resolve_role(role_name: str) -> str:
 
     return "generic_worker"
 
-from agents import (
+# Deliberately imported here, at the bottom of the file, not at the top:
+# every agents/*.py module below imports names (get_role_prompt,
+# add_role_prompt, AGENT_CAPABILITIES, etc.) from eo.registry at ITS OWN
+# top level. If this import were moved above those definitions, Python
+# would hit agents/__init__.py mid-way through initializing eo.registry,
+# before get_role_prompt/AGENT_CAPABILITIES/etc. exist yet, and the
+# agents.* modules' own `from eo.registry import ...` would fail with
+# ImportError. Placing it here, after every symbol agents/*.py needs is
+# already defined, breaks that cycle without restructuring either side.
+from agents import (  # noqa: E402
     memory_search,
     idea_planner,
     prompt_writer,
@@ -1819,8 +1826,6 @@ from agents import (
     documentation_agent,
     report_writer,
     responder,
-    architecture_diagrammer,
-    schema_diagrammer,
     architecture_diagrammer,
     schema_diagrammer,
     handoff_packager,  # Part 5 §5.6

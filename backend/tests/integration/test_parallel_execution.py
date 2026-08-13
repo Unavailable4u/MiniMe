@@ -81,7 +81,7 @@ def _make_fakes(sleep_seconds: float = 0.0):
 
     def fake_worker(role, task_text=None, input_keys=None, session_id=None,
                      key_override=None, include_conversation_context=True,
-                     domain=None):
+                     domain=None, chain_override=None):
         start_times[role] = time.monotonic()
         call_log.append(role)
         if sleep_seconds:

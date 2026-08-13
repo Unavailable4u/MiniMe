@@ -151,7 +151,6 @@ def _coerce_section_bucket(value, section_name: str | None = None) -> dict:
         if key not in bucket["order"]:
             bucket["order"].append(key)
     if isinstance(order, list):
-        seen = set(bucket["order"])
         ordered = [key for key in order if key in bucket["entries"]]
         ordered.extend([key for key in bucket["order"] if key not in ordered])
         bucket["order"] = ordered

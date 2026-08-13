@@ -10,7 +10,6 @@ per this module's own comment: documentation_agent.py and
 memory_search.py both read report["summary"], which used to always be
 empty since only "text" was ever written).
 """
-import json
 
 from memory.bus import write, read, KEYS
 import agents.report_writer as report_writer  # noqa: F401  (ensures mock_llm patches this module)

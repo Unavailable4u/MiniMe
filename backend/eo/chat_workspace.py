@@ -698,7 +698,7 @@ def delete_workspace(ws_id: str, user_id: str) -> None:
     """Owner OR partner can delete — both tiers are full-power. A
     moderator cannot, regardless of how long they've been trusted with
     membership management."""
-    role = _require_owner_or_partner(ws_id, user_id)
+    _require_owner_or_partner(ws_id, user_id)
     ws = get_workspace(ws_id, user_id)
     with db.cursor(user_id=user_id) as cur:
         cur.execute("delete from workspaces where id = %s", (ws_id,))
