@@ -105,6 +105,7 @@ Place this file at: agents/hardware_speccer.py
 """
 
 import os
+import re
 import sys
 import json
 import urllib.parse
@@ -1030,6 +1031,359 @@ def _apply_placement_shapes(spec: dict, parts: list) -> None:
             placement["shape"] = primitive
 
 
+# ---------------------------------------------------------------------------
+# G3a (Master Guide, "G3/G4. Hierarchical parallel build + validate" --
+# Level 0->1, deterministic-first primitive composition): extends every
+# mech.placements[] entry a part actually got real dimensions_mm for
+# (either G1a's curated-table hit or G1b's DigiKey/Mouser hit -- see
+# _populate_curated_dimensions()/_populate_dimensions() above) with a
+# `primitives` list -- local offset/size/rotation/color_role entries
+# that compose into that one part, per the guide's own three Level-0
+# templates (cylinder, box, cone-on-a-box-shaft). No LLM call and no
+# FreeCAD validation yet -- purely mechanical geometry off data already
+# resolved earlier in this same pipeline. G3b (agents/mech_primitive_
+# pool.py, not built by this patch) is the LLM-driven sibling step for
+# whatever's left uncovered here (no dimensions_mm at all); G3c (eo/
+# mech_validator.py, also not built by this patch) is what actually
+# checks a composed part's primitives stay inside its own bounding box
+# -- this patch only produces the primitives, it doesn't verify them.
+# ---------------------------------------------------------------------------
+
+# Cone-on-a-box-shaft split (buttons/buzzers): no curated-table row
+# carries a separate shaft/dome measurement, only one overall w/h/d, so
+# the split is a fixed, documented ratio (a third of the part's own
+# height goes to the dome) rather than a per-part guess.
+_CONE_DOME_RATIO = 0.35
+
+
+def _box_primitive_template(w: float, h: float, d: float) -> list:
+    """Level-0 "box" template -- a single box primitive spanning the
+    part's own full w/h/d, corner-origin (offset 0,0,0) like every
+    other placement in this module."""
+    return [{
+        "offset": {"x": 0, "y": 0, "z": 0},
+        "size": {"w": w, "h": h, "d": d},
+        "rotation": {"x": 0, "y": 0, "z": 0},
+        "shape": "box",
+        "color_role": "primary",
+    }]
+
+
+def _cylinder_primitive_template(w: float, h: float, d: float) -> list:
+    """Level-0 "cylinder" template -- a single cylinder primitive, w as
+    diameter and h as height (same axis convention
+    _apply_placement_shapes()/MechView.jsx's PrimitiveGeometry already
+    use for round shapes), spanning the part's own full bounding box."""
+    return [{
+        "offset": {"x": 0, "y": 0, "z": 0},
+        "size": {"w": w, "h": h, "d": d},
+        "rotation": {"x": 0, "y": 0, "z": 0},
+        "shape": "cylinder",
+        "color_role": "primary",
+    }]
+
+
+def _cone_primitive_template(w: float, h: float, d: float) -> list:
+    """Level-0 "cone" template -- a short box "shaft" at the part's own
+    base, topped by a cone "dome" sized off _CONE_DOME_RATIO, per the
+    Master Guide's own "cone on a small box shaft" wording for buttons/
+    buzzers. Both primitives share the part's own w/d footprint; only
+    h is split between them, stacked corner-origin (dome's offset.y
+    starts exactly where the shaft ends) so the two read as one
+    continuous part rather than two floating pieces."""
+    dome_h = max(round(h * _CONE_DOME_RATIO, 2), 1)
+    shaft_h = max(round(h - dome_h, 2), 1)
+    return [
+        {
+            "offset": {"x": 0, "y": 0, "z": 0},
+            "size": {"w": w, "h": shaft_h, "d": d},
+            "rotation": {"x": 0, "y": 0, "z": 0},
+            "shape": "box",
+            "color_role": "primary",
+        },
+        {
+            "offset": {"x": 0, "y": shaft_h, "z": 0},
+            "size": {"w": w, "h": dome_h, "d": d},
+            "rotation": {"x": 0, "y": 0, "z": 0},
+            "shape": "cone",
+            "color_role": "primary",
+        },
+    ]
+
+
+# Keyed by the same "box"/"cylinder"/"cone" vocabulary
+# _apply_placement_shapes() writes onto placement["shape"] (and that
+# MechView.jsx's PrimitiveGeometry already renders) -- no fourth
+# vocabulary invented just for template lookup.
+_PRIMITIVE_TEMPLATES = {
+    "box": _box_primitive_template,
+    "cylinder": _cylinder_primitive_template,
+    "cone": _cone_primitive_template,
+}
+
+# mount_spec grammar (Master Guide example: "35mm hole c-c"). No data-
+# file legend for this string's grammar exists anywhere else in the
+# repo, so this patch is what defines it -- three shapes, all optionally
+# carrying a trailing thread size:
+#   "M3 thread"                                   -- single threaded boss
+#   "2-hole 35mm c-c, M3"                          -- linear center-to-center pair
+#   "4-hole 48x18mm rectangular pattern, M2"       -- rectangular N-hole pattern
+_MOUNT_SPEC_RECT_RE = re.compile(
+    r"(\d+)-hole\s+([\d.]+)\s*x\s*([\d.]+)\s*mm\s+rectangular\s+pattern"
+    r"(?:,\s*(M\d+(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+_MOUNT_SPEC_CC_RE = re.compile(
+    r"(\d+)-hole\s+([\d.]+)\s*mm\s+c-c(?:,\s*(M\d+(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+_MOUNT_SPEC_THREAD_RE = re.compile(r"^\s*(M\d+(?:\.\d+)?)\s+thread\s*$", re.IGNORECASE)
+
+
+def _parse_mount_spec(mount_spec) -> dict | None:
+    """Parses a curated-table/distributor `mount_spec` string into a
+    small structured dict _mount_hole_primitives()/
+    _resize_mount_parts_from_mount_spec() below can act on. Returns
+    None for anything that isn't a non-empty string matching one of
+    the three grammars above -- same fail-safe convention as the rest
+    of this module: an unparseable mount_spec just means "no mounting-
+    hole primitives / no mount resize for this part," never an error.
+    """
+    if not isinstance(mount_spec, str) or not mount_spec.strip():
+        return None
+
+    m = _MOUNT_SPEC_RECT_RE.search(mount_spec)
+    if m:
+        return {
+            "pattern": "rect",
+            "hole_count": int(m.group(1)),
+            "span_x": float(m.group(2)),
+            "span_y": float(m.group(3)),
+            "thread": m.group(4),
+        }
+
+    m = _MOUNT_SPEC_CC_RE.search(mount_spec)
+    if m:
+        return {
+            "pattern": "cc",
+            "hole_count": int(m.group(1)),
+            "span": float(m.group(2)),
+            "thread": m.group(3),
+        }
+
+    m = _MOUNT_SPEC_THREAD_RE.match(mount_spec)
+    if m:
+        return {"pattern": "thread", "thread": m.group(1)}
+
+    return None
+
+
+# Hole radius per thread size (slightly larger than the thread's own
+# nominal diameter, standard clearance-hole practice) -- not exact
+# per-standard clearance figures, just enough to read as "a real hole
+# sized to its thread" rather than a fixed blob regardless of M2 vs M4.
+_THREAD_HOLE_RADIUS_MM = {"M2": 1.1, "M2.5": 1.4, "M3": 1.6, "M4": 2.1}
+_DEFAULT_HOLE_RADIUS_MM = 1.5
+
+
+def _hole_radius_for_thread(thread) -> float:
+    if not thread:
+        return _DEFAULT_HOLE_RADIUS_MM
+    return _THREAD_HOLE_RADIUS_MM.get(thread.upper(), _DEFAULT_HOLE_RADIUS_MM)
+
+
+def _mount_hole_primitives(w: float, h: float, d: float, parsed: dict) -> list:
+    """Turns a _parse_mount_spec() result into small accent-colored
+    hole cylinders on the part's own placement -- through-drilled
+    along the part's own depth (`d`), positioned symmetrically around
+    the part's own w/h center, and clamped so no hole (nor its own
+    radius) can land outside the part's own footprint. This is the
+    "clamped to its own footprint" behavior the guide's mounting-hole
+    fidelity note calls for -- a spec'd hole span larger than the part
+    itself (e.g. a stepper's c-c spacing wider than its own diameter,
+    or a rounding artifact) gets pulled back inside rather than drawing
+    a hole primitive that pokes outside its own part's volume.
+    """
+    if not parsed:
+        return []
+
+    radius = _hole_radius_for_thread(parsed.get("thread"))
+    diameter = radius * 2
+    hole_d = max(d, 1)
+    cx, cy = w / 2, h / 2
+
+    pattern = parsed.get("pattern")
+    if pattern == "thread":
+        centers = [(cx, cy)]
+    elif pattern == "cc":
+        max_span = max(w - 2 * radius, 0)
+        span = min(parsed.get("span") or 0, max_span)
+        centers = [(cx - span / 2, cy), (cx + span / 2, cy)]
+    elif pattern == "rect":
+        span_x = min(parsed.get("span_x") or 0, max(w - 2 * radius, 0))
+        span_y = min(parsed.get("span_y") or 0, max(h - 2 * radius, 0))
+        centers = [
+            (cx - span_x / 2, cy - span_y / 2),
+            (cx + span_x / 2, cy - span_y / 2),
+            (cx - span_x / 2, cy + span_y / 2),
+            (cx + span_x / 2, cy + span_y / 2),
+        ]
+    else:
+        return []
+
+    primitives = []
+    for hx, hy in centers:
+        hx = min(max(hx, radius), max(w - radius, radius))
+        hy = min(max(hy, radius), max(h - radius, radius))
+        primitives.append({
+            "offset": {"x": round(hx - radius, 2), "y": round(hy - radius, 2), "z": 0},
+            "size": {"w": round(diameter, 2), "h": round(diameter, 2), "d": hole_d},
+            "rotation": {"x": 0, "y": 0, "z": 0},
+            "shape": "cylinder",
+            "color_role": "accent",
+        })
+    return primitives
+
+
+def _apply_primitive_composition(spec: dict, parts: list) -> None:
+    """G3a's main step: for every mech.placements[] entry whose part
+    actually has `dimensions_mm` resolved -- either G1a's curated
+    table or G1b's DigiKey/Mouser lookup -- builds a `primitives` list
+    off the deterministic shape->template mapping
+    (_PRIMITIVE_TEMPLATES), keyed by whatever _apply_placement_shapes()
+    already set on `placement["shape"]` (defaulting to "box" when no
+    G1a shape match exists, same default MechView.jsx's own single-
+    primitive fallback already uses). A part whose mount_spec parses
+    successfully (_parse_mount_spec() above) also gets small accent-
+    colored mounting-hole primitives appended on top of its main
+    template, via _mount_hole_primitives().
+
+    Gated on `dimensions_mm` rather than a matched `shape` specifically
+    -- a G1b (DigiKey/Mouser) hit has real w/h/d but no shape/mount_spec
+    at all (component_spec_lookup.get_real_spec() doesn't return
+    those), so it still gets a real-sized single-box template here
+    instead of being skipped just because it has no shape opinion. A
+    part with neither dimensions_mm nor a resolved shape is left
+    completely untouched -- that's exactly G3b's future scope (the LLM
+    primitive pool), not this deterministic pass's job.
+
+    Must run after _apply_placement_shapes() (needs its `shape` output)
+    and after _clamp_placements_to_enclosure() (needs each placement's
+    own w/h/d already fitted inside the enclosure, since every
+    primitive here is sized as a fraction of that same w/h/d).
+    """
+    placements = (spec.get("mech") or {}).get("placements")
+    if not isinstance(placements, list):
+        return
+
+    parts_by_id = {
+        part.get("id"): part for part in parts if isinstance(part, dict)
+    }
+
+    for placement in placements:
+        if not isinstance(placement, dict):
+            continue
+        part = parts_by_id.get(placement.get("part_id"))
+        if not isinstance(part, dict) or not part.get("dimensions_mm"):
+            continue
+
+        w = placement.get("w") or 1
+        h = placement.get("h") or 1
+        d = placement.get("d") or 1
+        shape = placement.get("shape") or "box"
+        template_fn = _PRIMITIVE_TEMPLATES.get(shape, _box_primitive_template)
+        primitives = template_fn(w, h, d)
+
+        parsed_mount = _parse_mount_spec(part.get("mount_spec"))
+        if parsed_mount:
+            primitives = primitives + _mount_hole_primitives(w, h, d, parsed_mount)
+
+        placement["primitives"] = primitives
+
+
+# G0's own mount-per-subsystem naming convention (SYSTEM_PROMPT_PARTS's
+# own example: "mount_mcu_1" mounts "mcu_1") -- the sibling-lookup key
+# _resize_mount_parts_from_mount_spec() below uses.
+_MOUNT_ID_PREFIX = "mount_"
+# Fixed bracket material margin around the outermost hole span -- same
+# "documented ratio, not a per-part guess" spirit as _CONE_DOME_RATIO
+# above; nothing in the curated table specifies bracket wall thickness.
+_MOUNT_MARGIN_MM = 6
+
+
+def _resize_mount_parts_from_mount_spec(spec: dict, parts: list) -> None:
+    """G3a side effect (Master Guide: "mount_spec ... can size/position
+    that subsystem's G0-created mount part instead of G0's mount sizing
+    staying LLM-guessed"): for any part with a parsed mount_spec AND a
+    sibling mount part already in the BOM (id "mount_" + this part's
+    own id), resizes that mount's own mech.placements entry to span the
+    real hole footprint (plus a small fixed material margin) instead of
+    whatever the model guessed for it, and recenters it under the
+    mounted part's own placement.
+
+    A rectangular N-hole pattern drives both w and h; a 2-hole c-c spec
+    drives w only (h is left as whatever it already was, since c-c is a
+    single linear span, not a footprint) -- only touch what the spec
+    actually constrains, same honesty _clamp_placements_to_enclosure()
+    already practices elsewhere in this module. A single threaded boss
+    (`pattern == "thread"`) has no span to size a bracket off of at all
+    -- skipped here; only _mount_hole_primitives() (the composition
+    step above) draws it, as a hole on the part's own placement.
+
+    Must run BEFORE _clamp_placements_to_enclosure() -- a resized mount
+    here is still only a candidate size/position; it needs the same
+    enclosure-bounds clipping every other placement gets before it's
+    final.
+
+    A part with no mount_spec, no parsed mount_spec, or no sibling
+    mount placement is left completely untouched, same fail-safe
+    convention as every other step in this pipeline.
+    """
+    mech = spec.get("mech")
+    if not isinstance(mech, dict):
+        return
+    placements = mech.get("placements")
+    if not isinstance(placements, list):
+        return
+
+    placements_by_part_id = {
+        p.get("part_id"): p for p in placements if isinstance(p, dict)
+    }
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        parsed = _parse_mount_spec(part.get("mount_spec"))
+        if not parsed or parsed.get("pattern") == "thread":
+            continue
+
+        part_placement = placements_by_part_id.get(part.get("id"))
+        mount_placement = placements_by_part_id.get(
+            _MOUNT_ID_PREFIX + str(part.get("id")))
+        if not isinstance(part_placement, dict) or not isinstance(mount_placement, dict):
+            continue
+
+        if parsed["pattern"] == "rect":
+            new_w = parsed["span_x"] + 2 * _MOUNT_MARGIN_MM
+            new_h = parsed["span_y"] + 2 * _MOUNT_MARGIN_MM
+        else:  # "cc"
+            new_w = parsed["span"] + 2 * _MOUNT_MARGIN_MM
+            new_h = mount_placement.get("h") or part_placement.get("h") or new_w
+
+        mount_placement["w"] = round(new_w, 2)
+        mount_placement["h"] = round(new_h, 2)
+
+        # Recenter the (now-resized) mount directly under the part it
+        # mounts -- same x/y-center-alignment idea SYSTEM_PROMPT_WIRING
+        # already asks the model to eyeball ("the MCU's mount sits
+        # right under or beside the MCU's own placement"), just made
+        # exact now that a real size/center exists to align to.
+        part_cx = (part_placement.get("x") or 0) + (part_placement.get("w") or 0) / 2
+        part_cy = (part_placement.get("y") or 0) + (part_placement.get("h") or 0) / 2
+        mount_placement["x"] = round(part_cx - new_w / 2, 2)
+        mount_placement["y"] = round(part_cy - new_h / 2, 2)
+
+
 def _ensure_electrical_placements(spec: dict, parts: list) -> None:
     """
     Safety net for SYSTEM_PROMPT_WIRING's mech.placements coverage rule.
@@ -1433,10 +1787,18 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # wiring.mermaid build below, though mermaid itself doesn't read mech.
     _ensure_electrical_placements(spec, spec["parts"])
 
-    # Clip every placement (model-produced or just gap-filled above) to
-    # the enclosure's own bounds -- see _clamp_placements_to_enclosure's
-    # own docstring for why an unclamped placement is what produces the
-    # "floating disconnected cluster" Mech-view symptom.
+    # G3a side effect: resize/recenter any G0-created mount part off
+    # its mounted part's real mount_spec, BEFORE the enclosure clamp
+    # below -- see _resize_mount_parts_from_mount_spec()'s own
+    # docstring for why this has to run first (a resized mount is still
+    # only a candidate size/position, not a final one).
+    _resize_mount_parts_from_mount_spec(spec, spec["parts"])
+
+    # Clip every placement (model-produced, gap-filled, or just
+    # mount-resized above) to the enclosure's own bounds -- see
+    # _clamp_placements_to_enclosure's own docstring for why an
+    # unclamped placement is what produces the "floating disconnected
+    # cluster" Mech-view symptom.
     _clamp_placements_to_enclosure(spec)
 
     # G1c: annotate every placement whose part had a G1a curated-table
@@ -1445,6 +1807,13 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # steps above since it only annotates placements that already
     # exist, never adds/resizes/repositions one.
     _apply_placement_shapes(spec, spec["parts"])
+
+    # G3a main step: compose each placement's own `primitives` list off
+    # its now-final (clamped, shape-annotated) w/h/d -- see
+    # _apply_primitive_composition()'s own docstring. Must run last of
+    # this group, after both the shape annotation and the enclosure
+    # clamp it depends on.
+    _apply_primitive_composition(spec, spec["parts"])
 
 
     # Step 3 of the wiring-detail fix: deterministically render the
