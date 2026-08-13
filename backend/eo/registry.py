@@ -177,14 +177,22 @@ AGENT_CAPABILITIES = {
     # parallel, independent-per-item shape as content fan-out, so it
     # reuses this pool's accounts and rotation instead of provisioning
     # its own.
-    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
-    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+    #
+    # G3e-2 (Master Guide, "G3/G4" Level 1->2 "Subsections", generate
+    # half): "mech_subsection" added the same way again --
+    # agents/mech_subsection_pool.py fans one small LLM call out per
+    # subsection needing its mount placed relative to its part, same
+    # genuinely-parallel, independent-per-item shape as its Level 0->1
+    # sibling, so it reuses this same pool instead of provisioning its
+    # own.
+    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
 
     # --- Cerebras: Fixer Pool (fixed 3, no reserve tier defined anywhere in Parts 1-8) ---
     "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},

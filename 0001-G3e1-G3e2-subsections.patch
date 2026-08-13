@@ -1,0 +1,876 @@
+From d85eb97557e328cdd2223d4dbc4ee903c49dc1d5 Mon Sep 17 00:00:00 2001
+From: patch <patch@local>
+Date: Thu, 13 Aug 2026 22:24:55 +0000
+Subject: [PATCH] G3e-1 + G3e-2: Level 1->2 subsection grouping + LLM
+ relative-placement pool
+
+G3e-1 (eo/mech_subsections.py): deterministic, LLM-free grouping of
+mech.placements into Level 2 subsections off G0's existing mount_<id>
+sibling convention. Singleton subsections for mount-less parts, orphaned
+mounts kept as their own singleton so nothing gets dropped.
+
+G3e-2 (agents/mech_subsection_pool.py): worker-pool LLM fan-out
+(role_tag=mech_subsection, same Cerebras pool as mech_primitive) that
+proposes each subsection's mount-relative-to-part offset, skipping
+subsections already grounded in real mount_spec data
+(_resize_mount_parts_from_mount_spec's rect/cc patterns).
+
+eo/registry.py: registers mech_subsection onto the shared Cerebras pool.
+
+Tests: 28 new unit tests, full suite (315) green.
+---
+ backend/agents/mech_subsection_pool.py        | 307 ++++++++++++++++++
+ backend/eo/mech_subsections.py                | 169 ++++++++++
+ backend/eo/registry.py                        |  24 +-
+ .../tests/unit/test_mech_subsection_pool.py   | 165 ++++++++++
+ backend/tests/unit/test_mech_subsections.py   | 141 ++++++++
+ 5 files changed, 798 insertions(+), 8 deletions(-)
+ create mode 100644 backend/agents/mech_subsection_pool.py
+ create mode 100644 backend/eo/mech_subsections.py
+ create mode 100644 backend/tests/unit/test_mech_subsection_pool.py
+ create mode 100644 backend/tests/unit/test_mech_subsections.py
+
+diff --git a/backend/agents/mech_subsection_pool.py b/backend/agents/mech_subsection_pool.py
+new file mode 100644
+index 0000000..6979a5b
+--- /dev/null
++++ b/backend/agents/mech_subsection_pool.py
+@@ -0,0 +1,307 @@
++"""
++agents/mech_subsection_pool.py — G3e-2 (Master Guide, "G3/G4.
++Hierarchical parallel build + validate", Level 1->2 "Subsections", the
++"generate" half): fans one small LLM call out per subsection via
++eo/worker_pool.py, same worker-pool pattern agents/mech_primitive_pool.py
++(G3b) already uses for Level 0->1 -- "same idea, one level up" per the
++Master Guide's own description of this whole tier: "Placement generation
++is split by zone/subsystem instead of one monolithic call... solve each
++group's relative placement in parallel (same worker-pool pattern)."
++
++Scope: for every subsection eo/mech_subsections.py's
++group_into_subsections() reports with an actual mount member (a
++singleton subsection -- a part with no mount -- has nothing to place
++relative to anything, so it's never in scope here), propose where that
++mount sits RELATIVE to its part's own local origin. This is deliberately
++narrower than "decide the whole subsection's absolute position" -- Level
++2->3 (G3f) is what places a subsection relative to its section, this
++module only ever settles the *internal* geometry of one part + its own
++mount.
++
++Skips subsections already grounded in real data: a part whose
++`mount_spec` parses into a rect/c-c pattern already had its mount's size
++AND position set deterministically off that real hole spec by
++agents/hardware_speccer.py's `_resize_mount_parts_from_mount_spec()`
++(a G3a side effect) -- running an LLM guess on top of real geometry would
++replace known-good data with a worse guess, the same "don't guess where
++you already know" split G3a/G3b already apply at Level 0->1. A `thread`-
++pattern mount_spec (a single threaded boss, no separate bracket to size)
++is NOT touched by that deterministic step, so it stays in scope here.
++
++Unlike content_adapter_pool.py, this isn't a standalone top-level agent
++dispatched by eo/executor.py -- like agents/mech_primitive_pool.py, it's
++one more mutator step meant to run synchronously from
++agents/hardware_speccer.py's own run_hardware_speccer() pipeline (once
++G3e-4 wires the Level 1->2 driver in), called with `spec`/`parts`
++directly and mutating spec["mech"]["placements"] in place.
++
++Worker selection reuses eo/worker_pool.py's shared, role_tag-parameterized
++helper with role_tag="mech_subsection" -- registered onto the same
++Cerebras Code-Writer-Pool accounts "mech_primitive"/"content_writer"
++already share (eo/registry.py), not a new pool of keys, same "quota-aware
++fairness spreads load regardless of which tag(s) an account carries"
++reasoning that pool's own comment there already documents.
++
++Deferred imports of agents.hardware_speccer inside the functions below
++(never at module level): same circular-import fix agents/
++mech_primitive_pool.py's own module docstring documents, for the same
++reason (agents/hardware_speccer.py will call this module's run()).
++"""
++
++import os
++import sys
++import json
++import time
++from concurrent.futures import ThreadPoolExecutor, as_completed
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from relay.emitter import emit_event
++from utils.llm_client import generate_text
++from eo.worker_pool import _select_workers as _select_workers_for_role
++from eo.mech_subsections import group_into_subsections
++
++ROLE_TAG = "mech_subsection"
++
++# Generous slack around the part's own largest dimension -- big enough
++# that a legitimate "beside" or "behind" placement never gets clipped,
++# small enough to catch a genuinely broken/runaway LLM number. Shape-
++# aware collision itself is G3e-3's job (real FreeCAD), not this
++# module's -- this is only a numeric-sanity backstop, same spirit as
++# agents/mech_primitive_pool.py's own _clamp_primitive() bound.
++_MAX_OFFSET_MULTIPLIER = 3
++
++_VALID_AXES = ("x", "y", "z")
++
++SYSTEM_PROMPT = """You are a mechanical layout assistant. You are given \
++ONE part and its own mount/holder (the small mechanical piece that \
++holds it inside the enclosure) as a subsection -- their own bounding \
++box w/h/d in millimeters each. Your only job is deciding where the \
++mount sits RELATIVE to the part; you do not redesign either shape.
++
++Coordinate convention: the part sits at this subsection's own local \
++origin (0,0,0), corner-origin like a CSS box model -- x maps to width \
++(w), y maps to height (h), z maps to depth (d), the same axis \
++convention already used everywhere else in this pipeline (e.g. a lid's \
++z is set to the housing's own d so it stacks directly on top). Propose \
++ONLY the mount's own offset {x,y,z} in this local frame so the mount \
++sits directly adjacent to the part -- below, beside, or behind it, with \
++little or no gap -- and does not overlap the part's own bounding box.
++
++Respond with ONLY valid JSON, no markdown fences, no explanation, in \
++exactly this shape:
++{"mount_offset": {"x": 0, "y": 0, "z": 0}}
++"""
++
++
++def _strip_fences(text: str) -> str:
++    text = text.strip()
++    if text.startswith("```"):
++        text = text.split("```")[1]
++        if text.startswith("json"):
++            text = text[4:]
++        text = text.strip()
++    return text
++
++
++def _as_float(value) -> float:
++    try:
++        return float(value)
++    except (TypeError, ValueError):
++        return 0.0
++
++
++def _default_relative_offset(part_h: float) -> dict:
++    """Fallback used on any parse failure AND as this module's plain
++    "place it somewhere sane" default -- directly below the part, edge-
++    to-edge, matching SYSTEM_PROMPT_WIRING's own already-established
++    eyeballed convention ("the MCU's mount sits right under or beside
++    the MCU's own placement") rather than inventing a new one."""
++    return {"x": 0.0, "y": round(part_h, 2), "z": 0.0}
++
++
++def _parse_relative_offset(raw_text: str, part_w: float, part_h: float, part_d: float) -> dict:
++    """Parses/clamps the LLM's response into a usable {x,y,z} offset,
++    falling back to _default_relative_offset() on any parse failure or a
++    response that isn't even shaped like one -- never raises, same
++    fail-safe convention agents/mech_primitive_pool.py's own
++    _parse_primitives() already uses for its own LLM path."""
++    try:
++        parsed = json.loads(_strip_fences(raw_text))
++        raw_offset = parsed.get("mount_offset")
++        if not isinstance(raw_offset, dict):
++            raise ValueError("no mount_offset in response")
++    except (json.JSONDecodeError, AttributeError, ValueError):
++        return _default_relative_offset(part_h)
++
++    max_extent = max(part_w, part_h, part_d, 1.0) * _MAX_OFFSET_MULTIPLIER
++    offset = {}
++    for axis in _VALID_AXES:
++        value = _as_float(raw_offset.get(axis))
++        offset[axis] = round(min(max(value, -max_extent), max_extent), 2)
++    return offset
++
++
++def _needs_llm_relative_placement(subsection: dict, parts_by_id: dict) -> bool:
++    """G3e-2's own scope, per the module docstring: a subsection needs
++    an LLM call only when (a) it actually has a mount to place relative
++    to something (a singleton has no relative-placement decision at all)
++    and (b) that placement isn't already grounded in real mount_spec
++    data. Imported lazily -- see module docstring on the circular-import
++    fix."""
++    from agents.hardware_speccer import _parse_mount_spec
++
++    member_ids = (subsection or {}).get("member_ids") or []
++    if len(member_ids) < 2:
++        return False  # singleton -- nothing to place relative to anything
++
++    anchor_part = parts_by_id.get(subsection.get("subsection_id"))
++    if not isinstance(anchor_part, dict):
++        return True  # no BOM entry to confirm this is already grounded -- don't skip it
++
++    parsed = _parse_mount_spec(anchor_part.get("mount_spec"))
++    # rect/cc patterns already got a real, deterministic reposition from
++    # _resize_mount_parts_from_mount_spec(); "thread" (no bracket span to
++    # size) did not, so it stays in scope here.
++    return not (parsed and parsed.get("pattern") != "thread")
++
++
++def _generate_relative_placement_for_subsection(subsection: dict, placements_by_id: dict,
++                                                  key_env: str, worker_id: int,
++                                                  session_id: str = None, path: str = None,
++                                                  domain: str = None) -> tuple:
++    """Runs on one worker thread with one fixed account. Returns
++    (subsection_id, mount_id, offset). Mirrors agents/
++    mech_primitive_pool.py's own _generate_primitives_for_part() almost
++    exactly -- same generate_text()/agent_start/agent_done shape."""
++    subsection_id = subsection.get("subsection_id")
++    member_ids = subsection.get("member_ids") or []
++    mount_id = next((mid for mid in member_ids if mid != subsection_id), None)
++
++    agent_name = f"mech_subsection_{worker_id}"
++    emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
++               payload={"label": f"Mech Subsection {worker_id} — {subsection_id}"})
++    started = time.monotonic()
++
++    part_placement = placements_by_id.get(subsection_id) or {}
++    mount_placement = placements_by_id.get(mount_id) or {}
++    part_w = part_placement.get("w") or 1
++    part_h = part_placement.get("h") or 1
++    part_d = part_placement.get("d") or 1
++
++    user_content = json.dumps({
++        "part": {"part_id": subsection_id, "w": part_w, "h": part_h, "d": part_d},
++        "mount": {
++            "part_id": mount_id,
++            "w": mount_placement.get("w") or 1,
++            "h": mount_placement.get("h") or 1,
++            "d": mount_placement.get("d") or 1,
++        },
++    })
++
++    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
++
++    try:
++        raw = generate_text(
++            SYSTEM_PROMPT, user_content, chain,
++            agent_name=agent_name, session_id=session_id, path=path, domain=domain,
++        )
++        offset = _parse_relative_offset(raw, part_w, part_h, part_d)
++    except RuntimeError:
++        # Every provider in the chain failed -- fall back to the same
++        # safe "directly below" default _parse_relative_offset() itself
++        # falls back to on a bad response, so a quota/outage blip
++        # degrades this subsection to a sane default, never a crash of
++        # the whole pool.
++        offset = _default_relative_offset(part_h)
++
++    duration_ms = int((time.monotonic() - started) * 1000)
++    emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
++               payload={"summary": f"placed {mount_id} relative to {subsection_id}",
++                        "duration_ms": duration_ms})
++    return subsection_id, mount_id, offset
++
++
++def run(spec: dict, parts: list, session_id: str = None, path: str = None,
++        domain: str = None, key_override=None, expanded: bool = False) -> dict:
++    """G3e-2's entry point -- meant to be called synchronously from
++    agents.hardware_speccer.run_hardware_speccer() once G3e-4 wires
++    Level 1->2 into the pipeline, the same in-process shape agents/
++    mech_primitive_pool.py's own run() already uses for Level 0->1.
++    Mutates spec["mech"]["placements"] in place (each in-scope mount
++    placement's x/y/z gets recomputed from its part's absolute position
++    plus the LLM-proposed relative offset) and returns `spec`.
++
++    key_override: same three-shape contract as agents/
++    mech_primitive_pool.py's/code_writers.py's run() -- None (pick own
++    workers via _select_workers), a single key_env string (use only that
++    account for every subsection), or a list (use exactly those accounts
++    as the parallel worker pool).
++
++    No-op (returns `spec` unchanged, no worker-pool call at all) when no
++    subsection actually needs this path -- most runs will have most
++    mounts already grounded by mount_spec, and there's no reason to
++    rank/select workers for an empty job, same short-circuit agents/
++    mech_primitive_pool.py's own run() already uses.
++    """
++    mech = spec.get("mech") or {}
++    placements = mech.get("placements")
++    if not isinstance(placements, list):
++        return spec
++
++    placements_by_id = {
++        p.get("part_id"): p for p in placements
++        if isinstance(p, dict) and p.get("part_id")
++    }
++    parts_by_id = {p.get("id"): p for p in parts if isinstance(p, dict)}
++
++    subsections = group_into_subsections(mech)
++    targets = [s for s in subsections if _needs_llm_relative_placement(s, parts_by_id)]
++    if not targets:
++        return spec
++
++    # Fixed pool size, same as agents/mech_primitive_pool.py's/
++    # code_writers.py's run() -- NOT scaled to len(targets). Keys are
++    # reused round-robin below when there are more subsections than
++    # workers.
++    worker_count = 8 if expanded else 5
++    key_envs = _select_workers_for_role(ROLE_TAG, worker_count, key_override,
++                                        session_id=session_id, agent_name=ROLE_TAG)
++
++    with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
++        futures = {
++            executor.submit(
++                _generate_relative_placement_for_subsection, subsection, placements_by_id,
++                key_envs[i % len(key_envs)], (i % len(key_envs)) + 1,
++                session_id=session_id, path=path, domain=domain,
++            ): subsection
++            for i, subsection in enumerate(targets)
++        }
++        for future in as_completed(futures):
++            subsection_id, mount_id, offset = future.result()
++            if not mount_id:
++                continue
++            part_placement = placements_by_id.get(subsection_id)
++            mount_placement = placements_by_id.get(mount_id)
++            if not isinstance(part_placement, dict) or not isinstance(mount_placement, dict):
++                continue
++            print(f"    [Mech Subsection Pool] placed {mount_id} relative to {subsection_id}: {offset}")
++            mount_placement["x"] = round((part_placement.get("x") or 0) + offset["x"], 2)
++            mount_placement["y"] = round((part_placement.get("y") or 0) + offset["y"], 2)
++            mount_placement["z"] = round((part_placement.get("z") or 0) + offset["z"], 2)
++
++    return spec
++
++
++if __name__ == "__main__":
++    _demo_spec = {
++        "mech": {"placements": [
++            {"part_id": "sensor_1", "x": 10, "y": 10, "z": 0, "w": 20, "h": 15, "d": 5},
++            {"part_id": "mount_sensor_1", "x": 0, "y": 0, "z": 0, "w": 20, "h": 5, "d": 5},
++        ]},
++    }
++    _demo_parts = [
++        {"id": "sensor_1", "name": "Generic Sensor", "category": "sensor"},
++        {"id": "mount_sensor_1", "name": "Sensor Bracket", "category": "3D_PRINT/MISC"},
++    ]
++    result = run(_demo_spec, _demo_parts)
++    print(json.dumps(result["mech"]["placements"], indent=2))
+diff --git a/backend/eo/mech_subsections.py b/backend/eo/mech_subsections.py
+new file mode 100644
+index 0000000..043516f
+--- /dev/null
++++ b/backend/eo/mech_subsections.py
+@@ -0,0 +1,169 @@
++"""
++eo/mech_subsections.py — G3e-1 (Master Guide, "G3/G4. Hierarchical
++parallel build + validate", Level 1->2 "Subsections"): the deterministic,
++LLM-free half of Level 1->2 -- turns Level 1's flat mech.placements list
++into Level 2's grouping, a part plus its own G0-created mount, per the
++Master Guide's own definition of what a subsection even is: "Level 2's
++grouping isn't invented -- it's G0's own mount-per-subsystem
++decomposition (MCU + its mount are already sibling parts in the BOM), so
++'subsection' just means a part and the mechanical thing that holds it, a
++real, already-existing relationship."
++
++This is the first, purely-mechanical rung of Level 1->2 -- same build-
++order reasoning as G3a being the first rung of Level 0->1. No LLM call,
++no FreeCAD call: this module only reshapes data that's already sitting on
++`mech["placements"]` into subsection groups. G3e-2
++(agents/mech_subsection_pool.py) is what actually proposes each member's
++relative placement inside a group this module creates; G3e-3 (eo/
++mech_validator.py's LEVEL_1_2, not built by this patch) is what checks
++it; G3e-4 (not built by this patch) wires both into eo/mech_repair.py's
++shared retry loop -- this module's own output shape (`subsection_id` /
++`member_ids`) is written to be exactly what that loop's node-identifier
++contract (`{"node_id", "issue"}`, per eo/mech_repair.py's own docstring)
++will key off of once it lands: `subsection_id` doubles as Level 1->2's
++`node_id`.
++
++Grouping rule: reuses G0's own mount-naming convention exactly
++(agents/hardware_speccer.py's `_MOUNT_ID_PREFIX = "mount_"` -- duplicated
++here as a local constant rather than imported, matching eo/
++mech_validator.py's own documented precedent of never importing agents/
++hardware_speccer.py or agents/mech_primitive_pool.py from this package;
++see that module's "Dependency shape" docstring section, and
++agents/mech_primitive_pool.py's own module docstring on why the reverse
++import direction is the circular one). A placement whose `part_id` is
++NOT itself "mount_"-prefixed is a subsection's anchor; if a sibling
++placement with id "mount_" + that part_id also exists, it joins the same
++subsection. A part with no mount sibling becomes a singleton subsection
++of one -- Level 2 still needs to name it something, and "a part with no
++mount" is a perfectly valid (if trivial) "part + the mechanical thing
++that holds it" case (nothing holds it but the enclosure itself). An
++orphaned "mount_x" placement whose "x" part doesn't exist in this mech
++(shouldn't happen given G0's own sibling-creation convention, but a part
++deleted/renamed mid-pipeline shouldn't silently vanish from Level 2
++either) becomes its own singleton subsection too -- same "nothing gets
++dropped" fail-safe posture agents/hardware_speccer.py's own
++_ensure_electrical_placements() already practices for Level 0->1
++coverage.
++
++Idempotent / side-effect-free: group_into_subsections() is a pure
++function of `mech["placements"]` -- it does not mutate `mech` and can be
++called repeatedly (once by G3e-2 to know what to generate for, again
++later by G3e-3/G3e-4 to know what to validate/repair) without needing to
++cache or invalidate anything.
++"""
++
++import os
++import sys
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++# Mirrors agents/hardware_speccer.py's own _MOUNT_ID_PREFIX exactly (see
++# module docstring on why this is a local copy, not an import).
++MOUNT_ID_PREFIX = "mount_"
++
++
++def group_into_subsections(mech: dict) -> list:
++    """Returns Level 2's node list:
++        [{"subsection_id": str, "member_ids": [part_id, ...]}, ...]
++
++    `subsection_id` is always the anchor part's own `part_id` (never a
++    synthesized "sub_"-prefixed id) -- Level 2 nodes stay named after
++    real BOM parts, same "no invented identifiers" spirit as every other
++    level in this tree. `member_ids` holds 1 entry (no mount found) or 2
++    (part + its "mount_"-prefixed sibling), always ordered part-then-
++    mount.
++
++    Placements with no `part_id` are skipped entirely -- there's no
++    identity to group or later validate them under, matching eo/
++    mech_validator.py's own `_checkable_placements()` skip-don't-flag
++    posture for entries that aren't ready to participate in a level yet.
++
++    Never modifies `mech` -- read-only, same contract eo/
++    mech_validator.py's validate_layout() already holds itself to.
++    """
++    placements = (mech or {}).get("placements") or []
++    by_id = {
++        p.get("part_id"): p for p in placements
++        if isinstance(p, dict) and p.get("part_id")
++    }
++
++    subsections = []
++    grouped_mount_ids = set()
++
++    for placement in placements:
++        if not isinstance(placement, dict):
++            continue
++        part_id = placement.get("part_id")
++        if not part_id or part_id.startswith(MOUNT_ID_PREFIX):
++            continue  # mounts are only ever visited as a sibling below, never their own anchor
++
++        mount_id = MOUNT_ID_PREFIX + str(part_id)
++        member_ids = [part_id]
++        if mount_id in by_id:
++            member_ids.append(mount_id)
++            grouped_mount_ids.add(mount_id)
++        subsections.append({"subsection_id": part_id, "member_ids": member_ids})
++
++    # Orphaned mounts -- see module docstring.
++    for placement in placements:
++        if not isinstance(placement, dict):
++            continue
++        part_id = placement.get("part_id")
++        if (part_id and part_id.startswith(MOUNT_ID_PREFIX)
++                and part_id not in grouped_mount_ids):
++            subsections.append({"subsection_id": part_id, "member_ids": [part_id]})
++
++    return subsections
++
++
++def members_for_subsection(mech: dict, subsection: dict) -> list:
++    """Resolves a subsection's `member_ids` back to their full placement
++    dicts from `mech["placements"]`, in the same order as `member_ids`.
++    Shared helper -- G3e-2 needs each member's w/h/d to generate relative
++    placement, G3e-3/G3e-4 (not built by this patch) will need their
++    absolute x/y/z + primitives to validate/repair, and both would
++    otherwise duplicate this exact lookup-by-part_id loop.
++
++    A `member_id` with no matching placement (shouldn't happen --
++    group_into_subsections() only ever emits member_ids it just read
++    from `mech["placements"]` itself) is silently skipped rather than
++    raising, same fail-safe posture as the rest of this module.
++    """
++    placements = (mech or {}).get("placements") or []
++    by_id = {
++        p.get("part_id"): p for p in placements
++        if isinstance(p, dict) and p.get("part_id")
++    }
++    return [
++        by_id[member_id] for member_id in (subsection or {}).get("member_ids") or []
++        if member_id in by_id
++    ]
++
++
++def apply_subsection_grouping(mech: dict) -> list:
++    """Convenience wrapper matching this pipeline's usual mutate-in-place
++    call shape (agents/hardware_speccer.py's own G-series steps all work
++    this way) -- computes group_into_subsections(mech) and also stashes
++    it on `mech["subsections"]`, so a caller that just wants the side
++    effect (e.g. a future top-level Level-1->2 driver, G3e-4) doesn't
++    have to thread the return value through by hand. Still returns the
++    list too, so a caller that wants the pure-function shape (G3e-2,
++    tests) can ignore the mutation and just use the return value.
++    """
++    subsections = group_into_subsections(mech)
++    if isinstance(mech, dict):
++        mech["subsections"] = subsections
++    return subsections
++
++
++if __name__ == "__main__":
++    import json
++
++    _demo_mech = {
++        "placements": [
++            {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5},
++            {"part_id": "mount_mcu_1", "x": 0, "y": 25, "z": 0, "w": 30, "h": 5, "d": 5},
++            {"part_id": "battery_1", "x": 50, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10},
++        ],
++    }
++    print(json.dumps(group_into_subsections(_demo_mech), indent=2))
+diff --git a/backend/eo/registry.py b/backend/eo/registry.py
+index eda15fe..aded82c 100644
+--- a/backend/eo/registry.py
++++ b/backend/eo/registry.py
+@@ -177,14 +177,22 @@ AGENT_CAPABILITIES = {
+     # parallel, independent-per-item shape as content fan-out, so it
+     # reuses this pool's accounts and rotation instead of provisioning
+     # its own.
+-    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
+-    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive"]},
++    #
++    # G3e-2 (Master Guide, "G3/G4" Level 1->2 "Subsections", generate
++    # half): "mech_subsection" added the same way again --
++    # agents/mech_subsection_pool.py fans one small LLM call out per
++    # subsection needing its mount placed relative to its part, same
++    # genuinely-parallel, independent-per-item shape as its Level 0->1
++    # sibling, so it reuses this same pool instead of provisioning its
++    # own.
++    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
++    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection"]},
+ 
+     # --- Cerebras: Fixer Pool (fixed 3, no reserve tier defined anywhere in Parts 1-8) ---
+     "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
+diff --git a/backend/tests/unit/test_mech_subsection_pool.py b/backend/tests/unit/test_mech_subsection_pool.py
+new file mode 100644
+index 0000000..d4a7f63
+--- /dev/null
++++ b/backend/tests/unit/test_mech_subsection_pool.py
+@@ -0,0 +1,165 @@
++"""
++tests/unit/test_mech_subsection_pool.py — G3e-2 (Master Guide, "G3/G4.
++Hierarchical parallel build + validate", Level 1->2 "Subsections", LLM
++path): covers agents/mech_subsection_pool.py --
++
++  - _parse_relative_offset()'s parsing/clamping and fallback-to-default
++    behavior on garbage/empty/malformed LLM output
++  - _default_relative_offset()'s "directly below" shape
++  - _needs_llm_relative_placement()'s gating: singleton -> False,
++    mount_spec-resized (rect/cc) -> False, thread-pattern or no
++    mount_spec -> True, unknown BOM part -> True (don't skip what you
++    can't confirm is already grounded)
++  - run()'s end-to-end wiring: only in-scope subsections get an LLM
++    call, mount x/y/z gets recomputed from the part's own position plus
++    the proposed offset, and a no-targets spec never calls the worker
++    pool at all
++
++Uses the same mock_llm/fake_bus fixtures as the rest of this tree
++(tests/conftest.py) -- no real network calls.
++"""
++import agents.hardware_speccer  # noqa: F401 -- ensure importable before mech_subsection_pool's lazy imports
++import agents.mech_subsection_pool as msp
++
++
++# ---------------------------------------------------------------------------
++# _parse_relative_offset / _default_relative_offset
++# ---------------------------------------------------------------------------
++
++def test_default_relative_offset_places_mount_directly_below():
++    assert msp._default_relative_offset(20) == {"x": 0.0, "y": 20.0, "z": 0.0}
++
++
++def test_parse_relative_offset_passes_through_reasonable_values():
++    raw = '{"mount_offset": {"x": 1.5, "y": 12, "z": 0}}'
++    offset = msp._parse_relative_offset(raw, 20, 20, 20)
++    assert offset == {"x": 1.5, "y": 12.0, "z": 0.0}
++
++
++def test_parse_relative_offset_falls_back_on_garbage_json():
++    offset = msp._parse_relative_offset("not json at all", 10, 20, 10)
++    assert offset == msp._default_relative_offset(20)
++
++
++def test_parse_relative_offset_falls_back_on_missing_key():
++    offset = msp._parse_relative_offset('{"something_else": 1}', 10, 20, 10)
++    assert offset == msp._default_relative_offset(20)
++
++
++def test_parse_relative_offset_strips_markdown_fences():
++    raw = '```json\n{"mount_offset": {"x": 0, "y": 5, "z": 0}}\n```'
++    offset = msp._parse_relative_offset(raw, 10, 10, 10)
++    assert offset == {"x": 0.0, "y": 5.0, "z": 0.0}
++
++
++def test_parse_relative_offset_clamps_runaway_values():
++    raw = '{"mount_offset": {"x": 999999, "y": -999999, "z": 0}}'
++    offset = msp._parse_relative_offset(raw, 10, 10, 10)
++    max_extent = 10 * msp._MAX_OFFSET_MULTIPLIER
++    assert offset["x"] == max_extent
++    assert offset["y"] == -max_extent
++
++
++# ---------------------------------------------------------------------------
++# _needs_llm_relative_placement
++# ---------------------------------------------------------------------------
++
++def test_needs_llm_false_for_singleton_subsection():
++    subsection = {"subsection_id": "battery_1", "member_ids": ["battery_1"]}
++    assert msp._needs_llm_relative_placement(subsection, {}) is False
++
++
++def test_needs_llm_true_when_no_mount_spec_at_all():
++    subsection = {"subsection_id": "sensor_1", "member_ids": ["sensor_1", "mount_sensor_1"]}
++    parts_by_id = {"sensor_1": {"id": "sensor_1", "category": "sensor"}}
++    assert msp._needs_llm_relative_placement(subsection, parts_by_id) is True
++
++
++def test_needs_llm_false_when_mount_spec_already_resized_rect_pattern():
++    subsection = {"subsection_id": "mcu_1", "member_ids": ["mcu_1", "mount_mcu_1"]}
++    parts_by_id = {"mcu_1": {"id": "mcu_1", "mount_spec": "4-hole 48x18mm rectangular pattern, M2"}}
++    assert msp._needs_llm_relative_placement(subsection, parts_by_id) is False
++
++
++def test_needs_llm_true_for_thread_pattern_mount_spec():
++    subsection = {"subsection_id": "buzzer_1", "member_ids": ["buzzer_1", "mount_buzzer_1"]}
++    parts_by_id = {"buzzer_1": {"id": "buzzer_1", "mount_spec": "M3 threaded boss"}}
++    assert msp._needs_llm_relative_placement(subsection, parts_by_id) is True
++
++
++def test_needs_llm_true_when_anchor_part_missing_from_bom():
++    subsection = {"subsection_id": "ghost_1", "member_ids": ["ghost_1", "mount_ghost_1"]}
++    assert msp._needs_llm_relative_placement(subsection, {}) is True
++
++
++# ---------------------------------------------------------------------------
++# run() end-to-end
++# ---------------------------------------------------------------------------
++
++def test_run_places_mount_relative_to_part(mock_llm):
++    mock_llm.set_json_response({"mount_offset": {"x": 0, "y": 20, "z": 0}})
++    spec = {"mech": {"placements": [
++        {"part_id": "sensor_1", "x": 10, "y": 5, "z": 0, "w": 20, "h": 15, "d": 5},
++        {"part_id": "mount_sensor_1", "x": 0, "y": 0, "z": 0, "w": 20, "h": 5, "d": 5},
++        # Singleton -- never touched by this pool.
++        {"part_id": "battery_1", "x": 0, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10},
++    ]}}
++    parts = [
++        {"id": "sensor_1", "category": "sensor"},
++        {"id": "mount_sensor_1", "category": "3D_PRINT"},
++        {"id": "battery_1", "category": "power"},
++    ]
++
++    result = msp.run(spec, parts, session_id="s1")
++
++    placements_by_id = {p["part_id"]: p for p in result["mech"]["placements"]}
++    mount = placements_by_id["mount_sensor_1"]
++    # part's own x/y/z (10, 5, 0) + proposed offset (0, 20, 0)
++    assert mount["x"] == 10
++    assert mount["y"] == 25
++    assert mount["z"] == 0
++    # Untouched.
++    assert placements_by_id["battery_1"]["x"] == 0
++    assert placements_by_id["battery_1"]["y"] == 0
++
++
++def test_run_skips_subsection_already_grounded_by_mount_spec(mock_llm):
++    spec = {"mech": {"placements": [
++        {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5},
++        {"part_id": "mount_mcu_1", "x": 5, "y": 5, "z": 0, "w": 40, "h": 5, "d": 5},
++    ]}}
++    parts = [{"id": "mcu_1", "category": "mcu", "mount_spec": "4-hole 48x18mm rectangular pattern, M2"}]
++
++    msp.run(spec, parts, session_id="s1")
++
++    mock_llm.mock.assert_not_called()
++
++
++def test_run_is_a_noop_when_only_singletons_present(mock_llm):
++    spec = {"mech": {"placements": [{"part_id": "battery_1", "x": 0, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10}]}}
++    parts = [{"id": "battery_1", "category": "power"}]
++
++    result = msp.run(spec, parts, session_id="s1")
++
++    mock_llm.mock.assert_not_called()
++    assert result["mech"]["placements"][0]["x"] == 0
++
++
++def test_run_falls_back_to_default_offset_when_every_provider_fails(mock_llm):
++    mock_llm.raise_on_call(RuntimeError("all providers exhausted"))
++    spec = {"mech": {"placements": [
++        {"part_id": "sensor_1", "x": 10, "y": 5, "z": 0, "w": 20, "h": 15, "d": 5},
++        {"part_id": "mount_sensor_1", "x": 0, "y": 0, "z": 0, "w": 20, "h": 5, "d": 5},
++    ]}}
++    parts = [
++        {"id": "sensor_1", "category": "sensor"},
++        {"id": "mount_sensor_1", "category": "3D_PRINT"},
++    ]
++
++    result = msp.run(spec, parts, session_id="s1")
++
++    placements_by_id = {p["part_id"]: p for p in result["mech"]["placements"]}
++    mount = placements_by_id["mount_sensor_1"]
++    # part's own y (5) + default fallback offset (part_h = 15)
++    assert mount["y"] == 20
++    assert mount["x"] == 10
+diff --git a/backend/tests/unit/test_mech_subsections.py b/backend/tests/unit/test_mech_subsections.py
+new file mode 100644
+index 0000000..20d5651
+--- /dev/null
++++ b/backend/tests/unit/test_mech_subsections.py
+@@ -0,0 +1,141 @@
++"""
++tests/unit/test_mech_subsections.py — G3e-1 (Master Guide, "G3/G4.
++Hierarchical parallel build + validate", Level 1->2 "Subsections",
++deterministic grouping): covers eo/mech_subsections.py --
++
++  - group_into_subsections()'s part+mount pairing off the "mount_"
++    naming convention
++  - singleton subsections for parts with no mount sibling
++  - orphaned "mount_x" placements (no matching "x" part) still becoming
++    their own singleton subsection, nothing dropped
++  - placements with no part_id skipped entirely
++  - members_for_subsection()'s lookup-back-to-placements helper
++  - apply_subsection_grouping()'s mutate-and-return wrapper
++
++No LLM, no FreeCAD -- this module is pure data reshaping, so these tests
++need no mock_llm/fake_bus fixtures at all.
++"""
++import eo.mech_subsections as ms
++
++
++# ---------------------------------------------------------------------------
++# group_into_subsections
++# ---------------------------------------------------------------------------
++
++def test_groups_part_with_its_mount_sibling():
++    mech = {"placements": [
++        {"part_id": "mcu_1", "w": 30, "h": 20, "d": 5},
++        {"part_id": "mount_mcu_1", "w": 30, "h": 5, "d": 5},
++    ]}
++    subsections = ms.group_into_subsections(mech)
++    assert subsections == [
++        {"subsection_id": "mcu_1", "member_ids": ["mcu_1", "mount_mcu_1"]},
++    ]
++
++
++def test_part_with_no_mount_becomes_singleton_subsection():
++    mech = {"placements": [{"part_id": "battery_1", "w": 20, "h": 10, "d": 10}]}
++    subsections = ms.group_into_subsections(mech)
++    assert subsections == [{"subsection_id": "battery_1", "member_ids": ["battery_1"]}]
++
++
++def test_orphaned_mount_becomes_its_own_singleton_subsection():
++    # "mount_ghost_1" exists but "ghost_1" itself does not -- nothing
++    # should silently vanish from Level 2.
++    mech = {"placements": [{"part_id": "mount_ghost_1", "w": 10, "h": 10, "d": 5}]}
++    subsections = ms.group_into_subsections(mech)
++    assert subsections == [{"subsection_id": "mount_ghost_1", "member_ids": ["mount_ghost_1"]}]
++
++
++def test_mixed_bom_produces_expected_grouping():
++    mech = {"placements": [
++        {"part_id": "mcu_1"},
++        {"part_id": "mount_mcu_1"},
++        {"part_id": "battery_1"},
++        {"part_id": "sensor_1"},
++        {"part_id": "mount_sensor_1"},
++        {"part_id": "housing_1"},
++    ]}
++    subsections = ms.group_into_subsections(mech)
++    by_id = {s["subsection_id"]: s["member_ids"] for s in subsections}
++    assert by_id == {
++        "mcu_1": ["mcu_1", "mount_mcu_1"],
++        "battery_1": ["battery_1"],
++        "sensor_1": ["sensor_1", "mount_sensor_1"],
++        "housing_1": ["housing_1"],
++    }
++    # Every subsection_id is a real anchor part -- never a "mount_"-
++    # prefixed id used as its own anchor.
++    assert all(not sid.startswith(ms.MOUNT_ID_PREFIX) for sid in by_id)
++
++
++def test_placements_missing_part_id_are_skipped():
++    mech = {"placements": [{"w": 10, "h": 10, "d": 10}, {"part_id": "mcu_1"}]}
++    subsections = ms.group_into_subsections(mech)
++    assert subsections == [{"subsection_id": "mcu_1", "member_ids": ["mcu_1"]}]
++
++
++def test_empty_or_missing_placements_returns_empty_list():
++    assert ms.group_into_subsections({}) == []
++    assert ms.group_into_subsections({"placements": []}) == []
++    assert ms.group_into_subsections(None) == []
++
++
++def test_non_dict_placements_are_ignored():
++    mech = {"placements": ["not a dict", None, {"part_id": "mcu_1"}]}
++    subsections = ms.group_into_subsections(mech)
++    assert subsections == [{"subsection_id": "mcu_1", "member_ids": ["mcu_1"]}]
++
++
++def test_does_not_mutate_input_mech():
++    mech = {"placements": [{"part_id": "mcu_1"}, {"part_id": "mount_mcu_1"}]}
++    original = {"placements": list(mech["placements"])}
++    ms.group_into_subsections(mech)
++    assert mech == original
++    assert "subsections" not in mech
++
++
++# ---------------------------------------------------------------------------
++# members_for_subsection
++# ---------------------------------------------------------------------------
++
++def test_members_for_subsection_resolves_placements_in_order():
++    mech = {"placements": [
++        {"part_id": "mount_mcu_1", "w": 30, "h": 5, "d": 5},
++        {"part_id": "mcu_1", "w": 30, "h": 20, "d": 5},
++    ]}
++    subsection = {"subsection_id": "mcu_1", "member_ids": ["mcu_1", "mount_mcu_1"]}
++    members = ms.members_for_subsection(mech, subsection)
++    assert [m["part_id"] for m in members] == ["mcu_1", "mount_mcu_1"]
++    assert members[0]["h"] == 20
++    assert members[1]["h"] == 5
++
++
++def test_members_for_subsection_skips_unresolvable_member_id():
++    mech = {"placements": [{"part_id": "mcu_1"}]}
++    subsection = {"subsection_id": "mcu_1", "member_ids": ["mcu_1", "mount_mcu_1"]}
++    members = ms.members_for_subsection(mech, subsection)
++    assert [m["part_id"] for m in members] == ["mcu_1"]
++
++
++def test_members_for_subsection_handles_empty_subsection():
++    assert ms.members_for_subsection({"placements": []}, {}) == []
++    assert ms.members_for_subsection({"placements": []}, None) == []
++
++
++# ---------------------------------------------------------------------------
++# apply_subsection_grouping
++# ---------------------------------------------------------------------------
++
++def test_apply_subsection_grouping_mutates_and_returns_same_list():
++    mech = {"placements": [{"part_id": "mcu_1"}, {"part_id": "mount_mcu_1"}]}
++    returned = ms.apply_subsection_grouping(mech)
++    assert mech["subsections"] == returned
++    assert returned == [{"subsection_id": "mcu_1", "member_ids": ["mcu_1", "mount_mcu_1"]}]
++
++
++def test_apply_subsection_grouping_is_idempotent():
++    mech = {"placements": [{"part_id": "mcu_1"}, {"part_id": "mount_mcu_1"}]}
++    first = ms.apply_subsection_grouping(mech)
++    second = ms.apply_subsection_grouping(mech)
++    assert first == second
+-- 
+2.43.0
+
