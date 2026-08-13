@@ -18,6 +18,8 @@ path): covers agents/mech_subsection_pool.py --
 Uses the same mock_llm/fake_bus fixtures as the rest of this tree
 (tests/conftest.py) -- no real network calls.
 """
+import pytest
+
 import agents.hardware_speccer  # noqa: F401 -- ensure importable before mech_subsection_pool's lazy imports
 import agents.mech_subsection_pool as msp
 
@@ -163,3 +165,64 @@ def test_run_falls_back_to_default_offset_when_every_provider_fails(mock_llm):
     # part's own y (5) + default fallback offset (part_h = 15)
     assert mount["y"] == 20
     assert mount["x"] == 10
+
+
+# ---------------------------------------------------------------------------
+# regenerate_subsection (G3e-4, this patch) -- the Level 1->2
+# regenerate_node_fn eo/mech_repair.py's run_repair_loop() calls
+# ---------------------------------------------------------------------------
+
+def test_regenerate_subsection_repositions_mount_from_llm_response(mock_llm):
+    mock_llm.set_json_response({"mount_offset": {"x": 0, "y": 22, "z": 0}})
+    mech = {"placements": [
+        {"part_id": "mcu_1", "x": 10, "y": 5, "z": 0, "w": 30, "h": 20, "d": 5},
+        {"part_id": "mount_mcu_1", "x": 10, "y": 12, "z": 0, "w": 30, "h": 5, "d": 5},
+    ]}
+    violation = {"node_id": "mcu_1", "issue": "part and mount collide (~9.0 mm^3 overlap)"}
+
+    msp.regenerate_subsection(mech, "mcu_1", violation, 1, key_override="fake_key", session_id="s1")
+
+    placements_by_id = {p["part_id"]: p for p in mech["placements"]}
+    mount = placements_by_id["mount_mcu_1"]
+    assert mount["x"] == 10  # part's own x (10) + offset x (0)
+    assert mount["y"] == 27  # part's own y (5) + offset y (22)
+    assert mount["z"] == 0
+
+
+def test_regenerate_subsection_feeds_violation_back_as_context(mock_llm):
+    mock_llm.set_json_response({"mount_offset": {"x": 0, "y": 25, "z": 0}})
+    mech = {"placements": [
+        {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5},
+        {"part_id": "mount_mcu_1", "x": 0, "y": 10, "z": 0, "w": 30, "h": 5, "d": 5},
+    ]}
+    violation = {"node_id": "mcu_1", "issue": "part and mount collide (~9.0 mm^3 overlap)"}
+
+    msp.regenerate_subsection(mech, "mcu_1", violation, 1, key_override="fake_key", session_id="s1")
+
+    user_content = mock_llm.mock.call_args.args[1]
+    assert "part and mount collide" in user_content
+
+
+def test_regenerate_subsection_raises_for_unknown_node_id(mock_llm):
+    mech = {"placements": [{"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5}]}
+    with pytest.raises(ValueError):
+        msp.regenerate_subsection(mech, "nonexistent", {"issue": "x"}, 1, key_override="fake_key")
+
+
+def test_regenerate_subsection_raises_when_no_mount_sibling(mock_llm):
+    mech = {"placements": [{"part_id": "battery_1", "x": 0, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10}]}
+    with pytest.raises(ValueError):
+        msp.regenerate_subsection(mech, "battery_1", {"issue": "x"}, 1, key_override="fake_key")
+
+
+def test_regenerate_subsection_falls_back_to_default_when_provider_fails(mock_llm):
+    mock_llm.raise_on_call(RuntimeError("all providers exhausted"))
+    mech = {"placements": [
+        {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5},
+        {"part_id": "mount_mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 5, "d": 5},
+    ]}
+    msp.regenerate_subsection(mech, "mcu_1", {"issue": "collision"}, 1, key_override="fake_key")
+
+    placements_by_id = {p["part_id"]: p for p in mech["placements"]}
+    # part's own y (0) + default fallback offset (part_h = 20)
+    assert placements_by_id["mount_mcu_1"]["y"] == 20

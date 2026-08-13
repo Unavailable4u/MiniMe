@@ -83,6 +83,51 @@ def test_subset_for_nodes_handles_missing_placements():
 
 
 # ---------------------------------------------------------------------------
+# _subset_for_nodes -- Level 1->2 (G3e-4): node_ids are subsection_ids,
+# and the subset must keep BOTH a kept subsection's anchor placement AND
+# its "mount_"-prefixed sibling (see this function's own docstring on why
+# dropping the mount would silently re-derive a singleton).
+# ---------------------------------------------------------------------------
+
+def _subsection_mech():
+    return {"placements": [
+        {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5},
+        {"part_id": "mount_mcu_1", "x": 0, "y": 20, "z": 0, "w": 30, "h": 5, "d": 5},
+        {"part_id": "sensor_1", "x": 50, "y": 0, "z": 0, "w": 20, "h": 15, "d": 5},
+        {"part_id": "mount_sensor_1", "x": 50, "y": 15, "z": 0, "w": 20, "h": 5, "d": 5},
+        {"part_id": "battery_1", "x": 100, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10},
+    ]}
+
+
+def test_subset_for_nodes_level_1_2_keeps_anchor_and_mount():
+    mech = _subsection_mech()
+    subset = mr._subset_for_nodes(mech, {"mcu_1"}, level=mr.LEVEL_1_2)
+    assert {p["part_id"] for p in subset["placements"]} == {"mcu_1", "mount_mcu_1"}
+
+
+def test_subset_for_nodes_level_1_2_handles_multiple_subsections():
+    mech = _subsection_mech()
+    subset = mr._subset_for_nodes(mech, {"mcu_1", "sensor_1"}, level=mr.LEVEL_1_2)
+    assert {p["part_id"] for p in subset["placements"]} == {
+        "mcu_1", "mount_mcu_1", "sensor_1", "mount_sensor_1",
+    }
+
+
+def test_subset_for_nodes_level_1_2_singleton_contributes_only_itself():
+    mech = _subsection_mech()
+    subset = mr._subset_for_nodes(mech, {"battery_1"}, level=mr.LEVEL_1_2)
+    assert {p["part_id"] for p in subset["placements"]} == {"battery_1"}
+
+
+def test_subset_for_nodes_default_level_is_still_level_0_1():
+    # Backward-compat: no `level` arg at all still behaves exactly like
+    # the pre-G3e-4 Level 0->1-only implementation.
+    mech = _mech("a", "b", "c")
+    subset = mr._subset_for_nodes(mech, {"a", "c"})
+    assert [p["part_id"] for p in subset["placements"]] == ["a", "c"]
+
+
+# ---------------------------------------------------------------------------
 # No violations / can't-even-check paths
 # ---------------------------------------------------------------------------
 
@@ -269,3 +314,111 @@ def test_validator_error_mid_repair_after_an_earlier_confirmed_fix(monkeypatch):
     assert result["validator_error"] == "sandbox died"
     assert result["repaired"] == ["motor_1"]  # confirmed in round 2, preserved through the round-3 failure
     assert [v["node_id"] for v in result["violations"]] == ["battery_1"]
+
+
+# ---------------------------------------------------------------------------
+# run_level_1_2_repair (G3e-4) -- the Level 1->2 integration driver:
+# run_repair_loop() + one final full validate_layout() call + persisting
+# footprints onto mech["subsections"]. eo.mech_repair.validate_layout and
+# agents.mech_subsection_pool.regenerate_subsection are both monkeypatched
+# scripted stand-ins -- no real FreeCAD sandbox or LLM call in this file.
+# ---------------------------------------------------------------------------
+
+def _level_1_2_mech():
+    return {"placements": [
+        {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5,
+         "primitives": [{"shape": "box"}]},
+        {"part_id": "mount_mcu_1", "x": 0, "y": 10, "z": 0, "w": 30, "h": 5, "d": 5,
+         "primitives": [{"shape": "box"}]},
+    ]}
+
+
+def test_run_level_1_2_repair_clean_run_persists_footprints(monkeypatch):
+    # First call: run_repair_loop()'s own initial validate -- clean.
+    # Second call: run_level_1_2_repair()'s own final full re-validate.
+    _install(monkeypatch, [
+        {"valid": True, "violations": [], "footprints": {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 15, "d": 5}}},
+        {"valid": True, "violations": [], "footprints": {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 15, "d": 5}}},
+    ])
+    regen_calls = []
+    monkeypatch.setattr(
+        "agents.mech_subsection_pool.regenerate_subsection",
+        lambda *a, **k: regen_calls.append((a, k)),
+    )
+
+    spec = {"mech": _level_1_2_mech()}
+    result = mr.run_level_1_2_repair(spec, parts=[], session_id="s1")
+
+    assert result["valid"] is True
+    assert regen_calls == []  # nothing violated -- never asked to regenerate
+    subsections = spec["mech"]["subsections"]
+    assert subsections == [{
+        "subsection_id": "mcu_1", "member_ids": ["mcu_1", "mount_mcu_1"],
+        "footprint": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 15, "d": 5},
+    }]
+
+
+def test_run_level_1_2_repair_regenerates_on_collision_and_persists_footprint(monkeypatch):
+    _install(monkeypatch, [
+        # run_repair_loop()'s initial validate: collision
+        {"valid": False, "violations": [{"node_id": "mcu_1", "issue": "part and mount collide"}]},
+        # re-validate after regeneration: clean
+        {"valid": True, "violations": []},
+        # run_level_1_2_repair()'s own final full re-validate
+        {"valid": True, "violations": [], "footprints": {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 25, "d": 5}}},
+    ])
+    regen_calls = []
+    monkeypatch.setattr(
+        "agents.mech_subsection_pool.regenerate_subsection",
+        lambda mech, node_id, violation, attempt, **k: regen_calls.append(node_id),
+    )
+
+    spec = {"mech": _level_1_2_mech()}
+    result = mr.run_level_1_2_repair(spec, parts=[], session_id="s1")
+
+    assert result["valid"] is True
+    assert result["repaired"] == ["mcu_1"]
+    assert regen_calls == ["mcu_1"]
+    subsections = spec["mech"]["subsections"]
+    assert subsections[0]["footprint"] == {"x": 0, "y": 0, "z": 0, "w": 30, "h": 25, "d": 5}
+
+
+def test_run_level_1_2_repair_skips_final_call_on_validator_error(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": True, "violations": [], "validator_error": "sandbox unreachable"},
+    ])
+    monkeypatch.setattr("agents.mech_subsection_pool.regenerate_subsection", lambda *a, **k: None)
+
+    spec = {"mech": _level_1_2_mech()}
+    result = mr.run_level_1_2_repair(spec, parts=[], session_id="s1")
+
+    assert result["validator_error"] == "sandbox unreachable"
+    # No second validate_layout call was scripted -- if run_level_1_2_repair
+    # tried to make one, _ScriptedValidate would raise "called more times
+    # than the test scripted" and this test would fail with that error.
+    assert "subsections" not in spec["mech"]
+
+
+def test_run_level_1_2_repair_flagged_subsection_still_gets_a_footprint(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": False, "violations": [{"node_id": "mcu_1", "issue": "still colliding"}]},  # initial
+        {"valid": False, "violations": [{"node_id": "mcu_1", "issue": "still colliding"}]},  # attempt 1 revalidate
+        {"valid": False, "violations": [{"node_id": "mcu_1", "issue": "still colliding"}]},  # attempt 2 revalidate -> cap hit
+        # final full re-validate after the repair loop settles
+        {"valid": True, "violations": [], "footprints": {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 12, "d": 5}}},
+    ])
+    attempts_seen = []
+    monkeypatch.setattr(
+        "agents.mech_subsection_pool.regenerate_subsection",
+        lambda mech, node_id, violation, attempt, **k: attempts_seen.append(attempt),
+    )
+
+    spec = {"mech": _level_1_2_mech()}
+    result = mr.run_level_1_2_repair(spec, parts=[], session_id="s1", max_retries=2)
+
+    assert attempts_seen == [1, 2]  # both retries actually used, cap respected
+    assert result["valid"] is False
+    assert result["violations"][0]["node_id"] == "mcu_1"
+    # Still gets a footprint from the final call even though it's flagged.
+    subsections = spec["mech"]["subsections"]
+    assert subsections[0]["footprint"] == {"x": 0, "y": 0, "z": 0, "w": 30, "h": 12, "d": 5}
