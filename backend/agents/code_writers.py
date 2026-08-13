@@ -105,13 +105,16 @@ def _select_workers(worker_count: int, key_override=None, session_id: str = None
 EXTRA_FALLBACK_STEPS = 2
 
 
-def _extra_fallback_chain_steps(primary_key_env: str) -> list:
+def _extra_fallback_chain_steps(primary_key_env: str, already_used: set = None) -> list:
     from eo.panel import _best_match
     from eo.quota_sentinel import get_quota_snapshot
     from agents.generic_worker import _chain_step_for
 
     quota_status = get_quota_snapshot()
-    exclude = {primary_key_env}
+    # already_used (NEW): the keys _model_rotation_chain() below already
+    # spent on this worker's own MODELS rotation, so this tail doesn't
+    # re-offer one of those as a "different" account.
+    exclude = {primary_key_env} | (already_used or set())
     steps = []
     for _ in range(EXTRA_FALLBACK_STEPS):
         candidate = _best_match(ROLE_TAG, quota_status, exclude=exclude)
@@ -120,6 +123,55 @@ def _extra_fallback_chain_steps(primary_key_env: str) -> list:
         exclude.add(candidate)
         steps.append(_chain_step_for(candidate))
     return steps
+
+
+# Fix 3 (reliability audit, follow-up to Fix 2) -- follows the exact bug
+# code_writer_lean.py's 2026-08-12 fix already found and fixed in the
+# tier-1 pipeline (see that file's docstring): the MODELS rotation below
+# used to read the SAME key_env for all three model names, so three
+# "different" models were really one Cerebras quota bucket -- a single
+# 429/cooldown on that one account skipped all three at once. That's the
+# "code_writer_1 ... skipped -- still cooling down" trio you get in the
+# logs when CEREBRAS_API_KEY_1 gets rate-limited.
+#
+# code_writer_lean.py could just hardcode three sibling keys
+# (CEREBRAS_API_KEY_1/_2/_3) because it's a fixed single-worker pipeline.
+# This file can't do that the same way: `key_env` here is whichever
+# account eo/worker_pool.py's fairness rotation handed THIS worker for
+# THIS run, so a second hardcoded key could just as easily collide with
+# a DIFFERENT worker's own assigned key running concurrently in the same
+# ThreadPoolExecutor. Instead, each step after the first asks the same
+# quota-/cooldown-aware picker _extra_fallback_chain_steps() above
+# already uses for another live account from the SAME natural-roles pool
+# (implementer-tagged Cerebras keys only, so the model names stay
+# accurate to what's actually being called) -- falling back to
+# `primary_key_env` only once that pool is genuinely exhausted, which
+# just degrades to the old (safe, if not independent) behavior instead
+# of raising.
+def _model_rotation_chain(primary_key_env: str) -> list:
+    from eo.panel import _is_cooling_down, _sorted_by_quota
+    from eo.quota_sentinel import get_quota_snapshot
+    from eo.registry import AGENT_CAPABILITIES
+
+    quota_status = get_quota_snapshot()
+    cerebras_pool = [
+        k for k, info in AGENT_CAPABILITIES.items()
+        if info.get("provider") == "cerebras" and ROLE_TAG in info.get("natural_roles", [])
+    ]
+    exclude = {primary_key_env}
+    key_envs = [primary_key_env]
+    for _ in range(len(MODELS) - 1):
+        candidates = [
+            k for k in cerebras_pool
+            if k not in exclude and not _is_cooling_down(k, quota_status)
+        ]
+        if not candidates:
+            key_envs.append(primary_key_env)  # pool exhausted -- degrade, don't crash
+            continue
+        candidate = _sorted_by_quota(candidates, quota_status)[0]
+        exclude.add(candidate)
+        key_envs.append(candidate)
+    return [{"provider": "cerebras", "model": m, "key_env": k} for m, k in zip(MODELS, key_envs)]
 
 
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
@@ -185,12 +237,15 @@ def _write_one_module(module_spec: dict, key_env: str, worker_id: int,
                    payload={"summary": summary, "duration_ms": duration_ms})
         return name, code
 
-    chain = [{"provider": "cerebras", "model": m, "key_env": key_env} for m in MODELS]
-    # Fix 2: extend past the primary key's own model rotation with a few
-    # steps on OTHER accounts/providers (see _extra_fallback_chain_steps()
-    # above), instead of failing as soon as this one Cerebras key is
-    # exhausted across all of MODELS.
-    chain += _extra_fallback_chain_steps(key_env)
+    # Fix 3: each MODELS step now gets its own live Cerebras account where
+    # possible, instead of all three sharing key_env's single quota bucket
+    # (see _model_rotation_chain()'s docstring above).
+    chain = _model_rotation_chain(key_env)
+    # Fix 2: extend past the model rotation with a few steps on OTHER
+    # accounts/providers (see _extra_fallback_chain_steps() above),
+    # instead of failing as soon as every key the rotation touched is
+    # exhausted.
+    chain += _extra_fallback_chain_steps(key_env, already_used={step["key_env"] for step in chain})
     spec_for_prompt = dict(module_spec)
     if design_approach:
         # Patch 8 — folded into the SAME per-module JSON prompt payload
