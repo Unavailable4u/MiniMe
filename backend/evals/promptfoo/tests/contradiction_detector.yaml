@@ -89,6 +89,7 @@
 - description: "Both pre-filter candidates are noisy wording, not real disagreement -- tests rubber-stamping failure mode directly"
   vars:
     role_name: "contradiction_detector"
+    provider_override: "groq"
     context: >-
       Research extraction table (2 papers on remote work and reported
       productivity):
