@@ -31,6 +31,22 @@ eo/local_workspace_tools.py for the actual list_dir/read_file
 functions built on top of call_daemon(), and daemon/tools.py for the
 daemon-side implementation and the exact message shapes.
 
+Part 7 adds one more inbound message type on this same connection:
+{"type": "tool_stream", "request_id": ..., "stream": "stdout"|"stderr",
+"chunk": "..."} -- daemon/connection.py's execute_command streaming
+(see that module's docstring). Unlike tool_result, a tool_stream
+message never resolves anything in `_pending`; it's forwarded live as
+a Pusher event on the workspace's channel (see _forward_stream_chunk
+below) so Part 7's frontend terminal panel can render output as it
+happens instead of waiting for the final tool_result. This is why
+`_pending`'s entries now carry an `action_id` alongside the Future --
+call_daemon() needs some correlation id to put on that Pusher event so
+the frontend can match a stream of chunks to the specific pending
+action / terminal run it belongs to, and action_id (already known to
+eo/local_workspace_tools.py's confirm_action(), which is the only
+caller that ever runs execute_command) is the natural one to reuse
+rather than inventing a second id with the same job.
+
 Place this file at: eo/local_workspace.py
 """
 from __future__ import annotations
@@ -44,6 +60,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from relay.emitter import EventType, emit_workspace_event  # NEW — Part 7
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -56,12 +74,31 @@ router = APIRouter()
 # case on the other registry.
 _connections: dict[str, WebSocket] = {}
 
-# request_id -> (workspace_id, the Future call_daemon() is waiting on).
-# workspace_id is carried alongside the Future purely so a disconnect
-# (see _fail_pending_for_workspace) can find and fail every request
-# still in flight for that daemon, rather than leaving callers to hang
-# until their own timeout even though the connection is already gone.
-_pending: dict[str, tuple[str, "asyncio.Future[dict]"]] = {}
+
+class _PendingCall:
+    """One in-flight call_daemon() request. A small class instead of a
+    bare tuple (Part 3's original shape) now that Part 7 adds a third
+    field -- `entry.future`/`entry.action_id` at the call sites below
+    reads better than `entry[1]`/`entry[2]` once there's more than one
+    non-workspace_id field to carry."""
+
+    __slots__ = ("workspace_id", "future", "action_id")
+
+    def __init__(self, workspace_id: str, future: "asyncio.Future[dict]", action_id: str | None):
+        self.workspace_id = workspace_id
+        self.future = future
+        self.action_id = action_id
+
+
+# request_id -> the _PendingCall it belongs to. workspace_id is carried
+# alongside the Future purely so a disconnect (see
+# _fail_pending_for_workspace) can find and fail every request still in
+# flight for that daemon, rather than leaving callers to hang until
+# their own timeout even though the connection is already gone.
+# action_id (Part 7, may be None for read tools) is what lets an
+# in-flight tool_stream chunk get tagged with the pending action it
+# belongs to -- see _forward_stream_chunk below.
+_pending: dict[str, _PendingCall] = {}
 
 DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 30.0
 
@@ -145,36 +182,77 @@ def _fail_pending_for_workspace(workspace_id: str, reason: str) -> None:
     until its own timeout elapses."""
     stale_ids = [
         request_id
-        for request_id, (ws_id, future) in _pending.items()
-        if ws_id == workspace_id and not future.done()
+        for request_id, entry in _pending.items()
+        if entry.workspace_id == workspace_id and not entry.future.done()
     ]
     for request_id in stale_ids:
-        _, future = _pending.pop(request_id)
-        if not future.done():
-            future.set_exception(ToolCallError(reason))
+        entry = _pending.pop(request_id)
+        if not entry.future.done():
+            entry.future.set_exception(ToolCallError(reason))
+
+
+def _forward_stream_chunk(workspace_id: str, action_id: str | None, msg: dict) -> None:
+    """Part 7. A tool_stream message never resolves a Future -- it's
+    forwarded live as a Pusher event on the workspace channel, the same
+    emit_workspace_event() mechanism Part 5 already uses for
+    proposed/confirmed/denied/executed/result, so the frontend's
+    terminal panel can subscribe to one channel for both "here's a line
+    of live output" and "here's the final result" instead of needing a
+    second transport. Fire-and-forget, same as every other
+    emit_workspace_event() call site: a dropped Pusher event must never
+    affect the actual running command, which is exactly why the
+    complete (truncated-at-the-cap, not chunk-dropped) output still
+    rides on the authoritative tool_result once execute_command
+    returns.
+    """
+    emit_workspace_event(
+        EventType.LOCAL_TOOL_STREAM_CHUNK,
+        workspace_id=workspace_id,
+        agent="local_workspace",
+        payload={
+            "action_id": action_id,
+            "stream": msg.get("stream"),
+            "chunk": msg.get("chunk"),
+        },
+    )
 
 
 def _resolve_pending(msg: Any) -> bool:
     """Called from daemon_endpoint's receive loop for every inbound
     message. Returns True if the message was a tool_result matched to
-    a pending call_daemon() (and has therefore been fully handled) so
-    the loop knows not to also log/discard it as an unhandled message."""
-    if not isinstance(msg, dict) or msg.get("type") != "tool_result":
+    a pending call_daemon() (handled: resolves the Future) or a
+    tool_stream chunk (handled: forwarded live, Part 7) -- either way
+    the loop knows not to also log/discard it as an unhandled message.
+    """
+    if not isinstance(msg, dict):
+        return False
+
+    msg_type = msg.get("type")
+    if msg_type not in ("tool_result", "tool_stream"):
         return False
 
     request_id = msg.get("request_id")
     entry = _pending.get(request_id)
     if entry is None:
-        logger.warning(
-            "[local_workspace] tool_result for unknown or already-"
-            "resolved request_id %r, discarding",
-            request_id,
+        # A stream chunk for a request that's already resolved (or was
+        # never one we're tracking) is expected near the tail end of a
+        # command -- the reader thread can still be draining a final
+        # line or two after tool_result is sent -- so this stays a
+        # debug log, not the tool_result branch's warning.
+        log_fn = logger.debug if msg_type == "tool_stream" else logger.warning
+        log_fn(
+            "[local_workspace] %s for unknown or already-resolved "
+            "request_id %r, discarding",
+            msg_type, request_id,
         )
         return True
 
-    _, future = entry
-    if not future.done():
-        future.set_result(msg)
+    if msg_type == "tool_stream":
+        _forward_stream_chunk(entry.workspace_id, entry.action_id, msg)
+        return True
+
+    if not entry.future.done():
+        entry.future.set_result(msg)
     return True
 
 
@@ -183,11 +261,19 @@ async def call_daemon(
     tool: str,
     params: dict[str, Any],
     timeout: float = DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
+    action_id: str | None = None,
 ) -> dict[str, Any]:
     """The actual send-a-request-and-await-the-response half of the
     protocol -- eo/local_workspace_tools.py's list_workspace_dir()/
     read_workspace_file() are thin wrappers over this. Raises
     ToolCallError; never returns a partial/ambiguous result.
+
+    `action_id`, new in Part 7: purely informational, passed through
+    from eo/local_workspace_tools.py's confirm_action() (the only
+    caller that ever runs execute_command) so any tool_stream chunks
+    that arrive while this call is in flight can be tagged with the
+    pending action they belong to -- see _forward_stream_chunk above.
+    None for the read tools (list_dir/read_file), which never stream.
     """
     websocket = _connections.get(workspace_id)
     if websocket is None:
@@ -195,7 +281,7 @@ async def call_daemon(
 
     request_id = str(uuid.uuid4())
     future: "asyncio.Future[dict]" = asyncio.get_running_loop().create_future()
-    _pending[request_id] = (workspace_id, future)
+    _pending[request_id] = _PendingCall(workspace_id, future, action_id)
 
     try:
         await websocket.send_json({
@@ -230,12 +316,13 @@ async def daemon_endpoint(websocket: WebSocket, workspace_id: str) -> None:
     first message, or a hello with a wrong/missing token, closes the
     socket. A successful hello gets {"type": "hello_ack",
     "workspace_id": ...} back and the connection is registered. Every
-    message received after that is either a {"type": "tool_result",
-    ...} answering an in-flight call_daemon() (handled by
-    _resolve_pending -- Part 3) or, for now, anything else, which is
-    logged and discarded purely to detect disconnects, same as
-    api/server.py's browser-facing /ws/{session_id} loop already does
-    for the same reason.
+    message received after that is one of: a {"type": "tool_result",
+    ...} answering an in-flight call_daemon() (Part 3), a
+    {"type": "tool_stream", ...} live output chunk from an in-flight
+    execute_command (Part 7) -- both handled by _resolve_pending -- or,
+    for anything else, logged and discarded purely to detect
+    disconnects, same as api/server.py's browser-facing
+    /ws/{session_id} loop already does for the same reason.
     """
     await websocket.accept()
 

@@ -212,6 +212,16 @@ class EventType(str, Enum):
     LOCAL_TOOL_DENIED = "local_tool_denied"
     LOCAL_TOOL_EXECUTED = "local_tool_executed"
     LOCAL_TOOL_RESULT = "local_tool_result"
+    # NEW -- Part 7. One event per line of live execute_command output
+    # (eo/local_workspace.py's _forward_stream_chunk), fired on the same
+    # workspace channel as the five LOCAL_TOOL_* events above, so the
+    # terminal panel and the tool-call timeline both read off one
+    # channel. Payload: {"action_id", "stream": "stdout"|"stderr",
+    # "chunk"}. Deliberately NOT part of the AgentStepList/
+    # RoutingTraceGraph timeline the other LOCAL_TOOL_* events feed --
+    # a chip per output line would flood that trace UI; this one is
+    # consumed only by Part 7's terminal panel.
+    LOCAL_TOOL_STREAM_CHUNK = "local_tool_stream_chunk"
 
 
 # Backward-compat view: existing code/tests that do

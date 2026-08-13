@@ -291,7 +291,13 @@ async def confirm_action(workspace_id: str, action_id: str) -> Dict[str, Any]:
         EventType.LOCAL_TOOL_CONFIRMED, workspace_id, action.tool, action.params, action_id=action_id
     )
     try:
-        result = await call_daemon(workspace_id, action.tool, action.params)
+        # action_id is threaded through to call_daemon() (Part 7) purely
+        # so any tool_stream chunks execute_command produces while this
+        # call is in flight (see eo/local_workspace.py's
+        # _forward_stream_chunk) can be tagged with the action they
+        # belong to -- write_file/delete never stream, so this is a
+        # no-op for those two, just a slightly-unused kwarg.
+        result = await call_daemon(workspace_id, action.tool, action.params, action_id=action_id)
     except ToolCallError as exc:
         _emit_tool_event(
             EventType.LOCAL_TOOL_RESULT, workspace_id, action.tool, action.params,

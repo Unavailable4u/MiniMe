@@ -2,9 +2,11 @@
 import { useState, useEffect, useCallback, useRef, memo } from "react";
 import { authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // same list-of-workspaces store every other project picker in this app reads from
+import PendingActionBar from "../PendingActionBar";   // NEW — Part 7
+import TerminalPanel from "../TerminalPanel";           // NEW — Part 7
 import {
   Folder, FolderOpen, File, Loader2, RefreshCw, WifiOff, ChevronRight,
-  HardDrive, AlertTriangle,
+  HardDrive, AlertTriangle, FileText, TerminalSquare,
 } from "lucide-react";
 
 /**
@@ -21,16 +23,19 @@ import {
  * one level up in Settings, is the right amount of picker for what this
  * tab actually needs.
  *
- * Talks only to Part 3's already-shipped, always-runs-free read routes
- * (POST .../local/list_dir, POST .../local/read_file) plus Part 2's
- * GET .../local/status poll. No propose/confirm, no write/delete/
- * execute_command, no terminal -- those are Part 4 (already live on the
- * backend) and Part 7 (not built here). This tab's whole job is: prove
- * the pipe works end-to-end by rendering a real directory tree pulled
- * from a real paired folder, and let someone click into a file to read
- * it -- also read-only, also already-shipped Part 3 surface, so there's
- * no new backend capability being exposed here that isn't already live
- * and safe.
+ * Talks to Part 3's always-runs-free read routes (POST .../local/
+ * list_dir, POST .../local/read_file), Part 2's GET .../local/status
+ * poll, and, as of Part 7, Part 4's propose/confirm/deny surface for
+ * write_file/delete/execute_command -- surfaced here as a Files/
+ * Terminal sub-view toggle: Files is this same read-only tree (still
+ * read-only; write_file has no UI trigger from the tree yet, only from
+ * an agent's own tool calls landing on PendingActionBar), Terminal is
+ * Part 7's real xterm.js panel (see TerminalPanel.jsx) for proposing
+ * and watching execute_command run. PendingActionBar renders above
+ * both sub-views (not per-sub-view) since a pending write_file/delete/
+ * execute_command can be proposed by an agent regardless of which
+ * sub-view is currently open, and confirming/denying it isn't specific
+ * to either one.
  *
  * Place this file at: frontend/app/components/tabs/LocalWorkspaceTab.jsx
  */
@@ -243,6 +248,7 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
   const [rootLoading, setRootLoading] = useState(false);
   const [rootError, setRootError] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [subView, setSubView] = useState("files"); // "files" | "terminal" — NEW, Part 7
 
   // Consumed once, same "promote/handoff sets it, destination tab reads
   // it once and clears it" contract AppShell.jsx's pendingWorkspaceSelection
@@ -358,68 +364,107 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
           {live ? "Daemon connected" : "No daemon connected"}
         </span>
 
+        {selectedId && (
+          <div className="flex items-center gap-0.5 rounded-lg border border-[var(--neutral-800)] p-0.5">
+            <button
+              type="button"
+              onClick={() => setSubView("files")}
+              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md ${
+                subView === "files" ? "bg-[var(--neutral-800)] text-[var(--neutral-200)]" : "text-[var(--neutral-500)]"
+              }`}
+            >
+              <FileText size={11} /> Files
+            </button>
+            <button
+              type="button"
+              onClick={() => setSubView("terminal")}
+              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md ${
+                subView === "terminal" ? "bg-[var(--neutral-800)] text-[var(--neutral-200)]" : "text-[var(--neutral-500)]"
+              }`}
+            >
+              <TerminalSquare size={11} /> Terminal
+            </button>
+          </div>
+        )}
+
         <button
           type="button"
           onClick={handleRefresh}
-          disabled={!live || rootLoading}
+          disabled={!live || rootLoading || subView !== "files"}
           title="Refresh"
-          className="ml-auto text-[var(--neutral-500)] hover:text-[var(--neutral-300)] disabled:opacity-40 disabled:cursor-not-allowed"
+          className={`text-[var(--neutral-500)] hover:text-[var(--neutral-300)] disabled:opacity-40 disabled:cursor-not-allowed ${subView === "files" ? "ml-auto" : ""}`}
         >
           <RefreshCw size={13} className={rootLoading ? "animate-spin" : ""} />
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 flex">
-        <div className="w-64 shrink-0 border-r border-[var(--neutral-800)] overflow-auto py-1.5">
-          {!selectedId && (
+      {/* NEW — Part 7: pending write_file/delete/execute_command actions,
+          from ANY proposer (an agent's tool call, another tab), shown
+          above both sub-views since confirming/denying one isn't tied
+          to whichever sub-view happens to be open right now. */}
+      {selectedId && <PendingActionBar workspaceId={selectedId} onConfirmed={() => { if (live) loadRoot(selectedId); }} />}
+
+      {subView === "terminal" ? (
+        <div className="flex-1 min-h-0">
+          {selectedId ? (
+            <TerminalPanel workspaceId={selectedId} live={live} />
+          ) : (
             <p className="text-xs text-[var(--neutral-600)] px-3 py-2">Pick a workspace to get started.</p>
           )}
-
-          {selectedId && statusChecked && !live && (
-            <div className="flex flex-col items-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3 py-8">
-              <WifiOff size={18} className="text-[var(--neutral-700)]" />
-              <span>
-                No local daemon is paired with this workspace right now.
-                Run the daemon locally (see <code className="text-[10px]">daemon/README.md</code>)
-                and this tree fills in automatically once it connects.
-              </span>
-            </div>
-          )}
-
-          {selectedId && live && rootLoading && rootEntries === null && (
-            <div className="flex items-center gap-2 text-xs text-[var(--neutral-600)] py-6 justify-center">
-              <Loader2 size={14} className="animate-spin" /> Loading…
-            </div>
-          )}
-
-          {selectedId && live && rootError && (
-            <div className="flex items-start gap-2 text-xs text-amber-500 px-3 py-2">
-              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-              <span>{rootError}</span>
-            </div>
-          )}
-
-          {selectedId && live && !rootError && rootEntries && rootEntries.length === 0 && (
-            <p className="text-xs text-[var(--neutral-600)] px-3 py-2">This folder is empty.</p>
-          )}
-
-          {selectedId && live && !rootError && rootEntries && rootEntries.map((entry) => (
-            <FileTreeNode
-              key={entry.name}
-              wsId={selectedId}
-              entry={entry}
-              path={entry.name}
-              depth={0}
-              onSelectFile={onSelectFile}
-              selectedPath={selectedFile?.path}
-            />
-          ))}
         </div>
+      ) : (
+        <div className="flex-1 min-h-0 flex">
+          <div className="w-64 shrink-0 border-r border-[var(--neutral-800)] overflow-auto py-1.5">
+            {!selectedId && (
+              <p className="text-xs text-[var(--neutral-600)] px-3 py-2">Pick a workspace to get started.</p>
+            )}
 
-        <div className="flex-1 min-w-0">
-          <FilePreview file={selectedFile} />
+            {selectedId && statusChecked && !live && (
+              <div className="flex flex-col items-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3 py-8">
+                <WifiOff size={18} className="text-[var(--neutral-700)]" />
+                <span>
+                  No local daemon is paired with this workspace right now.
+                  Run the daemon locally (see <code className="text-[10px]">daemon/README.md</code>)
+                  and this tree fills in automatically once it connects.
+                </span>
+              </div>
+            )}
+
+            {selectedId && live && rootLoading && rootEntries === null && (
+              <div className="flex items-center gap-2 text-xs text-[var(--neutral-600)] py-6 justify-center">
+                <Loader2 size={14} className="animate-spin" /> Loading…
+              </div>
+            )}
+
+            {selectedId && live && rootError && (
+              <div className="flex items-start gap-2 text-xs text-amber-500 px-3 py-2">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span>{rootError}</span>
+              </div>
+            )}
+
+            {selectedId && live && !rootError && rootEntries && rootEntries.length === 0 && (
+              <p className="text-xs text-[var(--neutral-600)] px-3 py-2">This folder is empty.</p>
+            )}
+
+            {selectedId && live && !rootError && rootEntries && rootEntries.map((entry) => (
+              <FileTreeNode
+                key={entry.name}
+                wsId={selectedId}
+                entry={entry}
+                path={entry.name}
+                depth={0}
+                onSelectFile={onSelectFile}
+                selectedPath={selectedFile?.path}
+              />
+            ))}
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <FilePreview file={selectedFile} />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

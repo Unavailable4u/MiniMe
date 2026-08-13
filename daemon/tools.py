@@ -255,24 +255,44 @@ def delete(root: Path, path: str) -> Dict[str, Any]:
     }
 
 
-def execute_command(root: Path, command: str, timeout: int | None = None) -> Dict[str, Any]:
-    """Part 4. Runs `command` through the shell with cwd pinned to
-    `root`. This is the one tool in this module that path_guard's
-    containment check doesn't apply to (there's no single "path"
-    argument to resolve) -- the actual safety property it provides is
-    narrower and worth being explicit about: the *working directory*
-    the command starts in is the allowed root, exactly like a person
-    would get by `cd`-ing into the paired folder in their own
-    terminal, and nothing more. It does not sandbox the command
-    itself, does not stop `cd ..` or an absolute path inside the
-    command from touching anything outside root, and does not restrict
-    which binaries can run. That's why this tool -- unlike list_dir/
-    read_file -- always goes through Part 4's propose/confirm gate on
-    the backend side (eo/local_workspace_tools.py) with no "run
-    freely" path, the same as write_file/delete: the person pairing
-    their machine is trusting themselves (or whoever they've paired
-    with) with real shell access scoped only by "starts here," not a
-    real sandbox boundary.
+def execute_command(
+    root: Path,
+    command: str,
+    timeout: int | None = None,
+    on_chunk: "Callable[[str, str], None] | None" = None,
+) -> Dict[str, Any]:
+    """Part 4 (batch) + Part 7 (streaming). Runs `command` through the
+    shell with cwd pinned to `root`. This is the one tool in this
+    module that path_guard's containment check doesn't apply to
+    (there's no single "path" argument to resolve) -- the actual
+    safety property it provides is narrower and worth being explicit
+    about: the *working directory* the command starts in is the
+    allowed root, exactly like a person would get by `cd`-ing into the
+    paired folder in their own terminal, and nothing more. It does not
+    sandbox the command itself, does not stop `cd ..` or an absolute
+    path inside the command from touching anything outside root, and
+    does not restrict which binaries can run. That's why this tool --
+    unlike list_dir/read_file -- always goes through Part 4's
+    propose/confirm gate on the backend side
+    (eo/local_workspace_tools.py) with no "run freely" path, the same
+    as write_file/delete: the person pairing their machine is trusting
+    themselves (or whoever they've paired with) with real shell access
+    scoped only by "starts here," not a real sandbox boundary.
+
+    `on_chunk`, new in Part 7: an optional `(stream, text) -> None`
+    callback, called synchronously from this function (which itself
+    always runs off the daemon's event loop -- see
+    connection.py's `asyncio.to_thread(tools.dispatch, ...)`) once per
+    line of output as the subprocess produces it, `stream` being
+    `"stdout"` or `"stderr"`. This is what lets Part 7's terminal panel
+    show output live instead of only after the whole command finishes.
+    When `on_chunk` is None (every caller before Part 7, and any future
+    caller that just wants the final result), behavior is byte-for-byte
+    identical to the old `subprocess.run`-based implementation --
+    same captured stdout/stderr, same truncation, same timeout
+    handling. Streaming and truncation both apply to the exact same
+    accumulated text; `on_chunk` never sees data that the returned
+    `stdout`/`stderr` fields don't also (possibly truncated) contain.
     """
     if not command or not command.strip():
         raise ToolError("command must be a non-empty string")
@@ -287,35 +307,87 @@ def execute_command(root: Path, command: str, timeout: int | None = None) -> Dic
     actual_timeout = min(requested_timeout, MAX_EXECUTE_TIMEOUT_SECONDS)
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=str(root),
-            capture_output=True,
-            timeout=actual_timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
         )
-    except subprocess.TimeoutExpired:
-        raise ToolError(
-            f"command timed out after {actual_timeout}s: {command!r}"
-        ) from None
     except OSError as exc:
         raise ToolError(f"could not run command: {exc}") from exc
 
-    def _decode_truncate(raw: bytes) -> tuple[str, bool]:
-        text = raw.decode("utf-8", errors="replace")
-        if len(text) > MAX_EXECUTE_OUTPUT_CHARS:
-            return text[:MAX_EXECUTE_OUTPUT_CHARS], True
-        return text, False
+    # Two reader threads (one per stream) rather than one thread
+    # alternating between proc.stdout/proc.stderr -- a command that
+    # writes a lot to one and nothing to the other must never have its
+    # output delayed behind a blocking readline() on the quiet stream.
+    # Each thread appends into its own accumulator list (thread-safe
+    # enough for this: each thread only ever appends to its own list,
+    # this function only reads them after both threads have been
+    # joined) and, once truncation hasn't already kicked in, invokes
+    # `on_chunk` per line -- the same per-line granularity a person
+    # watching a real terminal would see, not one chunk per raw
+    # OS-level read().
+    import threading
 
-    stdout, stdout_truncated = _decode_truncate(proc.stdout or b"")
-    stderr, stderr_truncated = _decode_truncate(proc.stderr or b"")
+    accumulated: Dict[str, list[str]] = {"stdout": [], "stderr": []}
+    accumulated_chars: Dict[str, int] = {"stdout": 0, "stderr": 0}
+    truncated_flags: Dict[str, bool] = {"stdout": False, "stderr": False}
+
+    def _reader(stream_name: str, pipe) -> None:
+        try:
+            for raw_line in iter(pipe.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace")
+                if truncated_flags[stream_name]:
+                    continue  # already hit the cap for this stream -- keep draining the pipe, stop accumulating/emitting
+                remaining = MAX_EXECUTE_OUTPUT_CHARS - accumulated_chars[stream_name]
+                if len(line) > remaining:
+                    line = line[:remaining]
+                    truncated_flags[stream_name] = True
+                accumulated[stream_name].append(line)
+                accumulated_chars[stream_name] += len(line)
+                if on_chunk is not None and line:
+                    try:
+                        on_chunk(stream_name, line)
+                    except Exception:
+                        # A broken/closed websocket on the backend side
+                        # must never take down the command that's
+                        # actually running -- the final tool_result
+                        # below is still assembled and returned/sent
+                        # normally either way.
+                        pass
+        finally:
+            pipe.close()
+
+    stdout_thread = threading.Thread(target=_reader, args=("stdout", proc.stdout), daemon=True)
+    stderr_thread = threading.Thread(target=_reader, args=("stderr", proc.stderr), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=actual_timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+
+    if timed_out:
+        raise ToolError(f"command timed out after {actual_timeout}s: {command!r}")
+
+    stdout = "".join(accumulated["stdout"])
+    stderr = "".join(accumulated["stderr"])
 
     return {
         "command": command,
         "exit_code": proc.returncode,
         "stdout": stdout,
         "stderr": stderr,
-        "truncated": stdout_truncated or stderr_truncated,
+        "truncated": truncated_flags["stdout"] or truncated_flags["stderr"],
         "timed_out": False,
     }
 
