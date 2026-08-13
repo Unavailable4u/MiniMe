@@ -599,17 +599,40 @@ if __name__ == "__main__":
         # actually returned for this part, so _digikey_size_text can
         # be pointed at whatever label the API really uses (e.g.
         # "Package / Case") instead of guessing.
+        #
+        # Permanent fix (real-bug follow-up, 2026-08-13): this still
+        # called the old single-SKU productdetails endpoint via the
+        # since-removed DIGIKEY_PRODUCT_DETAILS_URL constant (undefined
+        # name -- Ruff F821 / Pylance reportUndefinedVariable), left
+        # over from before _lookup_digikey() switched to
+        # DIGIKEY_KEYWORD_SEARCH_URL. Updated to issue the same POST
+        # keyword-search call the real lookup path uses, and to read
+        # Parameters off the first entry in the returned "Products"
+        # list rather than a single top-level "Product" dict, since
+        # keyword search returns candidates plural, not one exact hit.
         token = _get_digikey_token()
         client_id = os.getenv("DIGIKEY_CLIENT_ID")
-        resp = requests.get(
-            DIGIKEY_PRODUCT_DETAILS_URL.format(part_number=TEST_PART),
+        resp = requests.post(
+            DIGIKEY_KEYWORD_SEARCH_URL,
             headers={
                 "Authorization": f"Bearer {token}",
                 "X-DIGIKEY-Client-Id": client_id,
                 **DIGIKEY_LOCALE_HEADERS,
             },
+            json={
+                "Keywords": TEST_PART,
+                "Limit": 10,
+                "Offset": 0,
+            },
             timeout=REQUEST_TIMEOUT,
         )
-        product = resp.json().get("Product", {})
-        for p in product.get("Parameters", []):
-            print(f"  {p.get('ParameterText')!r}: {p.get('ValueText')!r}")
+        products = resp.json().get("Products") or []
+        if not products:
+            print(f"  [DEBUG_DIGIKEY_PARAMS] no candidates for {TEST_PART!r}")
+        else:
+            product = products[0]
+            print(f"  [DEBUG_DIGIKEY_PARAMS] showing Parameters for first of "
+                  f"{len(products)} candidate(s): "
+                  f"{product.get('ManufacturerProductNumber')!r}")
+            for p in product.get("Parameters", []):
+                print(f"  {p.get('ParameterText')!r}: {p.get('ValueText')!r}")
