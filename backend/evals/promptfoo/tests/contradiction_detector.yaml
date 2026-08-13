@@ -14,6 +14,20 @@
 # modules -- see that provider's module docstring for why those two
 # don't work here).
 #
+# Patch 9: both cases below now set `provider_override: "groq"`. Without
+# it, call_api() calls _build_live_chain(), which -- now that CI wires
+# in real Upstash creds (ci.yml's patch 9 comment) -- ranks the FULL
+# production AGENT_CAPABILITIES pool by quota (contradiction_detector
+# isn't natural_roles-tagged on any account, so _best_match() falls
+# through to the whole pool, not just Groq accounts; see eo/panel.py).
+# With a fresh CI Upstash instance every account ties at 0% usage, so
+# that ranking is arbitrary -- and only 2 of the ~20 pool accounts have
+# a real CI credential behind them. provider_override sidesteps this
+# entirely: it forces role_provider.py's single-step
+# PROVIDER_OVERRIDE_DEFAULTS["groq"] chain (key_env "GROQ_API_KEY",
+# wired to CI_GROQ_API_KEY_2 in ci.yml) instead of a pool draw --
+# deterministic, and matches the one provider CI actually has a key for.
+#
 # The brief's own stated failure mode (ROLE_PROMPTS_SEED, Part 3 §3.6):
 # rubber-stamping the pre-filter's candidates instead of actually
 # judging them against real paper content. Both cases below test
@@ -24,6 +38,7 @@
 - description: "Genuine contradiction confirmed, noisy near-duplicate wording dismissed"
   vars:
     role_name: "contradiction_detector"
+    provider_override: "groq"
     context: >-
       Research extraction table (2 papers on intermittent fasting and
       insulin sensitivity):

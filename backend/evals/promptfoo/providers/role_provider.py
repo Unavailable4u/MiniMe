@@ -45,6 +45,24 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 logger = logging.getLogger("promptfoo.role_provider")
 logging.basicConfig(level=logging.INFO, format="[role_provider] %(levelname)s: %(message)s")
 
+# Patch 9, resolving the TODO(patch 2b) below: confirmed against
+# upstash_redis==1.7.0's own installed source (http.py) rather than
+# guessed. The two failure modes the TODO wanted separated really do
+# raise differently distinguishable exceptions:
+#   - Connectivity failures (DNS, timeout, connection refused) never
+#     get a response back at all -- SyncHttpClient.execute() re-raises
+#     whatever httpx raised (e.g. httpx.ConnectError, httpx.TimeoutException,
+#     httpx.ReadTimeout -- all subclasses of httpx.HTTPError/httpx.TransportError).
+#   - A bad/rotated token DOES get a response (Upstash's REST API
+#     returns a 200 with an {"error": ...} JSON body, not a raised
+#     HTTP-status exception) -- http.py's format_response() checks
+#     response.get("error") and raises upstash_redis.errors.UpstashError,
+#     a distinct, importable class.
+# So catching UpstashError separately from the transport-level
+# exception classes is a real, confirmed distinction, not a guess at
+# an unstable exception shape.
+from upstash_redis.errors import UpstashError  # noqa: E402
+
 
 def _reject_real_action_role(role_name: str) -> str | None:
     """Returns an error string if `role_name` resolves to a dedicated
@@ -104,15 +122,29 @@ def _get_brief_live_or_seed(role_name: str) -> tuple[str | None, str]:
                 "(this is expected for a role that's never been hired yet).", role_name)
             return seed_brief, "seed"
         return None, "live"
+    except UpstashError as exc:
+        # A response DID come back -- Upstash itself rejected the
+        # request, almost always a bad/rotated REST token (see this
+        # file's top-of-file comment for how this is distinguished from
+        # a connectivity failure). Still falls back to seed rather than
+        # hard-failing every case in the run -- an eval run shouldn't
+        # die over this either -- but logged at ERROR, not warning, and
+        # tagged with a distinct source string so it's visible at a
+        # glance in promptfoo's own output (call_api()'s metadata.brief_source)
+        # instead of looking identical to ordinary Redis flakiness.
+        seed_brief = ROLE_PROMPTS_SEED.get(role_name)
+        logger.error(
+            "Upstash rejected the request for '%s' (%s: %s) -- this looks like a "
+            "bad or rotated CI_UPSTASH_REDIS_REST_TOKEN, not a connectivity issue. "
+            "Falling back to ROLE_PROMPTS_SEED, but check the token.", role_name,
+            type(exc).__name__, exc)
+        return seed_brief, "seed-auth-error"
     except Exception as exc:
-        # Broad catch is deliberate: upstash-redis surfaces connectivity
-        # failures as a plain requests-level exception, not one
-        # dedicated exception class we can import and catch narrowly.
-        # TODO(patch 2b): narrow this once we've confirmed the exact
-        # exception shape upstash_redis raises on a REST timeout vs a
-        # bad-credential 401 -- right now both are treated the same
-        # (fall back to seed), which is correct for "Redis unreachable"
-        # but would silently mask a genuinely misconfigured token.
+        # Genuine connectivity failure (DNS, timeout, connection refused,
+        # etc. -- httpx transport-level exceptions never got a response
+        # to parse into an UpstashError at all). This is the case CI
+        # without reachable Upstash should degrade gracefully from, so
+        # it stays a warning and the original "seed" source string.
         seed_brief = ROLE_PROMPTS_SEED.get(role_name)
         logger.warning(
             "Could not reach the Role Library store for '%s' (%s: %s). "

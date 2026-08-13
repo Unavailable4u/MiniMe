@@ -124,74 +124,62 @@ jobs:
           # in the process env) -- so this doesn't need a placeholder
           # backend/.env file or a config edit to coexist with envPath.
 
-          # --- UPSTASH secrets: confirmed NOT optional for this suite,
-          # narrower than the package README's "Running in CI" section
-          # implies ---
-          # That section is right about the BRIEF lookup only:
-          # _get_brief_live_or_seed() falls back to ROLE_PROMPTS_SEED
-          # fine with no reachable Redis. It does NOT hold for CHAIN
-          # BUILDING, and this is the part worth flagging explicitly:
-          # traced _build_live_chain()'s degraded fallback (the path
-          # taken when get_quota_snapshot() raises, i.e. no reachable
-          # Redis) and confirmed it filters AGENT_CAPABILITIES by literal
-          # natural_roles membership -- then confirmed "contradiction_detector"
-          # (the only case file wired into promptfooconfig.yaml as of
-          # patch 4) isn't tagged in ANY account's natural_roles list in
-          # backend/eo/registry.py. So with no UPSTASH secrets, every
-          # case in this suite would error with "no usable account
-          # found" -- not a real prompt regression, just a gap between
-          # this eval provider's degraded fallback and production's own
-          # eo/panel.py::_best_match(), which DOES fall through to the
-          # full account pool when nothing is natural-role-tagged (see
-          # that function's docstring). Real UPSTASH secrets sidestep
-          # this by letting get_quota_snapshot() succeed so the LIVE
-          # chain path runs instead. Worth bringing role_provider.py's
-          # degraded fallback in line with _best_match's behavior in a
-          # follow-up -- out of scope for a CI-wiring-only patch.
-          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
-          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          # --- CI-only key pool (patch 9) ---
+          # Was: this job exported the full production account pool
+          # (GROQ_API_KEY_6-14, GROQ_RESERVE_1/2, SGA_GROQ_1-3,
+          # CEREBRAS_API_KEY_1, MISTRAL_API_KEY, GEMINI_API_KEY_1) as
+          # job-level secrets, reasoned about in the comment that used to
+          # sit here as "same pool production uses, not CI-only reserved
+          # keys". Reversed that decision now that CI_* secrets actually
+          # exist (repo Settings -> Secrets and variables -> Actions):
+          # production-key reuse in CI was never actually required by
+          # anything below, and splitting the blast radius of a leaked
+          # CI credential from production quota/billing is worth the
+          # one-time setup cost.
+          #
+          # Only 2 CI-scoped Groq keys exist, nowhere near the ~20-account
+          # production pool _build_live_chain() ranks by quota when Redis
+          # IS reachable (see the UPSTASH comment below) -- with a fresh
+          # CI Upstash instance every account ties at 0% usage, so quota
+          # ranking among a pool where only 2 of ~20 key_envs actually
+          # have a CI credential is arbitrary, not deterministic. Rather
+          # than exporting these 2 keys into that pool under production
+          # key_env names (e.g. GROQ_API_KEY_6) and hoping quota ranking
+          # happens to pick one of them, tests/contradiction_detector.yaml
+          # now sets `provider_override: "groq"` on both cases -- see
+          # that file's patch 9 comment -- which makes role_provider.py
+          # skip chain-building entirely via PROVIDER_OVERRIDE_DEFAULTS
+          # (already in this file from patch 5's provider comparison),
+          # for a single deterministic step instead of a pool draw.
+          #
+          # Split by purpose rather than reusing one key for both calls
+          # promptfoo makes per case, so a grading call and a generation
+          # call in flight together don't compete for the same key's
+          # per-minute rate limit:
+          #   - CI_GROQ_API_KEY_1 grades (promptfooconfig.yaml's
+          #     defaultTest llm-rubric provider, Node-side, now reads
+          #     GROQ_API_KEY_GRADING -- see that file's patch 9 comment).
+          #   - CI_GROQ_API_KEY_2 generates (role_provider.py's
+          #     PROVIDER_OVERRIDE_DEFAULTS["groq"]["key_env"], still
+          #     "GROQ_API_KEY" -- unchanged name, just a CI-scoped value
+          #     now instead of a production one).
+          GROQ_API_KEY_GRADING: ${{ secrets.CI_GROQ_API_KEY_1 }}
+          GROQ_API_KEY: ${{ secrets.CI_GROQ_API_KEY_2 }}
 
-          # --- grading provider ---
-          # promptfooconfig.yaml's defaultTest.options.provider points
-          # llm-rubric grading at groq:llama-3.3-70b-versatile /
-          # apiKeyEnvar GROQ_API_KEY. That's a Node-side promptfoo
-          # provider call -- reads process.env directly, no dotenv
-          # involved on that side at all. Without this secret, every
-          # llm-rubric assert hard-fails with "GROQ_API_KEY is not set"
-          # even when role generation itself succeeded fine on seed --
-          # exactly the false-negative this job's own continue-on-error
-          # comment above flags as not yet distinguishable from a real
-          # regression.
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-
-          # --- quota/cost decision (already made; wired in here) ---
-          # Same account pool production uses, not CI-only reserved keys
-          # -- role-prompt evals are early/cheap enough to land before a
-          # longer-running task in the same pool has a chance to exhaust
-          # it. Scoped to the pool an untagged reasoning role can
-          # actually be routed to once chain-building falls through to
-          # quota-only ranking (see the UPSTASH comment above) --
-          # Cloudflare/HuggingFace omitted: nothing in the current case
-          # set routes to them, and their step shape needs an
-          # account_id+token pair rather than a single key anyway (see
-          # role_provider.py's PROVIDER_OVERRIDE_DEFAULTS comment).
-          GROQ_API_KEY_6: ${{ secrets.GROQ_API_KEY_6 }}
-          GROQ_API_KEY_7: ${{ secrets.GROQ_API_KEY_7 }}
-          GROQ_API_KEY_8: ${{ secrets.GROQ_API_KEY_8 }}
-          GROQ_API_KEY_9: ${{ secrets.GROQ_API_KEY_9 }}
-          GROQ_API_KEY_10: ${{ secrets.GROQ_API_KEY_10 }}
-          GROQ_API_KEY_11: ${{ secrets.GROQ_API_KEY_11 }}
-          GROQ_API_KEY_12: ${{ secrets.GROQ_API_KEY_12 }}
-          GROQ_API_KEY_13: ${{ secrets.GROQ_API_KEY_13 }}
-          GROQ_API_KEY_14: ${{ secrets.GROQ_API_KEY_14 }}
-          GROQ_RESERVE_1: ${{ secrets.GROQ_RESERVE_1 }}
-          GROQ_RESERVE_2: ${{ secrets.GROQ_RESERVE_2 }}
-          SGA_GROQ_1: ${{ secrets.SGA_GROQ_1 }}
-          SGA_GROQ_2: ${{ secrets.SGA_GROQ_2 }}
-          SGA_GROQ_3: ${{ secrets.SGA_GROQ_3 }}
-          CEREBRAS_API_KEY_1: ${{ secrets.CEREBRAS_API_KEY_1 }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+          # --- UPSTASH secrets: still not optional for this suite ---
+          # Unchanged reasoning from before (see the file history for
+          # the full version): the BRIEF lookup (_get_brief_live_or_seed())
+          # degrades fine to ROLE_PROMPTS_SEED with no reachable Redis,
+          # but real Upstash creds are still what let CI test against
+          # the actual live-hired brief instead of always falling back
+          # to seed. Chain-building itself no longer depends on these
+          # for contradiction_detector specifically now that its cases
+          # force provider_override -- but the brief lookup still does,
+          # and future case files that DON'T set provider_override will
+          # still need Redis reachable for anything beyond a seed-brief
+          # run. Now CI-scoped rather than production Upstash creds.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.CI_UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.CI_UPSTASH_REDIS_REST_TOKEN }}
 
           # --- per-test timeout (this patch's new addition) ---
           # generate_text() can walk up to MAX_CHAIN_STEPS_CEILING (6)
