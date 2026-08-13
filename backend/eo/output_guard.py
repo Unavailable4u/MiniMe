@@ -21,13 +21,50 @@ Python strings, not raw JSON text from an LLM -- so this uses a custom
 Validator via Guardrails' plugin API (register_validator) with
 Guard.for_string instead.
 
-Later parts still to come:
-  - Part 3: api/task_runner.py, right after `organize_final_answer()` returns
-    `organized["answer"]` -- validates the final chat answer is well-formed
-    text/markdown before it's written to eo/chat_store.py / chat_workspace.py.
-  - Part 4: eo/result_render.py's `collect_artifacts()` -- validates each
-    {"artifacts": [...]} entry's shape before it's handed to the frontend's
-    ArtifactRenderer.jsx.
+Part 3 adds the second choke point: api/task_runner.py's _run_tier3_hires(),
+right after `organize_final_answer()` returns `organized["answer"]` (~line
+479) -- validates the merged final chat answer is well-formed text/markdown
+before it's written to eo/chat_store.py / chat_workspace.py. Same
+Guard.for_string + custom Validator shape as Part 2's ModuleCodeNonEmpty
+above (the input here is also a single already-generated string, not raw
+JSON text an LLM turn could reask into), and the same OnFailAction.NOOP +
+caller-decides-the-fallback contract. What's checked:
+
+  - non-empty (an organizer call that returned "" would otherwise silently
+    blank out what was, pre-synthesis, a real per-role answer);
+  - doesn't contain the literal "---DEDUP_NOTES---" marker
+    agents/output_organizer.py's own DEDUP_NOTES_MARKER uses to separate the
+    answer from its trailing JSON notes -- that string showing up inside
+    `answer` means _parse_organizer_response()'s partition() on that marker
+    didn't behave as expected and the notes payload leaked into user-facing
+    text, which is the "leaked internal role-routing artifact" case Part 3's
+    plan calls out;
+  - has a balanced number of ``` fence markers -- an odd count means a
+    fenced code/diagram block was left open, the cheap dependency-free
+    stand-in for "no broken structure" (a full markdown parse isn't worth
+    adding here for one structural check).
+
+Part 4 adds the third and final choke point: eo/result_render.py's
+collect_artifacts(), once per {"artifacts": [...]} entry a role attached to
+its own output -- before that entry is added to the flat list handed to the
+frontend's ArtifactRenderer.jsx. This is the one Part 1's plan called out as
+mattering most, since html/svg artifacts are rendered straight into a
+sandboxed iframe's srcDoc (see ArtifactRenderer.jsx's own security comment --
+sandbox="allow-scripts" only, no allow-same-origin -- the guard here is
+defense in depth on top of that, not a substitute for it).
+
+Same Guard + custom Validator shape as Parts 2-3, except the value being
+validated is a dict (one artifact entry), not a string -- so this uses the
+generic `Guard().use(...)` constructor instead of `Guard.for_string(...)`.
+collect_artifacts() already had a truthiness-only check before Part 4
+(`if not entry.get("type") or not entry.get("code")`), which is what let a
+non-string "code" (e.g. a role emitting a list or nested dict by mistake)
+through as long as it was truthy -- ArtifactEntryWellFormed below replaces
+that with a real type check on "type"/"code" (and "title", when present).
+The plan's own wording says "type/content keys"; the actual field this
+codebase's collect_artifacts()/ArtifactRenderer.jsx use is "code", not
+"content" -- another Part-1-plan-vs-actual-code correction, same spirit as
+Part 2's line-number/shape corrections above.
 
 Place this file at: eo/output_guard.py
 """
@@ -95,17 +132,173 @@ def validate_module_code(code: str) -> tuple[bool, str]:
     return False, reasons
 
 
+# NEW -- Part 3. Matches agents/output_organizer.py's own
+# DEDUP_NOTES_MARKER constant. Hardcoded here rather than imported --
+# output_guard.py stays a leaf module with no cross-imports into agents/,
+# the same "mirror the string, don't import the module" approach
+# ModuleCodeNonEmpty above takes with code_writers.py's own placeholder
+# text.
+_DEDUP_NOTES_MARKER = "---DEDUP_NOTES---"
+
+
+@register_validator(name="final-answer-well-formed", data_type="string")
+class FinalAnswerWellFormed(Validator):
+    """Fails on an empty final answer, on the internal DEDUP_NOTES marker
+    leaking into it (output_organizer's marker-partition not behaving as
+    expected), or on an unbalanced number of ``` fence markers (a fenced
+    code/diagram block left open)."""
+
+    LEAKED_MARKER = _DEDUP_NOTES_MARKER
+
+    def _validate(self, value, metadata):
+        text = value or ""
+        stripped = text.strip()
+        if not stripped:
+            return FailResult(error_message="final answer is empty")
+        if self.LEAKED_MARKER in text:
+            return FailResult(
+                error_message=(
+                    "final answer leaked the internal "
+                    f"{self.LEAKED_MARKER!r} marker -- output_organizer's "
+                    "marker-parsing likely failed"
+                )
+            )
+        if text.count("```") % 2 != 0:
+            return FailResult(
+                error_message="final answer has an unbalanced number of ``` fence markers"
+            )
+        return PassResult()
+
+
+_answer_guard = None
+
+
+def get_answer_guard() -> Guard:
+    """Lazily built, then reused across calls -- same reasoning as
+    get_code_guard() above."""
+    global _answer_guard
+    if _answer_guard is None:
+        _answer_guard = Guard.for_string(
+            validators=[FinalAnswerWellFormed(on_fail=OnFailAction.NOOP)]
+        )
+    return _answer_guard
+
+
+def validate_final_answer(answer: str) -> tuple[bool, str]:
+    """Used by api/task_runner.py's _run_tier3_hires(), right after
+    organize_final_answer() returns organized["answer"]. Returns
+    (is_valid, reason) -- reason is "" when is_valid is True.
+
+    OnFailAction.NOOP, same reasoning as validate_module_code() above:
+    there's no LLM turn left to reask into once organize_final_answer()
+    has already returned, so this never raises -- the caller decides what
+    to do with a failing answer. task_runner.py's existing fail-open
+    pattern (keep whatever `answer` was already set to before this call --
+    the un-organized final_role text computed earlier in the function) is
+    what Part 3 wires this into, rather than inventing a new fallback
+    shape.
+    """
+    outcome = get_answer_guard().validate(answer)
+    if outcome.validation_passed:
+        return True, ""
+    reasons = "; ".join(
+        s.failure_reason for s in (outcome.validation_summaries or []) if s.failure_reason
+    ) or "validation failed"
+    return False, reasons
+
+
 def get_guard():
     """
-    Placeholder for Parts 3-4's Guards (final chat answer text, CO2
-    artifact payload shape). Not used by Part 2 -- see get_code_guard()
-    above for that one.
+    Kept for backward compat with anything that imported the Part-1
+    placeholder name -- superseded by get_code_guard() (Part 2),
+    get_answer_guard() (Part 3), and get_artifact_guard() (Part 4) above/
+    below, each scoped to its own choke point rather than one shared
+    Guard trying to cover three unrelated shapes.
     """
     raise NotImplementedError(
-        "output_guard.get_guard() is not wired up yet -- Parts 3 and 4 "
-        "will add their own Guard constructors here, following "
-        "get_code_guard()'s pattern above."
+        "output_guard.get_guard() was Part 1's placeholder and was never "
+        "wired up -- use get_code_guard() / get_answer_guard() / "
+        "get_artifact_guard() instead."
     )
+
+
+# NEW -- Part 4. Mirrors ArtifactRenderer.jsx's TYPE_LABELS keys
+# (html/svg/python/react) for documentation purposes only -- NOT enforced
+# as an allow-list below. ArtifactRenderer.jsx already degrades an
+# unrecognized "type" gracefully (falls back to a read-only source card,
+# see its own final ternary branch), so rejecting a future/unimplemented
+# type here would throw away a valid entry the frontend can already
+# handle; the guard's job is catching malformed entries, not gatekeeping
+# which types are "allowed".
+_ARTIFACT_KNOWN_TYPES_FOR_REFERENCE = ("html", "svg", "python", "react")
+
+
+@register_validator(name="artifact-entry-well-formed", data_type="dict")
+class ArtifactEntryWellFormed(Validator):
+    """Fails when an artifact entry isn't a dict, is missing a non-empty
+    string "type" or "code", or has a "title" that's present but not a
+    string. "code" is the field ArtifactRenderer.jsx hands straight to an
+    iframe's srcDoc for html/svg types (via wrapAsHtmlDoc()) or to
+    Sandpack for react -- a non-string value there (list/dict/int a role
+    emitted by mistake) is what this backstops against; the pre-Part-4
+    `if not entry.get("code")` check in collect_artifacts() would have let
+    any truthy non-string through."""
+
+    def _validate(self, value, metadata):
+        if not isinstance(value, dict):
+            return FailResult(error_message="artifact entry is not an object")
+
+        artifact_type = value.get("type")
+        if not isinstance(artifact_type, str) or not artifact_type.strip():
+            return FailResult(error_message='artifact entry is missing a non-empty "type"')
+
+        code = value.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return FailResult(error_message='artifact entry is missing non-empty string "code"')
+
+        title = value.get("title", "")
+        if title is not None and not isinstance(title, str):
+            return FailResult(error_message='artifact entry\'s "title" must be a string when present')
+
+        return PassResult()
+
+
+_artifact_guard = None
+
+
+def get_artifact_guard() -> Guard:
+    """Lazily built, then reused across calls -- same reasoning as
+    get_code_guard() / get_answer_guard() above. Uses the generic
+    Guard().use(...) constructor (not Guard.for_string()) since the value
+    validated here is a dict, not a string."""
+    global _artifact_guard
+    if _artifact_guard is None:
+        _artifact_guard = Guard().use(ArtifactEntryWellFormed(on_fail=OnFailAction.NOOP))
+    return _artifact_guard
+
+
+def validate_artifact_entry(entry) -> tuple[bool, str]:
+    """Used by eo/result_render.py's collect_artifacts(), once per entry
+    in a role's raw_output["artifacts"] list -- before that entry is
+    appended to the flat list handed back to api/task_runner.py (and from
+    there, to the frontend's ArtifactRenderer.jsx). Returns
+    (is_valid, reason) -- reason is "" when is_valid is True.
+
+    OnFailAction.NOOP, same reasoning as validate_module_code() /
+    validate_final_answer() above: there's no LLM turn left to reask into
+    once a role's raw_output already exists, so this never raises --
+    collect_artifacts()'s existing "skip anything malformed rather than
+    erroring the whole run over one entry from one role" behavior is what
+    Part 4 wires this into; it just replaces the old truthiness-only
+    check with a real shape check.
+    """
+    outcome = get_artifact_guard().validate(entry)
+    if outcome.validation_passed:
+        return True, ""
+    reasons = "; ".join(
+        s.failure_reason for s in (outcome.validation_summaries or []) if s.failure_reason
+    ) or "validation failed"
+    return False, reasons
 
 
 if __name__ == "__main__":
@@ -121,3 +314,29 @@ if __name__ == "__main__":
 
     ok, reason = validate_module_code("   ")
     print(f"empty sample             -> passed={ok} reason={reason!r}")
+
+    ok, reason = validate_final_answer("## Summary\n\nAll good, here's a fenced block:\n\n```python\nprint('hi')\n```\n")
+    print(f"valid final answer       -> passed={ok}")
+
+    ok, reason = validate_final_answer(
+        "Here's the answer.\n---DEDUP_NOTES---\n{\"reviewer\": \"folded into implementer\"}"
+    )
+    print(f"leaked-marker sample     -> passed={ok} reason={reason!r}")
+
+    ok, reason = validate_final_answer("Unterminated code block:\n\n```python\nprint('hi')\n")
+    print(f"unbalanced-fence sample  -> passed={ok} reason={reason!r}")
+
+    ok, reason = validate_final_answer("")
+    print(f"empty final answer       -> passed={ok} reason={reason!r}")
+
+    ok, reason = validate_artifact_entry({"type": "html", "code": "<b>hi</b>", "title": "Demo"})
+    print(f"valid artifact entry     -> passed={ok}")
+
+    ok, reason = validate_artifact_entry({"type": "html", "code": ["not", "a", "string"]})
+    print(f"non-string code sample   -> passed={ok} reason={reason!r}")
+
+    ok, reason = validate_artifact_entry({"type": "", "code": "<b>hi</b>"})
+    print(f"empty type sample        -> passed={ok} reason={reason!r}")
+
+    ok, reason = validate_artifact_entry({"code": "<b>hi</b>"})
+    print(f"missing type sample      -> passed={ok} reason={reason!r}")
