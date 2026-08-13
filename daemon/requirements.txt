@@ -1,0 +1,6 @@
+# Daemon runs as a separate local process on the user's own machine,
+# not inside the backend's deploy -- kept as its own requirements file
+# so installing it never touches the backend's pinned dependency set.
+# Deliberately tiny for Part 1 (config + path safety only); Part 2 adds
+# a websocket client library here.
+python-dotenv==1.2.2
