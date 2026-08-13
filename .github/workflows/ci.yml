@@ -139,6 +139,30 @@ jobs:
           cache-dependency-path: backend/evals/promptfoo/package-lock.json
       - run: npm ci
 
+      # promptfooconfig.yaml's commandLineOptions.envPath (../../.env,
+      # i.e. backend/.env) is a deliberate local-dev convenience -- see
+      # that file's own comment and this repo's promptfoo README ("point
+      # this at your .env"). promptfoo 0.122.0's setupEnv() (dist/src/
+      # util-BY2oJymW.js) hard-throws "Environment file not found" when
+      # an explicit envPath doesn't exist on disk, rather than no-oping
+      # like the bare/no-path case does -- confirmed by reading that
+      # function's own source, not assumed. A CI checkout has no
+      # backend/.env by design (every var it would have loaded is
+      # exported directly in this step's `env:` block below instead), so
+      # eval:ci was crashing at env-file-load time before it ever got to
+      # run a case. Rather than removing envPath from the config (which
+      # would break the local-dev flow the README documents), create an
+      # empty file here just to satisfy setupEnv()'s existsSync check.
+      # Left empty on purpose: when the path exists, setupEnv() calls
+      # dotenv.config({ path, override: true }) -- confirmed against the
+      # same source that an empty file parses to zero keys, so
+      # override:true has nothing to override and every var exported
+      # below survives untouched (verified locally: pre-set env vars are
+      # unaffected by loading an empty file with override:true).
+      - name: Ensure promptfoo's configured env file exists (empty -- CI exports vars directly below)
+        working-directory: backend
+        run: touch .env
+
       - name: Run Role Library promptfoo evals
         run: npm run eval:ci
         env:
