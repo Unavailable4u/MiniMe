@@ -172,6 +172,22 @@ Leave "estimated_price_bdt", "vendor_name", "vendor_url", and \
 "price_checked_at" as null for every part -- pricing is looked up \
 separately after you respond, not something you should guess at.
 
+For every part, also fill in "generic_name" -- a short, distributor-\
+agnostic canonical name for what kind of part this is (e.g. "ESP32 \
+Dev Board", "DHT22 Temperature/Humidity Sensor", "18650 Li-ion \
+Battery", "5V Boost Converter"), independent of whatever specific \
+"name" you gave it or any "part_number". Later steps use this as the \
+shared vocabulary to look up known dimensions for this exact kind of \
+part and to search real reference designs that used one -- it needs \
+to describe the part itself, not a specific listing, product page, or \
+one distributor's wording for it. Also fill in "aliases" -- a list of \
+1-4 other real names/spellings that same generic part commonly goes \
+by (e.g. for a DHT22: ["DHT-22", "AM2302"]), so that lookup still \
+matches when a distributor or datasheet uses a different name for the \
+same part. Leave "aliases" as an empty list when you don't know any \
+real alternates -- do not invent plausible-sounding ones just to fill \
+the list.
+
 Respond with ONLY valid JSON, no markdown fences, no explanation, in \
 exactly this shape:
 {
@@ -179,26 +195,36 @@ exactly this shape:
     {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
      "description": "Main microcontroller", "qty": 1,
      "part_number": "ESP32-WROOM-32U-N4",
+     "generic_name": "ESP32 Dev Board",
+     "aliases": ["ESP32 Development Board", "ESP32-WROOM-32 Dev Kit"],
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null},
     {"id": "housing_1", "name": "Enclosure housing", "category": "3D_PRINT",
      "description": "Bottom shell", "qty": 1,
      "part_number": null,
+     "generic_name": "3D-Printed Enclosure Housing",
+     "aliases": [],
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null},
     {"id": "lid_1", "name": "Enclosure lid", "category": "3D_PRINT",
      "description": "Top shell", "qty": 1,
      "part_number": null,
+     "generic_name": "3D-Printed Enclosure Lid",
+     "aliases": [],
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null},
     {"id": "mount_mcu_1", "name": "MCU standoff mount", "category": "3D_PRINT",
      "description": "Standoff bracket for mcu_1", "qty": 1,
      "part_number": null,
+     "generic_name": "Standoff Mount Bracket",
+     "aliases": [],
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null},
     {"id": "fastener_1", "name": "M3 heat-set insert + screw", "category": "MISC",
      "description": "Housing/lid fastening", "qty": 4,
      "part_number": null,
+     "generic_name": "M3 Heat-Set Insert and Screw",
+     "aliases": ["M3 Threaded Insert"],
      "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
      "price_checked_at": null}
   ]
@@ -539,6 +565,60 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     return parts
 
 
+def _ensure_generic_names(parts: list) -> list:
+    """
+    Safety net for SYSTEM_PROMPT_PARTS's "generic_name"/"aliases" fields
+    -- same "prompt instruction, not enforced schema" gap
+    _ensure_electrical_placements()/_fix_wiring_electrical_integrity()
+    already patch elsewhere in this file, applied here to Call 1's
+    parts[] output. These two fields are the shared vocabulary the
+    Master Guide's G1a curated-dimension-table lookup and G2's
+    reference-design search are both meant to key off of ("generic 9V
+    battery", "28BYJ-48 Stepper") instead of each other's or the
+    model's own ad-hoc wording -- a part the model left un-tagged would
+    otherwise reach either lookup with nothing canonical to match
+    against at all.
+
+    Runs right after Call 1's parts are parsed (success or fail-safe
+    fallback), before _populate_dimensions() -- which is itself already
+    part_number-keyed, not generic_name-keyed, so ordering relative to
+    it doesn't matter for that call, but this needs to run before any
+    future G1a/G2 lookup is added that does key off these fields.
+
+    Never blocks on a missing/malformed field: falls back to the
+    part's own "name" for generic_name (broader than a true generic
+    name would be, since it may carry a specific model/variant, but
+    still far better than no vocabulary at all), and normalizes
+    "aliases" to always be a list -- dropping any non-string or blank
+    entry and de-duplicating case-insensitively -- rather than leaving
+    it null/absent/malformed for downstream code to special-case.
+
+    Mutates each part dict in place; returns the same list, unchanged
+    in length or order (this only fills gaps, never adds/drops parts).
+    """
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if not (part.get("generic_name") or "").strip():
+            part["generic_name"] = part.get("name") or part.get("id") or "Unknown part"
+
+        aliases = part.get("aliases")
+        cleaned = []
+        if isinstance(aliases, list):
+            seen = set()
+            for alias in aliases:
+                if not isinstance(alias, str):
+                    continue
+                alias = alias.strip()
+                if not alias or alias.lower() in seen:
+                    continue
+                seen.add(alias.lower())
+                cleaned.append(alias)
+        part["aliases"] = cleaned
+
+    return parts
+
+
 def _populate_dimensions(parts: list, session_id: str = None) -> list:
     """F3 Part 4: looks up real physical dimensions/datasheet links for
     every part that carries a part_number (SYSTEM_PROMPT_PARTS's Call 1
@@ -771,6 +851,15 @@ def _build_wiring_mermaid(spec: dict) -> str:
             raw_label = f"{kind}: {from_pin or to_pin}"
         else:
             raw_label = kind
+        # _fix_wiring_electrical_integrity() tags edges it synthesized
+        # (a missing I2C clock line, a missing power-tree input) with
+        # "_inferred" -- surface that on the diagram itself rather than
+        # blending a safety-net guess in as if the model had proposed
+        # it, so a reader can tell "wire this for real" from "this is
+        # what the model actually said."
+        inferred = bool(e.get("_inferred"))
+        if inferred:
+            raw_label += " (inferred)"
         # Quoted, not bare, edge label: an unquoted Mermaid pipe-label
         # (|...|) can't safely contain parentheses -- exactly the
         # "ESP[ESP32 5V (Vin)]"-style parse error from the rendering
@@ -780,9 +869,19 @@ def _build_wiring_mermaid(spec: dict) -> str:
         # away without it.
         label = _sanitize_mermaid_label(raw_label, fallback=kind)
 
-        lines.append(f'    {from_id} -->|"{label}"| {to_id}')
+        # Dashed arrow ("-.->") for an inferred edge vs. Mermaid's
+        # default solid "-->" for everything the model actually
+        # proposed -- same color-per-kind as before either way, so an
+        # inferred edge still reads as "power"/"data"/"ground" at a
+        # glance, just visibly provisional rather than indistinguishable
+        # from a model-verified connection.
+        arrow = "-.->" if inferred else "-->"
+        lines.append(f'    {from_id} {arrow}|"{label}"| {to_id}')
         color = _EDGE_COLOR_BY_KIND.get(kind, _DEFAULT_EDGE_COLOR)
-        style_lines.append(f'    linkStyle {edge_index} stroke:{color},color:{color}')
+        style = f'    linkStyle {edge_index} stroke:{color},color:{color}'
+        if inferred:
+            style += ",stroke-dasharray:4 3"
+        style_lines.append(style)
         edge_index += 1
 
     lines.extend(style_lines)
@@ -925,6 +1024,164 @@ def _clamp_placements_to_enclosure(spec: dict) -> None:
         p["z"] = min(max(p.get("z") or 0, 0), enc_d - d)
 
 
+def _fix_wiring_electrical_integrity(spec: dict) -> None:
+    """
+    Safety net for three wiring.edges shapes that read as physically
+    invalid on the rendered diagram even though they pass the model's
+    own schema -- same "prompt instruction, not enforced schema" gap
+    _ensure_electrical_placements()/_clamp_placements_to_enclosure()
+    already patch for mech.placements, applied here to wiring.edges
+    instead. Runs before _build_wiring_mermaid() renders spec["wiring"],
+    so the Mermaid diagram and the force-graph (WiringGraph.jsx, reading
+    the same wiring.edges) inherit the fix identically -- one repaired
+    wiring object, not a render-time patch only one of the two views
+    would get.
+
+    1. Incomplete I2C pair: SYSTEM_PROMPT_WIRING asks the model to name
+       "SDA"/"SCL" for I2C, but nothing stops it wiring only one of the
+       two -- a device on the bus for data with no clock line isn't
+       actually wired. For every edge naming "SDA" on either side,
+       ensure a matching "SCL" edge exists between the same two nodes;
+       synthesize one when it doesn't, leaving the new edge's pin on the
+       MCU side null (this safety net has no way to know the real GPIO,
+       and SYSTEM_PROMPT_WIRING's own rule is that null is correct for a
+       pin that genuinely can't be resolved -- guessing a wrong GPIO
+       here would be worse than admitting it's unresolved).
+
+    2. Orphaned power input: same "not enforced schema" gap as #1, on
+       the supply side of a power edge -- a power-category node with an
+       outgoing "power" edge (it feeds something) but zero incoming
+       "power" edges (nothing feeds it) reads as a component powering
+       itself, e.g. the second of two parallel regulators the model
+       wired only one of. Among power-category nodes with zero incoming
+       power edges, pick the one with the most outgoing power edges as
+       the tree's root (ties broken by earliest position in
+       wiring.nodes) -- almost always the battery/cell, the one thing
+       every other power part ultimately traces back to -- then connect
+       every other such orphan to it. As blunt as
+       _ensure_electrical_placements' own grid-fill: this restores a
+       valid tree shape, it doesn't reason about which specific rail
+       should feed which regulator.
+
+    3. Same pin fed by two different rails: two power edges landing on
+       the same (to node, to pin) pair from two different sources --
+       e.g. both a 5V and a 3.3V rail wired to the MCU's "VCC" -- read
+       as one physical pin taking two different voltages at once, which
+       isn't valid; they're two distinct real pins the model just gave
+       the same generic name. Disambiguate by folding each source's own
+       from_pin (or, failing that, its node's label) into the to_pin
+       text, so the diagram shows two separate destination pins instead
+       of one pin with two power sources feeding it.
+
+    Visual note: every edge #1/#2 synthesizes is tagged "_inferred":
+    True so _build_wiring_mermaid() can render it as a dashed link --
+    distinguishing "the model proposed this" from "this safety net
+    filled a gap" on the diagram itself, rather than silently blending
+    inferred wiring in as if the model had proposed it.
+
+    Mutates spec["wiring"]["edges"] in place (appends new edges for
+    #1/#2, rewrites "to_pin" strings in place for #3). No-ops on an
+    empty/missing wiring.
+    """
+    wiring = spec.get("wiring")
+    if not isinstance(wiring, dict):
+        return
+    nodes = wiring.get("nodes")
+    edges = wiring.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list) or not nodes:
+        return
+
+    node_by_id = {n.get("id"): n for n in nodes if isinstance(n, dict) and n.get("id")}
+    node_order = {n.get("id"): i for i, n in enumerate(nodes) if isinstance(n, dict)}
+
+    def _norm_pin(p):
+        return (p or "").strip().lower()
+
+    # ---- 1. complete I2C pairs (SDA present, SCL missing) -----------
+    new_edges = []
+    handled_links = set()
+    for e in edges:
+        if not isinstance(e, dict):
+            continue
+        fp, tp = _norm_pin(e.get("from_pin")), _norm_pin(e.get("to_pin"))
+        if tp == "sda":
+            sda_side = "to"
+        elif fp == "sda":
+            sda_side = "from"
+        else:
+            continue
+
+        from_id, to_id = e.get("from"), e.get("to")
+        link_key = frozenset((from_id, to_id))
+        if link_key in handled_links:
+            continue
+        handled_links.add(link_key)
+
+        has_scl = any(
+            isinstance(e2, dict)
+            and frozenset((e2.get("from"), e2.get("to"))) == link_key
+            and (_norm_pin(e2.get("from_pin")) == "scl" or _norm_pin(e2.get("to_pin")) == "scl")
+            for e2 in edges
+        )
+        if has_scl:
+            continue
+
+        new_edges.append({
+            "from": from_id, "to": to_id, "kind": e.get("kind") or "data",
+            "from_pin": "SCL" if sda_side == "from" else None,
+            "to_pin": "SCL" if sda_side == "to" else None,
+            "_inferred": True,
+        })
+
+    # ---- 2. connect orphaned power inputs ---------------------------
+    power_ids = {nid for nid, n in node_by_id.items() if n.get("type") == "power"}
+    if power_ids:
+        outgoing_power, incoming_power = {}, {}
+        for e in edges:
+            if not isinstance(e, dict) or (e.get("kind") or "") != "power":
+                continue
+            outgoing_power[e.get("from")] = outgoing_power.get(e.get("from"), 0) + 1
+            incoming_power[e.get("to")] = incoming_power.get(e.get("to"), 0) + 1
+
+        root_candidates = [pid for pid in power_ids if incoming_power.get(pid, 0) == 0]
+        root_id = None
+        if root_candidates:
+            root_id = min(
+                root_candidates,
+                key=lambda pid: (-outgoing_power.get(pid, 0), node_order.get(pid, 0)),
+            )
+
+        if root_id:
+            for pid in power_ids:
+                if pid == root_id:
+                    continue
+                if outgoing_power.get(pid, 0) > 0 and incoming_power.get(pid, 0) == 0:
+                    new_edges.append({
+                        "from": root_id, "to": pid, "kind": "power",
+                        "from_pin": None, "to_pin": "VIN",
+                        "_inferred": True,
+                    })
+
+    edges.extend(new_edges)
+
+    # ---- 3. disambiguate one pin fed by two different sources -------
+    by_target = {}
+    for e in edges:
+        if not isinstance(e, dict) or (e.get("kind") or "") != "power":
+            continue
+        key = (e.get("to"), _norm_pin(e.get("to_pin")))
+        by_target.setdefault(key, []).append(e)
+
+    for (_to_id, _tp), group in by_target.items():
+        if len({e.get("from") for e in group}) < 2:
+            continue  # only one source into this pin -- nothing to disambiguate
+        for e in group:
+            src_node = node_by_id.get(e.get("from")) or {}
+            source_label = e.get("from_pin") or src_node.get("label") or e.get("from")
+            base = e.get("to_pin") or "VCC"
+            e["to_pin"] = f"{base} ({source_label})"
+
+
 def run_hardware_speccer(session_id: str = None, tier: int = None,
                           task_text: str = None, domain: str = None,
                           workspace_id: str = None) -> dict:
@@ -982,8 +1239,16 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # to decompose when generation failed outright.
         parts = [{"id": "unavailable", "name": "Spec unavailable", "category": "module",
                   "description": "", "qty": 1, "part_number": None,
+                  "generic_name": "Spec unavailable", "aliases": [],
                   "estimated_price_bdt": None, "vendor_name": None,
                   "vendor_url": None, "price_checked_at": None}]
+
+    # Fill any generic_name/aliases gaps Call 1 left -- see
+    # _ensure_generic_names' own docstring. Runs before dimension
+    # lookup/Call 2 so every downstream consumer (including this
+    # function's own later steps and any future G1a/G2 lookup) can rely
+    # on both fields always being present in a normalized shape.
+    parts = _ensure_generic_names(parts)
 
     # Merge real dimensions/datasheet links onto whichever parts carry a
     # part_number, BEFORE Call 2 -- see _populate_dimensions()'s own
@@ -1046,6 +1311,17 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # for an empty nodes/edges list.
     if "wiring" not in spec or not isinstance(spec["wiring"], dict):
         spec["wiring"] = {"nodes": [], "edges": []}
+
+    # Repair the three wiring.edges shapes that pass the model's own
+    # schema but render as physically invalid (incomplete I2C pair,
+    # orphaned power input, one pin fed by two rails) -- see
+    # _fix_wiring_electrical_integrity()'s own docstring. Must run
+    # after "wiring" is guaranteed to be a dict (immediately above) and
+    # before _build_wiring_mermaid() below, so the diagram it renders
+    # already reflects the repaired edges rather than needing a second
+    # pass.
+    _fix_wiring_electrical_integrity(spec)
+
     spec["wiring"]["mermaid"] = _build_wiring_mermaid(spec)
 
     # T2b, step 19a: Blueprint Info/summary surface -- one more small
