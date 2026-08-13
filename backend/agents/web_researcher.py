@@ -58,7 +58,7 @@ from utils.web_search import search as web_search
 REQUEST_TIMEOUT = 15
 MAX_RESULTS = 8
 
-HN_SEARCH_URL = "http://hn.algolia.com/api/v1/search"
+HN_SEARCH_URL = "https://hn.algolia.com/api/v1/search"
 
 # Reddit + a COUPLE of adjacent forums -- the guide's own phrasing for
 # the "forum" scope, not just reddit.com alone.
