@@ -70,9 +70,24 @@ jobs:
       # rules or PR-comment integration are wanted.
       - run: semgrep scan --config=auto --sarif --output=semgrep.sarif
         continue-on-error: true  # upload the SARIF even if semgrep exits non-zero on findings
-      - uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
+      - id: upload-sarif  # named so dismiss-alerts below can read its sarif-id output
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
         with:
           sarif_file: semgrep.sarif
+          wait-for-processing: true  # dismiss-alerts needs the upload fully processed before it queries the Alerts API
+      # Reads semgrep.sarif's own suppressions[] (set by `# nosemgrep: ...`
+      # comments -- either trailing or on the standalone line immediately
+      # above the flagged line) and dismisses any open Code Scanning alert
+      # that matches, on every run. This is what upload-sarif itself never
+      # did for third-party SARIF: without this step, a suppressed
+      # semgrep result still shows up as an open alert.
+      - if: github.ref == 'refs/heads/main'
+        uses: advanced-security/dismiss-alerts@a18f986bdb40edba0dd7a74382c15d4a3d50a1c8 # v2.0.3
+        with:
+          sarif-id: ${{ steps.upload-sarif.outputs.sarif-id }}
+          sarif-file: semgrep.sarif
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   promptfoo:
     # D2 patch 6 — Role Library regression evals (backend/evals/promptfoo).

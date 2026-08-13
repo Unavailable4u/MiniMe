@@ -78,7 +78,8 @@ def _owned_chat_ids(chat_ids: list[str], owner_id: str) -> list[str]:
 
 def list_batches(owner_id: str) -> list:
     with db.cursor(user_id=owner_id) as cur:
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _BATCH_SELECT fragment above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _BATCH_SELECT fragment above; every value is a %s param
+        cur.execute(
             _BATCH_SELECT + " where b.owner_id = %s group by b.id order by b.updated_at desc",
             (owner_id,),
         )
@@ -88,7 +89,8 @@ def list_batches(owner_id: str) -> list:
 
 def get_batch(batch_id: str, owner_id: str) -> dict:
     with db.cursor(user_id=owner_id) as cur:
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _BATCH_SELECT fragment above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _BATCH_SELECT fragment above; every value is a %s param
+        cur.execute(
             _BATCH_SELECT + " where b.id = %s and b.owner_id = %s group by b.id",
             (batch_id, owner_id),
         )
