@@ -62,7 +62,17 @@ moviepy==2.2.1
 multidict==6.7.1
 narwhals==2.23.0
 ndg-httpsclient==0.5.1
-numpy==2.5.1
+# Pinned to 2.4.6, not 2.5.1: numpy 2.5.0+ dropped Python 3.11 support
+# (requires_python >=3.12 on every 2.5.x wheel on PyPI, confirmed against
+# the package's own release metadata). ci.yml pins actions/setup-python
+# to "3.11" for the test/lint/promptfoo jobs, so 2.5.1 has no installable
+# wheel there -- `pip install -r requirements.txt` fails immediately with
+# "No matching distribution found for numpy==2.5.1", before pytest/ruff/
+# the promptfoo eval ever run. 2.4.6 is the newest 2.4.x release, still
+# supports 3.11, and is the smallest change that unblocks CI without
+# touching the Python version pin (which may have its own reasons to
+# stay on 3.11 -- not investigated here, out of scope for this fix).
+numpy==2.4.6
 onnxruntime==1.27.0
 openai==2.44.0
 openpyxl==3.1.5
@@ -100,7 +110,11 @@ reportlab==5.0.0
 requests==2.34.2
 rich==15.0.0
 scikit-learn==1.9.0
-scipy==1.18.0
+# Same issue and same fix as the numpy pin above: scipy 1.18.0's own
+# PyPI wheel metadata requires_python >=3.12 (confirmed directly, not
+# guessed), no wheel installable under ci.yml's pinned Python 3.11.
+# 1.17.1 is the newest 1.17.x release, still supports 3.11.
+scipy==1.17.1
 sentry-sdk==2.19.2
 setuptools==83.0.0
 six==1.17.0
