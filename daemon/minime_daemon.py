@@ -1,37 +1,36 @@
 """
-daemon/minime_daemon.py — F2 Part 1: standalone daemon scaffolding.
+daemon/minime_daemon.py — F2 Part 1 + Part 2.
 
-Scope for this part, deliberately narrow: load config, start up, prove
-the configured root folder is safe, and prove path_guard actually
-refuses paths outside it. No websocket, no backend connection, no
-pairing handshake yet -- that's Part 2. This file's only job is to be
-something you can run locally and trust before it's ever given a
-network connection.
+Part 1 scope (unchanged): load config, prove the configured root
+folder is safe, and prove path_guard actually refuses paths outside
+it -- all before this process is ever given a network connection.
+
+Part 2 adds the actual backend connection: once the self-checks pass,
+this now runs daemon/connection.py's run_forever(), which connects out
+to MINIME_BACKEND_WS_URL, pairs via the handshake eo/local_workspace.py
+implements on the backend side, and idles on that socket (reconnecting
+with backoff on drop) until Ctrl+C/SIGTERM. Still no tool-call message
+shape -- that's Part 3.
 
 Run it:
     cd MiniMe
     pip install -r daemon/requirements.txt
     cp daemon/.env.example daemon/.env
     python -c "import secrets; print(secrets.token_urlsafe(32))"  # paste into .env
-    # set MINIME_ALLOWED_ROOT in daemon/.env to a real project folder
+    # set MINIME_ALLOWED_ROOT, MINIME_BACKEND_WS_URL, and
+    # MINIME_WORKSPACE_ID in daemon/.env
     python -m daemon.minime_daemon
-
-What "starts up and does nothing else yet" means concretely here: it
-loads config, logs its own status, runs a handful of self-checks
-against the configured root (see _self_check below) so a misconfigured
-root is caught immediately and loudly instead of surfacing later as a
-confusing Part 3/4 bug, then idles. Ctrl+C to stop.
 
 Place this file at: daemon/minime_daemon.py
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import signal
 import sys
-import time
-from pathlib import Path
 
+from daemon import connection
 from daemon.config import ConfigError, DaemonConfig, load_config
 from daemon.path_guard import PathGuardError, assert_within_root
 
@@ -40,14 +39,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("minime_daemon")
-
-_running = True
-
-
-def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001 -- signal handler sig
-    global _running
-    logger.info("shutdown signal received (%s), stopping", signum)
-    _running = False
 
 
 def _self_check(config: DaemonConfig) -> None:
@@ -96,7 +87,7 @@ def _self_check(config: DaemonConfig) -> None:
         logger.info("self-check PASS: '../..' traversal is rejected")
 
 
-def main() -> int:
+async def _amain() -> int:
     try:
         config = load_config()
     except ConfigError as exc:
@@ -110,23 +101,39 @@ def main() -> int:
         return 1
 
     logger.info(
-        "minime_daemon starting -- root=%s, pairing token loaded (%d chars)",
+        "minime_daemon starting -- root=%s, workspace=%s, backend=%s, "
+        "pairing token loaded (%d chars)",
         config.allowed_root,
+        config.workspace_id,
+        config.backend_ws_url,
         len(config.pairing_token),
     )
-    logger.info(
-        "no backend connection in this build (F2 Part 1 scope) -- "
-        "idling until Part 2 wires the websocket handshake"
-    )
 
-    signal.signal(signal.SIGINT, _handle_shutdown)
-    signal.signal(signal.SIGTERM, _handle_shutdown)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    while _running:
-        time.sleep(1)
+    def _handle_shutdown(signum: int) -> None:
+        logger.info("shutdown signal received (%s), stopping", signum)
+        stop_event.set()
+
+    # signal.signal (not loop.add_signal_handler) for the same reason
+    # Part 1 used it: it's the one registration API that behaves the
+    # same on Windows and Unix, and this daemon is meant to run on
+    # whatever machine the user happens to be developing on.
+    signal.signal(signal.SIGINT, lambda signum, frame: loop.call_soon_threadsafe(_handle_shutdown, signum))
+    signal.signal(signal.SIGTERM, lambda signum, frame: loop.call_soon_threadsafe(_handle_shutdown, signum))
+
+    # NEW — Part 2: replaces Part 1's plain idle-sleep loop. Connects
+    # out to the backend, pairs, and reconnects with backoff on drop,
+    # until stop_event is set above.
+    await connection.run_forever(config, stop_event)
 
     logger.info("minime_daemon stopped")
     return 0
+
+
+def main() -> int:
+    return asyncio.run(_amain())
 
 
 if __name__ == "__main__":
