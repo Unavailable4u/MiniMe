@@ -25,12 +25,23 @@ source_ingestor's existing len(sections) <= 1 branch (already there,
 already writes exactly one node) now does the right thing for PDFs with
 no changes needed on that side at all.
 
+D3 Part 5: every page's text (and the guessed title) is run through
+eo/pii_scrub.py's scrub() before `_join_pages()` runs — see that
+module's own docstring for why the scrub happens per-page rather than on
+the joined `content` string (Presidio's replacements change text length,
+which would otherwise invalidate every page_breaks offset after the
+first redaction).
+
 Place this file at: agents/pdf_ingestor.py
 """
 
 import os
+import sys
 
 import pdfplumber
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.pii_scrub import scrub
 
 
 SUPPORTED_EXTENSIONS = (".pdf",)
@@ -93,6 +104,15 @@ def ingest_pdf(path: str) -> dict:
     agents/importer.py's import_artifact() contract so callers can
     handle both the same way.
 
+    D3 Part 5: page text and the guessed title are PII-scrubbed (see
+    eo/pii_scrub.py) before this function returns, so both call sites
+    that feed this straight into source_ingestor.write_ingested_source()
+    (agents/source_manager.py's process_upload(), and this module's own
+    convenience wrapper agents/source_ingestor.py's ingest_pdf_to_graph())
+    get already-scrubbed text without needing their own scrub() call —
+    PII never reaches the knowledge graph or gets embedded into Upstash
+    Vector.
+
     Always returns exactly one section (the whole document) — see the
     module docstring for why sections no longer track pages.
     """
@@ -100,8 +120,8 @@ def ingest_pdf(path: str) -> dict:
         raise FileNotFoundError(path)
 
     with pdfplumber.open(path) as pdf:
-        title = _guess_title(pdf, path)
-        page_texts = [_extract_page_text(page) for page in pdf.pages]
+        title = scrub(_guess_title(pdf, path))
+        page_texts = [scrub(_extract_page_text(page)) for page in pdf.pages]
 
     content, page_breaks = _join_pages(page_texts)
 
@@ -118,7 +138,6 @@ def ingest_pdf(path: str) -> dict:
 
 
 if __name__ == "__main__":
-    import sys
     import json
     for p in sys.argv[1:]:
         artifact = ingest_pdf(p)

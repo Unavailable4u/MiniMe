@@ -55,6 +55,7 @@ from eo.sga import attempt as sga_attempt
 from eo.semantic_cache import check_cache, write_cache
 from eo.panel import staff_task
 from eo.registry import update_role_prompt   # NEW — Part 2 §2.5
+from eo.output_guard import validate_final_answer   # NEW — D3 Part 3
 from agents.source_manager import process_upload   # NEW — Data Layer §4a: the deterministic
 # "attachment present" short-circuit below hires Source Manager directly,
 # same entry point every upload endpoint already funnels through (§2b).
@@ -476,8 +477,22 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         try:
             from agents.output_organizer import organize_final_answer
             organized = organize_final_answer(results, task_text, final_role=final_role, session_id=session_id)
-            answer = organized["answer"]
-            dedup_notes = organized["dedup_notes"]
+
+            # NEW — D3 Part 3: guard the merged answer before it replaces
+            # the final_role fallback already sitting in `answer`. Same
+            # fail-open contract as the except block below -- on a
+            # failing check, leave `answer`/`dedup_notes` exactly as they
+            # were pre-synthesis rather than shipping a blank, marker-
+            # leaking, or structurally-broken answer to chat_store /
+            # chat_workspace.
+            is_valid, reason = validate_final_answer(organized["answer"])
+            if is_valid:
+                answer = organized["answer"]
+                dedup_notes = organized["dedup_notes"]
+            else:
+                print(f"  [task_runner] output_organizer answer failed "
+                      f"output_guard validation, falling back to "
+                      f"final_role's own answer (fail-open): {reason}")
         except Exception as exc:
             print(f"  [task_runner] output_organizer synthesis failed, "
                   f"falling back to final_role's own answer (fail-open): {exc}")

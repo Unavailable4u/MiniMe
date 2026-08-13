@@ -42,6 +42,8 @@ param existed.
 """
 import json
 
+from eo.output_guard import validate_artifact_entry   # NEW — D3 Part 4
+
 
 def _render_code_modules(modules: dict) -> str:
     """Renders a {module_name: code_str | {"language","code"}} dict as
@@ -273,11 +275,12 @@ def collect_artifacts(role_outputs: dict) -> list:
     flat list for the final chat response.
 
     Each entry is expected to look like {"type": "html"|"svg"|"python"|
-    "react", "title": str, "code": str} — validated defensively here
-    (skip anything missing "type"/"code" rather than erroring the whole
-    run over one malformed entry from one role), tagged with which role
-    produced it so a future caller (e.g. CO4's Working Panel) can group
-    by origin if it wants to.
+    "react", "title": str, "code": str} — validated via eo/output_guard.py's
+    validate_artifact_entry() (D3 Part 4): skip anything that fails shape
+    validation (missing/empty "type" or "code", or a non-string "code"/
+    "title") rather than erroring the whole run over one malformed entry
+    from one role, tagged with which role produced it so a future caller
+    (e.g. CO4's Working Panel) can group by origin if it wants to.
 
     No REAL_ACTION_ROLES module emits "artifacts" yet as of this patch —
     this is the shared collection point CO2's follow-up patches
@@ -295,9 +298,10 @@ def collect_artifacts(role_outputs: dict) -> list:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if not entry.get("type") or not entry.get("code"):
+            is_valid, reason = validate_artifact_entry(entry)
+            if not is_valid:
+                print(f"  [result_render] dropping malformed artifact entry "
+                      f"from role '{role}': {reason}")
                 continue
             collected.append({
                 "type": entry["type"],
