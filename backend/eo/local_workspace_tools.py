@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from eo.local_workspace import ToolCallError, call_daemon  # noqa: F401 -- re-exported for callers
+from relay.emitter import EventType, emit_workspace_event  # NEW — Part 5
 
 __all__ = [
     "ToolCallError",
@@ -69,6 +70,77 @@ __all__ = [
 ]
 
 
+# ---------------------------------------------------------------------
+# Part 5 — event logging. Every local tool call (proposed/confirmed/
+# denied/executed/result) emits onto the workspace's Pusher channel via
+# relay/emitter.py's emit_workspace_event(), the same mechanism CO4's
+# cache_hit/worker_pool_selection instrumentation already uses, so
+# local-daemon activity shows up in the same decisionEvents-driven
+# timeline (AgentStepList.jsx's chips, RoutingTraceGraph.jsx's nodes)
+# instead of needing a bespoke log view of its own.
+# ---------------------------------------------------------------------
+
+# How much of a tool's own params/result to actually put in an event
+# payload. This is a live-activity log, not the tool_result transport
+# itself (that's still call_daemon()'s full, untruncated return value,
+# used as-is by the HTTP route) -- a whole file's contents or a
+# command's full stdout has no business riding on a Pusher event just
+# to show a chip that says "wrote src/app.py" or "ran pytest -q".
+_EVENT_FIELD_PREVIEW_CHARS = 200
+
+
+def _preview(value: Any) -> Any:
+    """Truncates a string field for event payloads; passes anything
+    else (numbers, bools, None) through unchanged. Keeps this a
+    one-line call at every emit site below instead of repeating the
+    same isinstance/len check five times."""
+    if isinstance(value, str) and len(value) > _EVENT_FIELD_PREVIEW_CHARS:
+        return value[:_EVENT_FIELD_PREVIEW_CHARS] + "…"
+    return value
+
+
+def _tool_event_payload(tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """The small, display-oriented subset of a tool call's params worth
+    putting on the wire for a log chip -- notably never `content` (
+    write_file's full new file body), which is exactly the kind of
+    payload emit_event()'s own docstring warns an event-emission
+    failure must never be load-bearing for, and which would otherwise
+    make every write_file proposal balloon the event payload with data
+    the timeline UI has no use for."""
+    payload: Dict[str, Any] = {"tool": tool}
+    if "path" in params:
+        payload["path"] = _preview(params.get("path"))
+    if "command" in params:
+        payload["command"] = _preview(params.get("command"))
+    if tool == "write_file":
+        content = params.get("content")
+        payload["content_bytes"] = len(content.encode("utf-8")) if isinstance(content, str) else None
+    return payload
+
+
+def _emit_tool_event(
+    event_type: EventType,
+    workspace_id: str,
+    tool: str,
+    params: Dict[str, Any],
+    action_id: str | None = None,
+    ok: bool | None = None,
+    error: str | None = None,
+) -> None:
+    payload = _tool_event_payload(tool, params)
+    if action_id is not None:
+        payload["action_id"] = action_id
+    if ok is not None:
+        payload["ok"] = ok
+    if error is not None:
+        payload["error"] = _preview(error)
+    # Fire-and-forget, same as every other emit_workspace_event() call
+    # site (api/task_runner.py's PANEL_CONTENT_UPDATED/CODE_FILE_UPDATED)
+    # -- a dead relay or unset Pusher env must never affect whether the
+    # actual daemon call happens or what its result was.
+    emit_workspace_event(event_type, workspace_id=workspace_id, agent="local_workspace", payload=payload)
+
+
 async def list_workspace_dir(workspace_id: str, path: str = ".") -> Dict[str, Any]:
     """Raises eo.local_workspace.ToolCallError if no daemon is
     connected for this workspace, the call times out, or the daemon
@@ -77,12 +149,28 @@ async def list_workspace_dir(workspace_id: str, path: str = ".") -> Dict[str, An
     shape rather than handling it here, so this stays a thin,
     transport-agnostic wrapper any future caller (a route, an agent
     step) can reuse as-is."""
-    return await call_daemon(workspace_id, "list_dir", {"path": path})
+    params = {"path": path}
+    _emit_tool_event(EventType.LOCAL_TOOL_EXECUTED, workspace_id, "list_dir", params)
+    try:
+        result = await call_daemon(workspace_id, "list_dir", params)
+    except ToolCallError as exc:
+        _emit_tool_event(EventType.LOCAL_TOOL_RESULT, workspace_id, "list_dir", params, ok=False, error=str(exc))
+        raise
+    _emit_tool_event(EventType.LOCAL_TOOL_RESULT, workspace_id, "list_dir", params, ok=True)
+    return result
 
 
 async def read_workspace_file(workspace_id: str, path: str) -> Dict[str, Any]:
     """Same error contract as list_workspace_dir() above."""
-    return await call_daemon(workspace_id, "read_file", {"path": path})
+    params = {"path": path}
+    _emit_tool_event(EventType.LOCAL_TOOL_EXECUTED, workspace_id, "read_file", params)
+    try:
+        result = await call_daemon(workspace_id, "read_file", params)
+    except ToolCallError as exc:
+        _emit_tool_event(EventType.LOCAL_TOOL_RESULT, workspace_id, "read_file", params, ok=False, error=str(exc))
+        raise
+    _emit_tool_event(EventType.LOCAL_TOOL_RESULT, workspace_id, "read_file", params, ok=True)
+    return result
 
 
 # ---------------------------------------------------------------------
@@ -172,6 +260,7 @@ def propose_action(workspace_id: str, tool: str, params: Dict[str, Any]) -> Pend
         params=dict(params or {}),
     )
     _pending_actions[action.action_id] = action
+    _emit_tool_event(EventType.LOCAL_TOOL_PROPOSED, workspace_id, tool, action.params, action_id=action.action_id)
     return action
 
 
@@ -198,7 +287,22 @@ async def confirm_action(workspace_id: str, action_id: str) -> Dict[str, Any]:
     """
     action = get_pending_action(workspace_id, action_id)
     _pending_actions.pop(action_id, None)
-    return await call_daemon(workspace_id, action.tool, action.params)
+    _emit_tool_event(
+        EventType.LOCAL_TOOL_CONFIRMED, workspace_id, action.tool, action.params, action_id=action_id
+    )
+    try:
+        result = await call_daemon(workspace_id, action.tool, action.params)
+    except ToolCallError as exc:
+        _emit_tool_event(
+            EventType.LOCAL_TOOL_RESULT, workspace_id, action.tool, action.params,
+            action_id=action_id, ok=False, error=str(exc),
+        )
+        raise
+    _emit_tool_event(
+        EventType.LOCAL_TOOL_RESULT, workspace_id, action.tool, action.params,
+        action_id=action_id, ok=True,
+    )
+    return result
 
 
 def deny_action(workspace_id: str, action_id: str) -> None:
@@ -207,8 +311,9 @@ def deny_action(workspace_id: str, action_id: str) -> None:
     get_pending_action() -- denying an already-gone action is still an
     error, not a silent no-op, so a caller can tell "you denied
     something real" apart from "that action_id was never valid"."""
-    get_pending_action(workspace_id, action_id)
+    action = get_pending_action(workspace_id, action_id)
     _pending_actions.pop(action_id, None)
+    _emit_tool_event(EventType.LOCAL_TOOL_DENIED, workspace_id, action.tool, action.params, action_id=action_id)
 
 
 def local_workspace_tools() -> List[Dict[str, Any]]:

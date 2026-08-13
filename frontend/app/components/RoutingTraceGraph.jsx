@@ -67,6 +67,16 @@ function decisionLabel(event) {
     const picked = selected?.length ?? worker_count ?? "?";
     return `Worker pool: ${role_tag || event.agent || "?"} (${picked}/${pool_size ?? "?"} picked)`;
   }
+  // NEW — F2 Part 5. relay/emitter.py's LOCAL_TOOL_* events (daemon
+  // tool-call log) get their own terminal node here too, same as the
+  // AgentStepList.jsx chip -- see that file's decisionLabel() for the
+  // matching text and _localToolTarget()'s payload shape.
+  if (event.type.startsWith("local_tool_")) {
+    const { tool, path, command } = event.payload || {};
+    const target = path || command || tool || "?";
+    const stage = event.type.replace("local_tool_", "");
+    return `Local ${stage}: ${target}`;
+  }
   return event.type;
 }
 

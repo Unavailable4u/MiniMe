@@ -367,7 +367,23 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       // just distinguished by `type` for whatever CO4 patch 4 renders
       // per type. No rendering here — see decisionEvents' own comment
       // in makeInitialDockState above.
-      if (eventType === "cache_hit" || eventType === "worker_pool_selection") {
+      if (
+        eventType === "cache_hit" ||
+        eventType === "worker_pool_selection" ||
+        // NEW — F2 Part 5: relay/emitter.py's LOCAL_TOOL_* events (the
+        // daemon tool-call log -- eo/local_workspace_tools.py's
+        // propose_action/confirm_action/deny_action/list_workspace_dir/
+        // read_workspace_file). Same "decision point outside the normal
+        // agent_start/agent_done sequence" bucket cache_hit/worker_pool_
+        // selection already land in above -- a local tool call isn't an
+        // agent step and has no role to key a StepRow off of, so it goes
+        // through this same array rather than liveSteps.
+        eventType === "local_tool_proposed" ||
+        eventType === "local_tool_confirmed" ||
+        eventType === "local_tool_denied" ||
+        eventType === "local_tool_executed" ||
+        eventType === "local_tool_result"
+      ) {
         setState(key, (prev) => ({
           decisionEvents: [
             ...prev.decisionEvents,
