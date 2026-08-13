@@ -147,7 +147,8 @@ def export_chats(owner_id: str, chat_ids: list) -> list[dict]:
     if not chat_ids:
         return []
     with db.cursor(user_id=owner_id) as cur:
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+        cur.execute(
             f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where owner_id = %s and id = any(%s)",
             (owner_id, list(chat_ids)),
         )
@@ -188,7 +189,8 @@ def restore_chats(owner_id: str, exported_chats: list[dict], workspace_id: str |
     with db.cursor(user_id=owner_id) as cur:
         for chat in exported_chats:
             chat_id = new_chat_id()
-            cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+            # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+            cur.execute(
                 f"""
                 insert into chats (id, title, owner_id, tags, template_id, messages,
                                     linked_chat_ids, workspace_id)
@@ -209,7 +211,8 @@ def create_chat(owner_id: str, title: str = "New Chat", tags: list | None = None
     """Creates an empty chat row. Returns the chat dict."""
     chat_id = new_chat_id()
     with db.cursor(user_id=owner_id) as cur:
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+        cur.execute(
             f"""
             insert into chats (id, title, owner_id, tags, template_id, messages, linked_chat_ids)
             values (%s, %s, %s, %s, %s, %s, %s)
@@ -345,7 +348,8 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
     one, rather than a separate count() round trip). It's always False
     on the unpaginated path, since that path returns everything."""
     with db.cursor(user_id=owner_id) as cur:
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+        cur.execute(
             f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where id = %s and owner_id = %s",
             (chat_id, owner_id),
         )
@@ -370,7 +374,8 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
             # beyond this page -- trimmed back off below, never
             # returned to the caller.
             params.append(limit + 1)
-            cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- extra_clause is one of two hardcoded literals set a few lines above (never derived from input); every value is a %s param
+            # nosemgrep: sqlalchemy-execute-raw-query -- extra_clause is one of two hardcoded literals set a few lines above (never derived from input); every value is a %s param
+            cur.execute(
                 f"select id, seq, payload from chat_messages where chat_id = %s{extra_clause} "
                 f"order by seq desc limit %s",
                 params,
@@ -399,7 +404,8 @@ def set_chat_tags(chat_id: str, owner_id: str, tags: list) -> dict:
     """Full replace — the tag editor UI sends the whole list back on
     save, same convention as before."""
     with db.cursor(user_id=owner_id) as cur:
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+        cur.execute(
             f"""
             update chats set tags = %s, updated_at = %s
             where id = %s and owner_id = %s
@@ -489,7 +495,8 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
                 text = (message.get("text") or "").strip().replace("\n", " ")
                 if text:
                     title = text[:60] + ("..." if len(text) > 60 else "")
-            cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+            # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+            cur.execute(
                 f"""
                 insert into chats (id, title, owner_id, messages)
                 values (%s, %s, %s, %s)
@@ -507,7 +514,8 @@ def append_message(chat_id: str, owner_id: str, message: dict) -> dict:
             if text:
                 title = text[:60] + ("..." if len(text) > 60 else "")
 
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+        cur.execute(
             f"""
             update chats set title = %s, updated_at = %s
             where id = %s and owner_id = %s
@@ -530,7 +538,8 @@ def rename_chat(chat_id: str, owner_id: str, new_title: str) -> dict:
     new_title = new_title.strip()[:120]
     with db.cursor(user_id=owner_id) as cur:
         if new_title:
-            cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+            # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+            cur.execute(
                 f"update chats set title = %s, updated_at = %s where id = %s and owner_id = %s "
                 f"returning {_CHAT_COLUMNS}",
                 (new_title, _now(), chat_id, owner_id),
@@ -539,7 +548,8 @@ def rename_chat(chat_id: str, owner_id: str, new_title: str) -> dict:
             # Empty new title: keep the existing title (matches the
             # original's `new_title.strip()[:120] or chat["title"]`),
             # but updated_at still moves, same as before.
-            cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+            # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+            cur.execute(
                 f"update chats set updated_at = %s where id = %s and owner_id = %s "
                 f"returning {_CHAT_COLUMNS}",
                 (_now(), chat_id, owner_id),
@@ -563,7 +573,8 @@ def set_linked_chats(chat_id: str, owner_id: str, linked_chat_ids: list) -> dict
         existing_ids = {r["id"] for r in cur.fetchall()}
         clean_links = [c for c in linked_chat_ids if c != chat_id and c in existing_ids]
 
-        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+        # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
+        cur.execute(
             f"""
             update chats set linked_chat_ids = %s, updated_at = %s
             where id = %s and owner_id = %s
