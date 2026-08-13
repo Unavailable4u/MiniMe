@@ -1,6 +1,11 @@
 # Daemon runs as a separate local process on the user's own machine,
 # not inside the backend's deploy -- kept as its own requirements file
 # so installing it never touches the backend's pinned dependency set.
-# Deliberately tiny for Part 1 (config + path safety only); Part 2 adds
-# a websocket client library here.
+# Deliberately tiny for Part 1 (config + path safety only).
 python-dotenv==1.2.2
+
+# NEW — Part 2: the websocket client the daemon uses to connect OUT to
+# eo/local_workspace.py's /ws/daemon/{workspace_id} route. Pinned to
+# the same version backend/requirements.txt already uses server-side,
+# so both ends of the connection are running the same library version.
+websockets==16.0

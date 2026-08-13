@@ -38,6 +38,7 @@ from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hoo
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect  # NEW — §9b
 from fastapi.middleware.cors import CORSMiddleware
 from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
+from eo import local_workspace  # NEW — F2 Part 2: daemon-facing /ws/daemon/{workspace_id} route
 
 # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
 # _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
@@ -68,6 +69,19 @@ from api.routes.graph_and_notes import router as graph_and_notes_router
 from api.routes.notebooks import router as notebooks_router
 from api.routes.deploy import router as deploy_router
 from api.routes.code import router as code_router
+# F2 Part 2 — local_workspace_router owns /ws/daemon/{workspace_id}, the
+# daemon's own websocket route. Included as a router (not a bare
+# @app.websocket like /ws/{session_id} below) purely so its handshake
+# logic lives in eo/local_workspace.py alongside the registry it shares
+# module state with, rather than split across two files.
+from eo.local_workspace import router as local_workspace_router
+# F2 Part 3 — local_workspace_data_router owns the HTTP surface over the
+# read-only list_dir/read_file tool calls (+ /local/status). A separate
+# router/file from local_workspace_router above (which is the websocket
+# route + registry) since this one follows the plain require_auth +
+# ws_id-ownership shape every other api/routes/*.py file uses, unlike
+# the websocket route's pairing-token auth.
+from api.routes.local_workspace import router as local_workspace_data_router
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
@@ -163,6 +177,8 @@ app.include_router(graph_and_notes_router)
 app.include_router(notebooks_router)
 app.include_router(deploy_router)
 app.include_router(code_router)
+app.include_router(local_workspace_router)  # F2 Part 2: /ws/daemon/{workspace_id}
+app.include_router(local_workspace_data_router)  # F2 Part 3: /api/workspaces/{ws_id}/local/*
 
 
 # NEW — Data Layer architecture §9b: the real transport behind

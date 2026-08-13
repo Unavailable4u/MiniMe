@@ -1,14 +1,17 @@
 """
-daemon/config.py — F2 Part 1: loads the daemon's two-value config
-(pairing token, one allowed root folder) from daemon/.env, following
-this repo's existing python-dotenv + os.environ convention (see
-backend/eo/db.py, backend/eo/quota_sentinel.py).
+daemon/config.py — F2 Part 1 + Part 2: loads the daemon's config
+(pairing token, allowed root folder, and — new in Part 2 — the backend
+websocket URL and which workspace this daemon instance pairs as) from
+daemon/.env, following this repo's existing python-dotenv + os.environ
+convention (see backend/eo/db.py, backend/eo/quota_sentinel.py).
 
-Deliberately minimal: no backend URL, no session/workspace id, nothing
-about the websocket connection yet -- that's Part 2. This module's only
-job in Part 1 is proving config loads correctly and the root folder is
-safe (see path_guard.assert_safe_root) before the daemon does anything
-else.
+Part 1 shipped with only the pairing token and allowed root, since
+nothing existed yet for a backend URL to be useful for. Part 2 wires
+the actual websocket connection (daemon/connection.py), which needs
+somewhere to connect to (MINIME_BACKEND_WS_URL) and a workspace_id to
+identify itself as (MINIME_WORKSPACE_ID) -- both added here rather than
+hardcoded in connection.py, so they follow the same validate-once-at-
+startup shape as the token and root already do.
 
 Place this file at: daemon/config.py
 """
@@ -44,6 +47,8 @@ class ConfigError(Exception):
 class DaemonConfig:
     pairing_token: str
     allowed_root: Path
+    backend_ws_url: str  # NEW — Part 2
+    workspace_id: str  # NEW — Part 2
 
 
 def load_config(env_path: Path | None = None) -> DaemonConfig:
@@ -64,6 +69,8 @@ def load_config(env_path: Path | None = None) -> DaemonConfig:
 
     token = os.environ.get("MINIME_PAIRING_TOKEN", "").strip()
     root = os.environ.get("MINIME_ALLOWED_ROOT", "").strip()
+    backend_ws_url = os.environ.get("MINIME_BACKEND_WS_URL", "").strip()
+    workspace_id = os.environ.get("MINIME_WORKSPACE_ID", "").strip()
 
     if not token:
         raise ConfigError("MINIME_PAIRING_TOKEN is not set in daemon/.env")
@@ -76,13 +83,32 @@ def load_config(env_path: Path | None = None) -> DaemonConfig:
     if not root:
         raise ConfigError("MINIME_ALLOWED_ROOT is not set in daemon/.env")
 
+    # NEW — Part 2: the two values connection.py needs to actually dial
+    # out. Validated here, not in connection.py, so a bad value is
+    # caught at startup alongside the token/root checks above rather
+    # than surfacing later as a confusing first-connect failure.
+    if not backend_ws_url:
+        raise ConfigError("MINIME_BACKEND_WS_URL is not set in daemon/.env")
+    if not (backend_ws_url.startswith("ws://") or backend_ws_url.startswith("wss://")):
+        raise ConfigError(
+            f"MINIME_BACKEND_WS_URL must start with ws:// or wss:// "
+            f"(got: {backend_ws_url!r})"
+        )
+    if not workspace_id:
+        raise ConfigError("MINIME_WORKSPACE_ID is not set in daemon/.env")
+
     try:
         resolved_root = assert_safe_root(root)
     except PathGuardError as exc:
         raise ConfigError(str(exc)) from exc
 
     logger.info("config loaded: allowed root = %s", resolved_root)
-    return DaemonConfig(pairing_token=token, allowed_root=resolved_root)
+    return DaemonConfig(
+        pairing_token=token,
+        allowed_root=resolved_root,
+        backend_ws_url=backend_ws_url,
+        workspace_id=workspace_id,
+    )
 
 
 def generate_pairing_token() -> str:
