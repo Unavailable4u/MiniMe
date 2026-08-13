@@ -1,6 +1,8 @@
 "use client";
+import { useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Edges } from "@react-three/drei";
+import { Eye, EyeOff } from "lucide-react";
 
 // Same category palette as PartsTable.jsx's CATEGORY_COLORS and
 // WiringGraph.jsx's TYPE_COLORS, in hex here since three.js materials
@@ -87,7 +89,7 @@ function PrimitiveBox({ size, color, isShell, selected }) {
   );
 }
 
-function PartBox({ placement, part, enclosure }) {
+function PartBox({ placement, part, enclosure, selected, onSelect }) {
   const color = CATEGORY_COLORS[part?.category] || DEFAULT_COLOR;
   const isShell = isShellPlacement(placement, enclosure);
   // BUG FIX (prior patch): `placement.x/y/z` is a corner coordinate --
@@ -113,9 +115,111 @@ function PartBox({ placement, part, enclosure }) {
   const centerY = placement.y + placement.h / 2 - enclosure.h / 2;
   const centerZ = placement.z + placement.d / 2 - enclosure.d / 2;
   return (
-    <mesh position={[centerX, centerY, centerZ]}>
-      <PrimitiveBox size={[placement.w, placement.h, placement.d]} color={color} isShell={isShell} />
+    <mesh
+      position={[centerX, centerY, centerZ]}
+      // Shells (housing/lid) fully enclose whatever sits inside them, so
+      // a naive raycast would hit the shell's near wall before it ever
+      // reaches the part behind it -- clicking "into" the housing would
+      // just keep selecting the housing. Disabling raycasting on shell
+      // meshes lets clicks pass through to whatever's actually inside;
+      // shells remain selectable, just only from the sidebar (patch 6),
+      // which is where you'd realistically go to select "the housing"
+      // as a whole anyway.
+      raycast={isShell ? () => null : undefined}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect(placement.part_id);
+      }}
+    >
+      <PrimitiveBox size={[placement.w, placement.h, placement.d]} color={color} isShell={isShell} selected={selected} />
     </mesh>
+  );
+}
+
+/**
+ * PartsSidePanel — full BOM listing next to the 3D canvas (patch 5).
+ * Deliberately iterates `parts` (device_spec.parts), not `placements`:
+ * placements only cover parts hardware_speccer.py chose to lay out in
+ * 3D space, but fasteners/adhesives/misc parts that never get a
+ * placement still belong in a "what's in this build" reference. Rows
+ * for those unplaced parts get a dimmed, disabled eye icon since
+ * there's nothing in the canvas for them to toggle.
+ */
+function PartsSidePanel({ parts, placedPartIds, hiddenPartIds, onToggleHidden, selectedPartId, onSelect }) {
+  return (
+    <div className="h-[480px] w-56 shrink-0 flex flex-col rounded-lg border border-[var(--neutral-800)] overflow-hidden">
+      <div className="shrink-0 px-2 py-1.5 border-b border-[var(--neutral-800)] text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
+        Parts ({parts.length})
+      </div>
+      <ul className="flex-1 overflow-y-auto divide-y divide-[var(--neutral-800)]">
+        {parts.map((part) => {
+          const isPlaced = placedPartIds.has(part.id);
+          const isHidden = hiddenPartIds.has(part.id);
+          const isSelected = part.id === selectedPartId;
+          const color = CATEGORY_COLORS[part.category] || DEFAULT_COLOR;
+          return (
+            <li
+              key={part.id}
+              onClick={() => isPlaced && onSelect(part.id)}
+              className={
+                "flex items-center gap-2 h-8 px-2 text-xs text-[var(--neutral-300)] transition-colors" +
+                (isPlaced ? " cursor-pointer hover:bg-[var(--neutral-900)]" : "") +
+                (isSelected ? " bg-[var(--neutral-800)]" : "")
+              }
+            >
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: color }}
+              />
+              <span className={"flex-1 truncate" + (isPlaced ? "" : " text-[var(--neutral-600)]")}>
+                {part.name}
+              </span>
+              <button
+                type="button"
+                disabled={!isPlaced}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  isPlaced && onToggleHidden(part.id);
+                }}
+                aria-label={isHidden ? `Show ${part.name}` : `Hide ${part.name}`}
+                className={
+                  isPlaced
+                    ? "text-[var(--neutral-400)] hover:text-[var(--neutral-100)]"
+                    : "text-[var(--neutral-700)] cursor-not-allowed"
+                }
+              >
+                {isHidden ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * CategoryLegend — small swatch+label row under the canvas (patch 7),
+ * so the box colors are self-explanatory without cross-referencing the
+ * Parts tab. Only lists categories actually present in this spec's
+ * parts list, rather than the full CATEGORY_COLORS map, so a simple
+ * build doesn't show a legend full of categories it doesn't use.
+ */
+function CategoryLegend({ parts }) {
+  const presentCategories = [...new Set(parts.map((p) => p.category).filter(Boolean))];
+  if (presentCategories.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+      {presentCategories.map((category) => (
+        <div key={category} className="flex items-center gap-1.5">
+          <span
+            className="h-2 w-2 shrink-0 rounded-full"
+            style={{ backgroundColor: CATEGORY_COLORS[category] || DEFAULT_COLOR }}
+          />
+          <span className="text-[10px] text-[var(--neutral-500)]">{category}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -143,7 +247,41 @@ function PartBox({ placement, part, enclosure }) {
 export default function MechView({ mech, parts }) {
   const enclosure = mech?.enclosure || { w: 100, h: 60, d: 40 };
   const placements = mech?.placements || [];
-  const partsById = Object.fromEntries((parts || []).map((p) => [p.id, p]));
+  const allParts = parts || [];
+  const partsById = Object.fromEntries(allParts.map((p) => [p.id, p]));
+  const placedPartIds = new Set(placements.map((pl) => pl.part_id));
+
+  // Pure frontend state, keyed by part_id -- part_id stays stable across
+  // future Phase-G changes (per earlier discussion), so this set never
+  // needs to be reconciled against placement/index changes elsewhere.
+  const [hiddenPartIds, setHiddenPartIds] = useState(() => new Set());
+  // Single source of truth for "what's selected", settable two ways:
+  // clicking a mesh in the 3D view (r3f's built-in raycasting `onClick`
+  // on each PartBox) or clicking a row in the sidebar. Both funnel into
+  // the same setter below.
+  const [selectedPartId, setSelectedPartId] = useState(null);
+
+  function toggleHidden(partId) {
+    setHiddenPartIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(partId)) {
+        next.delete(partId);
+      } else {
+        next.add(partId);
+        // Edge case (patch 7): if the part being hidden is currently
+        // selected, clear the selection rather than leaving a stale
+        // highlighted sidebar row pointing at something no longer on
+        // screen -- there'd be nothing in the canvas to show as
+        // selected anymore.
+        setSelectedPartId((sel) => (sel === partId ? null : sel));
+      }
+      return next;
+    });
+  }
+
+  function selectPart(partId) {
+    setSelectedPartId((prev) => (prev === partId ? prev : partId));
+  }
 
   if (placements.length === 0) {
     return (
@@ -153,28 +291,54 @@ export default function MechView({ mech, parts }) {
     );
   }
 
+  const visiblePlacements = placements.filter((pl) => !hiddenPartIds.has(pl.part_id));
+
   return (
     <div className="space-y-2">
-      <div className="h-[480px] rounded-lg border border-[var(--neutral-800)] overflow-hidden bg-black/30">
-        <Canvas camera={{ position: [enclosure.w * 1.5, enclosure.h * 1.5, enclosure.d * 1.5], fov: 45 }}>
-          <ambientLight intensity={0.6} />
-          <pointLight position={[10, 10, 10]} intensity={0.8} />
-          {/* FIX: was `meshBasicMaterial wireframe` directly on a
-              boxGeometry, which renders three.js's own triangulated
-              wireframe -- a diagonal cross through every face, not a
-              clean rectangular hull outline. `<Edges>` draws only the
-              box's true 12 edges. */}
-          <mesh>
-            <boxGeometry args={[enclosure.w, enclosure.h, enclosure.d]} />
-            <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-            <Edges color="#5b6472" linewidth={1} />
-          </mesh>
-          {placements.map((pl) => (
-            <PartBox key={pl.part_id} placement={pl} part={partsById[pl.part_id]} enclosure={enclosure} />
-          ))}
-          <OrbitControls />
-        </Canvas>
+      <div className="flex gap-2">
+        <div className="h-[480px] flex-1 rounded-lg border border-[var(--neutral-800)] overflow-hidden bg-black/30">
+          <Canvas
+            camera={{ position: [enclosure.w * 1.5, enclosure.h * 1.5, enclosure.d * 1.5], fov: 45 }}
+            // Standard r3f pattern: fires when a click doesn't land on
+            // any mesh (i.e. empty space in the canvas), so clicking
+            // away from a part deselects it -- no extra library needed.
+            onPointerMissed={() => setSelectedPartId(null)}
+          >
+            <ambientLight intensity={0.6} />
+            <pointLight position={[10, 10, 10]} intensity={0.8} />
+            {/* FIX: was `meshBasicMaterial wireframe` directly on a
+                boxGeometry, which renders three.js's own triangulated
+                wireframe -- a diagonal cross through every face, not a
+                clean rectangular hull outline. `<Edges>` draws only the
+                box's true 12 edges. */}
+            <mesh>
+              <boxGeometry args={[enclosure.w, enclosure.h, enclosure.d]} />
+              <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+              <Edges color="#5b6472" linewidth={1} />
+            </mesh>
+            {visiblePlacements.map((pl) => (
+              <PartBox
+                key={pl.part_id}
+                placement={pl}
+                part={partsById[pl.part_id]}
+                enclosure={enclosure}
+                selected={pl.part_id === selectedPartId}
+                onSelect={selectPart}
+              />
+            ))}
+            <OrbitControls />
+          </Canvas>
+        </div>
+        <PartsSidePanel
+          parts={allParts}
+          placedPartIds={placedPartIds}
+          hiddenPartIds={hiddenPartIds}
+          onToggleHidden={toggleHidden}
+          selectedPartId={selectedPartId}
+          onSelect={selectPart}
+        />
       </div>
+      <CategoryLegend parts={allParts} />
       <p className="text-[10px] text-[var(--neutral-600)] px-1">
         Rough layout, not engineering-grade CAD — drag to orbit.
       </p>
