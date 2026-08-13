@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import { useSession } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
 import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
@@ -1219,21 +1219,43 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
     setRenderFailed(false);
   }, [spec?.info?.image_url]);
 
+  // FIX — spec has two independent writers (the refetch effect below and
+  // handleRefreshPrices), and neither used to check whether its own
+  // response was still the newest one in flight before calling setSpec.
+  // A full device-spec refetch (triggered by ANY panel_content_updated
+  // push for this workspace, not just pricing — see refreshSignal's own
+  // comment above) always reseeds every part's estimated_price_bdt back
+  // to null. If that refetch's response landed *after* a price-refresh
+  // response resolved, it would silently clobber the priced parts with
+  // unpriced ones while the footer's total (computed in the same render
+  // pass, from the same array) still reflected whichever set of numbers
+  // won the race — producing exactly the "N unpriced, non-zero total"
+  // contradiction this was patched for.
+  //
+  // requestSeqRef is a single counter shared by both writers. Each async
+  // operation stamps the counter's value at the moment IT started; when
+  // it resolves, it only applies setSpec if no newer operation (of
+  // either kind) has started since. The operation that started last
+  // always wins, and anything that resolves out of order is dropped as
+  // stale instead of being applied.
+  const requestSeqRef = useRef(0);
+
   useEffect(() => {
-    let cancelled = false;
+    const mySeq = ++requestSeqRef.current;
     setLoading(true);
     fetchDeviceSpec(workspaceId).then((data) => {
-      if (cancelled) return;
+      if (mySeq !== requestSeqRef.current) return; // superseded — drop
       setSpec(data);
       setLoading(false);
     });
-    return () => { cancelled = true; };
   }, [workspaceId, fetchDeviceSpec, refreshSignal]);
 
   async function handleRefreshPrices() {
+    const mySeq = ++requestSeqRef.current;
     setRefreshing(true);
     try {
       const updatedParts = await refreshPartPrices(workspaceId, spec.parts);
+      if (mySeq !== requestSeqRef.current) return; // superseded — drop
       setSpec((prev) => ({ ...prev, parts: updatedParts }));
     } finally {
       setRefreshing(false);

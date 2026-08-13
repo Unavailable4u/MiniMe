@@ -263,6 +263,19 @@ category, with power/MCU parts placed near the enclosure's center and \
 sensors placed near the hull edges they would realistically mount at. \
 Treat this as "which part roughly goes where," not engineering-grade CAD.
 
+Every electrical part (i.e. every part whose category is "mcu", \
+"sensor", "actuator", "power", or "module") MUST also have its own \
+"mech.placements" entry, on top of (not instead of) its "wiring.nodes" \
+entry above -- a part that's wired but never physically placed is the \
+same class of bug as a part that's never wired: it silently disappears \
+from the physical layout view even though it's a real item in the bill \
+of materials. This applies to every electrical part, not only the ones \
+you're confident about the exact position of -- use your best rough \
+grid-layout guess (per the paragraph above) rather than omitting the \
+entry. The only parts that may be omitted from "mech.placements" at \
+all are fasteners (per the fastener rule below); every other part in \
+the given list, electrical or 3D_PRINT/MISC, needs an entry.
+
 Every 3D_PRINT/MISC enclosure part in the given parts list (housing, \
 lid, each mount) needs its own "mech.placements" entry -- so the \
 layout draws an assembled enclosure instead of floating unrelated \
@@ -776,6 +789,142 @@ def _build_wiring_mermaid(spec: dict) -> str:
     return "\n".join(lines)
 
 
+# Categories the wiring rule already treats as "MUST be present" in
+# wiring.nodes (SYSTEM_PROMPT_WIRING's electrical-part paragraph) --
+# reused here as the same MUST-have-a-placement set the new
+# mech.placements paragraph above asks the model for.
+_ELECTRICAL_CATEGORIES = {"mcu", "sensor", "actuator", "power", "module"}
+
+
+def _ensure_electrical_placements(spec: dict, parts: list) -> None:
+    """
+    Safety net for SYSTEM_PROMPT_WIRING's mech.placements coverage rule.
+    That rule is a prompt instruction, not an enforced schema -- the model
+    can still (and, before this fix, routinely did) return mech.placements
+    covering only the 3D_PRINT/MISC enclosure parts (housing/lid/mounts)
+    and silently drop every electrical part (sensors, actuators, power,
+    modules), even though those same parts are correctly required to be
+    present in wiring.nodes. That's the "14 BOM parts, ~5-6 rendered
+    boxes" bug: MechView.jsx only ever draws what's in mech.placements,
+    so a part missing from there simply never appears, with no error
+    anywhere to flag it.
+
+    Runs after Call 2's spec is parsed, before persistence. Mutates
+    spec["mech"]["placements"] in place, adding one entry for every
+    electrical part the model left out -- never touching a placement the
+    model already provided (so any legitimate model-chosen position is
+    left alone; this only fills gaps). New entries are packed into a
+    simple left-to-right, top-to-bottom grid clamped to the enclosure's
+    own w/h footprint, using each part's own "dimensions_mm" when a
+    distributor lookup already supplied one (same ground-truth precedent
+    _populate_dimensions() sets for everything else), or a small
+    placeholder box otherwise. This is deliberately as unintelligent as
+    the "rough grid" the prompt itself asks the model for elsewhere --
+    the goal is coverage (every part visible somewhere), not placement
+    quality.
+    """
+    mech = spec.setdefault("mech", {})
+    if not isinstance(mech, dict):
+        return
+    enclosure = mech.get("enclosure") or {}
+    placements = mech.get("placements")
+    if not isinstance(placements, list):
+        placements = []
+        mech["placements"] = placements
+
+    placed_ids = {p.get("part_id") for p in placements if isinstance(p, dict)}
+    missing = [
+        part for part in parts
+        if part.get("category") in _ELECTRICAL_CATEGORIES
+        and part.get("id") not in placed_ids
+    ]
+    if not missing:
+        return
+
+    enc_w = enclosure.get("w") or 100
+    enc_h = enclosure.get("h") or 60
+    enc_d = enclosure.get("d") or 40
+    default_dims = {"w": 15, "h": 15, "d": 8}
+
+    cursor_x, cursor_y, row_h = 0, 0, 0
+    for part in missing:
+        dims = part.get("dimensions_mm") or {}
+        w = min(dims.get("w") or default_dims["w"], enc_w)
+        h = min(dims.get("h") or default_dims["h"], enc_h)
+        d = min(dims.get("d") or default_dims["d"], enc_d)
+
+        if cursor_x + w > enc_w:
+            cursor_x = 0
+            cursor_y += row_h
+            row_h = 0
+        if cursor_y + h > enc_h:
+            cursor_y = 0  # wrap inside the footprint rather than run off it
+
+        placements.append({
+            "part_id": part.get("id"),
+            "x": cursor_x, "y": cursor_y, "z": 0,
+            "w": w, "h": h, "d": d,
+        })
+        cursor_x += w
+        row_h = max(row_h, h)
+
+
+def _clamp_placements_to_enclosure(spec: dict) -> None:
+    """
+    Safety net for the second Mech-view bug: parts rendering as a
+    disconnected cluster floating outside the enclosure hull on some
+    generations of an otherwise-identical spec. SYSTEM_PROMPT_WIRING's
+    placement guidance for electrical parts is only the loose "rough
+    grid... near hull edges" heuristic (unlike housing/lid/mounts, which
+    get exact nesting rules) -- nothing ties a sensor/actuator/power/
+    module part's x/y/z or w/h/d to the enclosure's own bounds, so the
+    model's freely-guessed coordinates vary run to run and can land
+    partly or fully outside enclosure.w/h/d. MechView.jsx's <mesh> then
+    renders that box exactly where it's told, with no bounds check of
+    its own -- so the same design can look assembled in one generation
+    and have a block cluster floating beside the hull in the next,
+    purely because the guessed numbers differ, not because anything
+    about the device changed.
+
+    Runs over EVERY placement already in spec["mech"]["placements"] at
+    this point -- both what the model itself proposed and what
+    _ensure_electrical_placements() (above) added for parts the model
+    omitted entirely -- and clips each one's w/h/d to fit within the
+    enclosure's own dimensions, then clips x/y/z so the (now-clipped)
+    box's far edge can't extend past the enclosure's far edge either.
+    This never changes which part is placed where relative to its
+    neighbors (order and rough position are preserved), only pulls
+    anything that overshoots back inside the hull -- the same "coverage
+    and containment, not layout quality" honesty framing the rest of
+    this view already uses.
+    """
+    mech = spec.get("mech")
+    if not isinstance(mech, dict):
+        return
+    enclosure = mech.get("enclosure") or {}
+    placements = mech.get("placements")
+    if not isinstance(placements, list):
+        return
+
+    enc_w = enclosure.get("w") or 100
+    enc_h = enclosure.get("h") or 60
+    enc_d = enclosure.get("d") or 40
+
+    for p in placements:
+        if not isinstance(p, dict):
+            continue
+        # Clip size first (never larger than the hull itself), then clip
+        # position against the now-known size so x+w/y+h/z+d can't run
+        # past the far wall.
+        w = min(max(p.get("w") or 0, 1), enc_w)
+        h = min(max(p.get("h") or 0, 1), enc_h)
+        d = min(max(p.get("d") or 0, 1), enc_d)
+        p["w"], p["h"], p["d"] = w, h, d
+        p["x"] = min(max(p.get("x") or 0, 0), enc_w - w)
+        p["y"] = min(max(p.get("y") or 0, 0), enc_h - h)
+        p["z"] = min(max(p.get("z") or 0, 0), enc_d - d)
+
+
 def run_hardware_speccer(session_id: str = None, tier: int = None,
                           task_text: str = None, domain: str = None,
                           workspace_id: str = None) -> dict:
@@ -870,6 +1019,19 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
 
     spec["parts"] = parts
     spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
+
+    # Fill any mech.placements gaps the model left for electrical parts
+    # (see _ensure_electrical_placements' own docstring) -- must run
+    # after parts are finalized above (for dimensions_mm) and before the
+    # wiring.mermaid build below, though mermaid itself doesn't read mech.
+    _ensure_electrical_placements(spec, spec["parts"])
+
+    # Clip every placement (model-produced or just gap-filled above) to
+    # the enclosure's own bounds -- see _clamp_placements_to_enclosure's
+    # own docstring for why an unclamped placement is what produces the
+    # "floating disconnected cluster" Mech-view symptom.
+    _clamp_placements_to_enclosure(spec)
+
 
     # Step 3 of the wiring-detail fix: deterministically render the
     # pin-level flowchart off spec["wiring"] (nodes/edges, now carrying
