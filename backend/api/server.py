@@ -38,7 +38,6 @@ from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hoo
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect  # NEW — §9b
 from fastapi.middleware.cors import CORSMiddleware
 from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
-from eo import local_workspace  # NEW — F2 Part 2: daemon-facing /ws/daemon/{workspace_id} route
 
 # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
 # _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
