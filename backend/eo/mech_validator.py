@@ -5,14 +5,36 @@ Runs headless FreeCAD (real solid geometry, via its Python scripting API,
 not axis-aligned arithmetic) against a level's proposed nodes and reports
 containment/collision violations without ever modifying the layout.
 
-Scope of THIS patch: Level 0->1 only -- "does every primitive a part is
-composed of actually stay inside that part's own w/h/d bounding box, once
-its declared offset/rotation is really applied." Level 1->2 / 2->3 / 3->4
-(subsection/section/device collision + containment) land with G3e/G3f/G3g,
-each calling into this same module with a new `level` value once they
-exist -- validate_layout() below rejects any level it doesn't implement
-yet rather than silently no-op'ing, so a premature caller fails loudly
-instead of shipping an unchecked layout that looks validated.
+Scope through G3e-3: Level 0->1 ("does every primitive a part is composed
+of actually stay inside that part's own w/h/d bounding box, once its
+declared offset/rotation is really applied") AND Level 1->2 ("does a
+subsection's part collide with its own mount, once both are placed at
+their real absolute positions, and what's the subsection's combined
+footprint"). Level 2->3 / 3->4 (section/device collision + containment)
+land with G3f/G3g, each calling into this same module with a new `level`
+value once they exist -- validate_layout() below rejects any level it
+doesn't implement yet rather than silently no-op'ing, so a premature
+caller fails loudly instead of shipping an unchecked layout that looks
+validated.
+
+Level 1->2 specifics (G3e-3): reuses the exact same rotate-then-boolean
+machinery Level 0->1 already built (_build_primitive_shape() below,
+extended with an optional `base` translation so a primitive can be built
+at its member's real absolute x/y/z, not just its part-local offset) --
+"one geometry kernel, two things to ask it," not a second implementation.
+A subsection's two members (a part and its "mount_"-prefixed sibling, per
+eo/mech_subsections.py's group_into_subsections()) are boolean-intersected
+against each other instead of cut against a bounding box: any non-noise
+overlap volume is a real collision, full stop -- unlike Level 0->1's
+confidence-aware clearance buffer, there's no "typical parts get some
+slack" case for two solids actually occupying the same space. A singleton
+subsection (no mount sibling) has nothing to collide with, so it only
+ever contributes a footprint, never a violation. Every checkable
+subsection (singleton or not) reports its own aggregate bounding footprint
+-- the union bounding box of every member's composed primitives in
+absolute space -- back to the caller regardless of whether it collided,
+since eo/mech_repair.py's Level 1->2 driver (G3e-4) needs a footprint for
+every subsection it ships, not just the clean ones, to hand off to G3f.
 
 Why real FreeCAD instead of the same offset+size<=bounds arithmetic
 agents/mech_primitive_pool.py's _clamp_primitive() already does at
@@ -77,13 +99,15 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from relay.emitter import emit_event
 from e2b_code_interpreter import Sandbox
+from eo.mech_subsections import group_into_subsections, members_for_subsection
 
 # Level vocabulary matches the arrow notation the Master Guide and this
 # codebase's own docstrings already use ("Level 0->1" in agents/
 # mech_primitive_pool.py's module docstring, agents/hardware_speccer.py's
 # G3a comments, eo/registry.py) -- no new naming invented here.
 LEVEL_0_1 = "0->1"
-_IMPLEMENTED_LEVELS = {LEVEL_0_1}
+LEVEL_1_2 = "1->2"
+_IMPLEMENTED_LEVELS = {LEVEL_0_1, LEVEL_1_2}
 
 # Confidence-aware clearance buffer (Master Guide: "a `verified` part
 # gets a strict 0-margin check; a `typical` part gets a small clearance
@@ -128,11 +152,15 @@ import FreeCAD
 import Part
 
 
-def _build_primitive_shape(prim):
+def _build_primitive_shape(prim, base=None):
     shape = prim.get("shape") or "box"
     size = prim.get("size") or {}
     offset = prim.get("offset") or {}
     rotation = prim.get("rotation") or {}
+    base = base or {}
+    bx = float(base.get("x") or 0)
+    by = float(base.get("y") or 0)
+    bz = float(base.get("z") or 0)
 
     w = max(float(size.get("w") or 0), 0.01)
     h = max(float(size.get("h") or 0), 0.01)
@@ -175,7 +203,13 @@ def _build_primitive_shape(prim):
         solid.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 1, 0), ry)
     if rz:
         solid.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), rz)
-    solid.translate(FreeCAD.Vector(cx + ox, cy + oy, cz + oz))
+    # `base` (Level 1->2's addition -- always {0,0,0} for Level 0->1's own
+    # calls below, so this is a no-op there): a member's own absolute
+    # x/y/z on top of its part-local corner offset, so two different
+    # placements' primitives land in the SAME shared coordinate frame and
+    # can be boolean-intersected against each other for a real collision
+    # check, not just each checked against its own bounding box.
+    solid.translate(FreeCAD.Vector(cx + ox + bx, cy + oy + by, cz + oz + bz))
     return solid
 
 
@@ -211,12 +245,108 @@ def _check_part(part):
     return leftover_mm3
 
 
+def _check_subsection(subsection):
+    # Level 1->2's per-subsection check: builds every member's composed
+    # primitives in the SAME absolute frame (each primitive's own local
+    # offset plus its member's absolute x/y/z, via _build_primitive_shape's
+    # `base` param), boolean-intersects every cross-member primitive pair
+    # for a real collision volume, and unions every member's own bounding
+    # box into the subsection's aggregate footprint. A subsection with only
+    # one member (no mount to collide with, per eo/mech_subsections.py's
+    # singleton case) skips the collision loop entirely but still returns a
+    # footprint -- see module docstring.
+    #
+    # Returns (collision_mm3, footprint | None). footprint is None only
+    # when every member's primitives failed to build (degenerate input --
+    # same "flag, never silently drop" posture _check_part() already uses,
+    # handled by the caller in main() below).
+    members = subsection.get("members") or []
+
+    member_solids = []  # one list of solids per member, in member order
+    bounds = None  # [xmin, ymin, zmin, xmax, ymax, zmax]
+    build_failures = 0
+
+    for member in members:
+        base = {"x": member.get("x") or 0, "y": member.get("y") or 0, "z": member.get("z") or 0}
+        solids = []
+        for prim in member.get("primitives") or []:
+            try:
+                solid = _build_primitive_shape(prim, base=base)
+            except Exception:
+                build_failures += 1
+                continue
+            solids.append(solid)
+            bb = solid.BoundBox
+            if bounds is None:
+                bounds = [bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax]
+            else:
+                bounds[0] = min(bounds[0], bb.XMin)
+                bounds[1] = min(bounds[1], bb.YMin)
+                bounds[2] = min(bounds[2], bb.ZMin)
+                bounds[3] = max(bounds[3], bb.XMax)
+                bounds[4] = max(bounds[4], bb.YMax)
+                bounds[5] = max(bounds[5], bb.ZMax)
+        member_solids.append(solids)
+
+    collision_mm3 = 0.0
+    for i in range(len(member_solids)):
+        for j in range(i + 1, len(member_solids)):
+            for si in member_solids[i]:
+                for sj in member_solids[j]:
+                    try:
+                        overlap = si.common(sj)
+                        collision_mm3 += overlap.Volume
+                    except Exception:
+                        # Same "degenerate input is a real violation, not
+                        # a silent skip" posture _check_part() uses.
+                        collision_mm3 += 1.0
+
+    if bounds is None:
+        return collision_mm3, None
+
+    footprint = {
+        "x": round(bounds[0], 3), "y": round(bounds[1], 3), "z": round(bounds[2], 3),
+        "w": round(bounds[3] - bounds[0], 3),
+        "h": round(bounds[4] - bounds[1], 3),
+        "d": round(bounds[5] - bounds[2], 3),
+    }
+    return collision_mm3, footprint
+
+
 def main():
     input_path, output_path = sys.argv[1], sys.argv[2]
     with open(input_path) as f:
         payload = json.load(f)
 
+    level = payload.get("level")
     violations = []
+
+    if level == %(level_1_2)r:
+        footprints = {}
+        for subsection in payload.get("subsections") or []:
+            subsection_id = subsection.get("subsection_id")
+            try:
+                collision_mm3, footprint = _check_subsection(subsection)
+            except Exception as exc:
+                violations.append({
+                    "node_id": subsection_id,
+                    "issue": f"geometry check failed: {exc}",
+                })
+                continue
+            if footprint is not None:
+                footprints[subsection_id] = footprint
+            if collision_mm3 > %(volume_epsilon)r:
+                violations.append({
+                    "node_id": subsection_id,
+                    "issue": (
+                        "part and mount collide "
+                        f"(~{round(collision_mm3, 2)} mm^3 overlap)"
+                    ),
+                })
+        with open(output_path, "w") as f:
+            json.dump({"violations": violations, "footprints": footprints}, f)
+        return
+
     for part in payload.get("parts") or []:
         part_id = part.get("part_id")
         try:
@@ -241,7 +371,7 @@ def main():
 
 
 main()
-""" % {"volume_epsilon": _VOLUME_EPSILON_MM3}
+""" % {"volume_epsilon": _VOLUME_EPSILON_MM3, "level_1_2": LEVEL_1_2}
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +465,10 @@ def _checkable_placements(placements) -> list:
 
 
 def _build_payload(checkable: list) -> dict:
+    # No "level" key here (unlike _build_subsection_payload below) -- the
+    # FreeCAD script's main() only branches on level == LEVEL_1_2, so
+    # Level 0->1's payload staying exactly the shape it was before G3e-3
+    # keeps this function's output byte-for-byte backward compatible.
     return {
         "parts": [
             {
@@ -346,6 +480,58 @@ def _build_payload(checkable: list) -> dict:
                 "primitives": p.get("primitives") or [],
             }
             for p in checkable
+        ],
+    }
+
+
+def _checkable_subsections(mech: dict) -> list:
+    """Level 1->2's scope (G3e-3): every subsection eo/mech_subsections.py's
+    group_into_subsections() reports, resolved down to just the members
+    that already have a non-empty `primitives` list -- same "skip, don't
+    flag, a placement G3a/G3b/G3c-Level-0->1 haven't reached yet" posture
+    _checkable_placements() already holds for Level 0->1. A subsection
+    where NO member has primitives yet is skipped entirely (nothing to
+    build); a subsection with at least one composed member is still
+    checked with whatever it has, so a singleton (never has a second
+    member to begin with) or a subsection whose mount hasn't been
+    composed yet both still contribute a footprint for what IS ready,
+    rather than the whole subsection waiting on its slowest member.
+
+    Returns [{"subsection_id": str, "members": [placement, ...]}, ...] --
+    `members` already resolved to full placement dicts (via eo/
+    mech_subsections.py's own members_for_subsection() helper, its
+    documented reason for existing) and filtered to composed-only.
+    """
+    checkable = []
+    for subsection in group_into_subsections(mech):
+        members = [
+            m for m in members_for_subsection(mech, subsection)
+            if isinstance(m, dict) and isinstance(m.get("primitives"), list) and m["primitives"]
+        ]
+        if not members:
+            continue
+        checkable.append({"subsection_id": subsection.get("subsection_id"), "members": members})
+    return checkable
+
+
+def _build_subsection_payload(checkable: list) -> dict:
+    return {
+        "level": LEVEL_1_2,
+        "subsections": [
+            {
+                "subsection_id": s.get("subsection_id"),
+                "members": [
+                    {
+                        "part_id": m.get("part_id"),
+                        "x": m.get("x") or 0,
+                        "y": m.get("y") or 0,
+                        "z": m.get("z") or 0,
+                        "primitives": m.get("primitives") or [],
+                    }
+                    for m in s.get("members") or []
+                ],
+            }
+            for s in checkable
         ],
     }
 
@@ -402,36 +588,59 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
     on why this degrades rather than raising for that specific failure
     mode (sandbox/apt/network), unlike the level-not-implemented check
     above, which IS a programmer error worth raising loudly.
+
+    Level 1->2 (LEVEL_1_2) additionally returns a "footprints" key,
+    {subsection_id: {"x","y","z","w","h","d"}}, for every checkable
+    subsection regardless of whether it violated -- see module docstring
+    and _check_subsection()'s own docstring inside _FREECAD_SCRIPT above
+    on why a footprint is reported even for a clean subsection (G3f needs
+    it to group by next). Absent (empty dict) on the no-op and fail-open
+    paths below, same "nothing was actually computed" reasoning as
+    `violations` being [] on those same paths.
     """
     if level not in _IMPLEMENTED_LEVELS:
         raise NotImplementedError(
-            f"eo/mech_validator.py only implements level={LEVEL_0_1!r} so far "
-            f"(got {level!r}); Level 1->2 / 2->3 / 3->4 land with G3e/G3f/G3g."
+            f"eo/mech_validator.py only implements level={LEVEL_0_1!r} and "
+            f"level={LEVEL_1_2!r} so far (got {level!r}); Level 2->3 / 3->4 "
+            "land with G3f/G3g."
         )
 
-    checkable = _checkable_placements((mech or {}).get("placements"))
+    is_subsection_level = (level == LEVEL_1_2)
+    if is_subsection_level:
+        checkable = _checkable_subsections(mech or {})
+    else:
+        checkable = _checkable_placements((mech or {}).get("placements"))
     if not checkable:
-        return {"valid": True, "violations": []}
+        return {"valid": True, "violations": []} if not is_subsection_level else \
+            {"valid": True, "violations": [], "footprints": {}}
 
     agent_name = "mech_validator"
+    node_word = "subsection" if is_subsection_level else "part"
     emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
-               payload={"label": f"Mech Validator — Level {level} ({len(checkable)} part(s))"})
+               payload={"label": f"Mech Validator — Level {level} ({len(checkable)} {node_word}(s))"})
     started = time.monotonic()
 
     try:
-        result = _run_batch(_build_payload(checkable), session_id=session_id)
+        payload = _build_subsection_payload(checkable) if is_subsection_level else _build_payload(checkable)
+        result = _run_batch(payload, session_id=session_id)
         violations = result.get("violations") or []
     except Exception as exc:
         duration_ms = int((time.monotonic() - started) * 1000)
         emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
                    payload={"summary": f"validator unavailable: {exc}", "duration_ms": duration_ms})
-        return {"valid": True, "violations": [], "validator_error": str(exc)}
+        error_result = {"valid": True, "violations": [], "validator_error": str(exc)}
+        if is_subsection_level:
+            error_result["footprints"] = {}
+        return error_result
 
     duration_ms = int((time.monotonic() - started) * 1000)
     summary = "no violations" if not violations else f"{len(violations)} violation(s)"
     emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
                payload={"summary": summary, "duration_ms": duration_ms})
-    return {"valid": not violations, "violations": violations}
+    output = {"valid": not violations, "violations": violations}
+    if is_subsection_level:
+        output["footprints"] = result.get("footprints") or {}
+    return output
 
 
 if __name__ == "__main__":
@@ -444,5 +653,17 @@ if __name__ == "__main__":
     }
     try:
         print(json.dumps(validate_layout(_demo_mech, LEVEL_0_1), indent=2))
+
+        _demo_subsection_mech = {
+            "placements": [
+                {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5,
+                 "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 30, "h": 20, "d": 5},
+                                  "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "primary"}]},
+                {"part_id": "mount_mcu_1", "x": 0, "y": 20, "z": 0, "w": 30, "h": 5, "d": 5,
+                 "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 30, "h": 5, "d": 5},
+                                  "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "accent"}]},
+            ],
+        }
+        print(json.dumps(validate_layout(_demo_subsection_mech, LEVEL_1_2), indent=2))
     finally:
         close_session()

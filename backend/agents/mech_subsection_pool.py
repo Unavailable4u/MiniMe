@@ -165,6 +165,58 @@ def _needs_llm_relative_placement(subsection: dict, parts_by_id: dict) -> bool:
     return not (parsed and parsed.get("pattern") != "thread")
 
 
+def _generate_relative_placement(part_placement: dict, mount_placement: dict,
+                                  subsection_id: str, mount_id: str, key_env: str,
+                                  agent_name: str, session_id: str = None, path: str = None,
+                                  domain: str = None, violation_issue: str = None) -> dict:
+    """The actual generate_text() call, factored out of
+    _generate_relative_placement_for_subsection() so both G3e-2's pool
+    path (first proposal, no feedback) and G3e-4's repair path
+    (regenerate_subsection() below, violation fed back as extra context)
+    share one implementation instead of two copies that could drift.
+
+    `violation_issue`: when given (a Level 1->2 collision report's own
+    `violation["issue"]` string, per eo/mech_validator.py's
+    _check_subsection()), appended to the user turn as feedback -- same
+    "feed the violation back as context" contract every other level's
+    regenerate_node_fn follows (eo/mech_repair.py's own module
+    docstring). None on a first-proposal call (G3e-2's pool path always
+    passes None here).
+    """
+    part_w = part_placement.get("w") or 1
+    part_h = part_placement.get("h") or 1
+    part_d = part_placement.get("d") or 1
+
+    payload = {
+        "part": {"part_id": subsection_id, "w": part_w, "h": part_h, "d": part_d},
+        "mount": {
+            "part_id": mount_id,
+            "w": mount_placement.get("w") or 1,
+            "h": mount_placement.get("h") or 1,
+            "d": mount_placement.get("d") or 1,
+        },
+    }
+    if violation_issue:
+        payload["previous_attempt_failed_because"] = violation_issue
+    user_content = json.dumps(payload)
+
+    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
+
+    try:
+        raw = generate_text(
+            SYSTEM_PROMPT, user_content, chain,
+            agent_name=agent_name, session_id=session_id, path=path, domain=domain,
+        )
+        return _parse_relative_offset(raw, part_w, part_h, part_d)
+    except RuntimeError:
+        # Every provider in the chain failed -- fall back to the same
+        # safe "directly below" default _parse_relative_offset() itself
+        # falls back to on a bad response, so a quota/outage blip
+        # degrades this subsection to a sane default, never a crash of
+        # the whole pool.
+        return _default_relative_offset(part_h)
+
+
 def _generate_relative_placement_for_subsection(subsection: dict, placements_by_id: dict,
                                                   key_env: str, worker_id: int,
                                                   session_id: str = None, path: str = None,
@@ -184,41 +236,84 @@ def _generate_relative_placement_for_subsection(subsection: dict, placements_by_
 
     part_placement = placements_by_id.get(subsection_id) or {}
     mount_placement = placements_by_id.get(mount_id) or {}
-    part_w = part_placement.get("w") or 1
-    part_h = part_placement.get("h") or 1
-    part_d = part_placement.get("d") or 1
 
-    user_content = json.dumps({
-        "part": {"part_id": subsection_id, "w": part_w, "h": part_h, "d": part_d},
-        "mount": {
-            "part_id": mount_id,
-            "w": mount_placement.get("w") or 1,
-            "h": mount_placement.get("h") or 1,
-            "d": mount_placement.get("d") or 1,
-        },
-    })
-
-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
-
-    try:
-        raw = generate_text(
-            SYSTEM_PROMPT, user_content, chain,
-            agent_name=agent_name, session_id=session_id, path=path, domain=domain,
-        )
-        offset = _parse_relative_offset(raw, part_w, part_h, part_d)
-    except RuntimeError:
-        # Every provider in the chain failed -- fall back to the same
-        # safe "directly below" default _parse_relative_offset() itself
-        # falls back to on a bad response, so a quota/outage blip
-        # degrades this subsection to a sane default, never a crash of
-        # the whole pool.
-        offset = _default_relative_offset(part_h)
+    offset = _generate_relative_placement(
+        part_placement, mount_placement, subsection_id, mount_id, key_env, agent_name,
+        session_id=session_id, path=path, domain=domain,
+    )
 
     duration_ms = int((time.monotonic() - started) * 1000)
     emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
                payload={"summary": f"placed {mount_id} relative to {subsection_id}",
                         "duration_ms": duration_ms})
     return subsection_id, mount_id, offset
+
+
+def regenerate_subsection(mech: dict, node_id: str, violation: dict, attempt: int,
+                           key_override=None, session_id: str = None, path: str = None,
+                           domain: str = None) -> None:
+    """G3e-4's `regenerate_node_fn` for Level 1->2 -- the exact
+    `(mech, node_id, violation, attempt)` -> None shape eo/mech_repair.py's
+    run_repair_loop() requires (see that module's docstring), wired to
+    THIS pool's own single-subsection generation call
+    (_generate_relative_placement() above) instead of duplicating it.
+
+    `node_id` is a `subsection_id` (== the anchor part's own `part_id`,
+    per eo/mech_subsections.py's group_into_subsections()) -- resolves
+    the subsection's mount sibling straight off `mech["placements"]`
+    itself rather than needing the caller to pass the subsection's
+    member_ids back in, since `mech` (mutated in place by prior
+    generate/repair rounds) is always the current source of truth for
+    what this subsection's members actually are.
+
+    Mutates the mount member's x/y/z on `mech["placements"]` in place,
+    same "recompute mount position from part position + LLM-proposed
+    relative offset" step run()'s own worker-pool loop already performs
+    -- this is that same step, just for one node, called from the repair
+    loop instead of the initial fan-out.
+
+    A node_id with no "mount_"-prefixed sibling in `mech["placements"]`
+    (shouldn't happen -- eo/mech_validator.py's LEVEL_1_2 check only
+    ever reports a collision violation for a subsection that HAS two
+    members) raises ValueError rather than silently no-op'ing, so a
+    caller never mistakes "nothing to regenerate" for "regenerated but
+    the fix didn't help" -- run_repair_loop() already treats a raise
+    from regenerate_node_fn as a burned, failed attempt (see its own
+    docstring's failure-modes section), which is exactly the right
+    outcome for this genuinely-shouldn't-happen case too.
+    """
+    placements = (mech or {}).get("placements") or []
+    placements_by_id = {
+        p.get("part_id"): p for p in placements
+        if isinstance(p, dict) and p.get("part_id")
+    }
+    part_placement = placements_by_id.get(node_id)
+    if not isinstance(part_placement, dict):
+        raise ValueError(f"regenerate_subsection: no placement found for node_id={node_id!r}")
+
+    mount_id = f"mount_{node_id}"
+    mount_placement = placements_by_id.get(mount_id)
+    if not isinstance(mount_placement, dict):
+        raise ValueError(
+            f"regenerate_subsection: node_id={node_id!r} has no mount sibling "
+            f"({mount_id!r}) to reposition"
+        )
+
+    agent_name = f"mech_subsection_repair_{node_id}"
+    key_env = key_override
+    if key_env is None:
+        selected = _select_workers_for_role(ROLE_TAG, 1, None, session_id=session_id, agent_name=agent_name)
+        key_env = selected[0] if selected else None
+
+    offset = _generate_relative_placement(
+        part_placement, mount_placement, node_id, mount_id, key_env, agent_name,
+        session_id=session_id, path=path, domain=domain,
+        violation_issue=(violation or {}).get("issue"),
+    )
+
+    mount_placement["x"] = round((part_placement.get("x") or 0) + offset["x"], 2)
+    mount_placement["y"] = round((part_placement.get("y") or 0) + offset["y"], 2)
+    mount_placement["z"] = round((part_placement.get("z") or 0) + offset["z"], 2)
 
 
 def run(spec: dict, parts: list, session_id: str = None, path: str = None,

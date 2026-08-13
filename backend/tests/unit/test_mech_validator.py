@@ -118,8 +118,11 @@ def test_build_payload_defaults_missing_dims_to_zero():
 # ---------------------------------------------------------------------------
 
 def test_validate_layout_rejects_unimplemented_level():
+    # "1->2" (LEVEL_1_2) is now implemented as of G3e-3 -- use a level
+    # still genuinely unimplemented (Level 2->3, landing with G3f) so
+    # this test keeps covering the actual gate, not a level that moved.
     with pytest.raises(NotImplementedError):
-        mv.validate_layout({"placements": []}, "1->2")
+        mv.validate_layout({"placements": []}, "2->3")
 
 
 def test_validate_layout_noop_when_nothing_checkable(monkeypatch):
@@ -277,3 +280,192 @@ def test_validate_layout_fails_open_and_closes_wedged_session(monkeypatch):
     assert result["violations"] == []
     assert "validator_error" in result
     assert mv._session_key("run-x") not in mv._sessions  # wedged session was closed, not left cached
+
+
+# ---------------------------------------------------------------------------
+# Level 1->2 (G3e-3) -- _checkable_subsections / _build_subsection_payload
+# ---------------------------------------------------------------------------
+
+_MCU_MEMBER = {
+    "part_id": "mcu_1", "x": 0, "y": 0, "z": 0, "w": 30, "h": 20, "d": 5,
+    "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 30, "h": 20, "d": 5},
+                     "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box"}],
+}
+_MOUNT_MEMBER = {
+    "part_id": "mount_mcu_1", "x": 0, "y": 20, "z": 0, "w": 30, "h": 5, "d": 5,
+    "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 30, "h": 5, "d": 5},
+                     "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box"}],
+}
+
+
+def test_checkable_subsections_keeps_only_composed_members():
+    mech = {"placements": [
+        _MCU_MEMBER, _MOUNT_MEMBER,
+        {"part_id": "battery_1", "x": 50, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10},  # no primitives
+    ]}
+    checkable = mv._checkable_subsections(mech)
+    assert len(checkable) == 1
+    assert checkable[0]["subsection_id"] == "mcu_1"
+    assert [m["part_id"] for m in checkable[0]["members"]] == ["mcu_1", "mount_mcu_1"]
+
+
+def test_checkable_subsections_skips_subsection_with_no_composed_members():
+    mech = {"placements": [
+        {"part_id": "battery_1", "x": 50, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10},
+    ]}
+    assert mv._checkable_subsections(mech) == []
+
+
+def test_checkable_subsections_keeps_partially_composed_subsection():
+    # Only the anchor part is composed yet -- mount hasn't gotten
+    # primitives from G3a/G3b/G3e-2 yet. Still checkable (contributes a
+    # partial footprint), per _checkable_subsections()'s own docstring.
+    uncomposed_mount = {**_MOUNT_MEMBER, "primitives": []}
+    mech = {"placements": [_MCU_MEMBER, uncomposed_mount]}
+    checkable = mv._checkable_subsections(mech)
+    assert len(checkable) == 1
+    assert [m["part_id"] for m in checkable[0]["members"]] == ["mcu_1"]
+
+
+def test_build_subsection_payload_shape():
+    checkable = mv._checkable_subsections({"placements": [_MCU_MEMBER, _MOUNT_MEMBER]})
+    payload = mv._build_subsection_payload(checkable)
+    assert payload["level"] == mv.LEVEL_1_2
+    assert len(payload["subsections"]) == 1
+    sub = payload["subsections"][0]
+    assert sub["subsection_id"] == "mcu_1"
+    assert [m["part_id"] for m in sub["members"]] == ["mcu_1", "mount_mcu_1"]
+    assert sub["members"][1]["x"] == 0 and sub["members"][1]["y"] == 20
+
+
+# ---------------------------------------------------------------------------
+# Level 1->2 (G3e-3) -- validate_layout() end-to-end via the fake sandbox
+# ---------------------------------------------------------------------------
+
+def test_validate_layout_level_1_2_noop_when_nothing_checkable(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mv.Sandbox, "create", staticmethod(lambda **kw: calls.append(kw) or None))
+    result = mv.validate_layout({"placements": []}, mv.LEVEL_1_2)
+    assert result == {"valid": True, "violations": [], "footprints": {}}
+    assert calls == []
+
+
+def test_validate_layout_level_1_2_clean_run_reports_footprints(fake_sandbox_factory):
+    fake_sandbox_factory(output_json=json.dumps({
+        "violations": [],
+        "footprints": {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 25, "d": 5}},
+    }))
+    result = mv.validate_layout({"placements": [_MCU_MEMBER, _MOUNT_MEMBER]}, mv.LEVEL_1_2)
+    assert result["valid"] is True
+    assert result["violations"] == []
+    assert result["footprints"] == {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 25, "d": 5}}
+
+
+def test_validate_layout_level_1_2_reports_collision_violation(fake_sandbox_factory):
+    fake_sandbox_factory(output_json=json.dumps({
+        "violations": [{"node_id": "mcu_1", "issue": "part and mount collide (~12.5 mm^3 overlap)"}],
+        "footprints": {"mcu_1": {"x": 0, "y": 0, "z": 0, "w": 30, "h": 25, "d": 5}},
+    }))
+    result = mv.validate_layout({"placements": [_MCU_MEMBER, _MOUNT_MEMBER]}, mv.LEVEL_1_2)
+    assert result["valid"] is False
+    assert result["violations"][0]["node_id"] == "mcu_1"
+    assert result["footprints"]  # still reported even though it collided
+
+
+def test_validate_layout_level_1_2_fails_open_with_empty_footprints(monkeypatch):
+    def _broken_create(**kwargs):
+        class _Broken:
+            @property
+            def commands(self):
+                raise RuntimeError("sandbox unreachable")
+
+            def kill(self):
+                pass
+        return _Broken()
+
+    monkeypatch.setattr(mv.Sandbox, "create", staticmethod(_broken_create))
+    result = mv.validate_layout({"placements": [_MCU_MEMBER, _MOUNT_MEMBER]}, mv.LEVEL_1_2, session_id="run-y")
+
+    assert result["valid"] is True
+    assert result["violations"] == []
+    assert result["footprints"] == {}
+    assert "validator_error" in result
+
+
+# ---------------------------------------------------------------------------
+# _check_subsection / _build_primitive_shape (the code that actually runs
+# INSIDE FreeCAD) -- exercised directly here rather than via the sandbox,
+# same "unit-test the geometry kernel logic with a real FreeCAD install"
+# gap tests/integration/test_sandbox_tester.py's own docstring notes for
+# static_scan.py. Skipped automatically if FreeCAD isn't importable in
+# this environment.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# _check_subsection / _build_primitive_shape (the code that actually runs
+# INSIDE FreeCAD) -- exercised directly here rather than via the sandbox,
+# same "unit-test the geometry kernel logic with a real FreeCAD install"
+# gap tests/integration/test_sandbox_tester.py's own docstring notes for
+# static_scan.py. Skipped automatically if FreeCAD isn't importable in
+# this environment -- guarded per-test (not a module-level importorskip)
+# so a missing FreeCAD install only skips THESE tests, not this whole file.
+# ---------------------------------------------------------------------------
+
+try:
+    import FreeCAD as _freecad_probe  # noqa: F401
+    _HAS_FREECAD = True
+except ImportError:
+    _HAS_FREECAD = False
+
+_needs_freecad = pytest.mark.skipif(not _HAS_FREECAD, reason="real FreeCAD install required for geometry-kernel tests")
+
+
+def _run_freecad_script_namespace():
+    """Executes _FREECAD_SCRIPT's function DEFINITIONS (not its
+    top-level main() call, which reads argv/files) in a throwaway
+    namespace, so a test can call _check_subsection()/_build_primitive_shape()
+    directly without shelling out to freecadcmd."""
+    ns = {}
+    # Strip the trailing `main()` call (the last non-blank line) so this
+    # only defines functions, matching how eo/mech_validator.py's own
+    # _run_batch() would otherwise only invoke this inside a sandbox.
+    body = mv._FREECAD_SCRIPT.rsplit("main()", 1)[0]
+    exec(compile(body, "<freecad_script>", "exec"), ns)
+    return ns
+
+
+@_needs_freecad
+def test_check_subsection_no_collision_reports_zero_and_footprint():
+    ns = _run_freecad_script_namespace()
+    subsection = {
+        "members": [
+            {"x": 0, "y": 0, "z": 0, "primitives": [_MCU_MEMBER["primitives"][0]]},
+            {"x": 0, "y": 20, "z": 0, "primitives": [_MOUNT_MEMBER["primitives"][0]]},
+        ],
+    }
+    collision_mm3, footprint = ns["_check_subsection"](subsection)
+    assert collision_mm3 == 0.0
+    assert footprint == {"x": 0.0, "y": 0.0, "z": 0.0, "w": 30.0, "h": 25.0, "d": 5.0}
+
+
+@_needs_freecad
+def test_check_subsection_overlapping_members_reports_collision():
+    ns = _run_freecad_script_namespace()
+    subsection = {
+        "members": [
+            {"x": 0, "y": 0, "z": 0, "primitives": [_MCU_MEMBER["primitives"][0]]},
+            # Mount overlaps the part instead of sitting flush below it.
+            {"x": 0, "y": 10, "z": 0, "primitives": [_MOUNT_MEMBER["primitives"][0]]},
+        ],
+    }
+    collision_mm3, footprint = ns["_check_subsection"](subsection)
+    assert collision_mm3 > 0.0
+
+
+@_needs_freecad
+def test_check_subsection_singleton_has_no_collision_check():
+    ns = _run_freecad_script_namespace()
+    subsection = {"members": [{"x": 0, "y": 0, "z": 0, "primitives": [_MCU_MEMBER["primitives"][0]]}]}
+    collision_mm3, footprint = ns["_check_subsection"](subsection)
+    assert collision_mm3 == 0.0
+    assert footprint == {"x": 0.0, "y": 0.0, "z": 0.0, "w": 30.0, "h": 20.0, "d": 5.0}
