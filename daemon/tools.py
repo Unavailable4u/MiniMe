@@ -1,16 +1,31 @@
 """
-daemon/tools.py — F2 Part 3: the two read-only tool implementations
-(list_dir, read_file) the daemon executes on request from the backend,
-and the dispatch table daemon/connection.py's message loop uses to run
-them. Every path this module touches is routed through
+daemon/tools.py — F2 Part 3 + Part 4. Part 3 shipped the two
+read-only tool implementations (list_dir, read_file). Part 4 adds the
+three mutating ones -- write_file, delete, execute_command -- in the
+same module rather than a separate one, since they share _resolve()
+and the same dispatch()/ToolError contract Part 3 already established;
+splitting them out would just mean importing path_guard twice.
+
+Every path this module touches is routed through
 daemon/path_guard.py's assert_within_root -- see that module's own
 docstring for why the containment check lives in its own file rather
-than duplicated here.
+than duplicated here. execute_command is the one exception that isn't
+a *path* check: it still runs with cwd pinned to the allowed root (see
+execute_command's own docstring for what that does and doesn't
+protect against).
 
-Read-only by design (Part 3's whole scope, per the F2 plan): nothing
-in this module ever writes, deletes, or executes anything on disk --
-that's Part 4, which gets its own module plus a propose/confirm step
-this one doesn't need.
+Read-only vs mutating is a daemon-side distinction only in the sense
+that this module now contains both -- the actual "reads run freely,
+writes/deletes/executes need a confirm" split is enforced entirely on
+the backend side (eo/local_workspace_tools.py's propose/confirm store,
+Part 4). By the time a write_file/delete/execute_command tool_call
+reaches this module at all, the backend has already gotten an explicit
+confirm for it; this module has no concept of "pending" and just runs
+whatever tool_call it's handed, exactly like Part 3's read tools
+always have. That's deliberate -- the daemon is the dumb, deterministic
+end of this pipe on purpose (see eo/local_workspace.py's docstring),
+and duplicating a confirm gate here would just be a second, redundant
+place for that logic to drift out of sync with the real one.
 
 Message shapes (also documented in eo/local_workspace.py on the
 backend side, which is the other half of this protocol):
@@ -20,6 +35,12 @@ backend side, which is the other half of this protocol):
      "params": {"path": "."}}
     {"type": "tool_call", "request_id": "<uuid4>", "tool": "read_file",
      "params": {"path": "src/app.py"}}
+    {"type": "tool_call", "request_id": "<uuid4>", "tool": "write_file",
+     "params": {"path": "src/app.py", "content": "...", "create_dirs": true}}
+    {"type": "tool_call", "request_id": "<uuid4>", "tool": "delete",
+     "params": {"path": "old_file.py"}}
+    {"type": "tool_call", "request_id": "<uuid4>", "tool": "execute_command",
+     "params": {"command": "pytest -q", "timeout": 60}}
 
   daemon -> backend (tool_result):
     {"type": "tool_result", "request_id": "<uuid4>", "ok": true,
@@ -40,6 +61,8 @@ Place this file at: daemon/tools.py
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict
 
@@ -50,6 +73,28 @@ from daemon.path_guard import PathGuardError, assert_within_root
 # connection everything else on this workspace shares while it's
 # read/serialized/sent.
 MAX_READ_FILE_BYTES = 1_000_000
+
+# Same reasoning as MAX_READ_FILE_BYTES above, applied to the other
+# direction -- a runaway write shouldn't be able to fill the disk (or
+# just hang this connection serializing a huge request) any more than
+# a runaway read should.
+MAX_WRITE_FILE_BYTES = 1_000_000
+
+# execute_command's default and hard ceiling. A caller can ask for
+# less; nothing this module runs can ask for more -- an agent-proposed
+# "run the test suite" with no explicit timeout must still eventually
+# give the single daemon connection back, same reasoning as running
+# disk IO in a thread on the backend side (see connection.py).
+DEFAULT_EXECUTE_TIMEOUT_SECONDS = 30
+MAX_EXECUTE_TIMEOUT_SECONDS = 300
+
+# subprocess output is captured and sent back over the same JSON
+# websocket message every other tool_result uses -- an unbounded
+# amount of stdout/stderr from a runaway command would bloat that
+# message the same way an unbounded read_file would, so it's
+# truncated with the same shape (truncated: bool) read_file already
+# uses below.
+MAX_EXECUTE_OUTPUT_CHARS = 200_000
 
 
 class ToolError(Exception):
@@ -128,14 +173,185 @@ def read_file(root: Path, path: str) -> Dict[str, Any]:
     }
 
 
+def write_file(root: Path, path: str, content: str, create_dirs: bool = False) -> Dict[str, Any]:
+    """Part 4. Writes `content` (text, UTF-8) to `path`, overwriting
+    whatever's there. `create_dirs` mirrors os.makedirs' own default of
+    *not* silently creating parent directories -- a typo'd nested path
+    should come back as a clear error, not quietly create a folder
+    structure nobody asked for, unless the caller explicitly opts in.
+    """
+    if not isinstance(content, str):
+        raise ToolError("write_file content must be a string")
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_WRITE_FILE_BYTES:
+        raise ToolError(
+            f"content too large to write ({len(encoded)} bytes, limit is "
+            f"{MAX_WRITE_FILE_BYTES})"
+        )
+
+    target = _resolve(root, path)
+    if target.is_dir():
+        raise ToolError(f"not a file (it's a directory): {path}")
+
+    parent = target.parent
+    parent_existed = parent.exists()
+    if not parent_existed:
+        if not create_dirs:
+            raise ToolError(
+                f"parent directory does not exist: {parent.relative_to(root)} "
+                "(pass create_dirs to create it)"
+            )
+        # Still routed through the same containment check as the file
+        # itself -- _resolve() above already proved `target` (and
+        # therefore every ancestor up to `root`) resolves inside root,
+        # so creating the missing intermediate directories here can't
+        # itself escape the guard.
+        parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        target.write_bytes(encoded)
+    except OSError as exc:
+        raise ToolError(f"could not write file: {exc}") from exc
+
+    return {
+        "path": str(target.relative_to(root)),
+        "bytes_written": len(encoded),
+        "created_dirs": create_dirs and not parent_existed,
+    }
+
+
+def delete(root: Path, path: str) -> Dict[str, Any]:
+    """Part 4. Deletes a file or, recursively, a directory. Two
+    guards beyond the usual containment check, since "delete" is the
+    single most destructive read-adjacent-shaped tool this daemon
+    exposes:
+      - refuses to delete the allowed root itself (a caller wanting to
+        empty the whole paired folder isn't a normal single-file/dir
+        delete, and _resolve()'s containment check alone wouldn't
+        catch it, since the root is trivially "within" itself).
+      - refuses a path that doesn't exist, same as read_file/list_dir,
+        so a caller can tell "already gone" apart from "deleted just
+        now" rather than both looking like a silent no-op success.
+    """
+    target = _resolve(root, path)
+    if target == root:
+        raise ToolError("refusing to delete the daemon's configured root folder")
+    if not target.exists():
+        raise ToolError(f"path does not exist: {path}")
+
+    was_dir = target.is_dir()
+    try:
+        if was_dir:
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    except OSError as exc:
+        raise ToolError(f"could not delete: {exc}") from exc
+
+    return {
+        "path": str(target.relative_to(root)) if target != root else ".",
+        "type": "dir" if was_dir else "file",
+        "deleted": True,
+    }
+
+
+def execute_command(root: Path, command: str, timeout: int | None = None) -> Dict[str, Any]:
+    """Part 4. Runs `command` through the shell with cwd pinned to
+    `root`. This is the one tool in this module that path_guard's
+    containment check doesn't apply to (there's no single "path"
+    argument to resolve) -- the actual safety property it provides is
+    narrower and worth being explicit about: the *working directory*
+    the command starts in is the allowed root, exactly like a person
+    would get by `cd`-ing into the paired folder in their own
+    terminal, and nothing more. It does not sandbox the command
+    itself, does not stop `cd ..` or an absolute path inside the
+    command from touching anything outside root, and does not restrict
+    which binaries can run. That's why this tool -- unlike list_dir/
+    read_file -- always goes through Part 4's propose/confirm gate on
+    the backend side (eo/local_workspace_tools.py) with no "run
+    freely" path, the same as write_file/delete: the person pairing
+    their machine is trusting themselves (or whoever they've paired
+    with) with real shell access scoped only by "starts here," not a
+    real sandbox boundary.
+    """
+    if not command or not command.strip():
+        raise ToolError("command must be a non-empty string")
+
+    requested_timeout = timeout if timeout is not None else DEFAULT_EXECUTE_TIMEOUT_SECONDS
+    try:
+        requested_timeout = int(requested_timeout)
+    except (TypeError, ValueError):
+        raise ToolError(f"timeout must be a number of seconds, got {timeout!r}")
+    if requested_timeout <= 0:
+        raise ToolError("timeout must be positive")
+    actual_timeout = min(requested_timeout, MAX_EXECUTE_TIMEOUT_SECONDS)
+
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(root),
+            capture_output=True,
+            timeout=actual_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise ToolError(
+            f"command timed out after {actual_timeout}s: {command!r}"
+        ) from None
+    except OSError as exc:
+        raise ToolError(f"could not run command: {exc}") from exc
+
+    def _decode_truncate(raw: bytes) -> tuple[str, bool]:
+        text = raw.decode("utf-8", errors="replace")
+        if len(text) > MAX_EXECUTE_OUTPUT_CHARS:
+            return text[:MAX_EXECUTE_OUTPUT_CHARS], True
+        return text, False
+
+    stdout, stdout_truncated = _decode_truncate(proc.stdout or b"")
+    stderr, stderr_truncated = _decode_truncate(proc.stderr or b"")
+
+    return {
+        "command": command,
+        "exit_code": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "truncated": stdout_truncated or stderr_truncated,
+        "timed_out": False,
+    }
+
+
 # tool name -> (root, params) -> result dict. daemon/connection.py's
-# message loop looks up the requested tool here and calls it. Part 4
-# adding write_file/delete/execute_command later means adding entries
-# here (behind their own propose/confirm step), not branching
-# connection.py's loop itself.
+# message loop looks up the requested tool here and calls it -- one
+# combined table covering both Part 3's read tools and Part 4's
+# mutating ones, since by the time a tool_call reaches this module the
+# backend has already handled the read-vs-confirm distinction (see
+# module docstring). Kept as two named dicts (READ_ONLY_TOOLS,
+# MUTATING_TOOLS) rather than one flat one purely so each half stays
+# self-documenting about which risk class it's in -- dispatch() below
+# still looks both up as one combined table.
 READ_ONLY_TOOLS: Dict[str, Callable[[Path, Dict[str, Any]], Dict[str, Any]]] = {
     "list_dir": lambda root, params: list_dir(root, params.get("path", ".")),
     "read_file": lambda root, params: read_file(root, _require_param(params, "path")),
+}
+
+MUTATING_TOOLS: Dict[str, Callable[[Path, Dict[str, Any]], Dict[str, Any]]] = {
+    "write_file": lambda root, params: write_file(
+        root,
+        _require_param(params, "path"),
+        _require_param(params, "content"),
+        bool(params.get("create_dirs", False)),
+    ),
+    "delete": lambda root, params: delete(root, _require_param(params, "path")),
+    "execute_command": lambda root, params: execute_command(
+        root,
+        _require_param(params, "command"),
+        params.get("timeout"),
+    ),
+}
+
+ALL_TOOLS: Dict[str, Callable[[Path, Dict[str, Any]], Dict[str, Any]]] = {
+    **READ_ONLY_TOOLS,
+    **MUTATING_TOOLS,
 }
 
 
@@ -149,7 +365,7 @@ def dispatch(root: Path, tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Raises ToolError for both an unknown tool name and any failure
     inside the tool itself, so daemon/connection.py's caller has one
     exception type to catch and turn into a tool_result."""
-    handler = READ_ONLY_TOOLS.get(tool)
+    handler = ALL_TOOLS.get(tool)
     if handler is None:
         raise ToolError(f"unknown or not-yet-implemented tool: {tool!r}")
     return handler(root, params or {})
