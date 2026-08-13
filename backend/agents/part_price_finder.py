@@ -202,7 +202,8 @@ def _now_iso() -> str:
 
 
 def _safe_json(text: str) -> dict | None:
-    import json, re
+    import json
+    import re
     match = re.search(r"\{.*\}", text, re.S)
     if not match:
         return None

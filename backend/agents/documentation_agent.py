@@ -25,7 +25,7 @@ import json
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, read_many, KEYS
+from memory.bus import write, read_many, KEYS
 from utils.llm_client import generate_text
 
 load_dotenv()

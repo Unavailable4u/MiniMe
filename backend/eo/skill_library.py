@@ -269,7 +269,7 @@ def get_relevant_skill(task_text: str) -> str:
         vector = embed_text(task_text[:4000])
         matches = vector_index().query(
             vector=vector, top_k=1, include_metadata=True,
-            filter=f"skill_id != ''",
+            filter="skill_id != ''",
         )
     except Exception as exc:
         print(f"  [Skill Library] retrieval skipped ({exc.__class__.__name__}: {exc}).")

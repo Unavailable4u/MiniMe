@@ -13,7 +13,6 @@ if a future migration silently breaks the generic_worker fallback for a
 retired role, this catches it instead of the import just quietly failing
 the way the old test would have under pytest collection.
 """
-import json
 
 import agents.generic_worker as generic_worker  # noqa: F401  (ensures mock_llm patches this module)
 

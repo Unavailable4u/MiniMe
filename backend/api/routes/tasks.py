@@ -32,7 +32,7 @@ from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's 
 from eo import timeline_node_blurbs   # NEW — CO4 patch 5
 from eo.executor import resume_graph
 from eo.registry import (
-    list_known_roles, get_role_metadata, update_role_prompt, set_role_pinned,
+    get_role_metadata, update_role_prompt, set_role_pinned,
     list_role_metadata,
 )
 from eo.skill_library import list_skills   # NEW — Part 6 §E2, task 14, patch 4

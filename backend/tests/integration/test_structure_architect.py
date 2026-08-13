@@ -18,7 +18,6 @@ checking" sector 2 calls for:
     submitted_code plans a plain folder/file scaffold instead of raising)
   - the mermaid string always gets attached and written to FILE_PLAN_KEY
 """
-import json
 
 import agents.structure_architect as structure_architect  # noqa: F401
 from memory.bus import write, read, KEYS

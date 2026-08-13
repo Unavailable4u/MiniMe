@@ -24,7 +24,10 @@ Two ways an edge gets created (matching the blueprint's own distinction):
     to..." picker) hits a `create_edge` endpoint that also just calls
     create_edge() below. No agent involvement needed for this path.
 """
-import os, json, uuid, threading
+import os
+import json
+import uuid
+import threading
 from datetime import datetime, timezone
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

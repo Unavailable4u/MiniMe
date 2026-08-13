@@ -6,7 +6,8 @@ Run this once, THEN submit the tier-2 task through the frontend/CLI.
 Usage:
     python scripts/seed_tier2_test.py
 """
-import sys, os
+import sys
+import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import write, read, KEYS, slugify
 
@@ -43,5 +44,5 @@ print(f"app_slug set to: {confirmed_slug!r}")
 print(f"submitted_code modules: {list(confirmed_code.keys())}")
 print()
 print("Now submit the tier-2 task through your frontend/CLI, e.g.:")
-print(f'  "Add unit tests for shipping.py using pytest — cover the normal ')
-print(f'   cases and edge cases, do not modify the function itself."')
+print('  "Add unit tests for shipping.py using pytest — cover the normal ')
+print('   cases and edge cases, do not modify the function itself."')

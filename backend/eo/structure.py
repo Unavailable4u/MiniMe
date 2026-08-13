@@ -10,6 +10,9 @@ Adding a new domain later is exactly this — one new list, no code. That's
 the entire payoff of this part: domain expertise now lives in data, not
 in a new agents/*.py file per role.
 """
+import uuid as _uuid
+from datetime import datetime as _datetime, timezone as _timezone
+from memory.bus import read as _bus_read, write as _bus_write
 
 
 # Migration Part 26 §4c: shared home for the "path" (str, eo/inspector.py's
@@ -327,10 +330,6 @@ def build_reference_structure_addition(task_text: str) -> str:
 # STRUCTURE_TEMPLATES later with zero reshaping if it turns out to be
 # broadly useful.
 # ---------------------------------------------------------------------------
-import uuid as _uuid
-from datetime import datetime as _datetime, timezone as _timezone
-from memory.bus import read as _bus_read, write as _bus_write
-
 WORKFLOW_TEMPLATES_KEY = "workflow_templates"
 
 

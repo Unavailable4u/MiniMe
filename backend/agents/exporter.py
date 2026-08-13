@@ -39,7 +39,7 @@ from docx import Document
 from docx.shared import Pt
 
 from pptx import Presentation
-from pptx.util import Inches, Pt as PptxPt
+from pptx.util import Pt as PptxPt
 
 from openpyxl import Workbook
 
@@ -110,7 +110,7 @@ def _slugify_filename(title: str, ext: str, max_len: int = 60) -> str:
 
 def _write_docx(artifact: dict, output_path: str) -> None:
     doc = Document()
-    title_heading = doc.add_heading(artifact["title"], level=0)
+    doc.add_heading(artifact["title"], level=0)
     for section in artifact["sections"]:
         if section["heading"]:
             doc.add_heading(section["heading"], level=1)

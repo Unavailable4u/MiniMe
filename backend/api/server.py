@@ -12,7 +12,6 @@ tighten this before deploying anywhere real.
 """
 import os
 import sys
-import traceback
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -30,6 +29,46 @@ except ImportError:
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import asyncio  # NEW — Data Layer architecture §9b: capturing the running
+                 # event loop at startup for eo/ws_registry.py's thread-safe push
+from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hook
+
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect  # NEW — §9b
+from fastapi.middleware.cors import CORSMiddleware
+from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
+
+# B6 — auth/JWT verification (SUPABASE_URL, require_auth,
+# _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
+# so api/routes/* modules can import it without a circular import back
+# into this file. See api/deps.py's module docstring for why.
+from api.deps import _verify_supabase_jwt
+
+# B6 — routers split out of this file. tasks_router owns /api/task*,
+# /api/resume, /api/roles*, /api/workflow-templates*, and (as of piece 6)
+# /api/tasks/{session_id} + /api/tasks/workspace/{ws_id} (piece 1, plus
+# the leftover pair folded in alongside piece 6); system_router owns
+# /api/health, /api/quota, /api/usage/history (piece 2); graph_and_notes_
+# router owns graph edges, node summaries, topics/graph, nodes, note
+# candidates, backlinks, and clusters (piece 6). This is also where
+# CO3's /api/task/{id}/pause and CO5's /api/task/{id}/stream will
+# register once built, inside tasks_router. deploy_router (piece 8, the
+# last piece of the B6 split) owns the deploy propose/write/go-live
+# trio and the two UptimeRobot monitoring routes. code_router (patch 8)
+# owns the Build tab's Code sub-tab file persistence -- list/get/write
+# per workspace file path, see api/routes/code.py's own docstring for
+# why it's a separate file rather than folded into workspace_data.py.
+from api.routes.tasks import router as tasks_router
+from api.routes.system import router as system_router
+from api.routes.chats import router as chats_router
+from api.routes.workspaces import router as workspaces_router
+from api.routes.workspace_data import router as workspace_data_router
+from api.routes.graph_and_notes import router as graph_and_notes_router
+from api.routes.notebooks import router as notebooks_router
+from api.routes.deploy import router as deploy_router
+from api.routes.code import router as code_router
+
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
     sentry_sdk.init(
@@ -38,29 +77,6 @@ if SENTRY_DSN:
         integrations=[FastApiIntegration()],
         traces_sample_rate=1.0,
     )
-
-# B6 — auth/JWT verification (SUPABASE_URL, require_auth,
-# _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
-# so api/routes/* modules can import it without a circular import back
-# into this file. See api/deps.py's module docstring for why.
-from api.deps import (
-    SUPABASE_URL, SUPABASE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY,
-    require_auth, _verify_supabase_jwt,
-)
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import asyncio  # NEW — Data Layer architecture §9b: capturing the running
-                 # event loop at startup for eo/ws_registry.py's thread-safe push
-from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hook
-
-from fastapi import (
-    FastAPI, Request, HTTPException, Query,
-    WebSocket, WebSocketDisconnect,  # NEW — §9b
-)
-from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Union
 
 # B6 — run_task/preview_task/confirm_task/run_task_from_template,
 # resume_graph, the eo.registry role-library functions, and the
@@ -123,7 +139,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# B6 — routers split out of this file. tasks_router owns /api/task*,
+# B6 — routers split out of this file (imported near the top of this
+# file, alongside the other imports). tasks_router owns /api/task*,
 # /api/resume, /api/roles*, /api/workflow-templates*, and (as of piece 6)
 # /api/tasks/{session_id} + /api/tasks/workspace/{ws_id} (piece 1, plus
 # the leftover pair folded in alongside piece 6); system_router owns
@@ -137,15 +154,6 @@ app.add_middleware(
 # owns the Build tab's Code sub-tab file persistence -- list/get/write
 # per workspace file path, see api/routes/code.py's own docstring for
 # why it's a separate file rather than folded into workspace_data.py.
-from api.routes.tasks import router as tasks_router
-from api.routes.system import router as system_router
-from api.routes.chats import router as chats_router
-from api.routes.workspaces import router as workspaces_router
-from api.routes.workspace_data import router as workspace_data_router
-from api.routes.graph_and_notes import router as graph_and_notes_router
-from api.routes.notebooks import router as notebooks_router
-from api.routes.deploy import router as deploy_router
-from api.routes.code import router as code_router
 app.include_router(tasks_router)
 app.include_router(system_router)
 app.include_router(chats_router)

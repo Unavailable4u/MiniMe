@@ -37,9 +37,12 @@ import sys
 import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.inspector import SYSTEM_PROMPT, _strip_fences, _validate, VALID_DIRECTED_TASK_TYPES
+from eo.inspector import SYSTEM_PROMPT, _strip_fences, _validate
 from eo.structure import build_reference_structure_addition, PATH_TO_TIER, TIER_TO_PATH
 from utils.llm_client import generate_text
+from eo.registry import AGENT_CAPABILITIES, get_role_prompt, add_role_prompt, record_role_hire
+from eo.quota_sentinel import get_quota_snapshot
+from relay.emitter import emit_event
 
 MEMBER_B_CHAIN = [
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
@@ -326,11 +329,6 @@ def run_panel(task_text: str, draft: dict) -> dict:
     return result
 
 # NEW — add to eo/panel.py, below run_panel()
-
-from eo.registry import AGENT_CAPABILITIES, get_role_prompt, add_role_prompt, record_role_hire
-from eo.quota_sentinel import get_quota_snapshot
-from utils.llm_client import QUOTA_CONFIG
-from relay.emitter import emit_event
 
 QUOTA_CUTOFF = 0.8   # matches the blueprint's 80% figure — the same threshold
                      # quota_sentinel.py already uses to fire quota_alert
