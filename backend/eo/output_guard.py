@@ -233,7 +233,7 @@ def get_guard():
 _ARTIFACT_KNOWN_TYPES_FOR_REFERENCE = ("html", "svg", "python", "react")
 
 
-@register_validator(name="artifact-entry-well-formed", data_type="dict")
+@register_validator(name="artifact-entry-well-formed", data_type="object")
 class ArtifactEntryWellFormed(Validator):
     """Fails when an artifact entry isn't a dict, is missing a non-empty
     string "type" or "code", or has a "title" that's present but not a

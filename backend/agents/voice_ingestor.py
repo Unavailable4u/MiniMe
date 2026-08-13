@@ -14,12 +14,29 @@ ingestor's output is the right call, not a duplicate
 `meeting_summarizer` brief saying the same thing under a different
 name. This module only turns audio into text.
 
+D3 Part 6: every section's transcribed content (and the title, which is
+just the filename but can still carry a name — "call-with-jane-doe.m4a")
+is run through eo/pii_scrub.py's scrub() before this function returns,
+same choke point as agents/pdf_ingestor.py's D3 Part 5 wiring. Unlike
+the PDF ingestor there's no page_breaks-style offset map downstream of
+this module to protect from Presidio's length-changing replacements —
+sections here are keyed by timestamp heading, not by character offset —
+so each section's content is scrubbed once, after that section's
+chunk_lines are joined, rather than needing the pre-join-per-page
+ordering pdf_ingestor.py's docstring explains. Either way PII never
+reaches source_ingestor.write_ingested_source(), and never gets
+embedded into Upstash Vector or written to the knowledge graph.
+
 Place this file at: agents/voice_ingestor.py
 """
 
 import os
+import sys
 
 from faster_whisper import WhisperModel
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.pii_scrub import scrub
 
 # Same reasoning as agents/video_ingestor.py's SECTION_LENGTH_SECONDS:
 # one section per whole recording risks one overlong node; one section
@@ -61,6 +78,11 @@ def ingest_voice(path: str) -> dict:
     or a transcript with no detected speech collapses to a single
     ValueError — same one-exception-type contract as
     agents/web_clipper.py and agents/video_ingestor.py.
+
+    D3 Part 6: each section's content, and the title, are PII-scrubbed
+    (see eo/pii_scrub.py) before this function returns — see the module
+    docstring for why that happens per-section here rather than
+    pre-join like agents/pdf_ingestor.py.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(path)
@@ -74,7 +96,7 @@ def ingest_voice(path: str) -> dict:
             if segment.start - chunk_start >= SECTION_LENGTH_SECONDS and chunk_lines:
                 sections.append({
                     "heading": _format_timestamp(chunk_start),
-                    "content": " ".join(chunk_lines).strip(),
+                    "content": scrub(" ".join(chunk_lines).strip()),
                     "node_refs": [],
                 })
                 chunk_start = segment.start
@@ -83,7 +105,7 @@ def ingest_voice(path: str) -> dict:
         if chunk_lines:
             sections.append({
                 "heading": _format_timestamp(chunk_start),
-                "content": " ".join(chunk_lines).strip(),
+                "content": scrub(" ".join(chunk_lines).strip()),
                 "node_refs": [],
             })
     except Exception as exc:
@@ -93,7 +115,7 @@ def ingest_voice(path: str) -> dict:
         raise ValueError(f"no speech detected in {path}")
 
     return {
-        "title": os.path.splitext(os.path.basename(path))[0],
+        "title": scrub(os.path.splitext(os.path.basename(path))[0]),
         "sections": sections,
         "metadata": {"source_format": "voice", "source_path": path},
     }
