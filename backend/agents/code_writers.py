@@ -36,6 +36,7 @@ from memory.bus import read, write, KEYS
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
 from eo.worker_pool import _select_workers as _select_workers_for_role
+from eo.output_guard import validate_module_code
 
 load_dotenv()
 
@@ -357,6 +358,14 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
         }
         for future in as_completed(futures):
             name, code = future.result()
+            # D3 Part 2: guard the module code before it's trusted downstream
+            # by sandbox_tester.py. Fail-open, matching _write_one_module()'s
+            # own pattern above -- a validation failure marks this module
+            # failed rather than crashing the whole run.
+            is_valid, reason = validate_module_code(code)
+            if not is_valid:
+                print(f"    [Code Writer] module '{name}' failed output validation ({reason}); marking as failed")
+                code = f"# CODE WRITER FAILED: output validation failed ({reason})"
             results[name] = code
             print(f"    [Code Writer] wrote module: {name} ({len(code)} chars)")
 
