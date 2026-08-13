@@ -555,7 +555,7 @@ def list_workspaces(user_id: str) -> list:
     """Every workspace this user can see: owned, or where they're a
     member (any of the four workspace_members roles)."""
     with db.cursor(user_id=user_id) as cur:
-        cur.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query -- interpolates a static SQL fragment (see _chat_ids_sql()'s docstring); every value is a %s param
+        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates a static SQL fragment (see _chat_ids_sql()'s docstring); every value is a %s param
             f"""
             select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.active_stages, w.stage_history, w.created_at, w.updated_at,
                    {_chat_ids_sql()}
@@ -575,7 +575,7 @@ def list_workspaces(user_id: str) -> list:
 def get_workspace(ws_id: str, user_id: str) -> dict:
     _require_access(ws_id, user_id)  # raises FileNotFoundError if no access at all
     with db.cursor(user_id=user_id) as cur:
-        cur.execute(  # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query -- interpolates a static SQL fragment (see _chat_ids_sql()'s docstring); every value is a %s param
+        cur.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- interpolates a static SQL fragment (see _chat_ids_sql()'s docstring); every value is a %s param
             f"""
             select w.id, w.name, w.owner_id, w.show_attribution, w.stage, w.active_stages, w.stage_history, w.created_at, w.updated_at,
                    {_chat_ids_sql()}
