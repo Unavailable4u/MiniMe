@@ -55,15 +55,26 @@ prompts:
 # gemini/huggingface, no OpenAI key anywhere in the stack) -- left
 # unset, every llm-rubric assert errors with "OPENAI_API_KEY is not
 # set" even though the actual role_provider.py output generation
-# succeeded. Pointed at the same Groq model/key utils/llm_client.py's
-# own PROVIDER_CHAIN_DEFAULT already uses (line ~18) so this needs no
-# new key beyond what generating the output already required.
+# succeeded. Pointed at the same Groq model utils/llm_client.py's own
+# PROVIDER_CHAIN_DEFAULT already uses (line ~18).
+#
+# Patch 9: apiKeyEnvar changed from GROQ_API_KEY to a dedicated
+# GROQ_API_KEY_GRADING. Previously this deliberately reused GROQ_API_KEY
+# ("needs no new key beyond what generating the output already
+# required") when both sides drew from the same production account --
+# fine when there was effectively no quota ceiling to worry about in
+# practice. Now that CI wires in two separate CI-scoped keys (ci.yml's
+# patch 9 comment) specifically so a grading call and a generation call
+# in flight together don't compete for one key's per-minute limit, this
+# needs its own var name to actually land on the second key rather than
+# silently colliding with role_provider.py's PROVIDER_OVERRIDE_DEFAULTS
+# ["groq"]["key_env"], which stays "GROQ_API_KEY" (the generation key).
 defaultTest:
   options:
     provider:
       id: groq:llama-3.3-70b-versatile
       config:
-        apiKeyEnvar: GROQ_API_KEY
+        apiKeyEnvar: GROQ_API_KEY_GRADING
 
 tests:
   - file://tests/contradiction_detector.yaml
