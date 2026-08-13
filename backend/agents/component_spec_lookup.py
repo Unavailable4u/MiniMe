@@ -43,6 +43,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.spec_cache import get_cached_spec, set_cached_spec
+from eo.datasheet_cache import get_cached_datasheet, set_cached_datasheet
 
 # Permanent fix (2026-08-13): load_dotenv() at MODULE level, not just
 # inside __main__. The __main__-only version only covered
@@ -61,6 +62,11 @@ from eo.spec_cache import get_cached_spec, set_cached_spec
 load_dotenv()
 
 REQUEST_TIMEOUT = 15
+
+# F3 Part 5: a full datasheet PDF download is bigger and slower than
+# any single DigiKey/Mouser JSON round-trip above, so it gets its own,
+# longer timeout rather than sharing REQUEST_TIMEOUT.
+DATASHEET_REQUEST_TIMEOUT = 30
 
 DIGIKEY_TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
 DIGIKEY_PRODUCT_DETAILS_URL = "https://api.digikey.com/products/v4/search/{part_number}/productdetails"
@@ -393,6 +399,94 @@ def get_real_spec(part_number: str) -> dict | None:
     return result
 
 
+def get_datasheet_detail(datasheet_url: str) -> dict | None:
+    """F3 Part 5 (optional stretch): downloads the PDF at datasheet_url
+    and runs it through agents/pdf_ingestor.py's existing ingest_pdf()
+    pipeline -- the same deterministic, no-LLM-call PDF parser already
+    used elsewhere -- to pull finer detail (mounting-hole positions,
+    pinout tables, anything else in the datasheet's running text)
+    beyond the top-level dimensions_mm get_real_spec() already exposes.
+    Callers store the result keyed to a part id (see
+    hardware_speccer.py's Part 5 wiring) for a later mech-primitive step
+    (G3) to read, if that gets built -- this function itself only
+    fetches and parses, it doesn't interpret the content.
+
+    Deliberately the most expensive per-part call in this module (a
+    full PDF download + parse, vs. one JSON API round-trip for
+    get_real_spec()) and the least likely to block anything downstream
+    if skipped -- a None return here means "no deep-dive available for
+    this part," never a reason to fail the part itself.
+
+    Checks eo/datasheet_cache.py first (180-day TTL, see that module's
+    own docstring for why) and writes to it after a real download+parse
+    succeeds, so the same datasheet_url met again across projects (a
+    common ESP32/DS18B20/etc. datasheet gets pulled once, not once per
+    project generation) doesn't re-download/re-parse for free.
+
+    Returns {"title", "content", "page_count"} on success -- "content"
+    is ingest_pdf()'s single joined section (see that module's
+    docstring for why a PDF always comes back as exactly one section),
+    the full extracted text a later step could search/parse further.
+    Returns None (never raises) for: no datasheet_url, a download that
+    fails or times out, a response that doesn't look like a PDF
+    (Content-Type and file extension both checked, since some vendors
+    put an HTML product page behind a "datasheet" link), or a parse
+    failure inside ingest_pdf() itself -- same "skip cleanly" pattern
+    as the rest of this module.
+    """
+    if not datasheet_url:
+        return None
+
+    cached = get_cached_datasheet(datasheet_url)
+    if cached is not None:
+        return {
+            "title": cached.get("title"),
+            "content": cached.get("content"),
+            "page_count": cached.get("page_count"),
+        }
+
+    import tempfile
+    from agents.pdf_ingestor import ingest_pdf
+
+    tmp_path = None
+    try:
+        resp = requests.get(datasheet_url, timeout=DATASHEET_REQUEST_TIMEOUT, stream=True)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "pdf" not in content_type and not datasheet_url.lower().endswith(".pdf"):
+            # Not actually a PDF (e.g. an HTML product page some vendors
+            # return under a "datasheet" link) -- ingest_pdf() would just
+            # raise on this, so skip the download/parse attempt entirely.
+            print(f"  [component_spec_lookup] datasheet_url doesn't look "
+                  f"like a PDF (Content-Type={content_type!r}): {datasheet_url}")
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            for chunk in resp.iter_content(chunk_size=65536):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+
+        artifact = ingest_pdf(tmp_path)
+    except Exception as e:
+        print(f"  [component_spec_lookup] datasheet deep-dive failed for "
+              f"'{datasheet_url}': {e}")
+        return None
+    finally:
+        # Always clean up the downloaded temp file, success or failure --
+        # this module has no standing reason to keep a copy of the raw
+        # PDF around once ingest_pdf() has extracted its text.
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    result = {
+        "title": artifact.get("title"),
+        "content": (artifact.get("sections") or [{}])[0].get("content", ""),
+        "page_count": (artifact.get("metadata") or {}).get("page_count"),
+    }
+    set_cached_datasheet(datasheet_url, result)
+    return result
+
+
 if __name__ == "__main__":
     # Manual smoke test — same "prove one real lookup works standalone"
     # step as part_price_finder.py's own __main__ block.
@@ -414,6 +508,20 @@ if __name__ == "__main__":
 
     result = get_real_spec(TEST_PART)
     print(json.dumps(result, indent=2))
+
+    # Part 5 smoke test: if the lookup above turned up a datasheet_url,
+    # prove the deep-dive works standalone too -- same "one real call,
+    # not just unit-tested plumbing" spirit as the DigiKey/Mouser tests
+    # above.
+    if result and result.get("datasheet_url"):
+        print("--- datasheet deep-dive ---")
+        detail = get_datasheet_detail(result["datasheet_url"])
+        if detail:
+            print(f"  title: {detail.get('title')!r}")
+            print(f"  page_count: {detail.get('page_count')}")
+            print(f"  content (first 300 chars): {(detail.get('content') or '')[:300]!r}")
+        else:
+            print("  no detail (download/parse failed or wasn't a PDF)")
 
     # Part 3 smoke test: call get_real_spec() again for the SAME part.
     # If caching is wired correctly this returns instantly from

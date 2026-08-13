@@ -1,5 +1,5 @@
 "use client";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, BadgeCheck } from "lucide-react";
 
 // device_spec.parts[].category -> badge color. Same palette as
 // WiringGraph.jsx's TYPE_COLORS (wiring nodes use the identical category
@@ -17,6 +17,16 @@ const CATEGORY_COLORS = {
 };
 const DEFAULT_CATEGORY_COLOR = "text-neutral-400 border-neutral-700";
 
+// F3 Part 6: part.source -> display label for the "real spec" badge
+// below. Absent/unrecognized source (the common case -- most parts
+// have no part_number, or their part_number missed on both vendors)
+// means no badge at all, i.e. "LLM-estimated," which is the majority
+// case and deliberately gets no visual noise of its own.
+const SOURCE_LABELS = {
+  digikey: "DigiKey",
+  mouser: "Mouser",
+};
+
 /**
  * PartsTable — first of Blueprint's four sub-views (Blueprint design
  * guide §2). Purpose-built, not a reuse of ExtractionTableView.jsx's
@@ -32,6 +42,15 @@ const DEFAULT_CATEGORY_COLOR = "text-neutral-400 border-neutral-700";
  * agents/part_price_finder.py's multi-vendor listings down to one before
  * this component ever sees the part, so there's no listings array to
  * render here.
+ *
+ * F3 Part 4/6: a part may also carry `dimensions_mm`, `datasheet_url`,
+ * and `source` ("digikey"/"mouser") when agents/component_spec_lookup.py
+ * found a real distributor match for that part's part_number -- absent
+ * on any part that had no part_number, or whose part_number missed on
+ * both vendors, in which case its sizing was LLM-estimated instead.
+ * `source` is surfaced here as a small badge (see SOURCE_LABELS above);
+ * `dimensions_mm` isn't rendered by this table today -- MechView.jsx is
+ * where physical sizing actually matters.
  *
  * `onRefreshPrices`: called with no args, expected to hit the
  * /refresh-prices endpoint and hand back updated parts; caller (Blueprint
@@ -76,6 +95,34 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
                 <span className={`text-[9px] uppercase border rounded px-1 ${CATEGORY_COLORS[p.category] || DEFAULT_CATEGORY_COLOR}`}>
                   {p.category}
                 </span>
+                {p.source && SOURCE_LABELS[p.source] && (
+                  // F3 Part 6: small, visible payoff for Part 4/5's real
+                  // distributor lookup -- badge next to the name when
+                  // this part's sizing came from DigiKey/Mouser rather
+                  // than LLM estimation. Links out to the datasheet when
+                  // present (Part 1-2's lookup), otherwise it's still a
+                  // useful non-link signal on its own.
+                  p.datasheet_url ? (
+                    <a
+                      href={p.datasheet_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`Verified via ${SOURCE_LABELS[p.source]} — view datasheet`}
+                      className="flex items-center gap-0.5 text-[9px] uppercase border rounded px-1 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/10 shrink-0"
+                    >
+                      <BadgeCheck size={9} />
+                      {SOURCE_LABELS[p.source]}
+                    </a>
+                  ) : (
+                    <span
+                      title={`Verified via ${SOURCE_LABELS[p.source]}`}
+                      className="flex items-center gap-0.5 text-[9px] uppercase border rounded px-1 text-emerald-300 border-emerald-500/40 shrink-0"
+                    >
+                      <BadgeCheck size={9} />
+                      {SOURCE_LABELS[p.source]}
+                    </span>
+                  )
+                )}
               </div>
               {p.description && (
                 <p className="text-[10px] text-[var(--neutral-600)] truncate">{p.description}</p>
