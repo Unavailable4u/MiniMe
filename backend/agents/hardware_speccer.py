@@ -70,6 +70,36 @@ What's different from schema/architecture_diagrammer.py:
     Fasteners are deliberately excluded from "mech.placements" -- too
     numerous/small to place individually. Depends on 20a's part ids
     (housing_1, lid_1, mount_*) existing to reference.
+  - NEW (F3, Part 4): what was one generate_text() call is now two.
+    Call 1 (SYSTEM_PROMPT_PARTS) proposes "parts" only, each optionally
+    carrying a part_number the model fills in when it knows one (e.g.
+    "ESP32-WROOM-32"). _populate_dimensions() (new, parallelized like
+    _populate_prices()) then looks up real dimensions_mm/datasheet_url
+    via agents/component_spec_lookup.py's get_real_spec() for every
+    part_number present, merging the result onto that part -- misses
+    (no part_number, or neither DigiKey nor Mouser has it) are left
+    untouched. Call 2 (SYSTEM_PROMPT_WIRING) then takes that
+    (dimension-enriched) parts list as fixed input and produces wiring/
+    mech/instructions, told explicitly that a part's "dimensions_mm" is
+    ground truth (use it for that part's mech.placements w/h/d, don't
+    re-estimate) versus a part with no such field, which still needs
+    the model's own estimated sizing exactly as before this change.
+    _populate_prices() is unaffected -- still runs once, after both
+    calls, over the same final parts list.
+  - NEW (F3, Part 5, optional stretch): a fifth custom key,
+    custom["datasheets"] -- {part_id: {"title", "content",
+    "page_count"}} -- written the same read-modify-write way as
+    custom["info"]. _populate_datasheet_details() (new) runs after
+    Call 2, Info generation, and pricing are all already done -- last
+    on purpose, since it's the most expensive per-part step (a full
+    PDF download+parse via agents/component_spec_lookup.py's
+    get_datasheet_detail(), which wraps the existing
+    agents/pdf_ingestor.py pipeline) and everything else in the spec
+    is already complete and renderable without it. Only parts that
+    ended up with a datasheet_url (Part 4's _populate_dimensions(), in
+    turn only set when DigiKey/Mouser had one) are attempted; a
+    failed/skipped deep-dive just means no entry for that part id, not
+    a failure of the spec around it.
 
 Place this file at: agents/hardware_speccer.py
 """
@@ -105,20 +135,106 @@ FALLBACK_CHAIN = [
 ]
 
 
-SYSTEM_PROMPT = """You are a hardware bill-of-materials and assembly \
-planner. You read a finished (or in-progress) hardware PRD/feasibility \
-note and propose the parts list, a wiring graph (which part connects to \
-which, over which specific pins/terminals, and whether that connection \
-carries data, power, or ground), a rough physical layout inside an \
-enclosure, and a step-by-step assembly sequence grouped into phases \
-(e.g. Fabricate, Wire, Bring-up).
+SYSTEM_PROMPT_PARTS = """You are a hardware bill-of-materials planner. \
+You read a finished (or in-progress) hardware PRD/feasibility note and \
+propose the parts list only -- a separate call, given your parts list \
+as input, will handle wiring, physical layout, and assembly \
+instructions, so do not attempt any of that here.
 
-Never invent a part the PRD gives you no reason to include. Every wiring \
-edge must reference two part ids that exist in your own parts list. Every \
-instruction step's tool_ids/part_ids must reference real entries.
+Never invent a part the PRD gives you no reason to include.
 
-Every electrical part in "parts" (i.e. every part whose category is \
-"mcu", "sensor", "actuator", or "power") MUST have a matching entry in \
+Never emit an enclosure as a single lump "parts" entry (e.g. one \
+"Enclosure" or "Case" part covering housing, lid, mounting, and \
+fasteners all at once). Decompose it into discrete parts instead: \
+a housing part and a lid part (category "3D_PRINT"); one mount part \
+per subsystem that needs standoff/bracket mounting -- the MCU, any \
+display, and any other part with exposed leads (category "3D_PRINT", \
+one mount per such subsystem, not one mount for the whole board); a \
+realistic fastener count -- screws and heat-set inserts, as a \
+quantity on one or a few "MISC" parts, not a single "screws" line with \
+qty 1; and, only when the PRD explicitly states a weatherproof or \
+outdoor requirement, a gasket/seal line (category "MISC"). Do not add \
+a gasket/seal part when the PRD gives no weatherproofing requirement.
+
+For every electrical part (category "mcu", "sensor", "actuator", or \
+"power"), fill in "part_number" with a real, specific manufacturer \
+part number when you know one with confidence -- e.g. "ESP32-WROOM-32" \
+for an ESP32 dev module, "DS18B20" for a common 1-Wire temperature \
+sensor. This is looked up against real distributor data after you \
+respond, so it must be an actual part number, never a plausible-\
+looking guess -- leave it null whenever you're not confident, and \
+always leave it null for generic passives (resistors, capacitors) and \
+for purely mechanical "3D_PRINT"/"MISC" parts, which don't have \
+distributor part numbers in the first place.
+
+Leave "estimated_price_bdt", "vendor_name", "vendor_url", and \
+"price_checked_at" as null for every part -- pricing is looked up \
+separately after you respond, not something you should guess at.
+
+Respond with ONLY valid JSON, no markdown fences, no explanation, in \
+exactly this shape:
+{
+  "parts": [
+    {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
+     "description": "Main microcontroller", "qty": 1,
+     "part_number": "ESP32-WROOM-32",
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "housing_1", "name": "Enclosure housing", "category": "3D_PRINT",
+     "description": "Bottom shell", "qty": 1,
+     "part_number": null,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "lid_1", "name": "Enclosure lid", "category": "3D_PRINT",
+     "description": "Top shell", "qty": 1,
+     "part_number": null,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "mount_mcu_1", "name": "MCU standoff mount", "category": "3D_PRINT",
+     "description": "Standoff bracket for mcu_1", "qty": 1,
+     "part_number": null,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "fastener_1", "name": "M3 heat-set insert + screw", "category": "MISC",
+     "description": "Housing/lid fastening", "qty": 4,
+     "part_number": null,
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null}
+  ]
+}
+"category" is one of: "mcu", "sensor", "actuator", "power", "module", \
+"3D_PRINT", "MISC". Use short lowercase_with_underscores ids -- the \
+next call references these ids verbatim in wiring edges, mech \
+placements, and instruction tool_ids/part_ids, so they must be stable \
+and unique.
+"""
+
+
+SYSTEM_PROMPT_WIRING = """You are a hardware wiring/layout/assembly \
+planner. You are given a hardware PRD/feasibility note AND an already-\
+finalized parts list (a separate call already produced it) -- propose \
+a wiring graph (which part connects to which, over which specific \
+pins/terminals, and whether that connection carries data, power, or \
+ground), a rough physical layout inside an enclosure, and a step-by-\
+step assembly sequence grouped into phases (e.g. Fabricate, Wire, \
+Bring-up).
+
+Treat the given parts list as fixed: do not add, remove, or rename \
+parts, and do not invent a part id that isn't already in it. Every \
+wiring edge must reference two part ids that exist in the given parts \
+list. Every instruction step's tool_ids/part_ids must reference real \
+entries from that same list.
+
+Some parts in the given list carry a "dimensions_mm": {"w", "h", "d"} \
+field -- these are real, verified physical dimensions from a \
+distributor lookup, not an estimate. Treat "dimensions_mm" as ground \
+truth for that part: use those exact w/h/d values for its \
+"mech.placements" entry rather than guessing your own. Parts with no \
+"dimensions_mm" field still need your own reasonable estimated sizing, \
+exactly as before.
+
+Every electrical part (i.e. every part whose category is "mcu", \
+"sensor", "actuator", or "power") MUST have a matching entry in \
 "wiring.nodes" and MUST appear in at least one "wiring.edges" entry \
 (as either "from" or "to") -- a part that's in the bill of materials but \
 never wired to anything is a bug, not a valid answer, even if it's a \
@@ -138,31 +254,17 @@ leave them null just because it's easier; a wiring diagram whose edges \
 don't say which pin connects to which pin is not detailed enough to \
 build from.
 
-Never emit an enclosure as a single lump "parts" entry (e.g. one \
-"Enclosure" or "Case" part covering housing, lid, mounting, and \
-fasteners all at once). Decompose it into discrete parts instead: \
-a housing part and a lid part (category "3D_PRINT"); one mount part \
-per subsystem that needs standoff/bracket mounting -- the MCU, any \
-display, and any other part with exposed leads (category "3D_PRINT", \
-one mount per such subsystem, not one mount for the whole board); a \
-realistic fastener count -- screws and heat-set inserts, as a \
-quantity on one or a few "MISC" parts, not a single "screws" line with \
-qty 1; and, only when the PRD explicitly states a weatherproof or \
-outdoor requirement, a gasket/seal line (category "MISC"). Do not add \
-a gasket/seal part when the PRD gives no weatherproofing requirement. \
-"3D_PRINT" and "MISC" parts are purely mechanical -- per the wiring \
-rule above, never add them to "wiring.nodes" or wire them to anything.
-
 For the physical layout, you are worse at spatial reasoning than at \
-listing parts or wiring edges -- do not attempt precise millimeter \
-placement. Propose a rough grid layout only: order parts front-to-back by \
+listing wiring edges -- do not attempt precise millimeter placement \
+except where a part's given "dimensions_mm" already fixes it for you. \
+Propose a rough grid layout only: order parts front-to-back by \
 category, with power/MCU parts placed near the enclosure's center and \
 sensors placed near the hull edges they would realistically mount at. \
 Treat this as "which part roughly goes where," not engineering-grade CAD.
 
-Every part from step 20a's enclosure decomposition needs its own \
-"mech.placements" entry -- the housing, the lid, and each mount -- so \
-the layout draws an assembled enclosure instead of floating unrelated \
+Every 3D_PRINT/MISC enclosure part in the given parts list (housing, \
+lid, each mount) needs its own "mech.placements" entry -- so the \
+layout draws an assembled enclosure instead of floating unrelated \
 cubes. The housing's placement should span the full enclosure \
 footprint starting at "z": 0 (it's the shell everything else sits \
 inside, not a part-sized box). The lid's placement goes directly atop \
@@ -175,35 +277,9 @@ beside the MCU's own placement). Fasteners are numerous and too small \
 to meaningfully place individually -- do not give fastener parts a \
 "mech.placements" entry at all.
 
-Leave "estimated_price_bdt", "vendor_name", "vendor_url", and \
-"price_checked_at" as null for every part -- pricing is looked up \
-separately after you respond, not something you should guess at.
-
 Respond with ONLY valid JSON, no markdown fences, no explanation, in \
 exactly this shape:
 {
-  "parts": [
-    {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
-     "description": "Main microcontroller", "qty": 1,
-     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
-     "price_checked_at": null},
-    {"id": "housing_1", "name": "Enclosure housing", "category": "3D_PRINT",
-     "description": "Bottom shell", "qty": 1,
-     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
-     "price_checked_at": null},
-    {"id": "lid_1", "name": "Enclosure lid", "category": "3D_PRINT",
-     "description": "Top shell", "qty": 1,
-     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
-     "price_checked_at": null},
-    {"id": "mount_mcu_1", "name": "MCU standoff mount", "category": "3D_PRINT",
-     "description": "Standoff bracket for mcu_1", "qty": 1,
-     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
-     "price_checked_at": null},
-    {"id": "fastener_1", "name": "M3 heat-set insert + screw", "category": "MISC",
-     "description": "Housing/lid fastening", "qty": 4,
-     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
-     "price_checked_at": null}
-  ],
   "wiring": {
     "nodes": [{"id": "mcu_1", "label": "ESP32 DevKit", "type": "mcu"}],
     "edges": [{"from": "mcu_1", "to": "sensor_1", "kind": "data",
@@ -228,19 +304,16 @@ exactly this shape:
     ]
   }
 }
-"category" is one of: "mcu", "sensor", "actuator", "power", "module", \
-"3D_PRINT", "MISC". "type" (wiring nodes) uses the same electrical \
-subset -- "mcu", "sensor", "actuator", "power", "module" -- never \
+"type" (wiring nodes) uses the electrical subset of the parts category \
+enum -- "mcu", "sensor", "actuator", "power", "module" -- never \
 "3D_PRINT"/"MISC", since those are always purely mechanical and are \
 never wired. "kind" (wiring edges) is one of: \
 "data", "power", "ground". "from_pin"/"to_pin" are short strings naming \
 the actual pin/terminal on each side (see above), or null only when \
-genuinely not resolvable. Use short lowercase_with_underscores ids; every \
-id referenced elsewhere (wiring edges, mech placements, instruction \
-tool_ids/part_ids) MUST match an id defined in "parts"/"wiring.nodes".
+genuinely not resolvable. Every id referenced (wiring edges, mech \
+placements, instruction tool_ids/part_ids) MUST match an id already \
+defined in the given parts list / your own "wiring.nodes".
 """
-
-
 
 INFO_PROMPT = """You are given a hardware bill-of-materials and wiring \
 graph already generated for a project. Write a short one-paragraph \
@@ -452,6 +525,127 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     return parts
 
 
+def _populate_dimensions(parts: list, session_id: str = None) -> list:
+    """F3 Part 4: looks up real physical dimensions/datasheet links for
+    every part that carries a part_number (SYSTEM_PROMPT_PARTS's Call 1
+    asks the model to fill this in when it knows one, e.g.
+    "ESP32-WROOM-32", "DS18B20"), via
+    agents/component_spec_lookup.py's get_real_spec(). Parts with no
+    part_number, or whose part_number misses on both DigiKey and Mouser
+    (get_real_spec() returns None), are left untouched -- Call 2's
+    SYSTEM_PROMPT_WIRING treats an absent "dimensions_mm" key as "still
+    needs LLM-estimated sizing," same as a part that never had a
+    part_number in the first place.
+
+    Parallelized with a ThreadPoolExecutor, same "don't make N parts
+    wait on N sequential network round-trips" motivation as
+    _populate_prices() above -- but deliberately NOT that function's
+    worker-pool-account rotation (eo/worker_pool.py's _select_workers()/
+    build_fallback_chain_excluding()). That machinery exists to spread
+    load across several *interchangeable* LLM-provider accounts;
+    component_spec_lookup.get_real_spec() isn't an LLM call at all --
+    it's a plain HTTP lookup against exactly one fixed DigiKey
+    credential pair and one fixed Mouser key (see that module's own
+    docstring), so there are no sibling accounts to rotate across.
+    Threads here only get the I/O off the critical path, same as
+    part_price_finder.py's own internal web_search fan-out.
+
+    A single lookup failure (network error, malformed response) never
+    fails the whole spec -- same "degrade, don't blow up" spirit as
+    _populate_prices()'s own per-part try/except; the part is just left
+    without dimensions_mm, exactly as if it had no part_number.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from agents.component_spec_lookup import get_real_spec
+
+    if not parts:
+        return parts
+
+    def _spec_one(part: dict) -> dict:
+        part_number = part.get("part_number")
+        if not part_number:
+            return part
+        try:
+            result = get_real_spec(part_number)
+        except Exception:
+            return part
+        if not result:
+            return part
+        if result.get("dimensions_mm"):
+            part["dimensions_mm"] = result["dimensions_mm"]
+        if result.get("datasheet_url"):
+            part["datasheet_url"] = result["datasheet_url"]
+        if result.get("source"):
+            part["source"] = result["source"]
+        return part
+
+    worker_count = min(len(parts), 8)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(_spec_one, part) for part in parts]
+        for future in as_completed(futures):
+            future.result()
+
+    return parts
+
+
+def _populate_datasheet_details(parts: list, session_id: str = None) -> dict:
+    """F3 Part 5 (optional stretch): for every part that ended up with a
+    datasheet_url (set by _populate_dimensions() above, itself only set
+    when DigiKey/Mouser actually had one), runs
+    agents/component_spec_lookup.py's get_datasheet_detail() to pull the
+    full extracted datasheet text -- mounting-hole positions, pinout
+    tables, anything else beyond the top-level dimensions_mm -- keyed to
+    that part's id.
+
+    Deliberately kept OUT of the part dict itself (unlike dimensions_mm/
+    datasheet_url/source, which _populate_dimensions() merges directly
+    onto each part): full datasheet text is far heavier than anything
+    else on a part, and nothing in Blueprint's four sub-views needs it
+    inline today -- see this function's caller in run_hardware_speccer()
+    for where it's written instead (workspace_facts.custom["datasheets"],
+    a fifth key alongside parts/wiring/mech/instructions, for a future
+    mech-primitive step (G3) to read by part id if that gets built).
+
+    Parallelized the same way _populate_dimensions() is, and for the
+    same reason that function skips _populate_prices()'s worker-pool-
+    account rotation -- get_datasheet_detail() is a plain HTTP
+    download+parse, not an LLM call spread across interchangeable
+    accounts.
+
+    A single part's failed/skipped deep-dive (get_datasheet_detail()
+    returning None -- no datasheet_url, download failure, non-PDF
+    response, parse error; see that function's own docstring) simply
+    means no entry for that part id in the returned dict -- never
+    raises, never fails the parts/wiring spec around it. Returns {}
+    if no part in `parts` has a datasheet_url at all.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from agents.component_spec_lookup import get_datasheet_detail
+
+    candidates = [p for p in parts if p.get("datasheet_url")]
+    if not candidates:
+        return {}
+
+    def _detail_one(part: dict):
+        part_id = part.get("id")
+        try:
+            detail = get_datasheet_detail(part["datasheet_url"])
+        except Exception:
+            return part_id, None
+        return part_id, detail
+
+    details = {}
+    worker_count = min(len(candidates), 8)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(_detail_one, part) for part in candidates]
+        for future in as_completed(futures):
+            part_id, detail = future.result()
+            if part_id and detail:
+                details[part_id] = detail
+
+    return details
+
+
 # Same color-per-kind convention WiringGraph.jsx's EDGE_COLORS already
 # uses for the force-graph view, kept identical here (via Mermaid's
 # linkStyle) so the two renderings of the same wiring data never disagree
@@ -612,12 +806,21 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.dynamic_chain import build_fallback_chain
     chain = build_fallback_chain("hardware_speccer") or FALLBACK_CHAIN
 
-    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Hardware Speccer",
-                         session_id=session_id, tier=tier, domain=domain)
-    cleaned = _strip_fences(raw)
+    # F3 Part 4: split into two calls. Call 1 proposes parts only (each
+    # optionally carrying a part_number); real dimensions get looked up
+    # and merged in before Call 2 ever runs, so Call 2's wiring/mech/
+    # instructions reasoning can be told which parts already have
+    # ground-truth sizing vs. which still need LLM estimation.
+    raw_parts = generate_text(SYSTEM_PROMPT_PARTS, user_prompt, chain,
+                               agent_name="Hardware Speccer Parts",
+                               session_id=session_id, tier=tier, domain=domain)
+    cleaned_parts = _strip_fences(raw_parts)
 
     try:
-        spec = json.loads(cleaned)
+        parts_result = json.loads(cleaned_parts)
+        parts = parts_result.get("parts", [])
+        if not isinstance(parts, list):
+            parts = []
     except json.JSONDecodeError:
         # Fail safe, same spirit as schema/architecture_diagrammer.py's
         # fallbacks: a minimal valid shape naming the failure, rather than
@@ -627,15 +830,44 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # rather than being decomposed -- decomposition is a property of
         # a real enclosure the model reasoned about, and there's nothing
         # to decompose when generation failed outright.
+        parts = [{"id": "unavailable", "name": "Spec unavailable", "category": "module",
+                  "description": "", "qty": 1, "part_number": None,
+                  "estimated_price_bdt": None, "vendor_name": None,
+                  "vendor_url": None, "price_checked_at": None}]
+
+    # Merge real dimensions/datasheet links onto whichever parts carry a
+    # part_number, BEFORE Call 2 -- see _populate_dimensions()'s own
+    # docstring. Parts left untouched here simply have no "dimensions_mm"
+    # key, which Call 2's SYSTEM_PROMPT_WIRING treats as "still needs
+    # your own estimated sizing."
+    parts = _populate_dimensions(parts, session_id=session_id)
+
+    # Call 2: wiring/mech/instructions, given the (now dimension-enriched)
+    # parts list as fixed input rather than generating parts itself.
+    wiring_user_prompt = (
+        f"{user_prompt}\n\n"
+        f"Parts (already finalized -- do not add, remove, or rename any; "
+        f"some carry a \"dimensions_mm\" field, which is verified ground "
+        f"truth, not an estimate):\n{json.dumps(parts)}"
+    )
+    raw_wiring = generate_text(SYSTEM_PROMPT_WIRING, wiring_user_prompt, chain,
+                                agent_name="Hardware Speccer Wiring",
+                                session_id=session_id, tier=tier, domain=domain)
+    cleaned_wiring = _strip_fences(raw_wiring)
+
+    try:
+        spec = json.loads(cleaned_wiring)
+    except json.JSONDecodeError:
+        # Same fail-safe spirit as Call 1 above -- Call 2 failing doesn't
+        # discard the parts Call 1 already produced, it just means no
+        # wiring/mech/instructions to show for them yet.
         spec = {
-            "parts": [{"id": "unavailable", "name": "Spec unavailable", "category": "module",
-                       "description": "", "qty": 1, "estimated_price_bdt": None,
-                       "vendor_name": None, "vendor_url": None, "price_checked_at": None}],
             "wiring": {"nodes": [], "edges": []},
             "mech": {"enclosure": {"w": 0, "h": 0, "d": 0}, "placements": []},
             "instructions": {"phases": []},
         }
 
+    spec["parts"] = parts
     spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
 
     # Step 3 of the wiring-detail fix: deterministically render the
@@ -659,9 +891,18 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # docstring for why this never raises.
     spec["info"] = _generate_info(spec, chain, session_id=session_id, tier=tier, domain=domain)
 
+    # F3 Part 5 (optional stretch): datasheet deep-dive, keyed by part
+    # id. Deliberately last of the "real data" work in this function --
+    # the most expensive per-part call and the least likely to block
+    # anything above it (Parts/Wiring/Mech/Instructions/Info are all
+    # already fully built by this point) if it comes back thin or
+    # empty. See _populate_datasheet_details()'s own docstring for why
+    # this is a standalone dict rather than merged onto spec["parts"].
+    spec["datasheets"] = _populate_datasheet_details(spec.get("parts", []), session_id=session_id)
+
     # Same read-modify-write shape api/server.py's refresh-prices endpoint
     # already uses for custom["parts"] alone -- read the whole facts
-    # object, update only this spec's four custom keys, write it back, so
+    # object, update only this spec's custom keys, write it back, so
     # unrelated custom entries (e.g. deploy_target) are never touched.
     facts = workspace_facts.get_facts(workspace_id)
     custom = dict(facts.get("custom") or {})
@@ -670,6 +911,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     custom["mech"] = spec.get("mech", {})
     custom["instructions"] = spec.get("instructions", {})
     custom["info"] = spec.get("info", {"summary": "", "tags": [], "image_url": ""})
+    custom["datasheets"] = spec.get("datasheets", {})
     workspace_facts.set_facts(workspace_id, {"custom": custom})
     print(f"  [hardware_speccer] wrote device spec to workspace_id={workspace_id!r} "
           f"(session_id={session_id!r}, {len(custom['parts'])} parts)")
