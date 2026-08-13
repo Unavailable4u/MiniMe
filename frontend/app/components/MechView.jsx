@@ -128,6 +128,63 @@ function PrimitiveBox({ shape, size, color, isShell, selected }) {
   );
 }
 
+// G3a (Master Guide, Level 0->1 primitive composition): a light-vs-dark
+// split of one category color for a primitive's own `color_role` --
+// "primary" (the main body) gets the category color as-is, "accent"
+// (mounting holes, small trim pieces) gets a darkened version of the
+// SAME color rather than an unrelated second color, so a composed part
+// still reads as one category at a glance (per the guide's own wording)
+// instead of looking like two different parts glued together. Darkened
+// rather than lightened because accents (holes) read as "cut into" the
+// body, not "sitting on top of" it -- a lighter accent tends to look
+// like a highlight/spotlight instead.
+function shadeForRole(colorHex, role) {
+  if (role !== "accent") return colorHex;
+  const hex = colorHex.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  const darken = (c) => Math.round(c * 0.55);
+  const toHex = (c) => c.toString(16).padStart(2, "0");
+  return `#${toHex(darken(r))}${toHex(darken(g))}${toHex(darken(b))}`;
+}
+
+/**
+ * PrimitivePiece — one entry of a part's `placement.primitives[]`
+ * (G3a). Each primitive's `offset`/`size` are corner-origin *within
+ * the part's own w/h/d box* (same corner-origin convention the whole
+ * placement scheme already uses, per PartBox's own doc comment below)
+ * -- so a primitive's local position here is computed the same
+ * corner-to-center way PartBox computes the part's own position
+ * relative to the enclosure, just one level further in: relative to
+ * the part's own box center instead of the enclosure's.
+ */
+function PrimitivePiece({ primitive, partSize, color, isShell, selected }) {
+  const [pw, ph, pd] = partSize;
+  const offset = primitive.offset || { x: 0, y: 0, z: 0 };
+  const size = primitive.size || { w: pw, h: ph, d: pd };
+  const localX = offset.x + size.w / 2 - pw / 2;
+  const localY = offset.y + size.h / 2 - ph / 2;
+  const localZ = offset.z + size.d / 2 - pd / 2;
+  const rotation = primitive.rotation || { x: 0, y: 0, z: 0 };
+  const pieceColor = shadeForRole(color, primitive.color_role);
+  return (
+    <mesh
+      position={[localX, localY, localZ]}
+      rotation={[rotation.x || 0, rotation.y || 0, rotation.z || 0]}
+      raycast={isShell ? () => null : undefined}
+    >
+      <PrimitiveBox
+        shape={primitive.shape}
+        size={[size.w, size.h, size.d]}
+        color={pieceColor}
+        isShell={isShell}
+        selected={selected}
+      />
+    </mesh>
+  );
+}
+
 function PartBox({ placement, part, enclosure, selected, onSelect }) {
   const color = CATEGORY_COLORS[part?.category] || DEFAULT_COLOR;
   const isShell = isShellPlacement(placement, enclosure);
@@ -153,23 +210,53 @@ function PartBox({ placement, part, enclosure, selected, onSelect }) {
   const centerX = placement.x + placement.w / 2 - enclosure.w / 2;
   const centerY = placement.y + placement.h / 2 - enclosure.h / 2;
   const centerZ = placement.z + placement.d / 2 - enclosure.d / 2;
+  const hasPrimitives = Array.isArray(placement.primitives) && placement.primitives.length > 0;
+
+  const sharedGroupProps = {
+    position: [centerX, centerY, centerZ],
+    // Shells (housing/lid) fully enclose whatever sits inside them, so
+    // a naive raycast would hit the shell's near wall before it ever
+    // reaches the part behind it -- clicking "into" the housing would
+    // just keep selecting the housing. Disabling raycasting on shell
+    // meshes/groups lets clicks pass through to whatever's actually
+    // inside; shells remain selectable, just only from the sidebar
+    // (patch 6), which is where you'd realistically go to select "the
+    // housing" as a whole anyway.
+    onClick: (e) => {
+      e.stopPropagation();
+      onSelect(placement.part_id);
+    },
+  };
+
+  // G3a: a part with `placement.primitives` (Level 0->1 composition --
+  // see agents/hardware_speccer.py's _apply_primitive_composition())
+  // renders as a <group> of several PrimitivePiece meshes instead of a
+  // single <mesh>, so a composed part (e.g. a button's cone-on-a-box,
+  // or a bracket with real mounting holes) reads as its own real shape
+  // instead of one bounding box. A placement with no `primitives` (pre-
+  // G3a spec, or a part G3a's deterministic path didn't cover) falls
+  // straight through to the original single-box/cylinder/cone render
+  // below, so nothing that used to render correctly stops rendering
+  // correctly.
+  if (hasPrimitives) {
+    return (
+      <group {...sharedGroupProps}>
+        {placement.primitives.map((primitive, i) => (
+          <PrimitivePiece
+            key={i}
+            primitive={primitive}
+            partSize={[placement.w, placement.h, placement.d]}
+            color={color}
+            isShell={isShell}
+            selected={selected}
+          />
+        ))}
+      </group>
+    );
+  }
+
   return (
-    <mesh
-      position={[centerX, centerY, centerZ]}
-      // Shells (housing/lid) fully enclose whatever sits inside them, so
-      // a naive raycast would hit the shell's near wall before it ever
-      // reaches the part behind it -- clicking "into" the housing would
-      // just keep selecting the housing. Disabling raycasting on shell
-      // meshes lets clicks pass through to whatever's actually inside;
-      // shells remain selectable, just only from the sidebar (patch 6),
-      // which is where you'd realistically go to select "the housing"
-      // as a whole anyway.
-      raycast={isShell ? () => null : undefined}
-      onClick={(e) => {
-        e.stopPropagation();
-        onSelect(placement.part_id);
-      }}
-    >
+    <mesh {...sharedGroupProps} raycast={isShell ? () => null : undefined}>
       <PrimitiveBox
         shape={placement.shape}
         size={[placement.w, placement.h, placement.d]}
@@ -277,11 +364,17 @@ function CategoryLegend({ parts }) {
  * MIT-licensed).
  *
  * `mech`: device_spec.mech -- {enclosure: {w,h,d}, placements: [{part_id,
- * x,y,z,w,h,d,shape?}]}, from GET /api/workspaces/{ws_id}/device-spec's
- * `mech` slice. `shape` (G1c, optional -- "box"/"cylinder"/"cone") is
- * only present on a placement whose part matched a real shape in G1a's
- * curated dimension table; a placement with no `shape` still renders
- * as a box, exactly as before G1c. agents/hardware_speccer.py's own
+ * x,y,z,w,h,d,shape?,primitives?}]}, from GET /api/workspaces/{ws_id}/
+ * device-spec's `mech` slice. `shape` (G1c, optional -- "box"/
+ * "cylinder"/"cone") is only present on a placement whose part matched
+ * a real shape in G1a's curated dimension table; a placement with no
+ * `shape` still renders as a box, exactly as before G1c. `primitives`
+ * (G3a, optional -- a list of {offset,size,rotation,shape,color_role}
+ * entries local to the part's own w/h/d box) is only present on a
+ * placement whose part had real dimensions_mm resolved (G1a or G1b) by
+ * the time agents/hardware_speccer.py's _apply_primitive_composition()
+ * ran; a placement with no `primitives` falls straight through to the
+ * single-shape (`shape`) render, exactly as before G3a. agents/hardware_speccer.py's own
  * system prompt tells the model to propose a rough grid layout only (power/MCU near center, sensors
  * near the hull edges), never precise millimeter placement -- this
  * component just renders whatever placements it's handed, correct or
@@ -341,12 +434,34 @@ export default function MechView({ mech, parts }) {
 
   const visiblePlacements = placements.filter((pl) => !hiddenPartIds.has(pl.part_id));
 
+  // G3a visual refinement: frame the camera off the enclosure's own
+  // bounding sphere (half its space diagonal) instead of the old fixed
+  // per-axis `*1.5` multiplier. A fixed per-axis multiplier frames a
+  // roughly-cubic enclosure fine, but composed multi-primitive parts
+  // make larger or oddly-proportioned enclosures (e.g. long and thin)
+  // common enough that the old approach could crop or under-fill the
+  // view depending on which axis was largest. The bounding sphere is
+  // shape-agnostic -- one number that always fully contains the
+  // enclosure regardless of its aspect ratio -- so the camera distance
+  // derived from it frames consistently either way. Placed along the
+  // same [1,1,1] diagonal direction the old fixed camera used, just at
+  // a distance proportional to the enclosure's own size instead of a
+  // per-axis guess.
+  const boundingRadius = Math.sqrt(enclosure.w ** 2 + enclosure.h ** 2 + enclosure.d ** 2) / 2;
+  const cameraDistance = boundingRadius * 2.2;
+  const diagonalUnit = 1 / Math.sqrt(3);
+  const cameraPosition = [
+    cameraDistance * diagonalUnit,
+    cameraDistance * diagonalUnit,
+    cameraDistance * diagonalUnit,
+  ];
+
   return (
     <div className="space-y-2">
       <div className="flex gap-2">
         <div className="h-[480px] flex-1 rounded-lg border border-[var(--neutral-800)] overflow-hidden bg-black/30">
           <Canvas
-            camera={{ position: [enclosure.w * 1.5, enclosure.h * 1.5, enclosure.d * 1.5], fov: 45 }}
+            camera={{ position: cameraPosition, fov: 45 }}
             // Standard r3f pattern: fires when a click doesn't land on
             // any mesh (i.e. empty space in the canvas), so clicking
             // away from a part deselects it -- no extra library needed.
