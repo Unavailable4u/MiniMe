@@ -208,6 +208,18 @@ export function categorize(label) {
 export const DECISION_CATEGORIES = {
   cache_hit: { key: "cache-hit", icon: "\u26A1", color: "#facc15" }, // ⚡
   worker_pool_selection: { key: "worker-pool", icon: "\u{1F500}", color: "#38bdf8" }, // 🔀
+  // NEW — F2 Part 5. relay/emitter.py's LOCAL_TOOL_* events (daemon
+  // tool-call log). One shared color family (a folder icon) across all
+  // five so a reader can tell "this is local-daemon activity" at a
+  // glance, distinguished from each other by decisionLabel()'s text
+  // (AgentStepList.jsx/RoutingTraceGraph.jsx) rather than by icon --
+  // five different icons for one feature's five lifecycle stages would
+  // be more visual noise than signal here.
+  local_tool_proposed: { key: "local-tool", icon: "\u{1F4C1}", color: "#a78bfa" }, // 📁
+  local_tool_confirmed: { key: "local-tool", icon: "\u{1F4C1}", color: "#a78bfa" },
+  local_tool_denied: { key: "local-tool", icon: "\u{1F4C1}", color: "#94a3b8" },
+  local_tool_executed: { key: "local-tool", icon: "\u{1F4C1}", color: "#a78bfa" },
+  local_tool_result: { key: "local-tool", icon: "\u{1F4C1}", color: "#a78bfa" },
 };
 
 export function categorizeDecision(type) {

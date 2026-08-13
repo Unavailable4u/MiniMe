@@ -54,6 +54,7 @@ const PlanTab = dynamic(() => import("./tabs/PlanTab"), { loading: TabLoadingFal
 const BuildTab = dynamic(() => import("./tabs/BuildTab"), { loading: TabLoadingFallback });           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
 const TestTab = dynamic(() => import("./tabs/TestTab"), { loading: TabLoadingFallback });             // NEW — Test tab design spec §1: simulate & test
 const GrowthTab = dynamic(() => import("./tabs/GrowthTab"), { loading: TabLoadingFallback });           // NEW — Growth tab design spec §2: growth & marketing
+const LocalWorkspaceTab = dynamic(() => import("./tabs/LocalWorkspaceTab"), { loading: TabLoadingFallback });   // NEW — F2 Part 6: read-only local-daemon file tree
 import WorkspaceDataBubble from "./WorkspaceDataBubble";   // NEW — items #5/#13: relocated from floating-over-tab-content into the top nav
 
 const TABS = [
@@ -64,6 +65,7 @@ const TABS = [
   { id: "build", label: "Build", render: BuildTab },               // NEW — Part 7 §7.2; label renamed Tasks→Build, id/component/localStorage keys left as "tasks" intentionally
   { id: "test", label: "Test", render: TestTab },                   // NEW — Test tab design spec §1
   { id: "growth", label: "Growth", render: GrowthTab },               // NEW — Growth tab design spec §2
+  { id: "local", label: "Local Files", render: LocalWorkspaceTab },     // NEW — F2 Part 6: read-only, no terminal/write yet (Part 7)
   { id: "roles", label: "Role Library", render: RoleLibraryTab },
   { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
@@ -74,11 +76,12 @@ const SIDEBAR_KEY = "minime_sidebar_collapsed";
 const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refresh, same pattern as SIDEBAR_KEY
 const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — Item 2 remaining piece, live-run-state slice, step 1: same key SessionContext.jsx/WorkspaceDockContext.jsx already read/write, needed here to decide which chat AppShellBody's bootstrap effect restores
 
-// NEW — item #13: the 7 tabs that resolve a workspaceId and therefore
-// have a Data bubble to show in the nav. Role Library, Workflow
-// Templates, Token Usage, and Settings never have project data, so the
-// nav slot stays empty (not just hidden) on those tabs.
-const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth"]);
+// NEW — item #13: the tabs that resolve a workspaceId and therefore
+// have a Data bubble to show in the nav (7 original + Part 6's "local"
+// tab). Role Library, Workflow Templates, Token Usage, and Settings
+// never have project data, so the nav slot stays empty (not just
+// hidden) on those tabs.
+const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth", "local"]);
 
 // NEW — §8: which tab owns each workspace stage.
 // FIX — plan/build were missing here even though Plan/Tasks tabs exist

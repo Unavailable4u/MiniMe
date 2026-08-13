@@ -180,6 +180,39 @@ class EventType(str, Enum):
     UPTIMEROBOT_REGISTERED = "uptimerobot_registered"    # agents/deploy_agent.py
     UPTIMEROBOT_REGISTRATION_FAILED = "uptimerobot_registration_failed"  # agents/deploy_agent.py
 
+    # F2 Part 5: local-daemon tool-call log, fired on the WORKSPACE
+    # channel (emit_workspace_event, same as PANEL_CONTENT_UPDATED/
+    # CODE_FILE_UPDATED above) rather than a session channel -- a
+    # local tool call isn't tied to any one chat turn the way an
+    # agent_start/agent_done pair is, and (per F2's own docs) the
+    # daemon itself has no session_id to hand back anyway. All four
+    # land in the frontend's decisionEvents array (CO4 patch 3's
+    # array, WorkspaceDockContext.jsx), the same non-agent-step
+    # "something happened mid-run" home cache_hit/worker_pool_
+    # selection already use -- see that file's handleDockEvent and
+    # CO4 patch 4's rendering in AgentStepList.jsx/RoutingTraceGraph.jsx.
+    #   - LOCAL_TOOL_PROPOSED: eo/local_workspace_tools.py's
+    #     propose_action(), for write_file/delete/execute_command only
+    #     -- nothing has touched the daemon yet.
+    #   - LOCAL_TOOL_CONFIRMED: confirm_action(), right before the
+    #     now-approved action is actually sent to the daemon.
+    #   - LOCAL_TOOL_DENIED: deny_action() -- the daemon is never
+    #     contacted for this proposal.
+    #   - LOCAL_TOOL_EXECUTED: list_workspace_dir()/read_workspace_file()
+    #     -- the read-only pair, which (per F2's plan) runs freely with
+    #     no propose/confirm step, so this is both this pair's "start"
+    #     and its "confirmed" equivalent, fired right before call_daemon().
+    #   - LOCAL_TOOL_RESULT: fired after call_daemon() returns or raises,
+    #     for BOTH the read path (right after LOCAL_TOOL_EXECUTED) and
+    #     the mutating path (right after LOCAL_TOOL_CONFIRMED) -- one
+    #     result event type regardless of which path got it there, since
+    #     by that point it's the same {ok, error?} shape either way.
+    LOCAL_TOOL_PROPOSED = "local_tool_proposed"
+    LOCAL_TOOL_CONFIRMED = "local_tool_confirmed"
+    LOCAL_TOOL_DENIED = "local_tool_denied"
+    LOCAL_TOOL_EXECUTED = "local_tool_executed"
+    LOCAL_TOOL_RESULT = "local_tool_result"
+
 
 # Backward-compat view: existing code/tests that do
 # `"foo" in emitter.VALID_EVENT_TYPES` or iterate/sort it as plain

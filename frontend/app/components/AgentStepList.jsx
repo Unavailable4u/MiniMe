@@ -77,10 +77,27 @@ function DecisionEventChips({ events }) {
 // chip's `title` tooltip instead (decisionDetail below), same "short on
 // canvas, full on hover" split RoutingTraceGraph.jsx's node label/tooltip
 // pair already uses.
+// NEW — F2 Part 5. Short chip text for the daemon tool-call log
+// (relay/emitter.py's LOCAL_TOOL_* events, see WorkspaceDockContext.jsx's
+// handleDockEvent). `path` is present for list_dir/read_file/write_file/
+// delete; `command` is present for execute_command instead -- see
+// eo/local_workspace_tools.py's _tool_event_payload().
+function _localToolTarget(payload) {
+  return payload?.path || payload?.command || payload?.tool || "?";
+}
+
 function decisionLabel(event) {
   if (event.type === "cache_hit") return "Cache hit";
   if (event.type === "worker_pool_selection") {
     return `Worker pool: ${event.payload?.role_tag || event.agent || "?"}`;
+  }
+  if (event.type === "local_tool_proposed") return `Proposed: ${_localToolTarget(event.payload)}`;
+  if (event.type === "local_tool_confirmed") return `Confirmed: ${_localToolTarget(event.payload)}`;
+  if (event.type === "local_tool_denied") return `Denied: ${_localToolTarget(event.payload)}`;
+  if (event.type === "local_tool_executed") return `Local: ${_localToolTarget(event.payload)}`;
+  if (event.type === "local_tool_result") {
+    const ok = event.payload?.ok;
+    return `${ok ? "Done" : "Failed"}: ${_localToolTarget(event.payload)}`;
   }
   return event.type;
 }
@@ -95,6 +112,19 @@ function decisionDetail(event) {
     const { role_tag, worker_count, pool_size, selected } = event.payload || {};
     const picked = selected?.length ?? worker_count ?? "?";
     return `${role_tag || event.agent || "?"}: ${picked}/${pool_size ?? "?"} accounts picked`;
+  }
+  if (
+    event.type === "local_tool_proposed" ||
+    event.type === "local_tool_confirmed" ||
+    event.type === "local_tool_denied" ||
+    event.type === "local_tool_executed" ||
+    event.type === "local_tool_result"
+  ) {
+    const { tool, content_bytes, ok, error } = event.payload || {};
+    const parts = [tool, _localToolTarget(event.payload)];
+    if (typeof content_bytes === "number") parts.push(`${content_bytes} bytes`);
+    if (event.type === "local_tool_result") parts.push(ok ? "ok" : error || "failed");
+    return parts.filter(Boolean).join(" · ");
   }
   return event.type;
 }
