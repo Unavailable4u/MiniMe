@@ -30,5 +30,11 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 
+# Run as a non-root user (Semgrep dockerfile.security.missing-user) —
+# node:*-slim images already ship an unprivileged "node" user (uid/gid
+# 1000), so just hand it ownership of /app and switch to it.
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 3000
 CMD ["npm", "start"]

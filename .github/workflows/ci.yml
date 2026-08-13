@@ -22,8 +22,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
       - run: pytest tests/unit tests/integration -v
@@ -33,30 +33,44 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - run: pip install ruff
       - run: ruff check .
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0  # gitleaks needs full history, not just the latest commit
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
       - run: pip install semgrep
-      - run: semgrep ci --config=auto --sarif --output=semgrep.sarif
-        env:
-          # Community/OSS ruleset via `auto` needs no token. If you later
-          # add a Semgrep AppSec Platform token for premium rules, wire it
-          # in here as SEMGREP_APP_TOKEN — not required for this pass.
-          SEMGREP_RULES: auto
+      # `semgrep ci` requires a Semgrep AppSec Platform login -- and per
+      # Semgrep's own CI env var docs, SEMGREP_RULES is *also* documented
+      # as "you must have a Semgrep AppSec Platform account to use this
+      # environment variable" (with an explicit caution against setting it
+      # without SEMGREP_APP_TOKEN). This job ran `semgrep ci` with
+      # SEMGREP_RULES set but no token anywhere -- an unsupported
+      # combination per Semgrep's own docs, and the most likely source of
+      # the "Semgrep OSS is reporting warnings/errors" banner on the
+      # Security tab's Code scanning page (semgrep.dev's own domain isn't
+      # reachable from this sandbox to confirm the exact failure text
+      # GitHub's runners would see, but the config mismatch itself is
+      # documented, not guessed). `semgrep scan` is Semgrep's own
+      # documented command for this case (community/OSS rules, no
+      # account) -- --config=auto is a flag understood the same way by
+      # both commands, so this doesn't change which rules run or what
+      # gets scanned, just drops the CI-auth machinery that was never
+      # going to work unauthenticated anyway. Add a SEMGREP_APP_TOKEN
+      # secret (and switch back to `semgrep ci`) later if/when premium
+      # rules or PR-comment integration are wanted.
+      - run: semgrep scan --config=auto --sarif --output=semgrep.sarif
         continue-on-error: true  # upload the SARIF even if semgrep exits non-zero on findings
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
         with:
           sarif_file: semgrep.sarif
 
@@ -95,15 +109,15 @@ jobs:
       run:
         working-directory: backend/evals/promptfoo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - name: Install backend Python deps (role_provider.py imports eo/agents/utils)
         working-directory: backend
         run: pip install -r requirements.txt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.22.0"  # exact floor from promptfoo 0.122.0's own engines.node — see job comment above
           cache: "npm"
