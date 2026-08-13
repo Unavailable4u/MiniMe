@@ -844,6 +844,17 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
 
     result = data.get("result", {}) or {}
     text = (result.get("response", "") or "")
+    # Some structured/tool-shaped completions (seen on
+    # @cf/meta/llama-3.1-8b-instruct, wired into eo/panel.py's
+    # MEMBER_B_CHAIN) come back with result["response"] as a nested
+    # dict/list instead of a plain string. A non-empty dict/list is
+    # truthy, so the `or ""` above doesn't rescue it, and the old
+    # `text.strip()` below threw AttributeError on the un-stringified
+    # object -- which isn't in _TRANSIENT_ERRORS, so it wasn't caught
+    # chain-locally and killed the whole member vote instead of just
+    # this step. Normalize to a string here so callers always get text.
+    if not isinstance(text, str):
+        text = json.dumps(text) if text else ""
     usage = result.get("usage")  # often absent -- see module docstring
     # Fix C: Cloudflare Workers AI's REST response doesn't expose a
     # finish_reason field the way the OpenAI-compatible providers do, so
