@@ -878,7 +878,7 @@ function splitByPlatformHeadings(text, platformIds) {
     const label = platformLabel(id);
     // Matches a line that's just the label, optionally wrapped in
     // markdown heading hashes, bold asterisks, or a trailing colon.
-    const re = new RegExp(
+    const re = new RegExp(  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp -- label can come from user-entered customPlatform (see addCustomPlatform() above), but escapeRegExp() runs on it first and escapes every regex metacharacter (.*+?^${}()|[]\), so it always ends up embedded as a literal match, never as regex syntax the caller controls; the rest of the pattern (heading markers, quantifiers) is fixed by this function, not user input
       `^[ \\t]*#{0,3}[ \\t]*\\*{0,2}${escapeRegExp(label)}\\*{0,2}[ \\t]*:?[ \\t]*$`,
       "im"
     );

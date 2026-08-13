@@ -30,6 +30,14 @@ COPY backend/ .
 # not just on your local disk.
 RUN mkdir -p data/exports
 
+# Run as a non-root user (Semgrep dockerfile.security.missing-user) —
+# python:3.12-slim has no unprivileged user baked in like node:*-slim
+# does, so create one explicitly and hand it ownership of /app (it
+# needs to write into data/exports at runtime, not just read code).
+RUN groupadd --system app && useradd --system --gid app --no-create-home app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 8000
 
 # Matches how you've been running it locally: uvicorn api.server:app --port 8000.
