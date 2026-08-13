@@ -44,14 +44,53 @@ function isShellPlacement(placement, enclosure) {
 }
 
 /**
- * PrimitiveBox — fill + edge-outline rendering for a single box-shaped
- * volume. Deliberately split out of PartBox (which still owns the
- * placement -> center-coordinate math) so it's the one place that knows
- * how to draw "one solid-ish volume with a crisp outline" -- when G3/G4
- * lands `placement.primitives` (a part composed of several primitives
- * instead of always exactly one box), PartBox becomes "loop over
- * primitives, render one of these per entry" instead of needing a
- * rewrite of the render styling itself.
+ * PrimitiveGeometry — G1c (Master Guide, "G1. Real component
+ * measurements" -- shape-aware single-primitive rendering): picks the
+ * actual three.js geometry for a placement's `shape` field
+ * (agents/hardware_speccer.py's _apply_placement_shapes() sets this
+ * from a G1a curated-table match -- "box"/"cylinder"/"cone", the same
+ * three Level-0 primitives G3/G4's own tree names) instead of always
+ * drawing a box. A placement with no `shape` (no G1a match, or a
+ * pre-G1c spec) still falls through to the "box" case below, so this
+ * is purely additive -- nothing that used to render correctly stops
+ * rendering correctly.
+ *
+ * Reuses the placement's own bounding-box w/h/d rather than needing a
+ * separate radius/height field on the placement: for a cylinder or
+ * cone, radius is derived from `w` (the curated table's own axis
+ * convention for round shapes is "w=diameter"), height from `h` --
+ * same "reuse w/h/d as-is, no axis reinterpretation" precedent
+ * hardware_speccer.py's dimensions_mm merge already set for boxes.
+ * `d` goes unused for round shapes, matching the curated table's own
+ * "d=always null" convention for them -- not a bug, just an axis a
+ * round cross-section doesn't have.
+ */
+function PrimitiveGeometry({ shape, size }) {
+  const [w, h, d] = size;
+  const radius = Math.max(w, 1) / 2;
+  switch (shape) {
+    case "cylinder":
+      return <cylinderGeometry args={[radius, radius, Math.max(h, 1), 24]} />;
+    case "cone":
+      return <coneGeometry args={[radius, Math.max(h, 1), 24]} />;
+    case "box":
+    default:
+      return <boxGeometry args={[w, h, d]} />;
+  }
+}
+
+/**
+ * PrimitiveBox — fill + edge-outline rendering for a single primitive
+ * volume (box, cylinder, or cone as of G1c -- the name predates
+ * shape-awareness and is kept as-is to avoid a wider rename; think of
+ * it as "the one shape a part currently renders as," not literally
+ * "always a box" anymore). Deliberately split out of PartBox (which
+ * still owns the placement -> center-coordinate math) so it's the one
+ * place that knows how to draw "one solid-ish volume with a crisp
+ * outline" -- when G3/G4 lands `placement.primitives` (a part
+ * composed of several primitives instead of always exactly one),
+ * PartBox becomes "loop over primitives, render one of these per
+ * entry" instead of needing a rewrite of the render styling itself.
  *
  * FIX (opacity/legibility): the old render was a single
  * `meshStandardMaterial` at opacity 0.75 with no edge treatment, so once
@@ -67,12 +106,12 @@ function isShellPlacement(placement, enclosure) {
  * lower fill opacity than regular parts, since they're the context
  * things sit inside, not a component of interest themselves.
  */
-function PrimitiveBox({ size, color, isShell, selected }) {
+function PrimitiveBox({ shape, size, color, isShell, selected }) {
   const fillOpacity = isShell ? 0.04 : 0.16;
   const edgeOpacity = isShell ? 0.35 : 1;
   return (
     <>
-      <boxGeometry args={size} />
+      <PrimitiveGeometry shape={shape} size={size} />
       <meshStandardMaterial
         color={color}
         transparent
@@ -131,7 +170,13 @@ function PartBox({ placement, part, enclosure, selected, onSelect }) {
         onSelect(placement.part_id);
       }}
     >
-      <PrimitiveBox size={[placement.w, placement.h, placement.d]} color={color} isShell={isShell} selected={selected} />
+      <PrimitiveBox
+        shape={placement.shape}
+        size={[placement.w, placement.h, placement.d]}
+        color={color}
+        isShell={isShell}
+        selected={selected}
+      />
     </mesh>
   );
 }
@@ -232,9 +277,12 @@ function CategoryLegend({ parts }) {
  * MIT-licensed).
  *
  * `mech`: device_spec.mech -- {enclosure: {w,h,d}, placements: [{part_id,
- * x,y,z,w,h,d}]}, from GET /api/workspaces/{ws_id}/device-spec's `mech`
- * slice. agents/hardware_speccer.py's own system prompt tells the model
- * to propose a rough grid layout only (power/MCU near center, sensors
+ * x,y,z,w,h,d,shape?}]}, from GET /api/workspaces/{ws_id}/device-spec's
+ * `mech` slice. `shape` (G1c, optional -- "box"/"cylinder"/"cone") is
+ * only present on a placement whose part matched a real shape in G1a's
+ * curated dimension table; a placement with no `shape` still renders
+ * as a box, exactly as before G1c. agents/hardware_speccer.py's own
+ * system prompt tells the model to propose a rough grid layout only (power/MCU near center, sensors
  * near the hull edges), never precise millimeter placement -- this
  * component just renders whatever placements it's handed, correct or
  * rough, without trying to validate or auto-arrange them.

@@ -287,12 +287,18 @@ def _lookup_digikey(part_number: str) -> dict | None:
                 "dimensions_mm": dimensions_mm,
                 "datasheet_url": datasheet_url,
                 "source": "digikey",
+                # Real distributor data -- same "verified" vocabulary
+                # G1a's curated table uses (Master Guide, G1 section).
+                # Only set alongside an actual resolved dimensions_mm;
+                # a datasheet-only hit below hasn't verified a size.
+                "confidence": "verified",
             }
         if first_with_datasheet is None and datasheet_url:
             first_with_datasheet = {
                 "dimensions_mm": None,
                 "datasheet_url": datasheet_url,
                 "source": "digikey",
+                "confidence": None,
             }
 
     return first_with_datasheet
@@ -397,22 +403,26 @@ def _lookup_mouser_with_options(part_number: str, api_key: str, exact: bool) -> 
                 "dimensions_mm": dimensions_mm,
                 "datasheet_url": datasheet_url,
                 "source": "mouser",
+                # Same "verified" vocabulary as the DigiKey branch above
+                # and G1a's curated table -- see that branch's comment.
+                "confidence": "verified",
             }
         if first_with_datasheet is None and datasheet_url:
             first_with_datasheet = {
                 "dimensions_mm": None,
                 "datasheet_url": datasheet_url,
                 "source": "mouser",
+                "confidence": None,
             }
 
     return first_with_datasheet
 
 
 def get_real_spec(part_number: str) -> dict | None:
-    """Returns {"dimensions_mm": {"w","h","d"}, "datasheet_url", "source"}
-    for the given exact part_number, or None if neither vendor has it
-    (creds unset, part not found, or response has neither a parseable
-    size nor a datasheet link on either side).
+    """Returns {"dimensions_mm": {"w","h","d"}, "datasheet_url", "source",
+    "confidence"} for the given exact part_number, or None if neither
+    vendor has it (creds unset, part not found, or response has
+    neither a parseable size nor a datasheet link on either side).
 
     Tries DigiKey first, only falls back to Mouser if that returns
     None -- the return shape (dimensions_mm/datasheet_url/source) is
@@ -420,6 +430,17 @@ def get_real_spec(part_number: str) -> dict | None:
     tells a caller which vendor actually answered. This None is the
     signal hardware_speccer.py (Part 4) uses to fall back to LLM
     estimation for that part.
+
+    "confidence" is "verified" whenever dimensions_mm was actually
+    resolved (a real distributor hit, same vocabulary G1a's curated
+    table uses -- see the Master Guide's G1 section: "A DigiKey/Mouser
+    hit is real distributor data, so it's tagged confidence: verified
+    too"), or None for a datasheet-only hit that never resolved a
+    size. hardware_speccer.py's _populate_dimensions() merges this
+    onto the part as "dimension_confidence", same field name G1a's
+    curated-table merge already uses, so downstream code (a future
+    G3/G4 confidence-aware mech_validator) reads one consistent field
+    regardless of which of the two sub-steps resolved it.
 
     Part 3: checks eo/spec_cache.py first (180-day TTL -- physical
     dimensions don't move the way price_cache.py's 5-day-cached prices
@@ -443,6 +464,7 @@ def get_real_spec(part_number: str) -> dict | None:
             "dimensions_mm": cached.get("dimensions_mm"),
             "datasheet_url": cached.get("datasheet_url"),
             "source": cached.get("source"),
+            "confidence": cached.get("confidence"),
         }
 
     result = _lookup_digikey(part_number)

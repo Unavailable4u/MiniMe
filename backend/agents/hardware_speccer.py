@@ -253,12 +253,16 @@ list. Every instruction step's tool_ids/part_ids must reference real \
 entries from that same list.
 
 Some parts in the given list carry a "dimensions_mm": {"w", "h", "d"} \
-field -- these are real, verified physical dimensions from a \
-distributor lookup, not an estimate. Treat "dimensions_mm" as ground \
-truth for that part: use those exact w/h/d values for its \
-"mech.placements" entry rather than guessing your own. Parts with no \
-"dimensions_mm" field still need your own reasonable estimated sizing, \
-exactly as before.
+field -- these are real physical dimensions from a curated reference \
+table or a distributor lookup, not an estimate. Treat "dimensions_mm" \
+as ground truth for that part: use those exact w/h/d values for its \
+"mech.placements" entry rather than guessing your own. Such a part \
+may also carry a "dimension_confidence" of "verified" (a distributor- \
+confirmed exact size -- treat it as fixed) or "typical" (a strong \
+prior for that part's common form factor -- still ground truth for \
+sizing, but adjust only if the project context clearly calls for a \
+different size). Parts with no "dimensions_mm" field still need your \
+own reasonable estimated sizing, exactly as before.
 
 Every electrical part (i.e. every part whose category is "mcu", \
 "sensor", "actuator", or "power") MUST have a matching entry in \
@@ -619,17 +623,63 @@ def _ensure_generic_names(parts: list) -> list:
     return parts
 
 
+def _populate_curated_dimensions(parts: list) -> list:
+    """G1a (Master Guide, "G1. Real component measurements"): local,
+    no-network curated-table lookup, run BEFORE _populate_dimensions()
+    (G1b) below. For every part, looks up its generic_name/aliases
+    against agents/component_dimension_table.py's curated dict -- a
+    hand-curated set of known real component dimensions keyed by a
+    stable "dimension_ref_id" -- and merges the *whole* matched row
+    onto the part (dimensions_mm, shape, mount_type, mount_spec,
+    dimension_confidence, source), not just dimensions_mm. Nothing
+    from a match gets silently dropped.
+
+    Must run after _ensure_generic_names() (needs normalized, always-
+    present generic_name/aliases to match against) and before
+    _populate_dimensions() (G1b is a gap-filler only -- see that
+    function's own docstring for the "skip if already resolved" half
+    of this coordination).
+
+    A part with no match is left completely untouched -- same
+    fail-safe convention as _populate_dimensions() and
+    _populate_prices(): no curated hit just means "still needs G1b or
+    LLM-estimated sizing," never an error.
+    """
+    from agents.component_dimension_table import lookup_curated_dimensions
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        match = lookup_curated_dimensions(part.get("generic_name"), part.get("aliases"))
+        if not match:
+            continue
+        if match.get("dimensions_mm"):
+            part["dimensions_mm"] = match["dimensions_mm"]
+        part["dimension_ref_id"] = match.get("dimension_ref_id")
+        part["shape"] = match.get("shape")
+        part["mount_type"] = match.get("mount_type")
+        part["mount_spec"] = match.get("mount_spec")
+        part["dimension_confidence"] = match.get("dimension_confidence")
+        part["source"] = match.get("source")
+
+    return parts
+
+
 def _populate_dimensions(parts: list, session_id: str = None) -> list:
-    """F3 Part 4: looks up real physical dimensions/datasheet links for
-    every part that carries a part_number (SYSTEM_PROMPT_PARTS's Call 1
-    asks the model to fill this in when it knows one, e.g.
-    "ESP32-WROOM-32", "DS18B20"), via
-    agents/component_spec_lookup.py's get_real_spec(). Parts with no
-    part_number, or whose part_number misses on both DigiKey and Mouser
-    (get_real_spec() returns None), are left untouched -- Call 2's
-    SYSTEM_PROMPT_WIRING treats an absent "dimensions_mm" key as "still
-    needs LLM-estimated sizing," same as a part that never had a
-    part_number in the first place.
+    """F3 Part 4 / G1b (gap-filler only, see the Master Guide's G1
+    section): looks up real physical dimensions/datasheet links for
+    every part that STILL has no "dimensions_mm" after
+    _populate_curated_dimensions() (G1a) above and carries a
+    part_number (SYSTEM_PROMPT_PARTS's Call 1 asks the model to fill
+    this in when it knows one, e.g. "ESP32-WROOM-32", "DS18B20"), via
+    agents/component_spec_lookup.py's get_real_spec(). Parts G1a
+    already resolved are skipped here outright -- no DigiKey/Mouser
+    call spent re-confirming what the local curated table already
+    answered for free. Parts with no part_number, or whose part_number
+    misses on both DigiKey and Mouser (get_real_spec() returns None),
+    are left untouched -- Call 2's SYSTEM_PROMPT_WIRING treats an
+    absent "dimensions_mm" key as "still needs LLM-estimated sizing,"
+    same as a part that never had a part_number in the first place.
 
     Parallelized with a ThreadPoolExecutor, same "don't make N parts
     wait on N sequential network round-trips" motivation as
@@ -656,6 +706,10 @@ def _populate_dimensions(parts: list, session_id: str = None) -> list:
         return parts
 
     def _spec_one(part: dict) -> dict:
+        if part.get("dimensions_mm"):
+            # G1a (curated table) already resolved this part -- G1b is
+            # a gap-filler only, see this function's own docstring.
+            return part
         part_number = part.get("part_number")
         if not part_number:
             return part
@@ -667,6 +721,14 @@ def _populate_dimensions(parts: list, session_id: str = None) -> list:
             return part
         if result.get("dimensions_mm"):
             part["dimensions_mm"] = result["dimensions_mm"]
+            # Same "dimension_confidence" field name G1a's curated-table
+            # merge uses (_populate_curated_dimensions() above) -- a
+            # DigiKey/Mouser hit that resolved a real size is tagged
+            # "verified", same vocabulary regardless of which sub-step
+            # resolved it. Gated on dimensions_mm being present, same
+            # as get_real_spec()'s own "confidence" semantics.
+            if result.get("confidence"):
+                part["dimension_confidence"] = result["confidence"]
         if result.get("datasheet_url"):
             part["datasheet_url"] = result["datasheet_url"]
         if result.get("source"):
@@ -893,6 +955,79 @@ def _build_wiring_mermaid(spec: dict) -> str:
 # reused here as the same MUST-have-a-placement set the new
 # mech.placements paragraph above asks the model for.
 _ELECTRICAL_CATEGORIES = {"mcu", "sensor", "actuator", "power", "module"}
+
+# G1c (Master Guide, "G1. Real component measurements" -- shape-aware
+# single-primitive rendering): maps the curated-dimension-table's own
+# shape vocabulary (component_dimension_table.py's data file --
+# "Box", "Cylindrical", "Conical Head", etc.) onto the three Level-0
+# primitives G3/G4's own tree already names ("Level 0  Primitives
+# (cylinder, box, cone)") -- G1c only draws a single primitive per
+# part, not full G3 composition, but reuses that same three-shape
+# vocabulary so MechView.jsx's primitive renderer doesn't need a
+# fourth kind invented just for this smaller slice of the work.
+# Shapes with no close single-primitive match (Hexagonal, Knurled
+# Cylinder, Circular, Irregular) fall back to the nearest visual
+# approximation (cylinder for round-but-not-plain-cylindrical shapes,
+# box for genuinely irregular ones) rather than a shape MechView.jsx
+# has no renderer for at all.
+_SHAPE_TO_PRIMITIVE = {
+    "box": "box",
+    "cylindrical": "cylinder",
+    "knurled cylinder": "cylinder",
+    "circular": "cylinder",
+    "hexagonal": "cylinder",
+    "conical head": "cone",
+    "irregular": "box",
+}
+
+
+def _apply_placement_shapes(spec: dict, parts: list) -> None:
+    """G1c: for any part with a matched `shape` (set by G1a's curated-
+    table lookup, _populate_curated_dimensions() above -- G1b's
+    DigiKey/Mouser lookup doesn't return a shape, only dimensions/
+    datasheet/source/confidence, so this only ever fires for G1a hits),
+    copy that shape straight onto the part's own mech.placements entry
+    as one of MechView.jsx's known primitive types (see
+    _SHAPE_TO_PRIMITIVE above). No LLM call -- a matched shape from the
+    curated table is a known fact, not a guess, so this is the cheap,
+    deterministic slice of full G3 multi-primitive composition that's
+    safe to ship right now, ahead of G3 landing.
+
+    Runs last in the mech.placements pipeline, after
+    _ensure_electrical_placements()/_clamp_placements_to_enclosure()
+    above -- it only annotates placement entries that already exist
+    (model-proposed or gap-filled) with a `shape` string, it never
+    adds, removes, resizes, or repositions one, so it has no ordering
+    dependency on the geometry-fixing steps beyond needing their
+    output to already exist.
+
+    A part with no matched shape (no G1a curated-table hit at all, or
+    a shape value outside _SHAPE_TO_PRIMITIVE's vocabulary) is left
+    completely untouched -- its placement entry simply has no `shape`
+    key, and MechView.jsx's existing default (always draw a box)
+    applies to it exactly as it did before this change.
+    """
+    placements = (spec.get("mech") or {}).get("placements")
+    if not isinstance(placements, list):
+        return
+
+    shape_by_part_id = {
+        part.get("id"): part.get("shape")
+        for part in parts
+        if isinstance(part, dict) and part.get("shape")
+    }
+    if not shape_by_part_id:
+        return
+
+    for placement in placements:
+        if not isinstance(placement, dict):
+            continue
+        curated_shape = shape_by_part_id.get(placement.get("part_id"))
+        if not curated_shape:
+            continue
+        primitive = _SHAPE_TO_PRIMITIVE.get(curated_shape.strip().lower())
+        if primitive:
+            placement["shape"] = primitive
 
 
 def _ensure_electrical_placements(spec: dict, parts: list) -> None:
@@ -1250,11 +1385,18 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # on both fields always being present in a normalized shape.
     parts = _ensure_generic_names(parts)
 
-    # Merge real dimensions/datasheet links onto whichever parts carry a
-    # part_number, BEFORE Call 2 -- see _populate_dimensions()'s own
-    # docstring. Parts left untouched here simply have no "dimensions_mm"
-    # key, which Call 2's SYSTEM_PROMPT_WIRING treats as "still needs
-    # your own estimated sizing."
+    # G1a: local, no-network curated-table lookup, BEFORE G1b's
+    # DigiKey/Mouser gap-filler -- see _populate_curated_dimensions()'s
+    # own docstring. Runs first because it's free and synchronous;
+    # whatever it resolves, G1b below skips outright.
+    parts = _populate_curated_dimensions(parts)
+
+    # G1b: merge real dimensions/datasheet links onto whichever parts
+    # STILL have no dimensions_mm after G1a and carry a part_number,
+    # BEFORE Call 2 -- see _populate_dimensions()'s own docstring.
+    # Parts left untouched here simply have no "dimensions_mm" key,
+    # which Call 2's SYSTEM_PROMPT_WIRING treats as "still needs your
+    # own estimated sizing."
     parts = _populate_dimensions(parts, session_id=session_id)
 
     # Call 2: wiring/mech/instructions, given the (now dimension-enriched)
@@ -1296,6 +1438,13 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # own docstring for why an unclamped placement is what produces the
     # "floating disconnected cluster" Mech-view symptom.
     _clamp_placements_to_enclosure(spec)
+
+    # G1c: annotate every placement whose part had a G1a curated-table
+    # shape match with a MechView.jsx-renderable primitive type -- see
+    # _apply_placement_shapes' own docstring. Runs after the geometry
+    # steps above since it only annotates placements that already
+    # exist, never adds/resizes/repositions one.
+    _apply_placement_shapes(spec, spec["parts"])
 
 
     # Step 3 of the wiring-detail fix: deterministically render the
