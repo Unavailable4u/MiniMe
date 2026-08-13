@@ -168,7 +168,7 @@ def main() -> None:
           "(clusters: started+done, study_guide: started+error, podcast: error)",
           len(calls) == 5)
     check("scenario 3 (session_id=None) emitted NO Pusher call",
-          all(c[2].get("session_id") is not None or True for c in calls) and
+          all(c[2].get("session_id") is not None for c in calls) and
           not any(c[2].get("payload", {}).get("panel_key") == "clusters" and
                   c[2].get("session_id") is None for c in calls))
     check("all calls landed on the expected session channel",
