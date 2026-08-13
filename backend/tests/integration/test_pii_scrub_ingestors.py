@@ -22,7 +22,14 @@ from agents.pdf_ingestor import ingest_pdf
 from agents.voice_ingestor import ingest_voice
 import agents.voice_ingestor as voice_ingestor
 
-PII_TEXT = "Contact Jane Doe at jane.doe@example.com. SSN: 123-45-6789."
+# NOTE: 123-45-6789 (the "obvious fake" SSN used in most examples) is
+# deliberately excluded by presidio_analyzer.predefined_recognizers
+# .UsSsnRecognizer.invalidate_result() as a canonical published
+# sample/placeholder -- along with 987-65-4320 and 078-05-1120 -- so it
+# is NEVER redacted, on purpose, regardless of scrub()'s own behavior.
+# 245-71-8390 is an equally synthetic, non-canonical value that doesn't
+# hit that exclusion and is used here instead.
+PII_TEXT = "Contact Jane Doe at jane.doe@example.com. SSN: 245-71-8390."
 
 
 def _make_pdf(path: str, text: str) -> None:
@@ -40,7 +47,7 @@ def test_ingest_pdf_redacts_pii(tmp_path):
 
     assert "Jane Doe" not in content
     assert "jane.doe@example.com" not in content
-    assert "123-45-6789" not in content
+    assert "245-71-8390" not in content
 
 
 class _FakeSegment:
@@ -71,4 +78,4 @@ def test_ingest_voice_redacts_pii(tmp_path, monkeypatch):
 
     assert "Jane Doe" not in content
     assert "jane.doe@example.com" not in content
-    assert "123-45-6789" not in content
+    assert "245-71-8390" not in content
