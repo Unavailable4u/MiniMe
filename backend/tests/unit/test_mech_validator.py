@@ -124,12 +124,13 @@ def test_build_payload_defaults_missing_dims_to_zero():
 # ---------------------------------------------------------------------------
 
 def test_validate_layout_rejects_unimplemented_level():
-    # "1->2" (LEVEL_1_2) and "2->3" (LEVEL_2_3) are now implemented as of
-    # G3e-3/G3f-2 -- use a level still genuinely unimplemented (Level
-    # 3->4, landing with G3g) so this test keeps covering the actual
-    # gate, not a level that moved.
+    # "1->2" (LEVEL_1_2), "2->3" (LEVEL_2_3), and "3->4" (LEVEL_3_4) are
+    # now implemented as of G3e-3/G3f-2/G3g -- Level 3->4 is also the
+    # last level in the tree (no "4->5" will ever land), so this made-up
+    # string is guaranteed to stay genuinely unimplemented rather than
+    # needing to move again.
     with pytest.raises(NotImplementedError):
-        mv.validate_layout({"placements": []}, "3->4")
+        mv.validate_layout({"placements": []}, "4->5")
 
 
 def test_validate_layout_noop_when_nothing_checkable(monkeypatch):

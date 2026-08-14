@@ -5,19 +5,55 @@ Runs headless FreeCAD (real solid geometry, via its Python scripting API,
 not axis-aligned arithmetic) against a level's proposed nodes and reports
 containment/collision violations without ever modifying the layout.
 
-Scope through G3f-2: Level 0->1 ("does every primitive a part is composed
+Scope through G3g: Level 0->1 ("does every primitive a part is composed
 of actually stay inside that part's own w/h/d bounding box, once its
 declared offset/rotation is really applied"), Level 1->2 ("does a
 subsection's part collide with its own mount, once both are placed at
 their real absolute positions, and what's the subsection's combined
-footprint"), AND Level 2->3 ("do two DIFFERENT subsections inside the
-same section collide with each other, once both are placed at their real
-absolute positions, and what's the section's combined footprint"). Level
-3->4 (device-level containment) lands with G3g, calling into this same
-module with a new `level` value once it exists -- validate_layout() below
-rejects any level it doesn't implement yet rather than silently
-no-op'ing, so a premature caller fails loudly instead of shipping an
+footprint"), Level 2->3 ("do two DIFFERENT subsections inside the same
+section collide with each other, once both are placed at their real
+absolute positions, and what's the section's combined footprint"), AND
+Level 3->4 ("does every non-Enclosure section, positioned by eo/
+mech_device.py's deterministic front/center/edge merge, actually stay
+inside the Enclosure section's own validated footprint, and do two
+DIFFERENT sections collide with each other"). Level 3->4 is the LAST
+level in the tree (Master Guide: "closes out the tree") -- there is no
+further `level` value validate_layout() below will ever grow; it still
+rejects any level it doesn't implement rather than silently no-op'ing,
+so a premature or mistyped caller fails loudly instead of shipping an
 unchecked layout that looks validated.
+
+Level 3->4 specifics (G3g, second half): one level up from Level 2->3's
+"two subsections in the same section" check, but a different SHAPE, not
+just the same machinery regrouped again -- Level 2->3 only ever asked
+"do these two things collide," Level 3->4 additionally asks "does this
+one thing stay inside that OTHER, fixed thing" (global containment),
+since eo/mech_device.py's own front/center/edge merge (G3g, first half)
+positions sections relative to a real container (the Enclosure section's
+own footprint) that Level 0->1/1->2/2->3 never had an equivalent of --
+those levels only ever checked members/subsections against EACH OTHER,
+never against a container. The containment half reuses the same
+"cut a solid against a bounds box, whatever's left over is a violation"
+shape Level 0->1's own _check_part() already established (there, a
+primitive cut against its part's own w/h/d box; here, a whole section's
+unioned geometry cut against the Enclosure section's own footprint box,
+same confidence-aware tolerance buffer). The collision half reuses Level
+2->3's own cross-pair shape one level up again: two DIFFERENT sections'
+unioned geometry boolean-intersected, never a section's own subsections
+against each other (Level 2->3 already settled that). The Enclosure
+section itself is never a checkable node at this level -- it's the fixed
+container every other section is checked against and inside of, mirroring
+eo/mech_device.py's own "container section is never zoned/translated"
+rule exactly (see that module's docstring). A section reports its own
+footprint (the union bounding box of every member of every subsection in
+the section, same shape Level 2->3's own footprint already is) regardless
+of whether it violated, since eo/mech_repair.py's Level 3->4 driver
+(G3g, second half, bottom of that module) needs one for every section it
+ships, not just the clean ones -- same "G3f needs it, G3g needs it,
+whoever's next needs it" reasoning every earlier level's footprint output
+already follows, even though Level 3->4 is the last level and nothing
+inside THIS tree consumes it further (G3i's pipeline wiring and G3j's
+frontend badge, both outside this tree, are the actual consumers now).
 
 Level 1->2 specifics (G3e-3): reuses the exact same rotate-then-boolean
 machinery Level 0->1 already built (_build_primitive_shape() below,
@@ -129,7 +165,15 @@ from eo.mech_subsections import group_into_subsections, members_for_subsection
 LEVEL_0_1 = "0->1"
 LEVEL_1_2 = "1->2"
 LEVEL_2_3 = "2->3"
-_IMPLEMENTED_LEVELS = {LEVEL_0_1, LEVEL_1_2, LEVEL_2_3}
+LEVEL_3_4 = "3->4"
+_IMPLEMENTED_LEVELS = {LEVEL_0_1, LEVEL_1_2, LEVEL_2_3, LEVEL_3_4}
+
+# The one section id Level 3->4 never treats as a checkable node -- it's
+# the fixed container every other section is checked against and inside
+# of. Matches eo/mech_sections.py's own _SECTION_ORDER (its fifth and
+# last value) and eo/mech_device.py's own _CONTAINER_SECTION_ID exactly --
+# not a value this module invents independently.
+_DEVICE_CONTAINER_SECTION_ID = "Enclosure"
 
 # Confidence-aware clearance buffer (Master Guide: "a `verified` part
 # gets a strict 0-margin check; a `typical` part gets a small clearance
@@ -404,6 +448,75 @@ def _check_section(section):
     return collision_mm3, footprint
 
 
+def _check_device_section(section, container_shape):
+    # Level 3->4's per-section check (G3g, second half): unions every
+    # member of every subsection in the section into ONE flat solid list
+    # (no intra-section cross-pair loop here -- Level 2->3 already
+    # settled every cross-subsection collision inside this section; see
+    # module docstring) built at each member's own real absolute x/y/z,
+    # exactly as Level 2->3 built them -- eo/mech_device.py's own
+    # apply_device_merge() already moved those x/y/z to their real
+    # front/center/edge positions before this ever runs, so "real
+    # absolute" here already means "post-merge."
+    #
+    # Returns (solids, footprint | None, leftover_mm3) -- `solids` is
+    # handed back to main() below for the SEPARATE cross-section
+    # collision pass (every section's solids checked against every OTHER
+    # section's, one level up from Level 2->3's own cross-subsection
+    # loop); `footprint` is None only when every member's primitives
+    # failed to build (degenerate input, same "flag, never silently
+    # drop" posture every earlier level already uses); `leftover_mm3` is
+    # this section's own total containment violation volume against
+    # `container_shape` (already includes the confidence-aware tolerance
+    # buffer -- see _build_bounds_shape() and _check_part() above, the
+    # same shape this reuses one level up).
+    solids = []
+    bounds = None
+
+    for subsection in section.get("subsections") or []:
+        for member in subsection.get("members") or []:
+            base = {"x": member.get("x") or 0, "y": member.get("y") or 0, "z": member.get("z") or 0}
+            for prim in member.get("primitives") or []:
+                try:
+                    solid = _build_primitive_shape(prim, base=base)
+                except Exception:
+                    continue
+                solids.append(solid)
+                bb = solid.BoundBox
+                if bounds is None:
+                    bounds = [bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax]
+                else:
+                    bounds[0] = min(bounds[0], bb.XMin)
+                    bounds[1] = min(bounds[1], bb.YMin)
+                    bounds[2] = min(bounds[2], bb.ZMin)
+                    bounds[3] = max(bounds[3], bb.XMax)
+                    bounds[4] = max(bounds[4], bb.YMax)
+                    bounds[5] = max(bounds[5], bb.ZMax)
+
+    if bounds is None:
+        return solids, None, 0.0
+
+    footprint = {
+        "x": round(bounds[0], 3), "y": round(bounds[1], 3), "z": round(bounds[2], 3),
+        "w": round(bounds[3] - bounds[0], 3),
+        "h": round(bounds[4] - bounds[1], 3),
+        "d": round(bounds[5] - bounds[2], 3),
+    }
+
+    leftover_mm3 = 0.0
+    for solid in solids:
+        try:
+            leftover = solid.cut(container_shape)
+            leftover_mm3 += leftover.Volume
+        except Exception:
+            # Same "degenerate input is a real violation, not a silent
+            # skip" posture every earlier per-solid check in this script
+            # already uses.
+            leftover_mm3 += 1.0
+
+    return solids, footprint, leftover_mm3
+
+
 def main():
     input_path, output_path = sys.argv[1], sys.argv[2]
     with open(input_path) as f:
@@ -411,6 +524,83 @@ def main():
 
     level = payload.get("level")
     violations = []
+
+    if level == %(level_3_4)r:
+        container = payload.get("container") or {}
+        cw = max(float(container.get("w") or 0), 0.01)
+        ch = max(float(container.get("h") or 0), 0.01)
+        cd = max(float(container.get("d") or 0), 0.01)
+        ctol = float(container.get("tolerance_mm") or 0)
+        container_shape = _build_bounds_shape(cw, ch, cd, ctol)
+        container_shape.translate(FreeCAD.Vector(
+            float(container.get("x") or 0),
+            float(container.get("y") or 0),
+            float(container.get("z") or 0),
+        ))
+
+        footprints = {}
+        section_solids = {}
+        containment_by_section = {}
+        section_order = []
+        for section in payload.get("sections") or []:
+            section_id = section.get("section_id")
+            section_order.append(section_id)
+            try:
+                solids, footprint, leftover_mm3 = _check_device_section(section, container_shape)
+            except Exception as exc:
+                violations.append({
+                    "node_id": section_id,
+                    "issue": f"geometry check failed: {exc}",
+                })
+                continue
+            if footprint is not None:
+                footprints[section_id] = footprint
+            section_solids[section_id] = solids
+            containment_by_section[section_id] = leftover_mm3
+
+        # Cross-section collision: same "two different X's, boolean-
+        # intersected, never the same X against itself" shape Level
+        # 2->3's own subsection-pair loop already uses, one level up --
+        # every DIFFERENT section pair, never a section's own
+        # subsections against each other (Level 2->3 already settled
+        # that; see module docstring).
+        collision_by_section = {}
+        checked_ids = [sid for sid in section_order if sid in section_solids]
+        for i in range(len(checked_ids)):
+            for j in range(i + 1, len(checked_ids)):
+                a, b = checked_ids[i], checked_ids[j]
+                pair_mm3 = 0.0
+                for sa in section_solids[a]:
+                    for sb in section_solids[b]:
+                        try:
+                            overlap = sa.common(sb)
+                            pair_mm3 += overlap.Volume
+                        except Exception:
+                            pair_mm3 += 1.0
+                if pair_mm3 > %(volume_epsilon)r:
+                    collision_by_section[a] = collision_by_section.get(a, 0.0) + pair_mm3
+                    collision_by_section[b] = collision_by_section.get(b, 0.0) + pair_mm3
+
+        for section_id in checked_ids:
+            issues = []
+            leftover_mm3 = containment_by_section.get(section_id, 0.0)
+            if leftover_mm3 > %(volume_epsilon)r:
+                issues.append(
+                    "extends outside the Enclosure section's own footprint "
+                    f"(~{round(leftover_mm3, 2)} mm^3 outside)"
+                )
+            collide_mm3 = collision_by_section.get(section_id, 0.0)
+            if collide_mm3 > %(volume_epsilon)r:
+                issues.append(
+                    "collides with another section "
+                    f"(~{round(collide_mm3, 2)} mm^3 overlap)"
+                )
+            if issues:
+                violations.append({"node_id": section_id, "issue": "; ".join(issues)})
+
+        with open(output_path, "w") as f:
+            json.dump({"violations": violations, "footprints": footprints}, f)
+        return
 
     if level == %(level_2_3)r:
         footprints = {}
@@ -488,7 +678,8 @@ def main():
 
 
 main()
-""" % {"volume_epsilon": _VOLUME_EPSILON_MM3, "level_1_2": LEVEL_1_2, "level_2_3": LEVEL_2_3}
+""" % {"volume_epsilon": _VOLUME_EPSILON_MM3, "level_1_2": LEVEL_1_2, "level_2_3": LEVEL_2_3,
+       "level_3_4": LEVEL_3_4}
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +899,101 @@ def _build_section_payload(checkable: list) -> dict:
     }
 
 
+def _checkable_device_sections(mech: dict, parts: list) -> tuple:
+    """Level 3->4's scope (G3g, second half): the container (the
+    Enclosure section's own validated `footprint`, set by eo/
+    mech_repair.py's run_level_2_3_repair() -- G3f-2) plus every OTHER
+    section _checkable_sections() above already considers checkable --
+    reused wholesale rather than re-implementing Level 2->3's own
+    subsection-checkability filtering a third time; the only new work
+    here is finding the container and excluding it from the checkable
+    set (see _DEVICE_CONTAINER_SECTION_ID above).
+
+    Returns (container, checkable):
+      - container: {"x","y","z","w","h","d"} (the Enclosure section's
+        own footprint) or None if it isn't in `mech["sections"]` yet, or
+        is there without a `footprint` key yet (run_level_2_3_repair()
+        hasn't reached it) -- "nothing to check against yet," same
+        fail-safe posture eo/mech_device.py's own _container_footprint()
+        already holds for the identical reason (this module deliberately
+        mirrors that function's logic rather than importing it -- see
+        this module's own dependency-shape note on why eo/mech_validator.py
+        doesn't import eo/mech_device.py: this module has no other reason
+        to depend on the device-merge module, and duplicating one small
+        lookup is cheaper than adding that whole import for it).
+      - checkable: _checkable_sections()'s own return shape, minus the
+        Enclosure entry itself -- the container is never a checkable NODE
+        at this level, matching eo/mech_device.py's own "container
+        section is never zoned/translated" rule.
+
+    `parts` is required for the same reason _checkable_sections() itself
+    requires it (Level 2->3/3->4's section grouping is a category lookup
+    only `parts` can answer) -- absent, this returns (None, []), same
+    fail-safe posture as every other "not ready yet" branch in this
+    module.
+    """
+    if not parts:
+        return None, []
+
+    container = None
+    for section in (mech or {}).get("sections") or []:
+        if isinstance(section, dict) and section.get("section_id") == _DEVICE_CONTAINER_SECTION_ID:
+            footprint = section.get("footprint")
+            container = footprint if isinstance(footprint, dict) else None
+            break
+    if container is None:
+        return None, []
+
+    checkable = [
+        s for s in _checkable_sections(mech, parts)
+        if s.get("section_id") != _DEVICE_CONTAINER_SECTION_ID
+    ]
+    return container, checkable
+
+
+def _build_device_payload(checkable: list, container: dict) -> dict:
+    return {
+        "level": LEVEL_3_4,
+        "container": {
+            "x": container.get("x") or 0,
+            "y": container.get("y") or 0,
+            "z": container.get("z") or 0,
+            "w": container.get("w") or 0,
+            "h": container.get("h") or 0,
+            "d": container.get("d") or 0,
+            # The Enclosure section's own w/h/d aren't a single part with
+            # a `dimension_confidence` of their own to read -- same
+            # "no more specific value wired, fall back to the
+            # conservative default" reasoning _tolerance_for() already
+            # applies for an unwired placement, reused here rather than
+            # inventing a second default.
+            "tolerance_mm": _tolerance_for(_DEFAULT_CONFIDENCE),
+        },
+        "sections": [
+            {
+                "section_id": section.get("section_id"),
+                "subsections": [
+                    {
+                        "subsection_id": s.get("subsection_id"),
+                        "members": [
+                            {
+                                "part_id": m.get("part_id"),
+                                "x": m.get("x") or 0,
+                                "y": m.get("y") or 0,
+                                "z": m.get("z") or 0,
+                                "primitives": m.get("primitives") or [],
+                            }
+                            for m in s.get("members") or []
+                        ],
+                    }
+                    for s in section.get("subsections") or []
+                ],
+            }
+            for section in checkable
+        ],
+    }
+
+
 def _build_subsection_payload(checkable: list) -> dict:
     return {
         "level": LEVEL_1_2,
@@ -763,20 +1049,23 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
     Implements level=LEVEL_0_1 ("0->1": does every primitive a part is
     composed of stay inside that part's own w/h/d bounding box, once its
     real offset/rotation is applied), level=LEVEL_1_2 ("1->2": does a
-    subsection's part collide with its own mount), and level=LEVEL_2_3
+    subsection's part collide with its own mount), level=LEVEL_2_3
     ("2->3": do two different subsections in the same section collide
-    with each other). Level 3->4 (device-level containment) is NOT
-    implemented here -- calling with any other `level` raises
+    with each other), and level=LEVEL_3_4 ("3->4": does every non-
+    Enclosure section stay inside the Enclosure section's own footprint,
+    and do two different sections collide with each other) -- the last
+    level in the tree. Calling with any other `level` raises
     NotImplementedError rather than silently reporting `valid: True` for
     a level nothing actually checked.
 
-    `parts` is required for level=LEVEL_2_3 (see _checkable_sections()'s
-    own docstring on why -- Level 2->3's section grouping is a category
-    lookup only `parts` can answer) and ignored for every other level.
-    Omitting it at LEVEL_2_3 is treated the same as "nothing checkable
-    yet," not an error -- same fail-safe posture as everything else in
-    this module -- so a caller mid-migration that hasn't wired `parts`
-    through yet degrades to a no-op rather than crashing.
+    `parts` is required for level=LEVEL_2_3 and level=LEVEL_3_4 (see
+    _checkable_sections()'s own docstring on why -- Level 2->3/3->4's
+    section grouping is a category lookup only `parts` can answer) and
+    ignored for every other level. Omitting it at either level is treated
+    the same as "nothing checkable yet," not an error -- same fail-safe
+    posture as everything else in this module -- so a caller mid-migration
+    that hasn't wired `parts` through yet degrades to a no-op rather than
+    crashing.
 
     Never modifies `mech` -- read-only, matches the Master Guide's own
     contract for this function ("never modifies the layout, only
@@ -800,24 +1089,31 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
     on why a footprint is reported even for a clean subsection (G3f needs
     it to group by next). Level 2->3 (LEVEL_2_3) returns the same shape
     one level up, {section_id: {"x","y","z","w","h","d"}}, for the same
-    reason (G3g needs it next). Absent (empty dict) on the no-op and
-    fail-open paths below, same "nothing was actually computed" reasoning
-    as `violations` being [] on those same paths.
+    reason (G3g needs it next). Level 3->4 (LEVEL_3_4) returns the same
+    shape again, one more time (G3i's pipeline wiring and G3j's frontend
+    badge, both outside this tree, are the consumers now that this is the
+    last level). Absent (empty dict) on the no-op and fail-open paths
+    below, same "nothing was actually computed" reasoning as `violations`
+    being [] on those same paths.
     """
     if level not in _IMPLEMENTED_LEVELS:
         raise NotImplementedError(
             f"eo/mech_validator.py only implements level={LEVEL_0_1!r}, "
-            f"level={LEVEL_1_2!r}, and level={LEVEL_2_3!r} so far (got "
-            f"{level!r}); Level 3->4 lands with G3g."
+            f"level={LEVEL_1_2!r}, level={LEVEL_2_3!r}, and level="
+            f"{LEVEL_3_4!r} (got {level!r})."
         )
 
     is_section_level = (level == LEVEL_2_3)
     is_subsection_level = (level == LEVEL_1_2)
-    is_grouped_level = is_subsection_level or is_section_level
+    is_device_level = (level == LEVEL_3_4)
+    is_grouped_level = is_subsection_level or is_section_level or is_device_level
+    container = None
     if is_section_level:
         checkable = _checkable_sections(mech or {}, parts)
     elif is_subsection_level:
         checkable = _checkable_subsections(mech or {})
+    elif is_device_level:
+        container, checkable = _checkable_device_sections(mech or {}, parts)
     else:
         checkable = _checkable_placements((mech or {}).get("placements"))
     if not checkable:
@@ -825,7 +1121,9 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
             {"valid": True, "violations": [], "footprints": {}}
 
     agent_name = "mech_validator"
-    node_word = "section" if is_section_level else "subsection" if is_subsection_level else "part"
+    node_word = ("device section" if is_device_level else
+                 "section" if is_section_level else
+                 "subsection" if is_subsection_level else "part")
     emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
                payload={"label": f"Mech Validator — Level {level} ({len(checkable)} {node_word}(s))"})
     started = time.monotonic()
@@ -835,6 +1133,8 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
             payload = _build_section_payload(checkable)
         elif is_subsection_level:
             payload = _build_subsection_payload(checkable)
+        elif is_device_level:
+            payload = _build_device_payload(checkable, container)
         else:
             payload = _build_payload(checkable)
         result = _run_batch(payload, session_id=session_id)
@@ -896,5 +1196,24 @@ if __name__ == "__main__":
             {"id": "sensor_2", "category": "sensor"},
         ]
         print(json.dumps(validate_layout(_demo_section_mech, LEVEL_2_3, parts=_demo_section_parts), indent=2))
+
+        _demo_device_mech = {
+            "placements": [
+                {"part_id": "sensor_1", "x": 200, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5,
+                 "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 15, "h": 10, "d": 5},
+                                  "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "primary"}]},
+                {"part_id": "battery_1", "x": 5, "y": 5, "z": 0, "w": 20, "h": 10, "d": 10,
+                 "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 20, "h": 10, "d": 10},
+                                  "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "primary"}]},
+            ],
+            "sections": [
+                {"section_id": "Enclosure", "footprint": {"x": 0, "y": 0, "z": 0, "w": 120, "h": 90, "d": 33}},
+            ],
+        }
+        _demo_device_parts = [
+            {"id": "sensor_1", "category": "sensor"},
+            {"id": "battery_1", "category": "power"},
+        ]
+        print(json.dumps(validate_layout(_demo_device_mech, LEVEL_3_4, parts=_demo_device_parts), indent=2))
     finally:
         close_session()
