@@ -113,7 +113,14 @@ from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusErro
 
 from memory.bus import read as bus_read, write as bus_write
 from relay.emitter import emit_event
-from eo.tracing import get_tracer
+import logging
+
+from eo.tracing import get_tracer, truncate_for_trace
+
+# D1 audit fix -- see eo/executor.py's matching _trace_logger; same
+# TRACE_EXPORT_FAILED marker convention so tracing-side failures from
+# either module are greppable together.
+_trace_logger = logging.getLogger("eo.tracing")
 # Part 26 §4 re-export: embed_text() used to be defined directly in this
 # module, but eo/routing_memory.py wanted it without the heavy groq/
 # cerebras/openai SDK imports above, so it now lives in
@@ -516,11 +523,18 @@ def _traced_generation(label: str, model: str, system_prompt: str, prompt_for_st
     traced is None: return` guard) then just runs the real LLM call
     untraced for this one step."""
     try:
+        # D1 audit fix -- prompt_for_step/system_prompt were previously
+        # attached to the span at full length (can be an entire generated
+        # file for code-writer/scanner/report-writer roles). Truncated
+        # here via truncate_for_trace() so a single span's contribution to
+        # the export batch stays bounded; see eo/tracing.py's
+        # TRACE_TEXT_CHAR_LIMIT docstring for why this is the fix that
+        # matters most (batch *size*, not just the HTTP timeout).
         cm = get_tracer().start_as_current_observation(
             name=label, as_type="generation", model=model,
-            input=prompt_for_step,
+            input=truncate_for_trace(prompt_for_step),
             metadata={
-                "system_prompt": system_prompt, "agent_name": agent_name,
+                "system_prompt": truncate_for_trace(system_prompt), "agent_name": agent_name,
                 "session_id": session_id, "tier": tier, "path": path,
                 "domain": domain,
             },
@@ -528,8 +542,9 @@ def _traced_generation(label: str, model: str, system_prompt: str, prompt_for_st
         gen = cm.__enter__()
         return (cm, gen)
     except Exception as trace_exc:
-        print(f"  [{agent_name}] Langfuse tracing failed to start for {label} "
-              f"(non-fatal): {trace_exc}")
+        _trace_logger.warning(
+            "TRACE_EXPORT_FAILED: [%s] tracing failed to start for %s "
+            "(non-fatal): %s", agent_name, label, trace_exc)
         return None
 
 
@@ -548,15 +563,19 @@ def _end_traced_generation(traced, agent_name: str, label: str, text, usage,
     cm, gen = traced
     try:
         if exc_info[0] is None:
+            # D1 audit fix -- same unbounded-payload issue as the input
+            # side in _traced_generation() above: `text` is the full
+            # completion, capped here for the same reason.
             gen.update(
-                output=text,
+                output=truncate_for_trace(text),
                 usage_details=_usage_details_from_usage(usage),
                 metadata={"finish_reason": finish_reason},
             )
         cm.__exit__(*exc_info)
     except Exception as trace_exc:
-        print(f"  [{agent_name}] Langfuse tracing failed to close for {label} "
-              f"(non-fatal): {trace_exc}")
+        _trace_logger.warning(
+            "TRACE_EXPORT_FAILED: [%s] tracing failed to close for %s "
+            "(non-fatal): %s", agent_name, label, trace_exc)
 
 
 def _usage_details_from_usage(usage) -> dict | None:

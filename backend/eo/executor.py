@@ -52,7 +52,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import resolve, resolve_role, list_known_roles
 from eo.structure import PATH_TO_TIER
 from eo.errors import MissingDependencyError
-from eo.tracing import get_tracer, TRACING_ENABLED
+import logging
+
+from eo.tracing import get_tracer, TRACING_ENABLED, truncate_for_trace
+
+# D1 audit fix -- these print()s were the only signal a Langfuse span
+# failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
+# a future export failure shows up in log aggregation instead of only
+# in raw stdout, per the audit report's point 5.
+_trace_logger = logging.getLogger("eo.tracing")
 from relay.emitter import emit_event
 
 TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
@@ -465,15 +473,16 @@ def _open_session_trace(session_id: str, task_text: str, domain: str, mode: str)
             name="execute_graph",
             as_type="span",
             trace_context={"trace_id": trace_id},
-            input=task_text,
+            input=truncate_for_trace(task_text),
             metadata={"session_id": session_id, "domain": domain, "mode": mode},
         ))
         from langfuse import propagate_attributes
         stack.enter_context(propagate_attributes(session_id=session_id))
     except Exception as trace_exc:
         stack.close()
-        print(f"  [executor] Langfuse session trace failed to open for "
-              f"session_id={session_id!r} (non-fatal): {trace_exc}")
+        _trace_logger.warning(
+            "TRACE_EXPORT_FAILED: session trace failed to open for "
+            "session_id=%r (non-fatal): %s", session_id, trace_exc)
         yield
         return
 
@@ -523,13 +532,14 @@ def _open_role_span(role: str, current_name: str, session_id: str, task_text: st
         span = stack.enter_context(tracer.start_as_current_observation(
             name=role,
             as_type="span",
-            input=task_text,
+            input=truncate_for_trace(task_text),
             metadata={"agent": current_name, "session_id": session_id, "domain": domain},
         ))
     except Exception as trace_exc:
         stack.close()
-        print(f"  [executor] Langfuse role span failed to open for "
-              f"role={role!r} (non-fatal): {trace_exc}")
+        _trace_logger.warning(
+            "TRACE_EXPORT_FAILED: role span failed to open for "
+            "role=%r (non-fatal): %s", role, trace_exc)
         yield None
         return
 
@@ -580,14 +590,15 @@ def _open_member_span(member_role: str, group_roles: list, session_id: str, task
         span = stack.enter_context(tracer.start_as_current_observation(
             name=member_role,
             as_type="span",
-            input=task_text,
+            input=truncate_for_trace(task_text),
             metadata={"agent": f"generic:{member_role}", "session_id": session_id,
                       "domain": domain, "group": sorted(group_roles)},
         ))
     except Exception as trace_exc:
         stack.close()
-        print(f"  [executor] Langfuse member span failed to open for "
-              f"role={member_role!r} (non-fatal): {trace_exc}")
+        _trace_logger.warning(
+            "TRACE_EXPORT_FAILED: member span failed to open for "
+            "role=%r (non-fatal): %s", member_role, trace_exc)
         yield None
         return
 
