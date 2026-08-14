@@ -100,6 +100,19 @@ level drivers is kept in THIS module rather than its own pool module
 because it owns the repair loop's lifecycle (including the final
 full-mech footprint recompute), not just one node's regeneration --
 same reasoning run_level_1_2_repair()'s own docstring already gives.
+
+run_level_0_1_repair() closes a gap left open through G3i: Level 0->1's
+own generate->validate->repair pass was never actually wired up, even
+though eo/mech_validator.py's LEVEL_0_1 path (G3c) and run_repair_loop()
+(G3d) were already generic enough to handle it. G3i's own scope was
+explicitly Level 1->2 through 3->4 only, so this driver -- and agents/
+mech_primitive_pool.py's regenerate_primitives(), its "generate" half --
+were the piece still missing. Simpler than the two drivers above: no
+`parts` requirement (Level 0->1's own checkable set is derived straight
+off `mech["placements"]`, same as eo/mech_validator.py's own
+_checkable_placements()) and no final footprint-persisting step (Level
+0->1 has no `footprints` output for a later level to consume -- see that
+function's own docstring).
 """
 
 import os
@@ -383,6 +396,70 @@ def run_repair_loop(mech: dict, level: str, regenerate_node_fn,
         "attempts": attempts,
         "repaired": sorted(repaired_ids),
     }
+
+
+def run_level_0_1_repair(spec: dict, parts: list, session_id: str = None, path: str = None,
+                          domain: str = None, max_retries: int = DEFAULT_MAX_RETRIES,
+                          key_override=None) -> dict:
+    """Level 0->1's own driver -- the piece that was still missing after
+    G3i: eo/mech_validator.py's LEVEL_0_1 path (G3c) and
+    run_repair_loop() (G3d) were both already written generically enough
+    to handle Level 0->1 with zero changes, and agents/
+    mech_primitive_pool.py's regenerate_primitives() (this same patch)
+    is that level's `regenerate_node_fn` -- but nothing in the codebase
+    ever actually called either of them together. G3i's own scope was
+    explicitly Level 1->2 through 3->4 only, so Level 0->1 kept shipping
+    whatever G3a/G3b's initial composition pass produced, uncorrected,
+    even when a primitive genuinely poked outside its own part's
+    bounding box. This function is that missing call; meant to run
+    synchronously from agents.hardware_speccer.run_hardware_speccer()
+    right after G3b's mech_primitive_pool.run() (the initial "generate"
+    pass this function's own repair loop then corrects), same in-process
+    shape run_level_1_2_repair() already uses one level up.
+
+    What this does, in order:
+      1. run_repair_loop(mech, LEVEL_0_1, regenerate_node_fn, ...) --
+         validates every placement's primitives against its own part's
+         w/h/d bounding box, and for each containment violation, calls
+         agents/mech_primitive_pool.py's regenerate_primitives() with
+         the violation fed back as context, capped at `max_retries` per
+         part, exactly like every other level's repair loop (see this
+         module's own top docstring).
+
+    Unlike run_level_1_2_repair()/run_level_2_3_repair() one level up,
+    there is no step 2/3 here -- Level 0->1 has no `footprints` output
+    for a later level to consume (eo/mech_validator.py's own
+    validate_layout() only returns a `footprints` key for the grouped
+    levels, LEVEL_1_2/LEVEL_2_3/LEVEL_3_4; see that module's own
+    `is_grouped_level` branch), so there's nothing to persist onto
+    `mech` beyond what `regenerate_node_fn` already wrote in place
+    during the loop itself. A final full re-validate would only ever
+    reconfirm what run_repair_loop()'s own return value already reports.
+
+    Returns run_repair_loop()'s own result dict, unmodified.
+
+    Does NOT call eo/mech_validator.py's close_session() -- same "caller
+    owns the session lifecycle for the whole run" contract every other
+    level driver in this module already follows; whatever ultimately
+    drives the full Level 0->1 through Level 3->4 run is responsible for
+    closing it once, at the very end.
+    """
+    from eo.mech_validator import LEVEL_0_1 as _LEVEL_0_1
+    from agents.mech_primitive_pool import regenerate_primitives
+
+    mech = spec.get("mech") or {}
+    parts_by_id = {p.get("id"): p for p in (parts or []) if isinstance(p, dict)}
+
+    def regenerate_node_fn(mech_arg, node_id, violation, attempt):
+        regenerate_primitives(
+            mech_arg, node_id, violation, attempt, parts_by_id,
+            key_override=key_override, session_id=session_id, path=path, domain=domain,
+        )
+
+    return run_repair_loop(
+        mech, _LEVEL_0_1, regenerate_node_fn,
+        session_id=session_id, path=path, domain=domain, max_retries=max_retries,
+    )
 
 
 def run_level_1_2_repair(spec: dict, parts: list, session_id: str = None, path: str = None,

@@ -185,7 +185,7 @@ function PrimitivePiece({ primitive, partSize, color, isShell, selected }) {
   );
 }
 
-function PartBox({ placement, part, enclosure, selected, onSelect }) {
+function PartBox({ placement, part, enclosure, selected, onSelect, onHover }) {
   const color = CATEGORY_COLORS[part?.category] || DEFAULT_COLOR;
   const isShell = isShellPlacement(placement, enclosure);
   // BUG FIX (prior patch): `placement.x/y/z` is a corner coordinate --
@@ -226,6 +226,22 @@ function PartBox({ placement, part, enclosure, selected, onSelect }) {
       e.stopPropagation();
       onSelect(placement.part_id);
     },
+    // G3j: same click-through-shell reasoning applies to hover -- a
+    // shell shouldn't steal the confidence badge from whatever's really
+    // under the pointer either, and since shell meshes already opt out
+    // of raycasting below (the non-primitives branch's `raycast={...}`),
+    // these two handlers simply never fire for a shell in that branch.
+    // r3f's own pointer-events model already calls onPointerOut when a
+    // pointer leaves a mesh (including via unmount/hide), so no separate
+    // cleanup is needed here.
+    onPointerOver: (e) => {
+      e.stopPropagation();
+      onHover(placement.part_id);
+    },
+    onPointerOut: (e) => {
+      e.stopPropagation();
+      onHover(null);
+    },
   };
 
   // G3a: a part with `placement.primitives` (Level 0->1 composition --
@@ -265,6 +281,60 @@ function PartBox({ placement, part, enclosure, selected, onSelect }) {
         selected={selected}
       />
     </mesh>
+  );
+}
+
+/**
+ * CONFIDENCE_META — G3j (Master Guide, "G3/G4. Hierarchical parallel
+ * build + validate", the remaining "close the G1->G3 loop" frontend
+ * refinement): display metadata for `part.dimension_confidence`, the
+ * SAME vocabulary eo/mech_validator.py's own `_TOLERANCE_MM` already
+ * uses ("verified" gets a strict 0-margin FreeCAD check, "typical" gets
+ * a small clearance buffer) -- this is that same field, surfaced to a
+ * human instead of just a geometry tolerance. Set on the PART (by
+ * agents/hardware_speccer.py's G1a curated-table match or G1b DigiKey/
+ * Mouser lookup), never the placement -- see eo/mech_validator.py's own
+ * module docstring on why -- so this reads `part.dimension_confidence`,
+ * not `placement.dimension_confidence`.
+ *
+ * A part with neither a G1a nor G1b hit never gets this field set at
+ * all (falls through to LLM-estimated sizing, per _populate_dimensions()'s
+ * own docstring) -- that's the `_default` entry below, deliberately
+ * labeled "Estimated" rather than reusing eo/mech_validator.py's own
+ * internal fallback label ("typical"), since that module's fallback is
+ * about which tolerance buffer to apply when the field is UNWIRED on a
+ * placement, not a claim about the part's real dimension provenance --
+ * conflating the two here would tell a user "typical" (implying some
+ * confidence) for a part whose size is actually a pure LLM guess.
+ */
+const CONFIDENCE_META = {
+  verified: { color: "#34d399", label: "Verified dimensions" },
+  typical: { color: "#fbbf24", label: "Typical dimensions" },
+  _default: { color: "#6b7280", label: "Estimated dimensions" },
+};
+
+/**
+ * ConfidenceBadge — G3j's own payoff: a small floating badge over the
+ * canvas naming whichever part is currently hovered or selected and how
+ * trustworthy its dimensions are. `part` is `null` when nothing's
+ * hovered/selected (nothing rendered then, see MechView's own guard
+ * below) or when a hovered/selected part_id has no matching entry in
+ * `parts` (shouldn't happen, per this component's own module docstring
+ * on placement/part joins, but degrades to "not shown" rather than a
+ * badge with blank text).
+ */
+function ConfidenceBadge({ part }) {
+  if (!part) return null;
+  const meta = CONFIDENCE_META[part.dimension_confidence] || CONFIDENCE_META._default;
+  return (
+    <div
+      className="pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-full border border-[var(--neutral-800)] bg-black/70 px-2 py-1 text-[10px] text-[var(--neutral-200)] backdrop-blur-sm"
+    >
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
+      <span className="font-medium text-[var(--neutral-100)]">{part.name}</span>
+      <span className="text-[var(--neutral-600)]">·</span>
+      <span className="text-[var(--neutral-400)]">{meta.label}</span>
+    </div>
   );
 }
 
@@ -383,7 +453,13 @@ function CategoryLegend({ parts }) {
  * each box can pick its category color -- a placement with no matching
  * part (shouldn't happen, since hardware_speccer.py's prompt requires
  * every placement's part_id to reference a real part) falls back to
- * DEFAULT_COLOR rather than erroring.
+ * DEFAULT_COLOR rather than erroring. This same join is also G3j's own
+ * source for `part.dimension_confidence` ("verified"/"typical", set by
+ * agents/hardware_speccer.py's G1a/G1b -- absent entirely means an
+ * LLM-estimated size, no real match at all): hovering or selecting a
+ * part in the canvas shows ConfidenceBadge below, so a rough LLM guess
+ * never looks as trustworthy on screen as a real measured/datasheet
+ * dimension.
  */
 export default function MechView({ mech, parts }) {
   const enclosure = mech?.enclosure || { w: 100, h: 60, d: 40 };
@@ -401,6 +477,16 @@ export default function MechView({ mech, parts }) {
   // on each PartBox) or clicking a row in the sidebar. Both funnel into
   // the same setter below.
   const [selectedPartId, setSelectedPartId] = useState(null);
+  // G3j: hover is its own, separate bit of state from selection -- a
+  // hover is transient (only the mesh currently under the pointer) and
+  // should win over a sticky selection for badge purposes, but must
+  // never clobber `selectedPartId` itself (moving the mouse away from a
+  // selected part should fall back to showing the selection's badge,
+  // not clear the selection). Only ever set from PartBox's own
+  // onPointerOver/onPointerOut (canvas hover) -- PartsSidePanel rows
+  // don't have a natural "hover" concept of their own here since they
+  // already show a click-to-select affordance.
+  const [hoveredPartId, setHoveredPartId] = useState(null);
 
   function toggleHidden(partId) {
     setHiddenPartIds((prev) => {
@@ -415,6 +501,11 @@ export default function MechView({ mech, parts }) {
         // screen -- there'd be nothing in the canvas to show as
         // selected anymore.
         setSelectedPartId((sel) => (sel === partId ? null : sel));
+        // G3j: same reasoning for hover -- hiding a mesh mid-hover
+        // isn't guaranteed to fire r3f's onPointerOut (the mesh is
+        // simply gone from the next render), so clear it explicitly
+        // rather than risk a stuck badge for a part no longer visible.
+        setHoveredPartId((hov) => (hov === partId ? null : hov));
       }
       return next;
     });
@@ -433,6 +524,14 @@ export default function MechView({ mech, parts }) {
   }
 
   const visiblePlacements = placements.filter((pl) => !hiddenPartIds.has(pl.part_id));
+
+  // G3j: hover wins over selection for badge purposes (see
+  // `hoveredPartId`'s own state comment above) -- whichever part_id is
+  // "active" right now, resolved to its real `parts` entry so the badge
+  // has a name/dimension_confidence to show. `null` (nothing hovered or
+  // selected) falls through to ConfidenceBadge's own no-op guard.
+  const badgePartId = hoveredPartId ?? selectedPartId;
+  const badgePart = badgePartId ? partsById[badgePartId] : null;
 
   // G3a visual refinement: frame the camera off the enclosure's own
   // bounding sphere (half its space diagonal) instead of the old fixed
@@ -459,7 +558,8 @@ export default function MechView({ mech, parts }) {
   return (
     <div className="space-y-2">
       <div className="flex gap-2">
-        <div className="h-[480px] flex-1 rounded-lg border border-[var(--neutral-800)] overflow-hidden bg-black/30">
+        <div className="relative h-[480px] flex-1 rounded-lg border border-[var(--neutral-800)] overflow-hidden bg-black/30">
+          <ConfidenceBadge part={badgePart} />
           <Canvas
             camera={{ position: cameraPosition, fov: 45 }}
             // Standard r3f pattern: fires when a click doesn't land on
@@ -487,6 +587,7 @@ export default function MechView({ mech, parts }) {
                 enclosure={enclosure}
                 selected={pl.part_id === selectedPartId}
                 onSelect={selectPart}
+                onHover={setHoveredPartId}
               />
             ))}
             <OrbitControls />

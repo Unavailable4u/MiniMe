@@ -1827,6 +1827,27 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from agents.mech_primitive_pool import run as run_mech_primitive_pool
     run_mech_primitive_pool(spec, spec["parts"], session_id=session_id, domain=domain)
 
+    # Gap fix (flagged against G3i, which scoped itself to Level 1->2
+    # through 3->4 only): Level 0->1's own generate->validate->repair
+    # pass was never actually driven anywhere, even though eo/
+    # mech_validator.py's LEVEL_0_1 path (G3c) and eo/mech_repair.py's
+    # run_repair_loop() (G3d) were already generic enough to handle it
+    # with zero changes. eo/mech_repair.py's new run_level_0_1_repair()
+    # is that missing driver -- validates every placement's `primitives`
+    # against its own part's w/h/d bounding box via headless FreeCAD and
+    # regenerates just the violating ones through agents/
+    # mech_primitive_pool.py's new regenerate_primitives() (capped at 2
+    # retries, flagged-not-blocked past the cap), same shape every later
+    # level's own repair driver already uses. Called here, right after
+    # the initial G3a/G3b composition pass this repair loop corrects,
+    # and folded into the SAME try/finally as every later level below
+    # (rather than its own try/finally) so eo/mech_validator.py's
+    # persistent per-run FreeCAD sandbox session -- opened lazily on
+    # first use -- stays warm from this very first validate_layout()
+    # call through Level 3->4's, instead of being closed and reopened
+    # between Level 0->1 and Level 1->2.
+    from eo.mech_repair import run_level_0_1_repair
+
     # G3i (Master Guide, "G3/G4. Hierarchical parallel build + validate",
     # pipeline wiring): the previously-standalone Level 1->2 -> 2->3 ->
     # 3->4 generate/validate/repair tree -- agents/mech_subsection_pool.py
@@ -1906,6 +1927,11 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.mech_device import apply_device_merge
     from eo.mech_validator import close_session as close_mech_validator_session
     try:
+        # Level 0->1 -- gap fix, see the comment block above: validates/
+        # repairs the primitives G3a/G3b just composed before Level 1->2
+        # ever groups them into subsections.
+        run_level_0_1_repair(spec, spec["parts"], session_id=session_id, domain=domain)
+
         run_mech_subsection_pool(spec, spec["parts"], session_id=session_id, domain=domain)
         run_level_1_2_repair(spec, spec["parts"], session_id=session_id, domain=domain)
 

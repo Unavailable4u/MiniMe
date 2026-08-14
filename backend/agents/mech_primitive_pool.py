@@ -41,6 +41,15 @@ run() from inside run_hardware_speccer(), so a module-level
 `import agents.hardware_speccer` here would be circular. Same fix, same
 justification eo/dynamic_chain.py's own module docstring already
 documents for the reverse-direction case.
+
+regenerate_primitives() (below) is this module's `regenerate_node_fn`
+for Level 0->1, closing the gap noted against G3i: eo/mech_validator.py
+(G3c) and eo/mech_repair.py's run_repair_loop() (G3d) were both already
+level-agnostic and worked fine at level=LEVEL_0_1, but nothing in the
+pipeline ever actually drove a Level 0->1 generate->validate->repair
+pass -- G3i's own scope was explicitly just Level 1->2 through 3->4, per
+its own description. eo/mech_repair.py's new run_level_0_1_repair()
+(same patch as this addition) is the driver that calls it.
 """
 
 import os
@@ -204,6 +213,58 @@ def _parse_primitives(raw_text: str, w: float, h: float, d: float) -> list:
     return clamped or _box_primitive_template(w, h, d)
 
 
+def _generate_primitives(placement: dict, part: dict, key_env: str,
+                          agent_name: str, session_id: str = None,
+                          path: str = None, domain: str = None,
+                          violation_issue: str = None) -> list:
+    """The actual generate_text() call, factored out of
+    _generate_primitives_for_part() below so both G3b's pool path (first
+    proposal, no feedback) and the Level 0->1 repair path
+    (regenerate_primitives() below, violation fed back as extra context)
+    share one implementation instead of two copies that could drift --
+    same split agents/mech_subsection_pool.py's own
+    _generate_relative_placement() already establishes for Level 1->2.
+
+    `violation_issue`: when given (a Level 0->1 containment report's own
+    `violation["issue"]` string, per eo/mech_validator.py's
+    _check_part()), appended to the user turn as feedback -- same "feed
+    the violation back as context" contract every other level's
+    regenerate_node_fn follows (eo/mech_repair.py's own module
+    docstring). None on a first-proposal call (this module's own run()
+    always passes None here, via _generate_primitives_for_part below).
+    """
+    w = placement.get("w") or 1
+    h = placement.get("h") or 1
+    d = placement.get("d") or 1
+
+    payload = {
+        "part_id": placement.get("part_id"),
+        "name": part.get("name"),
+        "generic_name": part.get("generic_name"),
+        "category": part.get("category"),
+        "description": part.get("description"),
+        "bounding_box_mm": {"w": w, "h": h, "d": d},
+    }
+    if violation_issue:
+        payload["previous_attempt_failed_because"] = violation_issue
+
+    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
+
+    try:
+        raw = generate_text(
+            SYSTEM_PROMPT, json.dumps(payload), chain,
+            agent_name=agent_name, session_id=session_id, path=path, domain=domain,
+        )
+        return _parse_primitives(raw, w, h, d)
+    except RuntimeError:
+        # Every provider in the chain failed -- fall back to the same
+        # safe single-box shape _parse_primitives() itself falls back
+        # to on a bad response, so a quota/outage blip degrades this
+        # part to "plain box," never a crash of the whole pool.
+        from agents.hardware_speccer import _box_primitive_template
+        return _box_primitive_template(w, h, d)
+
+
 def _generate_primitives_for_part(placement: dict, part: dict, key_env: str,
                                    worker_id: int, session_id: str = None,
                                    path: str = None, domain: str = None) -> tuple:
@@ -217,40 +278,94 @@ def _generate_primitives_for_part(placement: dict, part: dict, key_env: str,
                payload={"label": f"Mech Primitive {worker_id} — {part_id}"})
     started = time.monotonic()
 
-    w = placement.get("w") or 1
-    h = placement.get("h") or 1
-    d = placement.get("d") or 1
-
-    user_content = json.dumps({
-        "part_id": part_id,
-        "name": part.get("name"),
-        "generic_name": part.get("generic_name"),
-        "category": part.get("category"),
-        "description": part.get("description"),
-        "bounding_box_mm": {"w": w, "h": h, "d": d},
-    })
-
-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
-
-    try:
-        raw = generate_text(
-            SYSTEM_PROMPT, user_content, chain,
-            agent_name=agent_name, session_id=session_id, path=path, domain=domain,
-        )
-        primitives = _parse_primitives(raw, w, h, d)
-    except RuntimeError:
-        # Every provider in the chain failed -- fall back to the same
-        # safe single-box shape _parse_primitives() itself falls back
-        # to on a bad response, so a quota/outage blip degrades this
-        # part to "plain box," never a crash of the whole pool.
-        from agents.hardware_speccer import _box_primitive_template
-        primitives = _box_primitive_template(w, h, d)
+    primitives = _generate_primitives(
+        placement, part, key_env, agent_name,
+        session_id=session_id, path=path, domain=domain,
+    )
 
     duration_ms = int((time.monotonic() - started) * 1000)
     summary = f"{len(primitives)} primitive(s) for {part_id}"
     emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
                payload={"summary": summary, "duration_ms": duration_ms})
     return part_id, primitives
+
+
+def regenerate_primitives(mech: dict, node_id: str, violation: dict, attempt: int,
+                           parts_by_id: dict, key_override=None, session_id: str = None,
+                           path: str = None, domain: str = None) -> None:
+    """The Level 0->1 `regenerate_node_fn` eo/mech_repair.py's
+    run_repair_loop() requires -- the exact `(mech, node_id, violation,
+    attempt)` -> None shape, wired to THIS pool's own single-part
+    generation call (_generate_primitives() above) instead of
+    duplicating it. Mirrors agents/mech_subsection_pool.py's own
+    regenerate_subsection() almost exactly, one level down.
+
+    This closes the gap flagged twice now: G3c's validator and G3d's
+    generic repair loop both already handle level=LEVEL_0_1 just fine
+    (run_repair_loop() is written generically against "whatever
+    mech_validator.validate_layout() calls node_id"), but nothing in the
+    repo ever actually called a Level 0->1 regenerate function or drove
+    run_repair_loop() at that level -- so a part whose primitives poked
+    outside its own bounding box shipped uncorrected. This function is
+    that missing "generate" half; eo/mech_repair.py's new
+    run_level_0_1_repair() (this same patch) is the missing driver.
+
+    `node_id` is a `part_id` (Level 0->1's own node vocabulary, per eo/
+    mech_validator.py's LEVEL_0_1 violation shape and
+    `mech["placements"][i]["part_id"]`) -- resolves the placement
+    straight off `mech["placements"]` itself, same "mech is always the
+    current source of truth" reasoning regenerate_subsection() already
+    uses, rather than needing the caller to pass the placement back in.
+
+    `parts_by_id`: {part_id: part}, the same lookup agents/
+    hardware_speccer.py already builds before calling this module's
+    run() -- needed here (unlike regenerate_subsection(), which only
+    ever needs geometry already sitting on the placement) because the
+    LLM prompt needs the part's name/generic_name/category/description,
+    none of which live on the placement itself. A caller's
+    `regenerate_node_fn` closure (see run_level_0_1_repair() in eo/
+    mech_repair.py) is expected to close over this dict once per repair
+    run rather than rebuilding it per node.
+
+    Mutates the placement's `primitives` list on `mech["placements"]` in
+    place, same "this is that same generation step, just for one node,
+    called from the repair loop instead of the initial fan-out" shape
+    regenerate_subsection()'s own docstring already establishes.
+
+    A node_id with no matching placement (shouldn't happen -- eo/
+    mech_validator.py's LEVEL_0_1 check only ever reports a violation
+    for a placement that HAS primitives to check) raises ValueError
+    rather than silently no-op'ing, same "never mistake 'nothing to
+    regenerate' for 'regenerated but the fix didn't help'" reasoning
+    regenerate_subsection() already documents for its own identical
+    case -- run_repair_loop() already treats a raise from
+    regenerate_node_fn as a burned, failed attempt.
+    """
+    placements = (mech or {}).get("placements") or []
+    placements_by_id = {
+        p.get("part_id"): p for p in placements
+        if isinstance(p, dict) and p.get("part_id")
+    }
+    placement = placements_by_id.get(node_id)
+    if not isinstance(placement, dict):
+        raise ValueError(f"regenerate_primitives: no placement found for node_id={node_id!r}")
+
+    part = parts_by_id.get(node_id)
+    if not isinstance(part, dict):
+        part = {}
+
+    agent_name = f"mech_primitive_repair_{node_id}"
+    key_env = key_override
+    if key_env is None:
+        selected = _select_workers_for_role(ROLE_TAG, 1, None, session_id=session_id, agent_name=agent_name)
+        key_env = selected[0] if selected else None
+
+    primitives = _generate_primitives(
+        placement, part, key_env, agent_name,
+        session_id=session_id, path=path, domain=domain,
+        violation_issue=(violation or {}).get("issue"),
+    )
+    placement["primitives"] = primitives
 
 
 def _needs_llm_primitives(placement: dict, parts_by_id: dict) -> bool:

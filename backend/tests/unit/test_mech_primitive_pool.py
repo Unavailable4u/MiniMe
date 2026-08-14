@@ -16,6 +16,8 @@ composition, LLM path): covers agents/mech_primitive_pool.py --
 Uses the same mock_llm/fake_bus fixtures as the rest of this tree
 (tests/conftest.py) -- no real network/E2B/FreeCAD calls.
 """
+import pytest
+
 import agents.hardware_speccer  # noqa: F401 -- ensure importable before mech_primitive_pool's lazy imports
 import agents.mech_primitive_pool as mpp
 
@@ -189,3 +191,80 @@ def test_run_falls_back_to_box_when_every_provider_fails(mock_llm):
     placement = result["mech"]["placements"][0]
     assert placement["primitives"][0]["shape"] == "box"
     assert placement["primitives"][0]["size"] == {"w": 20, "h": 19, "d": 19}
+
+
+# ---------------------------------------------------------------------------
+# regenerate_primitives -- the Level 0->1 regenerate_node_fn
+# eo/mech_repair.py's run_repair_loop() calls (closes the gap left open
+# through G3i: Level 0->1's own repair pass was never actually driven).
+# ---------------------------------------------------------------------------
+
+def test_regenerate_primitives_composes_new_primitives_from_llm_response(mock_llm):
+    mock_llm.set_json_response({
+        "primitives": [
+            {"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 20, "h": 19, "d": 19},
+             "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "cylinder", "color_role": "primary"}
+        ]
+    })
+    mech = {"placements": [
+        {"part_id": "motor_1", "w": 20, "h": 19, "d": 19,
+         "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 999, "h": 19, "d": 19},
+                          "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "primary"}]},
+    ]}
+    parts_by_id = {"motor_1": {"id": "motor_1", "category": "actuator", "generic_name": "DC motor"}}
+    violation = {"node_id": "motor_1", "issue": "primitive(s) extend outside the part's own bounding box"}
+
+    mpp.regenerate_primitives(mech, "motor_1", violation, 1, parts_by_id, key_override="fake_key", session_id="s1")
+
+    placement = mech["placements"][0]
+    assert placement["primitives"][0]["shape"] == "cylinder"
+    assert placement["primitives"][0]["size"] == {"w": 20, "h": 19, "d": 19}
+
+
+def test_regenerate_primitives_feeds_violation_back_as_context(mock_llm):
+    mock_llm.set_json_response({
+        "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 20, "h": 19, "d": 19},
+                         "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "primary"}]
+    })
+    mech = {"placements": [{"part_id": "motor_1", "w": 20, "h": 19, "d": 19, "primitives": [{"shape": "box"}]}]}
+    parts_by_id = {"motor_1": {"id": "motor_1", "category": "actuator"}}
+    violation = {"node_id": "motor_1", "issue": "primitive(s) extend outside the part's own bounding box"}
+
+    mpp.regenerate_primitives(mech, "motor_1", violation, 1, parts_by_id, key_override="fake_key", session_id="s1")
+
+    user_content = mock_llm.mock.call_args.args[1]
+    assert "extend outside the part's own bounding box" in user_content
+
+
+def test_regenerate_primitives_raises_for_unknown_node_id(mock_llm):
+    mech = {"placements": [{"part_id": "motor_1", "w": 20, "h": 19, "d": 19, "primitives": [{"shape": "box"}]}]}
+    with pytest.raises(ValueError):
+        mpp.regenerate_primitives(mech, "nonexistent", {"issue": "x"}, 1, {}, key_override="fake_key")
+
+
+def test_regenerate_primitives_falls_back_to_box_when_every_provider_fails(mock_llm):
+    mock_llm.raise_on_call(RuntimeError("all providers exhausted"))
+    mech = {"placements": [{"part_id": "motor_1", "w": 20, "h": 19, "d": 19, "primitives": [{"shape": "box"}]}]}
+    parts_by_id = {"motor_1": {"id": "motor_1", "category": "actuator"}}
+
+    mpp.regenerate_primitives(mech, "motor_1", {"issue": "x"}, 1, parts_by_id, key_override="fake_key", session_id="s1")
+
+    placement = mech["placements"][0]
+    assert placement["primitives"][0]["shape"] == "box"
+    assert placement["primitives"][0]["size"] == {"w": 20, "h": 19, "d": 19}
+
+
+def test_regenerate_primitives_tolerates_unknown_part_id_in_parts_by_id(mock_llm):
+    # A part missing from `parts_by_id` (shouldn't happen in practice)
+    # degrades to an empty part dict rather than crashing -- same
+    # fail-safe posture regenerate_subsection() already uses one level
+    # up for its own lookups.
+    mock_llm.set_json_response({
+        "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 20, "h": 19, "d": 19},
+                         "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box", "color_role": "primary"}]
+    })
+    mech = {"placements": [{"part_id": "motor_1", "w": 20, "h": 19, "d": 19, "primitives": [{"shape": "box"}]}]}
+
+    mpp.regenerate_primitives(mech, "motor_1", {"issue": "x"}, 1, {}, key_override="fake_key", session_id="s1")
+
+    assert mech["placements"][0]["primitives"][0]["shape"] == "box"
