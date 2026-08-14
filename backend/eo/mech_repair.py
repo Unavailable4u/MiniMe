@@ -1,10 +1,10 @@
 """
 eo/mech_repair.py — G3d (Master Guide, "G3/G4. Hierarchical parallel
 build + validate", "Local repair on failure, capped"): the shared
-generate->validate->repair driver every tree level (Level 0->1 already
-built by G3a/G3b/G3c, Level 1->2 / 2->3 / 3->4 landing with G3e/G3f/G3g)
-plugs into, instead of each level re-implementing its own retry/cap/flag
-bookkeeping.
+generate->validate->repair driver every tree level (Level 0->1 built by
+G3a/G3b/G3c, Level 1->2 by G3e, Level 2->3 by G3f -- this patch, G3f-2 --
+Level 3->4 landing with G3g) plugs into, instead of each level
+re-implementing its own retry/cap/flag bookkeeping.
 
 What this module does NOT do: it never proposes geometry itself. This
 module's whole job is orchestration -- call eo/mech_validator.py's
@@ -57,31 +57,40 @@ infrastructure problems):
 
 Node identification: Level 0->1's node_id is a `part_id` (matching
 eo/mech_validator.py's own violation shape, `{"node_id", "issue"}`, and
-`mech["placements"][i]["part_id"]`). Level 1->2's node_id (G3e-4, this
-patch) is a `subsection_id` -- also matching eo/mech_validator.py's own
-LEVEL_1_2 violation shape, and (per eo/mech_subsections.py's
+`mech["placements"][i]["part_id"]`). Level 1->2's node_id (G3e-4) is a
+`subsection_id` -- also matching eo/mech_validator.py's own LEVEL_1_2
+violation shape, and (per eo/mech_subsections.py's
 group_into_subsections()) always equal to its anchor part's own
-`part_id`. This module's public entry point, run_repair_loop(), is
-written generically against "whatever mech_validator.validate_layout()
-calls node_id" and only gets level-specific in its one private helper
-that narrows `mech` down to just the retried nodes for re-validation
-(_subset_for_nodes() below) -- that's the one piece of this module that
-needed a sibling case added for Level 1->2, and the same spot Level
-2->3/3->4 (G3f/G3g) will each add their own case to; the retry/cap/flag
-loop above it does not change.
+`part_id`. Level 2->3's node_id (G3f-2, this patch) is a `section_id` --
+one of eo/mech_sections.py's fixed _SECTION_ORDER values, matching eo/
+mech_validator.py's own LEVEL_2_3 violation shape. This module's public
+entry point, run_repair_loop(), is written generically against "whatever
+mech_validator.validate_layout() calls node_id" and only gets
+level-specific in its one private helper that narrows `mech` down to
+just the retried nodes for re-validation (_subset_for_nodes() below) --
+that's the one piece of this module that needed a sibling case added for
+Level 1->2 and now Level 2->3, and the same spot Level 3->4 (G3g) will
+add its own case to; the retry/cap/flag loop above it does not change.
 
-run_level_1_2_repair() (G3e-4, bottom of this module) is the actual
-Level 1->2 integration: builds the `regenerate_node_fn` closure over
-agents/mech_subsection_pool.py's regenerate_subsection() (this level's
-"generate" half), drives run_repair_loop() with it, and -- once the loop
-settles -- persists every checkable subsection's validated aggregate
-footprint back onto `mech["subsections"]` so G3f has something to group
-by next. This is the level's own top-level driver, the Level-1->2
-counterpart of whatever eventually wires Level 0->1's run_repair_loop()
-call into agents/hardware_speccer.py's own pipeline -- kept in THIS
-module rather than agents/mech_subsection_pool.py because it owns the
-repair loop's lifecycle (including the final full-mech footprint
-recompute below), not just one subsection's regeneration.
+run_level_1_2_repair() (G3e-4) is the Level 1->2 integration: builds the
+`regenerate_node_fn` closure over agents/mech_subsection_pool.py's
+regenerate_subsection() (that level's "generate" half), drives
+run_repair_loop() with it, and -- once the loop settles -- persists every
+checkable subsection's validated aggregate footprint back onto
+`mech["subsections"]` so G3f has something to group by next.
+
+run_level_2_3_repair() (G3f-2, bottom of this module) is the same shape
+one level up: builds `regenerate_node_fn` over agents/
+mech_section_pool.py's regenerate_section() (Level 2->3's own "generate"
+half, G3f-1), drives run_repair_loop() with `parts` threaded through
+(Level 2->3's section grouping needs it -- see eo/mech_validator.py's
+_checkable_sections() docstring), and -- once the loop settles -- persists
+every checkable section's validated aggregate footprint onto
+`mech["sections"]` so G3g has something to merge next. Each of these
+level drivers is kept in THIS module rather than its own pool module
+because it owns the repair loop's lifecycle (including the final
+full-mech footprint recompute), not just one node's regeneration --
+same reasoning run_level_1_2_repair()'s own docstring already gives.
 """
 
 import os
@@ -90,13 +99,14 @@ import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from relay.emitter import emit_event
-from eo.mech_validator import validate_layout, LEVEL_0_1, LEVEL_1_2
+from eo.mech_validator import validate_layout, LEVEL_0_1, LEVEL_1_2, LEVEL_2_3
 
 # Master Guide: "Retry cap: 2 attempts per node."
 DEFAULT_MAX_RETRIES = 2
 
 
-def _subset_for_nodes(mech: dict, node_ids: set, level: str = LEVEL_0_1) -> dict:
+def _subset_for_nodes(mech: dict, node_ids: set, level: str = LEVEL_0_1,
+                       parts: list = None) -> dict:
     """Narrows `mech` down to just the placements the caller is about to
     re-validate, so a repair round only pays for what it just changed.
 
@@ -104,27 +114,69 @@ def _subset_for_nodes(mech: dict, node_ids: set, level: str = LEVEL_0_1) -> dict
     `mech["placements"]`/`part_id` directly, the one schema eo/
     mech_validator.py's validate_layout() originally understood.
 
-    Level 1->2 (G3e-4, this patch): `node_ids` are `subsection_id`s, not
-    `part_id`s. eo/mech_validator.py's LEVEL_1_2 path re-derives its own
-    subsection grouping from `mech["placements"]` (via
-    eo/mech_subsections.py's group_into_subsections()) on every call, so
-    the subset this function builds must include BOTH a kept
-    subsection's anchor placement AND its "mount_"-prefixed sibling --
-    dropping just the mount here would silently turn every requested
-    subsection back into a (mount-less) singleton for validate_layout()'s
-    own re-grouping, which would never re-check the collision that
-    triggered the retry in the first place. A subsection genuinely
-    without a mount sibling (shouldn't reach here at all -- see agents/
-    mech_subsection_pool.py's regenerate_subsection() docstring on why
-    LEVEL_1_2 only ever reports a collision violation for a two-member
-    subsection) just contributes no extra id, harmlessly.
+    Level 1->2 (G3e-4): `node_ids` are `subsection_id`s, not `part_id`s.
+    eo/mech_validator.py's LEVEL_1_2 path re-derives its own subsection
+    grouping from `mech["placements"]` (via eo/mech_subsections.py's
+    group_into_subsections()) on every call, so the subset this function
+    builds must include BOTH a kept subsection's anchor placement AND its
+    "mount_"-prefixed sibling -- dropping just the mount here would
+    silently turn every requested subsection back into a (mount-less)
+    singleton for validate_layout()'s own re-grouping, which would never
+    re-check the collision that triggered the retry in the first place. A
+    subsection genuinely without a mount sibling (shouldn't reach here at
+    all -- see agents/mech_subsection_pool.py's regenerate_subsection()
+    docstring on why LEVEL_1_2 only ever reports a collision violation
+    for a two-member subsection) just contributes no extra id, harmlessly.
 
-    Extending this to sections/device (G3f/G3g) is a lockstep change
-    alongside whatever those levels define their own `mech` subset shape
-    to be -- this function is where that next branch goes, not the loop
-    in run_repair_loop() below.
+    Level 2->3 (G3f-2, this patch): `node_ids` are `section_id`s. eo/
+    mech_validator.py's LEVEL_2_3 path re-derives its own section
+    grouping from `mech["placements"]` AND `parts` (via eo/
+    mech_sections.py's group_into_sections()) on every call, so this
+    branch needs `parts` too -- same reason eo/mech_validator.py's own
+    _checkable_sections() needs it. The subset built here is every
+    placement belonging to ANY subsection inside a kept section (resolved
+    via eo/mech_sections.py's subsections_for_section() down to eo/
+    mech_subsections.py's members_for_subsection() for each), same
+    "narrow to full membership, not just the anchor" reasoning the Level
+    1->2 branch above already applies one level down -- dropping a
+    section's non-anchor subsection here would silently turn the
+    re-validated section back into a singleton, missing exactly the
+    cross-subsection collision that triggered the retry. `parts=None`
+    (caller hasn't wired it through) degrades to an empty placements list
+    -- see eo/mech_validator.py's own _checkable_sections() docstring on
+    why that's the safe default rather than a crash.
+
+    Extending this to device (G3g) is a lockstep change alongside
+    whatever that level defines its own `mech` subset shape to be -- this
+    function is where that next branch goes, not the loop in
+    run_repair_loop() below.
     """
     placements = (mech or {}).get("placements") or []
+    if level == LEVEL_2_3:
+        if not parts:
+            return {"placements": []}
+        from eo.mech_sections import group_into_sections, subsections_for_section
+        from eo.mech_subsections import members_for_subsection
+
+        sections_by_id = {
+            s.get("section_id"): s for s in group_into_sections(mech, parts)
+            if isinstance(s, dict) and s.get("section_id")
+        }
+        keep_part_ids = set()
+        for node_id in node_ids:
+            section = sections_by_id.get(node_id)
+            if section is None:
+                continue
+            for subsection in subsections_for_section(mech, section):
+                for member in members_for_subsection(mech, subsection):
+                    if isinstance(member, dict) and member.get("part_id"):
+                        keep_part_ids.add(member["part_id"])
+        return {
+            "placements": [
+                p for p in placements
+                if isinstance(p, dict) and p.get("part_id") in keep_part_ids
+            ],
+        }
     if level == LEVEL_1_2:
         keep_ids = set()
         for node_id in node_ids:
@@ -146,7 +198,7 @@ def _subset_for_nodes(mech: dict, node_ids: set, level: str = LEVEL_0_1) -> dict
 
 def run_repair_loop(mech: dict, level: str, regenerate_node_fn,
                      session_id: str = None, path: str = None, domain: str = None,
-                     max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
+                     max_retries: int = DEFAULT_MAX_RETRIES, parts: list = None) -> dict:
     """Validates `mech` at `level`, and for as long as violations remain
     and nodes still have retries left, regenerates just the violating
     nodes and re-validates just those, capped at `max_retries` attempts
@@ -161,6 +213,13 @@ def run_repair_loop(mech: dict, level: str, regenerate_node_fn,
     on the last try can key off this. May raise; a raised exception is
     caught here and treated as "that attempt didn't fix it" (see module
     docstring's failure-modes section), never propagated.
+
+    `parts`: only meaningful at level=LEVEL_2_3 (G3f-2) -- threaded
+    straight through to both validate_layout() and _subset_for_nodes(),
+    which each need it to re-derive Level 2->3's category-based section
+    grouping (see eo/mech_validator.py's _checkable_sections() and this
+    module's own _subset_for_nodes() docstrings). Ignored at every other
+    level, same as those two functions themselves ignore it.
 
     Returns:
         {"valid": bool,           # True iff nothing is left flagged
@@ -181,7 +240,7 @@ def run_repair_loop(mech: dict, level: str, regenerate_node_fn,
                payload={"label": f"Mech Repair — Level {level}"})
     started = time.monotonic()
 
-    result = validate_layout(mech, level, session_id=session_id, path=path, domain=domain)
+    result = validate_layout(mech, level, session_id=session_id, path=path, domain=domain, parts=parts)
     if result.get("validator_error") is not None:
         # Nothing was actually checked -- no repair loop to run. Pass
         # the "couldn't validate" signal straight through rather than
@@ -238,8 +297,8 @@ def run_repair_loop(mech: dict, level: str, regenerate_node_fn,
 
         if regen_ok_ids:
             sub_result = validate_layout(
-                _subset_for_nodes(mech, regen_ok_ids, level=level), level,
-                session_id=session_id, path=path, domain=domain,
+                _subset_for_nodes(mech, regen_ok_ids, level=level, parts=parts), level,
+                session_id=session_id, path=path, domain=domain, parts=parts,
             )
             if sub_result.get("validator_error") is not None:
                 # Can no longer tell which of this round's regenerated
@@ -366,6 +425,97 @@ def run_level_1_2_repair(spec: dict, parts: list, session_id: str = None, path: 
             footprint = footprints.get(subsection.get("subsection_id"))
             if footprint is not None:
                 subsection["footprint"] = footprint
+
+    return result
+
+
+def run_level_2_3_repair(spec: dict, parts: list, session_id: str = None, path: str = None,
+                          domain: str = None, max_retries: int = DEFAULT_MAX_RETRIES,
+                          key_override=None) -> dict:
+    """G3f-2's Level 2->3 integration -- the "wire it all together" step
+    eo/mech_sections.py's group_into_sections() (G3f-1), agents/
+    mech_section_pool.py's regenerate_section() (this level's "generate"
+    half, also G3f-1) and eo/mech_validator.py's LEVEL_2_3 (G3f-2's own
+    "validate" half, above) were each built standalone for -- the exact
+    same shape run_level_1_2_repair() already establishes one level down,
+    with `parts` now threaded through everywhere LEVEL_2_3's category-
+    based grouping needs it. Meant to run synchronously from
+    agents.hardware_speccer.run_hardware_speccer(), called AFTER
+    agents/mech_section_pool.py's own run() (G3f-1's initial proposal
+    pass) has already populated every in-scope non-anchor subsection's
+    x/y/z once, so this function's own repair loop only ever regenerates
+    a section that's ALREADY been proposed at least once -- and AFTER
+    run_level_1_2_repair() below it, since Level 2->3 grouping and
+    validation both depend on `mech["subsections"][*]["footprint"]`
+    already being populated.
+
+    What this does, in order:
+      1. run_repair_loop(mech, LEVEL_2_3, regenerate_node_fn, parts=parts,
+         ...) -- validates every section, and for each cross-subsection
+         collision, calls agents/mech_section_pool.py's
+         regenerate_section() with the violation fed back as context,
+         capped at `max_retries` per section, exactly like every other
+         level's repair loop (see this module's own top docstring).
+      2. ONE final validate_layout(mech, LEVEL_2_3, parts=parts, ...) call
+         over the FULL mech -- needed for the same reason
+         run_level_1_2_repair()'s own step 2 needs it: run_repair_loop()'s
+         own per-round validate_layout() calls are deliberately narrowed
+         to just the regenerated nodes each round, so no single call
+         inside the loop ever holds every section's footprint at once.
+         eo/mech_validator.py's persistent-sandbox-session design (G3c)
+         makes this second batched call cheap once step 1 has already
+         warmed the session. Skipped if step 1 already reports a
+         `validator_error` -- the sandbox isn't usable right now, so a
+         second call would just fail the same way.
+      3. Writes every section's footprint from that final call onto
+         `mech["sections"]` (each entry's own new `footprint` key), via
+         eo/mech_sections.py's apply_section_grouping() -- G3g's own
+         input, per the Master Guide's Level 3->4 description ("places
+         sections relative to each other inside the enclosure
+         footprint"). A section the final call couldn't compute a
+         footprint for (every member of every one of its subsections
+         failed to build -- see eo/mech_validator.py's _check_section()
+         docstring) is left without a `footprint` key rather than one
+         filled with a fabricated value, same posture
+         run_level_1_2_repair() already holds for subsections.
+
+    Returns run_repair_loop()'s own result dict from step 1, unmodified --
+    the footprint-persisting step is a side effect on `spec`/`mech`, not a
+    change to what this function reports about repair outcomes.
+
+    Does NOT call eo/mech_validator.py's close_session() -- same "caller
+    owns the session lifecycle for the whole run" contract
+    run_level_1_2_repair()'s own docstring already establishes; whatever
+    ultimately drives the full Level 0->1 through Level 3->4 run is
+    responsible for closing it once, at the very end, not this one
+    level's driver.
+    """
+    from eo.mech_sections import apply_section_grouping
+    from eo.mech_validator import LEVEL_2_3 as _LEVEL_2_3
+    from agents.mech_section_pool import regenerate_section
+
+    mech = spec.get("mech") or {}
+
+    def regenerate_node_fn(mech_arg, node_id, violation, attempt):
+        regenerate_section(
+            mech_arg, node_id, violation, attempt, parts,
+            key_override=key_override, session_id=session_id, path=path, domain=domain,
+        )
+
+    result = run_repair_loop(
+        mech, _LEVEL_2_3, regenerate_node_fn,
+        session_id=session_id, path=path, domain=domain, max_retries=max_retries,
+        parts=parts,
+    )
+
+    if result.get("validator_error") is None:
+        final = validate_layout(mech, _LEVEL_2_3, session_id=session_id, path=path, domain=domain, parts=parts)
+        footprints = final.get("footprints") or {}
+        sections = apply_section_grouping(mech, parts)  # also stashes onto mech["sections"]
+        for section in sections:
+            footprint = footprints.get(section.get("section_id"))
+            if footprint is not None:
+                section["footprint"] = footprint
 
     return result
 
