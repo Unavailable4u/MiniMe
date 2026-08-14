@@ -321,17 +321,19 @@ the given list, electrical or 3D_PRINT/MISC, needs an entry.
 Every 3D_PRINT/MISC enclosure part in the given parts list (housing, \
 lid, each mount) needs its own "mech.placements" entry -- so the \
 layout draws an assembled enclosure instead of floating unrelated \
-cubes. The housing's placement should span the full enclosure \
-footprint starting at "z": 0 (it's the shell everything else sits \
-inside, not a part-sized box). The lid's placement goes directly atop \
-the housing -- same x/y footprint, "z" equal to the housing's own "d" \
-(depth/height), so it reads as a lid resting on top of the housing \
-rather than a second box floating beside it. Each mount's placement \
-goes inside the housing's footprint, positioned near whichever \
-subsystem part it mounts (e.g. the MCU's mount sits right under or \
-beside the MCU's own placement). Fasteners are numerous and too small \
-to meaningfully place individually -- do not give fastener parts a \
-"mech.placements" entry at all.
+cubes, and so it gets grouped into the Enclosure section downstream. \
+Give the housing_1 and lid_1 entries any reasonable rough placement -- \
+their exact x/y/z/w/h/d numbers do not matter and are not used: a \
+deterministic step later in the pipeline computes the housing and lid's \
+real size and position from what's actually packed inside and \
+overwrites whatever you put here, the same way your top-level \
+"mech.enclosure" w/h/d guess above is already only a rough starting \
+point for other parts' placement, never load-bearing for the housing/ \
+lid shell itself. Each mount's placement goes inside the housing's \
+footprint, positioned near whichever subsystem part it mounts (e.g. the \
+MCU's mount sits right under or beside the MCU's own placement). \
+Fasteners are numerous and too small to meaningfully place individually \
+-- do not give fastener parts a "mech.placements" entry at all.
 
 Respond with ONLY valid JSON, no markdown fences, no explanation, in \
 exactly this shape:
@@ -2035,6 +2037,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from agents.mech_section_pool import run as run_mech_section_pool
     from eo.mech_repair import run_level_1_2_repair, run_level_2_3_repair, run_level_3_4_repair
     from eo.mech_device import apply_device_merge
+    from eo.mech_enclosure import apply_enclosure_generation
     from eo.mech_validator import close_session as close_mech_validator_session
     try:
         # Level 0->1 -- gap fix, see the comment block above: validates/
@@ -2049,6 +2052,13 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         run_level_2_3_repair(spec, spec["parts"], session_id=session_id, domain=domain)
 
         apply_device_merge(spec.get("mech") or {}, spec["parts"])
+        # Patch 1.5: Phase 1's own pipeline wiring -- runs immediately
+        # after apply_device_merge() (needs its mech["device"]["footprint"]
+        # output, see eo/mech_enclosure.py's own apply_enclosure_generation()
+        # docstring) and BEFORE run_level_3_4_repair(), so containment/
+        # collision validation below checks against the real computed
+        # housing, not the LLM's now-discarded guess (Patch 1.4).
+        apply_enclosure_generation(spec.get("mech") or {}, spec["parts"])
         run_level_3_4_repair(spec, spec["parts"], session_id=session_id, domain=domain)
     finally:
         close_mech_validator_session(session_id)
