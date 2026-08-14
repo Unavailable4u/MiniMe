@@ -45,7 +45,8 @@ INTL_VENDOR_DOMAINS = ["aliexpress.com", "ebay.com"]
 # exact same 2 accounts one at a time -- see find_price()'s own
 # chain_override parameter below, which is what actually fixes that.
 FALLBACK_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
     # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
     # zai-glm-4.7 served now). See agents/generic_worker.py's

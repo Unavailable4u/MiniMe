@@ -1,0 +1,371 @@
+diff --git a/backend/agents/architecture_diagrammer.py b/backend/agents/architecture_diagrammer.py
+index aa9d68b..cc6714f 100644
+--- a/backend/agents/architecture_diagrammer.py
++++ b/backend/agents/architecture_diagrammer.py
+@@ -54,7 +54,8 @@ load_dotenv()
+ # back to (see run_architecture_diagrammer()'s real call below, which now
+ # builds a live, quota-ranked, multi-provider chain instead).
+ FALLBACK_CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
+ ]
+ 
+ ARCHITECTURE_DIAGRAM_KEY = "architecture_diagram"
+diff --git a/backend/agents/code_writers.py b/backend/agents/code_writers.py
+index fadb1a7..ca755f4 100644
+--- a/backend/agents/code_writers.py
++++ b/backend/agents/code_writers.py
+@@ -325,7 +325,8 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
+     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+     # its fallback step is removed here, not replaced.
+     chain = [
+-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     ]
+     try:
+         raw_text = generate_text(
+diff --git a/backend/agents/content_adapter_pool.py b/backend/agents/content_adapter_pool.py
+index 56f50e6..72ea36a 100644
+--- a/backend/agents/content_adapter_pool.py
++++ b/backend/agents/content_adapter_pool.py
+@@ -190,7 +190,8 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
+     # its fallback step is removed here, not replaced. This agent keeps
+     # whatever redundancy already sat in front of it (nothing else changes).
+     chain = [
+-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     ]
+     try:
+         raw_text = generate_text(
+diff --git a/backend/agents/dataset_analyst.py b/backend/agents/dataset_analyst.py
+index b35e411..630157f 100644
+--- a/backend/agents/dataset_analyst.py
++++ b/backend/agents/dataset_analyst.py
+@@ -61,7 +61,8 @@ load_dotenv()
+ # Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
+ # removed here, not replaced -- GitHub Models retired in full today.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+ ]
+ 
+diff --git a/backend/agents/deploy_config_writer.py b/backend/agents/deploy_config_writer.py
+index 3010c69..a07ae27 100644
+--- a/backend/agents/deploy_config_writer.py
++++ b/backend/agents/deploy_config_writer.py
+@@ -41,7 +41,8 @@ load_dotenv()
+ # Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
+ # removed here, not replaced -- GitHub Models retired in full today.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+ ]
+ 
+diff --git a/backend/agents/extraction_table_builder.py b/backend/agents/extraction_table_builder.py
+index d926167..9d7176b 100644
+--- a/backend/agents/extraction_table_builder.py
++++ b/backend/agents/extraction_table_builder.py
+@@ -62,7 +62,10 @@ load_dotenv()
+ # much smaller, cheaper completion (a handful of short fields, not a
+ # whole module), not because reliability matters less.
+ MODELS = [
+-    "llama-3.3-70b-versatile",
++    # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
++    # models Groq's decommission notice suggested in its place.
++    "openai/gpt-oss-120b",
++    "qwen/qwen3.6-27b",
+     "llama-3.1-8b-instant",
+ ]
+ 
+diff --git a/backend/agents/hardware_speccer.py b/backend/agents/hardware_speccer.py
+index 0a87226..d031db2 100644
+--- a/backend/agents/hardware_speccer.py
++++ b/backend/agents/hardware_speccer.py
+@@ -132,7 +132,8 @@ load_dotenv()
+ # run_hardware_speccer() below, which now builds a live, quota-ranked,
+ # multi-provider chain instead.
+ FALLBACK_CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
+ ]
+ 
+ 
+diff --git a/backend/agents/idea_planner.py b/backend/agents/idea_planner.py
+index 407300d..e6dc870 100644
+--- a/backend/agents/idea_planner.py
++++ b/backend/agents/idea_planner.py
+@@ -8,13 +8,15 @@ from utils.llm_client import generate_text
+ load_dotenv()
+ 
+ # Fallback chain per Part 4, agent #1 of the v5 blueprint:
+-# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b
++# Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b (migrated off llama-3.3-
++# 70b-versatile, decommissioned by Groq) -> Cerebras gpt-oss-120b
+ # (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s; gpt-oss-120b
+ # is the one model guaranteed on Cerebras's public production tier.)
+ # Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
+ # removed here, not replaced -- GitHub Models retired in full today.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+ ]
+ 
+diff --git a/backend/agents/note_table_builder.py b/backend/agents/note_table_builder.py
+index 14e0b74..6e442ec 100644
+--- a/backend/agents/note_table_builder.py
++++ b/backend/agents/note_table_builder.py
+@@ -84,7 +84,10 @@ from utils.llm_client import generate_text
+ # reasoning agents/extraction_table_builder.py already gives: extraction
+ # is a small, cheap completion, not a whole module.
+ MODELS = [
+-    "llama-3.3-70b-versatile",
++    # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
++    # models Groq's decommission notice suggested in its place.
++    "openai/gpt-oss-120b",
++    "qwen/qwen3.6-27b",
+     "llama-3.1-8b-instant",
+ ]
+ 
+diff --git a/backend/agents/output_organizer.py b/backend/agents/output_organizer.py
+index b42c167..7492f57 100644
+--- a/backend/agents/output_organizer.py
++++ b/backend/agents/output_organizer.py
+@@ -68,7 +68,8 @@ from eo.tracing import get_tracer, TRACING_ENABLED
+ # to need a third hop is far more likely after every other role in the
+ # run already made its own calls first.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+     # Env-audit fix: the account is named MISTRAL_API_KEY (bare, "account 1"
+     # per .env.example's own comment), not MISTRAL_API_KEY_1 -- that name
+diff --git a/backend/agents/part_price_finder.py b/backend/agents/part_price_finder.py
+index a319dc0..a567951 100644
+--- a/backend/agents/part_price_finder.py
++++ b/backend/agents/part_price_finder.py
+@@ -45,7 +45,8 @@ INTL_VENDOR_DOMAINS = ["aliexpress.com", "ebay.com"]
+ # exact same 2 accounts one at a time -- see find_price()'s own
+ # chain_override parameter below, which is what actually fixes that.
+ FALLBACK_CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
+     # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
+     # zai-glm-4.7 served now). See agents/generic_worker.py's
+diff --git a/backend/agents/prompt_writer.py b/backend/agents/prompt_writer.py
+index 7b1db30..3a6b99a 100644
+--- a/backend/agents/prompt_writer.py
++++ b/backend/agents/prompt_writer.py
+@@ -101,7 +101,8 @@ def _maybe_add_monitoring_module(specs: dict, session_id: str) -> dict:
+ # agent hardcoded onto that same key) -- see run()'s real call below,
+ # which now builds a live, quota-ranked, multi-provider chain instead.
+ FALLBACK_CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+ ]
+ 
+ SYSTEM_PROMPT = """You are a technical spec writer for an autonomous build loop.
+diff --git a/backend/agents/prompt_writer_lean.py b/backend/agents/prompt_writer_lean.py
+index 1d01046..68be346 100644
+--- a/backend/agents/prompt_writer_lean.py
++++ b/backend/agents/prompt_writer_lean.py
+@@ -11,7 +11,8 @@ Writer, with the concurrency caveat flagged in Part 12.1 — that's honored
+ here literally: GROQ_API_KEY is the same env var agents/prompt_writer.py
+ reads. Unlike the production version (which calls Groq directly with no
+ fallback), this one uses the full CHAIN/fallback pattern per Part 2.4's
+-table: originally Groq llama-3.3-70b-versatile -> GitHub Models
++table: originally Groq llama-3.3-70b-versatile (now decommissioned by
++Groq; migrated to openai/gpt-oss-120b -> qwen/qwen3.6-27b) -> GitHub Models
+ gpt-4.1-mini.
+ 
+ 2026-08-12 fix: GitHub Models retired (see the §4 note below), which had
+@@ -60,7 +61,8 @@ from utils.llm_client import generate_text
+ # instead, same approach as reviewer_fixer_lean.py's Groq -> Cerebras
+ # CHAIN.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+ ]
+ 
+diff --git a/backend/agents/report_writer.py b/backend/agents/report_writer.py
+index 8a3abc9..a688eff 100644
+--- a/backend/agents/report_writer.py
++++ b/backend/agents/report_writer.py
+@@ -9,10 +9,14 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
+ load_dotenv()
+ 
+ # Fallback chain per Part 4, agent #17 of the v5 blueprint:
+-# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b (key #9)
+-# (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s.)
++# Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b -> Cerebras gpt-oss-120b (key #9)
++# (Groq's llama-3.3-70b-versatile was decommissioned; migrated to the two
++# models above. Cerebras's llama-3.3-70b was separately deprecated Feb
++# 2026 and now 404s -- unrelated model, unrelated provider, noted here
++# only because it's easy to conflate the two.)
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
+ ]
+ 
+diff --git a/backend/agents/responder.py b/backend/agents/responder.py
+index eaa40fe..1a4c6e0 100644
+--- a/backend/agents/responder.py
++++ b/backend/agents/responder.py
+@@ -57,7 +57,8 @@ from eo import conversation_memory   # NEW — Part 23 fix
+ # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+ # its fallback step is removed here, not replaced.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
+ ]
+ 
+ SYSTEM_PROMPT = """You are a fast, direct assistant answering a single trivial \
+@@ -142,7 +143,8 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path:
+     # account doesn't take Responder down the way it used to; key_override
+     # (above) only ever affects the primary step, same as before.
+     chain = [
+-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": primary_key_env},
++        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": primary_key_env},
++        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": primary_key_env},
+         {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+     ]
+ 
+diff --git a/backend/agents/reviewer_fixer_lean.py b/backend/agents/reviewer_fixer_lean.py
+index cd0de1d..0fd0222 100644
+--- a/backend/agents/reviewer_fixer_lean.py
++++ b/backend/agents/reviewer_fixer_lean.py
+@@ -9,7 +9,8 @@ exist for a multi-module tier-3 cycle.
+ Part 2.4's table: "mirrors the Idea Planner's existing 3-tier fallback
+ chain, reused here since both jobs are single-pass judgment calls" — so
+ this CHAIN is copied from agents/idea_planner.py's, not hand-derived:
+-Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b -> GitHub Models
++Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b (migrated off llama-3.3-70b-
++versatile, decommissioned by Groq) -> Cerebras gpt-oss-120b -> GitHub Models
+ gpt-4.1-mini. (Same deprecation note as idea_planner.py: Cerebras's
+ original llama-3.3-70b 404s now, gpt-oss-120b is the current guaranteed
+ model.)
+@@ -32,7 +33,8 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
+ # its fallback step is removed here, not replaced. The Groq -> Cerebras
+ # redundancy above is unchanged.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+ ]
+ 
+diff --git a/backend/agents/schema_diagrammer.py b/backend/agents/schema_diagrammer.py
+index 534e6b6..7d58c98 100644
+--- a/backend/agents/schema_diagrammer.py
++++ b/backend/agents/schema_diagrammer.py
+@@ -32,7 +32,8 @@ load_dotenv()
+ # call below, which now builds a live, quota-ranked, multi-provider
+ # chain instead.
+ FALLBACK_CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
+ ]
+ 
+ SCHEMA_DIAGRAM_KEY = "schema_diagram"
+diff --git a/backend/agents/structure_architect.py b/backend/agents/structure_architect.py
+index ff09866..b1dd118 100644
+--- a/backend/agents/structure_architect.py
++++ b/backend/agents/structure_architect.py
+@@ -67,8 +67,10 @@ load_dotenv()
+ # generate_text() instead of a hand-rolled client so this call also gets
+ # usage-logged -- previously it logged nothing.
+ CHAIN = [
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY_9", "timeout": 30},
+-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY_9", "timeout": 30},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY_9", "timeout": 30},
++    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
++    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
+     # Gemini/Mistral/HF rollout, Patch 4 (§4b): this role had exactly one
+     # real account (GROQ_API_KEY_9) plus one shared-pool fallback
+     # (GROQ_API_KEY) before this -- AGENT_CAPABILITIES tags do nothing
+diff --git a/backend/utils/llm_client.py b/backend/utils/llm_client.py
+index cd5ccaf..bdfab4c 100644
+--- a/backend/utils/llm_client.py
++++ b/backend/utils/llm_client.py
+@@ -15,7 +15,8 @@ Each agent defines its own chain as a list of steps. Most providers
+ use "key_env":
+ 
+     CHAIN = [
+-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
++        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
++        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+         {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
+     ]
+ 
+@@ -53,8 +54,9 @@ models each chain is pinned to today, not just the provider in the
+ abstract:
+ 
+   - Groq: yes, full tools/tool_choice/tool_calls, including parallel
+-    tool calls. llama-3.3-70b-versatile (the model most chains use)
+-    supports it.
++    tool calls. openai/gpt-oss-120b and qwen/qwen3.6-27b (the models
++    most chains use now that llama-3.3-70b-versatile is decommissioned)
++    support it.
+   - Cerebras: yes. gpt-oss-120b (the model most chains use) supports
+     tools, but REJECTS a request that sets both "tools" and
+     "response_format" in the same call -- a step that wants both will
+@@ -131,9 +133,11 @@ from utils.embedding import embed_text, embed_text_with_fallback  # noqa: F401
+ #       has its own RPM/RPD/TPM/TPD, and this repo mixes several models
+ #       per provider.
+ #   1c. The old numbers (14400 for groq/cerebras) were never right for
+-#       the models actually in use -- llama-3.3-70b-versatile's real RPD
+-#       is 1,000, not 14,400 (that figure belongs to
+-#       llama-3.1-8b-instant, which nothing here calls).
++#       the models actually in use -- llama-3.3-70b-versatile (now
++#       decommissioned by Groq; replaced by openai/gpt-oss-120b and
++#       qwen/qwen3.6-27b below) had a real RPD of 1,000, not 14,400
++#       (that figure belongs to llama-3.1-8b-instant, which nothing
++#       here calls).
+ # Per-model, per-provider now. get_quota_snapshot() resolves which model
+ # a given key_id actually used today (from the usage record itself, or a
+ # fallback) and looks up QUOTA_CONFIG[provider][model] -- see
+@@ -620,8 +624,9 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
+ # Phase 2 step 2.5 — real (non-test-harness) tool-calling classification.
+ #
+ # scripts/test_tool_calling.py (steps 2.3/2.4) proved out a system prompt +
+-# tools array against Groq's llama-3.3-70b-versatile specifically, and
+-# talks to Groq directly via the `openai` SDK, deliberately bypassing this
++# tools array against Groq's openai/gpt-oss-120b specifically (migrated
++# off llama-3.3-70b-versatile, which Groq has decommissioned), and talks
++# to Groq directly via the `openai` SDK, deliberately bypassing this
+ # module's whole fallback chain (see that script's own header comment).
+ #
+ # generate_text()/_call_step()/_call_cloudflare_step() above still don't
+@@ -643,7 +648,11 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
+ # a dict with an "error" key instead of an exception.
+ # --------------------------------------------------------------------------
+ 
+-CLASSIFY_INTENT_MODEL = "llama-3.3-70b-versatile"
++# llama-3.3-70b-versatile decommissioned by Groq; this single-model, no-
++# fallback path (see block comment above) doesn't have room for a second
++# model, so openai/gpt-oss-120b was picked as the closer capability match
++# of the two suggested replacements -- qwen/qwen3.6-27b is used elsewhere.
++CLASSIFY_INTENT_MODEL = "openai/gpt-oss-120b"
+ CLASSIFY_INTENT_KEY_ENV = "GROQ_API_KEY"  # shared default key, same as most chains above
+ 
+ 

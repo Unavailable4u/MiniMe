@@ -57,7 +57,8 @@ from eo import conversation_memory   # NEW — Part 23 fix
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
 # its fallback step is removed here, not replaced.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
 ]
 
 SYSTEM_PROMPT = """You are a fast, direct assistant answering a single trivial \
@@ -142,7 +143,8 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     # account doesn't take Responder down the way it used to; key_override
     # (above) only ever affects the primary step, same as before.
     chain = [
-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": primary_key_env},
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": primary_key_env},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": primary_key_env},
         {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
     ]
 

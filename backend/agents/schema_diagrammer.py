@@ -32,7 +32,8 @@ load_dotenv()
 # call below, which now builds a live, quota-ranked, multi-provider
 # chain instead.
 FALLBACK_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
 ]
 
 SCHEMA_DIAGRAM_KEY = "schema_diagram"

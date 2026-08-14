@@ -15,7 +15,8 @@ Each agent defines its own chain as a list of steps. Most providers
 use "key_env":
 
     CHAIN = [
-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
         {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
     ]
 
@@ -53,8 +54,9 @@ models each chain is pinned to today, not just the provider in the
 abstract:
 
   - Groq: yes, full tools/tool_choice/tool_calls, including parallel
-    tool calls. llama-3.3-70b-versatile (the model most chains use)
-    supports it.
+    tool calls. openai/gpt-oss-120b and qwen/qwen3.6-27b (the models
+    most chains use now that llama-3.3-70b-versatile is decommissioned)
+    support it.
   - Cerebras: yes. gpt-oss-120b (the model most chains use) supports
     tools, but REJECTS a request that sets both "tools" and
     "response_format" in the same call -- a step that wants both will
@@ -131,9 +133,11 @@ from utils.embedding import embed_text, embed_text_with_fallback  # noqa: F401
 #       has its own RPM/RPD/TPM/TPD, and this repo mixes several models
 #       per provider.
 #   1c. The old numbers (14400 for groq/cerebras) were never right for
-#       the models actually in use -- llama-3.3-70b-versatile's real RPD
-#       is 1,000, not 14,400 (that figure belongs to
-#       llama-3.1-8b-instant, which nothing here calls).
+#       the models actually in use -- llama-3.3-70b-versatile (now
+#       decommissioned by Groq; replaced by openai/gpt-oss-120b and
+#       qwen/qwen3.6-27b below) had a real RPD of 1,000, not 14,400
+#       (that figure belongs to llama-3.1-8b-instant, which nothing
+#       here calls).
 # Per-model, per-provider now. get_quota_snapshot() resolves which model
 # a given key_id actually used today (from the usage record itself, or a
 # fallback) and looks up QUOTA_CONFIG[provider][model] -- see
@@ -620,8 +624,9 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
 # Phase 2 step 2.5 — real (non-test-harness) tool-calling classification.
 #
 # scripts/test_tool_calling.py (steps 2.3/2.4) proved out a system prompt +
-# tools array against Groq's llama-3.3-70b-versatile specifically, and
-# talks to Groq directly via the `openai` SDK, deliberately bypassing this
+# tools array against Groq's openai/gpt-oss-120b specifically (migrated
+# off llama-3.3-70b-versatile, which Groq has decommissioned), and talks
+# to Groq directly via the `openai` SDK, deliberately bypassing this
 # module's whole fallback chain (see that script's own header comment).
 #
 # generate_text()/_call_step()/_call_cloudflare_step() above still don't
@@ -643,7 +648,11 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
 # a dict with an "error" key instead of an exception.
 # --------------------------------------------------------------------------
 
-CLASSIFY_INTENT_MODEL = "llama-3.3-70b-versatile"
+# llama-3.3-70b-versatile decommissioned by Groq; this single-model, no-
+# fallback path (see block comment above) doesn't have room for a second
+# model, so openai/gpt-oss-120b was picked as the closer capability match
+# of the two suggested replacements -- qwen/qwen3.6-27b is used elsewhere.
+CLASSIFY_INTENT_MODEL = "openai/gpt-oss-120b"
 CLASSIFY_INTENT_KEY_ENV = "GROQ_API_KEY"  # shared default key, same as most chains above
 
 

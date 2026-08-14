@@ -54,7 +54,8 @@ load_dotenv()
 # back to (see run_architecture_diagrammer()'s real call below, which now
 # builds a live, quota-ranked, multi-provider chain instead).
 FALLBACK_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
 ]
 
 ARCHITECTURE_DIAGRAM_KEY = "architecture_diagram"

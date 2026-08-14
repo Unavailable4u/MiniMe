@@ -68,7 +68,8 @@ from eo.tracing import get_tracer, TRACING_ENABLED
 # to need a third hop is far more likely after every other role in the
 # run already made its own calls first.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
     # Env-audit fix: the account is named MISTRAL_API_KEY (bare, "account 1"
     # per .env.example's own comment), not MISTRAL_API_KEY_1 -- that name

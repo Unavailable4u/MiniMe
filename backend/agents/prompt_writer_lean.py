@@ -11,7 +11,8 @@ Writer, with the concurrency caveat flagged in Part 12.1 — that's honored
 here literally: GROQ_API_KEY is the same env var agents/prompt_writer.py
 reads. Unlike the production version (which calls Groq directly with no
 fallback), this one uses the full CHAIN/fallback pattern per Part 2.4's
-table: originally Groq llama-3.3-70b-versatile -> GitHub Models
+table: originally Groq llama-3.3-70b-versatile (now decommissioned by
+Groq; migrated to openai/gpt-oss-120b -> qwen/qwen3.6-27b) -> GitHub Models
 gpt-4.1-mini.
 
 2026-08-12 fix: GitHub Models retired (see the §4 note below), which had
@@ -60,7 +61,8 @@ from utils.llm_client import generate_text
 # instead, same approach as reviewer_fixer_lean.py's Groq -> Cerebras
 # CHAIN.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
 ]
 

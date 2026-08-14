@@ -84,7 +84,10 @@ from utils.llm_client import generate_text
 # reasoning agents/extraction_table_builder.py already gives: extraction
 # is a small, cheap completion, not a whole module.
 MODELS = [
-    "llama-3.3-70b-versatile",
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
+    # models Groq's decommission notice suggested in its place.
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.6-27b",
     "llama-3.1-8b-instant",
 ]
 
