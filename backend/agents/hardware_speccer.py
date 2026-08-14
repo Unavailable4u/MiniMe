@@ -1827,6 +1827,95 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from agents.mech_primitive_pool import run as run_mech_primitive_pool
     run_mech_primitive_pool(spec, spec["parts"], session_id=session_id, domain=domain)
 
+    # G3i (Master Guide, "G3/G4. Hierarchical parallel build + validate",
+    # pipeline wiring): the previously-standalone Level 1->2 -> 2->3 ->
+    # 3->4 generate/validate/repair tree -- agents/mech_subsection_pool.py
+    # (G3e-2), eo/mech_repair.py's run_level_1_2_repair() (G3e-4), agents/
+    # mech_section_pool.py (G3f-1), eo/mech_repair.py's
+    # run_level_2_3_repair() (G3f-2), eo/mech_device.py's
+    # apply_device_merge() (G3g, first half), and eo/mech_repair.py's
+    # run_level_3_4_repair() (G3g, second half) -- actually driven from
+    # this pipeline, in sequence, for the first time. Deferred imports,
+    # same "invoked from here, so a module-level import would be
+    # circular" reasoning as run_mech_primitive_pool just above -- agents/
+    # mech_subsection_pool.py's own module docstring documents the
+    # identical circular-import edge for its own deferred `from
+    # agents.hardware_speccer import _parse_mount_spec`.
+    #
+    # Level 1->2:
+    #   1. run_mech_subsection_pool(): pairs every part with its own
+    #      G0-created mount (or leaves a singleton subsection alone) and
+    #      proposes each ungrounded mount's relative offset via one LLM
+    #      call per pair -- see that module's own run() docstring for the
+    #      no-op/skip cases (singleton subsections, mount_spec already
+    #      grounded, no in-scope targets at all).
+    #   2. run_level_1_2_repair(): validates every subsection via headless
+    #      FreeCAD (does a part collide with its own mount?), regenerates
+    #      just the violating ones through agents/mech_subsection_pool.py's
+    #      regenerate_subsection() (capped at 2 retries, flagged-not-
+    #      blocked past the cap), and persists each subsection's validated
+    #      footprint onto mech["subsections"] -- Level 2->3's own input.
+    #
+    # Level 2->3 -- called AFTER Level 1->2 settles, since its section
+    # grouping and validation both read `mech["subsections"][*]
+    # ["footprint"]`:
+    #   3. run_mech_section_pool(): groups Level 2's subsections into
+    #      Level 3's five functional sections and proposes every non-
+    #      anchor subsection's offset relative to its section's own
+    #      anchor, one LLM call per section (2+ checkable subsections) --
+    #      see that module's own run() docstring for the no-op cases.
+    #   4. run_level_2_3_repair(): validates every section via headless
+    #      FreeCAD (do two different subsections in the same section
+    #      collide?), regenerates just the violating ones through agents/
+    #      mech_section_pool.py's regenerate_section(), and persists each
+    #      section's validated footprint onto mech["sections"] -- Level
+    #      3->4's own input.
+    #
+    # Level 3->4 -- called AFTER Level 2->3 settles, since the device
+    # merge below reads every section's own validated `footprint`:
+    #   5. apply_device_merge(): the deterministic, LLM-free front/center/
+    #      edge rule -- positions every non-Enclosure section's real
+    #      member placements relative to each other inside the Enclosure
+    #      section's own validated footprint, and stashes the plan onto
+    #      mech["device"]. No worker-pool sibling at this level -- see
+    #      that module's own docstring on why a fixed, five-node
+    #      deterministic rule replaces an LLM call here.
+    #   6. run_level_3_4_repair(): validates every non-Enclosure section
+    #      via headless FreeCAD against the Enclosure section's own
+    #      footprint (global containment) and against every other section
+    #      (cross-section collision), regenerates -- clips, never a fresh
+    #      LLM proposal, see that function's own docstring on why -- just
+    #      the violating ones via _clamp_section_into_container(), and
+    #      re-runs apply_device_merge() once more at the end to re-stash
+    #      the FINAL device layout plan onto mech["device"]. This is the
+    #      last level in the tree (Master Guide: "closes out the tree").
+    #
+    # This whole block is wrapped in one try/finally, not one per level,
+    # since eo/mech_validator.py's persistent per-run FreeCAD sandbox
+    # session (see that module's own docstring on why one session stays
+    # alive for the whole run rather than one per call) is opened lazily
+    # on first use by Level 1->2's own validate_layout() call and should
+    # stay warm through every later level's own validate_layout() calls
+    # instead of being torn down and re-opened between them -- so
+    # close_session() only runs once, here, after Level 3->4 (the actual
+    # last step), "success or abort," per the Master Guide, regardless of
+    # which level (if any) a mid-run exception came from.
+    from agents.mech_subsection_pool import run as run_mech_subsection_pool
+    from agents.mech_section_pool import run as run_mech_section_pool
+    from eo.mech_repair import run_level_1_2_repair, run_level_2_3_repair, run_level_3_4_repair
+    from eo.mech_device import apply_device_merge
+    from eo.mech_validator import close_session as close_mech_validator_session
+    try:
+        run_mech_subsection_pool(spec, spec["parts"], session_id=session_id, domain=domain)
+        run_level_1_2_repair(spec, spec["parts"], session_id=session_id, domain=domain)
+
+        run_mech_section_pool(spec, spec["parts"], session_id=session_id, domain=domain)
+        run_level_2_3_repair(spec, spec["parts"], session_id=session_id, domain=domain)
+
+        apply_device_merge(spec.get("mech") or {}, spec["parts"])
+        run_level_3_4_repair(spec, spec["parts"], session_id=session_id, domain=domain)
+    finally:
+        close_mech_validator_session(session_id)
 
     # Step 3 of the wiring-detail fix: deterministically render the
     # pin-level flowchart off spec["wiring"] (nodes/edges, now carrying
