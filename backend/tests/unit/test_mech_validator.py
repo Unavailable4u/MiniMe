@@ -8,7 +8,8 @@ mech_validator.py --
   - _tolerance_for()'s confidence-aware buffer mapping, including the
     "typical" fallback for missing/unrecognized confidence
   - _build_payload()'s shape
-  - validate_layout()'s level gate (only LEVEL_0_1 implemented so far)
+  - validate_layout()'s level gate (LEVEL_0_1/LEVEL_1_2/LEVEL_2_3
+    implemented so far)
   - validate_layout()'s no-op path when nothing is checkable yet (never
     even touches the sandbox)
   - validate_layout()'s persistent-session reuse across calls with the
@@ -17,6 +18,11 @@ mech_validator.py --
     crash) when the sandbox/FreeCAD pipeline itself blows up, and that
     the wedged session gets closed so the next call gets a fresh one
   - close_session()'s no-op-when-nothing-to-close safety
+  - _checkable_subsections()/_build_subsection_payload()'s Level 1->2
+    scope (G3e-3)
+  - _checkable_sections()/_build_section_payload()'s Level 2->3 scope
+    (G3f-2, this patch) -- category-based section grouping via `parts`,
+    degrading to "nothing checkable" when `parts` is absent
 
 Same "fake out the SDK object itself, no real E2B/FreeCAD network calls"
 approach tests/integration/test_sandbox_tester.py already uses for
@@ -118,11 +124,12 @@ def test_build_payload_defaults_missing_dims_to_zero():
 # ---------------------------------------------------------------------------
 
 def test_validate_layout_rejects_unimplemented_level():
-    # "1->2" (LEVEL_1_2) is now implemented as of G3e-3 -- use a level
-    # still genuinely unimplemented (Level 2->3, landing with G3f) so
-    # this test keeps covering the actual gate, not a level that moved.
+    # "1->2" (LEVEL_1_2) and "2->3" (LEVEL_2_3) are now implemented as of
+    # G3e-3/G3f-2 -- use a level still genuinely unimplemented (Level
+    # 3->4, landing with G3g) so this test keeps covering the actual
+    # gate, not a level that moved.
     with pytest.raises(NotImplementedError):
-        mv.validate_layout({"placements": []}, "2->3")
+        mv.validate_layout({"placements": []}, "3->4")
 
 
 def test_validate_layout_noop_when_nothing_checkable(monkeypatch):
@@ -469,3 +476,215 @@ def test_check_subsection_singleton_has_no_collision_check():
     collision_mm3, footprint = ns["_check_subsection"](subsection)
     assert collision_mm3 == 0.0
     assert footprint == {"x": 0.0, "y": 0.0, "z": 0.0, "w": 30.0, "h": 20.0, "d": 5.0}
+
+
+# ---------------------------------------------------------------------------
+# Level 2->3 (G3f-2) -- _checkable_sections / _build_section_payload
+# ---------------------------------------------------------------------------
+
+_SENSOR_1_MEMBER = {
+    "part_id": "sensor_1", "x": 0, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5,
+    "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 15, "h": 10, "d": 5},
+                     "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box"}],
+}
+_SENSOR_2_MEMBER = {
+    "part_id": "sensor_2", "x": 40, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5,
+    "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 15, "h": 10, "d": 5},
+                     "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box"}],
+}
+_BATTERY_MEMBER = {
+    "part_id": "battery_1", "x": 100, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10,
+    "primitives": [{"offset": {"x": 0, "y": 0, "z": 0}, "size": {"w": 20, "h": 10, "d": 10},
+                     "rotation": {"x": 0, "y": 0, "z": 0}, "shape": "box"}],
+}
+_SECTION_PARTS = [
+    {"id": "sensor_1", "category": "sensor"},
+    {"id": "sensor_2", "category": "sensor"},
+    {"id": "battery_1", "category": "power"},
+]
+
+
+def test_checkable_sections_groups_by_category():
+    mech = {"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER, _BATTERY_MEMBER]}
+    checkable = mv._checkable_sections(mech, _SECTION_PARTS)
+    by_id = {s["section_id"]: s for s in checkable}
+    assert set(by_id) == {"Sensing", "Power"}
+    assert [s["subsection_id"] for s in by_id["Sensing"]["subsections"]] == ["sensor_1", "sensor_2"]
+    assert [s["subsection_id"] for s in by_id["Power"]["subsections"]] == ["battery_1"]
+
+
+def test_checkable_sections_requires_parts():
+    mech = {"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER]}
+    assert mv._checkable_sections(mech, None) == []
+    assert mv._checkable_sections(mech, []) == []
+
+
+def test_checkable_sections_drops_subsections_with_no_composed_members():
+    uncomposed_sensor_2 = {**_SENSOR_2_MEMBER, "primitives": []}
+    mech = {"placements": [_SENSOR_1_MEMBER, uncomposed_sensor_2, _BATTERY_MEMBER]}
+    checkable = mv._checkable_sections(mech, _SECTION_PARTS)
+    by_id = {s["section_id"]: s for s in checkable}
+    # sensor_2 isn't composed yet -- Sensing still shows up (sensor_1 is),
+    # but with just the one checkable subsection, not two.
+    assert [s["subsection_id"] for s in by_id["Sensing"]["subsections"]] == ["sensor_1"]
+
+
+def test_build_section_payload_shape():
+    checkable = mv._checkable_sections(
+        {"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER]}, _SECTION_PARTS[:2],
+    )
+    payload = mv._build_section_payload(checkable)
+    assert payload["level"] == mv.LEVEL_2_3
+    assert len(payload["sections"]) == 1
+    section = payload["sections"][0]
+    assert section["section_id"] == "Sensing"
+    assert [s["subsection_id"] for s in section["subsections"]] == ["sensor_1", "sensor_2"]
+    assert section["subsections"][1]["members"][0]["x"] == 40
+
+
+# ---------------------------------------------------------------------------
+# Level 2->3 (G3f-2) -- validate_layout() end-to-end via the fake sandbox
+# ---------------------------------------------------------------------------
+
+def test_validate_layout_level_2_3_noop_when_nothing_checkable(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mv.Sandbox, "create", staticmethod(lambda **kw: calls.append(kw) or None))
+    result = mv.validate_layout({"placements": []}, mv.LEVEL_2_3, parts=_SECTION_PARTS)
+    assert result == {"valid": True, "violations": [], "footprints": {}}
+    assert calls == []
+
+
+def test_validate_layout_level_2_3_noop_without_parts(monkeypatch):
+    # Same no-op path, reached via the "parts wasn't wired through yet"
+    # degrade rather than an empty mech -- see _checkable_sections()'s
+    # own docstring.
+    calls = []
+    monkeypatch.setattr(mv.Sandbox, "create", staticmethod(lambda **kw: calls.append(kw) or None))
+    result = mv.validate_layout({"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER]}, mv.LEVEL_2_3)
+    assert result == {"valid": True, "violations": [], "footprints": {}}
+    assert calls == []
+
+
+def test_validate_layout_level_2_3_clean_run_reports_footprints(fake_sandbox_factory):
+    fake_sandbox_factory(output_json=json.dumps({
+        "violations": [],
+        "footprints": {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}},
+    }))
+    result = mv.validate_layout(
+        {"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER]}, mv.LEVEL_2_3, parts=_SECTION_PARTS[:2],
+    )
+    assert result["valid"] is True
+    assert result["violations"] == []
+    assert result["footprints"] == {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}}
+
+
+def test_validate_layout_level_2_3_reports_collision_violation(fake_sandbox_factory):
+    fake_sandbox_factory(output_json=json.dumps({
+        "violations": [{"node_id": "Sensing", "issue": "subsections collide (~9.0 mm^3 overlap)"}],
+        "footprints": {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}},
+    }))
+    result = mv.validate_layout(
+        {"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER]}, mv.LEVEL_2_3, parts=_SECTION_PARTS[:2],
+    )
+    assert result["valid"] is False
+    assert result["violations"][0]["node_id"] == "Sensing"
+    assert result["footprints"]  # still reported even though it collided
+
+
+def test_validate_layout_level_2_3_fails_open_with_empty_footprints(monkeypatch):
+    def _broken_create(**kwargs):
+        class _Broken:
+            @property
+            def commands(self):
+                raise RuntimeError("sandbox unreachable")
+
+            def kill(self):
+                pass
+        return _Broken()
+
+    monkeypatch.setattr(mv.Sandbox, "create", staticmethod(_broken_create))
+    result = mv.validate_layout(
+        {"placements": [_SENSOR_1_MEMBER, _SENSOR_2_MEMBER]}, mv.LEVEL_2_3,
+        parts=_SECTION_PARTS[:2], session_id="run-z",
+    )
+
+    assert result["valid"] is True
+    assert result["violations"] == []
+    assert result["footprints"] == {}
+    assert "validator_error" in result
+
+
+# ---------------------------------------------------------------------------
+# _check_section (the code that actually runs INSIDE FreeCAD) -- exercised
+# directly here rather than via the sandbox, same approach _check_subsection
+# uses above. Skipped automatically if FreeCAD isn't importable.
+# ---------------------------------------------------------------------------
+
+@_needs_freecad
+def test_check_section_no_collision_reports_zero_and_footprint():
+    ns = _run_freecad_script_namespace()
+    section = {
+        "subsections": [
+            {"subsection_id": "sensor_1", "members": [
+                {"x": 0, "y": 0, "z": 0, "primitives": [_SENSOR_1_MEMBER["primitives"][0]]},
+            ]},
+            {"subsection_id": "sensor_2", "members": [
+                {"x": 40, "y": 0, "z": 0, "primitives": [_SENSOR_2_MEMBER["primitives"][0]]},
+            ]},
+        ],
+    }
+    collision_mm3, footprint = ns["_check_section"](section)
+    assert collision_mm3 == 0.0
+    assert footprint == {"x": 0.0, "y": 0.0, "z": 0.0, "w": 55.0, "h": 10.0, "d": 5.0}
+
+
+@_needs_freecad
+def test_check_section_overlapping_subsections_reports_collision():
+    ns = _run_freecad_script_namespace()
+    section = {
+        "subsections": [
+            {"subsection_id": "sensor_1", "members": [
+                {"x": 0, "y": 0, "z": 0, "primitives": [_SENSOR_1_MEMBER["primitives"][0]]},
+            ]},
+            # sensor_2 overlaps sensor_1 instead of sitting clear of it.
+            {"subsection_id": "sensor_2", "members": [
+                {"x": 5, "y": 0, "z": 0, "primitives": [_SENSOR_2_MEMBER["primitives"][0]]},
+            ]},
+        ],
+    }
+    collision_mm3, footprint = ns["_check_section"](section)
+    assert collision_mm3 > 0.0
+
+
+@_needs_freecad
+def test_check_section_ignores_intra_subsection_overlap():
+    # Two MEMBERS of the SAME subsection overlapping each other (already
+    # Level 1->2's job) must not surface as a Level 2->3 collision -- only
+    # cross-subsection pairs count here. See module docstring.
+    ns = _run_freecad_script_namespace()
+    section = {
+        "subsections": [
+            {"subsection_id": "mcu_1", "members": [
+                {"x": 0, "y": 0, "z": 0, "primitives": [_MCU_MEMBER["primitives"][0]]},
+                # Overlaps mcu_1 itself, but it's the SAME subsection.
+                {"x": 0, "y": 10, "z": 0, "primitives": [_MOUNT_MEMBER["primitives"][0]]},
+            ]},
+        ],
+    }
+    collision_mm3, footprint = ns["_check_section"](section)
+    assert collision_mm3 == 0.0  # single subsection -- nothing to cross-compare
+
+
+@_needs_freecad
+def test_check_section_singleton_has_no_collision_check():
+    ns = _run_freecad_script_namespace()
+    section = {
+        "subsections": [
+            {"subsection_id": "sensor_1", "members": [
+                {"x": 0, "y": 0, "z": 0, "primitives": [_SENSOR_1_MEMBER["primitives"][0]]},
+            ]},
+        ],
+    }
+    collision_mm3, footprint = ns["_check_section"](section)
+    assert collision_mm3 == 0.0
+    assert footprint == {"x": 0.0, "y": 0.0, "z": 0.0, "w": 15.0, "h": 10.0, "d": 5.0}

@@ -21,6 +21,10 @@ eo/mech_repair.py --
     the first) -- loop stops, whatever was outstanding at that moment
     is flagged, prior real fixes still reported as repaired
   - max_retries override
+  - run_level_1_2_repair() (G3e-4) and run_level_2_3_repair() (G3f-2):
+    each level's own top-level driver -- repair loop + final full
+    re-validate + persisting footprints onto mech["subsections"] /
+    mech["sections"] respectively
 
 This module's own actual "generate" and "validate" halves (an LLM call
 and a real FreeCAD sandbox, respectively) are both someone else's job --
@@ -50,8 +54,8 @@ class _ScriptedValidate:
         self._results = list(results)
         self.calls = []
 
-    def __call__(self, mech, level, session_id=None, path=None, domain=None):
-        self.calls.append({"mech": mech, "level": level})
+    def __call__(self, mech, level, session_id=None, path=None, domain=None, parts=None):
+        self.calls.append({"mech": mech, "level": level, "parts": parts})
         assert self._results, "validate_layout called more times than the test scripted"
         return self._results.pop(0)
 
@@ -125,6 +129,56 @@ def test_subset_for_nodes_default_level_is_still_level_0_1():
     mech = _mech("a", "b", "c")
     subset = mr._subset_for_nodes(mech, {"a", "c"})
     assert [p["part_id"] for p in subset["placements"]] == ["a", "c"]
+
+
+# ---------------------------------------------------------------------------
+# _subset_for_nodes -- Level 2->3 (G3f-2): node_ids are section_ids, and the
+# subset must keep every placement belonging to EVERY subsection inside a
+# kept section (not just its anchor) -- see this function's own docstring
+# on why dropping a non-anchor subsection would silently re-derive the
+# section as a singleton for validate_layout()'s own re-grouping.
+# ---------------------------------------------------------------------------
+
+def _section_mech():
+    return {"placements": [
+        {"part_id": "sensor_1", "x": 0, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5},
+        {"part_id": "sensor_2", "x": 40, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5},
+        {"part_id": "battery_1", "x": 100, "y": 0, "z": 0, "w": 20, "h": 10, "d": 10},
+    ]}
+
+
+_SECTION_PARTS = [
+    {"id": "sensor_1", "category": "sensor"},
+    {"id": "sensor_2", "category": "sensor"},
+    {"id": "battery_1", "category": "power"},
+]
+
+
+def test_subset_for_nodes_level_2_3_keeps_every_subsection_in_the_section():
+    mech = _section_mech()
+    subset = mr._subset_for_nodes(mech, {"Sensing"}, level=mr.LEVEL_2_3, parts=_SECTION_PARTS)
+    assert {p["part_id"] for p in subset["placements"]} == {"sensor_1", "sensor_2"}
+
+
+def test_subset_for_nodes_level_2_3_singleton_section_contributes_only_itself():
+    mech = _section_mech()
+    subset = mr._subset_for_nodes(mech, {"Power"}, level=mr.LEVEL_2_3, parts=_SECTION_PARTS)
+    assert {p["part_id"] for p in subset["placements"]} == {"battery_1"}
+
+
+def test_subset_for_nodes_level_2_3_handles_multiple_sections():
+    mech = _section_mech()
+    subset = mr._subset_for_nodes(mech, {"Sensing", "Power"}, level=mr.LEVEL_2_3, parts=_SECTION_PARTS)
+    assert {p["part_id"] for p in subset["placements"]} == {"sensor_1", "sensor_2", "battery_1"}
+
+
+def test_subset_for_nodes_level_2_3_without_parts_degrades_to_empty():
+    # Same "not ready yet" degrade eo/mech_validator.py's own
+    # _checkable_sections() uses when `parts` hasn't been wired through --
+    # never a crash.
+    mech = _section_mech()
+    assert mr._subset_for_nodes(mech, {"Sensing"}, level=mr.LEVEL_2_3, parts=None) == {"placements": []}
+    assert mr._subset_for_nodes(mech, {"Sensing"}, level=mr.LEVEL_2_3, parts=[]) == {"placements": []}
 
 
 # ---------------------------------------------------------------------------
@@ -422,3 +476,144 @@ def test_run_level_1_2_repair_flagged_subsection_still_gets_a_footprint(monkeypa
     # Still gets a footprint from the final call even though it's flagged.
     subsections = spec["mech"]["subsections"]
     assert subsections[0]["footprint"] == {"x": 0, "y": 0, "z": 0, "w": 30, "h": 12, "d": 5}
+
+
+# ---------------------------------------------------------------------------
+# run_level_2_3_repair (G3f-2) -- the Level 2->3 integration driver, same
+# shape as run_level_1_2_repair() one level up: run_repair_loop() + one
+# final full validate_layout() call + persisting footprints onto
+# mech["sections"]. eo.mech_repair.validate_layout and agents.
+# mech_section_pool.regenerate_section are both monkeypatched scripted
+# stand-ins -- no real FreeCAD sandbox or LLM call in this file.
+# ---------------------------------------------------------------------------
+
+def _level_2_3_mech():
+    return {
+        "placements": [
+            {"part_id": "sensor_1", "x": 0, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5,
+             "primitives": [{"shape": "box"}]},
+            {"part_id": "sensor_2", "x": 40, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5,
+             "primitives": [{"shape": "box"}]},
+        ],
+        "subsections": [
+            {"subsection_id": "sensor_1", "member_ids": ["sensor_1"],
+             "footprint": {"x": 0, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5}},
+            {"subsection_id": "sensor_2", "member_ids": ["sensor_2"],
+             "footprint": {"x": 40, "y": 0, "z": 0, "w": 15, "h": 10, "d": 5}},
+        ],
+    }
+
+
+_LEVEL_2_3_PARTS = [
+    {"id": "sensor_1", "category": "sensor"},
+    {"id": "sensor_2", "category": "sensor"},
+]
+
+
+def test_run_level_2_3_repair_clean_run_persists_footprints(monkeypatch):
+    # First call: run_repair_loop()'s own initial validate -- clean.
+    # Second call: run_level_2_3_repair()'s own final full re-validate.
+    _install(monkeypatch, [
+        {"valid": True, "violations": [], "footprints": {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}}},
+        {"valid": True, "violations": [], "footprints": {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}}},
+    ])
+    regen_calls = []
+    monkeypatch.setattr(
+        "agents.mech_section_pool.regenerate_section",
+        lambda *a, **k: regen_calls.append((a, k)),
+    )
+
+    spec = {"mech": _level_2_3_mech()}
+    result = mr.run_level_2_3_repair(spec, parts=_LEVEL_2_3_PARTS, session_id="s1")
+
+    assert result["valid"] is True
+    assert regen_calls == []  # nothing violated -- never asked to regenerate
+    sections = spec["mech"]["sections"]
+    assert sections == [{
+        "section_id": "Sensing", "subsection_ids": ["sensor_1", "sensor_2"],
+        "footprint": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5},
+    }]
+
+
+def test_run_level_2_3_repair_regenerates_on_collision_and_persists_footprint(monkeypatch):
+    _install(monkeypatch, [
+        # run_repair_loop()'s initial validate: collision
+        {"valid": False, "violations": [{"node_id": "Sensing", "issue": "subsections collide"}]},
+        # re-validate after regeneration: clean
+        {"valid": True, "violations": []},
+        # run_level_2_3_repair()'s own final full re-validate
+        {"valid": True, "violations": [], "footprints": {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 65, "h": 10, "d": 5}}},
+    ])
+    regen_calls = []
+    monkeypatch.setattr(
+        "agents.mech_section_pool.regenerate_section",
+        lambda mech, node_id, violation, attempt, parts, **k: regen_calls.append(node_id),
+    )
+
+    spec = {"mech": _level_2_3_mech()}
+    result = mr.run_level_2_3_repair(spec, parts=_LEVEL_2_3_PARTS, session_id="s1")
+
+    assert result["valid"] is True
+    assert result["repaired"] == ["Sensing"]
+    assert regen_calls == ["Sensing"]
+    sections = spec["mech"]["sections"]
+    assert sections[0]["footprint"] == {"x": 0, "y": 0, "z": 0, "w": 65, "h": 10, "d": 5}
+
+
+def test_run_level_2_3_repair_skips_final_call_on_validator_error(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": True, "violations": [], "validator_error": "sandbox unreachable"},
+    ])
+    monkeypatch.setattr("agents.mech_section_pool.regenerate_section", lambda *a, **k: None)
+
+    spec = {"mech": _level_2_3_mech()}
+    result = mr.run_level_2_3_repair(spec, parts=_LEVEL_2_3_PARTS, session_id="s1")
+
+    assert result["validator_error"] == "sandbox unreachable"
+    # No second validate_layout call was scripted -- if run_level_2_3_repair
+    # tried to make one, _ScriptedValidate would raise "called more times
+    # than the test scripted" and this test would fail with that error.
+    assert "sections" not in spec["mech"]
+
+
+def test_run_level_2_3_repair_flagged_section_still_gets_a_footprint(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": False, "violations": [{"node_id": "Sensing", "issue": "still colliding"}]},  # initial
+        {"valid": False, "violations": [{"node_id": "Sensing", "issue": "still colliding"}]},  # attempt 1 revalidate
+        {"valid": False, "violations": [{"node_id": "Sensing", "issue": "still colliding"}]},  # attempt 2 revalidate -> cap hit
+        # final full re-validate after the repair loop settles
+        {"valid": True, "violations": [], "footprints": {"Sensing": {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}}},
+    ])
+    attempts_seen = []
+    monkeypatch.setattr(
+        "agents.mech_section_pool.regenerate_section",
+        lambda mech, node_id, violation, attempt, parts, **k: attempts_seen.append(attempt),
+    )
+
+    spec = {"mech": _level_2_3_mech()}
+    result = mr.run_level_2_3_repair(spec, parts=_LEVEL_2_3_PARTS, session_id="s1", max_retries=2)
+
+    assert attempts_seen == [1, 2]  # both retries actually used, cap respected
+    assert result["valid"] is False
+    assert result["violations"][0]["node_id"] == "Sensing"
+    # Still gets a footprint from the final call even though it's flagged.
+    sections = spec["mech"]["sections"]
+    assert sections[0]["footprint"] == {"x": 0, "y": 0, "z": 0, "w": 55, "h": 10, "d": 5}
+
+
+def test_run_level_2_3_repair_passes_parts_through_every_validate_call(monkeypatch):
+    # Both the initial/repair-round validate_layout calls (inside
+    # run_repair_loop) AND the final full re-validate must all see the
+    # same `parts` this function was called with -- Level 2->3's section
+    # grouping can't be re-derived without it. See eo/mech_validator.py's
+    # _checkable_sections() docstring.
+    stub = _install(monkeypatch, [
+        {"valid": True, "violations": [], "footprints": {}},
+        {"valid": True, "violations": [], "footprints": {}},
+    ])
+    monkeypatch.setattr("agents.mech_section_pool.regenerate_section", lambda *a, **k: None)
+
+    spec = {"mech": _level_2_3_mech()}
+    mr.run_level_2_3_repair(spec, parts=_LEVEL_2_3_PARTS, session_id="s1")
+
+    assert all(call["parts"] == _LEVEL_2_3_PARTS for call in stub.calls)
