@@ -67,8 +67,10 @@ load_dotenv()
 # generate_text() instead of a hand-rolled client so this call also gets
 # usage-logged -- previously it logged nothing.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY_9", "timeout": 30},
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY", "timeout": 30},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY_9", "timeout": 30},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY_9", "timeout": 30},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY", "timeout": 30},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY", "timeout": 30},
     # Gemini/Mistral/HF rollout, Patch 4 (§4b): this role had exactly one
     # real account (GROQ_API_KEY_9) plus one shared-pool fallback
     # (GROQ_API_KEY) before this -- AGENT_CAPABILITIES tags do nothing

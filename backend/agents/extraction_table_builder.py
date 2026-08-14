@@ -62,7 +62,10 @@ load_dotenv()
 # much smaller, cheaper completion (a handful of short fields, not a
 # whole module), not because reliability matters less.
 MODELS = [
-    "llama-3.3-70b-versatile",
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
+    # models Groq's decommission notice suggested in its place.
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.6-27b",
     "llama-3.1-8b-instant",
 ]
 

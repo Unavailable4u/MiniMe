@@ -8,13 +8,15 @@ from utils.llm_client import generate_text
 load_dotenv()
 
 # Fallback chain per Part 4, agent #1 of the v5 blueprint:
-# Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b
+# Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b (migrated off llama-3.3-
+# 70b-versatile, decommissioned by Groq) -> Cerebras gpt-oss-120b
 # (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s; gpt-oss-120b
 # is the one model guaranteed on Cerebras's public production tier.)
 # Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
 # removed here, not replaced -- GitHub Models retired in full today.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
 ]
 

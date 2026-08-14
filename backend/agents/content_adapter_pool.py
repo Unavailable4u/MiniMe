@@ -190,7 +190,8 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
     # its fallback step is removed here, not replaced. This agent keeps
     # whatever redundancy already sat in front of it (nothing else changes).
     chain = [
-        {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     ]
     try:
         raw_text = generate_text(

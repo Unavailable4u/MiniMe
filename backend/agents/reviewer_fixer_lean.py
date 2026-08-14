@@ -9,7 +9,8 @@ exist for a multi-module tier-3 cycle.
 Part 2.4's table: "mirrors the Idea Planner's existing 3-tier fallback
 chain, reused here since both jobs are single-pass judgment calls" — so
 this CHAIN is copied from agents/idea_planner.py's, not hand-derived:
-Groq llama-3.3-70b-versatile -> Cerebras gpt-oss-120b -> GitHub Models
+Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b (migrated off llama-3.3-70b-
+versatile, decommissioned by Groq) -> Cerebras gpt-oss-120b -> GitHub Models
 gpt-4.1-mini. (Same deprecation note as idea_planner.py: Cerebras's
 original llama-3.3-70b 404s now, gpt-oss-120b is the current guaranteed
 model.)
@@ -32,7 +33,8 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
 # its fallback step is removed here, not replaced. The Groq -> Cerebras
 # redundancy above is unchanged.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
 ]
 

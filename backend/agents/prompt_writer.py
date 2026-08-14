@@ -101,7 +101,8 @@ def _maybe_add_monitoring_module(specs: dict, session_id: str) -> dict:
 # agent hardcoded onto that same key) -- see run()'s real call below,
 # which now builds a live, quota-ranked, multi-provider chain instead.
 FALLBACK_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
 ]
 
 SYSTEM_PROMPT = """You are a technical spec writer for an autonomous build loop.
