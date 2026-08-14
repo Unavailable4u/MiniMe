@@ -42,6 +42,14 @@ _TABLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 _TABLE_BY_ID = None
 _ALIAS_INDEX = None
 
+# Queryable record of every alias collision _load_table() resolves,
+# so "first row wins" stays a logged, inspectable decision instead of
+# only a print() line on server stdout. One dict per collision:
+# {"key": normalized alias, "kept_id": row_id that kept the alias,
+# "dropped_id": row_id that lost it}. Reset alongside _TABLE_BY_ID/
+# _ALIAS_INDEX on every _load_table() call.
+_ALIAS_COLLISIONS = None
+
 
 def _normalize(text: str) -> str:
     """Case/whitespace-insensitive matching key. Deliberately simple
@@ -62,10 +70,11 @@ def _load_table() -> None:
     G1b/LLM estimation, never a hard dependency the rest of the spec
     pipeline should break on if the table file is absent.
     """
-    global _TABLE_BY_ID, _ALIAS_INDEX
+    global _TABLE_BY_ID, _ALIAS_INDEX, _ALIAS_COLLISIONS
 
     _TABLE_BY_ID = {}
     _ALIAS_INDEX = {}
+    _ALIAS_COLLISIONS = []
 
     try:
         with open(_TABLE_PATH, "r", encoding="utf-8") as f:
@@ -99,8 +108,39 @@ def _load_table() -> None:
                 print(f"  [component_dimension_table] alias collision on "
                       f"\"{key}\": {_ALIAS_INDEX[key]!r} vs {row_id!r}, "
                       f"keeping {_ALIAS_INDEX[key]!r}")
+                _ALIAS_COLLISIONS.append({
+                    "key": key,
+                    "kept_id": _ALIAS_INDEX[key],
+                    "dropped_id": row_id,
+                })
                 continue
             _ALIAS_INDEX[key] = row_id
+
+
+def get_alias_collisions() -> list:
+    """Returns the collisions recorded by the most recent _load_table()
+    call (a list of {"key", "kept_id", "dropped_id"} dicts, possibly
+    empty). Callers that only need to know *whether* a given row_id was
+    ever on the losing end of a collision -- e.g. lookup_curated_dimensions()
+    flagging a returned match as ambiguous -- should use
+    _row_id_has_collision() instead of scanning this list themselves.
+    """
+    if _ALIAS_COLLISIONS is None:
+        _load_table()
+    return list(_ALIAS_COLLISIONS or [])
+
+
+def _row_id_has_collision(row_id: str) -> bool:
+    """True if `row_id` appears as either side (kept or dropped) of any
+    recorded alias collision -- i.e. some alias that could have pointed
+    at this row was contested by another row. Used by _row_to_match()
+    to set "dimension_ambiguous" on a match without callers needing to
+    know about the collision-log's shape.
+    """
+    if _ALIAS_COLLISIONS is None:
+        _load_table()
+    return any(c["kept_id"] == row_id or c["dropped_id"] == row_id
+                for c in (_ALIAS_COLLISIONS or []))
 
 
 def _row_to_match(row: dict) -> dict:
@@ -119,14 +159,24 @@ def _row_to_match(row: dict) -> dict:
         if value is not None:
             dims[out_key] = value
 
+    row_id = row.get("id")
+
     return {
-        "dimension_ref_id": row.get("id"),
+        "dimension_ref_id": row_id,
         "dimensions_mm": dims,
         "shape": row.get("shape"),
         "mount_type": row.get("mount_type"),
         "mount_spec": row.get("mount_spec"),
         "dimension_confidence": row.get("dimension_confidence"),
         "source": "curated_table",
+        # True if this row's id ever appeared on either side of an
+        # alias collision -- i.e. some alias that resolved to this row
+        # was also claimed by a different row and silently dropped (or
+        # this row IS the dropped one, reachable only via a still-
+        # unique alias). Lets _populate_curated_dimensions() attach
+        # "dimension_ambiguous" onto the part without duplicating the
+        # collision-lookup logic.
+        "dimension_ambiguous": _row_id_has_collision(row_id),
     }
 
 

@@ -662,6 +662,16 @@ def _populate_curated_dimensions(parts: list) -> list:
         part["mount_spec"] = match.get("mount_spec")
         part["dimension_confidence"] = match.get("dimension_confidence")
         part["source"] = match.get("source")
+        # G1a alias-collision surfacing: True when this match's row id
+        # was ever on either side of a curated-table alias collision
+        # (see component_dimension_table.py's _load_table()/
+        # get_alias_collisions()) -- i.e. the "first row wins" policy
+        # actually had to break a tie to produce this match, so a
+        # different real component may have been discarded from the
+        # alias index in favor of this one. Always set (True or False)
+        # so downstream code/UI can distinguish "known unambiguous"
+        # from "field absent."
+        part["dimension_ambiguous"] = bool(match.get("dimension_ambiguous"))
 
     return parts
 

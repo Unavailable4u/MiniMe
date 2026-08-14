@@ -313,6 +313,19 @@ const CONFIDENCE_META = {
   _default: { color: "#6b7280", label: "Estimated dimensions" },
 };
 
+// AMBIGUOUS_META — fourth badge state for G1a's alias-collision
+// surfacing (see agents/component_dimension_table.py's
+// _load_table()/get_alias_collisions()). Takes priority over whatever
+// CONFIDENCE_META entry the part's own dimension_confidence would
+// otherwise pick: a "verified"-labeled match that was actually one of
+// several components sharing an alias is exactly the confidently-
+// wrong case this badge exists to flag, so it must outrank the normal
+// verified/typical styling rather than being layered underneath it.
+const AMBIGUOUS_META = {
+  color: "#f87171",
+  label: "Ambiguous match — dimensions may be from a different component",
+};
+
 /**
  * ConfidenceBadge — G3j's own payoff: a small floating badge over the
  * canvas naming whichever part is currently hovered or selected and how
@@ -325,7 +338,9 @@ const CONFIDENCE_META = {
  */
 function ConfidenceBadge({ part }) {
   if (!part) return null;
-  const meta = CONFIDENCE_META[part.dimension_confidence] || CONFIDENCE_META._default;
+  const meta = part.dimension_ambiguous
+    ? AMBIGUOUS_META
+    : CONFIDENCE_META[part.dimension_confidence] || CONFIDENCE_META._default;
   return (
     <div
       className="pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-full border border-[var(--neutral-800)] bg-black/70 px-2 py-1 text-[10px] text-[var(--neutral-200)] backdrop-blur-sm"
