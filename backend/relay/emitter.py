@@ -21,6 +21,7 @@ Design rules, straight from the blueprint:
     behavior for every caller that doesn't pass one yet (CLI usage,
     existing tests).
 """
+import json
 import os
 import re
 import sys
@@ -405,6 +406,123 @@ def _get_client():
     return _pusher_client
 
 
+# Bug fix 2026-08-14: Pusher's ~10KB cap is measured against the fully
+# JSON-serialized event *envelope* on the wire ({type, session_id,
+# agent, path, timestamp, payload}), not against any single field's raw
+# byte length. eo/result_render.py's render_agent_result() already
+# truncates payload["summary"] to a raw-UTF-8-byte budget (its own
+# 2026-08-12 fix), which correctly bounds *that field's* bytes -- but
+# JSON string-escaping (every '"', '\\', and control character,
+# including every '\n', becomes 2 bytes on the wire) is mandatory per
+# the JSON spec and has nothing to do with non-ASCII bytes. A summary
+# that's pure ASCII but dense in quotes/newlines -- exactly the shape
+# of the "```json\n" + json.dumps(result, indent=2) + "\n```" fallback
+# a few lines up in that file -- can measure safely under
+# render_agent_result()'s own limit and still push the assembled
+# envelope over Pusher's cap once escaping is applied. This is the one
+# place that actually assembles (and can measure) the final wire size,
+# so it's the right place to enforce the real cap.
+PUSHER_EVENT_BYTE_CAP = 10240
+_FALLBACK_SUMMARY = "[output too large to stream -- see final result]"
+
+
+def _fit_event_to_pusher_cap(event: dict, cap: int = PUSHER_EVENT_BYTE_CAP) -> dict:
+    """Returns `event` unchanged if it already serializes under `cap`
+    bytes, otherwise a shrunk copy that (best-effort) does. Degrades in
+    three steps, each attempted only if the previous one wasn't enough:
+
+      1. Drop payload["image"] -- routinely the single largest field,
+         and the least essential to a live "done" transition.
+      2. Truncate payload["summary"] on a byte boundary (same
+         errors="ignore" decode render_agent_result() itself uses),
+         shrinking just enough to clear the cap once the rest of the
+         envelope's own (escaped) size is accounted for.
+      3. If the envelope is still over cap even with the summary
+         emptied out -- some other field is what's actually oversized
+         -- replace the whole payload with a minimal placeholder.
+
+    Step 3 is what actually closes the "frontend never learns the step
+    finished" gap: this function is called before client.trigger()
+    below, so a run that would have silently 413'd instead sends
+    *something* that fits -- letting SessionContext.jsx still pop its
+    openStepStack and flip the step to "done" -- rather than emit_event()
+    swallowing the exception and returning False with nothing sent.
+
+    Never raises. Worst case (a genuinely unserializable event, e.g. a
+    stray non-JSON-safe object slipping into payload), returns `event`
+    unchanged and lets the caller's own try/except around
+    client.trigger() handle it exactly like any other Pusher failure.
+    """
+    try:
+        if len(json.dumps(event, ensure_ascii=False).encode("utf-8")) <= cap:
+            return event
+    except Exception:
+        return event
+
+    payload = dict(event.get("payload") or {})
+    shrunk = dict(event)
+
+    # Step 1: image first -- biggest and least essential to a live
+    # status update.
+    if "image" in payload:
+        trimmed = {k: v for k, v in payload.items() if k != "image"}
+        shrunk["payload"] = trimmed
+        try:
+            if len(json.dumps(shrunk, ensure_ascii=False).encode("utf-8")) <= cap:
+                return shrunk
+        except Exception:
+            pass
+        payload = trimmed
+
+    # Step 2: truncate payload["summary"] to whatever budget is left
+    # once the rest of the (already-escaped) envelope is accounted for.
+    summary = payload.get("summary")
+    if isinstance(summary, str) and summary:
+        probe = dict(payload)
+        probe["summary"] = ""
+        probe_event = dict(shrunk)
+        probe_event["payload"] = probe
+        try:
+            overhead = len(json.dumps(probe_event, ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            overhead = cap  # forces a fall-through to step 3 below
+        marker = "\n\n... [truncated for delivery]"
+        marker_bytes = len(marker.encode("utf-8"))
+        budget = cap - overhead - marker_bytes
+        if budget > 0:
+            encoded = summary.encode("utf-8")
+            cut = min(budget, len(encoded))
+            # JSON escaping isn't 1:1 with raw bytes, so a slice that's
+            # under `budget` raw bytes can still overshoot after
+            # re-serializing if it happens to land on a lot of
+            # quote/backslash/newline characters -- shrink and retry
+            # rather than assume the first cut clears the cap.
+            while cut > 0:
+                candidate = encoded[:cut].decode("utf-8", errors="ignore") + marker
+                probe["summary"] = candidate
+                probe_event["payload"] = probe
+                try:
+                    size = len(json.dumps(probe_event, ensure_ascii=False).encode("utf-8"))
+                except Exception:
+                    break
+                if size <= cap:
+                    shrunk["payload"] = probe
+                    return shrunk
+                cut = int(cut * 0.9)
+        # Budget collapsed to ~nothing even for an emptied-out summary
+        # -- fall through to step 3 instead of sending an unreadable
+        # sliver of text.
+
+    # Step 3: something other than image/summary is oversized, or the
+    # summary budget above collapsed to nothing -- send a minimal
+    # placeholder instead of nothing at all.
+    minimal_payload = {"summary": _FALLBACK_SUMMARY}
+    if isinstance(payload.get("duration_ms"), (int, float)):
+        minimal_payload["duration_ms"] = payload["duration_ms"]
+    shrunk["payload"] = minimal_payload
+    return shrunk
+
+
 def emit_event(
     event_type: "EventType | str",
     session_id: str = None,
@@ -470,6 +588,19 @@ def emit_event(
         "payload": payload or {},
     }
 
+    # Bug fix 2026-08-14: enforce Pusher's real ~10KB cap against the
+    # fully assembled envelope, not just render_agent_result()'s own
+    # raw-byte budget on the summary text alone -- see
+    # _fit_event_to_pusher_cap()'s docstring above for why those two
+    # numbers can diverge.
+    fitted = _fit_event_to_pusher_cap(event)
+    if fitted is not event:
+        print(f"  [relay] emit_event({event_type!r}): payload exceeded Pusher's "
+              f"{PUSHER_EVENT_BYTE_CAP}-byte cap once serialized, sent a "
+              f"shrunk/fallback payload instead so the frontend still gets "
+              f"a completion event.")
+    event = fitted
+
     try:
         client.trigger(_channel_name(session_id), event_type, event)
         return True
@@ -526,6 +657,15 @@ def emit_user_event(
         "payload": payload or {},
     }
 
+    # Same envelope-size gap as emit_event() above -- see
+    # _fit_event_to_pusher_cap()'s docstring.
+    fitted = _fit_event_to_pusher_cap(event)
+    if fitted is not event:
+        print(f"  [relay] emit_user_event({event_type!r}): payload exceeded "
+              f"Pusher's {PUSHER_EVENT_BYTE_CAP}-byte cap once serialized, "
+              f"sent a shrunk/fallback payload instead.")
+    event = fitted
+
     try:
         client.trigger(_user_channel_name(user_id), event_type, event)
         return True
@@ -579,6 +719,15 @@ def emit_workspace_event(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": payload or {},
     }
+
+    # Same envelope-size gap as emit_event() above -- see
+    # _fit_event_to_pusher_cap()'s docstring.
+    fitted = _fit_event_to_pusher_cap(event)
+    if fitted is not event:
+        print(f"  [relay] emit_workspace_event({event_type!r}): payload exceeded "
+              f"Pusher's {PUSHER_EVENT_BYTE_CAP}-byte cap once serialized, "
+              f"sent a shrunk/fallback payload instead.")
+    event = fitted
 
     try:
         client.trigger(_workspace_channel_name(workspace_id), event_type, event)
