@@ -18,8 +18,35 @@ import MermaidDiagram from "./MermaidDiagram";
 // leak into a real link's target.
 const NODE_CITE_SCHEME = "notecite://";
 
+// BUGFIX (PRD tab mermaid fallback): this used to run its [[id]] -> link
+// rewrite as one global regex over the *entire* raw markdown string,
+// before ReactMarkdown ever sees fence boundaries. That's fine for plain
+// prose, but "[[Label]]" is also legal Mermaid syntax -- a subroutine-
+// shape flowchart node, e.g. `A[[Init System]] --> B`. Any ```mermaid
+// block using that node shape got silently corrupted into
+// `A[Init System](notecite://Init%20System) --> B` before mermaid.render()
+// ever ran, which is exactly why the PRD tab's diagram would fail to
+// parse and MermaidDiagram.jsx would fall back to showing raw source
+// instead of rendering. Same risk for any other fenced block (```json,
+// ```python, etc.) that happens to contain a literal "[[...]]" substring.
+//
+// Fix: split on fenced code blocks first (``` ... ```, handling an
+// unterminated trailing fence defensively) and only apply the citation
+// rewrite to the prose segments in between. Fenced content is passed
+// through completely untouched, so Mermaid (and any other code block)
+// always gets exactly what the author/LLM wrote.
+const FENCE_SPLIT_RE = /(```[\s\S]*?```|```[\s\S]*$)/g;
+
 function rewriteCitationMarkers(text) {
-  return String(text).replace(/\[\[([^\[\]]+)\]\]/g, (_, id) => `[${id}](${NODE_CITE_SCHEME}${encodeURIComponent(id)})`);
+  const str = String(text);
+  return str
+    .split(FENCE_SPLIT_RE)
+    .map((chunk) =>
+      chunk.startsWith("```")
+        ? chunk
+        : chunk.replace(/\[\[([^\[\]]+)\]\]/g, (_, id) => `[${id}](${NODE_CITE_SCHEME}${encodeURIComponent(id)})`)
+    )
+    .join("");
 }
 
 export default function Markdown({ children, onCitationClick }) {
