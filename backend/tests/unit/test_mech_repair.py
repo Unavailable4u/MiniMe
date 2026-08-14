@@ -21,6 +21,10 @@ eo/mech_repair.py --
     the first) -- loop stops, whatever was outstanding at that moment
     is flagged, prior real fixes still reported as repaired
   - max_retries override
+  - run_level_0_1_repair(): the previously-missing Level 0->1 driver --
+    repair loop only, no footprint persistence (Level 0->1 has none to
+    persist), including its own parts_by_id-building and validator_error
+    short-circuit behavior
   - run_level_1_2_repair() (G3e-4) and run_level_2_3_repair() (G3f-2):
     each level's own top-level driver -- repair loop + final full
     re-validate + persisting footprints onto mech["subsections"] /
@@ -385,6 +389,105 @@ def _level_1_2_mech():
         {"part_id": "mount_mcu_1", "x": 0, "y": 10, "z": 0, "w": 30, "h": 5, "d": 5,
          "primitives": [{"shape": "box"}]},
     ]}
+
+
+def test_run_level_0_1_repair_clean_run_never_calls_regenerate(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": True, "violations": []},
+    ])
+    regen_calls = []
+    monkeypatch.setattr(
+        "agents.mech_primitive_pool.regenerate_primitives",
+        lambda *a, **k: regen_calls.append((a, k)),
+    )
+
+    spec = {"mech": _mech("motor_1"), "parts": [{"id": "motor_1", "category": "actuator"}]}
+    result = mr.run_level_0_1_repair(spec, spec["parts"], session_id="s1")
+
+    assert result["valid"] is True
+    assert regen_calls == []
+
+
+def test_run_level_0_1_repair_regenerates_violating_part(monkeypatch):
+    _install(monkeypatch, [
+        # run_repair_loop()'s initial validate: containment violation
+        {"valid": False, "violations": [{"node_id": "motor_1", "issue": "pokes outside bounding box"}]},
+        # re-validate after regeneration: clean
+        {"valid": True, "violations": []},
+    ])
+    regen_calls = []
+    monkeypatch.setattr(
+        "agents.mech_primitive_pool.regenerate_primitives",
+        lambda mech, node_id, violation, attempt, parts_by_id, **k: regen_calls.append(
+            (node_id, violation["issue"], attempt, parts_by_id)
+        ),
+    )
+
+    spec = {"mech": _mech("motor_1"), "parts": [{"id": "motor_1", "category": "actuator"}]}
+    result = mr.run_level_0_1_repair(spec, spec["parts"], session_id="s1")
+
+    assert result["valid"] is True
+    assert result["repaired"] == ["motor_1"]
+    assert len(regen_calls) == 1
+    node_id, issue, attempt, parts_by_id = regen_calls[0]
+    assert node_id == "motor_1"
+    assert "pokes outside bounding box" in issue
+    assert attempt == 1
+    # regenerate_node_fn's closure passes the same parts_by_id lookup
+    # through on every call, built once from the `parts` argument.
+    assert parts_by_id == {"motor_1": {"id": "motor_1", "category": "actuator"}}
+
+
+def test_run_level_0_1_repair_still_bad_after_cap_is_flagged_not_blocked(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": False, "violations": [{"node_id": "motor_1", "issue": "still bad"}]},  # initial
+        {"valid": False, "violations": [{"node_id": "motor_1", "issue": "still bad"}]},  # attempt 1 revalidate
+        {"valid": False, "violations": [{"node_id": "motor_1", "issue": "still bad"}]},  # attempt 2 revalidate -> cap
+    ])
+    monkeypatch.setattr("agents.mech_primitive_pool.regenerate_primitives", lambda *a, **k: None)
+
+    spec = {"mech": _mech("motor_1"), "parts": [{"id": "motor_1", "category": "actuator"}]}
+    result = mr.run_level_0_1_repair(spec, spec["parts"], session_id="s1", max_retries=2)
+
+    assert result["valid"] is False
+    assert result["violations"][0]["node_id"] == "motor_1"
+    assert result["attempts"]["motor_1"] == 2
+
+
+def test_run_level_0_1_repair_validator_error_on_first_call_short_circuits(monkeypatch):
+    _install(monkeypatch, [
+        {"valid": True, "violations": [], "validator_error": "sandbox unreachable"},
+    ])
+    monkeypatch.setattr("agents.mech_primitive_pool.regenerate_primitives", lambda *a, **k: None)
+
+    spec = {"mech": _mech("motor_1"), "parts": [{"id": "motor_1", "category": "actuator"}]}
+    result = mr.run_level_0_1_repair(spec, spec["parts"], session_id="s1")
+
+    assert result["validator_error"] == "sandbox unreachable"
+    # No second validate_layout call was scripted -- if this driver tried
+    # to make one, _ScriptedValidate would raise "called more times than
+    # the test scripted" and this test would fail with that error.
+
+
+def test_run_level_0_1_repair_builds_parts_by_id_from_none_safely(monkeypatch):
+    # A caller with no parts on hand (shouldn't happen, but the same
+    # fail-safe posture the rest of this module uses elsewhere) degrades
+    # to an empty parts_by_id rather than crashing.
+    _install(monkeypatch, [
+        {"valid": False, "violations": [{"node_id": "motor_1", "issue": "bad"}]},
+        {"valid": True, "violations": []},
+    ])
+    seen = {}
+    monkeypatch.setattr(
+        "agents.mech_primitive_pool.regenerate_primitives",
+        lambda mech, node_id, violation, attempt, parts_by_id, **k: seen.update(parts_by_id),
+    )
+
+    spec = {"mech": _mech("motor_1")}
+    result = mr.run_level_0_1_repair(spec, None, session_id="s1")
+
+    assert result["valid"] is True
+    assert seen == {}
 
 
 def test_run_level_1_2_repair_clean_run_persists_footprints(monkeypatch):
