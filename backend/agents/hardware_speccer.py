@@ -695,6 +695,79 @@ def _populate_curated_dimensions(parts: list) -> list:
     return parts
 
 
+def _build_hw_reference_context(parts: list, matches_per_part: int = 2) -> str:
+    """G2 (Master Guide Phase 0, Patch 0.4): before Call 2's prompt is
+    built, pull top hw_ref: precedent per part via
+    eo/hw_reference.search_hw_references() -- querying each part's own
+    "generic_name"/"aliases", the same canonical fields
+    _ensure_generic_names() already guarantees are present and
+    normalized by this point (never an ad-hoc name from Call 1's own
+    wording, and never re-derived here).
+
+    Returns "" when nothing matched for ANY part -- so a spec run
+    where Phase 0 has no indexed precedent yet produces byte-identical
+    wiring_user_prompt to before this patch existed (the "no
+    regression" half of Patch 0.4's done-when). Returns "" on
+    search_hw_references() failure too, since that function already
+    degrades to [] rather than raising -- this is the "unavailable
+    research agent" failure posture the Phase 0 design calls for,
+    inherited for free rather than re-implemented here.
+
+    Deliberately capped at `matches_per_part` (default 2): this is
+    framing context for the model, not a citation list -- more than a
+    couple of precedents per part would crowd out the prompt's actual
+    parts/PRD content for marginal benefit.
+    """
+    from eo.hw_reference import search_hw_references
+
+    lines = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        generic_name = (part.get("generic_name") or "").strip()
+        if not generic_name:
+            continue
+        try:
+            matches = search_hw_references(generic_name, part.get("aliases"),
+                                            top_k=matches_per_part)
+        except Exception as exc:
+            # Belt-and-suspenders: search_hw_references() already
+            # catches its own embed/query failures and returns [], but
+            # a prompt-construction step degrading silently on ANY
+            # unexpected exception (not just the ones that module
+            # anticipated) is the safer default here -- this runs on
+            # every spec generation, so it should never be the reason
+            # one fails.
+            print(f"  [Hardware Speccer] hw_reference lookup failed for "
+                  f"{generic_name!r}, skipping: {exc}")
+            continue
+        if not matches:
+            continue
+        lines.append(f"- {generic_name}:")
+        for m in matches[:matches_per_part]:
+            title = m.get("title") or m.get("generic_name") or "untitled"
+            snippet = (m.get("content") or "").strip()
+            if len(snippet) > 240:
+                snippet = snippet[:240].rstrip() + "..."
+            url = m.get("source_url")
+            bit = f"  * \"{title}\""
+            if url:
+                bit += f" ({url})"
+            if snippet:
+                bit += f" -- {snippet}"
+            lines.append(bit)
+
+    if not lines:
+        return ""
+
+    return (
+        "\n\nReference-design precedent (anecdotal, hobbyist-sourced -- "
+        "NOT IPC-2221 or any formal engineering standard; treat as "
+        "informal precedent from real published builds/app-notes, "
+        "never as authoritative spec guidance):\n" + "\n".join(lines)
+    )
+
+
 def _populate_dimensions(parts: list, session_id: str = None) -> list:
     """F3 Part 4 / G1b (gap-filler only, see the Master Guide's G1
     section): looks up real physical dimensions/datasheet links for
@@ -1790,6 +1863,14 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         f"some carry a \"dimensions_mm\" field, which is verified ground "
         f"truth, not an estimate):\n{json.dumps(parts)}"
     )
+
+    # Phase 0, Patch 0.4: fold in hw_ref: precedent (if any) right
+    # before Call 2 runs -- see _build_hw_reference_context()'s own
+    # docstring for why this is the last thing added to
+    # wiring_user_prompt and why it degrades to "" (no prompt change at
+    # all) rather than ever blocking or altering generation on its own.
+    wiring_user_prompt += _build_hw_reference_context(parts)
+
     raw_wiring = generate_text(SYSTEM_PROMPT_WIRING, wiring_user_prompt, chain,
                                 agent_name="Hardware Speccer Wiring",
                                 session_id=session_id, tier=tier, domain=domain)
