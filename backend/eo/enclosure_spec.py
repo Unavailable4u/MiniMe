@@ -91,4 +91,43 @@ ENCLOSURE_SPEC = {
     # own fastener part stay sized for the same real hardware instead
     # of two independent guesses.
     "screw_boss_dia_mm": 4.5,
+
+    # Patch 2.1 (Phase 2, "Ribs / standoffs"): outer diameter of a plain
+    # (borehole-free) standoff post -- distinct from screw_boss_dia_mm
+    # above, which is the BORE diameter drilled INTO a boss for an M3
+    # heat-set insert. A screw boss reuses this same post primitive with
+    # that bore added (see Phase 2's own design section), so it needs
+    # real wall material left over once the bore is cut out of it, not
+    # just an outer diameter equal to the bore itself. Sized as
+    # screw_boss_dia_mm (4.5) plus min_feature_mm (1.2) of solid wall on
+    # each side of the bore -- 4.5 + 2*1.2 = 6.9 -- rounded up to 7.0 for
+    # ordinary FDM print margin, same manufacturability-floor reasoning
+    # min_feature_mm itself already documents above, not a fresh
+    # independent guess.
+    "standoff_dia_mm": 7.0,
 }
+
+# Patch 2.1: which BOM part categories get standoff/screw-boss support at
+# all -- Phase 2's own design section iterates "every placed member whose
+# category needs mechanical support" against exactly this set. The Master
+# Guide's own worked example for this set is {"mcu", "battery", "pcb",
+# "module"}, but "battery" and "pcb" are not real values of this
+# codebase's actual part-category enum: agents/hardware_speccer.py's
+# SYSTEM_PROMPT_PARTS (see its own "category" is one of: ..." line) and
+# its _ELECTRICAL_CATEGORIES constant both fix that enum at exactly
+# {"mcu", "sensor", "actuator", "power", "module"} -- a battery is always
+# categorized "power" in this codebase, and there is no standalone "pcb"
+# category at all (a bare PCB, if ever added as its own BOM line, would
+# most likely land under "module" or "mcu" depending on what it carries).
+# Using the guide's literal wording verbatim here would silently match
+# nothing for the two categories that don't exist, so this set instead
+# uses the real enum values covering the same intent -- "mcu" and "power"
+# (batteries/battery holders) are the parts whose weight and mounting-hole
+# footprint most need physical standoff support, and "module" (radios,
+# breakout boards) commonly ships with its own mounting holes too.
+# "sensor"/"actuator" are deliberately excluded -- per Phase 2's own
+# design section, standoff support is for parts meant to be RIGIDLY
+# mounted, not every electrical part generally; most sensors/actuators in
+# a typical BOM are small enough to sit in a form-fit pocket or dangle on
+# a wire lead instead.
+SUPPORT_CATEGORIES = {"mcu", "power", "module"}

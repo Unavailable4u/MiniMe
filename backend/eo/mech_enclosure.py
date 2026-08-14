@@ -114,3 +114,135 @@ def compute_housing_footprint(device_footprint: dict) -> dict:
     }
 
     return {"outer": outer, "inner": inner, "lid": lid}
+
+
+# ---------------------------------------------------------------------------
+# Patch 1.3 -- pipeline-integration half of Phase 1.
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is Patch 1.2's pure function, deliberately
+# ignorant of `mech`/`parts`/eo/mech_sections.py -- see the module
+# docstring's "Deliberately does NOT read..." paragraph. This half is the
+# opposite: it reads `mech["device"]` (Patch 1.5 wires it to run
+# immediately after eo/mech_device.py's own apply_device_merge(), which is
+# what actually populates that key), calls compute_housing_footprint()
+# above, and mutates `mech` in place -- same "mutate AND return" wrapper
+# convention apply_device_merge() itself already established.
+
+from eo.mech_sections import subsections_for_section
+from eo.mech_subsections import members_for_subsection
+
+# A housing/lid placement is matched by `part_id` PREFIX, not literal
+# equality -- same "a model-authored id only ever needs to start with the
+# right word" convention eo/mech_subsections.py's own MOUNT_ID_PREFIX
+# ("mount_") already establishes, for the identical reason: agents/
+# hardware_speccer.py's SYSTEM_PROMPT_PARTS shows "housing_1"/"lid_1" as
+# its worked example, not a literal contract the model is guaranteed to
+# match exactly.
+_HOUSING_ID_PREFIX = "housing"
+_LID_ID_PREFIX = "lid"
+
+# The one section every housing/lid placement lives in -- same constant
+# eo/mech_device.py's own _CONTAINER_SECTION_ID names, duplicated here
+# rather than imported since eo/mech_device.py is a peer, not a
+# dependency, of this module (this module still never imports it).
+_CONTAINER_SECTION_ID = "Enclosure"
+
+
+def _apply_dims(placement: dict, dims: dict) -> None:
+    """Mutates `placement`'s own x/y/z/w/h/d in place to match `dims`
+    (one of compute_housing_footprint()'s own "outer"/"lid" results) --
+    same "mutate the SAME dict a caller reading mech["placements"]
+    afterward already holds" posture eo/mech_device.py's own
+    apply_device_merge() uses for a section's `footprint`, just applied
+    to one placement entry instead of a whole section.
+    """
+    for key in ("x", "y", "z", "w", "h", "d"):
+        if key in dims:
+            placement[key] = dims[key]
+
+
+def apply_enclosure_generation(mech: dict, parts: list) -> dict:
+    """Patch 1.3: wires compute_housing_footprint() into the pipeline.
+    MUST run immediately after eo/mech_device.py's own
+    apply_device_merge() (Patch 1.5 wires that ordering into agents/
+    hardware_speccer.py's G3g call site) -- reads the `device_footprint`
+    apply_device_merge() already computed and stashed on
+    `mech["device"]["footprint"]`, never recomputes it itself, same
+    "reads a footprint, doesn't invent one" boundary this module's own
+    top docstring draws around compute_housing_footprint()'s input.
+
+    Stashes the full {"outer","inner","lid"} result on the new
+    `mech["housing"]` key -- same "mutate in place AND still return the
+    value" convention every apply_* function in this package already
+    follows -- so Phase 2/5/6's later checkers (standoffs, cutouts,
+    manufacturability) have the real x/y/z origin boxes to work from,
+    not just a size.
+
+    Deliberately does NOT overwrite the existing `mech["enclosure"]` key
+    with that same nested result, even though the patch breakdown's own
+    shorthand ("stashes result on mech['enclosure']") reads that way at
+    a glance: frontend/app/components/MechView.jsx's PartBox/
+    isShellPlacement/wireframe-hull code all read `mech["enclosure"]` as
+    a FLAT {"w","h","d"} hull size (`enclosure.w`, `enclosure.h`,
+    `enclosure.d` -- never a nested lookup), and agents/
+    hardware_speccer.py's own _ensure_electrical_placements()/
+    _clamp_placements_to_enclosure() read that same flat shape earlier
+    in the pipeline. Replacing it with this function's nested dict would
+    turn every one of those `enclosure.w` reads into `undefined` and
+    silently break the 3D wireframe render -- a regression this patch
+    avoids by instead REFRESHING `mech["enclosure"]` in its existing
+    flat shape (now sourced from the real computed outer box instead of
+    the LLM's stale guess -- safe to overwrite here because both
+    _ensure_electrical_placements() and _clamp_placements_to_enclosure()
+    already ran and fully consumed that guess earlier in
+    run_hardware_speccer(), well before Level 0->1 of the repair tree
+    this function is part of even starts) and adding the full breakdown
+    under the new, non-colliding `mech["housing"]` key instead.
+
+    Also overwrites the Enclosure section's own housing_1/lid_1
+    placement entries in `mech["placements"]` (resolved the same
+    two-hop way eo/mech_device.py's own apply_device_merge() already
+    resolves section->subsection->member) to match `outer`/`lid`
+    respectively -- the exact downstream target Patch 1.4 stops the LLM
+    from authoring in the first place, so a placement that's already
+    correctly computed here is never subsequently overwritten by
+    anything else later in the pipeline.
+
+    Returns None (and stashes None onto both `mech["housing"]` and,
+    unlike housing, leaves `mech["enclosure"]` untouched) when
+    `mech["device"]` itself is missing or has no `footprint` -- nothing
+    to derive a housing from yet, same "nothing to merge yet" no-op
+    posture apply_device_merge() already takes.
+    """
+    device = (mech or {}).get("device")
+    if not isinstance(device, dict) or not isinstance(device.get("footprint"), dict):
+        if isinstance(mech, dict):
+            mech["housing"] = None
+        return None
+
+    result = compute_housing_footprint(device["footprint"])
+
+    if isinstance(mech, dict):
+        mech["housing"] = result
+        # See docstring above on why this stays flat rather than nested.
+        outer = result["outer"]
+        mech["enclosure"] = {"w": outer["w"], "h": outer["h"], "d": outer["d"]}
+
+    section = next(
+        (s for s in (mech.get("sections") or [])
+         if isinstance(s, dict) and s.get("section_id") == _CONTAINER_SECTION_ID),
+        None,
+    )
+    if section is not None:
+        for subsection in subsections_for_section(mech, section):
+            for member in members_for_subsection(mech, subsection):
+                if not isinstance(member, dict):
+                    continue
+                part_id = member.get("part_id") or ""
+                if part_id.startswith(_HOUSING_ID_PREFIX):
+                    _apply_dims(member, result["outer"])
+                elif part_id.startswith(_LID_ID_PREFIX):
+                    _apply_dims(member, result["lid"])
+
+    return result
