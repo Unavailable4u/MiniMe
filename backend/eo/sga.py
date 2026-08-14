@@ -39,10 +39,21 @@ from eo import conversation_memory   # NEW — Part 23 fix, see _call_one() belo
 
 logger = logging.getLogger(__name__)
 
+# llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
+# models Groq's decommission notice suggested in its place.
 SGA_CHAINS = {
-    "sga_1": [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "SGA_GROQ_1"}],
-    "sga_2": [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "SGA_GROQ_2"}],
-    "sga_3": [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "SGA_GROQ_3"}],
+    "sga_1": [
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1"},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1"},
+    ],
+    "sga_2": [
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_2"},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_2"},
+    ],
+    "sga_3": [
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_3"},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_3"},
+    ],
 }
 
 SYSTEM_PROMPT = """You are a fast, general-purpose first responder. Try to answer the task \

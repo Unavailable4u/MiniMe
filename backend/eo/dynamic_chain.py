@@ -51,7 +51,11 @@ from eo.registry import AGENT_CAPABILITIES
 # on agents/generic_worker.py in either direction, so neither file's
 # import order can ever create a cycle with the other.
 PROVIDER_DEFAULT_MODEL = {
-    "groq": "llama-3.3-70b-versatile",
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b, same single-value pick and reasoning as
+    # agents/generic_worker.py's own copy of this dict (see that file's
+    # comment for the full trace) -- kept in sync deliberately.
+    "groq": "openai/gpt-oss-120b",
     "cerebras": "gpt-oss-120b",
     "mistral": "mistral-large-latest",
     "gemini": "gemini-3.1-flash-lite",

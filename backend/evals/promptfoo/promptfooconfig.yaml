@@ -72,7 +72,11 @@ prompts:
 defaultTest:
   options:
     provider:
-      id: groq:llama-3.3-70b-versatile
+      # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+      # openai/gpt-oss-120b, same single-model pick as
+      # providers/role_provider.py's own PROVIDER_OVERRIDE_DEFAULTS
+      # ["groq"] (kept in sync deliberately -- see that file's comment).
+      id: groq:openai/gpt-oss-120b
       config:
         apiKeyEnvar: GROQ_API_KEY_GRADING
 

@@ -62,7 +62,13 @@ EO_PANEL_CF_ACCOUNT = "EO_PANEL_CLOUDFLARE_ACCOUNT_ID"
 EO_PANEL_CF_TOKEN = "EO_PANEL_CLOUDFLARE_API_TOKEN"
 
 PROVIDER_DEFAULT_MODEL = {
-    "groq": "llama-3.3-70b-versatile",
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b. Same single-value pick and reasoning as
+    # agents/generic_worker.py's own PROVIDER_DEFAULT_MODEL -- this dict
+    # only has room for one model per provider (each test_*_key() call
+    # below fires a single request), so gpt-oss-120b was picked as the
+    # closer capability match of the two suggested replacements.
+    "groq": "openai/gpt-oss-120b",
     "cerebras": "gpt-oss-120b",
     "gemini": "gemini-3.1-flash-lite",
     "mistral": "mistral-medium-latest",

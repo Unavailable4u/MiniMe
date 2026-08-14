@@ -247,8 +247,13 @@ def _build_live_chain(role_name: str) -> list:
 # utils/llm_client.py's own module docstring). Add either the same way
 # if you want them in the comparison, using their real step shape
 # rather than forcing them through this key_env-only dict.
+# llama-3.3-70b-versatile decommissioned by Groq; migrated to
+# openai/gpt-oss-120b. Single value per provider here (each entry is one
+# comparison step, not a chain), so gpt-oss-120b was picked as the
+# closer capability match of the two suggested replacements, same as
+# agents/generic_worker.py's PROVIDER_DEFAULT_MODEL.
 PROVIDER_OVERRIDE_DEFAULTS = {
-    "groq":     {"provider": "groq",     "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    "groq":     {"provider": "groq",     "model": "openai/gpt-oss-120b",     "key_env": "GROQ_API_KEY"},
     "cerebras": {"provider": "cerebras", "model": "gpt-oss-120b",            "key_env": "CEREBRAS_API_KEY_1"},
     "mistral":  {"provider": "mistral",  "model": "mistral-medium-latest",   "key_env": "MISTRAL_API_KEY"},
     "gemini":   {"provider": "gemini",   "model": "gemini-3.6-flash",        "key_env": "GEMINI_API_KEY_1"},

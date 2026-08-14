@@ -18,8 +18,11 @@ pytestmark = pytest.mark.manual
 @pytest.mark.skipif(not os.getenv("GROQ_API_KEY_2"), reason="GROQ_API_KEY_2 not set")
 def test_groq_secondary_key_chat_completion():
     client = Groq(api_key=os.getenv("GROQ_API_KEY_2"))
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b, one of the two models Groq's decommission
+    # notice suggested in its place.
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": "say hello"}],
     )
     content = response.choices[0].message.content

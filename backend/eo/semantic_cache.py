@@ -28,7 +28,12 @@ SIMILARITY_THRESHOLD = 0.93
 INVALIDATION_THRESHOLD = 0.90
 CACHE_TTL_SECONDS = 60 * 60 * 48
 
-_VERIFY_CHAIN = [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "SGA_GROQ_1"}]
+# llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
+# models Groq's decommission notice suggested in its place.
+_VERIFY_CHAIN = [
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1"},
+]
 
 _VERIFY_SYSTEM_PROMPT = """You check whether a previously-given answer is still accurate. \
 You will be shown the original question, a previously cached answer, and the CURRENT \

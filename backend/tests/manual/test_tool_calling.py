@@ -148,7 +148,14 @@ TEST_CASES = [
 MAX_RETRIES = 4
 BACKOFF_BASE_SECONDS = 2  # 2, 4, 8, 16...
 
-MODEL = "llama-3.3-70b-versatile"
+# llama-3.3-70b-versatile decommissioned by Groq; migrated to
+# openai/gpt-oss-120b, matching utils/llm_client.py's own note that this
+# script "proved out a system prompt + tools array against Groq's
+# openai/gpt-oss-120b specifically" (see that file's _call_step() block
+# comment). No fallback path here (see module docstring), so only one of
+# the two suggested replacement models is used, same pick as
+# CLASSIFY_INTENT_MODEL in llm_client.py.
+MODEL = "openai/gpt-oss-120b"
 
 SYSTEM_PROMPT = (
     "You are the assistant for a study workspace app. You have tools "

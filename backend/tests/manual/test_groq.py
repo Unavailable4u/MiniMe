@@ -19,8 +19,11 @@ pytestmark = pytest.mark.manual
 def test_groq_chat_completion():
     api_key = os.getenv("GROQ_API_KEY")
     client = Groq(api_key=api_key)
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b, one of the two models Groq's decommission
+    # notice suggested in its place.
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": "Say hello in exactly 5 words."}],
     )
     content = response.choices[0].message.content
