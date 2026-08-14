@@ -706,8 +706,10 @@ def _clamp_section_into_container(mech: dict, section_id: str, parts: list) -> N
 
     cx, cy = float(container.get("x") or 0), float(container.get("y") or 0)
     cw, ch = float(container.get("w") or 0), float(container.get("h") or 0)
+    cz, cd = float(container.get("z") or 0), float(container.get("d") or 0)
     fx, fy = float(footprint.get("x") or 0), float(footprint.get("y") or 0)
     fw, fh = float(footprint.get("w") or 0), float(footprint.get("h") or 0)
+    fz, fd = float(footprint.get("z") or 0), float(footprint.get("d") or 0)
 
     dx = 0.0
     if fx < cx:
@@ -719,10 +721,15 @@ def _clamp_section_into_container(mech: dict, section_id: str, parts: list) -> N
         dy = cy - fy
     elif fy + fh > cy + ch:
         dy = (cy + ch) - (fy + fh)
+    dz = 0.0
+    if fz < cz:
+        dz = cz - fz
+    elif fz + fd > cz + cd:
+        dz = (cz + cd) - (fz + fd)
 
-    if dx == 0.0 and dy == 0.0:
-        return  # already inside the container on x/y -- see docstring on
-                 # why a pure cross-section collision or a genuinely
+    if dx == 0.0 and dy == 0.0 and dz == 0.0:
+        return  # already inside the container on x/y/z -- see docstring
+                 # on why a pure cross-section collision or a genuinely
                  # oversize section both fall through untouched here.
 
     from eo.mech_sections import group_into_sections, subsections_for_section
@@ -742,9 +749,11 @@ def _clamp_section_into_container(mech: dict, section_id: str, parts: list) -> N
                 continue
             member["x"] = float(member.get("x") or 0) + dx
             member["y"] = float(member.get("y") or 0) + dy
+            member["z"] = float(member.get("z") or 0) + dz
 
     footprint["x"] = fx + dx
     footprint["y"] = fy + dy
+    footprint["z"] = fz + dz
 
 
 def run_level_3_4_repair(spec: dict, parts: list, session_id: str = None, path: str = None,
