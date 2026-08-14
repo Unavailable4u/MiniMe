@@ -18,11 +18,20 @@ same rather than relying on a "default" that doesn't exist.
 """
 import os
 import sys
+import logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.llm_client import generate_text
 from utils.web_search import search as web_search
 from eo.price_cache import get_cached_price, set_cached_price
+
+# Bug fix (pricing-audit root cause 2): every failure in this module used
+# to be silently swallowed -- a genuine "no listing exists" and a broken
+# LLM-extraction call both landed on the exact same {"found": False,
+# "listings": []} result, with no way to tell them apart after the fact.
+# This logger makes every non-success path here greppable (search
+# "part_price_finder" in logs) instead of invisible.
+log = logging.getLogger(__name__)
 
 BD_VENDOR_DOMAINS = [
     "startech.com.bd", "ryanscomputers.com", "techlandbd.com",
@@ -142,8 +151,25 @@ def find_price(part_name: str, force_refresh: bool = False, chain_override: list
         user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
         chain=chain_override or FALLBACK_CHAIN,
         agent_name=agent_name,
+        # Bug fix (pricing-audit root cause 1): this is a single-shot JSON
+        # classifier, same shape as eo/inspector.py's own call. Without
+        # this, a reasoning model (e.g. FALLBACK_CHAIN's qwen/qwen3.6-27b)
+        # that gets truncated mid-<think> and told to "continue
+        # seamlessly" just finishes its train of thought and never emits
+        # the JSON -- see generate_text()'s own allow_continuation
+        # docstring. A truncation here should discard the partial output
+        # and retry fresh on the next chain step, not splice onto an
+        # empty <think> block.
+        allow_continuation=False,
     )
-    parsed = _safe_json(raw) or {"found": False, "listings": []}
+    parsed = _safe_json(raw)
+    if parsed is None:
+        log.warning(
+            "find_price: unparseable JSON from LLM extraction — part=%r branch=bd "
+            "raw=%r",
+            part_name, raw[:500] if raw else raw,
+        )
+        parsed = {"found": False, "listings": []}
     result = {
         "part_name": part_name,
         "listings": _sanitize_listings(parsed.get("listings", [])),
@@ -186,8 +212,18 @@ def _find_international_fallback(part_name: str, chain_override: list, agent_nam
         user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
         chain=chain_override or FALLBACK_CHAIN,
         agent_name=agent_name,
+        # Same fix as find_price()'s BD-path call above -- see the
+        # comment there.
+        allow_continuation=False,
     )
-    parsed = _safe_json(raw) or {"found": False, "listings": []}
+    parsed = _safe_json(raw)
+    if parsed is None:
+        log.warning(
+            "find_price: unparseable JSON from LLM extraction — part=%r branch=intl "
+            "raw=%r",
+            part_name, raw[:500] if raw else raw,
+        )
+        parsed = {"found": False, "listings": []}
     result = {
         "part_name": part_name,
         "listings": _sanitize_listings(parsed.get("listings", [])),

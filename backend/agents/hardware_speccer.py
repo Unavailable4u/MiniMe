@@ -108,6 +108,7 @@ import os
 import re
 import sys
 import json
+import logging
 import urllib.parse
 from dotenv import load_dotenv
 
@@ -122,6 +123,15 @@ from agents.structure_architect import (
 )  # reuse, don't reimplement
 
 load_dotenv()
+
+# Bug fix (pricing-audit root cause 2): _populate_prices()'s per-part
+# try/except used to swallow every exception with zero logging -- a
+# RuntimeError from find_price() exhausting its whole chain (e.g. every
+# part_price_finder-tagged account rate-limited) was indistinguishable
+# from a genuine bug, and both were indistinguishable from a real "no
+# listing exists" result. This logger makes that failure visible/greppable
+# instead of vanishing silently.
+log = logging.getLogger(__name__)
 
 # FALLBACK_CHAIN: last-resort static chain for the spec-generation call
 # below, used ONLY if eo/dynamic_chain.py's build_fallback_chain() comes
@@ -533,10 +543,18 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
         try:
             result = find_price(name, chain_override=chain,
                                  agent_name=f"{ROLE_TAG}_{worker_id}")
-        except Exception:
+        except Exception as exc:
             # A single vendor-search failure shouldn't fail the whole
             # spec -- same "degrade, don't blow up" spirit as
-            # part_price_finder.py's own per-provider try/except.
+            # part_price_finder.py's own per-provider try/except. But it
+            # must not vanish silently either (pricing-audit root cause
+            # 2) -- log enough to tell a real bug/rate-limit apart from a
+            # genuine "not found" further down the pipeline.
+            log.warning(
+                "_populate_prices: price lookup failed — part=%r worker_id=%s "
+                "%s: %s",
+                name, worker_id, type(exc).__name__, exc,
+            )
             return part
         listing = result["listings"][0] if result.get("listings") else None
         if not listing:
