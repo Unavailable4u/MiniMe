@@ -329,6 +329,28 @@ def _patch_pusher_double_escaping(pusher_module) -> None:
             # Re-encode with ensure_ascii=False and re-run auth signing,
             # since body_md5/auth_signature were computed off the
             # (wrong) ascii-escaped body by _orig_init above.
+            #
+            # Bug fix: _orig_init()'s call to _generate_auth() already
+            # wrote an 'auth_signature' key into self.query_params (Pusher's
+            # own Request._generate_auth() does query_params.update({...})
+            # for auth_key/body_md5/auth_version/auth_timestamp, then
+            # separately sets query_params['auth_signature'] afterwards --
+            # nothing ever clears that key). Calling _generate_auth() again
+            # here recomputes body_md5/auth_timestamp/etc. correctly, but
+            # the auth_string it signs is built from make_query_string(self.
+            # query_params) BEFORE the new auth_signature is assigned --
+            # which means it still contains the STALE auth_signature from
+            # the first call as a query param, so this second signature is
+            # computed over a string Pusher's server never expects (it only
+            # ever signs auth_key/body_md5/auth_version/auth_timestamp,
+            # never auth_signature itself). Pusher then rejects every event
+            # with "Invalid signature: you should have sent
+            # HmacSHA256Hex(<our 4-param string>, secret), but you sent
+            # <our 5-param signature>" -- exactly the errors flooding the
+            # logs. Popping the stale key before re-signing makes this
+            # second _generate_auth() call produce the same 4-param auth
+            # string Pusher itself computes.
+            self.query_params.pop("auth_signature", None)
             self.body = _json.dumps(params, ensure_ascii=False).encode("utf8")
             self._generate_auth()
 

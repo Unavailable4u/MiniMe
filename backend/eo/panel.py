@@ -355,6 +355,28 @@ QUOTA_CUTOFF = 0.8   # matches the blueprint's 80% figure — the same threshold
 # brief is an occasional single call, not parallel worker traffic.
 BRIEF_WRITER_CHAIN = [
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
+    # Fallback fix: this chain used to be a single step on the SAME
+    # EO_PANEL_CEREBRAS_KEY account MEMBER_B_CHAIN above hammers on every
+    # escalation. When Member B's own traffic rate-limits that account,
+    # _set_cooldown() puts cerebras:EO_PANEL_CEREBRAS_KEY into cooldown --
+    # and because this chain had no other step, generate_text() below hit
+    # _is_cooling_down() straight away, `continue`d past the only entry,
+    # and fell out of the loop having never actually attempted a call. That
+    # left last_exc unset (it's only assigned inside the `except
+    # _TRANSIENT_ERRORS` branch, which never ran) and produced the
+    # confusing "All providers in fallback chain exhausted or unavailable.
+    # Last error: None" crash -- a single shared-account outage taking down
+    # role-brief writing for every in-flight task.
+    #
+    # Rather than provision new credentials for what the original comment
+    # already correctly notes is "an occasional single call, not parallel
+    # worker traffic", this reuses MEMBER_B_CHAIN's own already-wired
+    # fallback slots immediately above -- distinct provider, distinct
+    # accounts, so a Member-B-triggered cooldown on the Cerebras key no
+    # longer strands this chain too.
+    {"provider": "cloudflare", "model": "@cf/meta/llama-3.1-8b-instruct",
+     "account_id_env": "EO_PANEL_CLOUDFLARE_ACCOUNT_ID", "token_env": "EO_PANEL_CLOUDFLARE_API_TOKEN"},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_7"},
 ]
 
 BRIEF_WRITER_SYSTEM_PROMPT = """You write reusable role briefs for a multi-agent task-execution system. \
@@ -376,14 +398,44 @@ def _get_or_write_role_prompt(role_name: str, task_text: str, session_id: str = 
 
     emit_event("agent_start", session_id, agent="panel_brief_writer",
                payload={"label": f"Writing a new role brief: {role_name}"})
-    brief = generate_text(
-        system_prompt=BRIEF_WRITER_SYSTEM_PROMPT,
-        user_content=f"Role: {role_name}\nTask that currently needs it: {task_text}",
-        chain=BRIEF_WRITER_CHAIN,
-        agent_name="Panel (brief writer)",
-        session_id=session_id,   # Part 8 §9 — without this, this call's usage
-        tier=tier,                # never got logged or shown live, silently.
-    ).strip()
+    try:
+        brief = generate_text(
+            system_prompt=BRIEF_WRITER_SYSTEM_PROMPT,
+            user_content=f"Role: {role_name}\nTask that currently needs it: {task_text}",
+            chain=BRIEF_WRITER_CHAIN,
+            agent_name="Panel (brief writer)",
+            session_id=session_id,   # Part 8 §9 — without this, this call's usage
+            tier=tier,                # never got logged or shown live, silently.
+        ).strip()
+    except RuntimeError as exc:
+        # Fallback-chain fix, follow-up: even with BRIEF_WRITER_CHAIN now
+        # three providers deep, a total outage is still theoretically
+        # possible -- and this call sits directly in the request path of
+        # staff_task()/_resolve_decision_and_hires(), so letting it raise
+        # here takes down the entire /tasks request over what's genuinely
+        # a "nice to have" (a well-written, reusable role brief), not a
+        # hard requirement. Same fire-and-forget posture emit_event() and
+        # _set_cooldown() already follow elsewhere in this file: log it,
+        # don't let it take down the real work riding alongside it.
+        #
+        # Deliberately NOT calling add_role_prompt() here -- that would
+        # permanently cache this generic text as role_name's brief
+        # (get_role_prompt()'s fast path above means it would never be
+        # retried), silently degrading every future task that hires this
+        # role. Returning it unpersisted means this one task proceeds with
+        # a generic-but-workable brief, and the next task that needs this
+        # role gets a fresh attempt at a real one.
+        print(f"  [Panel (brief writer)] role brief generation failed for "
+              f"'{role_name}' ({exc}); using a generic, non-persisted "
+              f"fallback brief for this task only.")
+        emit_event("agent_done", session_id, agent="panel_brief_writer",
+                   payload={"summary": f"Role brief generation failed for "
+                                       f"'{role_name}'; used a generic fallback"})
+        return (f"Act as the '{role_name}' role for this task. Focus on "
+                f"exactly the work you were hired to do, use the task "
+                f"context and any prior agents' output you're given, and "
+                f"hand back a complete, direct result.")
+
     add_role_prompt(role_name, brief)
     emit_event("agent_done", session_id, agent="panel_brief_writer",
                payload={"summary": f"New role '{role_name}' added to the registry"})
