@@ -350,7 +350,10 @@ def _ensure_seed_embedded() -> None:
 # docstring already establishes (it imports FROM eo.skill_library, not
 # the other way around).
 CONDENSE_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"},
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
+    # models Groq's decommission notice suggested in its place.
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
 ]
 

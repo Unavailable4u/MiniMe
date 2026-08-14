@@ -68,7 +68,17 @@ from agents.handoff_packager import PLAN_HANDOFF_PACKAGE_KEY
 # the time run() is actually CALLED, both modules have finished loading.
 
 PROVIDER_DEFAULT_MODEL = {
-    "groq": "llama-3.3-70b-versatile",
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b, one of the two models Groq's decommission
+    # notice suggested in its place (the other, qwen/qwen3.6-27b, is
+    # used explicitly in per-agent CHAINs elsewhere -- see e.g.
+    # architecture_diagrammer.py/idea_planner.py). This dict only has
+    # room for a single value per provider (PROVIDER_DEFAULT_MODEL.get()
+    # below feeds exactly one step, not a chain), so gpt-oss-120b was
+    # picked as the default the same way utils/llm_client.py's
+    # CLASSIFY_INTENT_MODEL was: it's the closer capability match of the
+    # two suggested replacements.
+    "groq": "openai/gpt-oss-120b",
     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras'
     # catalog (confirmed via GET /v1/models against a live account:
     # only gpt-oss-120b/gemma-4-31b/zai-glm-4.7 are served now). Every

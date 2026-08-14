@@ -242,7 +242,10 @@ def test_generate_text_logs_usage_after_mocked_chat_completion(monkeypatch):
         lambda key_env, timeout=None: _make_fake_client("hello world", 321),
     )
 
-    chain = [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"}]
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b (this test only asserts the chain step's model
+    # string passes through unchanged, so any live Groq model works here).
+    chain = [{"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"}]
     result = llm_client.generate_text(
         "system prompt", "user content", chain,
         agent_name="Test Agent", session_id="sess_xyz", tier=1,
@@ -255,7 +258,7 @@ def test_generate_text_logs_usage_after_mocked_chat_completion(monkeypatch):
     # (record["model"]) so get_quota_snapshot() can resolve per-model
     # limits -- the record has one more key than it used to.
     assert fake_bus.store[key] == {
-        "requests": 1, "tokens": 321, "model": "llama-3.3-70b-versatile",
+        "requests": 1, "tokens": 321, "model": "openai/gpt-oss-120b",
     }
     assert fake_emitter.calls[0]["payload"]["tokens_used_today"] == 321
 
@@ -281,12 +284,15 @@ def test_generate_text_logs_zero_tokens_when_usage_object_missing(monkeypatch):
 
     monkeypatch.setattr(llm_client, "_get_groq", lambda key_env, timeout=None: _NoUsageClient())
 
-    chain = [{"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_API_KEY"}]
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to
+    # openai/gpt-oss-120b (same passthrough-only reasoning as the test
+    # above).
+    chain = [{"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"}]
     llm_client.generate_text("sys", "user", chain, agent_name="Test Agent")
 
     key = f"usage:groq:GROQ_API_KEY:{TODAY}"
     assert fake_bus.store[key] == {
-        "requests": 1, "tokens": 0, "model": "llama-3.3-70b-versatile",
+        "requests": 1, "tokens": 0, "model": "openai/gpt-oss-120b",
     }
 
 

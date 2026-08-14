@@ -38,7 +38,10 @@ from eo.workspace_facts import CATEGORY_TO_SECTION
 # (2026-07-30, full GitHub Models retirement) -- Groq -> Cerebras is the
 # full chain now.
 CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "key_env": "GROQ_RESERVE_1"},
+    # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
+    # models Groq's decommission notice suggested in its place.
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_RESERVE_1"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_RESERVE_1"},
     # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
     # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
     # zai-glm-4.7 served now). See agents/generic_worker.py's
