@@ -93,7 +93,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
 from eo.worker_pool import _select_workers as _select_workers_for_role
-from eo.mech_sections import group_into_sections, subsections_for_section
+from eo.mech_sections import group_into_sections
 
 ROLE_TAG = "mech_section"
 

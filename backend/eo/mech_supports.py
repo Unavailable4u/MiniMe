@@ -77,6 +77,8 @@ plan_device_layout()).
 """
 
 from eo.enclosure_spec import ENCLOSURE_SPEC, SUPPORT_CATEGORIES
+from eo.mech_sections import subsections_for_section
+from eo.mech_subsections import members_for_subsection
 
 # Corner offsets (as (dx, dy) fractions of a member's own w/h) each
 # standoff sits at -- fixed at the plan-view rectangle's four corners,
@@ -255,10 +257,6 @@ def compute_screw_bosses(section_members: list) -> list:
 # functions' own docstrings), calls both functions above, and mutates
 # `mech` in place -- same "mutate AND return" wrapper convention every
 # apply_* function in this package already follows.
-
-from eo.mech_sections import subsections_for_section
-from eo.mech_subsections import members_for_subsection
-
 
 def _joined_section_members(mech: dict, parts: list) -> list:
     """Resolves every placement across EVERY section of `mech` (not just

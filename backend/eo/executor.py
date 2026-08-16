@@ -56,13 +56,13 @@ from eo.agent_dependencies import AGENT_DEPENDENCIES
 import logging
 
 from eo.tracing import get_tracer, TRACING_ENABLED, truncate_for_trace
+from relay.emitter import emit_event
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
 # failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
 # a future export failure shows up in log aggregation instead of only
 # in raw stdout, per the audit report's point 5.
 _trace_logger = logging.getLogger("eo.tracing")
-from relay.emitter import emit_event
 
 TASK_TEXT_ENTRYPOINTS = {"responder", "prompt_writer_lean"}
 

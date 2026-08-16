@@ -117,10 +117,6 @@ import logging
 
 from eo.tracing import get_tracer, truncate_for_trace
 
-# D1 audit fix -- see eo/executor.py's matching _trace_logger; same
-# TRACE_EXPORT_FAILED marker convention so tracing-side failures from
-# either module are greppable together.
-_trace_logger = logging.getLogger("eo.tracing")
 # Part 26 §4 re-export: embed_text() used to be defined directly in this
 # module, but eo/routing_memory.py wanted it without the heavy groq/
 # cerebras/openai SDK imports above, so it now lives in
@@ -131,6 +127,11 @@ _trace_logger = logging.getLogger("eo.tracing")
 # eo/knowledge_graph.py, eo/semantic_cache.py). Not used directly in
 # this file, hence the noqa.
 from utils.embedding import embed_text, embed_text_with_fallback  # noqa: F401
+
+# D1 audit fix -- see eo/executor.py's matching _trace_logger; same
+# TRACE_EXPORT_FAILED marker convention so tracing-side failures from
+# either module are greppable together.
+_trace_logger = logging.getLogger("eo.tracing")
 
 # Quota-reality fix, §1 — replaces the old flat per-provider dict. Three
 # separate bugs that one flat number hid:
