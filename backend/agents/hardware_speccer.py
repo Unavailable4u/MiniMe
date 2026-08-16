@@ -2141,6 +2141,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.mech_enclosure import apply_enclosure_generation
     from eo.mech_supports import apply_supports_generation
     from eo.mech_cutouts import apply_cutout_generation
+    from eo.mech_manufacturability import build_manufacturability_report
     from eo.mech_validator import close_session as close_mech_validator_session
     from eo.mech_validator import find_unresolved_inferred_pins
     try:
@@ -2191,6 +2192,21 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # guarantees mech["supports"] already exists by the time
         # mech["cutouts"] is populated alongside it.
         apply_cutout_generation(spec.get("mech") or {}, spec["parts"])
+        # Patch 6.4: Phase 6's own pipeline wiring. Runs last in this
+        # block, after mech["housing"]/mech["supports"]/mech["cutouts"]
+        # are ALL populated -- build_manufacturability_report() (Patch
+        # 6.1/6.2/6.3) only reads that already-computed geometry, it
+        # never generates any of its own, so it belongs strictly after
+        # every generator above, same "checks run after the geometry
+        # they check exists" ordering apply_cutout_generation() itself
+        # already sits at relative to apply_supports_generation(). Makes
+        # no FreeCAD/validator calls of its own, so it's harmless to run
+        # inside this same try block ahead of close_mech_validator_session()
+        # below rather than after it -- kept here (not in `finally`)
+        # so a mid-pipeline exception above still skips it, same as
+        # every other apply_*() call in this block.
+        mech = spec.get("mech") or {}
+        mech["manufacturability"] = build_manufacturability_report(mech)
     finally:
         close_mech_validator_session(session_id)
 
@@ -2288,6 +2304,12 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     custom = dict(facts.get("custom") or {})
     custom["parts"] = spec.get("parts", [])
     custom["wiring"] = spec.get("wiring", {})
+    # Patch 6.4: no separate custom["manufacturability"] key needed --
+    # mech["manufacturability"] (stashed above, right after
+    # apply_cutout_generation()) already rides along inside this same
+    # mech dict, so the report reaches the handoff surface for free,
+    # same "one dict already carries it" shape mech["housing"]/
+    # mech["supports"]/mech["cutouts"] themselves already rely on here.
     custom["mech"] = spec.get("mech", {})
     custom["instructions"] = spec.get("instructions", {})
     custom["info"] = spec.get("info", {"summary": "", "tags": [], "image_url": ""})
