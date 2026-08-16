@@ -7,14 +7,25 @@ from memory.bus import write, read_many, KEYS
 from utils.llm_client import generate_text
 load_dotenv()
 
-# Fallback chain per Part 4, agent #1 of the v5 blueprint:
-# Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b (migrated off llama-3.3-
-# 70b-versatile, decommissioned by Groq) -> Cerebras gpt-oss-120b
-# (Cerebras's llama-3.3-70b was deprecated Feb 2026 and now 404s; gpt-oss-120b
-# is the one model guaranteed on Cerebras's public production tier.)
-# Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
-# removed here, not replaced -- GitHub Models retired in full today.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below returns nothing at
+# all (every registered account excluded/cooling down at once -- should
+# be very rare). This used to be the ONLY chain this module ever tried
+# (module-level CHAIN, both Groq steps AND the Cerebras step all pinned
+# to one hardcoded account each -- CEREBRAS_API_KEY_1 in particular was
+# quietly shared with deploy_config_writer.py, dataset_analyst.py,
+# output_organizer.py, responder.py, prompt_writer_lean.py, and
+# reviewer_fixer_lean.py, so one cooldown on that single account took
+# out this agent's Cerebras fallback step along with all of theirs at
+# once -- see backend/eo/agent_dependencies.py-adjacent Patch 8 audit).
+# "idea_planner" is already tagged in eo/registry.py's
+# AGENT_CAPABILITIES (GROQ_API_KEY/_10/_11/_12's natural_roles), so
+# build_fallback_chain() below gets a real, live, quota-ranked,
+# cooldown-aware chain to build from -- no registry changes needed for
+# this agent specifically. Kept here as the literal fallback of last
+# resort, same model/key choices as before (see run()'s real call site
+# for the fix).
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
@@ -61,7 +72,20 @@ def run(session_id: str = None, domain: str = None):
     # real sleeps (1/2/4/8s) in between, on top of generate_text() already
     # having walked every step in CHAIN once per attempt. generate_text()
     # is the single source of retry/fallback behavior now.
-    raw_text = generate_text(SYSTEM_PROMPT, user_content, CHAIN, agent_name="Idea Planner",
+    #
+    # Patch 8.2 (key-rotation fix, generalized): deferred import -- see
+    # eo/dynamic_chain.py's module docstring for why this can't be a
+    # module-level import (eo.registry imports this module at load time;
+    # eo.dynamic_chain imports eo.registry at ITS module level, so a
+    # top-level import here would close a circular loop). Quota-ranked,
+    # cooldown-aware, spread across every account "idea_planner" is
+    # tagged for in AGENT_CAPABILITIES -- replaces the old fixed CHAIN
+    # that pinned every step (including the one Cerebras step) to one
+    # hardcoded account with nothing to fall back to.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("idea_planner") or FALLBACK_CHAIN
+
+    raw_text = generate_text(SYSTEM_PROMPT, user_content, chain, agent_name="Idea Planner",
                               session_id=session_id, domain=domain)
     # Strip markdown code fences if the model adds them anyway
     if raw_text.startswith("```"):

@@ -1158,6 +1158,103 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
     return output
 
 
+def find_unresolved_inferred_pins(mech: dict) -> list:
+    """
+    Patch 3.1 (Phase 3, Master Guide gap #10, "Pin resolution gate") --
+    pure scan, no mutation, no I/O, no FreeCAD: finds every wiring edge
+    agents/hardware_speccer.py's _fix_wiring_electrical_integrity()
+    synthesized (tagged "_inferred": True, see that function's own
+    docstring for the two shapes it currently produces: a missing I2C
+    clock line, an orphaned power-tree input) whose still-null pin
+    belongs to a part that's actually part of the FINAL device -- present
+    in `mech["mech"]["sections"]` (populated by eo/mech_sections.py's
+    apply_section_grouping(), already run by the time run_level_3_4_repair()
+    settles -- see eo/mech_repair.py's run_level_3_4_repair() docstring)
+    -- not just any part still sitting in `mech["mech"]["placements"]`
+    that never made it into a checkable section (a discarded/unused
+    part, or one G3f-1's own category grouping dropped). Detection only,
+    same "can we find the problem" vs. "what do we do about it" split
+    every other level's own checkable-set helper in this module already
+    keeps separate from its repair driver.
+
+    NOTE on the `mech` argument's shape: agents/hardware_speccer.py's own
+    run_hardware_speccer() is the only caller with both wiring edges
+    (`spec["wiring"]`) and section membership (`spec["mech"]["sections"]`)
+    on hand at once -- those two live as SIBLINGS on its `spec` dict, not
+    both nested under one `spec["mech"]` -- so it passes its own `spec`
+    object here as `mech`, matching this module's existing precedent of a
+    caller-shaped `mech` argument rather than one fixed schema (see
+    validate_layout()'s own `mech` argument, which is sometimes the bare
+    placements dict and sometimes a fuller object depending on level/
+    caller). `mech.get("wiring")` and `mech.get("mech", {}).get("sections")`
+    are read directly rather than assuming a flattened shape.
+
+    Returns [{"part_id": str, "pin_side": "from"|"to", "pin_hint": str
+    or None, "edge": edge_dict}, ...] -- one entry per still-unresolved
+    (null-pin) side of a load-bearing inferred edge, `edge` being the
+    SAME dict object living in `mech["wiring"]["edges"]` (so a caller,
+    e.g. Patch 3.3's finalize-path wiring, can fill the resolved pin name
+    straight back onto it without a second lookup). `pin_hint` is the
+    OTHER side's already-known pin name (e.g. "SCL", "VIN") when this
+    edge's own shape provides one -- a hint for Patch 3.2's targeted
+    retry to know what it's resolving, not a value this function
+    invents. An inferred edge with both sides already named (shouldn't
+    happen given today's two synthesis cases -- both always leave
+    exactly one side null -- but a future third synthesis case might
+    not) contributes nothing: there's no unresolved *pin* left to chase
+    even though the edge itself is still "_inferred".
+
+    Empty input (no wiring, no edges, no sections yet -- i.e. called
+    before the mech pipeline has actually placed anything) returns []
+    cleanly, no error, same fail-safe posture every other "not ready
+    yet" branch in this module already holds.
+    """
+    if not isinstance(mech, dict):
+        return []
+
+    wiring = mech.get("wiring")
+    edges = wiring.get("edges") if isinstance(wiring, dict) else None
+    if not isinstance(edges, list) or not edges:
+        return []
+
+    device_mech = mech.get("mech")
+    device_mech = device_mech if isinstance(device_mech, dict) else {}
+    sections = device_mech.get("sections") or []
+    if not sections:
+        return []  # nothing placed in the final device yet -- nothing is "load-bearing"
+
+    from eo.mech_sections import subsections_for_section
+
+    placed_part_ids = set()
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        for subsection in subsections_for_section(device_mech, section):
+            for member_id in (subsection or {}).get("member_ids") or []:
+                placed_part_ids.add(member_id)
+
+    if not placed_part_ids:
+        return []
+
+    unresolved = []
+    for edge in edges:
+        if not isinstance(edge, dict) or not edge.get("_inferred"):
+            continue
+        from_id, to_id = edge.get("from"), edge.get("to")
+        from_pin, to_pin = edge.get("from_pin"), edge.get("to_pin")
+        if not from_pin and from_id in placed_part_ids:
+            unresolved.append({
+                "part_id": from_id, "pin_side": "from",
+                "pin_hint": to_pin, "edge": edge,
+            })
+        if not to_pin and to_id in placed_part_ids:
+            unresolved.append({
+                "part_id": to_id, "pin_side": "to",
+                "pin_hint": from_pin, "edge": edge,
+            })
+    return unresolved
+
+
 if __name__ == "__main__":
     _demo_mech = {
         "placements": [
