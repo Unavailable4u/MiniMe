@@ -46,6 +46,19 @@ code_writer_lean.py and the same pattern reviewer_fixer_lean.py already
 uses. That step is appended after the key_override-built primary step
 below, so key_override still only ever changes the primary account, never
 the fallback.
+
+Patch 8.7 fix: the appended Cerebras step above pointed at
+CEREBRAS_API_KEY_1 -- confirmed by Patch 8.1's audit as the single most
+shared account in the whole roster, hardcoded as the SAME step in
+idea_planner.py, prompt_writer_lean.py, and reviewer_fixer_lean.py too
+(deploy_config_writer.py/dataset_analyst.py/output_organizer.py/
+report_writer.py also pointed at a shared Cerebras key, fixed separately
+in Patches 8.3-8.6 via the registry, which this agent explicitly can't
+use -- see the paragraph above). A cooldown on that one account was
+capable of taking out Responder at the exact same moment it took out
+three other agents. Moved to CEREBRAS_API_KEY_4 -- not shared as a
+single-call fallback point by any other agent in the roster -- so
+Responder's own outage domain is now genuinely independent of theirs.
 """
 import os
 import sys
@@ -142,10 +155,16 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     # (own account, own infrastructure) so an outage on the shared Groq
     # account doesn't take Responder down the way it used to; key_override
     # (above) only ever affects the primary step, same as before.
+    #
+    # Patch 8.7 fix: was CEREBRAS_API_KEY_1 -- the single most shared
+    # Cerebras account in the roster (see docstring above). Moved to its
+    # own dedicated CEREBRAS_API_KEY_4 so a cooldown on _1 (which still
+    # takes out idea_planner.py/prompt_writer_lean.py/
+    # reviewer_fixer_lean.py at once) doesn't also take Responder with it.
     chain = [
         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": primary_key_env},
         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": primary_key_env},
-        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_4"},
     ]
 
     conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23 fix

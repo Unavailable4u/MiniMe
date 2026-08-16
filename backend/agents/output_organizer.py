@@ -21,14 +21,18 @@ deploy_config_writer.py already documents for staying out of
 generic_worker despite also being pure reasoning with no real action of
 its own.
 
-CHAIN below is a fixed, hardcoded fallback list (same shape and same
-reasoning-role sizing as deploy_config_writer.py's own CHAIN) rather than
-generic_worker.py's dynamic quota-ranked _build_fallback_chain(): this is
-a single one-off call per finished run, not a parallel fan-out pool, so
-the simpler static chain is the right fit — it still walks multiple
-providers on a transient failure via generate_text()'s own chain-walk,
-same free-tier rotation everything else in this codebase relies on, it's
-just not quota-ranked per-call the way a pool selection is.
+Patch 8.5: CHAIN (below, renamed FALLBACK_CHAIN) used to be the ONLY
+chain both call sites below ever tried -- its hardcoded CEREBRAS_API_KEY_1
+third step was one of six agents in Patch 8.1's audit quietly sharing
+that single unmonitored, un-fallback-able account (idea_planner.py,
+deploy_config_writer.py, dataset_analyst.py, responder.py,
+prompt_writer_lean.py, reviewer_fixer_lean.py were the other five) -- a
+cooldown on that one key took out every one of their Cerebras fallback
+steps at once. Same fix as agents/hardware_speccer.py /
+agents/architecture_diagrammer.py: both organize_final_answer() and
+organize_final_answer_stream() below now build a live, quota-ranked,
+multi-provider chain via eo/dynamic_chain.py's build_fallback_chain()
+instead, falling back to FALLBACK_CHAIN only if that comes back empty.
 
 Wired into api/task_runner.py's tier-3 result packaging (CO1's second
 piece): called whenever a finished run produced more than one role's
@@ -60,14 +64,17 @@ from utils.llm_client import generate_text, stream_completion
 from eo.result_render import render_agent_result
 from eo.tracing import get_tracer, TRACING_ENABLED
 
-# Same reasoning-role chain shape as agents/deploy_config_writer.py /
-# agents/prompt_writer.py -- a planning/reasoning call, not a tight,
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() comes back empty (every
+# registered account excluded/cooling down at once -- should be very
+# rare). Same reasoning-role chain shape as agents/deploy_config_writer.py
+# / agents/prompt_writer.py -- a planning/reasoning call, not a tight,
 # latency-sensitive one, so a 3-step chain (vs. those two modules' 2)
 # is worth the extra resilience: this call sits at the very end of an
 # already-completed multi-agent run, so a account exhausted deep enough
 # to need a third hop is far more likely after every other role in the
 # run already made its own calls first.
-CHAIN = [
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
@@ -235,11 +242,20 @@ def organize_final_answer(role_outputs: dict, user_request: str, final_role: str
         + "\n\n".join(sections)
     )
 
+    # Patch 8.5: deferred import -- see eo/dynamic_chain.py's module
+    # docstring for why this can't be a module-level import (eo.registry
+    # imports agent modules at load time; eo.dynamic_chain imports
+    # eo.registry at ITS module level). Quota-ranked, cooldown-aware,
+    # spread across providers -- replaces FALLBACK_CHAIN's single shared
+    # Cerebras key with no fallback.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("output_organizer") or FALLBACK_CHAIN
+
     with _open_organizer_span(session_id, user_content) as _span:
         raw_response = generate_text(
             system_prompt=SYSTEM_PROMPT,
             user_content=user_content,
-            chain=CHAIN,
+            chain=chain,
             agent_name="output_organizer",
         )
         result = _parse_organizer_response(raw_response)
@@ -302,12 +318,17 @@ async def organize_final_answer_stream(role_outputs: dict, user_request: str, fi
         + "\n\n".join(sections)
     )
 
+    # Patch 8.5: deferred import, same reasoning as
+    # organize_final_answer()'s call site above.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("output_organizer") or FALLBACK_CHAIN
+
     with _open_organizer_span(session_id, user_content) as _span:
         _chunks = [] if _span is not None else None
         async for chunk in stream_completion(
             system_prompt=SYSTEM_PROMPT,
             user_content=user_content,
-            chain=CHAIN,
+            chain=chain,
             agent_name="output_organizer",
         ):
             if _chunks is not None:

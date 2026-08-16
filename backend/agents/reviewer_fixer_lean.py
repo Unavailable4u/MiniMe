@@ -19,6 +19,13 @@ One call does both jobs at once — review AND fix in the same pass —
 since for one small module there's no independent value in reviewing
 first and fixing second as two separate LLM calls; it's the same model
 looking at the same code twice.
+
+Patch 8.9 fix: the CHAIN copied from idea_planner.py (see above) also
+copied its single-shared-Cerebras-key bug. Now a 3-step Cerebras rotation
+across CEREBRAS_API_KEY_1/_2/_3 plus a real Gemini fallback, the exact
+fix agents/code_writer_lean.py already proved out and agents/
+prompt_writer_lean.py's Patch 8.8 already applied for the same reason --
+see this file's own CHAIN comment below.
 """
 import os
 import sys
@@ -32,10 +39,37 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
 # its fallback step is removed here, not replaced. The Groq -> Cerebras
 # redundancy above is unchanged.
+#
+# Patch 8.9 fix: the Cerebras step read CEREBRAS_API_KEY_1 -- copied
+# verbatim from agents/idea_planner.py's own pre-fix CHAIN (see this
+# file's docstring), carrying that account's single-point-of-failure bug
+# along with it. Confirmed by Patch 8.1's audit as the same account
+# hardcoded in idea_planner.py, responder.py, and prompt_writer_lean.py
+# too -- a cooldown on it took out this agent's whole fallback step at
+# the same moment it took out the others. idea_planner.py's own fix
+# (Patch 8.2) wired it into eo/registry.py's build_fallback_chain(), but
+# this is the tier-1 lean pipeline, which deliberately bypasses the
+# registry for speed (see eo/registry.py:110) -- build_fallback_chain()
+# has nothing to resolve under a "reviewer_fixer_lean" role, so unlike
+# idea_planner.py this can't just call into the registry. Same exact fix
+# as agents/code_writer_lean.py's 2026-08-12 fix (and agents/
+# prompt_writer_lean.py's Patch 8.8, applied for the identical reason):
+# each Cerebras step now uses its own real account (CEREBRAS_API_KEY_1/
+# _2/_3, siblings of the production 5-key pool -- see eo/registry.py)
+# instead of one shared key, plus a genuine second-provider step (Gemini,
+# its own key/account/infrastructure) appended after so a Cerebras-wide
+# outage doesn't take this agent down entirely either.
+MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
+MODEL_KEYS = ["CEREBRAS_API_KEY_1", "CEREBRAS_API_KEY_2", "CEREBRAS_API_KEY_3"]
+
 CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+] + [
+    {"provider": "cerebras", "model": m, "key_env": k}
+    for m, k in zip(MODELS, MODEL_KEYS)
+] + [
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_1"},
 ]
 
 SYSTEM_PROMPT = """You are reviewing and fixing ONE small, self-contained code \

@@ -8,13 +8,23 @@ from utils.llm_client import generate_text
 from eo.errors import MissingDependencyError   # NEW — bug fix
 load_dotenv()
 
-# Fallback chain per Part 4, agent #17 of the v5 blueprint:
-# Groq openai/gpt-oss-120b -> qwen/qwen3.6-27b -> Cerebras gpt-oss-120b (key #9)
+# FALLBACK_CHAIN: last-resort static chain per Part 4, agent #17 of the
+# v5 blueprint, used ONLY if eo/dynamic_chain.py's build_fallback_chain()
+# below comes back empty (every registered account excluded/cooling down
+# at once -- should be very rare). This used to be the ONLY chain this
+# module ever tried -- its hardcoded CEREBRAS_API_KEY_9 third step was
+# one of six agents in Patch 8.1's audit quietly sharing a single
+# unmonitored, un-fallback-able account (idea_planner.py,
+# deploy_config_writer.py, dataset_analyst.py, responder.py,
+# prompt_writer_lean.py, reviewer_fixer_lean.py shared CEREBRAS_API_KEY_1
+# the same way). Same fix as agents/hardware_speccer.py /
+# agents/architecture_diagrammer.py: see run_report_writer() below, which
+# now builds a live, quota-ranked, multi-provider chain instead.
 # (Groq's llama-3.3-70b-versatile was decommissioned; migrated to the two
 # models above. Cerebras's llama-3.3-70b was separately deprecated Feb
 # 2026 and now 404s -- unrelated model, unrelated provider, noted here
 # only because it's easy to conflate the two.)
-CHAIN = [
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
@@ -80,7 +90,17 @@ def run_report_writer(session_id: str = None, domain: str = None):
     # real sleeps (1/2/4/8s) in between, on top of generate_text() already
     # having walked every step in CHAIN once per attempt. generate_text()
     # is the single source of retry/fallback behavior now.
-    report_text = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Report Writer",
+    #
+    # Patch 8.6: deferred import -- see eo/dynamic_chain.py's module
+    # docstring for why this can't be a module-level import (eo.registry
+    # imports this module at load time; eo.dynamic_chain imports
+    # eo.registry at ITS module level). Quota-ranked, cooldown-aware,
+    # spread across providers -- replaces FALLBACK_CHAIN's single shared
+    # Cerebras key with no fallback.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("report_writer") or FALLBACK_CHAIN
+
+    report_text = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Report Writer",
                                  session_id=session_id, domain=domain)
 
     failed_modules = [

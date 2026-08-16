@@ -29,6 +29,13 @@ step, Cerebras on its own key/account, so a Groq-side outage or cooldown
 on GROQ_API_KEY (shared with prompt_writer.py) doesn't take this agent
 down with it.
 
+Patch 8.8 fix: that single Cerebras step was itself a shared single
+point of failure (CEREBRAS_API_KEY_1, also hardcoded in idea_planner.py/
+responder.py/reviewer_fixer_lean.py -- see Patch 8.1's audit). Now a
+3-step Cerebras rotation across CEREBRAS_API_KEY_1/_2/_3 plus a real
+Gemini fallback, the exact fix agents/code_writer_lean.py already proved
+out -- see that file's docstring and this file's own CHAIN comment below.
+
 Deliberately produces ONE module, not 2-3 like the production Prompt
 Writer — Part 2.1 defines tier 1 as "a small, self-contained script or
 single-file program," so there's nothing to split.
@@ -60,10 +67,31 @@ from utils.llm_client import generate_text
 # the registry -- it needs a real, hardcoded second-provider step
 # instead, same approach as reviewer_fixer_lean.py's Groq -> Cerebras
 # CHAIN.
+#
+# Patch 8.8 fix: that single Cerebras step read CEREBRAS_API_KEY_1 --
+# confirmed by Patch 8.1's audit as the same account hardcoded in
+# idea_planner.py, responder.py, and reviewer_fixer_lean.py too (this
+# file's own CHAIN was copied verbatim into reviewer_fixer_lean.py,
+# carrying the bug with it). A cooldown on that one account took out this
+# agent's entire fallback step at the same moment it took out the others.
+# Same exact fix as agents/code_writer_lean.py's 2026-08-12 fix (see that
+# file's docstring): each Cerebras step now uses its own real account
+# (CEREBRAS_API_KEY_1/_2/_3, siblings of the production 5-key pool -- see
+# eo/registry.py) instead of one shared key repeated three ways, plus a
+# genuine second-provider step (Gemini, its own key/account/
+# infrastructure) appended after them so a Cerebras-wide outage doesn't
+# take this agent down entirely either.
+MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
+MODEL_KEYS = ["CEREBRAS_API_KEY_1", "CEREBRAS_API_KEY_2", "CEREBRAS_API_KEY_3"]
+
 CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+] + [
+    {"provider": "cerebras", "model": m, "key_env": k}
+    for m, k in zip(MODELS, MODEL_KEYS)
+] + [
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_1"},
 ]
 
 SYSTEM_PROMPT = """You are a technical spec writer for a lean, single-file build \
