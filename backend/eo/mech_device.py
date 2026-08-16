@@ -126,6 +126,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.mech_sections import group_into_sections, subsections_for_section
 from eo.mech_subsections import members_for_subsection
+from eo.mech_wiring_weight import build_section_adjacency_weights, section_pair_weight
 
 # The one section this module never assigns a zone to -- it's the
 # container every zoned section gets positioned inside of. See module
@@ -173,6 +174,92 @@ def _sections_with_footprints(mech: dict, parts: list) -> list:
     if sections:
         return sections
     return group_into_sections(mech, parts)
+
+
+def _weight_to_zone_ids(section_id: str, zone_section_ids: list, weights: dict) -> int:
+    """Patch 4.2: sums this section's own wiring-adjacency weight (eo/
+    mech_wiring_weight.py's own section_pair_weight(), Patch 4.1) against
+    every section already assigned to `zone_section_ids` -- the previous
+    band in `_ZONE_ORDER`, i.e. the "nearest already-placed zone" the
+    Master Guide's own Phase 4 Design step 3 describes. A zone with more
+    than one already-placed section (shouldn't happen given
+    `_SECTION_TO_ZONE`'s current front/center 1:1 mapping, but not
+    assumed) sums against all of them, not just one -- "adjacency to a
+    zone" is the total pull toward everything already sitting there, not
+    a single representative section's own weight.
+    """
+    return sum(
+        section_pair_weight(weights, section_id, other_id)
+        for other_id in zone_section_ids
+    )
+
+
+def _ordered_for_packing(sections: list, weights: dict) -> list:
+    """Patch 4.2: the one thing this patch actually changes -- reorders
+    `sections`' own zoned, footprint-carrying entries so that sections
+    SHARING a zone (only Sensing/Actuation, under today's
+    `_SECTION_TO_ZONE`, but never hardcoded to those two names below)
+    are packed in descending order of wiring-adjacency weight to
+    whichever zone was already placed immediately before them in
+    `_ZONE_ORDER` -- a section with more wiring edges to that
+    neighboring zone sorts first, so plan_device_layout()'s own
+    unchanged packing loop (still iterating `running_x_by_zone[zone]`
+    left-to-right) seats it closer to that zone's own boundary. See
+    Master Guide, Phase 4 Design step 3's own worked example: "a sensor
+    with more wiring edges to Compute gets packed closer to Compute's
+    edge of the zone boundary."
+
+    Zone assignment itself is untouched -- this never moves a section
+    into a different zone, only reorders sections that were ALREADY
+    going to share one. The front zone (index 0 in `_ZONE_ORDER`) has no
+    "previous" zone to weight against and is left in its original
+    relative order, same as any zone that ends up with 0-1 sections in
+    it (nothing to reorder).
+
+    Ties (equal weight, including the common "zero wiring edges to the
+    neighboring zone at all" case) preserve `sections`' own original
+    relative order -- Python's `sorted()` is stable, and the per-zone id
+    lists below are built by iterating `sections` in its own existing
+    order, so this degrades to exactly today's `_SECTION_ORDER`-derived
+    behavior whenever `weights` is empty or has nothing relevant in it
+    (e.g. `mech["wiring"]` not populated yet). This is the ONLY behavior
+    change from before this patch: iteration order, never the
+    translation math plan_device_layout() applies once ordering is
+    decided.
+
+    Sections that plan_device_layout()'s own loop would skip anyway (the
+    Enclosure container itself, or a section with no `footprint` yet)
+    are excluded here too, same skip conditions that loop already
+    applies -- see plan_device_layout()'s own docstring on why those are
+    "not ready yet," not errors.
+    """
+    zone_ids = {zone: [] for zone in _ZONE_ORDER}
+    by_id = {}
+    for section in sections or []:
+        if not isinstance(section, dict):
+            continue
+        section_id = section.get("section_id")
+        if not section_id or section_id == _CONTAINER_SECTION_ID:
+            continue
+        if not isinstance(section.get("footprint"), dict):
+            continue
+        zone = _SECTION_TO_ZONE.get(section_id, _DEFAULT_ZONE)
+        zone_ids[zone].append(section_id)
+        by_id[section_id] = section
+
+    ordered = []
+    for index, zone in enumerate(_ZONE_ORDER):
+        ids_in_zone = zone_ids[zone]
+        if index == 0 or len(ids_in_zone) <= 1:
+            ordered.extend(by_id[section_id] for section_id in ids_in_zone)
+            continue
+        prev_zone_ids = zone_ids[_ZONE_ORDER[index - 1]]
+        ids_in_zone_sorted = sorted(
+            ids_in_zone,
+            key=lambda sid: -_weight_to_zone_ids(sid, prev_zone_ids, weights),
+        )
+        ordered.extend(by_id[section_id] for section_id in ids_in_zone_sorted)
+    return ordered
 
 
 def _container_footprint(sections: list) -> dict:
@@ -244,16 +331,22 @@ def plan_device_layout(mech: dict, parts: list) -> dict:
     translations = {}
     running_x_by_zone = {zone: cx + _ZONE_MARGIN_MM for zone in _ZONE_ORDER}
 
-    # Iterate in `sections`'s own order -- eo/mech_sections.py's
-    # group_into_sections() already returns _SECTION_ORDER's fixed,
-    # deterministic order (see module docstring's "Packing within a
-    # zone" section on why that's what makes a shared zone pack the same
-    # way on every run).
+    # Patch 4.2: within a shared zone, sections pack in descending order
+    # of wiring-adjacency weight to whichever zone was already placed
+    # immediately before them, instead of eo/mech_sections.py's own fixed
+    # _SECTION_ORDER -- see _ordered_for_packing()'s own docstring above.
+    # Falls back to `sections`'s own original order whenever `mech`
+    # carries no `wiring` yet (build_section_adjacency_weights() returns
+    # {} in that case), so this is a strict behavior superset, not a
+    # replacement, of what ran before this patch.
+    weights = build_section_adjacency_weights(mech)
+    ordered_sections = _ordered_for_packing(sections, weights)
+
     bounds = [container["x"], container["y"], container.get("z", 0),
               container["x"] + container["w"], container["y"] + container["h"],
               container.get("z", 0) + container.get("d", 0)]
 
-    for section in sections:
+    for section in ordered_sections:
         section_id = section.get("section_id")
         if section_id == _CONTAINER_SECTION_ID:
             continue
