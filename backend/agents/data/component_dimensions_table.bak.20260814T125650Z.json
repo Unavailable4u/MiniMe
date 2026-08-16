@@ -1,0 +1,93 @@
+[
+  {
+    "id": "esp32_devkit_38pin",
+    "generic_name": "ESP32 Dev Board",
+    "aliases": ["ESP32 Development Board", "ESP32-WROOM-32 Dev Kit", "ESP32 DevKit"],
+    "shape": "Box",
+    "dimensions_w_mm": 55.0,
+    "dimensions_h_mm": 28.0,
+    "dimensions_d_mm": 13.0,
+    "mount_type": "standoff",
+    "mount_spec": "4-hole 48x18mm rectangular pattern, M2",
+    "dimension_confidence": "typical",
+    "source_notes": "Common 38-pin ESP32-WROOM-32 devkit footprint; mounting-hole span from widely-sold devkit variants, not one specific vendor's drawing."
+  },
+  {
+    "id": "dht22_am2302",
+    "generic_name": "DHT22",
+    "aliases": ["AM2302", "DHT22 Temperature Humidity Sensor"],
+    "shape": "Box",
+    "dimensions_w_mm": 15.5,
+    "dimensions_h_mm": 25.0,
+    "dimensions_d_mm": 7.7,
+    "mount_type": null,
+    "mount_spec": null,
+    "dimension_confidence": "verified",
+    "source_notes": "Aosong DHT22/AM2302 datasheet body dimensions; no standard mounting holes, typically zip-tied or bracket-clipped."
+  },
+  {
+    "id": "li_ion_18650_cell",
+    "generic_name": "18650 Li-ion Cell",
+    "aliases": ["18650 Battery", "18650 Cell", "18650 Lithium Cell"],
+    "shape": "Cylindrical",
+    "dimensions_w_mm": 18.6,
+    "dimensions_h_mm": 65.2,
+    "dimensions_d_mm": null,
+    "mount_type": "holder",
+    "mount_spec": null,
+    "dimension_confidence": "verified",
+    "source_notes": "IEC 60086 standard 18650 cell envelope. w=diameter, h=length. Held by a battery holder part, not screw-mounted, so no mount_spec."
+  },
+  {
+    "id": "stepper_28byj48",
+    "generic_name": "28BYJ-48 Stepper",
+    "aliases": ["28BYJ-48", "28BYJ-48 Stepper Motor", "Unipolar Stepper Motor"],
+    "shape": "Cylindrical",
+    "dimensions_w_mm": 28.0,
+    "dimensions_h_mm": 19.0,
+    "dimensions_d_mm": null,
+    "mount_type": "screw",
+    "mount_spec": "2-hole 35mm c-c, M3",
+    "dimension_confidence": "verified",
+    "source_notes": "28BYJ-48 datasheet: 28mm body diameter, 19mm body depth. Two mounting ears at 35mm center-to-center -- wider than the 28mm body, so the ear tips sit outside the round body itself; G3a's own hole-clamp step pulls the drawn holes back inside the body's footprint rather than drawing them off the part."
+  },
+  {
+    "id": "piezo_buzzer_12mm",
+    "generic_name": "Piezo Buzzer",
+    "aliases": ["Buzzer", "Piezo Speaker", "12mm Piezo Buzzer"],
+    "shape": "Conical Head",
+    "dimensions_w_mm": 12.0,
+    "dimensions_h_mm": 9.5,
+    "dimensions_d_mm": null,
+    "mount_type": "through-hole",
+    "mount_spec": "2-hole 7.6mm c-c, M2",
+    "dimension_confidence": "typical",
+    "source_notes": "Common 12mm THT piezo buzzer footprint. w=case diameter, h=case height (dome + base). Two-pin through-hole leads, not a real screw mount -- mount_spec here approximates lead spacing for hole-primitive fidelity."
+  },
+  {
+    "id": "tact_switch_6mm",
+    "generic_name": "Tactile Push Button",
+    "aliases": ["Tact Switch", "Push Button", "6mm Tactile Switch"],
+    "shape": "Conical Head",
+    "dimensions_w_mm": 6.0,
+    "dimensions_h_mm": 5.0,
+    "dimensions_d_mm": null,
+    "mount_type": "through-hole",
+    "mount_spec": null,
+    "dimension_confidence": "typical",
+    "source_notes": "Standard 6x6mm THT tact switch, plunger height included in h. No real screw mount -- through-hole legs only, so no mount_spec."
+  },
+  {
+    "id": "ds18b20_waterproof_probe",
+    "generic_name": "DS18B20",
+    "aliases": ["DS18B20 Temperature Sensor", "DS18B20 Waterproof Probe", "1-Wire Temp Sensor"],
+    "shape": "Cylindrical",
+    "dimensions_w_mm": 6.0,
+    "dimensions_h_mm": 50.0,
+    "dimensions_d_mm": null,
+    "mount_type": null,
+    "mount_spec": null,
+    "dimension_confidence": "verified",
+    "source_notes": "Waterproof stainless-steel probe variant (not bare TO-92), common 6mm x 50mm probe body. Cable-mounted, no screw mount, so no mount_spec."
+  }
+]

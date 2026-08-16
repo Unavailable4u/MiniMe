@@ -711,7 +711,8 @@ def _usage_details_from_usage(usage) -> dict | None:
     return details
 
 
-def _call_step(client, model: str, system_prompt: str, user_content: str):
+def _call_step(client, model: str, system_prompt: str, user_content: str,
+                max_tokens: int = None):
     """OpenAI-SDK-shaped call, used for groq/cerebras/mistral/gemini. Returns
     (text, usage, finish_reason) — usage is the provider SDK's usage
     object (has .total_tokens on all three, since they're all
@@ -724,14 +725,26 @@ def _call_step(client, model: str, system_prompt: str, user_content: str):
     (real, partial output exists and is worth keeping) versus "stop"
     for a normal completion. All three OpenAI-compatible providers
     here expose this on response.choices[0].finish_reason. Callers
-    that don't care can just ignore the third value."""
-    response = client.chat.completions.create(
+    that don't care can just ignore the third value.
+
+    Root Cause A fix: max_tokens is now an explicit argument instead
+    of being omitted (which silently fell back to whatever short
+    default the provider/SDK applies -- see the comment above
+    _max_tokens_for()). generate_text() always resolves and passes a
+    real value via _max_tokens_for(); callers hitting this function
+    directly (there are none left as of this fix) still fall back to
+    "don't send the key at all" when max_tokens is left None/falsy, so
+    this stays backward compatible."""
+    kwargs = dict(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
     )
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    response = client.chat.completions.create(**kwargs)
     choice = response.choices[0]
     text = (choice.message.content or "").strip()
     usage = getattr(response, "usage", None)
@@ -924,7 +937,7 @@ def classify_tool_intent(message: str, tools: list) -> dict:
 
 
 def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: str,
-                           json_mode: bool = False):
+                           json_mode: bool = False, max_tokens: int = None):
     """Plain REST call — Cloudflare Workers AI has no OpenAI-compatible
     SDK, so this is its own path rather than going through _call_step().
     Returns (text, usage_dict_or_None). See the module docstring's
@@ -936,7 +949,12 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
     Default False keeps every existing caller (reviewer.py, fixer_pool.py,
     security_scanner.py's Cloudflare fallback steps) byte-for-byte
     unchanged -- they never set this key in their chain, so this param
-    stays at its default for them."""
+    stays at its default for them.
+
+    Root Cause A fix: max_tokens is threaded through to Workers AI's
+    own "max_tokens" request field the same way _call_step() now
+    threads it to the OpenAI-compatible providers -- previously this
+    request never set it either, riding on Cloudflare's own default."""
     account_id, token = creds
     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
     payload = {
@@ -947,6 +965,8 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     try:
         response = requests.post(
             url,
@@ -1242,6 +1262,43 @@ _MAX_CONTINUATIONS = 2  # Fix C: cap how many times one call will chase a
 # short max_tokens setting could burn the whole chain on continuations
 # and leave nothing for a genuine 429/5xx to fall back to.
 
+# Root Cause A fix (2026-08-16 reliability audit): every call through
+# _call_step()/_call_cloudflare_step() previously left max_tokens unset
+# entirely, so it silently rode on whatever short default the provider/
+# SDK applies. That's the actual reason truncation (finish_reason ==
+# "length") was showing up on almost every agent in the chain rather
+# than one flaky call -- Fix C's continuation handoff was recovering
+# from a self-inflicted ceiling, not a real provider limit. Reasoning-
+# flavored models (e.g. groq's qwen/qwen3.6-27b, used by both
+# eo/inspector.py and hardware_speccer.py's fallback chain) make this
+# worse: they spend part of that budget on invisible <think> tokens
+# before ever emitting the real answer, so a flat default isn't enough
+# for them specifically.
+#
+# DEFAULT_MAX_TOKENS / REASONING_MODEL_MAX_TOKENS are floors applied
+# automatically per step via _max_tokens_for() below -- a chain step
+# that wants a different budget can still set its own "max_tokens" key
+# (see generate_text()'s chain-shape docstring), which always wins.
+DEFAULT_MAX_TOKENS = 8192
+REASONING_MODEL_MAX_TOKENS = 16384
+_REASONING_MODEL_HINTS = ("qwen3.6", "qwen/qwen3.6", "-thinking", "r1", "deepseek-r1")
+
+
+def _max_tokens_for(model: str, step: dict) -> int:
+    """Resolves the max_tokens budget for one chain step. An explicit
+    step["max_tokens"] (set by the caller's chain definition) always
+    wins; otherwise a model name matching _REASONING_MODEL_HINTS gets
+    REASONING_MODEL_MAX_TOKENS, everything else gets
+    DEFAULT_MAX_TOKENS. See the Root Cause A comment above
+    _MAX_CONTINUATIONS for why this exists."""
+    explicit = step.get("max_tokens") if step else None
+    if explicit:
+        return explicit
+    model_lower = (model or "").lower()
+    if any(hint in model_lower for hint in _REASONING_MODEL_HINTS):
+        return REASONING_MODEL_MAX_TOKENS
+    return DEFAULT_MAX_TOKENS
+
 
 def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
     """Fix C (reliability guide, §3 "Fix C", item 1 -- truncation
@@ -1408,7 +1465,8 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                                                   agent_name, session_id, tier, path, domain)
                     try:
                         text, usage, finish_reason = _call_cloudflare_step(
-                            creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
+                            creds, model, system_prompt, prompt_for_step, json_mode=json_mode,
+                            max_tokens=_max_tokens_for(model, step))  # Root Cause A fix
                     except BaseException:
                         _end_traced_generation(_traced, agent_name, label, None, None, None,
                                                 exc_info=sys.exc_info())
@@ -1433,6 +1491,24 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                               f"continuation disabled for this call -- discarding partial "
                               f"output and retrying original prompt on next chain step...")
                         break  # move on to next chain step
+                    if finish_reason == "length" and is_last:
+                        # Root Cause C fix (2026-08-16 reliability audit):
+                        # previously this case fell straight through to the
+                        # unconditional `return full_text` below with NO log
+                        # line and no flag on the return value -- a
+                        # truncation that happened to land on the LAST chain
+                        # step (nothing left to hand off to, regardless of
+                        # allow_continuation) was silently shipped as if it
+                        # were a normal, complete answer. Route it through
+                        # the same accumulated_text path every other
+                        # "ran out while truncated" case already uses, so it
+                        # gets the same visible "chain exhausted while still
+                        # truncated" log line at the bottom of this function
+                        # instead of vanishing.
+                        accumulated_text = full_text
+                        print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
+                              f"on the LAST chain step -- no further step to hand off to.")
+                        break  # fall through to the end-of-chain truncated-output handling
                     return full_text
                 except _TRANSIENT_ERRORS as exc:
                     last_exc = exc
@@ -1487,7 +1563,9 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
                                               agent_name, session_id, tier, path, domain)
                 try:
-                    text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
+                    text, usage, finish_reason = _call_step(
+                        client, model, system_prompt, prompt_for_step,
+                        max_tokens=_max_tokens_for(model, step))  # Root Cause A fix
                 except BaseException:
                     _end_traced_generation(_traced, agent_name, label, None, None, None,
                                             exc_info=sys.exc_info())
@@ -1514,6 +1592,19 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                           f"continuation disabled for this call -- discarding partial "
                           f"output and retrying original prompt on next chain step...")
                     break  # move on to next chain step
+                if finish_reason == "length" and is_last:
+                    # Root Cause C fix (2026-08-16 reliability audit): see
+                    # the matching comment on the cloudflare branch above --
+                    # previously this case fell straight through to the
+                    # unconditional `return full_text` below with NO log
+                    # line and no flag on the return value, silently
+                    # shipping a cut-off answer as if it were complete.
+                    # Route it through the same accumulated_text path every
+                    # other "ran out while truncated" case already uses.
+                    accumulated_text = full_text
+                    print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
+                          f"on the LAST chain step -- no further step to hand off to.")
+                    break  # fall through to the end-of-chain truncated-output handling
                 return full_text
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
@@ -1699,6 +1790,10 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
             ("chunk", text) / ("done", (usage, finish_reason)) /
             ("error", exc) onto chunk_queue via call_soon_threadsafe so
             the async side above can await it safely."""
+            # Root Cause A fix: same _max_tokens_for() budget resolution
+            # generate_text() now uses -- this streaming path had the
+            # identical "max_tokens never set" gap.
+            _stream_max_tokens = _max_tokens_for(model, step)
             try:
                 try:
                     response_stream = client.chat.completions.create(
@@ -1707,6 +1802,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_content},
                         ],
+                        max_tokens=_stream_max_tokens,
                         stream=True,
                         stream_options={"include_usage": True},
                     )
@@ -1721,6 +1817,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_content},
                         ],
+                        max_tokens=_stream_max_tokens,
                         stream=True,
                     )
                 usage = None

@@ -1,0 +1,77 @@
+{
+  "chats": [
+    {
+      "id": "chat_2a39997718d6",
+      "title": "write me a hard c++ problem with answer properly explaining ",
+      "created_at": "2026-07-10T11:39:12.757829+00:00",
+      "updated_at": "2026-07-10T11:42:09.604108+00:00",
+      "message_count": 2,
+      "linked_chat_ids": [],
+      "tags": []
+    },
+    {
+      "id": "chat_e7ee28457d94",
+      "title": "write me a hard python problem with solution detailed explai",
+      "created_at": "2026-07-10T11:18:13.061230+00:00",
+      "updated_at": "2026-07-10T11:20:36.678528+00:00",
+      "message_count": 2,
+      "linked_chat_ids": [],
+      "tags": []
+    },
+    {
+      "id": "chat_2d0fe1386d38",
+      "title": "New Chat",
+      "created_at": "2026-07-10T01:41:47.661481+00:00",
+      "updated_at": "2026-07-10T01:41:47.661499+00:00",
+      "message_count": 0,
+      "linked_chat_ids": [],
+      "tags": []
+    },
+    {
+      "id": "chat_cd273d6a9d81",
+      "title": "write the multiplication table of 8",
+      "created_at": "2026-07-08T18:34:04.362787+00:00",
+      "updated_at": "2026-07-08T19:14:48.818226+00:00",
+      "message_count": 8,
+      "linked_chat_ids": []
+    },
+    {
+      "id": "chat_fbb1f7be8c81",
+      "title": "kire",
+      "created_at": "2026-07-08T17:52:36.286018+00:00",
+      "updated_at": "2026-07-08T18:29:57.855281+00:00",
+      "message_count": 6,
+      "linked_chat_ids": []
+    },
+    {
+      "id": "chat_4053be6177b1",
+      "title": "New Chakd",
+      "created_at": "2026-07-08T17:43:24.029493+00:00",
+      "updated_at": "2026-07-08T20:03:34.677455+00:00",
+      "message_count": 0,
+      "linked_chat_ids": [
+        "chat_2b39d75343c3"
+      ]
+    },
+    {
+      "id": "chat_2b39d75343c3",
+      "title": "hello",
+      "created_at": "2026-07-08T16:24:40.123208+00:00",
+      "updated_at": "2026-07-08T20:03:34.663762+00:00",
+      "message_count": 2,
+      "linked_chat_ids": [
+        "chat_4053be6177b1"
+      ]
+    },
+    {
+      "id": "chat_b0aa06c82864",
+      "title": "Chat A - Aurora project",
+      "created_at": "2026-07-08T12:45:46.297860+00:00",
+      "updated_at": "2026-07-08T17:49:02.627259+00:00",
+      "message_count": 2,
+      "linked_chat_ids": [
+        "chat_4053be6177b1"
+      ]
+    }
+  ]
+}

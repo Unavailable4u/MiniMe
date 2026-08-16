@@ -1,0 +1,967 @@
+{
+  "ws_5a94800327": {
+    "topics": {
+      "dee168f0-1d17-4771-9199-e2925a200e33": {
+        "name": "Alternator Basics",
+        "summary": "Alternators operate on the principle of electromagnetic induction and consist of a stationary armature winding and a rotating magnetic field. The rotor acts like a flywheel and has alternating north and south magnetic poles fixed around its outer rim.",
+        "parent": null,
+        "source_section_ids": [
+          "853b0af619d6"
+        ],
+        "content_hint": "conceptual"
+      },
+      "60afab1e-2561-40d7-97b8-19a3667df49e": {
+        "name": "Alternator Construction",
+        "summary": "The alternator consists of a stator and a rotor, with the stator having a cast-iron frame that supports the armature core, and the rotor having alternating north and south magnetic poles fixed around its outer rim.",
+        "parent": null,
+        "source_section_ids": [
+          "853b0af619d6"
+        ],
+        "content_hint": "conceptual"
+      },
+      "78a5bad6-e6d2-49fa-9228-49c8d466f60f": {
+        "name": "Stator Construction",
+        "summary": "The stator consists of a cast-iron frame that supports the armature core, which has slots on its inner periphery to house the armature conductors. The stator has several advantages, including direct high-voltage output without brushes and easier insulation for high voltages.",
+        "parent": "60afab1e-2561-40d7-97b8-19a3667df49e",
+        "source_section_ids": [
+          "853b0af619d6"
+        ],
+        "content_hint": "conceptual"
+      },
+      "1c9c7975-9047-4a1c-96a4-2552f8307b91": {
+        "name": "Rotor Construction",
+        "summary": "The rotor can be either salient pole type or smooth cylindrical type, with each type having its own advantages and disadvantages. The salient pole type is used in low to medium-speed alternators, while the smooth cylindrical type is used in high-speed turbo-generators.",
+        "parent": "60afab1e-2561-40d7-97b8-19a3667df49e",
+        "source_section_ids": [
+          "853b0af619d6"
+        ],
+        "content_hint": "conceptual"
+      },
+      "68fc934a-71b8-40cc-acf7-355d92125d9a": {
+        "name": "Damper Windings",
+        "summary": "Damper windings are used to prevent hunting, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads. They consist of copper bars placed in slots on the pole-shoes and short-circuited at both ends by copper rings.",
+        "parent": null,
+        "source_section_ids": [
+          "853b0af619d6"
+        ],
+        "content_hint": "conceptual"
+      },
+      "77e097ef-f0cc-475e-96d8-06a2876f8f97": {
+        "name": "A.C. Armature Windings",
+        "summary": "A.C. armature windings can be either concentrated or distributed, with each type having its own advantages and disadvantages. Distributed windings are generally used in a.c. armature windings and have two principal advantages: they generate a voltage wave that is nearly a sine curve, and copper is evenly distributed on the armature surface.",
+        "parent": null,
+        "source_section_ids": [
+          "853b0af619d6"
+        ],
+        "content_hint": "conceptual"
+      },
+      "09c9a748-6c6a-46a2-9675-06f5eb252d7b": {
+        "name": "Induction Motor Experiment",
+        "summary": "The experiment involves studying the torque-speed curve of a three-phase induction motor and analyzing its performance under varying load conditions. The goal is to understand the relationship between torque and speed, identify key points such as starting torque and breakdown torque, and observe the effect of slip on torque production.",
+        "parent": null,
+        "source_section_ids": [
+          "a8c4f01822ad"
+        ],
+        "content_hint": "procedural"
+      },
+      "ab3dfd5e-bdb8-415a-9f17-e2e304a112a7": {
+        "name": "Induction Motor Theory",
+        "summary": "A three-phase squirrel-cage induction motor operates on the principle of electromagnetic induction, where a rotating magnetic field induces an electromotive force in the rotor conductors, resulting in the flow of current and production of torque. The motor's performance is influenced by the concept of slip, which is essential for torque production.",
+        "parent": null,
+        "source_section_ids": [
+          "a8c4f01822ad"
+        ],
+        "content_hint": "conceptual"
+      },
+      "2036c74d-0ded-44b4-8480-405457c8cde7": {
+        "name": "Torque-Speed Characteristic Curve",
+        "summary": "The torque-speed characteristic curve of an induction motor demonstrates a nonlinear relationship between torque and speed, with key points including starting torque, breakdown torque, and operating region. The curve is influenced by the concept of slip and is crucial for understanding the motor's performance and efficiency.",
+        "parent": null,
+        "source_section_ids": [
+          "a8c4f01822ad"
+        ],
+        "content_hint": "data-heavy"
+      }
+    },
+    "connections": []
+  },
+  "ws_4f8c9f762c": {
+    "topics": {
+      "1d320a27-b5f0-46ab-aa43-c1ee24077eb7": {
+        "name": "Alternators",
+        "summary": "Alternators are a type of electrical machine that generates alternating current (AC) using the principles of electromagnetic induction. They consist of a stationary armature winding and a rotating magnetic field.",
+        "parent": null,
+        "source_section_ids": [
+          "f9f153db42a8"
+        ],
+        "content_hint": "conceptual"
+      },
+      "c720e334-7afd-444a-a67b-e77272fd6a92": {
+        "name": "Alternator Construction",
+        "summary": "The construction of an alternator includes a stator (stationary armature) and a rotor (rotating magnetic field), with the stator consisting of a cast-iron frame, armature core, and slots for armature conductors, and the rotor having alternating north and south magnetic poles.",
+        "parent": "1d320a27-b5f0-46ab-aa43-c1ee24077eb7",
+        "source_section_ids": [
+          "f9f153db42a8"
+        ],
+        "content_hint": "conceptual"
+      },
+      "7e92d929-8441-46d2-830f-3ed617893ed3": {
+        "name": "Stator and Rotor",
+        "summary": "The stator is the stationary part of the alternator, consisting of a cast-iron frame and armature core, while the rotor is the rotating part, consisting of a magnetic field with alternating north and south poles.",
+        "parent": "c720e334-7afd-444a-a67b-e77272fd6a92",
+        "source_section_ids": [
+          "f9f153db42a8"
+        ],
+        "content_hint": "conceptual"
+      },
+      "7d32b6bd-3bbf-4ff9-b11a-8f01f37f8d32": {
+        "name": "Damper Windings",
+        "summary": "Damper windings are used to prevent hunting (small speed fluctuations) in alternators, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads.",
+        "parent": "1d320a27-b5f0-46ab-aa43-c1ee24077eb7",
+        "source_section_ids": [
+          "f9f153db42a8"
+        ],
+        "content_hint": "conceptual"
+      },
+      "99038ced-3afc-4655-9688-9ff79cbff6de": {
+        "name": "AC Armature Windings",
+        "summary": "AC armature windings are used in alternators and can be either concentrated or distributed, with distributed windings providing a uniform magnetic field and smoother torque.",
+        "parent": "1d320a27-b5f0-46ab-aa43-c1ee24077eb7",
+        "source_section_ids": [
+          "f9f153db42a8"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_d7a4e7c9f8": {
+    "topics": {
+      "9c4c756e-c84d-44f6-a850-03365517795e": {
+        "name": "Alternators",
+        "summary": "Alternators, also known as A.C. generators, operate on the principle of electromagnetic induction and are used to generate alternating current. They consist of a stationary armature winding and a rotating magnetic field.",
+        "parent": null,
+        "source_section_ids": [
+          "efd8b6cb78f5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "1f841065-2d9a-4d58-952e-16321ee01886": {
+        "name": "Basic Principle of Alternators",
+        "summary": "The basic principle of alternators involves the rotation of a magnetic field, which induces an electromotive force in the stationary stator conductors, resulting in the generation of alternating current.",
+        "parent": "9c4c756e-c84d-44f6-a850-03365517795e",
+        "source_section_ids": [
+          "efd8b6cb78f5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "e0d217b9-6187-4861-a991-da2e3d7c51e6": {
+        "name": "Construction of Alternators",
+        "summary": "Alternators consist of a stator and a rotor, with the stator being the stationary armature winding and the rotor being the rotating magnetic field. The construction of alternators can vary, with different types of rotors and stators.",
+        "parent": "9c4c756e-c84d-44f6-a850-03365517795e",
+        "source_section_ids": [
+          "efd8b6cb78f5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "44814f1e-a93e-487b-96ae-f7e4ce37ffb8": {
+        "name": "Damper Windings",
+        "summary": "Damper windings are used in alternators to prevent hunting, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads.",
+        "parent": "9c4c756e-c84d-44f6-a850-03365517795e",
+        "source_section_ids": [
+          "efd8b6cb78f5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "807d9bca-5223-4586-ab6f-7acfea5bf0b7": {
+        "name": "A.C. Armature Windings",
+        "summary": "A.C. armature windings are used in alternators and can be either concentrated or distributed, with distributed windings being more complex but offering superior performance.",
+        "parent": "9c4c756e-c84d-44f6-a850-03365517795e",
+        "source_section_ids": [
+          "efd8b6cb78f5"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_a31e18bb39": {
+    "topics": {
+      "2bd21e32-3640-40e5-95b4-35b9f44d2e7f": {
+        "name": "Alternator Basics",
+        "summary": "This topic covers the fundamental principles and construction of alternators, including their basic principle, stator, and rotor design. It also touches on the advantages of stationary armature and the difference between alternators and DC generators.",
+        "parent": null,
+        "source_section_ids": [
+          "d6fd1d643ee5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "7add2cdc-a424-4302-99db-31ab4f303777": {
+        "name": "Alternator Construction",
+        "summary": "This topic delves into the specific components of an alternator, including the stator, rotor, and damper windings, and their roles in the alternator's operation.",
+        "parent": null,
+        "source_section_ids": [
+          "d6fd1d643ee5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "9c5fb2fb-9280-4e7b-bebd-aa0c8526a35f": {
+        "name": "AC Armature Windings",
+        "summary": "This topic explores the design and characteristics of AC armature windings, including concentrated and distributed windings, and their effects on the alternator's performance.",
+        "parent": null,
+        "source_section_ids": [
+          "d6fd1d643ee5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "0bc02dfa-627b-4578-9c5a-6c2a97aa6488": {
+        "name": "Damper Windings",
+        "summary": "This topic discusses the purpose and function of damper windings in an alternator, including their role in preventing hunting and maintaining voltage balance.",
+        "parent": "7add2cdc-a424-4302-99db-31ab4f303777",
+        "source_section_ids": [
+          "d6fd1d643ee5"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_d827ea1df4": {
+    "topics": {
+      "dc5439f4-90c0-449a-b2f9-69bb384d1959": {
+        "name": "Test Plan",
+        "summary": "The test plan covers various test cases for checking topic duplication, merging, and connection, as well as regression tests and frontend tests. The tests aim to ensure that the system handles topic creation and updating correctly.",
+        "parent": null,
+        "source_section_ids": [
+          "45e370b81a55"
+        ],
+        "content_hint": "procedural"
+      },
+      "74526fd6-96bf-40df-93e5-0c493e131bd2": {
+        "name": "System Limitations",
+        "summary": "The system has certain limitations and decisions on what not to build, including no graph DB migration, no server-side layout service, and no fully-streaming per-sentence extraction. These decisions are based on the current scale and functionality of the system.",
+        "parent": null,
+        "source_section_ids": [
+          "451cfa86ad38"
+        ],
+        "content_hint": "conceptual"
+      },
+      "b1a21db0-f85d-4264-9d56-66e21f997b1a": {
+        "name": "Topic Deduplication",
+        "summary": "This topic covers the process of eliminating duplicate topics by comparing their names and summaries, and either merging or folding them into existing topics.",
+        "parent": null,
+        "source_section_ids": [
+          "12901de09ad1",
+          "6fe3cdba6f08",
+          "52e19f7d7644",
+          "4ea0f9e8cc7d",
+          "dab0530bbe0e"
+        ],
+        "content_hint": "procedural"
+      },
+      "472d3cbe-d1a8-411a-b12b-09265b84e7ac": {
+        "name": "Overlapping Topic Checker",
+        "summary": "This topic discusses the implementation of the overlapping topic checker, which uses embeddings and similarity metrics to determine whether a new topic is a duplicate or a merge candidate.",
+        "parent": null,
+        "source_section_ids": [
+          "6fe3cdba6f08"
+        ],
+        "content_hint": "procedural"
+      },
+      "55862308-d512-4401-85ae-f7940e719889": {
+        "name": "Schema Addition",
+        "summary": "This topic covers the addition of a new field to the topic schema to store instances of a topic, allowing for provenance and merge history.",
+        "parent": null,
+        "source_section_ids": [
+          "52e19f7d7644"
+        ],
+        "content_hint": "conceptual"
+      },
+      "e365ce06-9237-4f73-bb53-d3e4d495e3b6": {
+        "name": "Source Manager Integration",
+        "summary": "This topic discusses the integration of the overlapping topic checker with the source manager, including the modification of the topic extraction process and the application of patches.",
+        "parent": null,
+        "source_section_ids": [
+          "4ea0f9e8cc7d"
+        ],
+        "content_hint": "procedural"
+      },
+      "4bc5ec12-38d5-4934-acb3-281807b52b77": {
+        "name": "Backlink Detector Integration",
+        "summary": "This topic covers the integration of the overlapping topic checker with the backlink detector, including the modification of the reconciliation process and the addition of new relation types.",
+        "parent": null,
+        "source_section_ids": [
+          "dab0530bbe0e"
+        ],
+        "content_hint": "procedural"
+      },
+      "3244e01c-1a87-449e-977f-34c38368d67e": {
+        "name": "Live Events and Notifications",
+        "summary": "This topic discusses the addition of new live event types and notifications to inform users of topic additions, merges, and connection updates.",
+        "parent": null,
+        "source_section_ids": [
+          "1f1f43e2d11a"
+        ],
+        "content_hint": "conceptual"
+      },
+      "b9a397fa-2f2d-44ef-8d8d-89be6e15ca1e": {
+        "name": "Frontend Updates",
+        "summary": "This topic covers the updates to the frontend to display pulsing nodes and edges in the knowledge graph view, indicating recent changes.",
+        "parent": null,
+        "source_section_ids": [
+          "07d86348d260"
+        ],
+        "content_hint": "procedural"
+      },
+      "09320d76-6aa3-4a44-b840-f74d07b4f640": {
+        "name": "Worker Count and Upload Dispatch",
+        "summary": "This topic discusses the optimization of worker count and upload dispatch to improve the efficiency of the topic ingestion process.",
+        "parent": null,
+        "source_section_ids": [
+          "279864def37f"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_f86b9323a9": {
+    "topics": {
+      "b487cc7c-54f5-44d4-9821-14b5d506e148": {
+        "name": "Alternators",
+        "summary": "Alternators, also known as A.C. generators, operate on the principle of electromagnetic induction and consist of a stationary armature winding and a rotating magnetic field. They are used to generate alternating current.",
+        "parent": null,
+        "source_section_ids": [
+          "c97dcda0c1fd"
+        ],
+        "content_hint": "conceptual"
+      },
+      "4648e7ca-edc2-435c-9db9-bda2c6cc351e": {
+        "name": "Alternator Construction",
+        "summary": "The construction of an alternator includes a stator with a cast-iron frame, armature core, and slots for armature conductors, as well as a rotor with a rotating magnetic field. The rotor can be of the salient pole type or the smooth cylindrical type.",
+        "parent": "b487cc7c-54f5-44d4-9821-14b5d506e148",
+        "source_section_ids": [
+          "c97dcda0c1fd"
+        ],
+        "content_hint": "conceptual"
+      },
+      "9dfba222-a0a9-4380-8429-33a3c97e1500": {
+        "name": "Damper Windings",
+        "summary": "Damper windings are used in alternators to prevent hunting, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads. They consist of copper bars placed in slots on the pole-shoes and short-circuited at both ends by copper rings.",
+        "parent": "b487cc7c-54f5-44d4-9821-14b5d506e148",
+        "source_section_ids": [
+          "c97dcda0c1fd"
+        ],
+        "content_hint": "conceptual"
+      },
+      "85796961-e10b-4859-903e-b8ae45a1272e": {
+        "name": "A.C. Armature Windings",
+        "summary": "A.C. armature windings can be either concentrated or distributed, with distributed windings being more common. They are used to generate a uniform magnetic field and a sinusoidal back-EMF, resulting in smoother torque and quieter operation.",
+        "parent": "b487cc7c-54f5-44d4-9821-14b5d506e148",
+        "source_section_ids": [
+          "c97dcda0c1fd"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_93cb8b0b60": {
+    "topics": {
+      "13cd6b6e-1352-42e9-a143-853eec5e552a": {
+        "name": "Alternators",
+        "summary": "This topic covers the basic principles and construction of alternators, including their operation, types, and components. Alternators are a type of electrical machine that generates alternating current (AC) using electromagnetic induction.",
+        "parent": null,
+        "source_section_ids": [
+          "40c5a06754ed"
+        ],
+        "content_hint": "conceptual"
+      },
+      "0adb260f-f173-4f95-95ab-0018573bff83": {
+        "name": "Alternator Construction",
+        "summary": "This topic discusses the construction of alternators, including the stator, rotor, and other components. It also covers the advantages and disadvantages of different types of alternator construction.",
+        "parent": "13cd6b6e-1352-42e9-a143-853eec5e552a",
+        "source_section_ids": [
+          "40c5a06754ed"
+        ],
+        "content_hint": "conceptual"
+      },
+      "5af1cabc-f9b0-4279-8a57-59bdea309978": {
+        "name": "Damper Windings",
+        "summary": "This topic explains the purpose and function of damper windings in alternators, including their role in preventing hunting and providing starting torque in synchronous motors.",
+        "parent": "13cd6b6e-1352-42e9-a143-853eec5e552a",
+        "source_section_ids": [
+          "40c5a06754ed"
+        ],
+        "content_hint": "conceptual"
+      },
+      "ff899fc8-ed18-4ffd-aaff-df659a39a0f0": {
+        "name": "AC Armature Windings",
+        "summary": "This topic covers the design and characteristics of AC armature windings, including concentrated and distributed windings, and their advantages and disadvantages.",
+        "parent": "13cd6b6e-1352-42e9-a143-853eec5e552a",
+        "source_section_ids": [
+          "40c5a06754ed"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_e4b21543a0": {
+    "topics": {
+      "efde2afe-7fac-436a-95c0-a143a5742a4c": {
+        "name": "Alternator Basics",
+        "summary": "This topic covers the fundamental principles of alternators, including their basic construction and operation. Alternators operate on the principle of electromagnetic induction, similar to DC generators, but with a rotating magnetic field and a stationary armature.",
+        "parent": null,
+        "source_section_ids": [
+          "5ff7479b6da4"
+        ],
+        "content_hint": "conceptual"
+      },
+      "d30f1b69-e918-4d38-b4f6-259f3e15a4a8": {
+        "name": "Alternator Construction",
+        "summary": "This topic delves into the construction of alternators, including the stator and rotor components, and their respective advantages and disadvantages. The stator consists of a cast-iron frame, armature core, and slots for armature conductors, while the rotor has alternating north and south magnetic poles.",
+        "parent": null,
+        "source_section_ids": [
+          "5ff7479b6da4"
+        ],
+        "content_hint": "conceptual"
+      },
+      "31b8e207-23b6-4020-b9b2-3becc206e8e0": {
+        "name": "Damper Windings",
+        "summary": "This topic explains the purpose and function of damper windings in alternators, including preventing hunting, providing starting torque, and maintaining voltage balance during unbalanced loads.",
+        "parent": null,
+        "source_section_ids": [
+          "5ff7479b6da4"
+        ],
+        "content_hint": "conceptual"
+      },
+      "17bd08ee-537e-4a38-bcb9-61c4f766b5c6": {
+        "name": "AC Armature Windings",
+        "summary": "This topic discusses the design and characteristics of AC armature windings, including concentrated and distributed windings, and their effects on torque, vibration, and noise.",
+        "parent": null,
+        "source_section_ids": [
+          "5ff7479b6da4"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_3801e2c886": {
+    "topics": {
+      "ba044855-d599-4466-bbda-dde09c3d4446": {
+        "name": "Topic Duplication Handling",
+        "summary": "The system identifies and handles duplicate topics across multiple uploads, allowing for efficient data management and preventing data redundancy. The goal is to enhance the existing live-event pipeline to accommodate the knowledge graph updates.",
+        "parent": null,
+        "source_section_ids": [
+          "f6e04d26af9e",
+          "758d69a964ee",
+          "5323dafa77bf",
+          "d045e6c9a573",
+          "6a9606fec3a0",
+          "1178c5e2e14d",
+          "8ab4b864ba81"
+        ],
+        "content_hint": "procedural"
+      },
+      "8c6ebdfc-76ae-46e8-af00-cc43e14bf7db": {
+        "name": "Overlapping Topic Checker",
+        "summary": "A module that checks for overlapping topics by comparing embeddings of topic names and summaries, utilizing a vector index and a large language model for arbitration in cases where the similarity score falls within a certain threshold.",
+        "parent": null,
+        "source_section_ids": [
+          "758d69a964ee"
+        ],
+        "content_hint": "procedural"
+      },
+      "18d638cc-608e-45eb-88a8-e54e4d28d7d0": {
+        "name": "Schema Addition for Topic Instances",
+        "summary": "Adding an optional 'instances' list to the topic schema allows for the preservation of provenance when merging topics, ensuring that the source and confidence of the information are maintained.",
+        "parent": null,
+        "source_section_ids": [
+          "5323dafa77bf"
+        ],
+        "content_hint": "conceptual"
+      },
+      "9205a140-b2ba-47b8-81f5-3e573ffadd8d": {
+        "name": "Integration with Source Manager and Backlink Detector",
+        "summary": "Modifying the source manager to utilize the overlapping topic checker and integrating the results into the backlink detector to enhance the accuracy of topic connections and relations.",
+        "parent": null,
+        "source_section_ids": [
+          "d045e6c9a573",
+          "6a9606fec3a0"
+        ],
+        "content_hint": "procedural"
+      },
+      "60ca8775-97b4-4b1f-8857-dfd27ac333cc": {
+        "name": "Live Events and Notifications",
+        "summary": "Introducing new event kinds for finer-grained live updates, including topic addition, merging, and connection addition, to provide more detailed information about changes to the knowledge graph.",
+        "parent": null,
+        "source_section_ids": [
+          "1178c5e2e14d"
+        ],
+        "content_hint": "conceptual"
+      },
+      "695057de-8bca-4b2f-9cb2-b2abd0d5c6c6": {
+        "name": "Frontend Updates for Visualization",
+        "summary": "Enhancing the knowledge graph visualization to highlight newly changed nodes and edges, providing a more dynamic and interactive user experience.",
+        "parent": null,
+        "source_section_ids": [
+          "8ab4b864ba81"
+        ],
+        "content_hint": "procedural"
+      },
+      "06fc3dcb-73f9-413a-832b-2619b6d82183": {
+        "name": "Worker Count and Upload Dispatch",
+        "summary": "Optimizing the worker count and upload dispatch logic to improve the efficiency and scalability of the system, without introducing new agents or renaming existing components.",
+        "parent": null,
+        "source_section_ids": [
+          "aefc3199e0dc"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_5f76400d53": {
+    "topics": {
+      "5fc794bd-c844-4517-a442-ee045fed9944": {
+        "name": "Reconciliation Mode",
+        "summary": "Reconciliation mode is used in the post-ingestion sweep to receive a small cluster of node id/title/summary pairs that an embedding sweep flagged as similar across branches. The only allowed output in this mode is zero or more `add_related_topic` operations.",
+        "parent": null,
+        "source_section_ids": [
+          "89e8ee955e79"
+        ],
+        "content_hint": "procedural"
+      },
+      "c7d1b577-9adc-4682-be83-50bb4ad63082": {
+        "name": "Duplication Checker",
+        "summary": "The Duplication Checker (DC) is a system prompt that arbitrates borderline cases where an embedding similarity search returns one or more candidate nodes whose score is in the ambiguous middle band. It decides exactly one tag for the chunk, considering the candidates' title and summary only.",
+        "parent": null,
+        "source_section_ids": [
+          "9392f0a7fdc5"
+        ],
+        "content_hint": "conceptual"
+      },
+      "00ecd724-e712-466f-8885-029dd164c8c7": {
+        "name": "Data Analyzer Output",
+        "summary": "The Data Analyzer (DA) output contract specifies the shape of the output, which includes emitting each reviewed chunk as soon as it's ready, with fields such as chunk_id, upload_id, sequence_index, text, confidence, and flags.",
+        "parent": null,
+        "source_section_ids": [
+          "9392f0a7fdc5"
+        ],
+        "content_hint": "procedural"
+      },
+      "a523e781-c3ea-4125-b445-3b638da2509e": {
+        "name": "Source Manager Patch Proposal",
+        "summary": "The Source Manager patch-proposal note describes how to turn a raw old-text/new-text diff into a short human-readable explanation for the user's approval screen using a one-line prompt.",
+        "parent": null,
+        "source_section_ids": [
+          "9392f0a7fdc5"
+        ],
+        "content_hint": "narrative"
+      },
+      "ff0cce20-c5a2-419d-9ed2-7a499868f4b1": {
+        "name": "Ingestion Pipeline",
+        "summary": "The ingestion pipeline is a series of steps that process uploaded files, including parsing, analyzing, and graphing the data. It consists of several agents, each with a specific role, such as Inspector, Data Analyzer, Duplication Checker, Graph Analyzer, Backlink Generator, and Source Manager.",
+        "parent": null,
+        "source_section_ids": [
+          "0d941d936350",
+          "cec2072b2871",
+          "59ddc78e1173",
+          "4eb411a6a196",
+          "1cc86d140159",
+          "15f04a1d859d",
+          "8fddae0e6b2f"
+        ],
+        "content_hint": "procedural"
+      },
+      "8bf125c8-d52b-4627-b7e2-30c91ddf9af5": {
+        "name": "Data Model",
+        "summary": "The data model is a hierarchical topic tree that stores the processed data, with each node representing a topic and containing instances of that topic. The tree is addressable, and each node has a unique id.",
+        "parent": null,
+        "source_section_ids": [
+          "1cc86d140159"
+        ],
+        "content_hint": "conceptual"
+      },
+      "acc8dad5-c97b-4f7a-a2f8-52cf4df89f45": {
+        "name": "Agent Contracts",
+        "summary": "The agents in the ingestion pipeline have specific contracts that define their roles and interactions. For example, the Duplication Checker checks for duplicate chunks, and the Graph Analyzer consumes tagged chunks and writes/merges nodes into the Secondary Memory.",
+        "parent": null,
+        "source_section_ids": [
+          "15f04a1d859d"
+        ],
+        "content_hint": "conceptual"
+      },
+      "bfdd5bfc-40c5-4c65-aea5-bf9b00b50f18": {
+        "name": "Live Ingestion Visualization",
+        "summary": "The live ingestion visualization is a feature that visualizes the ingestion process in real-time, showing nodes and edges being added to the graph as the data is processed.",
+        "parent": null,
+        "source_section_ids": [
+          "8fddae0e6b2f"
+        ],
+        "content_hint": "narrative"
+      },
+      "1a6364be-47a3-4d4d-9c2b-81258021aa88": {
+        "name": "Correction and Patch Flow",
+        "summary": "The correction and patch flow is a sequence of steps that allows users to request corrections to the data, and for the system to apply patches to the data.",
+        "parent": null,
+        "source_section_ids": [
+          "5c71a95a86a5"
+        ],
+        "content_hint": "procedural"
+      },
+      "26873d27-8b90-45a8-9736-e2cef627d3c0": {
+        "name": "System Architecture",
+        "summary": "The suggested system architecture includes a graph storage layer, vector similarity layer, parallel data analyzer workers, live channel to frontend, and frontend graph rendering. The system is designed to handle document sizes and volumes, with considerations for scalability and concurrency.",
+        "parent": null,
+        "source_section_ids": [
+          "6a8f4167b728"
+        ],
+        "content_hint": "conceptual"
+      },
+      "d59837b8-8520-40f3-8e4b-909a15a7c5d8": {
+        "name": "Changes and Additions",
+        "summary": "The system has undergone several changes and additions, including the split of the Duplication Checker into its own stage, the addition of version history per node, and the explicit statement of the Graph Analyzer being single-instance per project.",
+        "parent": null,
+        "source_section_ids": [
+          "a4a9ada3043b"
+        ],
+        "content_hint": "conceptual"
+      },
+      "d7e414c0-d2b8-48e4-bdcc-44185346f7d0": {
+        "name": "Open Questions",
+        "summary": "There are several open questions regarding the system, including the scale of document sizes and volumes, the budget for Large Language Models, and the need for human approval of patches.",
+        "parent": null,
+        "source_section_ids": [
+          "673bb2e01d53"
+        ],
+        "content_hint": "narrative"
+      },
+      "bd3fc22b-0029-476d-a64b-5bb401fe47f1": {
+        "name": "Graph Analyzer System Prompt",
+        "summary": "The Graph Analyzer system prompt is an incremental topic-tree patch generator that receives one analyzed chunk per call and returns one small JSON patch operation.",
+        "parent": "26873d27-8b90-45a8-9736-e2cef627d3c0",
+        "source_section_ids": [
+          "d5b3f20bb906",
+          "b62eed8539ef",
+          "37007b9bb343",
+          "b8a7dafaae66",
+          "9f8cca1f1497"
+        ],
+        "content_hint": "procedural"
+      }
+    },
+    "connections": []
+  },
+  "ws_6e8a4a05e9": {
+    "topics": {
+      "6285416f-e7d4-404d-bef8-19392dff77c5": {
+        "name": "Alternator Basics",
+        "summary": "Alternators operate on the principle of electromagnetic induction and consist of a stationary armature winding and a rotating magnetic field. They generate alternating current (AC) as the rotor turns, cutting the stator conductors and inducing an electromotive force (e.m.f.) in them.",
+        "parent": null,
+        "source_section_ids": [
+          "680f21528c32"
+        ],
+        "content_hint": "conceptual"
+      },
+      "933f14a5-b32e-436f-93de-6411859f1763": {
+        "name": "Alternator Construction",
+        "summary": "The construction of an alternator includes a stator (stationary armature) and a rotor (rotating magnetic field). The stator consists of a cast-iron frame, armature core, and slots for armature conductors, while the rotor has alternating north and south magnetic poles fixed around its outer rim.",
+        "parent": null,
+        "source_section_ids": [
+          "680f21528c32"
+        ],
+        "content_hint": "conceptual"
+      },
+      "bcd84822-9e52-41f4-9888-e9ba6f164770": {
+        "name": "Damper Windings",
+        "summary": "Damper windings are copper bars placed in slots on the pole-shoes and short-circuited at both ends by copper rings. They prevent hunting (small speed fluctuations during load changes), provide starting torque in synchronous motors, and help maintain voltage balance during unbalanced loads.",
+        "parent": null,
+        "source_section_ids": [
+          "680f21528c32"
+        ],
+        "content_hint": "conceptual"
+      },
+      "35d2ab47-5254-498f-ba95-54cd4cbbb2c5": {
+        "name": "AC Armature Windings",
+        "summary": "AC armature windings are distributed windings that are symmetrically distributed in slots around the complete circumference of the armature. They can be concentrated or distributed, with distributed windings offering superior performance for precision applications.",
+        "parent": null,
+        "source_section_ids": [
+          "680f21528c32"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_ccd282f888": {
+    "topics": {
+      "c0ba10ad-d2b5-49e6-bec0-b375f69e3bac": {
+        "name": "Basic principle of alternators",
+        "summary": "Explains how alternators operate on electromagnetic induction with a stationary stator armature and a rotating rotor that creates a rotating magnetic field, determining frequency by pole count and speed, and using Fleming\u2019s Right\u2011hand Rule.",
+        "parent": null,
+        "source_section_ids": [
+          "91bb66d26f31"
+        ],
+        "content_hint": "conceptual"
+      },
+      "fa3d846e-a986-479b-b15c-89e72ce9b95a": {
+        "name": "Stator (stationary armature) construction",
+        "summary": "Describes the stator\u2019s cast\u2011iron or steel frame, laminated magnetic steel core with slots for armature windings, and advantages such as high\u2011voltage output without brushes and better mechanical support.",
+        "parent": null,
+        "source_section_ids": [
+          "91bb66d26f31"
+        ],
+        "content_hint": "conceptual"
+      },
+      "fb6442bd-b8bc-4103-b1ba-4bc668cf4252": {
+        "name": "Rotor construction types",
+        "summary": "Compares salient\u2011pole rotors used in low\u2011to\u2011medium speed machines with smooth cylindrical rotors for high\u2011speed turbo\u2011generators, outlining their geometry, lamination, and performance implications.",
+        "parent": null,
+        "source_section_ids": [
+          "91bb66d26f31"
+        ],
+        "content_hint": "conceptual"
+      },
+      "7f3cb6d6-765d-49a0-ad46-d2e6193b458b": {
+        "name": "Damper windings",
+        "summary": "Details the placement of copper bars in pole\u2011shoe slots, their role in damping oscillations (hunting), providing starting torque in synchronous motors, and maintaining voltage balance during unbalanced loads.",
+        "parent": null,
+        "source_section_ids": [
+          "91bb66d26f31"
+        ],
+        "content_hint": "conceptual"
+      },
+      "8f5262e3-b3e7-47ca-b6de-2a8288cdc0ae": {
+        "name": "AC armature winding configurations",
+        "summary": "Contrasts concentrated windings, which are compact but produce trapezoidal back\u2011EMF, with distributed windings that yield sinusoidal back\u2011EMF, smoother torque, and better heat distribution, noting trade\u2011offs in complexity and copper usage.",
+        "parent": null,
+        "source_section_ids": [
+          "91bb66d26f31"
+        ],
+        "content_hint": "conceptual"
+      },
+      "6086c30c-0012-4af8-bfe3-e3fed2cbfdff": {
+        "name": "Distributed winding characteristics and coil pitch",
+        "summary": "Explains the benefits of symmetrically distributed windings for uniform voltage waveforms and heating, and distinguishes full\u2011pitch coils (180\u00b0 electrical span) from fractional\u2011pitch coils (less than 180\u00b0) and their impact on induced EMF.",
+        "parent": null,
+        "source_section_ids": [
+          "91bb66d26f31"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": []
+  },
+  "ws_0d72d2f8cc": {
+    "topics": {
+      "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c": {
+        "name": "Alternators",
+        "summary": "AC generators (alternators) operate on electromagnetic induction, using a stationary armature (stator) and a rotating magnetic field (rotor).",
+        "parent": null,
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "b72a1983-173a-4443-9b54-eae2c227836a": {
+        "name": "Alternator Basic Principle",
+        "summary": "Describes how the rotating magnetic field of the rotor cuts the stationary stator conductors, inducing an e.m.f. that yields alternating current; frequency depends on pole count and rotor speed.",
+        "parent": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "9e6cf7e4-1064-4d9b-9984-48bc27ae8bdf": {
+        "name": "Alternator Stator Construction",
+        "summary": "Details the stator as a cast\u2011iron or steel frame supporting a laminated core with slots for armature windings, providing high\u2011voltage output without brushes and good mechanical support.",
+        "parent": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "d7f5cbd4-75db-4004-be36-43383c203071": {
+        "name": "Alternator Rotor Construction",
+        "summary": "Explains the rotor\u2019s role in producing the rotating magnetic field and introduces the two main rotor designs: salient\u2011pole and smooth\u2011cylindrical types.",
+        "parent": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "84f5f6b1-de24-4bbd-bc73-8791ae5cf88f": {
+        "name": "Salient Pole Rotor",
+        "summary": "Used in low\u2011to\u2011medium speed alternators (\u22641200\u202fRPM); features a large diameter, short axial length, laminated projecting poles, and is unsuitable for high\u2011speed operation due to mechanical stresses.",
+        "parent": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "a1c682d4-068d-4bb4-8628-b2fb8645bad0": {
+        "name": "Smooth Cylindrical Rotor",
+        "summary": "Employed in high\u2011speed turbo\u2011generators (\u22651800\u202fRPM); consists of a solid forged cylinder with milled slots, offering uniform air gap, low windage loss, and smoother, quieter operation.",
+        "parent": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "d3eb0e1b-fec0-43f8-a6c2-257f9da67821": {
+        "name": "Damper Windings",
+        "summary": "Copper bars placed in pole\u2011shoe slots and short\u2011circuited at both ends; they damp rotor hunting, provide starting torque for synchronous motors, and help maintain voltage balance during unbalanced loads.",
+        "parent": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "ad196176-8178-4f0f-aa90-60ce85aa027d": {
+        "name": "AC Armature Winding Types",
+        "summary": "Compares concentrated and distributed windings: concentrated windings are compact but produce trapezoidal back\u2011EMF, while distributed windings give a sinusoidal back\u2011EMF, smoother torque, and better heat distribution.",
+        "parent": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      },
+      "4373a3a9-a90c-4306-8d09-9dea35057461": {
+        "name": "AC Armature Winding Pitch",
+        "summary": "Describes full\u2011pitch (180\u00b0 electrical span) versus fractional\u2011pitch coils; full\u2011pitch coils generate maximum e.m.f., while fractional\u2011pitch coils have a span less than 180\u00b0 and affect the induced voltage.",
+        "parent": "ad196176-8178-4f0f-aa90-60ce85aa027d",
+        "source_section_ids": [
+          "33ec38164f77"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": [
+      {
+        "from_topic": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "to_topic": "b72a1983-173a-4443-9b54-eae2c227836a",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "to_topic": "9e6cf7e4-1064-4d9b-9984-48bc27ae8bdf",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "5c3c3840-bda1-46eb-86a9-39c5d1cc6e6c",
+        "to_topic": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "b72a1983-173a-4443-9b54-eae2c227836a",
+        "to_topic": "9e6cf7e4-1064-4d9b-9984-48bc27ae8bdf",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "b72a1983-173a-4443-9b54-eae2c227836a",
+        "to_topic": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "to_topic": "84f5f6b1-de24-4bbd-bc73-8791ae5cf88f",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "to_topic": "a1c682d4-068d-4bb4-8628-b2fb8645bad0",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "d7f5cbd4-75db-4004-be36-43383c203071",
+        "to_topic": "d3eb0e1b-fec0-43f8-a6c2-257f9da67821",
+        "relation": "prerequisite-of"
+      },
+      {
+        "from_topic": "ad196176-8178-4f0f-aa90-60ce85aa027d",
+        "to_topic": "4373a3a9-a90c-4306-8d09-9dea35057461",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "9e6cf7e4-1064-4d9b-9984-48bc27ae8bdf",
+        "to_topic": "ad196176-8178-4f0f-aa90-60ce85aa027d",
+        "relation": "prerequisite-of"
+      },
+      {
+        "from_topic": "9e6cf7e4-1064-4d9b-9984-48bc27ae8bdf",
+        "to_topic": "4373a3a9-a90c-4306-8d09-9dea35057461",
+        "relation": "prerequisite-of"
+      }
+    ]
+  },
+  "ws_bcc70c4e37": {
+    "topics": {
+      "725e3042-ab3d-407f-b965-2909a6257610": {
+        "name": "Alternator Basics",
+        "summary": "This topic covers the fundamental principles of alternators, including their basic construction and operation. Alternators operate on the principles of electromagnetic induction, similar to DC generators, but with a stationary armature and a rotating magnetic field.",
+        "parent": null,
+        "source_section_ids": [
+          "f4c1ddad221e"
+        ],
+        "content_hint": "conceptual"
+      },
+      "b7b07244-c714-495f-b5eb-5dbd25821a3c": {
+        "name": "Alternator Construction",
+        "summary": "This topic delves into the details of alternator construction, including the stator, rotor, and damper windings. The stator consists of a cast-iron frame, armature core, and slots for the armature conductors, while the rotor has a rotating magnetic field with alternating north and south poles.",
+        "parent": null,
+        "source_section_ids": [
+          "f4c1ddad221e"
+        ],
+        "content_hint": "procedural"
+      },
+      "c47223cd-10c3-4d60-b1db-1bde1db13fa5": {
+        "name": "AC Armature Windings",
+        "summary": "This topic discusses the design and characteristics of AC armature windings, including concentrated and distributed windings. Distributed windings offer superior performance with smoother torque, quieter operation, and better heat distribution, but are more complex and copper-intensive.",
+        "parent": null,
+        "source_section_ids": [
+          "f4c1ddad221e"
+        ],
+        "content_hint": "conceptual"
+      },
+      "9072301a-af12-4238-8de0-116071d9df35": {
+        "name": "Damper Windings",
+        "summary": "This topic explains the purpose and function of damper windings in alternators, which prevent hunting, provide starting torque in synchronous motors, and help maintain voltage balance during unbalanced loads.",
+        "parent": null,
+        "source_section_ids": [
+          "f4c1ddad221e"
+        ],
+        "content_hint": "conceptual"
+      }
+    },
+    "connections": [
+      {
+        "from_topic": "725e3042-ab3d-407f-b965-2909a6257610",
+        "to_topic": "b7b07244-c714-495f-b5eb-5dbd25821a3c",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "b7b07244-c714-495f-b5eb-5dbd25821a3c",
+        "to_topic": "c47223cd-10c3-4d60-b1db-1bde1db13fa5",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "b7b07244-c714-495f-b5eb-5dbd25821a3c",
+        "to_topic": "9072301a-af12-4238-8de0-116071d9df35",
+        "relation": "elaborates-on"
+      },
+      {
+        "from_topic": "725e3042-ab3d-407f-b965-2909a6257610",
+        "to_topic": "c47223cd-10c3-4d60-b1db-1bde1db13fa5",
+        "relation": "prerequisite-of"
+      },
+      {
+        "from_topic": "725e3042-ab3d-407f-b965-2909a6257610",
+        "to_topic": "9072301a-af12-4238-8de0-116071d9df35",
+        "relation": "prerequisite-of"
+      }
+    ]
+  }
+}
