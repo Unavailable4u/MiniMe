@@ -374,6 +374,26 @@ _REQUEST_TOO_LARGE_LIMIT_PATTERN = re.compile(
     r"Limit (?P<limit>\d+), Requested (?P<requested>\d+)", re.IGNORECASE,
 )
 
+# Bug fix (2026-08-16): Fix D/D2's original _shrink_prompt_for_retry() cut
+# user_content blindly from the end (`user_content[:new_len]`), with no
+# idea what was actually IN the tail it was slicing off. For callers like
+# agents/hardware_speccer.py's Call 2, the tail is exactly the content the
+# call most needs (the finalized parts JSON, then Patch 0.4's hw_ref
+# precedent context) -- so a shrink triggered by that same content being
+# too large would quietly discard some of it, producing a well-formed but
+# starved response (sparse/empty wiring.edges, mech.placements) instead of
+# a visible failure.
+#
+# A caller that has some genuinely optional trailing context (never a
+# structural, "the model needs this" part of the prompt) can mark the
+# boundary with this sentinel. On a 413, _shrink_prompt_for_retry() drops
+# everything after the LAST occurrence of the marker first -- a full,
+# cheap, structure-respecting cut -- before ever falling back to
+# proportional/blind slicing of what's left. Not caller-specific by
+# design: any agent building a "core content + optional context" prompt
+# can adopt this the same way hardware_speccer.py does below.
+DROPPABLE_CONTEXT_MARKER = "\n\n<<<DROPPABLE_CONTEXT>>>\n\n"
+
 
 def _is_request_too_large_error(exc) -> bool:
     """Fix D (reliability guide, §3 "Fix D" -- request-too-large handoff):
@@ -414,7 +434,22 @@ def _shrink_prompt_for_retry(user_content: str, exc) -> str:
     Falls back to a flat 40% cut if the message doesn't carry those
     figures (some providers phrase this differently) -- still guarantees
     forward progress instead of repeating the identical failure on every
-    remaining chain step."""
+    remaining chain step.
+
+    Bug fix (2026-08-16): before any of the above, check for
+    DROPPABLE_CONTEXT_MARKER. If present, drop everything from the LAST
+    marker onward and return just the core content -- a caller-declared
+    "safe to lose" region is always preferable to guessing which raw
+    characters are safe to cut. This alone is usually enough (optional
+    context is what pushed the request over the limit in the first
+    place); if a second shrink is still needed on the same step, the
+    marker will already be gone from the returned core content, so the
+    next call falls through to the ratio/flat-cut logic below, now
+    operating on the smaller, structurally-intact core only."""
+    if DROPPABLE_CONTEXT_MARKER in user_content:
+        core = user_content.rsplit(DROPPABLE_CONTEXT_MARKER, 1)[0]
+        if len(core) < len(user_content):
+            return core
     match = _REQUEST_TOO_LARGE_LIMIT_PATTERN.search(str(exc))
     if match:
         limit = int(match.group("limit"))
@@ -1309,11 +1344,23 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     # "length" truncation handoff. Empty string means "nothing generated
     # yet" -- distinct from a step that legitimately returns "".
     continuations_used = 0
+    _original_user_content = user_content  # Bug fix (2026-08-16), see below
 
     for i, step in enumerate(chain):
         provider = step["provider"]
         model = step["model"]
         is_last = i == len(chain) - 1
+        # Bug fix (2026-08-16): Fix D2's same_step_shrinks loop below
+        # reassigns the shared `user_content` variable in place. That's
+        # correct WITHIN one step's retry loop, but this is a plain
+        # function-local variable shared across the whole `for` loop --
+        # nothing previously reset it between chain steps, so a 413 on
+        # step 1 silently handed every later fallback provider the
+        # ALREADY-shrunk prompt too, compounding data loss across
+        # providers instead of giving each one a fresh full attempt.
+        # Resetting here scopes a shrink strictly to retries-in-place on
+        # THIS step, matching what same_step_shrinks' own name implies.
+        user_content = _original_user_content
         # Fix D2 (reliability guide, §3 "Fix D2" -- retry-in-place for a
         # too-large request): the first cut of Fix D only ever handed a
         # shrunk prompt to the *next* chain step. That's fine when there

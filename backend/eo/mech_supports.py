@@ -237,3 +237,127 @@ def compute_screw_bosses(section_members: list) -> list:
         ))
 
     return bosses
+
+
+# ---------------------------------------------------------------------------
+# Patch 2.4 -- pipeline-integration half of Phase 2.
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is Patch 2.2/2.3's pure functions, deliberately
+# ignorant of `mech`/`parts`/eo/mech_sections.py -- see this module's own
+# top docstring for that boundary. This half is the opposite: it reads
+# mech["sections"]/mech["placements"] (via the same two-hop
+# section->subsection->member resolution eo/mech_enclosure.py's own
+# apply_enclosure_generation() already uses) and `parts` (the BOM list --
+# for each member's own "category"/"mount_spec", the two fields
+# compute_standoffs()/compute_screw_bosses() read directly off a dict but
+# that a raw mech["placements"] entry never carries on its own, per those
+# functions' own docstrings), calls both functions above, and mutates
+# `mech` in place -- same "mutate AND return" wrapper convention every
+# apply_* function in this package already follows.
+
+from eo.mech_sections import subsections_for_section
+from eo.mech_subsections import members_for_subsection
+
+
+def _joined_section_members(mech: dict, parts: list) -> list:
+    """Resolves every placement across EVERY section of `mech` (not just
+    one named section) into member dicts, and joins each one with its
+    BOM part's own "category"/"mount_spec" by matching member["part_id"]
+    against part["id"]. Deliberately doesn't hardcode which sections to
+    check -- support-eligible categories (SUPPORT_CATEGORIES: "mcu",
+    "power", "module") only ever show up in Power/Compute/Sensing/
+    Actuation in practice, but this lets the category gate inside
+    compute_standoffs()/compute_screw_bosses() decide eligibility on its
+    own rather than this helper guessing which sections could contain
+    one, mirroring the "gate on the data, not a hardcoded section list"
+    posture eo/mech_enclosure.py's own apply_enclosure_generation() takes
+    with its housing_1/lid_1 id-PREFIX match instead of a section
+    allowlist.
+
+    Returns a NEW list of shallow-copied member dicts -- never mutates
+    the placements already living in mech["placements"] or the parts in
+    `parts`, same read-only posture every other _joined_*/_populate_*
+    helper in this tree already holds toward its own inputs.
+
+    A member whose part_id has no match in `parts` (should not happen in
+    practice -- every mech["placements"] entry traces back to a BOM part
+    by construction -- but never assumed) is still included, just without
+    a "category"/"mount_spec" key, which fails compute_standoffs()'s own
+    category gate the same as any other ineligible member; never raises.
+    """
+    parts_by_id = {
+        p.get("id"): p for p in (parts or []) if isinstance(p, dict) and p.get("id")
+    }
+
+    joined = []
+    for section in mech.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for subsection in subsections_for_section(mech, section):
+            for member in members_for_subsection(mech, subsection):
+                if not isinstance(member, dict):
+                    continue
+                part = parts_by_id.get(member.get("part_id"))
+                merged = dict(member)
+                if isinstance(part, dict):
+                    merged["category"] = part.get("category")
+                    merged["mount_spec"] = part.get("mount_spec")
+                joined.append(merged)
+    return joined
+
+
+def apply_supports_generation(mech: dict, parts: list) -> dict:
+    """Patch 2.4: wires compute_standoffs()/compute_screw_bosses() into
+    the pipeline. agents/hardware_speccer.py's own G3g call site runs
+    this AFTER run_level_3_4_repair() (not immediately after
+    apply_enclosure_generation(), despite the patch breakdown's own
+    shorthand) -- see that call site's own comment for why: a member's
+    x/y/z isn't truly final until Level 3->4's containment/collision
+    repair has run, and a standoff/boss computed against a pre-repair
+    position would be stale.
+
+    Joins mech["placements"] against `parts` via _joined_section_members()
+    above, then calls compute_standoffs()/compute_screw_bosses() on the
+    joined list. For any part_id compute_screw_bosses() returned
+    primitives for (cleared the category gate AND had a declared
+    mount_spec), this function PREFERS the bossed primitives and drops
+    that part_id's plain standoffs -- see compute_screw_bosses()'s own
+    docstring: "Patch 2.4's own apply_supports_generation() is what
+    decides how the two functions' outputs combine for a given member."
+    Without this step a bossed part would get 8 primitives (4 plain + 4
+    bossed) stacked at the same 4 corners, which is never the intent --
+    a boss already IS that part's corner support, just with a bore added.
+
+    Stashes the result on the new `mech["supports"]` key as
+    {"standoffs": [...], "bosses": [...]} -- kept as two separate lists
+    rather than merged into one, so a consumer (Phase 5's future
+    cutout-overlap check, Phase 6's future collision checker,
+    MechView.jsx) can render or reason about bores differently from
+    plain posts without re-deriving which primitives carry a
+    "bore_diameter" key, mirroring eo/mech_enclosure.py's own "housing"
+    key being a named dict of parts rather than one flat list.
+
+    Returns {"standoffs": [], "bosses": []} (and stashes that same empty
+    result onto mech["supports"]) when `mech` has no sections yet -- same
+    "nothing to derive support from yet" no-op posture
+    apply_enclosure_generation() already takes when mech["device"] isn't
+    populated, just gated on mech["sections"] since that's what this
+    function's own input actually depends on.
+    """
+    if not isinstance(mech, dict) or not mech.get("sections"):
+        result = {"standoffs": [], "bosses": []}
+        if isinstance(mech, dict):
+            mech["supports"] = result
+        return result
+
+    section_members = _joined_section_members(mech, parts)
+    standoffs = compute_standoffs(section_members)
+    bosses = compute_screw_bosses(section_members)
+
+    bossed_part_ids = {b["part_id"] for b in bosses}
+    standoffs = [s for s in standoffs if s["part_id"] not in bossed_part_ids]
+
+    result = {"standoffs": standoffs, "bosses": bosses}
+    mech["supports"] = result
+    return result

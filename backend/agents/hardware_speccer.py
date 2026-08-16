@@ -114,7 +114,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read_stage_output_text
-from utils.llm_client import generate_text
+from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
 from eo import workspace_facts
@@ -1871,7 +1871,19 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # docstring for why this is the last thing added to
     # wiring_user_prompt and why it degrades to "" (no prompt change at
     # all) rather than ever blocking or altering generation on its own.
-    wiring_user_prompt += _build_hw_reference_context(parts)
+    #
+    # Bug fix (2026-08-16): the hw_ref block is genuinely optional
+    # framing context, never something Call 2 structurally needs (parts/
+    # PRD/task text above it is what it needs) -- but it also made this
+    # prompt more likely to cross a provider's per-request TPM ceiling
+    # than before Patch 0.4 existed. Marking its start with
+    # DROPPABLE_CONTEXT_MARKER lets utils.llm_client's request-too-large
+    # handling drop exactly this block first on a 413, instead of blind
+    # end-of-string slicing that could just as easily cut into the parts
+    # JSON above it (see that module's own comment on this fix).
+    hw_reference_context = _build_hw_reference_context(parts)
+    if hw_reference_context:
+        wiring_user_prompt += DROPPABLE_CONTEXT_MARKER + hw_reference_context
 
     raw_wiring = generate_text(SYSTEM_PROMPT_WIRING, wiring_user_prompt, chain,
                                 agent_name="Hardware Speccer Wiring",
@@ -2038,6 +2050,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.mech_repair import run_level_1_2_repair, run_level_2_3_repair, run_level_3_4_repair
     from eo.mech_device import apply_device_merge
     from eo.mech_enclosure import apply_enclosure_generation
+    from eo.mech_supports import apply_supports_generation
     from eo.mech_validator import close_session as close_mech_validator_session
     try:
         # Level 0->1 -- gap fix, see the comment block above: validates/
@@ -2060,6 +2073,23 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # housing, not the LLM's now-discarded guess (Patch 1.4).
         apply_enclosure_generation(spec.get("mech") or {}, spec["parts"])
         run_level_3_4_repair(spec, spec["parts"], session_id=session_id, domain=domain)
+        # Patch 2.4: Phase 2's own pipeline wiring. Deliberately sequenced
+        # AFTER run_level_3_4_repair() rather than immediately after
+        # apply_enclosure_generation() (a literal reading of the patch
+        # breakdown's own "call it right after apply_enclosure_generation()"
+        # phrasing) -- run_level_3_4_repair() is what actually clips/
+        # regenerates any member placement that fails containment or
+        # cross-section collision (see the Level 3->4 comment block above),
+        # so a member's x/y/z isn't truly final until it returns. Computing
+        # standoffs/bosses BEFORE that repair pass would project corners
+        # off positions the repair step might still move, leaving stale
+        # supports under a part that's no longer where they were computed
+        # for -- the same "don't act on placements the validator hasn't
+        # signed off on yet" ordering apply_enclosure_generation() itself
+        # already applies one level up (housing before Level 3->4, not
+        # after, precisely because housing sizing does NOT depend on
+        # per-part final positions the way a per-part standoff does).
+        apply_supports_generation(spec.get("mech") or {}, spec["parts"])
     finally:
         close_mech_validator_session(session_id)
 

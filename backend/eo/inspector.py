@@ -145,6 +145,72 @@ def _requests_simulate_domain(task_text: str) -> bool:
     return _rough_domain_guess(task_text) == "simulate"
 
 
+# Bug fix (2026-08-16): same failure shape as the hardware-speccer and
+# simulate-domain short-circuits above, third instance of it. Plan tab's
+# Architecture / Schema / PRD sub-tabs (frontend/app/components/tabs/
+# PlanTab.jsx) are driven by free-text task_text typed into the project
+# chat, same as the hardware/simulate cases -- there's no forced prompt
+# template guaranteeing trigger wording. A request like "generate the
+# architecture, PRD, and blueprint" reads to the LLM classifier as small
+# in isolation (no multi-file build implied by the wording itself), so it
+# keeps getting scored "direct" (tier 1: prompt_writer_lean ->
+# code_writer_lean -> reviewer_fixer_lean) instead of "adaptive" -- and a
+# "direct" classification can never reach architecture_diagrammer/
+# schema_diagrammer/prd_writer, since those (like hardware_speccer) are
+# exclusively staffed through the panel's hires pass on the adaptive
+# path. The result: the user gets code in chat and nothing lands on the
+# Architecture/Schema/PRD panels, same silent-drop shape the 2026-08-12
+# fixes above were written to close for their own domains.
+#
+# Deliberately three independent keyword groups, not one combined
+# pattern -- a task can ask for just one of these (e.g. only a schema
+# diagram), and forcing in roles the task didn't actually ask for would
+# just waste a hire. "blueprint" is treated as its own trigger for
+# hardware_speccer specifically (not folded into
+# HARDWARE_SPECCER_REQUEST_PATTERNS above) because Blueprint is the name
+# of hardware_speccer's own four-panel tab (Parts/Wiring/Mech/
+# Instructions, see BLUEPRINT_VIEWS in PlanTab.jsx) -- a bare "generate
+# the blueprint" is a hardware_speccer request even though it doesn't
+# mention parts/wiring/enclosure by name.
+_ARCHITECTURE_REQUEST_RE = re.compile(
+    r"\barchitecture\b|system design diagram|"
+    r"component diagram|architecture_diagrammer",
+    re.IGNORECASE,
+)
+_SCHEMA_REQUEST_RE = re.compile(
+    r"schema diagram|database schema|entity[- ]relationship|\bER diagram\b|"
+    r"schema_diagrammer",
+    re.IGNORECASE,
+)
+_PRD_REQUEST_RE = re.compile(
+    r"\bPRD\b|product requirements doc|requirements doc|prd_writer",
+    re.IGNORECASE,
+)
+_BLUEPRINT_TAB_RE = re.compile(r"\bblueprint\b", re.IGNORECASE)
+
+
+def _requests_plan_tab_roles(task_text: str) -> list:
+    """Returns the subset of ["architecture_diagrammer", "schema_diagrammer",
+    "prd_writer", "hardware_speccer"] that task_text's own wording asks
+    for -- [] if none match, in which case classify() falls through to
+    the LLM classifier exactly as before this fix. Order in the returned
+    list matches a reasonable execution_order (PRD context first, since
+    architecture/schema work often wants it, hardware_speccer last since
+    it already has its own dedicated MissingDependencyError("prd_writer")
+    contract via eo/executor.py's self-heal)."""
+    text = task_text or ""
+    roles = []
+    if _PRD_REQUEST_RE.search(text):
+        roles.append("prd_writer")
+    if _ARCHITECTURE_REQUEST_RE.search(text):
+        roles.append("architecture_diagrammer")
+    if _SCHEMA_REQUEST_RE.search(text):
+        roles.append("schema_diagrammer")
+    if _BLUEPRINT_TAB_RE.search(text):
+        roles.append("hardware_speccer")
+    return roles
+
+
 CHAIN = [
     # Quota-reality fix, §3: qwen/qwen3-32b -> qwen/qwen3.6-27b (the old
     # model isn't in Groq's current live free-tier model table, confirmed
@@ -430,6 +496,40 @@ def classify(task_text: str, context: str = None, session_id: str = None) -> dic
             ),
             "domain": "simulate",
             "execution_order": list(STRUCTURE_TEMPLATES["simulate"]),
+            "parallel_groups": [],
+        }
+        emit_event("routing_decision", session_id, agent="inspector",
+                    path=parsed["path"], payload=parsed)
+        emit_event("agent_done", session_id, agent="inspector",
+                    path=parsed["path"],
+                    payload={"summary": parsed["reasoning"]})
+        return parsed
+
+    # Deterministic pre-check, same shape and same reasoning as the two
+    # short-circuits above -- see _requests_plan_tab_roles()'s own
+    # docstring. Forces "adaptive" so loop_v4.py's should_escalate always
+    # sends this to the panel; the panel's own hires pass is what
+    # actually staffs whichever of architecture_diagrammer/
+    # schema_diagrammer/prd_writer/hardware_speccer this task's wording
+    # implied -- this short-circuit only needs to guarantee escalation
+    # happens, not replicate the panel's full reasoning.
+    plan_tab_roles = _requests_plan_tab_roles(task_text)
+    if plan_tab_roles:
+        parsed = {
+            "path": "adaptive",
+            "directed_task_type": None,
+            "confidence": 1.0,
+            "suggested_agents": plan_tab_roles,
+            "reasoning": (
+                "Deterministic override: task text asks for one or more "
+                "of architecture/schema/PRD/blueprint output, which only "
+                "the panel's 'adaptive' path can staff with the real "
+                "registered modules for those panels -- forced to "
+                "'adaptive' regardless of how small the request reads in "
+                "isolation."
+            ),
+            "domain": "plan" if "prd_writer" in plan_tab_roles else None,
+            "execution_order": list(plan_tab_roles),
             "parallel_groups": [],
         }
         emit_event("routing_decision", session_id, agent="inspector",
