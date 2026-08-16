@@ -370,6 +370,70 @@ def _retry_after_seconds(exc) -> float:
     return _DEFAULT_COOLDOWN_SECONDS
 
 
+_REQUEST_TOO_LARGE_LIMIT_PATTERN = re.compile(
+    r"Limit (?P<limit>\d+), Requested (?P<requested>\d+)", re.IGNORECASE,
+)
+
+
+def _is_request_too_large_error(exc) -> bool:
+    """Fix D (reliability guide, §3 "Fix D" -- request-too-large handoff):
+    True for a 413 "Request too large for model ... tokens per minute
+    (TPM)" error -- distinct from an ordinary 429 rate limit. A 429 means
+    "this account's per-minute budget is spent, wait and it resets";
+    retrying the identical prompt on the next chain step (or even the
+    same account a bit later) is the right move, which is exactly what
+    Fix B's cooldown already does. A 413 request-too-large means THIS
+    SINGLE REQUEST, by itself, exceeds the model's per-request/per-minute
+    ceiling -- no amount of waiting fixes that, and neither does handing
+    the exact same oversized prompt to the next provider (see
+    _shrink_prompt_for_retry() below)."""
+    status_code = _status_code_from_exc(exc)
+    if status_code == 413:
+        return True
+    return "request too large" in str(exc).lower()
+
+
+def _shrink_prompt_for_retry(user_content: str, exc) -> str:
+    """Fix D (reliability guide, §3 "Fix D"): before this fix, a 413
+    "request too large" was caught by the same _TRANSIENT_ERRORS branch
+    as a normal 429 -- it set a cooldown (Fix B) and moved to the next
+    chain step, but handed that next step the IDENTICAL, still-oversized
+    prompt. If the next step's model has a similar or smaller per-request
+    TPM ceiling (common when a chain's steps are same-tier free models,
+    as happened here), it fails the exact same way, and the whole chain
+    burns out on a request that was never going to fit anywhere --
+    ending in "All providers in fallback chain exhausted" even though
+    every provider was individually reachable and the real problem was
+    request size, not availability.
+
+    Parses the provider's own "Limit X, Requested Y" figures out of the
+    error message (Groq's actual 413 body shape -- see the traceback
+    that motivated this fix) and truncates user_content to fit under
+    that limit, with a safety margin for the system prompt and
+    message-framing overhead the SDK adds on top of raw content length.
+    Falls back to a flat 40% cut if the message doesn't carry those
+    figures (some providers phrase this differently) -- still guarantees
+    forward progress instead of repeating the identical failure on every
+    remaining chain step."""
+    match = _REQUEST_TOO_LARGE_LIMIT_PATTERN.search(str(exc))
+    if match:
+        limit = int(match.group("limit"))
+        requested = int(match.group("requested"))
+        if requested > 0 and limit > 0:
+            # 15% safety margin below the stated limit: system prompt +
+            # chat-message JSON framing + (if this is a continuation
+            # hop) _continuation_prompt()'s own wrapper text all add
+            # tokens the provider counts that aren't in len(user_content).
+            keep_ratio = max(0.1, min(1.0, (limit / requested) * 0.85))
+            new_len = max(1, int(len(user_content) * keep_ratio))
+            if new_len < len(user_content):
+                return user_content[:new_len]
+    # No parseable limit/requested figures -- take a conservative
+    # across-the-board cut so the next step still gets a materially
+    # smaller request instead of the identical one that just failed.
+    return user_content[: max(1, int(len(user_content) * 0.6))]
+
+
 def _set_cooldown(provider: str, key_id: str, exc) -> None:
     """Writes cooldown_until:{provider}:{key_id} = a UTC unix timestamp
     to the bus after a transient failure, so eo/panel.py's _best_match()
@@ -1124,6 +1188,17 @@ def _probe_usage_shape(provider: str, model: str, usage, agent_name: str) -> Non
               f"probe raised {exc!r} while inspecting usage; ignoring.")
 
 
+_MAX_REQUEST_TOO_LARGE_RETRIES = 2  # Fix D2: cap how many times a single
+# chain step will be retried in place after a 413 "request too large"
+# (see _is_request_too_large_error()/_shrink_prompt_for_retry()) before
+# generate_text() gives up on that step and moves on (or, if it's the
+# last step, raises). _shrink_prompt_for_retry() computes its cut from
+# the provider's own stated Limit/Requested figures, so this should
+# converge within a single retry in the common case -- 2 is a safety
+# margin for a provider whose accounting isn't a 1:1 match for
+# len(user_content) (e.g. a very different tokenizer), not an
+# expectation that it normally takes both attempts.
+
 _MAX_CONTINUATIONS = 2  # Fix C: cap how many times one call will chase a
 # "length" cutoff before just returning what it has. Bounded independently
 # of chain length: a chain can be up to MAX_CHAIN_STEPS (3) long for
@@ -1238,10 +1313,22 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     for i, step in enumerate(chain):
         provider = step["provider"]
         model = step["model"]
-        prompt_for_step = (
-            _continuation_prompt(user_content, accumulated_text)
-            if accumulated_text else user_content
-        )
+        is_last = i == len(chain) - 1
+        # Fix D2 (reliability guide, §3 "Fix D2" -- retry-in-place for a
+        # too-large request): the first cut of Fix D only ever handed a
+        # shrunk prompt to the *next* chain step. That's fine when there
+        # IS a next step, but the traceback that motivated this fix hit
+        # the 413 on the chain's LAST step -- back then `if is_last:
+        # break` fired before Fix D's shrink logic ever ran, so the
+        # request was never actually retried smaller; generate_text()
+        # just gave up immediately with the same 413 as last_exc, even
+        # though this exact provider/model would likely have accepted
+        # the very same request at a smaller size. same_step_shrinks
+        # below lets a too-large request be retried against the SAME
+        # step, shrunk each time from that step's own stated Limit/
+        # Requested figures, before generate_text() ever falls through
+        # to "next step" (or gives up, on the last step) logic.
+        same_step_shrinks = 0
 
         if provider == "cloudflare":
             account_id_env = step["account_id_env"]
@@ -1258,50 +1345,66 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                       f"(see cooldown_until:{provider}:{key_id}).")
                 continue
             json_mode = step.get("json_mode", False)
-            try:
-                # D1 patch 2 -- tracing wraps the real network call. See
-                # _traced_generation()/_end_traced_generation() docstrings:
-                # the provider call below runs exactly once regardless of
-                # whether tracing itself succeeds.
-                _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
-                                              agent_name, session_id, tier, path, domain)
+
+            while True:  # Fix D2: retry loop scoped to THIS step only
+                prompt_for_step = (
+                    _continuation_prompt(user_content, accumulated_text)
+                    if accumulated_text else user_content
+                )
                 try:
-                    text, usage, finish_reason = _call_cloudflare_step(
-                        creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
-                except BaseException:
-                    _end_traced_generation(_traced, agent_name, label, None, None, None,
-                                            exc_info=sys.exc_info())
-                    raise
-                _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
-                _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-                full_text = accumulated_text + text
-                is_last = i == len(chain) - 1
-                if (finish_reason == "length" and allow_continuation
-                        and continuations_used < _MAX_CONTINUATIONS and not is_last):
-                    # Fix C: real partial output, hand it to the next step.
-                    accumulated_text = full_text
-                    continuations_used += 1
-                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                          f"continuing on next chain step...")
-                    continue
-                if finish_reason == "length" and not allow_continuation and not is_last:
-                    # Caller opted out of continuation (e.g. single-shot
-                    # JSON classifier) -- discard the partial text and
-                    # retry the *original* prompt fresh on the next step
-                    # instead of splicing a continuation onto it.
-                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                          f"continuation disabled for this call -- discarding partial "
-                          f"output and retrying original prompt on next chain step...")
-                    continue
-                return full_text
-            except _TRANSIENT_ERRORS as exc:
-                last_exc = exc
-                _set_cooldown(provider, key_id, exc)   # Fix B
-                is_last = i == len(chain) - 1
-                if is_last:
-                    break
-                print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}), "
-                      f"falling back to next in chain...")
+                    # D1 patch 2 -- tracing wraps the real network call. See
+                    # _traced_generation()/_end_traced_generation() docstrings:
+                    # the provider call below runs exactly once regardless of
+                    # whether tracing itself succeeds.
+                    _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                                  agent_name, session_id, tier, path, domain)
+                    try:
+                        text, usage, finish_reason = _call_cloudflare_step(
+                            creds, model, system_prompt, prompt_for_step, json_mode=json_mode)
+                    except BaseException:
+                        _end_traced_generation(_traced, agent_name, label, None, None, None,
+                                                exc_info=sys.exc_info())
+                        raise
+                    _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
+                    _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
+                    full_text = accumulated_text + text
+                    if (finish_reason == "length" and allow_continuation
+                            and continuations_used < _MAX_CONTINUATIONS and not is_last):
+                        # Fix C: real partial output, hand it to the next step.
+                        accumulated_text = full_text
+                        continuations_used += 1
+                        print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                              f"continuing on next chain step...")
+                        break  # move on to next chain step
+                    if finish_reason == "length" and not allow_continuation and not is_last:
+                        # Caller opted out of continuation (e.g. single-shot
+                        # JSON classifier) -- discard the partial text and
+                        # retry the *original* prompt fresh on the next step
+                        # instead of splicing a continuation onto it.
+                        print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                              f"continuation disabled for this call -- discarding partial "
+                              f"output and retrying original prompt on next chain step...")
+                        break  # move on to next chain step
+                    return full_text
+                except _TRANSIENT_ERRORS as exc:
+                    last_exc = exc
+                    _set_cooldown(provider, key_id, exc)   # Fix B
+                    if (_is_request_too_large_error(exc)   # Fix D / D2
+                            and same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES):
+                        shrunk = _shrink_prompt_for_retry(user_content, exc)
+                        same_step_shrinks += 1
+                        print(f"  [{agent_name}] {label} rejected the request as too "
+                              f"large ({exc.__class__.__name__}) -- shrinking prompt "
+                              f"from {len(user_content)} to {len(shrunk)} chars and "
+                              f"retrying {label} in place "
+                              f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
+                        user_content = shrunk
+                        accumulated_text = ""  # stale partial output no longer matches the shrunk prompt
+                        continue  # retry the SAME step, now with a smaller prompt
+                    if not is_last:
+                        print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}), "
+                              f"falling back to next in chain...")
+                    break  # move on to next chain step (or fall off the end, if is_last)
             continue
 
         key_env = step["key_env"]
@@ -1325,49 +1428,64 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
             continue
 
-        try:
-            # D1 patch 2 -- same traced-call pattern as the cloudflare
-            # branch above; see _traced_generation()/_end_traced_generation().
-            _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
-                                          agent_name, session_id, tier, path, domain)
+        while True:  # Fix D2: retry loop scoped to THIS step only
+            prompt_for_step = (
+                _continuation_prompt(user_content, accumulated_text)
+                if accumulated_text else user_content
+            )
             try:
-                text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
-            except BaseException:
-                _end_traced_generation(_traced, agent_name, label, None, None, None,
-                                        exc_info=sys.exc_info())
-                raise
-            _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
-            _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-            full_text = accumulated_text + text
-            is_last = i == len(chain) - 1
-            if (finish_reason == "length" and allow_continuation
-                    and continuations_used < _MAX_CONTINUATIONS and not is_last):
-                # Fix C: real partial output, hand it to the next step
-                # instead of returning a silently-truncated answer or
-                # discarding it on a later failure.
-                accumulated_text = full_text
-                continuations_used += 1
-                print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                      f"continuing on next chain step...")
-                continue
-            if finish_reason == "length" and not allow_continuation and not is_last:
-                # Caller opted out of continuation (e.g. single-shot JSON
-                # classifier) -- discard the partial text and retry the
-                # *original* prompt fresh on the next step instead of
-                # splicing a continuation onto it.
-                print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                      f"continuation disabled for this call -- discarding partial "
-                      f"output and retrying original prompt on next chain step...")
-                continue
-            return full_text
-        except _TRANSIENT_ERRORS as exc:
-            last_exc = exc
-            _set_cooldown(provider, key_env, exc)   # Fix B
-            is_last = i == len(chain) - 1
-            if is_last:
-                break
-            print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}), "
-                  f"falling back to next in chain...")
+                # D1 patch 2 -- same traced-call pattern as the cloudflare
+                # branch above; see _traced_generation()/_end_traced_generation().
+                _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                              agent_name, session_id, tier, path, domain)
+                try:
+                    text, usage, finish_reason = _call_step(client, model, system_prompt, prompt_for_step)
+                except BaseException:
+                    _end_traced_generation(_traced, agent_name, label, None, None, None,
+                                            exc_info=sys.exc_info())
+                    raise
+                _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
+                _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
+                full_text = accumulated_text + text
+                if (finish_reason == "length" and allow_continuation
+                        and continuations_used < _MAX_CONTINUATIONS and not is_last):
+                    # Fix C: real partial output, hand it to the next step
+                    # instead of returning a silently-truncated answer or
+                    # discarding it on a later failure.
+                    accumulated_text = full_text
+                    continuations_used += 1
+                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                          f"continuing on next chain step...")
+                    break  # move on to next chain step
+                if finish_reason == "length" and not allow_continuation and not is_last:
+                    # Caller opted out of continuation (e.g. single-shot JSON
+                    # classifier) -- discard the partial text and retry the
+                    # *original* prompt fresh on the next step instead of
+                    # splicing a continuation onto it.
+                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+                          f"continuation disabled for this call -- discarding partial "
+                          f"output and retrying original prompt on next chain step...")
+                    break  # move on to next chain step
+                return full_text
+            except _TRANSIENT_ERRORS as exc:
+                last_exc = exc
+                _set_cooldown(provider, key_env, exc)   # Fix B
+                if (_is_request_too_large_error(exc)   # Fix D / D2
+                        and same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES):
+                    shrunk = _shrink_prompt_for_retry(user_content, exc)
+                    same_step_shrinks += 1
+                    print(f"  [{agent_name}] {label} rejected the request as too "
+                          f"large ({exc.__class__.__name__}) -- shrinking prompt "
+                          f"from {len(user_content)} to {len(shrunk)} chars and "
+                          f"retrying {label} in place "
+                          f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
+                    user_content = shrunk
+                    accumulated_text = ""  # stale partial output no longer matches the shrunk prompt
+                    continue  # retry the SAME step, now with a smaller prompt
+                if not is_last:
+                    print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}), "
+                          f"falling back to next in chain...")
+                break  # move on to next chain step (or fall off the end, if is_last)
 
     if accumulated_text:
         # Fix C: the chain ran out (or hit _MAX_CONTINUATIONS) while a
