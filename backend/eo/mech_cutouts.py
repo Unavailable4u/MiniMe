@@ -42,6 +42,8 @@ already share it.
 """
 
 from eo.enclosure_spec import CUTOUT_TABLE, CUTOUT_ELIGIBLE_CATEGORIES, ENCLOSURE_SPEC
+from eo.mech_sections import subsections_for_section
+from eo.mech_subsections import members_for_subsection
 
 # ---------------------------------------------------------------------------
 # Patch 5.2 -- nearest_exterior_face()
@@ -568,10 +570,6 @@ def generate_port_cutout(part: dict, face: str, housing_inner: dict = None) -> d
 # per cutout-eligible member, and mutates `mech` in place -- same
 # "mutate AND return" wrapper convention every apply_* function in this
 # package already follows.
-
-from eo.mech_sections import subsections_for_section
-from eo.mech_subsections import members_for_subsection
-
 
 def _joined_cutout_members(mech: dict, parts: list) -> list:
     """Resolves every placement across EVERY section of `mech` into

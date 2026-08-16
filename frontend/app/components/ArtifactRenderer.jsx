@@ -108,12 +108,31 @@ function PythonArtifact({ code }) {
                 {result.stderr}
               </pre>
             )}
+            {/* BUGFIX (Maximum update depth exceeded / react-window
+                useVirtualizer setIndices crash) — same class as
+                Markdown.jsx's img renderer fix. This plot output lives
+                inside WorkspaceChatPanel's virtualized message list,
+                whose row height is measured via react-window v2's
+                useDynamicRowHeight (a ResizeObserver under the hood).
+                An <img> with only max-width has no height reserved
+                before it decodes, so the row's measured height differs
+                between the pre-decode and post-decode passes — same
+                "measure -> setIndices -> row resizes -> measure again"
+                non-convergence Markdown.jsx's own fix comment describes.
+                Unlike Markdown's img (which can guess a 16/9
+                aspect-ratio default), a matplotlib-style plot's real
+                aspect ratio varies too much for one guess to fit well,
+                so this reserves a fixed height (not max-height, which
+                only caps the POST-decode size and does nothing for the
+                PRE-decode 0-height pass) with object-contain so the
+                image scales inside that fixed box either way. */}
             {result.images?.map((b64, i) => (
               <img
                 key={i}
                 src={`data:image/png;base64,${b64}`}
                 alt={`Plot ${i + 1}`}
-                className="max-w-full rounded border border-[var(--neutral-800)]"
+                className="max-w-full rounded border border-[var(--neutral-800)] object-contain"
+                style={{ height: 360, width: "100%" }}
               />
             ))}
             {!hasOutput && (

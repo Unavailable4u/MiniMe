@@ -251,6 +251,28 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const mode = dockMode;
   const setMode = setDockMode;
   const activeMessageIndex = dock.state.activeMessageIndex;
+  // BUGFIX (Maximum update depth exceeded / react-window useVirtualizer
+  // setIndices crash, scroll-triggered instance): the "Fix (render-loop,
+  // take 2)" comment below only closed HALF the loop. setActiveMessageIndex
+  // still depended on the primitive dock.state.activeMessageIndex — which
+  // is the exact value this same callback writes — so its identity was
+  // still recreated on every scroll-driven index change, which cascaded
+  // into handleRowsRendered and rowProps (both depend on
+  // setActiveMessageIndex) getting new identities on every scroll tick
+  // too. List's own onRowsRendered effect depends on that callback
+  // reference (see node_modules/react-window's List.tsx), so a
+  // continuous scroll gesture — rapid, real startIndex changes — kept
+  // re-triggering that effect on top of the real changes, and each
+  // recreation also invalidated every row's memo via rowProps, undoing
+  // the step-8 fix's whole point. A ref lets these callbacks read the
+  // latest activeMessageIndex for their equality checks without needing
+  // to be recreated when it changes — same "depend on values you SET,
+  // read values you only need to COMPARE against via a ref" fix as
+  // setActiveMessageIndex's own comment already half-applies below.
+  const activeMessageIndexRef = useRef(activeMessageIndex);
+  useEffect(() => {
+    activeMessageIndexRef.current = activeMessageIndex;
+  }, [activeMessageIndex]);
   // Fix (render-loop, take 2): the first fix's `[dock]` dependency was
   // itself the bug — useWorkspaceDock() returns a brand-new object literal
   // on every render (only its individual fields, like setDockState, are
@@ -258,14 +280,18 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // callback was STILL recreated every render, which meant rowProps below
   // was still unstable, which is exactly what keeps react-window's
   // internal setIndices effect retriggering. Depending on the specific
-  // stable field (dock.setDockState) and the specific primitive value
-  // (dock.state.activeMessageIndex) actually breaks the cycle.
+  // stable field (dock.setDockState) and reading the current value via
+  // activeMessageIndexRef (rather than depending on the primitive
+  // dock.state.activeMessageIndex, which this same callback writes —
+  // see the fuller BUGFIX comment above activeMessageIndexRef's
+  // declaration) makes this callback's identity fully stable across
+  // renders, closing the cycle completely rather than just narrowing it.
   const setActiveMessageIndex = useCallback(
     (i) => {
-      if (i === dock.state.activeMessageIndex) return;
+      if (i === activeMessageIndexRef.current) return;
       dock.setDockState({ activeMessageIndex: i });
     },
-    [dock.setDockState, dock.state.activeMessageIndex]
+    [dock.setDockState]
   );
   const reviewBeforeDispatch = dockReviewBeforeDispatch;   // Part 2 §2.5
   const setReviewBeforeDispatch = setDockReviewBeforeDispatch;   // Part 2 §2.5
@@ -935,9 +961,9 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // this anchor once messages.length actually grows.
   const handleLoadOlder = useCallback(() => {
     if (loadingOlder || !hasMoreOlder || !chatId) return;
-    prependAnchorRef.current = { prevLength: messages.length, index: activeMessageIndex ?? 0 };
+    prependAnchorRef.current = { prevLength: messages.length, index: activeMessageIndexRef.current ?? 0 };
     loadOlderMessages(chatId);
-  }, [loadingOlder, hasMoreOlder, chatId, messages.length, activeMessageIndex, loadOlderMessages]);
+  }, [loadingOlder, hasMoreOlder, chatId, messages.length, loadOlderMessages]);
 
   // visibleRows.startIndex <= 3 (not just === 0) so the fetch starts a
   // little before the person hits the literal top row — same "prefetch
@@ -957,15 +983,26 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // this in useCallback (so its identity is stable across unrelated
   // renders) plus the equality guard below (so it doesn't fire a state
   // update when the index hasn't actually changed) closes the loop.
+  //
+  // BUGFIX follow-up (same crash, scroll-triggered instance): this still
+  // depended on the primitive `activeMessageIndex` directly for its own
+  // equality check, so its identity was still recreated on every
+  // scroll-driven index change — same residual gap as
+  // setActiveMessageIndex's own follow-up fix above. Reading
+  // activeMessageIndexRef.current instead (and dropping activeMessageIndex
+  // from the dependency array) makes this callback's identity fully
+  // stable, so a continuous scroll gesture no longer keeps re-triggering
+  // List's own onRowsRendered effect (which depends on this exact
+  // reference) on top of the real, already-legitimate index changes.
   const handleRowsRendered = useCallback(
     (visibleRows) => {
       if (isSyncingRef.current) return;
-      if (visibleRows.startIndex !== activeMessageIndex) {
+      if (visibleRows.startIndex !== activeMessageIndexRef.current) {
         setActiveMessageIndex(visibleRows.startIndex);
       }
       if (visibleRows.startIndex <= 3) handleLoadOlder();
     },
-    [activeMessageIndex, setActiveMessageIndex, handleLoadOlder]
+    [setActiveMessageIndex, handleLoadOlder]
   );
 
   // Fix (render-loop): memoized so this object's identity only changes when

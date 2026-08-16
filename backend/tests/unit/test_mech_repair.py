@@ -40,8 +40,6 @@ to a scripted stand-in returning a queue of canned results, and
 regenerate_node_fn is a plain test double the test itself controls --
 no real sandbox, LLM, or network call anywhere in this file.
 """
-import pytest
-
 import eo.mech_repair as mr
 
 

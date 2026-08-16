@@ -64,6 +64,8 @@ footprint and calls this.
 """
 
 from eo.enclosure_spec import ENCLOSURE_SPEC
+from eo.mech_sections import subsections_for_section
+from eo.mech_subsections import members_for_subsection
 
 
 def _expand(footprint: dict, pad: float) -> dict:
@@ -128,9 +130,6 @@ def compute_housing_footprint(device_footprint: dict) -> dict:
 # what actually populates that key), calls compute_housing_footprint()
 # above, and mutates `mech` in place -- same "mutate AND return" wrapper
 # convention apply_device_merge() itself already established.
-
-from eo.mech_sections import subsections_for_section
-from eo.mech_subsections import members_for_subsection
 
 # A housing/lid placement is matched by `part_id` PREFIX, not literal
 # equality -- same "a model-authored id only ever needs to start with the
