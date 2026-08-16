@@ -1,0 +1,418 @@
+diff --git a/backend/agents/hardware_speccer.py b/backend/agents/hardware_speccer.py
+index ddb8665..8136af9 100644
+--- a/backend/agents/hardware_speccer.py
++++ b/backend/agents/hardware_speccer.py
+@@ -2051,6 +2051,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+     from eo.mech_device import apply_device_merge
+     from eo.mech_enclosure import apply_enclosure_generation
+     from eo.mech_supports import apply_supports_generation
++    from eo.mech_cutouts import apply_cutout_generation
+     from eo.mech_validator import close_session as close_mech_validator_session
+     try:
+         # Level 0->1 -- gap fix, see the comment block above: validates/
+@@ -2090,6 +2091,16 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+         # after, precisely because housing sizing does NOT depend on
+         # per-part final positions the way a per-part standoff does).
+         apply_supports_generation(spec.get("mech") or {}, spec["parts"])
++        # Patch 5.6: Phase 5's own pipeline wiring. Sequenced AFTER
++        # apply_supports_generation() per that patch's own breakdown
++        # note ("needs standoff positions available for the overlap
++        # awareness described in the master guide") -- see eo/
++        # mech_cutouts.py's own apply_cutout_generation() docstring for
++        # why that "overlap awareness" is Phase 6's future job, not
++        # something this call computes itself; this ordering only
++        # guarantees mech["supports"] already exists by the time
++        # mech["cutouts"] is populated alongside it.
++        apply_cutout_generation(spec.get("mech") or {}, spec["parts"])
+     finally:
+         close_mech_validator_session(session_id)
+ 
+diff --git a/backend/eo/mech_cutouts.py b/backend/eo/mech_cutouts.py
+index 90ff853..57babc1 100644
+--- a/backend/eo/mech_cutouts.py
++++ b/backend/eo/mech_cutouts.py
+@@ -41,7 +41,7 @@ that same shape -- eo/mech_enclosure.py's own compute_housing_footprint()
+ already share it.
+ """
+ 
+-from eo.enclosure_spec import CUTOUT_TABLE, CUTOUT_ELIGIBLE_CATEGORIES
++from eo.enclosure_spec import CUTOUT_TABLE, CUTOUT_ELIGIBLE_CATEGORIES, ENCLOSURE_SPEC
+ 
+ # ---------------------------------------------------------------------------
+ # Patch 5.2 -- nearest_exterior_face()
+@@ -76,6 +76,12 @@ _FACE_NORMAL_DIM = {
+ # the same idea one function over).
+ _FACE_ORDER = ("-x", "+x", "-y", "+y", "-z", "+z")
+ 
++# Dimension key ("w"/"h"/"d") -> its own matching position key ("x"/"y"/
++# "z") -- shared by nearest_exterior_face()'s own gap math above and
++# Patch 5.5's check_min_wall_thickness() below, so both read the exact
++# same axis pairing rather than each re-deriving it.
++_DIM_TO_POS = {"w": "x", "h": "y", "d": "z"}
++
+ 
+ def nearest_exterior_face(part_footprint: dict, housing_inner: dict) -> str:
+     """Returns one of "+x"/"-x"/"+y"/"-y"/"+z"/"-z" -- the housing_inner
+@@ -220,6 +226,109 @@ def _part_id(part: dict):
+     return part.get("part_id") or part.get("id")
+ 
+ 
++# ---------------------------------------------------------------------------
++# Patch 5.5 -- check_min_wall_thickness(): the minimum-wall-thickness
++# guard every cutout from Patch 5.3/5.4 gets run through, per the
++# breakdown's own wording: "Before accepting any cutout from 5.3/5.4,
++# check it doesn't leave a wall segment thinner than
++# ENCLOSURE_SPEC['min_feature_mm']; reject/flag violations rather than
++# silently emitting bad geometry." Landed as its own function, kept
++# deliberately separate from generate_cutout()/generate_port_cutout()
++# themselves ("Why this size" in the breakdown: "Cross-cutting
++# validation, deliberately separate from the generators themselves so
++# the guard can be tested against both shape families uniformly").
++# ---------------------------------------------------------------------------
++
++def check_min_wall_thickness(part: dict, face: str, cutout: dict, housing_inner: dict) -> dict:
++    """Checks whether `cutout` (a dict already returned by
++    generate_cutout() or generate_port_cutout(), for `part` opened
++    through `face`) leaves a wall segment on that face thinner than
++    `ENCLOSURE_SPEC["min_feature_mm"]` anywhere around its own opening.
++
++    "Wall segment" here means the strip of housing wall BETWEEN the
++    cutout's own opening and that face's own outer boundary (the
++    housing's own edge on the two in-plane axes) -- not the housing's
++    shell thickness itself (`ENCLOSURE_SPEC["wall_thickness_mm"]`,
++    the material the cutout is drilled straight THROUGH, which this
++    function never checks; a cutout is always a through-hole by
++    definition in this pipeline, so there's no wall segment to measure
++    along the normal axis). A cutout placed too close to where two
++    walls meet (near a housing corner/edge on its own face) is exactly
++    the failure mode this guard exists to catch -- literal Master
++    Guide wording: "reject/flag any cutout that would leave a wall
++    segment thinner than the minimum printable feature."
++
++    Margin math, per in-plane axis (the same two dimension keys
++    _in_plane_extents() already isolates for `face`):
++      - `part`'s own low-side margin to the housing wall
++        (`part_pos - housing_pos`) and high-side margin
++        (`(housing_pos + housing_extent) - (part_pos + part_extent)`) --
++        the same edge-to-edge gap shape nearest_exterior_face() itself
++        already uses, one level up, to pick `face` in the first place.
++      - PLUS half of any slack between `part`'s own footprint extent
++        on that axis and the cutout's own (usually smaller, per
++        bezel/clearance shrinkage) opening extent -- since Patch 5.3/
++        5.4 both center the cutout's opening within the part's own
++        footprint rather than flush to one edge, that slack is real
++        extra margin the cutout's own opening enjoys beyond the part's
++        raw position, and ignoring it would under-count the true
++        available wall and over-flag violations that aren't real.
++      - A `cutout` whose "shape" is "circular" reads its own uniform
++        "diameter_mm" on BOTH in-plane axes (a round hole has no
++        separate width/height); "rectangular"/"port" shapes read their
++        own "width_mm" (first in-plane axis, per
++        _in_plane_extents()'s own fixed dimension ordering) and
++        "height_mm" (second) respectively.
++
++    Returns {"ok": bool, "margins": {dim: {"low": mm, "high": mm}, ...},
++    "violations": [{"axis": dim, "side": "low"|"high", "margin_mm": mm},
++    ...]}. `"ok"` is `True` iff `"violations"` is empty. NEVER raises --
++    this is a flag, not a hard-fail, same "reject/flag... rather than
++    silently emitting bad geometry" wording the breakdown itself uses
++    ("flag" being the second, equally valid half of that same
++    sentence): a caller that wants to hard-reject a violating cutout
++    can inspect `"ok"`/`"violations"` and decide for itself, but this
++    function never raises on `part`/`cutout`/`housing_inner` it can't
++    fully evaluate -- missing keys default to 0 on every side, same
++    "tolerant of a partial dict" posture every pure function in this
++    module (and this whole tree) already holds itself to.
++
++    Pure function: never mutates `part`, `cutout`, or `housing_inner`.
++    """
++    min_feature = ENCLOSURE_SPEC["min_feature_mm"]
++    normal = _FACE_NORMAL_DIM.get(face)
++    in_plane_dims = [dim for dim in ("w", "h", "d") if dim != normal]
++    cutout_shape = (cutout or {}).get("shape")
++
++    margins = {}
++    violations = []
++    for index, dim in enumerate(in_plane_dims):
++        pos_key = _DIM_TO_POS[dim]
++        part_pos = float((part or {}).get(pos_key) or 0)
++        part_extent = float((part or {}).get(dim) or 0)
++        inner_pos = float((housing_inner or {}).get(pos_key) or 0)
++        inner_extent = float((housing_inner or {}).get(dim) or 0)
++
++        if cutout_shape == "circular":
++            cutout_extent = float((cutout or {}).get("diameter_mm") or 0)
++        elif index == 0:
++            cutout_extent = float((cutout or {}).get("width_mm") or 0)
++        else:
++            cutout_extent = float((cutout or {}).get("height_mm") or 0)
++
++        slack = max(part_extent - cutout_extent, 0.0) / 2.0
++        low_margin = round(part_pos - inner_pos + slack, 3)
++        high_margin = round((inner_pos + inner_extent) - (part_pos + part_extent) + slack, 3)
++        margins[dim] = {"low": low_margin, "high": high_margin}
++
++        if low_margin < min_feature:
++            violations.append({"axis": dim, "side": "low", "margin_mm": low_margin})
++        if high_margin < min_feature:
++            violations.append({"axis": dim, "side": "high", "margin_mm": high_margin})
++
++    return {"ok": not violations, "margins": margins, "violations": violations}
++
++
+ # ---------------------------------------------------------------------------
+ # Patch 5.3 -- generate_cutout(): the simple-shape generator (window,
+ # vent, through-hole, light-pipe). Deliberately excludes "port" --
+@@ -229,7 +338,7 @@ def _part_id(part: dict):
+ # envelope, not just a primitive hole)."
+ # ---------------------------------------------------------------------------
+ 
+-def generate_cutout(part: dict, face: str, cutout_type: str) -> dict:
++def generate_cutout(part: dict, face: str, cutout_type: str, housing_inner: dict = None) -> dict:
+     """Returns one cutout primitive dict for `part`, opened through
+     `face` (one of nearest_exterior_face()'s own six return values),
+     shaped per `cutout_type` -- one of "window" (display), "vent"
+@@ -237,6 +346,19 @@ def generate_cutout(part: dict, face: str, cutout_type: str) -> dict:
+     indicator). "port" is NOT handled here; see generate_port_cutout()
+     below.
+ 
++    `housing_inner` (Patch 5.5, optional, default `None`): when
++    provided, this function additionally runs
++    check_min_wall_thickness() against the geometry it just computed
++    and attaches the result under the returned dict's own
++    "wall_thickness_check" key -- {"ok","margins","violations"}, never
++    raised as an exception (see that function's own docstring for why
++    this is a flag, not a hard-fail). Omitting `housing_inner`
++    (the default) skips the check entirely and omits the key, so every
++    existing Patch 5.3 caller/test written before Patch 5.5 landed
++    keeps returning exactly the same dict shape it always has --
++    strictly additive, never a breaking change to this function's own
++    established contract.
++
+     Re-derives `part`'s own CUTOUT_TABLE descriptor via
+     _match_cutout_descriptor() (rather than trusting `cutout_type`
+     alone) so a caller can never silently mismatch a part against the
+@@ -316,22 +438,31 @@ def generate_cutout(part: dict, face: str, cutout_type: str) -> dict:
+         dim1, dim2 = _in_plane_extents(part, face)
+         result["width_mm"] = round(max(dim1 - 2 * bezel, 0.0), 3)
+         result["height_mm"] = round(max(dim2 - 2 * bezel, 0.0), 3)
+-        return result
+-
+-    # Circular: "vent"/"light_pipe" use the descriptor's own fixed
+-    # hole_diameter_mm; "through_hole" derives its diameter from the
+-    # part's own in-plane footprint instead (see docstring above).
+-    if cutout_type == "through_hole":
+-        dim1, dim2 = _in_plane_extents(part, face)
+-        base_diameter = min(dim1, dim2) if (dim1 and dim2) else max(dim1, dim2)
+-        clearance = float(descriptor.get("clearance_mm") or 0)
+-        result["diameter_mm"] = round(base_diameter + clearance, 3)
+     else:
+-        result["diameter_mm"] = float(descriptor["hole_diameter_mm"])
+-        if "hole_count" in descriptor:
+-            result["hole_count"] = descriptor["hole_count"]
+-        if "mesh_clearance_mm" in descriptor:
+-            result["mesh_clearance_mm"] = descriptor["mesh_clearance_mm"]
++        # Circular: "vent"/"light_pipe" use the descriptor's own fixed
++        # hole_diameter_mm; "through_hole" derives its diameter from
++        # the part's own in-plane footprint instead (see docstring
++        # above).
++        if cutout_type == "through_hole":
++            dim1, dim2 = _in_plane_extents(part, face)
++            base_diameter = min(dim1, dim2) if (dim1 and dim2) else max(dim1, dim2)
++            clearance = float(descriptor.get("clearance_mm") or 0)
++            result["diameter_mm"] = round(base_diameter + clearance, 3)
++        else:
++            result["diameter_mm"] = float(descriptor["hole_diameter_mm"])
++            if "hole_count" in descriptor:
++                result["hole_count"] = descriptor["hole_count"]
++            if "mesh_clearance_mm" in descriptor:
++                result["mesh_clearance_mm"] = descriptor["mesh_clearance_mm"]
++
++    # Patch 5.5: flag (never raise) a minimum-wall-thickness violation
++    # when the caller supplied `housing_inner` -- see this function's
++    # own docstring above and check_min_wall_thickness()'s own
++    # docstring below for why this is additive/optional.
++    if housing_inner is not None:
++        result["wall_thickness_check"] = check_min_wall_thickness(
++            part, face, result, housing_inner
++        )
+ 
+     return result
+ 
+@@ -346,7 +477,7 @@ def generate_cutout(part: dict, face: str, cutout_type: str) -> dict:
+ # ordinary static hole.
+ # ---------------------------------------------------------------------------
+ 
+-def generate_port_cutout(part: dict, face: str) -> dict:
++def generate_port_cutout(part: dict, face: str, housing_inner: dict = None) -> dict:
+     """Returns one port-cutout primitive for `part`, opened through
+     `face` -- literal Master Guide wording ("port-shaped cutout at
+     part's footprint"). Only matches CUTOUT_TABLE keywords whose own
+@@ -357,6 +488,13 @@ def generate_port_cutout(part: dict, face: str) -> dict:
+     than trust the caller" posture generate_cutout() already takes
+     above.
+ 
++    `housing_inner` (Patch 5.5, optional, default `None`): identical
++    opt-in "flag a violation, never raise" contract generate_cutout()'s
++    own `housing_inner` parameter already documents above -- when
++    supplied, the returned dict gains a "wall_thickness_check" key;
++    omitted (the default), this function's return shape is unchanged
++    from Patch 5.4's own original contract.
++
+     Envelope size is `part`'s own in-plane footprint on `face` (see
+     _in_plane_extents()) expanded on every side by the matched
+     descriptor's own "clearance_mm" -- literal "read the real
+@@ -394,7 +532,7 @@ def generate_port_cutout(part: dict, face: str) -> dict:
+     width = round(dim1 + 2 * clearance, 3)
+     height = round(dim2 + 2 * clearance, 3)
+ 
+-    return {
++    result = {
+         "part_id": _part_id(part),
+         "face": face,
+         "cutout_type": "port",
+@@ -404,3 +542,144 @@ def generate_port_cutout(part: dict, face: str) -> dict:
+         "height_mm": height,
+         "connector_envelope_mm": {"width": width, "height": height},
+     }
++
++    # Patch 5.5: see generate_cutout()'s own identical block above for
++    # why this is additive/opt-in and never raises.
++    if housing_inner is not None:
++        result["wall_thickness_check"] = check_min_wall_thickness(
++            part, face, result, housing_inner
++        )
++
++    return result
++
++
++# ---------------------------------------------------------------------------
++# Patch 5.6 -- pipeline-integration half of Phase 5.
++# ---------------------------------------------------------------------------
++#
++# Everything above this line is Patch 5.2/5.3/5.4/5.5's pure functions,
++# deliberately ignorant of `mech`/`parts`/eo/mech_sections.py -- same
++# boundary this module's own top docstring already draws. This half is
++# the opposite: it reads `mech["housing"]["inner"]` (Patch 1.3's own
++# apply_enclosure_generation() output) and `mech["placements"]`/`parts`
++# (via the same two-hop section->subsection->member join eo/
++# mech_supports.py's own Patch 2.4 already established), calls
++# nearest_exterior_face() + generate_cutout()/generate_port_cutout()
++# per cutout-eligible member, and mutates `mech` in place -- same
++# "mutate AND return" wrapper convention every apply_* function in this
++# package already follows.
++
++from eo.mech_sections import subsections_for_section
++from eo.mech_subsections import members_for_subsection
++
++
++def _joined_cutout_members(mech: dict, parts: list) -> list:
++    """Resolves every placement across EVERY section of `mech` into
++    member dicts, joined with its BOM part's own "category"/
++    "generic_name" by matching member["part_id"] against part["id"] --
++    the same two-hop section->subsection->member resolution and
++    "gate on the data, not a hardcoded section list" posture eo/
++    mech_supports.py's own `_joined_section_members()` (Patch 2.4)
++    already establishes, extended to also carry "generic_name" (which
++    that function never needed, since SUPPORT_CATEGORIES is a pure
++    category gate, but _match_cutout_descriptor() above needs it for
++    its own keyword scan).
++
++    Returns a NEW list of shallow-copied member dicts -- never mutates
++    `mech["placements"]` or `parts`, same read-only posture
++    `_joined_section_members()` already holds toward its own inputs.
++    """
++    parts_by_id = {
++        p.get("id"): p for p in (parts or []) if isinstance(p, dict) and p.get("id")
++    }
++
++    joined = []
++    for section in mech.get("sections") or []:
++        if not isinstance(section, dict):
++            continue
++        for subsection in subsections_for_section(mech, section):
++            for member in members_for_subsection(mech, subsection):
++                if not isinstance(member, dict):
++                    continue
++                part = parts_by_id.get(member.get("part_id"))
++                merged = dict(member)
++                if isinstance(part, dict):
++                    merged["category"] = part.get("category")
++                    merged["generic_name"] = part.get("generic_name")
++                joined.append(merged)
++    return joined
++
++
++def apply_cutout_generation(mech: dict, parts: list) -> list:
++    """Patch 5.6: wires nearest_exterior_face() + generate_cutout()/
++    generate_port_cutout() into the pipeline. agents/hardware_speccer.py's
++    own G3g call site runs this AFTER apply_supports_generation() --
++    literal breakdown wording: "call after apply_supports_generation()
++    (needs standoff positions available for the overlap awareness
++    described in the master guide)." That "overlap awareness" is
++    Phase 6's own future check ("Any cutout overlapping a standoff or
++    another cutout?" -- Master Guide, Phase 6 "Design"), not something
++    this function computes itself; this function only needs to run
++    AFTER `mech["supports"]` exists so that a later Phase 6 pass has
++    both `mech["supports"]` and `mech["cutouts"]` populated together,
++    rather than checking cutouts against a supports key that isn't
++    there yet.
++
++    For every member resolved by `_joined_cutout_members()`, resolves
++    its own cutout eligibility/keyword via `_match_cutout_descriptor()`
++    (the same shared match Patch 5.3/5.4's own functions already use
++    internally) -- a member that fails the category pre-filter or
++    matches no CUTOUT_TABLE keyword is silently skipped, same "not
++    every part gets a cutout" posture the category/keyword gate itself
++    already establishes, not an error condition. For every member that
++    DOES match, computes its own nearest exterior face via
++    `nearest_exterior_face()` against `mech["housing"]["inner"]`, then
++    dispatches to `generate_port_cutout()` (for a "port"-type match) or
++    `generate_cutout()` (every other cutout_type) -- always passing
++    `housing_inner` through so Patch 5.5's own wall-thickness flag rides
++    along on every cutout this function emits, per this whole phase's
++    own "reject/flag... rather than silently emitting bad geometry"
++    posture.
++
++    Stashes the resulting list on the new `mech["cutouts"]` key (mirrors
++    `mech["supports"]`'s own flat-list-of-primitives shape from Patch
++    2.4, just one list instead of a `{"standoffs","bosses"}` split,
++    since -- unlike standoffs/bosses -- there is only ever one cutout
++    shape family active per member here, not two competing variants
++    that need to be told apart) -- same "mutate AND return" convention
++    every apply_* function in this package already follows.
++
++    Returns `[]` (and stashes that same empty result onto
++    `mech["cutouts"]`) when `mech` has no sections yet, OR when
++    `mech["housing"]["inner"]` isn't populated yet (nothing to project
++    an exterior face against) -- same "nothing to derive from yet"
++    no-op posture `apply_supports_generation()` already takes toward
++    `mech["sections"]`.
++    """
++    if not isinstance(mech, dict) or not mech.get("sections"):
++        if isinstance(mech, dict):
++            mech["cutouts"] = []
++        return []
++
++    housing = mech.get("housing")
++    housing_inner = housing.get("inner") if isinstance(housing, dict) else None
++    if not isinstance(housing_inner, dict):
++        mech["cutouts"] = []
++        return []
++
++    cutouts = []
++    for member in _joined_cutout_members(mech, parts):
++        match = _match_cutout_descriptor(member)
++        if match is None:
++            continue
++        _keyword, descriptor = match
++
++        face = nearest_exterior_face(member, housing_inner)
++        if descriptor["cutout_type"] == "port":
++            cutout = generate_port_cutout(member, face, housing_inner=housing_inner)
++        else:
++            cutout = generate_cutout(member, face, descriptor["cutout_type"], housing_inner=housing_inner)
++        cutouts.append(cutout)
++
++    mech["cutouts"] = cutouts
++    return cutouts

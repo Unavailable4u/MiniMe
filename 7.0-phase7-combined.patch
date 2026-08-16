@@ -1,0 +1,290 @@
+diff --git a/backend/eo/agent_dependencies.py b/backend/eo/agent_dependencies.py
+new file mode 100644
+index 0000000..3604b6c
+--- /dev/null
++++ b/backend/eo/agent_dependencies.py
+@@ -0,0 +1,104 @@
++"""
++eo/agent_dependencies.py — static ROLE -> prerequisite-ROLE(s) graph.
++
++Patch 7.1 (Phase 7, static dependency graph). Every entry below is mined
++directly from an existing `raise MissingDependencyError(required_role=...)`
++call site in agents/*.py — grep for `MissingDependencyError(` across
++agents/ to confirm this is the full current list. Pure data, zero new
++judgment calls: if an agent already asks eo/executor.py's reactive
++self-heal branch (eo/errors.py) for a role by name, that same
++(role -> required_role) edge belongs here too.
++
++Keyed and valued by ROLE name (eo/registry.py's vocabulary — what
++role_names[idx] holds), not resolved module name, same convention the
++reactive self-heal branch already uses (`role_names.insert(idx,
++needed_role)`).
++
++Deliberately excludes agents/deploy_agent.py's three
++MissingDependencyError raises:
++  - write_deploy_config() -> "deploy_config_writer": real edge, but
++    deploy_agent is dispatched directly from a UI-button API endpoint
++    (see eo/registry.py's REAL_ACTION_ROLES comment on
++    "deploy_config_writer"), never through the Panel-hire/executor.py
++    dispatch loop this graph feeds -- there's no role_names[idx] slot for
++    it to ever be looked up against.
++  - trigger_live_deploy() / register_uptimerobot_monitor() -> "deploy_agent":
++    self-referential ("call this module's other function first"), not an
++    inter-agent ordering dependency at all.
++
++Only ever consulted on the "adaptive" path (see eo/executor.py's
++proactive-check call site and eo/errors.py's module docstring for why:
++role_names is a Panel-decided, spliceable vocabulary ONLY there --
++"instant"/"direct"/"fixed" graphs are already in a statically-correct
++fixed order, so a missing edge on those paths is a real bug, not a
++staffing gap this graph should paper over).
++"""
++
++ID_PREFIX = "agent_deps"
++
++AGENT_DEPENDENCIES = {
++    # agents/test_writer.py's run() — needs submitted_code.
++    "test_writer": ["implementer"],
++
++    # agents/sandbox_tester.py's run_sandbox_tester() — needs
++    # fixed_code/submitted_code (falls back to fixer_pool's output, but
++    # the ultimate producer if neither exists yet is still the Code
++    # Writers -- same reasoning fixer_pool.py/report_writer.py use below).
++    "sandbox_tester": ["implementer"],
++
++    # agents/fixer_pool.py's run() — needs submitted_code.
++    "fixer_pool": ["implementer"],
++
++    # agents/report_writer.py's run_report_writer() — needs
++    # fixed_code/submitted_code.
++    "report_writer": ["implementer"],
++
++    # agents/file_manager.py's run() — needs a file_plan.
++    "file_manager": ["structure_architect"],
++    # Same underlying run(), reached via two other role names in the
++    # fixed "debug"/"add_tests" DIRECTED_TASK_MAP entries (eo/router.py)
++    # — kept here too since it's the exact same call site, even though
++    # neither of those paths is "adaptive" (see module docstring above).
++    "file_manager_writeback": ["structure_architect"],
++    "file_manager_test_writeback": ["structure_architect"],
++
++    # agents/sandbox_tester.py's run_sandbox_tester_lean() — needs
++    # tier1_fixed_code. Tier-1 "lean" pipeline, path == "direct" (see
++    # module docstring — inert here today, kept for completeness/any
++    # future adaptive use).
++    "sandbox_tester_lean": ["reviewer_fixer_lean"],
++
++    # agents/reviewer_fixer_lean.py's run() — needs tier1_code.
++    "reviewer_fixer_lean": ["code_writer_lean"],
++
++    # agents/code_writer_lean.py's run() — needs tier1_module_spec.
++    "code_writer_lean": ["prompt_writer_lean"],
++
++    # agents/source_quality_flagger.py's run() — needs the
++    # academic_search_report's papers.
++    "source_quality_flagger": ["academic_search"],
++
++    # agents/extraction_table_builder.py's run() — same academic_search
++    # report dependency as source_quality_flagger above.
++    "extraction_table_builder": ["academic_search"],
++
++    # agents/citation_graph_builder.py's run() — same academic_search
++    # report dependency again.
++    "citation_graph_builder": ["academic_search"],
++
++    # agents/contradiction_prefilter.py's run() — needs the extraction
++    # table's rows.
++    "contradiction_prefilter": ["extraction_table_builder"],
++
++    # agents/architecture_diagrammer.py — needs prd_writer's PRD context.
++    "architecture_diagrammer": ["prd_writer"],
++
++    # agents/schema_diagrammer.py — same prd_writer dependency.
++    "schema_diagrammer": ["prd_writer"],
++
++    # agents/hardware_speccer.py — same prd_writer dependency.
++    "hardware_speccer": ["prd_writer"],
++
++    # agents/handoff_packager.py — same prd_writer dependency.
++    "handoff_packager": ["prd_writer"],
++}
+diff --git a/backend/eo/executor.py b/backend/eo/executor.py
+index a1d6818..6478b38 100644
+--- a/backend/eo/executor.py
++++ b/backend/eo/executor.py
+@@ -52,6 +52,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ from eo.registry import resolve, resolve_role, list_known_roles
+ from eo.structure import PATH_TO_TIER
+ from eo.errors import MissingDependencyError
++from eo.agent_dependencies import AGENT_DEPENDENCIES
+ import logging
+ 
+ from eo.tracing import get_tracer, TRACING_ENABLED, truncate_for_trace
+@@ -778,6 +779,49 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
+ 
+         current_name = agent_names[idx]
+         role = role_names[idx]
++
++        # Patch 7.2 — consult the static dependency graph (eo/agent_
++        # dependencies.py) BEFORE dispatch, instead of only finding out a
++        # prerequisite is missing after the agent raises
++        # MissingDependencyError itself (the `except MissingDependencyError`
++        # branch further below). Same insertion mechanism
++        # (role_names.insert/agent_names.insert), same adaptive-only
++        # gating, and the same MAX_AUTO_INSERTS_PER_STEP budget keyed off
++        # the same `auto_inserted` dict — so a step that both proactively
++        # gets a prerequisite inserted here AND later raises
++        # MissingDependencyError for the same pair still can't loop past
++        # the shared budget. Only runs on "adaptive": role_names is a
++        # Panel-decided vocabulary a new role can be spliced into ONLY on
++        # that path (see eo/errors.py's module docstring) — on
++        # instant/direct/fixed's statically-built graphs, role_names is
++        # already in a correct fixed order, so there's nothing to insert.
++        # This doesn't replace the reactive branch below: an edge missing
++        # from AGENT_DEPENDENCIES (or a dependency an agent discovers at
++        # runtime that this static list doesn't know about) still gets
++        # caught and self-healed there.
++        if path == "adaptive":
++            given_roles = set(_flatten_role_names(role_names[:idx]))
++            for needed_role in AGENT_DEPENDENCIES.get(role, ()):
++                if needed_role in given_roles:
++                    continue
++                pair = (role, needed_role)
++                if auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP:
++                    continue
++                auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
++                print(f"  [Executor] {current_name} (role={role}) requires prerequisite "
++                      f"role '{needed_role}' per AGENT_DEPENDENCIES — inserting it before dispatch.")
++                emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
++                            payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
++                                     "requested_role": needed_role})
++                role_names.insert(idx, needed_role)
++                agent_names.insert(idx, resolve_role(needed_role))
++                given_roles.add(needed_role)
++            if role_names[idx] != role:
++                # A prerequisite got spliced in ahead of this step — re-enter
++                # the loop at the same idx, now pointing at the newly
++                # inserted role instead of the one we were about to dispatch.
++                continue
++
+         fn = resolve(current_name)
+         # key_overrides is always keyed by ROLE name, not resolved
+         # agent/module name.
+diff --git a/backend/tests/integration/test_parallel_execution.py b/backend/tests/integration/test_parallel_execution.py
+index 36ef044..e76603f 100644
+--- a/backend/tests/integration/test_parallel_execution.py
++++ b/backend/tests/integration/test_parallel_execution.py
+@@ -65,6 +65,8 @@ import eo.dispatcher as dispatcher
+ import memory.bus as bus
+ from eo.panel import run_panel
+ from eo.router import sanitize_parallel_groups, build_execution_graph_from_hires, MAX_PARALLEL_GROUP_SIZE
++from eo.errors import MissingDependencyError
++from eo.agent_dependencies import AGENT_DEPENDENCIES
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -334,3 +336,104 @@ def test_full_pipeline_sanitize_build_execute_against_adversarial_output():
+     assert any(e["type"] == "parallel_group_dispatched" and set(e["payload"]["roles"]) == {"a", "b"}
+                for e in events5), \
+         "the surviving [a, b] group should fire its own dispatched event"
++
++
++# =============================================================================
++# SCENARIO 6 (Patch 7.2): a role with a KNOWN AGENT_DEPENDENCIES
++# prerequisite gets that prerequisite spliced in and run BEFORE
++# dispatch, on the strength of the static graph alone -- its own fn is
++# never even given the chance to raise MissingDependencyError. Proves
++# prerequisite ordering doesn't rely on the reactive except-branch for
++# an edge this static list already knows about.
++# =============================================================================
++
++def test_proactive_dependency_insertion_for_known_edge():
++    fake_resolve6, fake_next_step6, fake_emit_event6, call_log6, _, events6 = _make_fakes(0.0)
++
++    assert AGENT_DEPENDENCIES["test_writer"] == ["implementer"], \
++        "sanity check on the fixture this test relies on -- see eo/agent_dependencies.py"
++
++    role_names6 = ["test_writer"]
++    agent_names6 = ["generic_worker"]
++
++    with patch.object(executor, "resolve", fake_resolve6), \
++         patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
++         patch.object(executor, "list_known_roles", lambda: []), \
++         patch.object(executor, "emit_event", fake_emit_event6), \
++         patch.object(dispatcher, "next_step", fake_next_step6):
++        result6 = executor.execute_graph(
++            agent_names6, role_names=role_names6, task_text="t",
++            session_id="sess-proactive", path="adaptive",
++        )
++
++    assert call_log6 == ["implementer", "test_writer"], \
++        "implementer should be spliced in and run BEFORE test_writer, not after a failure"
++    assert result6 == {"implementer": {"text": "output for implementer"},
++                        "test_writer": {"text": "output for test_writer"}}
++    requested6 = [e for e in events6 if e["type"] == "agent_requested_role"]
++    assert len(requested6) == 1 and requested6[0]["payload"]["requested_role"] == "implementer", \
++        "exactly one proactive-insertion event should fire, naming the prerequisite"
++    assert all(e["type"] != "error" for e in events6), \
++        "no error event should fire -- test_writer's fn is never given the chance to raise at all"
++
++
++# =============================================================================
++# SCENARIO 7 (Patch 7.2): the reactive `except MissingDependencyError`
++# branch is still the safety net for an edge that ISN'T in
++# AGENT_DEPENDENCIES -- the proactive check can't know to insert a
++# prerequisite it has no entry for, so the agent has to raise it
++# itself, same as before Patch 7.2 existed.
++# =============================================================================
++
++def test_reactive_self_heal_still_works_for_edge_not_in_static_graph():
++    assert "custom_role" not in AGENT_DEPENDENCIES, \
++        "this pair must be genuinely absent from the static graph for the test to prove anything"
++
++    call_log7 = []
++    events7 = []
++    attempts7 = {"custom_role": 0}
++
++    def fake_worker7(role, task_text=None, input_keys=None, session_id=None,
++                      key_override=None, include_conversation_context=True,
++                      domain=None, chain_override=None):
++        if role == "custom_role":
++            attempts7["custom_role"] += 1
++            if attempts7["custom_role"] == 1:
++                # First attempt: nothing has run yet, and this exact
++                # (role, prereq) pair is deliberately absent from
++                # AGENT_DEPENDENCIES -- the proactive check has nothing to
++                # insert here, so it has to reach this agent's own raise.
++                raise MissingDependencyError("unlisted_prereq", "needs unlisted_prereq first")
++        call_log7.append(role)
++        return {"text": f"output for {role}"}
++
++    def fake_resolve7(_agent_name):
++        return fake_worker7
++
++    def fake_next_step7(agent_result, role_plan, idx, session_id=None, known_roles=None):
++        nxt = idx + 1
++        return (nxt if nxt < len(role_plan) else None), "plan"
++
++    def fake_emit_event7(event_type, session_id=None, agent=None, path=None, payload=None):
++        events7.append({"type": event_type, "agent": agent, "payload": payload})
++        return True
++
++    role_names7 = ["custom_role"]
++    agent_names7 = ["generic_worker"]
++
++    with patch.object(executor, "resolve", fake_resolve7), \
++         patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
++         patch.object(executor, "list_known_roles", lambda: []), \
++         patch.object(executor, "emit_event", fake_emit_event7), \
++         patch.object(dispatcher, "next_step", fake_next_step7):
++        result7 = executor.execute_graph(
++            agent_names7, role_names=role_names7, task_text="t",
++            session_id="sess-reactive", path="adaptive",
++        )
++
++    assert call_log7 == ["unlisted_prereq", "custom_role"], \
++        "unlisted_prereq should still get spliced in and run first, via the reactive except-branch"
++    assert attempts7["custom_role"] == 2, \
++        "custom_role's own fn should be invoked twice: once where it raises, once where it succeeds"
++    assert result7 == {"unlisted_prereq": {"text": "output for unlisted_prereq"},
++                        "custom_role": {"text": "output for custom_role"}}
