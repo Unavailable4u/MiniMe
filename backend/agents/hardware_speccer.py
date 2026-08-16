@@ -2051,6 +2051,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.mech_device import apply_device_merge
     from eo.mech_enclosure import apply_enclosure_generation
     from eo.mech_supports import apply_supports_generation
+    from eo.mech_cutouts import apply_cutout_generation
     from eo.mech_validator import close_session as close_mech_validator_session
     try:
         # Level 0->1 -- gap fix, see the comment block above: validates/
@@ -2090,6 +2091,16 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # after, precisely because housing sizing does NOT depend on
         # per-part final positions the way a per-part standoff does).
         apply_supports_generation(spec.get("mech") or {}, spec["parts"])
+        # Patch 5.6: Phase 5's own pipeline wiring. Sequenced AFTER
+        # apply_supports_generation() per that patch's own breakdown
+        # note ("needs standoff positions available for the overlap
+        # awareness described in the master guide") -- see eo/
+        # mech_cutouts.py's own apply_cutout_generation() docstring for
+        # why that "overlap awareness" is Phase 6's future job, not
+        # something this call computes itself; this ordering only
+        # guarantees mech["supports"] already exists by the time
+        # mech["cutouts"] is populated alongside it.
+        apply_cutout_generation(spec.get("mech") or {}, spec["parts"])
     finally:
         close_mech_validator_session(session_id)
 

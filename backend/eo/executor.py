@@ -52,6 +52,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import resolve, resolve_role, list_known_roles
 from eo.structure import PATH_TO_TIER
 from eo.errors import MissingDependencyError
+from eo.agent_dependencies import AGENT_DEPENDENCIES
 import logging
 
 from eo.tracing import get_tracer, TRACING_ENABLED, truncate_for_trace
@@ -778,6 +779,49 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
 
         current_name = agent_names[idx]
         role = role_names[idx]
+
+        # Patch 7.2 — consult the static dependency graph (eo/agent_
+        # dependencies.py) BEFORE dispatch, instead of only finding out a
+        # prerequisite is missing after the agent raises
+        # MissingDependencyError itself (the `except MissingDependencyError`
+        # branch further below). Same insertion mechanism
+        # (role_names.insert/agent_names.insert), same adaptive-only
+        # gating, and the same MAX_AUTO_INSERTS_PER_STEP budget keyed off
+        # the same `auto_inserted` dict — so a step that both proactively
+        # gets a prerequisite inserted here AND later raises
+        # MissingDependencyError for the same pair still can't loop past
+        # the shared budget. Only runs on "adaptive": role_names is a
+        # Panel-decided vocabulary a new role can be spliced into ONLY on
+        # that path (see eo/errors.py's module docstring) — on
+        # instant/direct/fixed's statically-built graphs, role_names is
+        # already in a correct fixed order, so there's nothing to insert.
+        # This doesn't replace the reactive branch below: an edge missing
+        # from AGENT_DEPENDENCIES (or a dependency an agent discovers at
+        # runtime that this static list doesn't know about) still gets
+        # caught and self-healed there.
+        if path == "adaptive":
+            given_roles = set(_flatten_role_names(role_names[:idx]))
+            for needed_role in AGENT_DEPENDENCIES.get(role, ()):
+                if needed_role in given_roles:
+                    continue
+                pair = (role, needed_role)
+                if auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP:
+                    continue
+                auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
+                print(f"  [Executor] {current_name} (role={role}) requires prerequisite "
+                      f"role '{needed_role}' per AGENT_DEPENDENCIES — inserting it before dispatch.")
+                emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
+                            payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
+                                     "requested_role": needed_role})
+                role_names.insert(idx, needed_role)
+                agent_names.insert(idx, resolve_role(needed_role))
+                given_roles.add(needed_role)
+            if role_names[idx] != role:
+                # A prerequisite got spliced in ahead of this step — re-enter
+                # the loop at the same idx, now pointing at the newly
+                # inserted role instead of the one we were about to dispatch.
+                continue
+
         fn = resolve(current_name)
         # key_overrides is always keyed by ROLE name, not resolved
         # agent/module name.

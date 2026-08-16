@@ -65,6 +65,8 @@ import eo.dispatcher as dispatcher
 import memory.bus as bus
 from eo.panel import run_panel
 from eo.router import sanitize_parallel_groups, build_execution_graph_from_hires, MAX_PARALLEL_GROUP_SIZE
+from eo.errors import MissingDependencyError
+from eo.agent_dependencies import AGENT_DEPENDENCIES
 
 
 # ---------------------------------------------------------------------------
@@ -334,3 +336,104 @@ def test_full_pipeline_sanitize_build_execute_against_adversarial_output():
     assert any(e["type"] == "parallel_group_dispatched" and set(e["payload"]["roles"]) == {"a", "b"}
                for e in events5), \
         "the surviving [a, b] group should fire its own dispatched event"
+
+
+# =============================================================================
+# SCENARIO 6 (Patch 7.2): a role with a KNOWN AGENT_DEPENDENCIES
+# prerequisite gets that prerequisite spliced in and run BEFORE
+# dispatch, on the strength of the static graph alone -- its own fn is
+# never even given the chance to raise MissingDependencyError. Proves
+# prerequisite ordering doesn't rely on the reactive except-branch for
+# an edge this static list already knows about.
+# =============================================================================
+
+def test_proactive_dependency_insertion_for_known_edge():
+    fake_resolve6, fake_next_step6, fake_emit_event6, call_log6, _, events6 = _make_fakes(0.0)
+
+    assert AGENT_DEPENDENCIES["test_writer"] == ["implementer"], \
+        "sanity check on the fixture this test relies on -- see eo/agent_dependencies.py"
+
+    role_names6 = ["test_writer"]
+    agent_names6 = ["generic_worker"]
+
+    with patch.object(executor, "resolve", fake_resolve6), \
+         patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
+         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "emit_event", fake_emit_event6), \
+         patch.object(dispatcher, "next_step", fake_next_step6):
+        result6 = executor.execute_graph(
+            agent_names6, role_names=role_names6, task_text="t",
+            session_id="sess-proactive", path="adaptive",
+        )
+
+    assert call_log6 == ["implementer", "test_writer"], \
+        "implementer should be spliced in and run BEFORE test_writer, not after a failure"
+    assert result6 == {"implementer": {"text": "output for implementer"},
+                        "test_writer": {"text": "output for test_writer"}}
+    requested6 = [e for e in events6 if e["type"] == "agent_requested_role"]
+    assert len(requested6) == 1 and requested6[0]["payload"]["requested_role"] == "implementer", \
+        "exactly one proactive-insertion event should fire, naming the prerequisite"
+    assert all(e["type"] != "error" for e in events6), \
+        "no error event should fire -- test_writer's fn is never given the chance to raise at all"
+
+
+# =============================================================================
+# SCENARIO 7 (Patch 7.2): the reactive `except MissingDependencyError`
+# branch is still the safety net for an edge that ISN'T in
+# AGENT_DEPENDENCIES -- the proactive check can't know to insert a
+# prerequisite it has no entry for, so the agent has to raise it
+# itself, same as before Patch 7.2 existed.
+# =============================================================================
+
+def test_reactive_self_heal_still_works_for_edge_not_in_static_graph():
+    assert "custom_role" not in AGENT_DEPENDENCIES, \
+        "this pair must be genuinely absent from the static graph for the test to prove anything"
+
+    call_log7 = []
+    events7 = []
+    attempts7 = {"custom_role": 0}
+
+    def fake_worker7(role, task_text=None, input_keys=None, session_id=None,
+                      key_override=None, include_conversation_context=True,
+                      domain=None, chain_override=None):
+        if role == "custom_role":
+            attempts7["custom_role"] += 1
+            if attempts7["custom_role"] == 1:
+                # First attempt: nothing has run yet, and this exact
+                # (role, prereq) pair is deliberately absent from
+                # AGENT_DEPENDENCIES -- the proactive check has nothing to
+                # insert here, so it has to reach this agent's own raise.
+                raise MissingDependencyError("unlisted_prereq", "needs unlisted_prereq first")
+        call_log7.append(role)
+        return {"text": f"output for {role}"}
+
+    def fake_resolve7(_agent_name):
+        return fake_worker7
+
+    def fake_next_step7(agent_result, role_plan, idx, session_id=None, known_roles=None):
+        nxt = idx + 1
+        return (nxt if nxt < len(role_plan) else None), "plan"
+
+    def fake_emit_event7(event_type, session_id=None, agent=None, path=None, payload=None):
+        events7.append({"type": event_type, "agent": agent, "payload": payload})
+        return True
+
+    role_names7 = ["custom_role"]
+    agent_names7 = ["generic_worker"]
+
+    with patch.object(executor, "resolve", fake_resolve7), \
+         patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
+         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "emit_event", fake_emit_event7), \
+         patch.object(dispatcher, "next_step", fake_next_step7):
+        result7 = executor.execute_graph(
+            agent_names7, role_names=role_names7, task_text="t",
+            session_id="sess-reactive", path="adaptive",
+        )
+
+    assert call_log7 == ["unlisted_prereq", "custom_role"], \
+        "unlisted_prereq should still get spliced in and run first, via the reactive except-branch"
+    assert attempts7["custom_role"] == 2, \
+        "custom_role's own fn should be invoked twice: once where it raises, once where it succeeds"
+    assert result7 == {"unlisted_prereq": {"text": "output for unlisted_prereq"},
+                        "custom_role": {"text": "output for custom_role"}}

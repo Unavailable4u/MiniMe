@@ -1,0 +1,617 @@
+diff --git a/backend/agents/hardware_speccer.py b/backend/agents/hardware_speccer.py
+index ddb8665..cddffbc 100644
+--- a/backend/agents/hardware_speccer.py
++++ b/backend/agents/hardware_speccer.py
+@@ -385,6 +385,20 @@ exactly this shape:
+ {"summary": "one paragraph, plain language", "tags": ["Tag One", "Tag Two"]}
+ """
+ 
++# Patch 3.2 (Phase 3, gap #10): the ONE-pin equivalent of SYSTEM_PROMPT_WIRING
++# above -- deliberately narrow (one part, one pin, one answer) rather than
++# reusing that broader wiring prompt, so a targeted retry can't accidentally
++# re-propose the whole wiring graph.
++PIN_RESOLUTION_PROMPT = """You are given an excerpt from a component's own \
++datasheet and asked to name exactly ONE physical pin/GPIO on that \
++component. Answer only from the excerpt -- never guess a plausible-\
++sounding pin the excerpt doesn't actually support.
++
++Respond with ONLY the pin name/number (e.g. "GPIO22", "Pin 4"), or the \
++single word UNKNOWN if the excerpt doesn't say. No punctuation, no \
++explanation, no markdown.
++"""
++
+ 
+ def _pollinations_render_url(summary: str) -> str:
+     """T2b, step 19d (optional stretch): build a Pollinations.ai image
+@@ -907,6 +921,81 @@ def _populate_datasheet_details(parts: list, session_id: str = None) -> dict:
+     return details
+ 
+ 
++def resolve_inferred_pin(part: dict, pin_hint: str, edge_kind: str, chain: list,
++                          session_id: str = None, tier: int = None, domain: str = None) -> str | None:
++    """Patch 3.2 (Phase 3, gap #10): single targeted resolution retry for
++    ONE unresolved wiring pin on ONE part -- re-queries that part's own
++    datasheet detail (agents/component_spec_lookup.py's
++    get_datasheet_detail(), the same F3 Part 5 deep-dive
++    _populate_datasheet_details() above already runs; reused here rather
++    than a second download path, and normally already cached by eo/
++    datasheet_cache.py by the time this runs) and makes ONE small,
++    narrowly-scoped LLM call (PIN_RESOLUTION_PROMPT above) asking it to
++    name the real GPIO/pin serving `pin_hint` (e.g. "SCL", "VIN") on THIS
++    part specifically -- never a general re-run of the whole wiring agent
++    (SYSTEM_PROMPT_WIRING's own call), matching Patch 3.2's own sizing
++    note in the patch breakdown.
++
++    Capped at one retry BY CONSTRUCTION: this function makes exactly one
++    datasheet lookup and one LLM call, then returns -- looping/retrying
++    across multiple pins, or deciding what "still unresolved" means for
++    the run as a whole, belongs to the caller (Patch 3.3's finalize-path
++    wiring), same repair-until-cap posture eo/mech_repair.py's own
++    run_repair_loop() already holds for every other "regenerate, don't
++    loop forever" case in this pipeline -- this function itself has no
++    retry loop to cap.
++
++    Returns the resolved pin label (e.g. "GPIO22") on a clean,
++    label-shaped answer, or None if: `part` is falsy, the part has no
++    datasheet_url (nothing to query), the datasheet deep-dive fails or
++    comes back empty, the LLM call itself fails/is exhausted, or the
++    model's answer doesn't look like a real pin name -- said UNKNOWN
++    honestly, or came back long/sentence-shaped instead of a short label
++    (a hedge/explanation reads the same as "still unresolved" here, just
++    not spelled UNKNOWN). "Still unresolved" is a valid, expected, non-
++    error outcome -- this never raises past a failed lookup or a bad
++    answer.
++    """
++    if not part:
++        return None
++    datasheet_url = part.get("datasheet_url")
++    if not datasheet_url:
++        return None
++
++    from agents.component_spec_lookup import get_datasheet_detail
++    try:
++        detail = get_datasheet_detail(datasheet_url)
++    except Exception:
++        return None
++    content = (detail or {}).get("content") if isinstance(detail, dict) else None
++    if not content:
++        return None
++
++    part_label = part.get("name") or part.get("id") or "this part"
++    user_prompt = (
++        f"Datasheet excerpt for {part_label}:\n{content[:6000]}\n\n"
++        f'Which single physical pin/GPIO on {part_label} serves the '
++        f'"{pin_hint or "unresolved"}" ({edge_kind or "data"}) function?'
++    )
++    try:
++        raw = generate_text(PIN_RESOLUTION_PROMPT, user_prompt, chain,
++                             agent_name="Hardware Speccer Pin Resolution",
++                             session_id=session_id, tier=tier, domain=domain)
++    except Exception:
++        return None
++
++    candidate = (raw or "").strip().strip('"').strip(".")
++    if not candidate or candidate.upper() == "UNKNOWN":
++        return None
++    # A real pin label is short and label-shaped -- a multi-sentence or
++    # multi-clause answer means the model hedged/explained instead of
++    # naming one pin, which is the same "still unresolved" outcome as
++    # UNKNOWN, just not spelled that way.
++    if len(candidate) > 24 or "\n" in candidate or candidate.count(" ") > 3:
++        return None
++    return candidate
++
++
+ # Same color-per-kind convention WiringGraph.jsx's EDGE_COLORS already
+ # uses for the force-graph view, kept identical here (via Mermaid's
+ # linkStyle) so the two renderings of the same wiring data never disagree
+@@ -2052,6 +2141,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+     from eo.mech_enclosure import apply_enclosure_generation
+     from eo.mech_supports import apply_supports_generation
+     from eo.mech_validator import close_session as close_mech_validator_session
++    from eo.mech_validator import find_unresolved_inferred_pins
+     try:
+         # Level 0->1 -- gap fix, see the comment block above: validates/
+         # repairs the primitives G3a/G3b just composed before Level 1->2
+@@ -2117,6 +2207,51 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+     # pass.
+     _fix_wiring_electrical_integrity(spec)
+ 
++    # Patch 3.3 (Phase 3, gap #10): pin resolution gate -- close the loop
++    # on inferred wiring before this spec is considered final. Runs after
++    # _fix_wiring_electrical_integrity() immediately above (needs the
++    # inferred edges it may just have synthesized) and after the mech
++    # pipeline's own try/finally block earlier in this function has
++    # already run run_level_3_4_repair() -- which is what populates
++    # spec["mech"]["sections"] via apply_section_grouping() -- so
++    # find_unresolved_inferred_pins() below can tell "load-bearing" (a
++    # part that's actually in the final device) from "just sitting in
++    # placements" (see that function's own docstring on why `spec`
++    # itself, not spec["mech"] alone, is passed as its `mech` argument).
++    # Before mermaid build so a resolved pin's real name is what
++    # actually renders, not the pre-resolution null it replaced.
++    unresolved_pins = find_unresolved_inferred_pins(spec)
++    still_unresolved = []
++    if unresolved_pins:
++        parts_by_id = {p.get("id"): p for p in spec.get("parts", []) if isinstance(p, dict)}
++        for pin in unresolved_pins:
++            part = parts_by_id.get(pin["part_id"])
++            edge = pin["edge"]
++            resolved = resolve_inferred_pin(
++                part, pin.get("pin_hint"), edge.get("kind"), chain,
++                session_id=session_id, tier=tier, domain=domain,
++            )
++            if resolved:
++                if pin["pin_side"] == "from":
++                    edge["from_pin"] = resolved
++                else:
++                    edge["to_pin"] = resolved
++            else:
++                # Still unresolved after the one capped retry -- surface
++                # it loudly in the handoff (custom["wiring"] below)
++                # rather than silently shipping a null pin on a
++                # load-bearing net. The edge itself stays "_inferred":
++                # True either way; that flag already means "the model
++                # didn't propose this," resolving the pin doesn't change
++                # who proposed the edge.
++                still_unresolved.append({
++                    "part_id": pin["part_id"], "pin_side": pin["pin_side"],
++                    "kind": edge.get("kind"),
++                    "from": edge.get("from"), "to": edge.get("to"),
++                })
++    if still_unresolved:
++        spec["wiring"]["unresolved_pins"] = still_unresolved
++
+     spec["wiring"]["mermaid"] = _build_wiring_mermaid(spec)
+ 
+     # T2b, step 19a: Blueprint Info/summary surface -- one more small
+diff --git a/backend/eo/mech_validator.py b/backend/eo/mech_validator.py
+index 853baa5..14bd7b0 100644
+--- a/backend/eo/mech_validator.py
++++ b/backend/eo/mech_validator.py
+@@ -1158,6 +1158,103 @@ def validate_layout(mech: dict, level: str, session_id: str = None,
+     return output
+ 
+ 
++def find_unresolved_inferred_pins(mech: dict) -> list:
++    """
++    Patch 3.1 (Phase 3, Master Guide gap #10, "Pin resolution gate") --
++    pure scan, no mutation, no I/O, no FreeCAD: finds every wiring edge
++    agents/hardware_speccer.py's _fix_wiring_electrical_integrity()
++    synthesized (tagged "_inferred": True, see that function's own
++    docstring for the two shapes it currently produces: a missing I2C
++    clock line, an orphaned power-tree input) whose still-null pin
++    belongs to a part that's actually part of the FINAL device -- present
++    in `mech["mech"]["sections"]` (populated by eo/mech_sections.py's
++    apply_section_grouping(), already run by the time run_level_3_4_repair()
++    settles -- see eo/mech_repair.py's run_level_3_4_repair() docstring)
++    -- not just any part still sitting in `mech["mech"]["placements"]`
++    that never made it into a checkable section (a discarded/unused
++    part, or one G3f-1's own category grouping dropped). Detection only,
++    same "can we find the problem" vs. "what do we do about it" split
++    every other level's own checkable-set helper in this module already
++    keeps separate from its repair driver.
++
++    NOTE on the `mech` argument's shape: agents/hardware_speccer.py's own
++    run_hardware_speccer() is the only caller with both wiring edges
++    (`spec["wiring"]`) and section membership (`spec["mech"]["sections"]`)
++    on hand at once -- those two live as SIBLINGS on its `spec` dict, not
++    both nested under one `spec["mech"]` -- so it passes its own `spec`
++    object here as `mech`, matching this module's existing precedent of a
++    caller-shaped `mech` argument rather than one fixed schema (see
++    validate_layout()'s own `mech` argument, which is sometimes the bare
++    placements dict and sometimes a fuller object depending on level/
++    caller). `mech.get("wiring")` and `mech.get("mech", {}).get("sections")`
++    are read directly rather than assuming a flattened shape.
++
++    Returns [{"part_id": str, "pin_side": "from"|"to", "pin_hint": str
++    or None, "edge": edge_dict}, ...] -- one entry per still-unresolved
++    (null-pin) side of a load-bearing inferred edge, `edge` being the
++    SAME dict object living in `mech["wiring"]["edges"]` (so a caller,
++    e.g. Patch 3.3's finalize-path wiring, can fill the resolved pin name
++    straight back onto it without a second lookup). `pin_hint` is the
++    OTHER side's already-known pin name (e.g. "SCL", "VIN") when this
++    edge's own shape provides one -- a hint for Patch 3.2's targeted
++    retry to know what it's resolving, not a value this function
++    invents. An inferred edge with both sides already named (shouldn't
++    happen given today's two synthesis cases -- both always leave
++    exactly one side null -- but a future third synthesis case might
++    not) contributes nothing: there's no unresolved *pin* left to chase
++    even though the edge itself is still "_inferred".
++
++    Empty input (no wiring, no edges, no sections yet -- i.e. called
++    before the mech pipeline has actually placed anything) returns []
++    cleanly, no error, same fail-safe posture every other "not ready
++    yet" branch in this module already holds.
++    """
++    if not isinstance(mech, dict):
++        return []
++
++    wiring = mech.get("wiring")
++    edges = wiring.get("edges") if isinstance(wiring, dict) else None
++    if not isinstance(edges, list) or not edges:
++        return []
++
++    device_mech = mech.get("mech")
++    device_mech = device_mech if isinstance(device_mech, dict) else {}
++    sections = device_mech.get("sections") or []
++    if not sections:
++        return []  # nothing placed in the final device yet -- nothing is "load-bearing"
++
++    from eo.mech_sections import subsections_for_section
++
++    placed_part_ids = set()
++    for section in sections:
++        if not isinstance(section, dict):
++            continue
++        for subsection in subsections_for_section(device_mech, section):
++            for member_id in (subsection or {}).get("member_ids") or []:
++                placed_part_ids.add(member_id)
++
++    if not placed_part_ids:
++        return []
++
++    unresolved = []
++    for edge in edges:
++        if not isinstance(edge, dict) or not edge.get("_inferred"):
++            continue
++        from_id, to_id = edge.get("from"), edge.get("to")
++        from_pin, to_pin = edge.get("from_pin"), edge.get("to_pin")
++        if not from_pin and from_id in placed_part_ids:
++            unresolved.append({
++                "part_id": from_id, "pin_side": "from",
++                "pin_hint": to_pin, "edge": edge,
++            })
++        if not to_pin and to_id in placed_part_ids:
++            unresolved.append({
++                "part_id": to_id, "pin_side": "to",
++                "pin_hint": from_pin, "edge": edge,
++            })
++    return unresolved
++
++
+ if __name__ == "__main__":
+     _demo_mech = {
+         "placements": [
+diff --git a/backend/tests/unit/test_pin_resolution_gate.py b/backend/tests/unit/test_pin_resolution_gate.py
+new file mode 100644
+index 0000000..5256ae7
+--- /dev/null
++++ b/backend/tests/unit/test_pin_resolution_gate.py
+@@ -0,0 +1,336 @@
++"""
++tests/unit/test_pin_resolution_gate.py — Phase 3 (Master Guide gap #10,
++"Pin resolution gate"): covers the three Patch 3.1/3.2 building blocks --
++
++  - eo.mech_validator.find_unresolved_inferred_pins() (Patch 3.1): pure
++    scan of wiring.edges for "_inferred": True entries whose still-null
++    pin belongs to a part actually present in the final device
++    (mech["mech"]["sections"]) -- not just any part sitting unused in
++    mech["mech"]["placements"]
++  - agents.hardware_speccer.resolve_inferred_pin() (Patch 3.2): single
++    targeted resolution retry for one part/one pin, capped at one
++    datasheet lookup + one LLM call by construction (no internal loop)
++  - the combination the two are meant to support once Patch 3.3 wires
++    them into run_hardware_speccer()'s finalize path: a resolvable pin
++    gets resolved, an unresolvable one stays flagged rather than
++    silently dropped, and a non-load-bearing inferred pin (its part
++    isn't in any final section) is correctly ignored by the scanner so
++    Patch 3.2 is never even called for it.
++
++No real FreeCAD, no real datasheet download, no real LLM call anywhere
++in this file -- get_datasheet_detail() and generate_text() are both
++monkeypatched, same "fake out the network boundary, exercise this
++module's own orchestration logic" approach test_mech_repair.py and
++test_mech_validator.py already use.
++"""
++import eo.mech_validator as mv
++import agents.hardware_speccer as hs
++
++
++# ---------------------------------------------------------------------------
++# find_unresolved_inferred_pins (Patch 3.1)
++# ---------------------------------------------------------------------------
++
++def _mech_with_sections(section_id="Compute", member_ids=("mcu_1",)):
++    """A minimal mech dict shaped enough for subsections_for_section() to
++    resolve `section_id`'s subsection_ids back to real member_ids -- one
++    singleton subsection per member id, anchored by a placement with a
++    matching part_id (group_into_subsections()'s own "no mount found"
++    case)."""
++    return {
++        "placements": [{"part_id": pid, "x": 0, "y": 0, "z": 0} for pid in member_ids],
++        "sections": [{"section_id": section_id, "subsection_ids": list(member_ids)}],
++    }
++
++
++def test_no_wiring_returns_empty():
++    assert mv.find_unresolved_inferred_pins({}) == []
++    assert mv.find_unresolved_inferred_pins({"wiring": {}}) == []
++    assert mv.find_unresolved_inferred_pins({"wiring": {"edges": []}}) == []
++
++
++def test_no_sections_yet_returns_empty_even_with_inferred_edges():
++    spec = {
++        "wiring": {"edges": [
++            {"from": "mcu_1", "to": "sensor_1", "kind": "data",
++             "from_pin": "SCL", "to_pin": None, "_inferred": True},
++        ]},
++        "mech": {"placements": [], "sections": []},
++    }
++    assert mv.find_unresolved_inferred_pins(spec) == []
++
++
++def test_finds_load_bearing_unresolved_pin():
++    spec = {
++        "wiring": {"edges": [
++            {"from": "mcu_1", "to": "sensor_1", "kind": "data",
++             "from_pin": "SCL", "to_pin": None, "_inferred": True},
++        ]},
++        "mech": {
++            "placements": [
++                {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0},
++                {"part_id": "sensor_1", "x": 10, "y": 0, "z": 0},
++            ],
++            # Both mcu_1 and sensor_1 resolve into a checkable section --
++            # realistic end-to-end shape.
++            "sections": [
++                {"section_id": "Compute", "subsection_ids": ["mcu_1"]},
++                {"section_id": "Sensing", "subsection_ids": ["sensor_1"]},
++            ],
++        },
++    }
++
++    result = mv.find_unresolved_inferred_pins(spec)
++
++    assert len(result) == 1
++    entry = result[0]
++    assert entry["part_id"] == "sensor_1"
++    assert entry["pin_side"] == "to"
++    assert entry["pin_hint"] == "SCL"
++    assert entry["edge"] is spec["wiring"]["edges"][0]  # same object, not a copy
++
++
++def test_non_load_bearing_part_is_ignored():
++    """An inferred edge referencing a part that never made it into any
++    final section (mech["sections"]) is not "load-bearing" -- the
++    scanner must not report it, so Patch 3.2 never gets called for a
++    part that isn't actually shipping."""
++    spec = {
++        "wiring": {"edges": [
++            {"from": "mcu_1", "to": "orphan_sensor_1", "kind": "data",
++             "from_pin": "SCL", "to_pin": None, "_inferred": True},
++        ]},
++        "mech": {
++            "placements": [
++                {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0},
++                {"part_id": "orphan_sensor_1", "x": 10, "y": 0, "z": 0},
++            ],
++            # Only mcu_1 made it into a final section -- orphan_sensor_1
++            # is discarded/unused.
++            "sections": [{"section_id": "Compute", "subsection_ids": ["mcu_1"]}],
++        },
++    }
++
++    assert mv.find_unresolved_inferred_pins(spec) == []
++
++
++def test_non_inferred_edges_are_ignored():
++    spec = {
++        "wiring": {"edges": [
++            {"from": "mcu_1", "to": "sensor_1", "kind": "data",
++             "from_pin": "GPIO4", "to_pin": "SDA"},  # model-proposed, not inferred
++        ]},
++        "mech": {
++            "placements": [
++                {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0},
++                {"part_id": "sensor_1", "x": 10, "y": 0, "z": 0},
++            ],
++            "sections": [
++                {"section_id": "Compute", "subsection_ids": ["mcu_1"]},
++                {"section_id": "Sensing", "subsection_ids": ["sensor_1"]},
++            ],
++        },
++    }
++
++    assert mv.find_unresolved_inferred_pins(spec) == []
++
++
++def test_inferred_edge_with_both_pins_named_contributes_nothing():
++    """Shouldn't happen given today's two synthesis cases, but if a
++    future one ever leaves both sides named, there's no unresolved pin
++    left to chase even though the edge is still tagged _inferred."""
++    spec = {
++        "wiring": {"edges": [
++            {"from": "batt_1", "to": "reg_1", "kind": "power",
++             "from_pin": "OUT", "to_pin": "VIN", "_inferred": True},
++        ]},
++        "mech": {
++            "placements": [
++                {"part_id": "batt_1", "x": 0, "y": 0, "z": 0},
++                {"part_id": "reg_1", "x": 10, "y": 0, "z": 0},
++            ],
++            "sections": [{"section_id": "Power", "subsection_ids": ["batt_1", "reg_1"]}],
++        },
++    }
++    assert mv.find_unresolved_inferred_pins(spec) == []
++
++
++# ---------------------------------------------------------------------------
++# resolve_inferred_pin (Patch 3.2)
++# ---------------------------------------------------------------------------
++
++def test_resolve_inferred_pin_returns_none_without_datasheet_url():
++    part = {"id": "sensor_1", "name": "Generic Sensor"}
++    assert hs.resolve_inferred_pin(part, "SCL", "data", chain=[]) is None
++
++
++def test_resolve_inferred_pin_returns_none_when_datasheet_lookup_fails(monkeypatch):
++    def _boom(url):
++        raise RuntimeError("network down")
++    monkeypatch.setattr("agents.component_spec_lookup.get_datasheet_detail", _boom)
++
++    part = {"id": "sensor_1", "name": "Generic Sensor", "datasheet_url": "https://example.com/ds.pdf"}
++    assert hs.resolve_inferred_pin(part, "SCL", "data", chain=[]) is None
++
++
++def test_resolve_inferred_pin_returns_none_on_empty_detail(monkeypatch):
++    monkeypatch.setattr("agents.component_spec_lookup.get_datasheet_detail", lambda url: None)
++
++    part = {"id": "sensor_1", "name": "Generic Sensor", "datasheet_url": "https://example.com/ds.pdf"}
++    assert hs.resolve_inferred_pin(part, "SCL", "data", chain=[]) is None
++
++
++def test_resolve_inferred_pin_success(monkeypatch):
++    monkeypatch.setattr(
++        "agents.component_spec_lookup.get_datasheet_detail",
++        lambda url: {"title": "Sensor Datasheet", "content": "Pin table: SCL -> GPIO22", "page_count": 3},
++    )
++    monkeypatch.setattr(hs, "generate_text", lambda *a, **k: "GPIO22")
++
++    part = {"id": "sensor_1", "name": "Generic Sensor", "datasheet_url": "https://example.com/ds.pdf"}
++    result = hs.resolve_inferred_pin(part, "SCL", "data", chain=[])
++
++    assert result == "GPIO22"
++
++
++def test_resolve_inferred_pin_honest_unknown(monkeypatch):
++    monkeypatch.setattr(
++        "agents.component_spec_lookup.get_datasheet_detail",
++        lambda url: {"title": "t", "content": "no pinout table here", "page_count": 1},
++    )
++    monkeypatch.setattr(hs, "generate_text", lambda *a, **k: "UNKNOWN")
++
++    part = {"id": "sensor_1", "datasheet_url": "https://example.com/ds.pdf"}
++    assert hs.resolve_inferred_pin(part, "SCL", "data", chain=[]) is None
++
++
++def test_resolve_inferred_pin_rejects_sentence_shaped_answer(monkeypatch):
++    """A hedged/explained answer isn't a clean pin label -- treated the
++    same as "still unresolved", not returned as-is."""
++    monkeypatch.setattr(
++        "agents.component_spec_lookup.get_datasheet_detail",
++        lambda url: {"title": "t", "content": "ambiguous pinout", "page_count": 1},
++    )
++    monkeypatch.setattr(
++        hs, "generate_text",
++        lambda *a, **k: "It's probably GPIO22 but the datasheet is unclear about this",
++    )
++
++    part = {"id": "sensor_1", "datasheet_url": "https://example.com/ds.pdf"}
++    assert hs.resolve_inferred_pin(part, "SCL", "data", chain=[]) is None
++
++
++def test_resolve_inferred_pin_swallows_llm_failure(monkeypatch):
++    monkeypatch.setattr(
++        "agents.component_spec_lookup.get_datasheet_detail",
++        lambda url: {"title": "t", "content": "some content", "page_count": 1},
++    )
++
++    def _boom(*a, **k):
++        raise RuntimeError("provider chain exhausted")
++    monkeypatch.setattr(hs, "generate_text", _boom)
++
++    part = {"id": "sensor_1", "datasheet_url": "https://example.com/ds.pdf"}
++    assert hs.resolve_inferred_pin(part, "SCL", "data", chain=[]) is None
++
++
++# ---------------------------------------------------------------------------
++# Combined behavior the two functions are meant to support (Patch 3.3's
++# eventual finalize-path wiring) -- exercised directly here since 3.3
++# only threads these two together, it introduces no new logic of its own
++# to unit-test in isolation.
++# ---------------------------------------------------------------------------
++
++def test_resolvable_pin_gets_resolved_end_to_end(monkeypatch):
++    spec = {
++        "wiring": {"edges": [
++            {"from": "mcu_1", "to": "sensor_1", "kind": "data",
++             "from_pin": "SCL", "to_pin": None, "_inferred": True},
++        ]},
++        "parts": [
++            {"id": "sensor_1", "name": "Generic Sensor", "datasheet_url": "https://example.com/ds.pdf"},
++        ],
++        "mech": {
++            "placements": [
++                {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0},
++                {"part_id": "sensor_1", "x": 10, "y": 0, "z": 0},
++            ],
++            "sections": [
++                {"section_id": "Compute", "subsection_ids": ["mcu_1"]},
++                {"section_id": "Sensing", "subsection_ids": ["sensor_1"]},
++            ],
++        },
++    }
++    monkeypatch.setattr(
++        "agents.component_spec_lookup.get_datasheet_detail",
++        lambda url: {"title": "t", "content": "SCL -> GPIO21", "page_count": 1},
++    )
++    monkeypatch.setattr(hs, "generate_text", lambda *a, **k: "GPIO21")
++
++    unresolved = mv.find_unresolved_inferred_pins(spec)
++    assert len(unresolved) == 1
++    pin = unresolved[0]
++    parts_by_id = {p["id"]: p for p in spec["parts"]}
++    resolved = hs.resolve_inferred_pin(
++        parts_by_id.get(pin["part_id"]), pin["pin_hint"], pin["edge"].get("kind"), chain=[],
++    )
++    assert resolved == "GPIO21"
++
++    edge = pin["edge"]
++    if pin["pin_side"] == "from":
++        edge["from_pin"] = resolved
++    else:
++        edge["to_pin"] = resolved
++
++    assert spec["wiring"]["edges"][0]["to_pin"] == "GPIO21"
++    assert spec["wiring"]["edges"][0]["_inferred"] is True  # resolving the pin doesn't un-infer the edge
++
++
++def test_unresolvable_pin_is_flagged_not_dropped(monkeypatch):
++    spec = {
++        "wiring": {"edges": [
++            {"from": "mcu_1", "to": "sensor_1", "kind": "data",
++             "from_pin": "SCL", "to_pin": None, "_inferred": True},
++        ]},
++        "parts": [
++            {"id": "sensor_1", "name": "Generic Sensor", "datasheet_url": "https://example.com/ds.pdf"},
++        ],
++        "mech": {
++            "placements": [
++                {"part_id": "mcu_1", "x": 0, "y": 0, "z": 0},
++                {"part_id": "sensor_1", "x": 10, "y": 0, "z": 0},
++            ],
++            "sections": [
++                {"section_id": "Compute", "subsection_ids": ["mcu_1"]},
++                {"section_id": "Sensing", "subsection_ids": ["sensor_1"]},
++            ],
++        },
++    }
++    monkeypatch.setattr(
++        "agents.component_spec_lookup.get_datasheet_detail",
++        lambda url: {"title": "t", "content": "no pinout info", "page_count": 1},
++    )
++    monkeypatch.setattr(hs, "generate_text", lambda *a, **k: "UNKNOWN")
++
++    unresolved = mv.find_unresolved_inferred_pins(spec)
++    assert len(unresolved) == 1
++    pin = unresolved[0]
++    parts_by_id = {p["id"]: p for p in spec["parts"]}
++    resolved = hs.resolve_inferred_pin(
++        parts_by_id.get(pin["part_id"]), pin["pin_hint"], pin["edge"].get("kind"), chain=[],
++    )
++    assert resolved is None
++
++    # Simulate Patch 3.3's own "still unresolved -> flag loudly" branch.
++    still_unresolved = [] if resolved else [{
++        "part_id": pin["part_id"], "pin_side": pin["pin_side"],
++        "kind": pin["edge"].get("kind"),
++        "from": pin["edge"].get("from"), "to": pin["edge"].get("to"),
++    }]
++    assert still_unresolved == [{
++        "part_id": "sensor_1", "pin_side": "to",
++        "kind": "data", "from": "mcu_1", "to": "sensor_1",
++    }]
++    # The pin stays null on the edge itself -- flagged separately, never
++    # silently dropped or guessed.
++    assert spec["wiring"]["edges"][0]["to_pin"] is None
