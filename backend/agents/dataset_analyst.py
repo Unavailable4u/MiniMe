@@ -53,14 +53,20 @@ from agents.sandbox_tester import _run_one_module
 
 load_dotenv()
 
-# Same fallback chain shape as agents/idea_planner.py and
-# agents/reviewer_fixer_lean.py, reused for the same reason those two
-# give: this is a single-pass generation call, not a worker pool, so
-# there's no fairness rotation to do — just try each provider in order
-# until one answers.
-# Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
-# removed here, not replaced -- GitHub Models retired in full today.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below comes back empty
+# (every registered account excluded/cooling down at once -- should be
+# very rare). This used to be the ONLY chain this module ever tried --
+# its hardcoded CEREBRAS_API_KEY_1 third step was one of six agents in
+# Patch 8.1's audit quietly sharing that single unmonitored,
+# un-fallback-able account (idea_planner.py, deploy_config_writer.py,
+# output_organizer.py, responder.py, prompt_writer_lean.py,
+# reviewer_fixer_lean.py were the other five) -- a cooldown on that one
+# key took out every one of their Cerebras fallback steps at once. Same
+# fix as agents/hardware_speccer.py / agents/architecture_diagrammer.py:
+# see run() below, which now builds a live, quota-ranked, multi-provider
+# chain instead.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
@@ -211,8 +217,17 @@ def run(task_text: str = None, dataset_path: str = None, session_id: str = None,
         "filename": filename,
     })
     try:
+        # Patch 8.4: deferred import -- see eo/dynamic_chain.py's module
+        # docstring for why this can't be a module-level import
+        # (eo.registry imports this module at load time; eo.dynamic_chain
+        # imports eo.registry at ITS module level). Quota-ranked,
+        # cooldown-aware, spread across providers -- replaces the old
+        # static CHAIN's single shared Cerebras key with no fallback.
+        from eo.dynamic_chain import build_fallback_chain
+        chain = build_fallback_chain("dataset_analyst") or FALLBACK_CHAIN
+
         raw = generate_text(
-            SYSTEM_PROMPT.format(filename=filename), user_content, CHAIN,
+            SYSTEM_PROMPT.format(filename=filename), user_content, chain,
             agent_name="Dataset Analyst", session_id=session_id, path=path, domain=domain,
         )
         analysis_code = _strip_fences(raw)

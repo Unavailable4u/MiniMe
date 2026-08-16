@@ -34,13 +34,20 @@ from relay.emitter import emit_event, EventType
 
 load_dotenv()
 
-# Same reasoning-role chain shape as agents/prompt_writer.py -- this is a
-# planning/reasoning call (propose a config), not the tight, latency-
-# sensitive structure_architect.py call that runs mid-cycle right before
-# a file write.
-# Quota-reality fix, §4 (2026-07-30): the GitHub Models third step is
-# removed here, not replaced -- GitHub Models retired in full today.
-CHAIN = [
+# FALLBACK_CHAIN: last-resort static chain, used ONLY if
+# eo/dynamic_chain.py's build_fallback_chain() below comes back empty
+# (every registered account excluded/cooling down at once -- should be
+# very rare). This used to be the ONLY chain this module ever tried --
+# its hardcoded CEREBRAS_API_KEY_1 third step was one of the six agents
+# in Patch 8.1's audit quietly sharing that single unmonitored,
+# un-fallback-able account with idea_planner.py/dataset_analyst.py/
+# output_organizer.py/responder.py/prompt_writer_lean.py/
+# reviewer_fixer_lean.py -- a cooldown on that one key took out every
+# one of their Cerebras fallback steps simultaneously. Same fix as
+# agents/hardware_speccer.py / agents/architecture_diagrammer.py: see
+# run_deploy_config_writer() below, which now builds a live, quota-
+# ranked, multi-provider chain instead.
+FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
     {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
@@ -121,7 +128,16 @@ def run_deploy_config_writer(session_id: str = None, tier: int = None,
     if task_text:
         user_prompt += f"\n\nOriginal task: {task_text}"
 
-    raw = generate_text(SYSTEM_PROMPT, user_prompt, CHAIN, agent_name="Deploy Config Writer",
+    # Patch 8.3: deferred import -- see eo/dynamic_chain.py's module
+    # docstring for why this can't be a module-level import (eo.registry
+    # imports this module at load time; eo.dynamic_chain imports
+    # eo.registry at ITS module level). Quota-ranked, cooldown-aware,
+    # spread across providers -- replaces the old static CHAIN's single
+    # shared Cerebras key with no fallback.
+    from eo.dynamic_chain import build_fallback_chain
+    chain = build_fallback_chain("deploy_config_writer") or FALLBACK_CHAIN
+
+    raw = generate_text(SYSTEM_PROMPT, user_prompt, chain, agent_name="Deploy Config Writer",
                          session_id=session_id, tier=tier, domain=domain)
     cleaned = _strip_fences(raw)
 
