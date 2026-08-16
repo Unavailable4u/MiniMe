@@ -1,0 +1,25 @@
+{
+  "id": "chat_b0aa06c82864",
+  "title": "Chat A - Aurora project",
+  "created_at": "2026-07-08T12:45:46.297860+00:00",
+  "updated_at": "2026-07-08T17:49:02.627259+00:00",
+  "linked_chat_ids": [
+    "chat_4053be6177b1"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "text": "The project is called Aurora and it uses FastAPI.",
+      "ts": "2026-07-08T12:45:46.367829+00:00"
+    },
+    {
+      "role": "assistant",
+      "data": {
+        "result": {
+          "answer": "Got it \u2014 Aurora, built on FastAPI."
+        }
+      },
+      "ts": "2026-07-08T12:45:46.411440+00:00"
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "ws_079409dfed": [
+    {
+      "candidate_id": "cluster_48f18494ff",
+      "suggested_label": "MiniMe \u2014 Full Upgrade Plan \u2014 1. Foundation \u2014 the `stage` model fix",
+      "node_ids": [
+        "node:ws_079409dfed:0264af66af08",
+        "node:ws_079409dfed:90f026c96825",
+        "node:ws_079409dfed:6dd50d78c2fe"
+      ],
+      "titles": [
+        "MiniMe \u2014 Full Upgrade Plan \u2014 1. Foundation \u2014 the `stage` model fix",
+        "MiniMe \u2014 Full Upgrade Plan \u2014 7. How it all syncs together",
+        "MiniMe \u2014 Full Upgrade Plan \u2014 8. Build order"
+      ],
+      "created_at": "2026-07-24T19:48:04.821929+00:00"
+    },
+    {
+      "candidate_id": "cluster_52c28259e2",
+      "suggested_label": "MiniMe \u2014 Full Upgrade Plan \u2014 4. Trust layer \u2014 security, observability, prompt testing",
+      "node_ids": [
+        "node:ws_079409dfed:0b156476c40a",
+        "node:ws_079409dfed:5edce91e015a"
+      ],
+      "titles": [
+        "MiniMe \u2014 Full Upgrade Plan \u2014 4. Trust layer \u2014 security, observability, prompt testing",
+        "MiniMe \u2014 Full Upgrade Plan \u2014 6. GitHub Student Developer Pack \u2014 what powers what"
+      ],
+      "created_at": "2026-07-24T19:48:04.821943+00:00"
+    }
+  ],
+  "ws_5a94800327": [],
+  "ws_4f8c9f762c": [],
+  "ws_d7a4e7c9f8": [],
+  "ws_93cb8b0b60": [
+    {
+      "candidate_id": "cluster_0c2921293f",
+      "suggested_label": "Course No: EEE 1253               Course Title: Electrical Machine            Topic : DC  Motor",
+      "node_ids": [
+        "node:ws_93cb8b0b60:40c5a06754ed",
+        "topic:ws_93cb8b0b60:13cd6b6e-1352-42e9-a143-853eec5e552a",
+        "topic:ws_93cb8b0b60:0adb260f-f173-4f95-95ab-0018573bff83",
+        "topic:ws_93cb8b0b60:5af1cabc-f9b0-4279-8a57-59bdea309978"
+      ],
+      "titles": [
+        "Course No: EEE 1253               Course Title: Electrical Machine            Topic : DC  Motor",
+        "",
+        "",
+        ""
+      ],
+      "created_at": "2026-07-28T12:14:56.321790+00:00"
+    }
+  ]
+}

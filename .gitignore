@@ -19,6 +19,21 @@ backend/evals/promptfoo/.promptfoo/
 # Editor
 .vscode/
 
-# Persistent chat data (user content, not source)
-data/
+# Persistent chat data (user content, not source) — written at runtime
+# to <repo root>/data/{graph,study,timeline}/... by backend/eo/graph_edges.py,
+# backend/eo/study_progress.py, backend/eo/timeline_node_blurbs.py, etc.
+# (all resolve BASE_DIR to the repo root and join "data" onto it).
+#
+# Root Cause D fix (2026-08-16 reliability audit): this used to be the
+# bare pattern "data/", which gitignore matches against a directory
+# named "data" ANYWHERE in the tree, not just this repo-root one. That
+# silently also excluded backend/agents/data/ -- which holds a
+# committed, curated SOURCE file (component_dimensions_table.json,
+# maintained via backend/scripts/pull_component_table.py) that G1a
+# (agents/component_dimension_table.py) needs at runtime -- so every
+# fresh clone got an empty curated-dimension table with no error, just
+# a silent no-op fallback to LLM-estimated dimensions. Anchoring this
+# to the repo root with a leading slash makes it match only the
+# actual runtime-data directory it was written for.
+/data/
 

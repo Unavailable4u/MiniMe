@@ -1,0 +1,102 @@
+{
+  "id": "chat_fbb1f7be8c81",
+  "title": "kire",
+  "created_at": "2026-07-08T17:52:36.286018+00:00",
+  "updated_at": "2026-07-08T18:29:57.855281+00:00",
+  "linked_chat_ids": [],
+  "messages": [
+    {
+      "role": "user",
+      "text": "hi",
+      "ts": "2026-07-08T17:52:43.005093+00:00"
+    },
+    {
+      "role": "assistant",
+      "data": {
+        "decision": {},
+        "tier": "sga",
+        "session_id": "chat_fbb1f7be8c81",
+        "status": "ok",
+        "result": {
+          "answer": "hi"
+        },
+        "message": null
+      },
+      "task": "hi",
+      "steps": [
+        {
+          "id": 0,
+          "agent": "sga_relay",
+          "role": "SGA \u2014 attempting direct answer",
+          "text": "",
+          "summary": "resolved at stage 1 (sga_1)",
+          "status": "done"
+        }
+      ],
+      "routeTrace": [],
+      "roleRequests": [],
+      "dependencyMap": {},
+      "structurePlan": null,
+      "ts": "2026-07-08T17:52:50.954061+00:00"
+    },
+    {
+      "role": "user",
+      "text": "what is 2 + 2?",
+      "ts": "2026-07-08T18:29:38.664559+00:00"
+    },
+    {
+      "role": "assistant",
+      "data": {
+        "decision": {},
+        "tier": "cache",
+        "session_id": "chat_fbb1f7be8c81",
+        "status": "ok",
+        "result": {
+          "answer": "4"
+        },
+        "message": null
+      },
+      "task": "what is 2 + 2?",
+      "steps": [],
+      "routeTrace": [],
+      "roleRequests": [],
+      "dependencyMap": {},
+      "structurePlan": null,
+      "ts": "2026-07-08T18:29:42.257944+00:00"
+    },
+    {
+      "role": "user",
+      "text": "what is 5 times 9",
+      "ts": "2026-07-08T18:29:50.631188+00:00"
+    },
+    {
+      "role": "assistant",
+      "data": {
+        "decision": {},
+        "tier": "sga",
+        "session_id": "chat_fbb1f7be8c81",
+        "status": "ok",
+        "result": {
+          "answer": "45"
+        },
+        "message": null
+      },
+      "task": "what is 5 times 9",
+      "steps": [
+        {
+          "id": 0,
+          "agent": "sga_relay",
+          "role": "SGA \u2014 attempting direct answer",
+          "text": "",
+          "summary": "resolved at stage 1 (sga_1)",
+          "status": "done"
+        }
+      ],
+      "routeTrace": [],
+      "roleRequests": [],
+      "dependencyMap": {},
+      "structurePlan": null,
+      "ts": "2026-07-08T18:29:57.855257+00:00"
+    }
+  ]
+}

@@ -452,7 +452,18 @@ def _generate_info(spec: dict, chain: list, session_id: str = None,
         )
         raw = generate_text(INFO_PROMPT, user_prompt, chain,
                              agent_name="Hardware Speccer Info",
-                             session_id=session_id, tier=tier, domain=domain)
+                             session_id=session_id, tier=tier, domain=domain,
+                             allow_continuation=False)  # Root Cause B fix: this
+        # is a "respond with ONLY JSON" call (see INFO_PROMPT) -- Fix C's
+        # continuation prompt ("continue exactly where you left off") is
+        # written for prose/code, not JSON. A truncated response spliced
+        # onto a continuation from a different provider produces
+        # malformed JSON that json.loads() below can't parse, discarding
+        # this Info card back to the empty fallback anyway -- discarding
+        # the partial text up front and retrying the ORIGINAL prompt
+        # fresh on the next chain step (allow_continuation=False's actual
+        # behavior, see generate_text()'s own docstring) gives this a
+        # real second attempt instead of a guaranteed-broken splice.
         parsed = json.loads(_strip_fences(raw))
         summary = parsed.get("summary")
         tags = parsed.get("tags")
@@ -1902,7 +1913,17 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # ground-truth sizing vs. which still need LLM estimation.
     raw_parts = generate_text(SYSTEM_PROMPT_PARTS, user_prompt, chain,
                                agent_name="Hardware Speccer Parts",
-                               session_id=session_id, tier=tier, domain=domain)
+                               session_id=session_id, tier=tier, domain=domain,
+                               allow_continuation=False)  # Root Cause B fix:
+    # SYSTEM_PROMPT_PARTS demands "ONLY valid JSON" -- letting a "length"
+    # truncation get a continuation prompt spliced onto it from
+    # (possibly) a different provider corrupts the JSON (mismatched
+    # braces/formatting), which the json.loads() below can't parse, and
+    # the whole parts list collapses to the single "Spec unavailable"
+    # fail-safe stub. allow_continuation=False makes a "length" cutoff
+    # here behave like a transient error instead: the partial text is
+    # discarded and the ORIGINAL prompt is retried fresh (full token
+    # budget, no splice) on the next chain step.
     cleaned_parts = _strip_fences(raw_parts)
 
     try:
@@ -1976,7 +1997,13 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
 
     raw_wiring = generate_text(SYSTEM_PROMPT_WIRING, wiring_user_prompt, chain,
                                 agent_name="Hardware Speccer Wiring",
-                                session_id=session_id, tier=tier, domain=domain)
+                                session_id=session_id, tier=tier, domain=domain,
+                                allow_continuation=False)  # Root Cause B fix:
+    # same reasoning as Call 1 above -- SYSTEM_PROMPT_WIRING is also an
+    # "ONLY valid JSON" contract (wiring/mech/instructions), and a
+    # spliced continuation here is exactly why spec["wiring"] was
+    # collapsing to the empty {"nodes": [], "edges": []} fallback (which
+    # then left Blueprint's Wiring/Mech tabs with nothing to render).
     cleaned_wiring = _strip_fences(raw_wiring)
 
     try:

@@ -1,0 +1,158 @@
+{
+  "attempts": [
+    {
+      "attempt_id": "attempt_3a39160dca",
+      "workspace_id": "ws_0d72d2f8cc",
+      "quiz_node_id": "panel:ws_0d72d2f8cc:study_quiz",
+      "created_by": "user",
+      "created_at": "2026-07-30T20:10:37.778923+00:00",
+      "score": 3,
+      "total": 5,
+      "percent": 60.0,
+      "results": [
+        {
+          "question": "",
+          "options": [
+            "They operate on the principle of electromagnetic induction with a rotating armature and stationary magnetic field.",
+            "They operate on the principle of electromagnetic induction with a stationary armature and rotating magnetic field.",
+            "They operate on the principle of electromagnetic attraction with a rotating armature and stationary magnetic field.",
+            "They operate on the same fundamental principles of electromagnetic induction as d.c. generators, but with the armature winding mounted on a stationary element called stator and field windings on a rotating element called rotor."
+          ],
+          "correct_index": 3,
+          "given_index": 0,
+          "is_correct": false,
+          "explanation": "According to the source material, AC generators or alternators operate on the same fundamental principles of electromagnetic induction as d.c. generators, but with the armature winding mounted on a stationary element called stator and field windings on a rotating element called rotor."
+        },
+        {
+          "question": "Q2: What type of winding is used in A.C. armature windings?",
+          "options": [
+            "Concentrated winding coils wrapped around multiple stator teeth.",
+            "Distributed winding that spreads coils across multiple slots.",
+            "A combination of concentrated and distributed winding coils.",
+            "A special type of winding coil that is not mentioned in the source material."
+          ],
+          "correct_index": 1,
+          "given_index": 1,
+          "is_correct": true,
+          "explanation": "According to the source material, A.C. armature windings are generally distributed windings, which spread coils across multiple slots, creating a uniform magnetic field and a sinusoidal back-EMF."
+        },
+        {
+          "question": "Q3: What is the purpose of damper windings in an alternator?",
+          "options": [
+            "To increase the efficiency of the alternator.",
+            "To reduce the voltage output of the alternator.",
+            "To prevent hunting, provide starting torque in synchronous motors, and help maintain voltage balance during unbalanced loads.",
+            "To reduce the current output of the alternator."
+          ],
+          "correct_index": 2,
+          "given_index": 1,
+          "is_correct": false,
+          "explanation": "According to the source material, the purpose of damper windings is to prevent hunting, provide starting torque in synchronous motors, and help maintain voltage balance during unbalanced loads."
+        },
+        {
+          "question": "Q4: What type of rotor is used in high-speed turbo-generators?",
+          "options": [
+            "Salient pole type.",
+            "Smooth cylindrical type.",
+            "A combination of salient pole and smooth cylindrical type.",
+            "A special type of rotor that is not mentioned in the source material."
+          ],
+          "correct_index": 1,
+          "given_index": 1,
+          "is_correct": true,
+          "explanation": "According to the source material, smooth cylindrical type rotors are used in high-speed turbo-generators (\u22651800 RPM), as they offer better balance, low windage loss, and smooth operation."
+        },
+        {
+          "question": "Q5: How is the excitation current delivered to the rotor in modern alternator systems?",
+          "options": [
+            "Through slip-rings and brushes only.",
+            "Through brushless excitation, where a three-phase a.c. exciter and rectifiers provide d.c. without the need for brushes or slip-rings.",
+            "Through a small d.c. shunt generator mounted on the same shaft as the alternator only.",
+            "Through a combination of slip-rings, brushes, and brushless excitation."
+          ],
+          "correct_index": 1,
+          "given_index": 1,
+          "is_correct": true,
+          "explanation": "According to the source material, in modern systems, the excitation current is delivered through brushless excitation, where a three-phase a.c. exciter and rectifiers provide d.c. without the need for brushes or slip-rings."
+        }
+      ]
+    },
+    {
+      "attempt_id": "attempt_72cc7add2f",
+      "workspace_id": "ws_0d72d2f8cc",
+      "quiz_node_id": "panel:ws_0d72d2f8cc:study_quiz",
+      "created_by": "user",
+      "created_at": "2026-07-31T08:09:41.554620+00:00",
+      "score": 2,
+      "total": 5,
+      "percent": 40.0,
+      "results": [
+        {
+          "question": "Q1: What is the main difference between a DC generator and an AC generator (alternator) regarding the rotation of the armature and field?",
+          "options": [
+            "Both have rotating armature and stationary field.",
+            "In a DC generator the field rotates and the armature is stationary.",
+            "In a DC generator the armature rotates and the field is stationary, while in an alternator the armature is stationary and the field rotates.",
+            "Both have stationary armature and rotating field."
+          ],
+          "correct_index": 2,
+          "given_index": 1,
+          "is_correct": false,
+          "explanation": "The source states that in DC generators the armature rotates and the field is stationary, whereas in alternators the armature (stator) is stationary and the field (rotor) rotates."
+        },
+        {
+          "question": "Q2: Which type of rotor is used for low\u2011to\u2011medium\u2011speed alternators (\u22641200\u202fRPM) and what is its characteristic?",
+          "options": [
+            "Salient pole type; large diameter, short axial length, suitable for \u22641200\u202fRPM.",
+            "Smooth cylindrical type; large diameter, short axial length, suitable for \u22641200\u202fRPM.",
+            "Salient pole type; small diameter, long axial length, suitable for \u22651800\u202fRPM.",
+            "Smooth cylindrical type; small diameter, long axial length, suitable for \u22641200\u202fRPM."
+          ],
+          "correct_index": 0,
+          "given_index": 1,
+          "is_correct": false,
+          "explanation": "The source describes the salient pole rotor as used in low\u2011to\u2011medium\u2011speed alternators (\u22641200\u202fRPM) with a large diameter and short axial length."
+        },
+        {
+          "question": "Q3: What is the purpose of damper windings in an alternator?",
+          "options": [
+            "To prevent hunting by generating opposing currents, provide starting torque in synchronous motors, and maintain voltage balance during unbalanced loads.",
+            "To increase the output voltage of the alternator.",
+            "To supply the excitation current to the rotor field windings.",
+            "To cool the stator core by forced air flow."
+          ],
+          "correct_index": 0,
+          "given_index": 1,
+          "is_correct": false,
+          "explanation": "The source lists damper windings as preventing hunting, providing starting torque, and helping maintain voltage balance, while not carrying current under normal operation."
+        },
+        {
+          "question": "Q4: Which armature winding type produces a sinusoidal back\u2011EMF and offers smoother torque, quieter operation, and better heat distribution?",
+          "options": [
+            "Concentrated winding (produces trapezoidal back\u2011EMF).",
+            "Distributed winding (produces sinusoidal back\u2011EMF).",
+            "Full\u2011pitch winding (refers to coil span, not winding type).",
+            "Fractional\u2011pitch winding (refers to coil span, not winding type)."
+          ],
+          "correct_index": 1,
+          "given_index": 1,
+          "is_correct": true,
+          "explanation": "The source explains that distributed windings spread coils across multiple slots, creating a sinusoidal back\u2011EMF and smoother operation."
+        },
+        {
+          "question": "Q5: What is a full\u2011pitch coil in AC armature windings?",
+          "options": [
+            "A coil with span less than 180\u00b0 electrical, producing lower EMF.",
+            "A coil with a span of 180\u00b0 electrical, where the two sides occupy identical positions under adjacent opposite poles, giving maximum EMF.",
+            "A coil wound around a single stator tooth.",
+            "A coil used only in salient pole rotors."
+          ],
+          "correct_index": 1,
+          "given_index": 1,
+          "is_correct": true,
+          "explanation": "The source defines a full\u2011pitch coil as having a 180\u00b0 electrical span, with sides under opposite poles, yielding maximum EMF."
+        }
+      ]
+    }
+  ]
+}
