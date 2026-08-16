@@ -385,6 +385,20 @@ exactly this shape:
 {"summary": "one paragraph, plain language", "tags": ["Tag One", "Tag Two"]}
 """
 
+# Patch 3.2 (Phase 3, gap #10): the ONE-pin equivalent of SYSTEM_PROMPT_WIRING
+# above -- deliberately narrow (one part, one pin, one answer) rather than
+# reusing that broader wiring prompt, so a targeted retry can't accidentally
+# re-propose the whole wiring graph.
+PIN_RESOLUTION_PROMPT = """You are given an excerpt from a component's own \
+datasheet and asked to name exactly ONE physical pin/GPIO on that \
+component. Answer only from the excerpt -- never guess a plausible-\
+sounding pin the excerpt doesn't actually support.
+
+Respond with ONLY the pin name/number (e.g. "GPIO22", "Pin 4"), or the \
+single word UNKNOWN if the excerpt doesn't say. No punctuation, no \
+explanation, no markdown.
+"""
+
 
 def _pollinations_render_url(summary: str) -> str:
     """T2b, step 19d (optional stretch): build a Pollinations.ai image
@@ -905,6 +919,81 @@ def _populate_datasheet_details(parts: list, session_id: str = None) -> dict:
                 details[part_id] = detail
 
     return details
+
+
+def resolve_inferred_pin(part: dict, pin_hint: str, edge_kind: str, chain: list,
+                          session_id: str = None, tier: int = None, domain: str = None) -> str | None:
+    """Patch 3.2 (Phase 3, gap #10): single targeted resolution retry for
+    ONE unresolved wiring pin on ONE part -- re-queries that part's own
+    datasheet detail (agents/component_spec_lookup.py's
+    get_datasheet_detail(), the same F3 Part 5 deep-dive
+    _populate_datasheet_details() above already runs; reused here rather
+    than a second download path, and normally already cached by eo/
+    datasheet_cache.py by the time this runs) and makes ONE small,
+    narrowly-scoped LLM call (PIN_RESOLUTION_PROMPT above) asking it to
+    name the real GPIO/pin serving `pin_hint` (e.g. "SCL", "VIN") on THIS
+    part specifically -- never a general re-run of the whole wiring agent
+    (SYSTEM_PROMPT_WIRING's own call), matching Patch 3.2's own sizing
+    note in the patch breakdown.
+
+    Capped at one retry BY CONSTRUCTION: this function makes exactly one
+    datasheet lookup and one LLM call, then returns -- looping/retrying
+    across multiple pins, or deciding what "still unresolved" means for
+    the run as a whole, belongs to the caller (Patch 3.3's finalize-path
+    wiring), same repair-until-cap posture eo/mech_repair.py's own
+    run_repair_loop() already holds for every other "regenerate, don't
+    loop forever" case in this pipeline -- this function itself has no
+    retry loop to cap.
+
+    Returns the resolved pin label (e.g. "GPIO22") on a clean,
+    label-shaped answer, or None if: `part` is falsy, the part has no
+    datasheet_url (nothing to query), the datasheet deep-dive fails or
+    comes back empty, the LLM call itself fails/is exhausted, or the
+    model's answer doesn't look like a real pin name -- said UNKNOWN
+    honestly, or came back long/sentence-shaped instead of a short label
+    (a hedge/explanation reads the same as "still unresolved" here, just
+    not spelled UNKNOWN). "Still unresolved" is a valid, expected, non-
+    error outcome -- this never raises past a failed lookup or a bad
+    answer.
+    """
+    if not part:
+        return None
+    datasheet_url = part.get("datasheet_url")
+    if not datasheet_url:
+        return None
+
+    from agents.component_spec_lookup import get_datasheet_detail
+    try:
+        detail = get_datasheet_detail(datasheet_url)
+    except Exception:
+        return None
+    content = (detail or {}).get("content") if isinstance(detail, dict) else None
+    if not content:
+        return None
+
+    part_label = part.get("name") or part.get("id") or "this part"
+    user_prompt = (
+        f"Datasheet excerpt for {part_label}:\n{content[:6000]}\n\n"
+        f'Which single physical pin/GPIO on {part_label} serves the '
+        f'"{pin_hint or "unresolved"}" ({edge_kind or "data"}) function?'
+    )
+    try:
+        raw = generate_text(PIN_RESOLUTION_PROMPT, user_prompt, chain,
+                             agent_name="Hardware Speccer Pin Resolution",
+                             session_id=session_id, tier=tier, domain=domain)
+    except Exception:
+        return None
+
+    candidate = (raw or "").strip().strip('"').strip(".")
+    if not candidate or candidate.upper() == "UNKNOWN":
+        return None
+    # A real pin label is short and label-shaped -- a multi-sentence or
+    # multi-clause answer means the model hedged/explained instead of
+    # naming one pin, which is the same "still unresolved" outcome as
+    # UNKNOWN, just not spelled that way.
+    if len(candidate) > 24 or "\n" in candidate or candidate.count(" ") > 3:
+        return None
+    return candidate
 
 
 # Same color-per-kind convention WiringGraph.jsx's EDGE_COLORS already
@@ -2053,6 +2142,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.mech_supports import apply_supports_generation
     from eo.mech_cutouts import apply_cutout_generation
     from eo.mech_validator import close_session as close_mech_validator_session
+    from eo.mech_validator import find_unresolved_inferred_pins
     try:
         # Level 0->1 -- gap fix, see the comment block above: validates/
         # repairs the primitives G3a/G3b just composed before Level 1->2
@@ -2127,6 +2217,51 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # already reflects the repaired edges rather than needing a second
     # pass.
     _fix_wiring_electrical_integrity(spec)
+
+    # Patch 3.3 (Phase 3, gap #10): pin resolution gate -- close the loop
+    # on inferred wiring before this spec is considered final. Runs after
+    # _fix_wiring_electrical_integrity() immediately above (needs the
+    # inferred edges it may just have synthesized) and after the mech
+    # pipeline's own try/finally block earlier in this function has
+    # already run run_level_3_4_repair() -- which is what populates
+    # spec["mech"]["sections"] via apply_section_grouping() -- so
+    # find_unresolved_inferred_pins() below can tell "load-bearing" (a
+    # part that's actually in the final device) from "just sitting in
+    # placements" (see that function's own docstring on why `spec`
+    # itself, not spec["mech"] alone, is passed as its `mech` argument).
+    # Before mermaid build so a resolved pin's real name is what
+    # actually renders, not the pre-resolution null it replaced.
+    unresolved_pins = find_unresolved_inferred_pins(spec)
+    still_unresolved = []
+    if unresolved_pins:
+        parts_by_id = {p.get("id"): p for p in spec.get("parts", []) if isinstance(p, dict)}
+        for pin in unresolved_pins:
+            part = parts_by_id.get(pin["part_id"])
+            edge = pin["edge"]
+            resolved = resolve_inferred_pin(
+                part, pin.get("pin_hint"), edge.get("kind"), chain,
+                session_id=session_id, tier=tier, domain=domain,
+            )
+            if resolved:
+                if pin["pin_side"] == "from":
+                    edge["from_pin"] = resolved
+                else:
+                    edge["to_pin"] = resolved
+            else:
+                # Still unresolved after the one capped retry -- surface
+                # it loudly in the handoff (custom["wiring"] below)
+                # rather than silently shipping a null pin on a
+                # load-bearing net. The edge itself stays "_inferred":
+                # True either way; that flag already means "the model
+                # didn't propose this," resolving the pin doesn't change
+                # who proposed the edge.
+                still_unresolved.append({
+                    "part_id": pin["part_id"], "pin_side": pin["pin_side"],
+                    "kind": edge.get("kind"),
+                    "from": edge.get("from"), "to": edge.get("to"),
+                })
+    if still_unresolved:
+        spec["wiring"]["unresolved_pins"] = still_unresolved
 
     spec["wiring"]["mermaid"] = _build_wiring_mermaid(spec)
 
