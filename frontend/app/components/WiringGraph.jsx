@@ -112,6 +112,22 @@ export default function WiringGraph({ wiring }) {
     ));
   }, [wiring]);
 
+  // Root Cause E fix: an empty wiring.nodes list (the fail-safe stub
+  // from Root Cause B/C upstream, or a genuinely wire-free spec) used to
+  // just feed ForceGraphBase two empty arrays -- which silently renders
+  // an empty canvas with no indication of why. Same "explain the empty
+  // state" pattern MechView.jsx already uses for
+  // mech.placements.length === 0. Placed after all hooks above (not as
+  // an early return before them) to keep hook-call order stable across
+  // renders, per the Rules of Hooks.
+  if (graphData.nodes.length === 0) {
+    return (
+      <p className="text-xs text-[var(--neutral-600)]">
+        No wiring diagram proposed yet.
+      </p>
+    );
+  }
+
   return (
     <ForceGraphBase
       nodes={graphData.nodes}
