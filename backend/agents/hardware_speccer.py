@@ -2312,7 +2312,27 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # LLM call reusing the parts/wiring JSON already produced above,
     # same chain as the main generation call. See _generate_info()'s own
     # docstring for why this never raises.
-    spec["info"] = _generate_info(spec, chain, session_id=session_id, tier=tier, domain=domain)
+    #
+    # Root Cause F fix: _generate_info() only ever sees spec["parts"]/
+    # spec["wiring"] -- it never re-reads the PRD. When Call 1/Call 2
+    # above both hit their JSON-parse fail-safe (the single "unavailable"
+    # placeholder part, and/or an empty wiring.nodes list), that's almost
+    # no real signal to describe, and the model was confabulating a
+    # plausible-sounding generic product instead of admitting it had
+    # nothing to work with -- directly contradicting INFO_PROMPT's own
+    # "never invent parts/capabilities" instruction. Skip the call
+    # entirely in that case and fall back to the same empty-but-valid
+    # {"summary": "", "tags": [], "image_url": ""} shape _generate_info()
+    # itself already returns on any other failure, so callers don't need
+    # to special-case this path.
+    _parts_are_placeholder = (
+        len(spec["parts"]) == 1 and spec["parts"][0].get("id") == "unavailable"
+    )
+    _wiring_is_empty = not spec.get("wiring", {}).get("nodes")
+    if _parts_are_placeholder or _wiring_is_empty:
+        spec["info"] = {"summary": "", "tags": [], "image_url": ""}
+    else:
+        spec["info"] = _generate_info(spec, chain, session_id=session_id, tier=tier, domain=domain)
 
     # F3 Part 5 (optional stretch): datasheet deep-dive, keyed by part
     # id. Deliberately last of the "real data" work in this function --
