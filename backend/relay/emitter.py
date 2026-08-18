@@ -448,6 +448,16 @@ def _fit_event_to_pusher_cap(event: dict, cap: int = PUSHER_EVENT_BYTE_CAP) -> d
     openStepStack and flip the step to "done" -- rather than emit_event()
     swallowing the exception and returning False with nothing sent.
 
+    0b fix: this function only returns a shrunk COPY (`shrunk`) when it
+    had to degrade the payload -- callers (emit_event/emit_user_event/
+    emit_workspace_event) compare the return value against the original
+    `event` by identity and, on a mismatch, stamp `truncated: True` onto
+    the envelope before sending. That flag plus the identifier already
+    on every envelope (session_id/user_id/workspace_id) is what lets the
+    frontend tell "this is the whole result" apart from "this is a
+    shrunk stand-in, go re-fetch the real thing" instead of trusting
+    whatever arrived as complete.
+
     Never raises. Worst case (a genuinely unserializable event, e.g. a
     stray non-JSON-safe object slipping into payload), returns `event`
     unchanged and lets the caller's own try/except around
@@ -595,10 +605,18 @@ def emit_event(
     # numbers can diverge.
     fitted = _fit_event_to_pusher_cap(event)
     if fitted is not event:
+        # Bug 7 fix (0b): mark the envelope itself as truncated, not just
+        # the shrunk payload -- session_id is already on every envelope
+        # (Part 6.3's schema), so this is enough for the frontend to
+        # know both THAT it needs to re-fetch and WHICH session's step
+        # to re-fetch it for, instead of silently trusting a shrunk
+        # summary as the complete result.
+        fitted = dict(fitted)
+        fitted["truncated"] = True
         print(f"  [relay] emit_event({event_type!r}): payload exceeded Pusher's "
               f"{PUSHER_EVENT_BYTE_CAP}-byte cap once serialized, sent a "
               f"shrunk/fallback payload instead so the frontend still gets "
-              f"a completion event.")
+              f"a completion event (truncated=True, session_id={session_id!r}).")
     event = fitted
 
     try:
@@ -661,9 +679,14 @@ def emit_user_event(
     # _fit_event_to_pusher_cap()'s docstring.
     fitted = _fit_event_to_pusher_cap(event)
     if fitted is not event:
+        # Same 0b fix as emit_event() above -- user_id is already on
+        # this envelope, so it doubles as the re-fetch identifier here.
+        fitted = dict(fitted)
+        fitted["truncated"] = True
         print(f"  [relay] emit_user_event({event_type!r}): payload exceeded "
               f"Pusher's {PUSHER_EVENT_BYTE_CAP}-byte cap once serialized, "
-              f"sent a shrunk/fallback payload instead.")
+              f"sent a shrunk/fallback payload instead (truncated=True, "
+              f"user_id={user_id!r}).")
     event = fitted
 
     try:
@@ -724,9 +747,14 @@ def emit_workspace_event(
     # _fit_event_to_pusher_cap()'s docstring.
     fitted = _fit_event_to_pusher_cap(event)
     if fitted is not event:
+        # Same 0b fix as emit_event() above -- workspace_id is already on
+        # this envelope, so it doubles as the re-fetch identifier here.
+        fitted = dict(fitted)
+        fitted["truncated"] = True
         print(f"  [relay] emit_workspace_event({event_type!r}): payload exceeded "
               f"Pusher's {PUSHER_EVENT_BYTE_CAP}-byte cap once serialized, "
-              f"sent a shrunk/fallback payload instead.")
+              f"sent a shrunk/fallback payload instead (truncated=True, "
+              f"workspace_id={workspace_id!r}).")
     event = fitted
 
     try:

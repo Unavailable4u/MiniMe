@@ -318,6 +318,30 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       notify(key);
     };
 
+    // NEW — Bug 7 fix (0b), second half. Dock-store port of
+    // SessionContext.jsx's own refetchFullStep (see that file's comment
+    // for the full reasoning on why `role` is the right re-fetch key and
+    // why a 404 is a no-op, not an error) — same shrunk-envelope re-fetch,
+    // retargeted from stepsRef/setLiveSteps to this store's
+    // states.get(key)/setState(key, ...), same as every other branch in
+    // handleDockEvent below already is relative to its SessionContext
+    // counterpart.
+    const refetchFullStep = async (key, sid, role, stepId) => {
+      try {
+        const res = await fetch(
+          `${API_URL}/api/task/${sid}/step/${encodeURIComponent(role)}/full`,
+          { headers: await authHeaders() }
+        );
+        if (!res.ok) return;
+        const { text } = await res.json();
+        setState(key, (prev) => ({
+          liveSteps: prev.liveSteps.map((s) => (s.id === stepId ? { ...s, summary: text } : s)),
+        }));
+      } catch (err) {
+        console.warn("[Bug 7 / 0b] full-step re-fetch failed, keeping shrunk summary:", err);
+      }
+    };
+
     // Direct port of the bind_global callback body in SessionContext.jsx
     // (lines ~208-364), retargeted from component-level setXxx calls to
     // store.setState(key, ...), and from stepsRef/openStepStack refs to
@@ -461,6 +485,17 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
               : s
           ),
         }));
+        // NEW — Bug 7 fix (0b), second half, ported from
+        // SessionContext.jsx's own agent_done branch (see that file's
+        // comment for the full reasoning): `data.truncated` is the
+        // envelope-level flag relay/emitter.py's emit_event() stamps
+        // when this event had to be shrunk to fit Pusher's cap, and
+        // `role` is the same string this step was keyed under at
+        // agent_start above.
+        if (data.truncated && data.session_id) {
+          const role = payload?.label || agent;
+          refetchFullStep(key, data.session_id, role, targetId);
+        }
         return;
       }
       if (eventType === "error") {
