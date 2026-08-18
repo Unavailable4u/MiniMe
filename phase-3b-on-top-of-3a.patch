@@ -1,0 +1,186 @@
+From b257ee0bd30f7ee74821d522f463ba4c7adc3f5a Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Tue, 18 Aug 2026 14:08:26 +0000
+Subject: [PATCH] feat: Phase 3b -- reroute-or-wait control flow on ledger gate
+ in llm_client
+
+---
+ backend/utils/llm_client.py | 133 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 117 insertions(+), 16 deletions(-)
+
+diff --git a/backend/utils/llm_client.py b/backend/utils/llm_client.py
+index 2847be3..9261b21 100644
+--- a/backend/utils/llm_client.py
++++ b/backend/utils/llm_client.py
+@@ -100,6 +100,7 @@ import json
+ import os
+ import re
+ import sys
++import time
+ from datetime import date, datetime, timezone
+ 
+ import requests
+@@ -1318,6 +1319,78 @@ def _estimate_tokens_for_call(system_prompt: str, user_content: str) -> int:
+     return (len(system_prompt or "") + len(user_content or "")) // 4
+ 
+ 
++# Phase 3b -- hard ceiling on how long a single gated call will sleep
++# before retrying, regardless of what rate_ledger.can_proceed() suggests.
++# Bounds worst-case added latency from a single step's wait/reroute
++# decision; a suggested_wait_seconds bigger than this (e.g. a whole
++# window's worth) gets capped rather than blocking the caller for real.
++_LEDGER_WAIT_CAP_SECONDS = 20.0
++
++
++def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: int):
++    """Phase 3b -- cheap, read-only look-ahead used once the CURRENT
++    step's can_proceed() has already reported no headroom. For every
++    step after from_index, applies the same skip conditions the main
++    dispatch loop below applies right before it would otherwise send
++    (missing creds, active cooldown) so this never counts a step that
++    couldn't actually be dispatched to anyway, then asks the ledger --
++    no network call, just a bus read -- whether THAT step currently has
++    headroom for the same estimated_tokens figure.
++
++    Returns a list of (index, provider, key_id, model, ok, wait_seconds)
++    tuples, one per still-eligible step, so a caller can both look for a
++    reroute target (any ok=True) and, failing that, work out which of
++    the remaining steps resets soonest."""
++    results = []
++    for j in range(from_index + 1, len(chain)):
++        step = chain[j]
++        provider = step["provider"]
++        model = step["model"]
++        if provider == "cloudflare":
++            creds = _get_cloudflare_creds(step["account_id_env"], step["token_env"])
++            if creds is None:
++                continue
++            key_id = step["account_id_env"]
++        else:
++            if not os.getenv(step["key_env"]):
++                continue
++            key_id = step["key_env"]
++        if _is_cooling_down(provider, key_id):
++            continue
++        ok, wait = rate_ledger.can_proceed(provider, key_id, model, estimated_tokens)
++        results.append((j, provider, key_id, model, ok, wait))
++    return results
++
++
++def _decide_ledger_action(chain: list, index: int, current_wait: float,
++                           estimated_tokens: int) -> "tuple[str, float]":
++    """Phase 3 (§PHASE 3, the 'If NOT OK' branch) -- shared by both the
++    cloudflare and SDK-shaped dispatch loops below so the reroute-vs-wait
++    decision itself isn't duplicated in two places.
++
++    Returns ("reroute", 0.0) when some later, still-eligible step in the
++    chain already has headroom right now -- the caller should skip
++    sending on the current step entirely and fall through to that next
++    step instead, same as this codebase's existing "falling back to next
++    in chain" pattern on a hard failure.
++
++    Returns ("wait", wait_seconds) when nothing downstream has headroom
++    either. wait_seconds is the smaller of _LEDGER_WAIT_CAP_SECONDS and
++    the soonest reset among the current step and every remaining step
++    checked -- i.e. "the step with the soonest reset" from the plan,
++    whichever step that turns out to be. The caller retries the CURRENT
++    step after sleeping rather than jumping straight to that other step
++    (the chain is walked in order elsewhere in this function); waiting
++    only as long as the best-case step needs, rather than the current
++    step's own possibly-longer suggested wait, means the next gate check
++    re-evaluates sooner instead of over-sleeping."""
++    ahead = _remaining_chain_headroom(chain, index, estimated_tokens)
++    if any(ok for (_j, _p, _k, _m, ok, _w) in ahead):
++        return "reroute", 0.0
++    candidate_waits = [current_wait] + [w for (_j, _p, _k, _m, _ok, w) in ahead]
++    return "wait", min(min(candidate_waits), _LEDGER_WAIT_CAP_SECONDS)
++
++
+ def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
+     """Fix C (reliability guide, §3 "Fix C", item 1 -- truncation
+     handoff): builds the next step's prompt when the previous step's
+@@ -1474,18 +1547,32 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                     _continuation_prompt(user_content, accumulated_text)
+                     if accumulated_text else user_content
+                 )
+-                # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3a only:
+-                # this checks and logs; it doesn't yet reroute to another
+-                # step or wait on a soonest-reset (that's 3b) -- the call
+-                # below still goes out either way for now.
++                # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3b: on a
++                # "no headroom" read, don't send -- either reroute to a
++                # later chain step that already has headroom (cheap, no
++                # wait), or sleep on whichever step resets soonest and
++                # retry in place. See _decide_ledger_action()'s docstring
++                # for exactly how that choice is made.
+                 _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
+                 _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
+                     provider, key_id, model, _estimated_tokens)
+                 if not _ledger_ok:
+-                    print(f"  [{agent_name}] {label} pre-flight ledger check reports no "
+-                          f"headroom for ~{_estimated_tokens} estimated tokens "
+-                          f"(suggested wait {_ledger_wait:.1f}s) -- sending anyway for now, "
+-                          f"reroute/wait not yet wired (Phase 3 step 3b).")
++                    _action, _wait_seconds = _decide_ledger_action(
++                        chain, i, _ledger_wait, _estimated_tokens)
++                    if _action == "reroute":
++                        print(f"  [{agent_name}] {label} has no headroom for "
++                              f"~{_estimated_tokens} estimated tokens -- a later chain "
++                              f"step already has headroom, rerouting immediately "
++                              f"instead of waiting.")
++                        break  # skip this step, fall through to the next chain step
++                    print(f"  [{agent_name}] {label} has no headroom for "
++                          f"~{_estimated_tokens} estimated tokens, and neither does "
++                          f"anything else remaining in the chain -- sleeping "
++                          f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
++                          f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
++                          f"in place.")
++                    time.sleep(_wait_seconds)
++                    continue  # retry the SAME step now that we've waited
+                 try:
+                     # D1 patch 2 -- tracing wraps the real network call. See
+                     # _traced_generation()/_end_traced_generation() docstrings:
+@@ -1587,18 +1674,32 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                 _continuation_prompt(user_content, accumulated_text)
+                 if accumulated_text else user_content
+             )
+-            # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3a only: this
+-            # checks and logs; it doesn't yet reroute to another step or
+-            # wait on a soonest-reset (that's 3b) -- the call below still
+-            # goes out either way for now.
++            # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3b: on a "no
++            # headroom" read, don't send -- either reroute to a later
++            # chain step that already has headroom (cheap, no wait), or
++            # sleep on whichever step resets soonest and retry in place.
++            # See _decide_ledger_action()'s docstring for exactly how
++            # that choice is made.
+             _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
+             _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
+                 provider, key_env, model, _estimated_tokens)
+             if not _ledger_ok:
+-                print(f"  [{agent_name}] {label} pre-flight ledger check reports no "
+-                      f"headroom for ~{_estimated_tokens} estimated tokens "
+-                      f"(suggested wait {_ledger_wait:.1f}s) -- sending anyway for now, "
+-                      f"reroute/wait not yet wired (Phase 3 step 3b).")
++                _action, _wait_seconds = _decide_ledger_action(
++                    chain, i, _ledger_wait, _estimated_tokens)
++                if _action == "reroute":
++                    print(f"  [{agent_name}] {label} has no headroom for "
++                          f"~{_estimated_tokens} estimated tokens -- a later chain "
++                          f"step already has headroom, rerouting immediately "
++                          f"instead of waiting.")
++                    break  # skip this step, fall through to the next chain step
++                print(f"  [{agent_name}] {label} has no headroom for "
++                      f"~{_estimated_tokens} estimated tokens, and neither does "
++                      f"anything else remaining in the chain -- sleeping "
++                      f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
++                      f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
++                      f"in place.")
++                time.sleep(_wait_seconds)
++                continue  # retry the SAME step now that we've waited
+             try:
+                 # D1 patch 2 -- same traced-call pattern as the cloudflare
+                 # branch above; see _traced_generation()/_end_traced_generation().
+-- 
+2.43.0
+
