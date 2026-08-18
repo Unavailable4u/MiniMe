@@ -1,0 +1,74 @@
+diff --git a/backend/utils/llm_client.py b/backend/utils/llm_client.py
+index 5fd9499..2847be3 100644
+--- a/backend/utils/llm_client.py
++++ b/backend/utils/llm_client.py
+@@ -117,6 +117,14 @@ import logging
+ 
+ from eo.tracing import get_tracer, truncate_for_trace
+ 
++# Phase 3 (reliability_overhaul_plan.md §PHASE 3) -- rate_ledger.py's
++# QUOTA_CONFIG lookup (_tpm_limit_for) imports *this* module lazily,
++# inside a function, specifically to avoid a circular import once this
++# module imports rate_ledger at load time (see rate_ledger.py's own
++# comment on _tpm_limit_for). Safe to import at module level here as
++# long as that stays one-directional.
++from utils import rate_ledger
++
+ # Part 26 §4 re-export: embed_text() used to be defined directly in this
+ # module, but eo/routing_memory.py wanted it without the heavy groq/
+ # cerebras/openai SDK imports above, so it now lives in
+@@ -1300,6 +1308,16 @@ def _max_tokens_for(model: str, step: dict) -> int:
+     return DEFAULT_MAX_TOKENS
+ 
+ 
++def _estimate_tokens_for_call(system_prompt: str, user_content: str) -> int:
++    """Phase 3 (§PHASE 2 'Pre-flight estimation') -- rough chars/4
++    heuristic. Doesn't need to be exact, only good enough to gate
++    rate_ledger.can_proceed() before a call goes out; record_usage()
++    (fed from the real usage object after the call returns) is what
++    keeps the ledger's sliding window accurate over time regardless of
++    how rough this pre-flight guess is."""
++    return (len(system_prompt or "") + len(user_content or "")) // 4
++
++
+ def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
+     """Fix C (reliability guide, §3 "Fix C", item 1 -- truncation
+     handoff): builds the next step's prompt when the previous step's
+@@ -1456,6 +1474,18 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                     _continuation_prompt(user_content, accumulated_text)
+                     if accumulated_text else user_content
+                 )
++                # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3a only:
++                # this checks and logs; it doesn't yet reroute to another
++                # step or wait on a soonest-reset (that's 3b) -- the call
++                # below still goes out either way for now.
++                _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
++                _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
++                    provider, key_id, model, _estimated_tokens)
++                if not _ledger_ok:
++                    print(f"  [{agent_name}] {label} pre-flight ledger check reports no "
++                          f"headroom for ~{_estimated_tokens} estimated tokens "
++                          f"(suggested wait {_ledger_wait:.1f}s) -- sending anyway for now, "
++                          f"reroute/wait not yet wired (Phase 3 step 3b).")
+                 try:
+                     # D1 patch 2 -- tracing wraps the real network call. See
+                     # _traced_generation()/_end_traced_generation() docstrings:
+@@ -1557,6 +1587,18 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                 _continuation_prompt(user_content, accumulated_text)
+                 if accumulated_text else user_content
+             )
++            # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3a only: this
++            # checks and logs; it doesn't yet reroute to another step or
++            # wait on a soonest-reset (that's 3b) -- the call below still
++            # goes out either way for now.
++            _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
++            _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
++                provider, key_env, model, _estimated_tokens)
++            if not _ledger_ok:
++                print(f"  [{agent_name}] {label} pre-flight ledger check reports no "
++                      f"headroom for ~{_estimated_tokens} estimated tokens "
++                      f"(suggested wait {_ledger_wait:.1f}s) -- sending anyway for now, "
++                      f"reroute/wait not yet wired (Phase 3 step 3b).")
+             try:
+                 # D1 patch 2 -- same traced-call pattern as the cloudflare
+                 # branch above; see _traced_generation()/_end_traced_generation().
