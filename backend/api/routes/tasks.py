@@ -40,7 +40,7 @@ from eo.structure import (
     save_workflow_template, list_workflow_templates, delete_workflow_template,
     update_workflow_template,
 )
-from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write, read, delete as bus_delete   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup; bus_delete is CO5 Step 7 follow-up's cleanup of that same key
+from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write, read, delete as bus_delete, read_stage_output_text   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup; bus_delete is CO5 Step 7 follow-up's cleanup of that same key; read_stage_output_text is Bug 7 (0b)'s new re-fetch route's full-text lookup
 
 router = APIRouter()
 
@@ -837,6 +837,42 @@ def get_tasks(session_id: str):
             "uptimerobot": data[deploy_agent_module.LAST_UPTIMEROBOT_REGISTRATION_KEY],
         },
     }
+
+@router.get("/api/task/{session_id}/step/{role}/full", dependencies=[Depends(require_auth)])
+def get_step_full_result(session_id: str, role: str):
+    """Bug 7 fix (0b), first half -- the re-fetch counterpart to
+    relay/emitter.py's new `truncated: True` envelope flag.
+
+    When an agent_done (or agent_token_chunk-derived) payload gets
+    shrunk by _fit_event_to_pusher_cap() because it blew past Pusher's
+    ~10KB cap, the frontend now sees `truncated: True` on that event and
+    is expected to call this route instead of trusting the shrunk
+    summary as the complete result (second half of 0b wires that call
+    site up in SessionContext.jsx / WorkspaceDockContext.jsx).
+
+    Reuses read_stage_output_text() -- the same shared helper
+    memory/bus.py already exposes for reading a completed role's full
+    text regardless of which of its two legitimate storage shapes
+    (plain string vs. {"text": ...} dict from an approval edit) it's
+    stored as -- rather than re-implementing that shape-handling here.
+
+    set_app_slug(session_id) for the same cross-session-collision reason
+    get_tasks() above already sets it before every stage_output read.
+
+    Returns 404 if the role hasn't actually produced output for this
+    session yet (still running, never ran, or genuinely empty) -- the
+    frontend should keep the shrunk summary in that case rather than
+    blanking the step out.
+    """
+    set_app_slug(session_id)
+    text = read_stage_output_text(session_id, role)
+    if text is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No stage output found for role {role!r} in session {session_id!r}",
+        )
+    return {"session_id": session_id, "role": role, "text": text}
+
 
 @router.get("/api/tasks/workspace/{ws_id}", dependencies=[Depends(require_auth)])
 def get_tasks_for_workspace(ws_id: str, owner_id: str = Depends(require_auth)):

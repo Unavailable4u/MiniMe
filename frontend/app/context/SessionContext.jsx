@@ -208,6 +208,46 @@ export function SessionProvider({ children }) {
     }
     const channelName = `session-${sessionId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
     const channel = pusher.subscribe(channelName);
+    // NEW — Bug 7 fix (0b), second half. Counterpart to backend/relay/
+    // emitter.py's emit_event()/emit_user_event()/emit_workspace_event(),
+    // which now stamp `truncated: true` onto an event's envelope
+    // whenever _fit_event_to_pusher_cap() had to shrink it because the
+    // serialized payload blew past Pusher's ~10KB cap. When that flag is
+    // set, `payload.summary` on the agent_done that triggers this is
+    // the shrunk stand-in, not the real result -- this re-fetches the
+    // real one from backend/api/routes/tasks.py's new
+    // GET /api/task/{session_id}/step/{role}/full route (that route
+    // reuses memory/bus.py's read_stage_output_text(), the same shared
+    // helper get_tasks() already relies on for reading a role's stored
+    // output regardless of its two legitimate storage shapes) and swaps
+    // it into that step in place.
+    //
+    // 404 means the role's output genuinely isn't on the bus yet (still
+    // running under some other path, or never ran) -- the route's own
+    // docstring says to keep the shrunk summary rather than blank the
+    // step out in that case, so this just no-ops and leaves `updated`
+    // (set by the agent_done branch below, before this is called) alone.
+    const refetchFullStep = async (sid, role, stepId) => {
+      try {
+        const res = await fetch(
+          `${API_URL}/api/task/${sid}/step/${encodeURIComponent(role)}/full`,
+          { headers: await authHeaders() }
+        );
+        if (!res.ok) return;
+        const { text } = await res.json();
+        const refetched = stepsRef.current.map((s) =>
+          s.id === stepId ? { ...s, summary: text } : s
+        );
+        stepsRef.current = refetched;
+        setLiveSteps(refetched);
+      } catch (err) {
+        // Never let a re-fetch failure surface as a run-breaking error --
+        // same "degrade, don't propagate" rule emitter.py's own docstring
+        // states for the emit side of this fix. Worst case, the step just
+        // keeps showing the shrunk summary it already had.
+        console.warn("[Bug 7 / 0b] full-step re-fetch failed, keeping shrunk summary:", err);
+      }
+    };
     channel.bind_global((eventType, data) => {
       // NEW — Phase 8 (Working Panel transparency) step 8.1: log the
       // RAW envelope (relay/emitter.py's Part 6.3 shape: {type,
@@ -405,6 +445,21 @@ export function SessionProvider({ children }) {
         );
         stepsRef.current = updated;
         setLiveSteps(updated);
+        // NEW — Bug 7 fix (0b), second half: `data.truncated` is the
+        // envelope-level flag relay/emitter.py's emit_event() now stamps
+        // when this agent_done had to be shrunk to fit Pusher's cap --
+        // `role` (payload.label || agent) matches the same string the
+        // agent_start branch above stored as this step's `role`, which
+        // is also the exact key backend/relay writes stage output under
+        // (`stage_output:{session_id}:{role}`), so it's what the re-fetch
+        // route needs. Fired after the setLiveSteps above so the step
+        // shows the shrunk-but-present summary immediately and gets
+        // swapped to the real one once the re-fetch resolves, rather
+        // than the row sitting blank while the request is in flight.
+        if (data.truncated && data.session_id) {
+          const role = payload?.label || agent;
+          refetchFullStep(data.session_id, role, targetId);
+        }
         return;
       }
       if (eventType === "error") {
