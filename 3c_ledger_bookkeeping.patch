@@ -1,0 +1,273 @@
+diff --git a/backend/utils/llm_client.py b/backend/utils/llm_client.py
+index 9261b21..3fd67e8 100644
+--- a/backend/utils/llm_client.py
++++ b/backend/utils/llm_client.py
+@@ -743,7 +743,21 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
+     real value via _max_tokens_for(); callers hitting this function
+     directly (there are none left as of this fix) still fall back to
+     "don't send the key at all" when max_tokens is left None/falsy, so
+-    this stays backward compatible."""
++    this stays backward compatible.
++
++    Phase 3c: now returns a 4th element, `headers` -- the raw HTTP
++    response headers (a case-insensitive mapping), so generate_text()
++    can feed rate_ledger.record_headroom() the provider-reported
++    x-ratelimit-* values (rule 1, the preferred signal -- see
++    rate_ledger's module docstring) after every call. Getting at the
++    headers means going through .with_raw_response.create(...) instead
++    of .create(...) directly and parsing the body ourselves --
++    confirmed present on all three SDKs used here (groq, cerebras,
++    openai, the last of which mistral/gemini/huggingface also ride via
++    _get_mistral()/_get_gemini()/_get_huggingface()'s base_url trick).
++    `headers` is best-effort like everything else in this tuple: a
++    missing/empty mapping is a normal "this provider didn't send
++    rate-limit headers on this call" outcome, not an error."""
+     kwargs = dict(
+         model=model,
+         messages=[
+@@ -753,12 +767,14 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
+     )
+     if max_tokens:
+         kwargs["max_tokens"] = max_tokens
+-    response = client.chat.completions.create(**kwargs)
++    raw_response = client.chat.completions.with_raw_response.create(**kwargs)
++    headers = getattr(raw_response, "headers", None) or {}
++    response = raw_response.parse()
+     choice = response.choices[0]
+     text = (choice.message.content or "").strip()
+     usage = getattr(response, "usage", None)
+     finish_reason = getattr(choice, "finish_reason", None)
+-    return text, usage, finish_reason
++    return text, usage, finish_reason, headers
+ 
+ 
+ # --------------------------------------------------------------------------
+@@ -963,7 +979,23 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
+     Root Cause A fix: max_tokens is threaded through to Workers AI's
+     own "max_tokens" request field the same way _call_step() now
+     threads it to the OpenAI-compatible providers -- previously this
+-    request never set it either, riding on Cloudflare's own default."""
++    request never set it either, riding on Cloudflare's own default.
++
++    Phase 3c: now returns a 4th element, `headers` -- the raw REST
++    response's headers (a `requests` CaseInsensitiveDict), mirroring
++    _call_step()'s new 4th return value so generate_text() can feed
++    both branches into rate_ledger.record_headroom() the same way. Per
++    the module docstring's CLOUDFLARE CAVEAT above (usage is often
++    absent from this response entirely), don't assume Cloudflare's
++    headers carry standard x-ratelimit-* fields either -- Workers AI
++    isn't confirmed to send them. This is threaded through anyway (a)
++    on the chance a given account/model does surface them, matching the
++    same honest-but-hopeful posture the usage field already gets, and
++    (b) so the cloudflare branch in generate_text() doesn't need a
++    special-cased call shape vs. the SDK branch. record_headroom()
++    itself already treats an all-None reading as a no-op (see its own
++    docstring), so a Cloudflare call with no rate-limit headers costs
++    nothing beyond one harmless bus write of empty values."""
+     account_id, token = creds
+     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+     payload = {
+@@ -1022,7 +1054,7 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
+     # same honest-scoping caveat as the module docstring's usage-object
+     # caveat above.
+     finish_reason = result.get("finish_reason")
+-    return text.strip(), usage, finish_reason
++    return text.strip(), usage, finish_reason, response.headers
+ 
+ 
+ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
+@@ -1173,12 +1205,13 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
+ 
+     model (quota-reality fix, §1): the model string this specific chain
+     step called -- generate_text() already has it in scope as `model` at
+-    both call sites, just forwarded through here and into log_usage()."""
+-    tokens = None
+-    if usage is not None:
+-        tokens = getattr(usage, "total_tokens", None)
+-        if tokens is None and isinstance(usage, dict):
+-            tokens = usage.get("total_tokens")
++    both call sites, just forwarded through here and into log_usage().
++
++    Phase 3c: the actual extraction now lives in the shared
++    _extract_total_tokens() helper (above _LEDGER_WAIT_CAP_SECONDS) --
++    record_usage() needs the identical tolerant unwrap, so it's factored
++    out rather than copied a second time."""
++    tokens = _extract_total_tokens(usage)
+     log_usage(provider, key_id, tokens, session_id=session_id, tier=tier, path=path,
+               agent_name=agent_name, domain=domain, model=model)
+ 
+@@ -1319,6 +1352,107 @@ def _estimate_tokens_for_call(system_prompt: str, user_content: str) -> int:
+     return (len(system_prompt or "") + len(user_content or "")) // 4
+ 
+ 
++def _extract_total_tokens(usage) -> "int | None":
++    """Phase 3c -- pulled out of _log_usage() (below) so the same
++    tolerant unwrap (SDK object with .total_tokens, or a plain dict
++    with "total_tokens", or neither) is shared between _log_usage()'s
++    dashboard logging and record_usage()'s ledger bookkeeping instead
++    of two copies of the same three lines drifting apart. usage may
++    legitimately be None (no usage object came back at all -- the
++    Cloudflare gap the module docstring describes, or any other
++    provider hiccup); that's not an error, just "nothing to record"."""
++    if usage is None:
++        return None
++    tokens = getattr(usage, "total_tokens", None)
++    if tokens is None and isinstance(usage, dict):
++        tokens = usage.get("total_tokens")
++    return tokens
++
++
++# Phase 3c -- provider-reported rate-limit header names this module has
++# actually seen (Groq, Cerebras, and the OpenAI-compatible providers
++# riding _get_mistral()/_get_gemini()/_get_huggingface()'s base_url
++# trick all use the same OpenAI-style x-ratelimit-* header names).
++# Cloudflare's REST response isn't confirmed to send any of these --
++# see _call_cloudflare_step()'s Phase 3c docstring note -- so a
++# Cloudflare header mapping just won't match and this falls through to
++# all-None, which record_headroom() already treats as a no-op.
++_HEADROOM_REMAINING_TOKENS_HEADERS = ("x-ratelimit-remaining-tokens",)
++_HEADROOM_REMAINING_REQUESTS_HEADERS = ("x-ratelimit-remaining-requests",)
++# Reset can come back as a plain seconds figure ("60") or a duration
++# string ("1m0s", "30s") depending on provider -- Groq (and the OpenAI-
++# compatible providers) use the duration-string form.
++_HEADROOM_RESET_TOKENS_HEADERS = ("x-ratelimit-reset-tokens",)
++_HEADROOM_RESET_REQUESTS_HEADERS = ("x-ratelimit-reset-requests",)
++_RESET_DURATION_RE = re.compile(
++    r"(?:(?P<minutes>\d+(?:\.\d+)?)m)?(?:(?P<seconds>\d+(?:\.\d+)?)s)?$")
++
++
++def _parse_reset_seconds(raw: "str | None") -> "float | None":
++    """Best-effort parse of a reset header value into seconds. Accepts
++    a bare number ("60", "60.0") or Groq/OpenAI-style duration strings
++    ("1m0s", "30s", "2m"). Returns None (never raises) on anything that
++    doesn't match either shape -- can_proceed()'s caller-side fallback
++    (a flat 5.0s guess, see its own docstring) covers that case."""
++    if not raw:
++        return None
++    try:
++        return float(raw)
++    except ValueError:
++        pass
++    match = _RESET_DURATION_RE.match(raw.strip())
++    if not match or not (match.group("minutes") or match.group("seconds")):
++        return None
++    minutes = float(match.group("minutes") or 0)
++    seconds = float(match.group("seconds") or 0)
++    return minutes * 60 + seconds
++
++
++def _extract_headroom_from_headers(headers) -> "tuple[int|None, int|None, float|None]":
++    """Phase 3c -- parses whatever provider-reported rate-limit headers
++    are present into rate_ledger.record_headroom()'s
++    (remaining_tokens, remaining_requests, reset_seconds) shape.
++
++    Never raises: any missing/malformed header just falls through to
++    None for that field, same fail-open posture as everything else this
++    phase touches (see rate_ledger's own module docstring). `headers`
++    may be a requests CaseInsensitiveDict (cloudflare branch) or an
++    httpx-style Headers mapping (SDK branch, off raw_response.headers)
++    -- both support case-insensitive .get(), which is all this needs.
++    Picks the SMALLER of the tokens/requests reset windows when both are
++    present, since that's the soonest point *either* ceiling frees up,
++    and can_proceed() only needs one wait figure back out."""
++    try:
++        if not headers:
++            return None, None, None
++
++        def _int_header(names):
++            for name in names:
++                value = headers.get(name)
++                if value is not None:
++                    try:
++                        return int(float(value))
++                    except (TypeError, ValueError):
++                        return None
++            return None
++
++        remaining_tokens = _int_header(_HEADROOM_REMAINING_TOKENS_HEADERS)
++        remaining_requests = _int_header(_HEADROOM_REMAINING_REQUESTS_HEADERS)
++
++        reset_candidates = []
++        for names in (_HEADROOM_RESET_TOKENS_HEADERS, _HEADROOM_RESET_REQUESTS_HEADERS):
++            for name in names:
++                parsed = _parse_reset_seconds(headers.get(name))
++                if parsed is not None:
++                    reset_candidates.append(parsed)
++        reset_seconds = min(reset_candidates) if reset_candidates else None
++
++        return remaining_tokens, remaining_requests, reset_seconds
++    except Exception as parse_exc:
++        print(f"  [rate_ledger] header headroom parse failed (non-fatal): {parse_exc}")
++        return None, None, None
++
++
+ # Phase 3b -- hard ceiling on how long a single gated call will sleep
+ # before retrying, regardless of what rate_ledger.can_proceed() suggests.
+ # Bounds worst-case added latency from a single step's wait/reroute
+@@ -1581,7 +1715,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                     _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                                   agent_name, session_id, tier, path, domain)
+                     try:
+-                        text, usage, finish_reason = _call_cloudflare_step(
++                        text, usage, finish_reason, headroom_headers = _call_cloudflare_step(
+                             creds, model, system_prompt, prompt_for_step, json_mode=json_mode,
+                             max_tokens=_max_tokens_for(model, step))  # Root Cause A fix
+                     except BaseException:
+@@ -1590,6 +1724,25 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                         raise
+                     _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
+                     _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
++                    # Phase 3c -- post-call ledger bookkeeping. Both
++                    # signals get fed regardless of which one
++                    # can_proceed() ends up trusting on the next call:
++                    # record_headroom() with whatever this response's
++                    # headers carried (often nothing at all for
++                    # Cloudflare -- see _call_cloudflare_step()'s Phase
++                    # 3c docstring note, and record_headroom() itself
++                    # no-ops cleanly on an all-None reading), and
++                    # record_usage() with the real token count this call
++                    # actually cost, feeding the sliding-window fallback
++                    # that's the ONLY signal available whenever
++                    # provider-reported headroom is absent or stale.
++                    _remaining_tokens, _remaining_requests, _reset_seconds = \
++                        _extract_headroom_from_headers(headroom_headers)
++                    rate_ledger.record_headroom(provider, key_id, model,
++                                                 _remaining_tokens, _remaining_requests, _reset_seconds)
++                    _actual_tokens = _extract_total_tokens(usage)
++                    if _actual_tokens is not None:
++                        rate_ledger.record_usage(provider, key_id, model, _actual_tokens)
+                     full_text = accumulated_text + text
+                     if (finish_reason == "length" and allow_continuation
+                             and continuations_used < _MAX_CONTINUATIONS and not is_last):
+@@ -1706,7 +1859,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                 _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                               agent_name, session_id, tier, path, domain)
+                 try:
+-                    text, usage, finish_reason = _call_step(
++                    text, usage, finish_reason, headroom_headers = _call_step(
+                         client, model, system_prompt, prompt_for_step,
+                         max_tokens=_max_tokens_for(model, step))  # Root Cause A fix
+                 except BaseException:
+@@ -1715,6 +1868,22 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
+                     raise
+                 _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
+                 _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
++                # Phase 3c -- post-call ledger bookkeeping. See the
++                # matching comment on the cloudflare branch above; same
++                # two calls, just keyed on key_env (this branch's "org"
++                # unit) instead of key_id. groq/cerebras/mistral/gemini/
++                # huggingface are all confirmed to expose the standard
++                # x-ratelimit-* headers this module's SDKs surface via
++                # .with_raw_response (see _call_step()'s Phase 3c
++                # docstring note), so this branch is the one where
++                # record_headroom() actually has real data most calls.
++                _remaining_tokens, _remaining_requests, _reset_seconds = \
++                    _extract_headroom_from_headers(headroom_headers)
++                rate_ledger.record_headroom(provider, key_env, model,
++                                             _remaining_tokens, _remaining_requests, _reset_seconds)
++                _actual_tokens = _extract_total_tokens(usage)
++                if _actual_tokens is not None:
++                    rate_ledger.record_usage(provider, key_env, model, _actual_tokens)
+                 full_text = accumulated_text + text
+                 if (finish_reason == "length" and allow_continuation
+                         and continuations_used < _MAX_CONTINUATIONS and not is_last):
