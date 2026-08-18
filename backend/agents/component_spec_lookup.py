@@ -37,6 +37,7 @@ the corresponding lookup returns None rather than raising.
 import os
 import sys
 import time
+import unicodedata
 
 import requests
 from dotenv import load_dotenv
@@ -418,6 +419,30 @@ def _lookup_mouser_with_options(part_number: str, api_key: str, exact: bool) -> 
     return first_with_datasheet
 
 
+def _normalize_part_number(s: str) -> str:
+    """Bug 6 fix: fold Unicode dash variants an LLM-generated part
+    number can contain (most commonly U+2011 NON-BREAKING HYPHEN, also
+    U+2010 HYPHEN and U+2013 EN DASH) down to plain ASCII '-' before the
+    part number ever reaches DigiKey/Mouser. Neither vendor's search
+    matches across dash variants, so an unnormalized part number (e.g.
+    "R9\u2011MM") silently 404s exactly like a real not-found part,
+    with nothing in the response distinguishing the two cases.
+
+    NFKC normalization first so other compatibility-equivalent forms
+    (fullwidth digits/letters, etc.) are collapsed the same way, then
+    an explicit dash-variant fold since NFKC alone does not map
+    U+2011/U+2010/U+2013 to ASCII '-', then a final strip() for
+    incidental leading/trailing whitespace.
+    """
+    if not s:
+        return s
+
+    normalized = unicodedata.normalize("NFKC", s)
+    for dash in ("\u2011", "\u2013", "\u2010"):
+        normalized = normalized.replace(dash, "-")
+    return normalized.strip()
+
+
 def get_real_spec(part_number: str) -> dict | None:
     """Returns {"dimensions_mm": {"w","h","d"}, "datasheet_url", "source",
     "confidence"} for the given exact part_number, or None if neither
@@ -452,6 +477,8 @@ def get_real_spec(part_number: str) -> dict | None:
     """
     if not part_number:
         return None
+
+    part_number = _normalize_part_number(part_number)
 
     cached = get_cached_spec(part_number)
     if cached is not None:
