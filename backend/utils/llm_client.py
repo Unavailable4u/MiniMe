@@ -413,24 +413,6 @@ _REQUEST_TOO_LARGE_LIMIT_PATTERN = re.compile(
 DROPPABLE_CONTEXT_MARKER = "\n\n<<<DROPPABLE_CONTEXT>>>\n\n"
 
 
-def _is_request_too_large_error(exc) -> bool:
-    """Fix D (reliability guide, §3 "Fix D" -- request-too-large handoff):
-    True for a 413 "Request too large for model ... tokens per minute
-    (TPM)" error -- distinct from an ordinary 429 rate limit. A 429 means
-    "this account's per-minute budget is spent, wait and it resets";
-    retrying the identical prompt on the next chain step (or even the
-    same account a bit later) is the right move, which is exactly what
-    Fix B's cooldown already does. A 413 request-too-large means THIS
-    SINGLE REQUEST, by itself, exceeds the model's per-request/per-minute
-    ceiling -- no amount of waiting fixes that, and neither does handing
-    the exact same oversized prompt to the next provider (see
-    _shrink_prompt_for_retry() below)."""
-    status_code = _status_code_from_exc(exc)
-    if status_code == 413:
-        return True
-    return "request too large" in str(exc).lower()
-
-
 def _shrink_prompt_for_retry(user_content: str, exc) -> str:
     """Fix D (reliability guide, §3 "Fix D"): before this fix, a 413
     "request too large" was caught by the same _TRANSIENT_ERRORS branch
@@ -1335,9 +1317,10 @@ def _probe_usage_shape(provider: str, model: str, usage, agent_name: str) -> Non
 
 _MAX_REQUEST_TOO_LARGE_RETRIES = 2  # Fix D2: cap how many times a single
 # chain step will be retried in place after a 413 "request too large"
-# (see _is_request_too_large_error()/_shrink_prompt_for_retry()) before
-# generate_text() gives up on that step and moves on (or, if it's the
-# last step, raises). _shrink_prompt_for_retry() computes its cut from
+# (see classify_error()'s CONTEXT_LENGTH_EXCEEDED bucket / 3d, and
+# _shrink_prompt_for_retry() below) before generate_text() gives up on
+# that step and moves on (or, if it's the last step, raises).
+# _shrink_prompt_for_retry() computes its cut from
 # the provider's own stated Limit/Requested figures, so this should
 # converge within a single retry in the common case -- 2 is a safety
 # margin for a provider whose accounting isn't a 1:1 match for
@@ -1572,6 +1555,81 @@ def _decide_ledger_action(chain: list, index: int, current_wait: float,
     return "wait", min(min(candidate_waits), _LEDGER_WAIT_CAP_SECONDS)
 
 
+def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
+                  system_prompt: str, prompt_for_step: str, label: str,
+                  agent_name: str) -> str:
+    """3f-1 -- shared pre-flight ledger gate, extracted verbatim from the
+    duplicated cloudflare/SDK-shaped blocks in generate_text(). Reads
+    ledger state only (estimate -> can_proceed() -> _decide_ledger_action()),
+    sleeping in the "wait" case as a side effect, but never touches any
+    of generate_text()'s own loop-scoped state -- so unlike 3f-3/3f-4
+    this can return a plain sentinel with no state to hand back.
+
+    `key` is whichever identifier this call site uses to key the ledger
+    (key_id for cloudflare, key_env for the SDK-shaped branch) -- this
+    function is agnostic to which one it's given.
+
+    Returns one of:
+      "proceed"      -- headroom confirmed, caller should make the call.
+      "reroute"      -- caller should `break` out of this step's retry
+                         loop and fall through to the next chain step.
+      "waited-retry" -- caller already slept the decided duration and
+                         should `continue` to retry THIS step now.
+    """
+    _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
+    _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
+        provider, key, model, _estimated_tokens)
+    if _ledger_ok:
+        return "proceed"
+    _action, _wait_seconds = _decide_ledger_action(
+        chain, index, _ledger_wait, _estimated_tokens)
+    if _action == "reroute":
+        print(f"  [{agent_name}] {label} has no headroom for "
+              f"~{_estimated_tokens} estimated tokens -- a later chain "
+              f"step already has headroom, rerouting immediately "
+              f"instead of waiting.")
+        return "reroute"
+    print(f"  [{agent_name}] {label} has no headroom for "
+          f"~{_estimated_tokens} estimated tokens, and neither does "
+          f"anything else remaining in the chain -- sleeping "
+          f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
+          f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
+          f"in place.")
+    time.sleep(_wait_seconds)
+    return "waited-retry"
+
+
+def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_headers) -> None:
+    """3f-2 -- shared post-call ledger bookkeeping, extracted verbatim
+    from the duplicated cloudflare/SDK-shaped blocks in generate_text().
+    Called right after _log_usage() in both branches.
+
+    Both signals get fed regardless of which one can_proceed() ends up
+    trusting on the next call: record_headroom() with whatever this
+    response's headers carried (often nothing at all for Cloudflare --
+    see _call_cloudflare_step()'s Phase 3c docstring note, and
+    record_headroom() itself no-ops cleanly on an all-None reading), and
+    record_usage() with the real token count this call actually cost,
+    feeding the sliding-window fallback that's the ONLY signal available
+    whenever provider-reported headroom is absent or stale.
+
+    Purely side-effecting (rate_ledger.record_headroom()/record_usage()
+    calls on already-computed `usage`/`headroom_headers`) -- no control
+    flow, no loop-scoped state to hand back, unlike 3f-3/3f-4.
+
+    `key` is whichever identifier this call site uses to key the ledger
+    (key_id for cloudflare, key_env for the SDK-shaped branch) -- this
+    function is agnostic to which one it's given.
+    """
+    _remaining_tokens, _remaining_requests, _reset_seconds = \
+        _extract_headroom_from_headers(headroom_headers)
+    rate_ledger.record_headroom(provider, key, model,
+                                 _remaining_tokens, _remaining_requests, _reset_seconds)
+    _actual_tokens = _extract_total_tokens(usage)
+    if _actual_tokens is not None:
+        rate_ledger.record_usage(provider, key, model, _actual_tokens)
+
+
 def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
     """Fix C (reliability guide, §3 "Fix C", item 1 -- truncation
     handoff): builds the next step's prompt when the previous step's
@@ -1590,6 +1648,197 @@ def _continuation_prompt(original_user_content: str, partial_text: str) -> str:
         "add any preamble, header, or acknowledgement -- just continue "
         "the text seamlessly as if it were never interrupted."
     )
+
+
+def _handle_finish_reason(accumulated_text: str, full_text: str, finish_reason,
+                           allow_continuation: bool, continuations_used: int,
+                           is_last: bool, label: str, agent_name: str) -> "tuple[str, str, int]":
+    """3f-3 -- shared finish_reason/continuation handling, extracted
+    from the duplicated cloudflare/SDK-shaped blocks in generate_text():
+    the three `finish_reason == "length"` branches plus the final
+    `return full_text` for a complete (non-truncated) response.
+
+    Unlike 3f-1/3f-2, this mutates loop-scoped state (`accumulated_text`,
+    `continuations_used`) that lives in generate_text()'s own for-loop --
+    a nested helper can't reach into the caller's loop variables
+    directly, so instead of running side effects it takes the current
+    values in and hands back the (possibly updated) values for the
+    caller to reassign, plus a sentinel telling the caller what to do
+    next.
+
+    Returns (action, accumulated_text, continuations_used):
+      action == "return"    -- finish_reason wasn't "length": this step
+                                produced a complete answer. Caller
+                                should `return full_text` using its own
+                                already-computed full_text -- the
+                                accumulated_text/continuations_used
+                                values returned alongside are unchanged
+                                and unused in this case.
+      action == "next-step" -- caller should reassign its
+                                accumulated_text/continuations_used
+                                loop variables to the returned values
+                                and `break` out of this step's retry
+                                loop to fall through to the next chain
+                                step (or end-of-chain handling, if
+                                is_last).
+    """
+    if (finish_reason == "length" and allow_continuation
+            and continuations_used < _MAX_CONTINUATIONS and not is_last):
+        # Fix C: real partial output, hand it to the next step.
+        print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+              f"continuing on next chain step...")
+        return "next-step", full_text, continuations_used + 1
+    if finish_reason == "length" and not allow_continuation and not is_last:
+        # Caller opted out of continuation (e.g. single-shot JSON
+        # classifier) -- discard the partial text and retry the
+        # *original* prompt fresh on the next step instead of splicing
+        # a continuation onto it.
+        print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
+              f"continuation disabled for this call -- discarding partial "
+              f"output and retrying original prompt on next chain step...")
+        return "next-step", accumulated_text, continuations_used
+    if finish_reason == "length" and is_last:
+        # Root Cause C fix (2026-08-16 reliability audit): previously
+        # this case fell straight through to the unconditional `return
+        # full_text` below with NO log line and no flag on the return
+        # value -- a truncation that happened to land on the LAST chain
+        # step (nothing left to hand off to, regardless of
+        # allow_continuation) was silently shipped as if it were a
+        # normal, complete answer. Route it through the same
+        # accumulated_text path every other "ran out while truncated"
+        # case already uses, so it gets the same visible "chain
+        # exhausted while still truncated" log line at the bottom of
+        # this function instead of vanishing.
+        print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
+              f"on the LAST chain step -- no further step to hand off to.")
+        return "next-step", full_text, continuations_used
+    return "return", accumulated_text, continuations_used
+
+
+def _handle_transient_error(exc, provider: str, key, model: str, chain: list, index: int,
+                             is_last: bool, label: str, agent_name: str, system_prompt: str,
+                             prompt_for_step: str, user_content: str, accumulated_text: str,
+                             same_step_shrinks: int) -> "tuple[str, str, str, int]":
+    """3f-4 -- shared classify_error() exception dispatch, extracted
+    from the duplicated `except _TRANSIENT_ERRORS as exc:` bodies in
+    generate_text() (cloudflare/SDK-shaped branches), including the 3e
+    _set_cooldown()/_set_ledger_cooldown() call sites for whichever
+    bucket actually cools a key down.
+
+    This is the riskiest of the 3f extractions: the original code uses
+    `raise`, `continue`, and `break` to control the OUTER while/for loop
+    directly, which a nested helper can't do on the caller's behalf. So
+    instead of running that control flow itself, this returns a
+    sentinel that the caller's except-block translates back into the
+    real raise/continue/break, plus whatever loop-scoped state
+    (`user_content`, `accumulated_text`, `same_step_shrinks`) the
+    bucket's handling needs to update.
+
+    `key` is whichever identifier this call site uses to key the
+    ledger/cooldown (key_id for cloudflare, key_env for the SDK-shaped
+    branch) -- this function is agnostic to which one it's given.
+
+    Returns (action, user_content, accumulated_text, same_step_shrinks):
+      action == "raise"          -- caller should bare `raise` (re-raise
+                                     the exception currently being
+                                     handled) -- MALFORMED_REQUEST only;
+                                     a bare raise still works here since
+                                     the caller's except-block frame is
+                                     what's actually executing it, and
+                                     that frame's "currently handled
+                                     exception" context is unaffected by
+                                     this helper call returning normally.
+      action == "retry-in-place" -- caller should `continue` to retry
+                                     THIS step now (a shrink was just
+                                     applied, or a rate-limit wait
+                                     already ran inside this call).
+      action == "next-step"      -- caller should `break` to fall
+                                     through to the next chain step (or
+                                     off the end, if is_last).
+    """
+    _bucket = classify_error(exc)  # Phase 3d
+    if _bucket == ErrorBucket.CONTEXT_LENGTH_EXCEEDED:
+        # Unchanged Fix D/D2 shrink-and-retry-in-place logic -- a genuine
+        # per-request size ceiling is the one case where shrinking the
+        # prompt is the correct recovery.
+        if same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES:
+            shrunk = _shrink_prompt_for_retry(user_content, exc)
+            same_step_shrinks += 1
+            print(f"  [{agent_name}] {label} rejected the request as too "
+                  f"large ({exc.__class__.__name__}, CONTEXT_LENGTH_EXCEEDED) "
+                  f"-- shrinking prompt from {len(user_content)} to "
+                  f"{len(shrunk)} chars and retrying {label} in place "
+                  f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
+            # stale partial output no longer matches the shrunk prompt
+            return "retry-in-place", shrunk, "", same_step_shrinks
+        if not is_last:
+            print(f"  [{agent_name}] {label} still over context length "
+                  f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks, "
+                  f"falling back to next in chain...")
+        return "next-step", user_content, accumulated_text, same_step_shrinks
+    if _bucket == ErrorBucket.RATE_LIMIT_WINDOW:
+        # Phase 3d: an org-scoped, time-windowed quota problem is never a
+        # size problem -- never shrink the prompt here (see llm_errors.py's
+        # recovery table). Route back through 3b's reroute-vs-bounded-wait
+        # decision instead of the old blind "fall through to next step"
+        # dispatch. _retry_after_seconds(exc) (the provider's own
+        # Retry-After / "try again in Xs" signal for THIS failure) stands
+        # in for the pre-flight can_proceed() wait estimate 3b normally
+        # feeds _decide_ledger_action() with.
+        _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
+        _action, _wait_seconds = _decide_ledger_action(
+            chain, index, _retry_after_seconds(exc), _estimated_tokens)
+        if _action == "reroute":
+            print(f"  [{agent_name}] {label} hit a rate-limit window "
+                  f"({exc.__class__.__name__}) -- a later chain step "
+                  f"already has headroom, rerouting immediately instead "
+                  f"of waiting.")
+            return "next-step", user_content, accumulated_text, same_step_shrinks
+        # 3e: no headroom anywhere in the remaining chain -- this is the
+        # one RATE_LIMIT_WINDOW case that DOES cool this key down, using
+        # the ledger's own short wait figure rather than _set_cooldown()'s
+        # exception-derived duration.
+        _set_ledger_cooldown(provider, key, _wait_seconds)
+        print(f"  [{agent_name}] {label} hit a rate-limit window "
+              f"({exc.__class__.__name__}), and neither does anything "
+              f"else remaining in the chain -- sleeping "
+              f"{_wait_seconds:.1f}s before retrying {label} in place.")
+        time.sleep(_wait_seconds)
+        return "retry-in-place", user_content, accumulated_text, same_step_shrinks
+    if _bucket == ErrorBucket.MALFORMED_REQUEST:
+        # Our own payload is wrong. Never retry unchanged -- retrying
+        # (same step, next step, or after a wait) would just fail
+        # identically. Log loudly and surface it to the caller as the
+        # real bug it is.
+        print(f"  [{agent_name}] {label} rejected the request as "
+              f"malformed ({exc.__class__.__name__}) -- this is a bug "
+              f"in the request itself, not a transient failure. "
+              f"Not retrying; raising.")
+        return "raise", user_content, accumulated_text, same_step_shrinks
+    if _bucket == ErrorBucket.PERMANENT_AUTH:
+        # Bad/revoked key -- no amount of retrying helps. 3e: this is now
+        # the ONLY place in this branch that calls _set_cooldown() -- it
+        # applies the long (6h) cooldown for a 401/403 (see
+        # _retry_after_seconds()'s _PERMANENT_ERROR_STATUS_CODES check)
+        # right where the decision to pull this key from rotation is
+        # made, instead of unconditionally at the top of the except
+        # block regardless of bucket.
+        _set_cooldown(provider, key, exc)
+        if not is_last:
+            print(f"  [{agent_name}] {label} failed with a permanent "
+                  f"auth error ({exc.__class__.__name__}) -- pulling it "
+                  f"from rotation for this chain and falling back to "
+                  f"next in chain...")
+        return "next-step", user_content, accumulated_text, same_step_shrinks
+    # ErrorBucket.TRANSIENT_NETWORK -- timeout/5xx/connection reset. 3e:
+    # no longer cooled down here -- a single network blip doesn't mean
+    # this account/key is bad, so standard backoff is just "move to the
+    # next chain step now, this step gets tried again on its own merits
+    # next time it comes up" rather than an explicit cooldown.
+    if not is_last:
+        print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}, "
+              f"TRANSIENT_NETWORK), falling back to next in chain...")
+    return "next-step", user_content, accumulated_text, same_step_shrinks
 
 
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
@@ -1728,31 +1977,15 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                     _continuation_prompt(user_content, accumulated_text)
                     if accumulated_text else user_content
                 )
-                # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3b: on a
-                # "no headroom" read, don't send -- either reroute to a
-                # later chain step that already has headroom (cheap, no
-                # wait), or sleep on whichever step resets soonest and
-                # retry in place. See _decide_ledger_action()'s docstring
-                # for exactly how that choice is made.
-                _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
-                _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
-                    provider, key_id, model, _estimated_tokens)
-                if not _ledger_ok:
-                    _action, _wait_seconds = _decide_ledger_action(
-                        chain, i, _ledger_wait, _estimated_tokens)
-                    if _action == "reroute":
-                        print(f"  [{agent_name}] {label} has no headroom for "
-                              f"~{_estimated_tokens} estimated tokens -- a later chain "
-                              f"step already has headroom, rerouting immediately "
-                              f"instead of waiting.")
-                        break  # skip this step, fall through to the next chain step
-                    print(f"  [{agent_name}] {label} has no headroom for "
-                          f"~{_estimated_tokens} estimated tokens, and neither does "
-                          f"anything else remaining in the chain -- sleeping "
-                          f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
-                          f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
-                          f"in place.")
-                    time.sleep(_wait_seconds)
+                # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3f-1:
+                # extracted into _ledger_gate(), shared with the
+                # SDK-shaped branch below. See that function's docstring
+                # for exactly how the reroute-vs-wait choice is made.
+                _gate = _ledger_gate(chain, i, provider, key_id, model,
+                                      system_prompt, prompt_for_step, label, agent_name)
+                if _gate == "reroute":
+                    break  # skip this step, fall through to the next chain step
+                if _gate == "waited-retry":
                     continue  # retry the SAME step now that we've waited
                 try:
                     # D1 patch 2 -- tracing wraps the real network call. See
@@ -1771,152 +2004,40 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                         raise
                     _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
                     _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-                    # Phase 3c -- post-call ledger bookkeeping. Both
-                    # signals get fed regardless of which one
-                    # can_proceed() ends up trusting on the next call:
-                    # record_headroom() with whatever this response's
-                    # headers carried (often nothing at all for
-                    # Cloudflare -- see _call_cloudflare_step()'s Phase
-                    # 3c docstring note, and record_headroom() itself
-                    # no-ops cleanly on an all-None reading), and
-                    # record_usage() with the real token count this call
-                    # actually cost, feeding the sliding-window fallback
-                    # that's the ONLY signal available whenever
-                    # provider-reported headroom is absent or stale.
-                    _remaining_tokens, _remaining_requests, _reset_seconds = \
-                        _extract_headroom_from_headers(headroom_headers)
-                    rate_ledger.record_headroom(provider, key_id, model,
-                                                 _remaining_tokens, _remaining_requests, _reset_seconds)
-                    _actual_tokens = _extract_total_tokens(usage)
-                    if _actual_tokens is not None:
-                        rate_ledger.record_usage(provider, key_id, model, _actual_tokens)
+                    # Phase 3c -- post-call ledger bookkeeping. 3f-2:
+                    # extracted into _record_ledger_bookkeeping(), shared
+                    # with the SDK-shaped branch below. See that
+                    # function's docstring for what each signal feeds.
+                    _record_ledger_bookkeeping(provider, key_id, model, usage, headroom_headers)
                     full_text = accumulated_text + text
-                    if (finish_reason == "length" and allow_continuation
-                            and continuations_used < _MAX_CONTINUATIONS and not is_last):
-                        # Fix C: real partial output, hand it to the next step.
-                        accumulated_text = full_text
-                        continuations_used += 1
-                        print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                              f"continuing on next chain step...")
-                        break  # move on to next chain step
-                    if finish_reason == "length" and not allow_continuation and not is_last:
-                        # Caller opted out of continuation (e.g. single-shot
-                        # JSON classifier) -- discard the partial text and
-                        # retry the *original* prompt fresh on the next step
-                        # instead of splicing a continuation onto it.
-                        print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                              f"continuation disabled for this call -- discarding partial "
-                              f"output and retrying original prompt on next chain step...")
-                        break  # move on to next chain step
-                    if finish_reason == "length" and is_last:
-                        # Root Cause C fix (2026-08-16 reliability audit):
-                        # previously this case fell straight through to the
-                        # unconditional `return full_text` below with NO log
-                        # line and no flag on the return value -- a
-                        # truncation that happened to land on the LAST chain
-                        # step (nothing left to hand off to, regardless of
-                        # allow_continuation) was silently shipped as if it
-                        # were a normal, complete answer. Route it through
-                        # the same accumulated_text path every other
-                        # "ran out while truncated" case already uses, so it
-                        # gets the same visible "chain exhausted while still
-                        # truncated" log line at the bottom of this function
-                        # instead of vanishing.
-                        accumulated_text = full_text
-                        print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
-                              f"on the LAST chain step -- no further step to hand off to.")
-                        break  # fall through to the end-of-chain truncated-output handling
+                    # Fix C -- truncation/continuation handling. 3f-3:
+                    # extracted into _handle_finish_reason(), shared with
+                    # the SDK-shaped branch below. See that function's
+                    # docstring for the action/state-passing contract.
+                    _action, accumulated_text, continuations_used = _handle_finish_reason(
+                        accumulated_text, full_text, finish_reason, allow_continuation,
+                        continuations_used, is_last, label, agent_name)
+                    if _action == "next-step":
+                        break  # move on to next chain step (or fall through to
+                        # end-of-chain truncated-output handling, if is_last)
                     return full_text
                 except _TRANSIENT_ERRORS as exc:
                     last_exc = exc
-                    _bucket = classify_error(exc)          # Phase 3d
-                    if _bucket == ErrorBucket.CONTEXT_LENGTH_EXCEEDED:
-                        # Unchanged Fix D/D2 shrink-and-retry-in-place logic --
-                        # a genuine per-request size ceiling is the one case
-                        # where shrinking the prompt is the correct recovery.
-                        if same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES:
-                            shrunk = _shrink_prompt_for_retry(user_content, exc)
-                            same_step_shrinks += 1
-                            print(f"  [{agent_name}] {label} rejected the request as too "
-                                  f"large ({exc.__class__.__name__}, CONTEXT_LENGTH_EXCEEDED) "
-                                  f"-- shrinking prompt from {len(user_content)} to "
-                                  f"{len(shrunk)} chars and retrying {label} in place "
-                                  f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
-                            user_content = shrunk
-                            accumulated_text = ""  # stale partial output no longer matches the shrunk prompt
-                            continue  # retry the SAME step, now with a smaller prompt
-                        if not is_last:
-                            print(f"  [{agent_name}] {label} still over context length "
-                                  f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks, "
-                                  f"falling back to next in chain...")
-                        break  # move on to next chain step (or fall off the end, if is_last)
-                    if _bucket == ErrorBucket.RATE_LIMIT_WINDOW:
-                        # Phase 3d: an org-scoped, time-windowed quota problem
-                        # is never a size problem -- never shrink the prompt
-                        # here (see llm_errors.py's recovery table). Route
-                        # back through 3b's reroute-vs-bounded-wait decision
-                        # instead of the old blind "fall through to next
-                        # step" dispatch. _retry_after_seconds(exc) (the
-                        # provider's own Retry-After / "try again in Xs"
-                        # signal for THIS failure) stands in for the
-                        # pre-flight can_proceed() wait estimate 3b normally
-                        # feeds _decide_ledger_action() with.
-                        _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
-                        _action, _wait_seconds = _decide_ledger_action(
-                            chain, i, _retry_after_seconds(exc), _estimated_tokens)
-                        if _action == "reroute":
-                            print(f"  [{agent_name}] {label} hit a rate-limit window "
-                                  f"({exc.__class__.__name__}) -- a later chain step "
-                                  f"already has headroom, rerouting immediately instead "
-                                  f"of waiting.")
-                            break  # skip this step, fall through to the next chain step
-                        # 3e: no headroom anywhere in the remaining chain --
-                        # this is the one RATE_LIMIT_WINDOW case that DOES
-                        # cool this key down, using the ledger's own short
-                        # wait figure rather than _set_cooldown()'s
-                        # exception-derived duration.
-                        _set_ledger_cooldown(provider, key_id, _wait_seconds)
-                        print(f"  [{agent_name}] {label} hit a rate-limit window "
-                              f"({exc.__class__.__name__}), and neither does anything "
-                              f"else remaining in the chain -- sleeping "
-                              f"{_wait_seconds:.1f}s before retrying {label} in place.")
-                        time.sleep(_wait_seconds)
-                        continue  # retry the SAME step now that we've waited
-                    if _bucket == ErrorBucket.MALFORMED_REQUEST:
-                        # Our own payload is wrong. Never retry unchanged --
-                        # retrying (same step, next step, or after a wait)
-                        # would just fail identically. Log loudly and
-                        # surface it to the caller as the real bug it is.
-                        print(f"  [{agent_name}] {label} rejected the request as "
-                              f"malformed ({exc.__class__.__name__}) -- this is a bug "
-                              f"in the request itself, not a transient failure. "
-                              f"Not retrying; raising.")
+                    # Phase 3d/3e -- classify_error() dispatch. 3f-4:
+                    # extracted into _handle_transient_error(), shared
+                    # with the SDK-shaped branch below. See that
+                    # function's docstring for the action/state-passing
+                    # contract (it can't `raise`/`continue`/`break` this
+                    # loop directly, so it hands back a sentinel instead).
+                    _action, user_content, accumulated_text, same_step_shrinks = \
+                        _handle_transient_error(
+                            exc, provider, key_id, model, chain, i, is_last, label,
+                            agent_name, system_prompt, prompt_for_step, user_content,
+                            accumulated_text, same_step_shrinks)
+                    if _action == "raise":
                         raise
-                    if _bucket == ErrorBucket.PERMANENT_AUTH:
-                        # Bad/revoked key -- no amount of retrying helps.
-                        # 3e: this is now the ONLY place in this branch that
-                        # calls _set_cooldown() -- it applies the long (6h)
-                        # cooldown for a 401/403 (see _retry_after_seconds()'s
-                        # _PERMANENT_ERROR_STATUS_CODES check) right where the
-                        # decision to pull this key from rotation is made,
-                        # instead of unconditionally at the top of the except
-                        # block regardless of bucket.
-                        _set_cooldown(provider, key_id, exc)
-                        if not is_last:
-                            print(f"  [{agent_name}] {label} failed with a permanent "
-                                  f"auth error ({exc.__class__.__name__}) -- pulling it "
-                                  f"from rotation for this chain and falling back to "
-                                  f"next in chain...")
-                        break  # move on to next chain step (or fall off the end, if is_last)
-                    # ErrorBucket.TRANSIENT_NETWORK -- timeout/5xx/connection
-                    # reset. 3e: no longer cooled down here -- a single
-                    # network blip doesn't mean this account/key is bad, so
-                    # standard backoff is just "move to the next chain step
-                    # now, this step gets tried again on its own merits next
-                    # time it comes up" rather than an explicit cooldown.
-                    if not is_last:
-                        print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}, "
-                              f"TRANSIENT_NETWORK), falling back to next in chain...")
+                    if _action == "retry-in-place":
+                        continue  # retry the SAME step now
                     break  # move on to next chain step (or fall off the end, if is_last)
             continue
 
@@ -1946,31 +2067,15 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                 _continuation_prompt(user_content, accumulated_text)
                 if accumulated_text else user_content
             )
-            # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3b: on a "no
-            # headroom" read, don't send -- either reroute to a later
-            # chain step that already has headroom (cheap, no wait), or
-            # sleep on whichever step resets soonest and retry in place.
-            # See _decide_ledger_action()'s docstring for exactly how
-            # that choice is made.
-            _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
-            _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
-                provider, key_env, model, _estimated_tokens)
-            if not _ledger_ok:
-                _action, _wait_seconds = _decide_ledger_action(
-                    chain, i, _ledger_wait, _estimated_tokens)
-                if _action == "reroute":
-                    print(f"  [{agent_name}] {label} has no headroom for "
-                          f"~{_estimated_tokens} estimated tokens -- a later chain "
-                          f"step already has headroom, rerouting immediately "
-                          f"instead of waiting.")
-                    break  # skip this step, fall through to the next chain step
-                print(f"  [{agent_name}] {label} has no headroom for "
-                      f"~{_estimated_tokens} estimated tokens, and neither does "
-                      f"anything else remaining in the chain -- sleeping "
-                      f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
-                      f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
-                      f"in place.")
-                time.sleep(_wait_seconds)
+            # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3f-1:
+            # extracted into _ledger_gate(), shared with the cloudflare
+            # branch above. See that function's docstring for exactly how
+            # the reroute-vs-wait choice is made.
+            _gate = _ledger_gate(chain, i, provider, key_env, model,
+                                  system_prompt, prompt_for_step, label, agent_name)
+            if _gate == "reroute":
+                break  # skip this step, fall through to the next chain step
+            if _gate == "waited-retry":
                 continue  # retry the SAME step now that we've waited
             try:
                 # D1 patch 2 -- same traced-call pattern as the cloudflare
@@ -1987,146 +2092,45 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                     raise
                 _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
                 _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-                # Phase 3c -- post-call ledger bookkeeping. See the
-                # matching comment on the cloudflare branch above; same
-                # two calls, just keyed on key_env (this branch's "org"
-                # unit) instead of key_id. groq/cerebras/mistral/gemini/
-                # huggingface are all confirmed to expose the standard
-                # x-ratelimit-* headers this module's SDKs surface via
-                # .with_raw_response (see _call_step()'s Phase 3c
-                # docstring note), so this branch is the one where
-                # record_headroom() actually has real data most calls.
-                _remaining_tokens, _remaining_requests, _reset_seconds = \
-                    _extract_headroom_from_headers(headroom_headers)
-                rate_ledger.record_headroom(provider, key_env, model,
-                                             _remaining_tokens, _remaining_requests, _reset_seconds)
-                _actual_tokens = _extract_total_tokens(usage)
-                if _actual_tokens is not None:
-                    rate_ledger.record_usage(provider, key_env, model, _actual_tokens)
+                # Phase 3c -- post-call ledger bookkeeping. 3f-2:
+                # extracted into _record_ledger_bookkeeping(), shared
+                # with the cloudflare branch above. groq/cerebras/
+                # mistral/gemini/huggingface are all confirmed to expose
+                # the standard x-ratelimit-* headers this module's SDKs
+                # surface via .with_raw_response (see _call_step()'s
+                # Phase 3c docstring note), so this branch is the one
+                # where record_headroom() actually has real data most
+                # calls.
+                _record_ledger_bookkeeping(provider, key_env, model, usage, headroom_headers)
                 full_text = accumulated_text + text
-                if (finish_reason == "length" and allow_continuation
-                        and continuations_used < _MAX_CONTINUATIONS and not is_last):
-                    # Fix C: real partial output, hand it to the next step
-                    # instead of returning a silently-truncated answer or
-                    # discarding it on a later failure.
-                    accumulated_text = full_text
-                    continuations_used += 1
-                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                          f"continuing on next chain step...")
-                    break  # move on to next chain step
-                if finish_reason == "length" and not allow_continuation and not is_last:
-                    # Caller opted out of continuation (e.g. single-shot JSON
-                    # classifier) -- discard the partial text and retry the
-                    # *original* prompt fresh on the next step instead of
-                    # splicing a continuation onto it.
-                    print(f"  [{agent_name}] {label} truncated (finish_reason=length), "
-                          f"continuation disabled for this call -- discarding partial "
-                          f"output and retrying original prompt on next chain step...")
-                    break  # move on to next chain step
-                if finish_reason == "length" and is_last:
-                    # Root Cause C fix (2026-08-16 reliability audit): see
-                    # the matching comment on the cloudflare branch above --
-                    # previously this case fell straight through to the
-                    # unconditional `return full_text` below with NO log
-                    # line and no flag on the return value, silently
-                    # shipping a cut-off answer as if it were complete.
-                    # Route it through the same accumulated_text path every
-                    # other "ran out while truncated" case already uses.
-                    accumulated_text = full_text
-                    print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
-                          f"on the LAST chain step -- no further step to hand off to.")
-                    break  # fall through to the end-of-chain truncated-output handling
+                # Fix C -- truncation/continuation handling. 3f-3:
+                # extracted into _handle_finish_reason(), shared with the
+                # cloudflare branch above. See that function's docstring
+                # for the action/state-passing contract.
+                _action, accumulated_text, continuations_used = _handle_finish_reason(
+                    accumulated_text, full_text, finish_reason, allow_continuation,
+                    continuations_used, is_last, label, agent_name)
+                if _action == "next-step":
+                    break  # move on to next chain step (or fall through to
+                    # end-of-chain truncated-output handling, if is_last)
                 return full_text
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
-                _bucket = classify_error(exc)           # Phase 3d
-                if _bucket == ErrorBucket.CONTEXT_LENGTH_EXCEEDED:
-                    # Unchanged Fix D/D2 shrink-and-retry-in-place logic --
-                    # a genuine per-request size ceiling is the one case
-                    # where shrinking the prompt is the correct recovery.
-                    if same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES:
-                        shrunk = _shrink_prompt_for_retry(user_content, exc)
-                        same_step_shrinks += 1
-                        print(f"  [{agent_name}] {label} rejected the request as too "
-                              f"large ({exc.__class__.__name__}, CONTEXT_LENGTH_EXCEEDED) "
-                              f"-- shrinking prompt from {len(user_content)} to "
-                              f"{len(shrunk)} chars and retrying {label} in place "
-                              f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
-                        user_content = shrunk
-                        accumulated_text = ""  # stale partial output no longer matches the shrunk prompt
-                        continue  # retry the SAME step, now with a smaller prompt
-                    if not is_last:
-                        print(f"  [{agent_name}] {label} still over context length "
-                              f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks, "
-                              f"falling back to next in chain...")
-                    break  # move on to next chain step (or fall off the end, if is_last)
-                if _bucket == ErrorBucket.RATE_LIMIT_WINDOW:
-                    # Phase 3d: an org-scoped, time-windowed quota problem
-                    # is never a size problem -- never shrink the prompt
-                    # here (see llm_errors.py's recovery table). Route back
-                    # through 3b's reroute-vs-bounded-wait decision instead
-                    # of the old blind "fall through to next step" dispatch.
-                    # _retry_after_seconds(exc) (the provider's own
-                    # Retry-After / "try again in Xs" signal for THIS
-                    # failure) stands in for the pre-flight can_proceed()
-                    # wait estimate 3b normally feeds _decide_ledger_action()
-                    # with.
-                    _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
-                    _action, _wait_seconds = _decide_ledger_action(
-                        chain, i, _retry_after_seconds(exc), _estimated_tokens)
-                    if _action == "reroute":
-                        print(f"  [{agent_name}] {label} hit a rate-limit window "
-                              f"({exc.__class__.__name__}) -- a later chain step "
-                              f"already has headroom, rerouting immediately instead "
-                              f"of waiting.")
-                        break  # skip this step, fall through to the next chain step
-                    # 3e: no headroom anywhere in the remaining chain --
-                    # this is the one RATE_LIMIT_WINDOW case that DOES cool
-                    # this key down, using the ledger's own short wait
-                    # figure rather than _set_cooldown()'s exception-derived
-                    # duration.
-                    _set_ledger_cooldown(provider, key_env, _wait_seconds)
-                    print(f"  [{agent_name}] {label} hit a rate-limit window "
-                          f"({exc.__class__.__name__}), and neither does anything "
-                          f"else remaining in the chain -- sleeping "
-                          f"{_wait_seconds:.1f}s before retrying {label} in place.")
-                    time.sleep(_wait_seconds)
-                    continue  # retry the SAME step now that we've waited
-                if _bucket == ErrorBucket.MALFORMED_REQUEST:
-                    # Our own payload is wrong. Never retry unchanged --
-                    # retrying (same step, next step, or after a wait) would
-                    # just fail identically. Log loudly and surface it to
-                    # the caller as the real bug it is.
-                    print(f"  [{agent_name}] {label} rejected the request as "
-                          f"malformed ({exc.__class__.__name__}) -- this is a bug "
-                          f"in the request itself, not a transient failure. "
-                          f"Not retrying; raising.")
+                # Phase 3d/3e -- classify_error() dispatch. 3f-4:
+                # extracted into _handle_transient_error(), shared with
+                # the cloudflare branch above. See that function's
+                # docstring for the action/state-passing contract (it
+                # can't `raise`/`continue`/`break` this loop directly,
+                # so it hands back a sentinel instead).
+                _action, user_content, accumulated_text, same_step_shrinks = \
+                    _handle_transient_error(
+                        exc, provider, key_env, model, chain, i, is_last, label,
+                        agent_name, system_prompt, prompt_for_step, user_content,
+                        accumulated_text, same_step_shrinks)
+                if _action == "raise":
                     raise
-                if _bucket == ErrorBucket.PERMANENT_AUTH:
-                    # Bad/revoked key -- no amount of retrying helps.
-                    # 3e: this is now the ONLY place in this branch that
-                    # calls _set_cooldown() -- it applies the long (6h)
-                    # cooldown for a 401/403 (see _retry_after_seconds()'s
-                    # _PERMANENT_ERROR_STATUS_CODES check) right where the
-                    # decision to pull this key from rotation is made,
-                    # instead of unconditionally at the top of the except
-                    # block regardless of bucket.
-                    _set_cooldown(provider, key_env, exc)
-                    if not is_last:
-                        print(f"  [{agent_name}] {label} failed with a permanent "
-                              f"auth error ({exc.__class__.__name__}) -- pulling it "
-                              f"from rotation for this chain and falling back to "
-                              f"next in chain...")
-                    break  # move on to next chain step (or fall off the end, if is_last)
-                # ErrorBucket.TRANSIENT_NETWORK -- timeout/5xx/connection
-                # reset. 3e: no longer cooled down here -- a single network
-                # blip doesn't mean this account/key is bad, so standard
-                # backoff is just "move to the next chain step now, this
-                # step gets tried again on its own merits next time it
-                # comes up" rather than an explicit cooldown.
-                if not is_last:
-                    print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}, "
-                          f"TRANSIENT_NETWORK), falling back to next in chain...")
+                if _action == "retry-in-place":
+                    continue  # retry the SAME step now
                 break  # move on to next chain step (or fall off the end, if is_last)
 
     if accumulated_text:
