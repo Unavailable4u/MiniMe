@@ -1,0 +1,317 @@
+diff --git a/backend/tests/unit/test_eo_project_registry.py b/backend/tests/unit/test_eo_project_registry.py
+new file mode 100644
+index 0000000..c678474
+--- /dev/null
++++ b/backend/tests/unit/test_eo_project_registry.py
+@@ -0,0 +1,166 @@
++"""
++tests/unit/test_eo_project_registry.py — Patch 7e-2.
++
++eo/project_registry.py had zero test coverage before this. Every
++file operation against an external project is required to route
++through resolve_project_root() first (see that function's own
++docstring pointing at agents/file_manager.py's _confine_to_root()) --
++a bug in the registry lookup/merge logic here is a real path-safety
++issue, not just a bookkeeping inconvenience: it's one of the checks
++standing between a tier-2 task and writing outside the project root
++it was actually authorized for.
++
++Isolation: same bound-name gotcha as the other cache modules --
++project_registry.py does `from memory.bus import write, read`, so
++tests patch `read`/`write` on the project_registry module object, not
++on memory.bus. register_project() additionally does real filesystem
++I/O (writes CONTROL_UNIT_FILENAME into the target root) -- tests use
++pytest's tmp_path fixture for that, never a real project directory.
++"""
++import json
++import os
++
++import eo.project_registry as project_registry
++
++
++# ---------------------------------------------------------------------
++# _slugify
++# ---------------------------------------------------------------------
++
++def test_slugify_lowercases_and_replaces_non_alnum_with_underscore():
++    assert project_registry._slugify("My Cool Project!!") == "my_cool_project"
++
++
++def test_slugify_strips_leading_and_trailing_underscores():
++    assert project_registry._slugify("  --weird-- ") == "weird"
++
++
++def test_slugify_truncates_to_30_chars():
++    long_name = "a" * 50
++    result = project_registry._slugify(long_name)
++    assert len(result) == 30
++    assert result == "a" * 30
++
++
++# ---------------------------------------------------------------------
++# generate_control_unit
++# ---------------------------------------------------------------------
++
++def test_generate_control_unit_preserves_display_name_verbatim():
++    result = project_registry.generate_control_unit("My Robot Arm")
++    assert result["display_name"] == "My Robot Arm"
++
++
++def test_generate_control_unit_unique_name_is_slug_plus_6_hex_suffix():
++    result = project_registry.generate_control_unit("My Robot Arm")
++    slug, _, suffix = result["unique_name"].rpartition("_")
++    assert slug == "my_robot_arm"
++    assert len(suffix) == 6
++    int(suffix, 16)  # must be valid hex, raises ValueError otherwise
++
++
++def test_generate_control_unit_produces_different_unique_names_each_call():
++    """Two control units for the same display_name must not collide --
++    that's the entire reason for the uuid suffix."""
++    first = project_registry.generate_control_unit("My Robot Arm")
++    second = project_registry.generate_control_unit("My Robot Arm")
++    assert first["unique_name"] != second["unique_name"]
++
++
++# ---------------------------------------------------------------------
++# register_project
++# ---------------------------------------------------------------------
++
++def test_register_project_writes_marker_file_with_unique_name(tmp_path, monkeypatch):
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: default)
++    monkeypatch.setattr(project_registry, "write", lambda key, value: None)
++
++    project_registry.register_project("robot_arm_ab12cd", str(tmp_path))
++
++    marker_path = tmp_path / project_registry.CONTROL_UNIT_FILENAME
++    assert marker_path.exists()
++    assert json.loads(marker_path.read_text()) == {"unique_name": "robot_arm_ab12cd"}
++
++
++def test_register_project_stores_abspath_not_the_raw_input_path(tmp_path, monkeypatch):
++    seen = {}
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: {})
++    monkeypatch.setattr(project_registry, "write",
++                         lambda key, value: seen.update({"key": key, "value": value}))
++
++    relative_style = str(tmp_path) + os.sep + "." + os.sep
++    project_registry.register_project("robot_arm_ab12cd", relative_style)
++
++    assert seen["value"]["robot_arm_ab12cd"]["root_path"] == os.path.abspath(relative_style)
++
++
++def test_register_project_merges_into_existing_registry_without_dropping_others(tmp_path, monkeypatch):
++    """A second registration must not wipe out an unrelated project
++    already sitting in the shared, non-namespaced registry key."""
++    existing = {"other_project_xy9988": {"root_path": "/some/other/path"}}
++    seen = {}
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: existing)
++    monkeypatch.setattr(project_registry, "write",
++                         lambda key, value: seen.update({"key": key, "value": value}))
++
++    project_registry.register_project("robot_arm_ab12cd", str(tmp_path))
++
++    assert seen["key"] == "project_registry"
++    assert "other_project_xy9988" in seen["value"]
++    assert seen["value"]["other_project_xy9988"] == {"root_path": "/some/other/path"}
++    assert seen["value"]["robot_arm_ab12cd"]["root_path"] == os.path.abspath(str(tmp_path))
++
++
++# ---------------------------------------------------------------------
++# resolve_project_root
++# ---------------------------------------------------------------------
++
++def test_resolve_project_root_returns_root_path_for_known_unit(monkeypatch):
++    registry = {"robot_arm_ab12cd": {"root_path": "/home/user/robot-arm"}}
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: registry)
++
++    assert project_registry.resolve_project_root("robot_arm_ab12cd") == "/home/user/robot-arm"
++
++
++def test_resolve_project_root_raises_value_error_for_unknown_unit(monkeypatch):
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: {})
++    try:
++        project_registry.resolve_project_root("nonexistent_unit")
++        assert False, "expected ValueError"
++    except ValueError as exc:
++        assert "nonexistent_unit" in str(exc)
++
++
++def test_resolve_project_root_raises_when_registry_is_empty_default(monkeypatch):
++    """No stored registry at all (fresh install) must raise the same
++    ValueError as an unknown unit against a populated registry, not a
++    different error from indexing an empty dict."""
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: default)
++    try:
++        project_registry.resolve_project_root("anything")
++        assert False, "expected ValueError"
++    except ValueError:
++        pass
++
++
++# ---------------------------------------------------------------------
++# list_projects
++# ---------------------------------------------------------------------
++
++def test_list_projects_returns_empty_list_when_registry_is_empty(monkeypatch):
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: default)
++    assert project_registry.list_projects() == []
++
++
++def test_list_projects_flattens_unique_name_into_each_entry(monkeypatch):
++    registry = {
++        "robot_arm_ab12cd": {"root_path": "/home/user/robot-arm"},
++        "greenhouse_ef34gh": {"root_path": "/home/user/greenhouse"},
++    }
++    monkeypatch.setattr(project_registry, "read", lambda key, default=None: registry)
++
++    result = project_registry.list_projects()
++
++    assert {"unique_name": "robot_arm_ab12cd", "root_path": "/home/user/robot-arm"} in result
++    assert {"unique_name": "greenhouse_ef34gh", "root_path": "/home/user/greenhouse"} in result
++    assert len(result) == 2
+diff --git a/backend/tests/unit/test_eo_research_cache.py b/backend/tests/unit/test_eo_research_cache.py
+new file mode 100644
+index 0000000..d8fb07c
+--- /dev/null
++++ b/backend/tests/unit/test_eo_research_cache.py
+@@ -0,0 +1,139 @@
++"""
++tests/unit/test_eo_research_cache.py — Patch 7e-2.
++
++eo/research_cache.py had zero test coverage before this. Its whole
++reason to exist is the per-scope TTL table (a "reddit search for X"
++and a "news search for X" must cache independently and expire at very
++different rates) -- these tests pin the TTL-by-scope lookup, the
++DEFAULT_TTL fallback for an unlisted scope, and the scope-qualified
++key shape, which is the part most likely to silently rot as new scopes
++get added (per the module's own TTL_BY_SCOPE comment).
++
++Isolation: research_cache.py does `from memory.bus import read, write,
++slugify` (bound names in its own namespace) -- tests patch `read`/
++`write` on the research_cache module object, same gotcha as every
++other cache module in this batch. `slugify` is left un-mocked and
++exercised for real (it's pure, deterministic, and already covered
++directly in tests/unit/test_memory_bus.py), so a query-slug assertion
++below matches what memory.bus.slugify() actually produces rather than
++a hand-picked stand-in.
++
++Unlike price_cache.py/spec_cache.py, this module relies on write()'s
++native `ex` (TTL) param instead of hand-rolling its own `_cached_at`
++staleness check (see the module's own docstring for why) -- so there's
++no separate "read confirms it's expired" test here the way the other
++cache modules have one; the ONLY behavior worth pinning on the read
++side is that get_cached_research() passes the key straight through
++to read(), which the "looks up by scope-qualified key" test below
++covers directly.
++"""
++import eo.research_cache as research_cache
++
++
++# ---------------------------------------------------------------------
++# _key
++# ---------------------------------------------------------------------
++
++def test_key_includes_scope_and_slugified_query():
++    assert research_cache._key("news", "Fed rate decision") == \
++        "research_cache:news:fed_rate_decision"
++
++
++def test_key_differs_by_scope_for_the_same_query():
++    """Same query text under two different scopes must produce two
++    distinct keys -- the entire point of keying `scope:query_slug`
++    instead of just `query_slug`."""
++    news_key = research_cache._key("news", "ESP32 pinout")
++    forum_key = research_cache._key("forum", "ESP32 pinout")
++    assert news_key != forum_key
++
++
++# ---------------------------------------------------------------------
++# get_cached_research
++# ---------------------------------------------------------------------
++
++def test_get_cached_research_returns_none_on_a_miss(monkeypatch):
++    monkeypatch.setattr(research_cache, "read", lambda key, default=None: default)
++    assert research_cache.get_cached_research("news", "some query") is None
++
++
++def test_get_cached_research_returns_the_stored_result_on_a_hit(monkeypatch):
++    stored = {"results": [{"title": "Fed holds rates steady"}]}
++    monkeypatch.setattr(research_cache, "read", lambda key, default=None: stored)
++    assert research_cache.get_cached_research("news", "fed rates") == stored
++
++
++def test_get_cached_research_looks_up_by_the_scope_qualified_key(monkeypatch):
++    seen = {}
++
++    def fake_read(key, default=None):
++        seen["key"] = key
++        return default
++
++    monkeypatch.setattr(research_cache, "read", fake_read)
++    research_cache.get_cached_research("academic", "graphene synthesis")
++
++    assert seen["key"] == research_cache._key("academic", "graphene synthesis")
++
++
++# ---------------------------------------------------------------------
++# set_cached_research — per-scope TTL selection
++# ---------------------------------------------------------------------
++
++def test_set_cached_research_uses_the_matching_scope_ttl(monkeypatch):
++    seen = {}
++
++    def fake_write(key, value, ex=None):
++        seen["key"] = key
++        seen["value"] = value
++        seen["ex"] = ex
++
++    monkeypatch.setattr(research_cache, "write", fake_write)
++    research_cache.set_cached_research("news", "fed rates", {"results": []})
++
++    assert seen["ex"] == research_cache.TTL_BY_SCOPE["news"]
++
++
++def test_set_cached_research_forum_scope_uses_its_own_ttl_not_news(monkeypatch):
++    """Regression-style pin: forum (12h) and news (2h) must not be
++    conflated -- a lookup bug that always resolved to the first/last
++    dict entry would still pass a test that only checks one scope."""
++    seen = {}
++    monkeypatch.setattr(research_cache, "write",
++                         lambda key, value, ex=None: seen.update({"ex": ex}))
++    research_cache.set_cached_research("forum", "some thread", {"results": []})
++    assert seen["ex"] == 60 * 60 * 12
++    assert seen["ex"] != research_cache.TTL_BY_SCOPE["news"]
++
++
++def test_set_cached_research_unlisted_scope_falls_back_to_default_ttl(monkeypatch):
++    """A scope name not present in TTL_BY_SCOPE at all (e.g. a future
++    scope added to web_researcher.py before this table is updated)
++    must fall back to DEFAULT_TTL rather than raising a KeyError or
++    silently caching with no expiry."""
++    seen = {}
++    monkeypatch.setattr(research_cache, "write",
++                         lambda key, value, ex=None: seen.update({"ex": ex}))
++    research_cache.set_cached_research("some_future_scope", "query", {"results": []})
++    assert seen["ex"] == research_cache.DEFAULT_TTL
++
++
++def test_set_cached_research_passes_result_through_unmodified(monkeypatch):
++    """Unlike price_cache.py/spec_cache.py, this module relies on
++    write()'s native `ex` param instead of stamping its own
++    `_cached_at` into the value -- result must be written as-is, with
++    no extra key injected."""
++    seen = {}
++    monkeypatch.setattr(research_cache, "write",
++                         lambda key, value, ex=None: seen.update({"value": value}))
++    result = {"results": [{"title": "some article"}], "fetched_via": "hn_search"}
++    research_cache.set_cached_research("hackernews", "some query", result)
++    assert seen["value"] == result
++
++
++def test_set_cached_research_writes_under_the_scope_qualified_key(monkeypatch):
++    seen = {}
++    monkeypatch.setattr(research_cache, "write",
++                         lambda key, value, ex=None: seen.update({"key": key}))
++    research_cache.set_cached_research("academic", "graphene synthesis", {"results": []})
++    assert seen["key"] == research_cache._key("academic", "graphene synthesis")
