@@ -11,13 +11,13 @@ can call with its own ordered fallback chain, drawn from: Groq, Cerebras,
 Mistral, Gemini, HuggingFace, Cloudflare Workers AI.
 
 Each agent defines its own chain as a list of steps. Most providers
-(groq, cerebras, mistral, gemini, huggingface) are OpenAI-SDK-shaped and
-use "key_env":
+(groq, openrouter, mistral, gemini, huggingface) are OpenAI-SDK-shaped
+and use "key_env":
 
     CHAIN = [
         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
+        {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_9"},
     ]
 
 Cloudflare Workers AI is a plain REST call needing two credentials, so

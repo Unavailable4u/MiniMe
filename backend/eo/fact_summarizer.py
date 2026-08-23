@@ -42,11 +42,11 @@ CHAIN = [
     # models Groq's decommission notice suggested in its place.
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_RESERVE_1"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_RESERVE_1"},
-    # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
-    # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
-    # zai-glm-4.7 served now). See agents/generic_worker.py's
-    # PROVIDER_DEFAULT_MODEL comment for the full trace.
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_RESERVE_1"},
+    # OR-3f: Cerebras -> OpenRouter, same reserve slot (was
+    # CEREBRAS_RESERVE_1). "openrouter/free" is OpenRouter's own
+    # auto-router, not a pinned model slug (see utils/llm_client.py's
+    # OR-1 notes).
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_RESERVE_1"},
     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
     # its fallback step is removed here, not replaced.
 ]

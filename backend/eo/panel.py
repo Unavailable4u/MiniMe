@@ -45,7 +45,20 @@ from eo.quota_sentinel import get_quota_snapshot
 from relay.emitter import emit_event
 
 MEMBER_B_CHAIN = [
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
+    # OR-3f: Cerebras -> OpenRouter. Was EO_PANEL_CEREBRAS_KEY -- see
+    # eo/registry.py's matching rename. Honest tradeoff worth flagging,
+    # not hidden by this comment: Member B's whole job is to be a
+    # genuinely distinct model lineage from Member A/C's own providers.
+    # "openrouter/free" is a shared auto-router across whatever's on
+    # OpenRouter's free roster right now, same as every other OR-3
+    # agent's chain in this codebase -- it's no longer guaranteed to be a
+    # SPECIFIC different model family the way a dedicated Cerebras account
+    # was. The account itself is still isolated (its own key, its own
+    # quota), so it still won't queue behind other agents' bursts; it's
+    # the "distinct lineage" guarantee specifically that's now
+    # probabilistic rather than certain. Revisit if Member B's vote
+    # quality is ever suspected to have dropped.
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "EO_PANEL_OPENROUTER_KEY"},
     # Env-audit follow-up: EO_PANEL_CLOUDFLARE_ACCOUNT_ID/API_TOKEN were
     # provisioned back when the blueprint's original Member B plan was
     # Cloudflare Workers AI (@cf/meta/llama-3.1-8b-instruct — see this
@@ -350,15 +363,18 @@ def run_panel(task_text: str, draft: dict) -> dict:
 QUOTA_CUTOFF = 0.8   # matches the blueprint's 80% figure — the same threshold
                      # quota_sentinel.py already uses to fire quota_alert
 
-# Reuses the EXISTING EO_PANEL_CEREBRAS_KEY account (Part 2's Panel
-# Member B) — no new account provisioning needed for this. Writing a new
-# brief is an occasional single call, not parallel worker traffic.
+# Reuses the EXISTING EO_PANEL_OPENROUTER_KEY account (Part 2's Panel
+# Member B) — no new account provisioning needed for this beyond OR-3f's
+# migration of that account. Writing a new brief is an occasional single
+# call, not parallel worker traffic.
 BRIEF_WRITER_CHAIN = [
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
+    # OR-3f: Cerebras -> OpenRouter, same account/rationale as
+    # MEMBER_B_CHAIN above.
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "EO_PANEL_OPENROUTER_KEY"},
     # Fallback fix: this chain used to be a single step on the SAME
-    # EO_PANEL_CEREBRAS_KEY account MEMBER_B_CHAIN above hammers on every
+    # EO_PANEL_OPENROUTER_KEY account MEMBER_B_CHAIN above hammers on every
     # escalation. When Member B's own traffic rate-limits that account,
-    # _set_cooldown() puts cerebras:EO_PANEL_CEREBRAS_KEY into cooldown --
+    # _set_cooldown() puts openrouter:EO_PANEL_OPENROUTER_KEY into cooldown --
     # and because this chain had no other step, generate_text() below hit
     # _is_cooling_down() straight away, `continue`d past the only entry,
     # and fell out of the loop having never actually attempted a call. That
