@@ -91,6 +91,20 @@ PROVIDER_DEFAULT_MODEL = {
     # model used directly by idea_planner.py/dataset_analyst.py/
     # deploy_config_writer.py/reviewer_fixer_lean.py's own CHAINs.
     "cerebras": "gpt-oss-120b",
+    # OR-3e: added alongside the cerebras entry above (not replacing it --
+    # CEREBRAS_API_KEY_6/7/8 and EO_PANEL_CEREBRAS_KEY are still live
+    # Cerebras accounts in the registry, just outside this pool). Needed
+    # because code_writers.py's _extra_fallback_chain_steps() ->
+    # _chain_step_for() builds a chain step from PROVIDER_DEFAULT_MODEL.get(
+    # provider, "") for whatever account eo/panel.py's _best_match() picks
+    # as a "different provider" fallback -- now that the implementer/
+    # content_writer/mech_* pool has OpenRouter accounts in it (see
+    # eo/registry.py), that picker can land on one, and without this entry
+    # the resulting step would carry model="" (empty string) straight into
+    # generate_text(). "openrouter/free" is OpenRouter's own auto-router,
+    # not a pinned slug (see utils/llm_client.py's OR-1 notes), same as
+    # every other OR-3 agent's chain.
+    "openrouter": "openrouter/free",
     "mistral": "mistral-large-latest",
     # Quota-reality fix, §4 (2026-07-30): "github" entry removed --
     # GitHub Models retired in full today and no CHAIN or tag-driven

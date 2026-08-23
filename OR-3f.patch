@@ -1,0 +1,286 @@
+diff --git a/backend/.env.example b/backend/.env.example
+index 2ada82c..c68a811 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -110,19 +110,21 @@ SGA_GROQ_3=
+ # LLM Provider — OpenRouter
+ # Get keys from: https://openrouter.ai/settings/keys
+ #
+-# Added per reliability_overhaul_plan.md OR-2. Slot names/count mirror the
+-# Cerebras pool below since OR-3 migrates that pool's callers (Code Writer
++# Added per reliability_overhaul_plan.md OR-2. OR-3a through OR-3f have
++# since migrated every caller off Cerebras onto these slots (Code Writer
+ # Pool, Fixer Pool, Report Writer fallback, prompt_writer_lean/
+-# reviewer_fixer_lean's 3-key rotations, etc.) onto these keys one file at a
+-# time -- see the plan's OR-3a/3b/3c/3d steps. Until that migration lands for
+-# a given file, that file still reads its CEREBRAS_* keys below; don't delete
+-# the Cerebras section until every OR-3 step is done.
++# reviewer_fixer_lean's 3-key rotations, the implementer/content_writer/
++# mech_* worker pool, and the handful of standalone chains in
++# eo/skill_library.py and eo/fact_summarizer.py). The Cerebras section
++# that used to follow this block has been removed -- nothing in the
++# codebase reads a CEREBRAS_* env var anymore, so those keys can be
++# deleted from your real .env.
+ #
+ # Note: OpenRouter's free tier is request-count-limited (20 rpm, 50-1000 rpd
+ # per key), not token-limited like Cerebras -- see rate_ledger.py's OR-1d
+ # extension. Splitting load across more of these numbered slots buys more
+-# daily request headroom the same way the Cerebras/Groq pools do, but it does
+-# NOT buy more requests-per-minute on any single key.
++# daily request headroom the same way the Cerebras/Groq pools did, but it
++# does NOT buy more requests-per-minute on any single key.
+ OPENROUTER_API_KEY_1=
+ OPENROUTER_API_KEY_2=
+ OPENROUTER_API_KEY_3=
+@@ -139,30 +141,6 @@ OPENROUTER_RESERVE_2=
+ OPENROUTER_RESERVE_3=
+ 
+ 
+-# -----------------------------------------------------------------------------
+-# LLM Provider — Cerebras
+-# Get keys from: https://cloud.cerebras.ai/
+-# -----------------------------------------------------------------------------
+-
+-# Code Writer Pool (5 parallel workers), Fixer Pool, Report Writer fallback.
+-# One key per slot; can start by reusing the same key across all 9,
+-# splitting later only if you hit rate limits.
+-CEREBRAS_API_KEY_1=
+-CEREBRAS_API_KEY_2=
+-CEREBRAS_API_KEY_3=
+-CEREBRAS_API_KEY_4=
+-CEREBRAS_API_KEY_5=
+-CEREBRAS_API_KEY_6=
+-CEREBRAS_API_KEY_7=
+-CEREBRAS_API_KEY_8=
+-CEREBRAS_API_KEY_9=
+-
+-# Reserve pool for the above.
+-CEREBRAS_RESERVE_1=
+-CEREBRAS_RESERVE_2=
+-CEREBRAS_RESERVE_3=
+-
+-
+ # -----------------------------------------------------------------------------
+ # LLM Provider — Cloudflare Workers AI
+ # Get from: https://dash.cloudflare.com/ -> Workers AI -> Create API Token
+@@ -281,9 +259,13 @@ EO_INSPECTOR_GROQ_KEY_1=
+ # Optional second Groq account, used only if KEY_1 is rate-limited.
+ EO_INSPECTOR_GROQ_KEY_2=
+ 
+-# EO Panel Member B (primary). MUST be a dedicated Cerebras account.
+-# Get from: https://cloud.cerebras.ai/
+-EO_PANEL_CEREBRAS_KEY=
++# EO Panel Member B (primary). MUST be a dedicated OpenRouter account,
++# separate from the OPENROUTER_API_KEY_1..9 production pool above so a
++# busy tier-3 run never starves classification/triage for the next
++# incoming task. OR-3f: was EO_PANEL_CEREBRAS_KEY -- NEW variable name,
++# add a real key here before deleting the old one.
++# Get from: https://openrouter.ai/settings/keys
++EO_PANEL_OPENROUTER_KEY=
+ 
+ # EO Panel Member B (fallback). MUST be a dedicated Cloudflare account,
+ # separate from the production Cloudflare pool above.
+diff --git a/backend/eo/dynamic_chain.py b/backend/eo/dynamic_chain.py
+index f151b8f..6bbd9f3 100644
+--- a/backend/eo/dynamic_chain.py
++++ b/backend/eo/dynamic_chain.py
+@@ -57,6 +57,13 @@ PROVIDER_DEFAULT_MODEL = {
+     # comment for the full trace) -- kept in sync deliberately.
+     "groq": "openai/gpt-oss-120b",
+     "cerebras": "gpt-oss-120b",
++    # OR-3f: kept in sync with agents/generic_worker.py's own addition of
++    # this entry (see that file for the full reasoning) -- needed for the
++    # same reason there: this module's own _chain_step_for()-equivalent
++    # looks up PROVIDER_DEFAULT_MODEL.get(provider, "") for whatever
++    # AGENT_CAPABILITIES-selected account it lands on, and OpenRouter
++    # accounts are now a real possibility in that pool.
++    "openrouter": "openrouter/free",
+     "mistral": "mistral-large-latest",
+     "gemini": "gemini-3.1-flash-lite",
+     "huggingface": "openai/gpt-oss-120b:fastest",
+diff --git a/backend/eo/fact_summarizer.py b/backend/eo/fact_summarizer.py
+index 96fd29b..3d8cbe4 100644
+--- a/backend/eo/fact_summarizer.py
++++ b/backend/eo/fact_summarizer.py
+@@ -42,11 +42,11 @@ CHAIN = [
+     # models Groq's decommission notice suggested in its place.
+     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_RESERVE_1"},
+     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_RESERVE_1"},
+-    # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
+-    # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
+-    # zai-glm-4.7 served now). See agents/generic_worker.py's
+-    # PROVIDER_DEFAULT_MODEL comment for the full trace.
+-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_RESERVE_1"},
++    # OR-3f: Cerebras -> OpenRouter, same reserve slot (was
++    # CEREBRAS_RESERVE_1). "openrouter/free" is OpenRouter's own
++    # auto-router, not a pinned model slug (see utils/llm_client.py's
++    # OR-1 notes).
++    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_RESERVE_1"},
+     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
+     # its fallback step is removed here, not replaced.
+ ]
+diff --git a/backend/eo/panel.py b/backend/eo/panel.py
+index 82071e1..86eaa8f 100644
+--- a/backend/eo/panel.py
++++ b/backend/eo/panel.py
+@@ -45,7 +45,20 @@ from eo.quota_sentinel import get_quota_snapshot
+ from relay.emitter import emit_event
+ 
+ MEMBER_B_CHAIN = [
+-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
++    # OR-3f: Cerebras -> OpenRouter. Was EO_PANEL_CEREBRAS_KEY -- see
++    # eo/registry.py's matching rename. Honest tradeoff worth flagging,
++    # not hidden by this comment: Member B's whole job is to be a
++    # genuinely distinct model lineage from Member A/C's own providers.
++    # "openrouter/free" is a shared auto-router across whatever's on
++    # OpenRouter's free roster right now, same as every other OR-3
++    # agent's chain in this codebase -- it's no longer guaranteed to be a
++    # SPECIFIC different model family the way a dedicated Cerebras account
++    # was. The account itself is still isolated (its own key, its own
++    # quota), so it still won't queue behind other agents' bursts; it's
++    # the "distinct lineage" guarantee specifically that's now
++    # probabilistic rather than certain. Revisit if Member B's vote
++    # quality is ever suspected to have dropped.
++    {"provider": "openrouter", "model": "openrouter/free", "key_env": "EO_PANEL_OPENROUTER_KEY"},
+     # Env-audit follow-up: EO_PANEL_CLOUDFLARE_ACCOUNT_ID/API_TOKEN were
+     # provisioned back when the blueprint's original Member B plan was
+     # Cloudflare Workers AI (@cf/meta/llama-3.1-8b-instruct — see this
+@@ -350,15 +363,18 @@ def run_panel(task_text: str, draft: dict) -> dict:
+ QUOTA_CUTOFF = 0.8   # matches the blueprint's 80% figure — the same threshold
+                      # quota_sentinel.py already uses to fire quota_alert
+ 
+-# Reuses the EXISTING EO_PANEL_CEREBRAS_KEY account (Part 2's Panel
+-# Member B) — no new account provisioning needed for this. Writing a new
+-# brief is an occasional single call, not parallel worker traffic.
++# Reuses the EXISTING EO_PANEL_OPENROUTER_KEY account (Part 2's Panel
++# Member B) — no new account provisioning needed for this beyond OR-3f's
++# migration of that account. Writing a new brief is an occasional single
++# call, not parallel worker traffic.
+ BRIEF_WRITER_CHAIN = [
+-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "EO_PANEL_CEREBRAS_KEY"},
++    # OR-3f: Cerebras -> OpenRouter, same account/rationale as
++    # MEMBER_B_CHAIN above.
++    {"provider": "openrouter", "model": "openrouter/free", "key_env": "EO_PANEL_OPENROUTER_KEY"},
+     # Fallback fix: this chain used to be a single step on the SAME
+-    # EO_PANEL_CEREBRAS_KEY account MEMBER_B_CHAIN above hammers on every
++    # EO_PANEL_OPENROUTER_KEY account MEMBER_B_CHAIN above hammers on every
+     # escalation. When Member B's own traffic rate-limits that account,
+-    # _set_cooldown() puts cerebras:EO_PANEL_CEREBRAS_KEY into cooldown --
++    # _set_cooldown() puts openrouter:EO_PANEL_OPENROUTER_KEY into cooldown --
+     # and because this chain had no other step, generate_text() below hit
+     # _is_cooling_down() straight away, `continue`d past the only entry,
+     # and fell out of the loop having never actually attempted a call. That
+diff --git a/backend/eo/registry.py b/backend/eo/registry.py
+index 5494e08..b3bb16c 100644
+--- a/backend/eo/registry.py
++++ b/backend/eo/registry.py
+@@ -193,27 +193,58 @@ AGENT_CAPABILITIES = {
+     # section's own anchor subsection at once), same genuinely-parallel,
+     # independent-per-item shape one level further up, so it reuses this
+     # same pool instead of provisioning its own.
+-    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    # OR-3e: Cerebras -> OpenRouter (registry-level). This pool feeds
++    # eo/worker_pool.py's _select_workers_for_role() for every agent tagged
++    # "implementer"/"content_writer"/"mech_primitive"/"mech_subsection"/
++    # "mech_section" (agents/code_writers.py, content_adapter_pool.py,
++    # mech_primitive_pool.py, mech_section_pool.py, mech_subsection_pool.py).
++    # Editing each agent file's own chain-building line isn't enough on its
++    # own -- key_env is handed out by THIS table before any of those files
++    # even run, so the account itself has to change here, not just the
++    # provider string each file writes into its chain step. Reliability
++    # overhaul plan OR-3d flagged this as the risky, non-blind-swap part of
++    # the audit; this closes it out. Key numbering carried over 1:1 from the
++    # Cerebras slots it replaces, matching OR-2's .env.example naming.
++    "OPENROUTER_API_KEY_1": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_2": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_3": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_4": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_5": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_RESERVE_1": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_RESERVE_2": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_RESERVE_3": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+ 
+     # --- Cerebras: Fixer Pool (fixed 3, no reserve tier defined anywhere in Parts 1-8) ---
+-    "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
+-    "CEREBRAS_API_KEY_7": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
+-    "CEREBRAS_API_KEY_8": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
++    # NOTE: agents/fixer_pool.py stopped reading this table for its own keys
++    # as of OR-3a (it hardcodes OPENROUTER_KEY_ENVS directly) -- these three
++    # entries are dead weight for that agent specifically, but left in place
++    # since nothing else in this audit confirmed another live reader of the
++    # "fixer" tag. Out of scope for OR-3d/3e; revisit separately if this
++    # table needs a dead-entry cleanup pass.
++    # --- Fixer Pool: no registry entries needed ---
++    # OR-3f: removed the 3 CEREBRAS_API_KEY_6/7/8 entries that used to sit
++    # here. Confirmed dead as of OR-3a: agents/fixer_pool.py hardcodes its
++    # own OPENROUTER_KEY_ENVS list directly and has never read this table
++    # for key selection, and nothing else in the codebase reads the
++    # "fixer" natural_roles tag. If a future agent needs a registry-driven
++    # fixer pool, add fresh entries rather than reviving these -- the old
++    # CEREBRAS_API_KEY_6/7/8 slots are being retired along with the rest
++    # of the Cerebras roster.
+     # Note: "report_writer" is no longer tagged on CEREBRAS_API_KEY_1 as it
+     # was pre-Part-9 -- GROQ_API_KEY above already covers that role, and
+     # Part 9's real account table ties CEREBRAS_API_KEY_1-5/RESERVE_1-3
+     # to "implementer" only, matching code_writers.py's actual pool.
+ 
+-    # --- Cerebras: EO Panel Member B (isolated, real key name confirmed in Part 2 §0.2) ---
+-    "EO_PANEL_CEREBRAS_KEY": {
+-        "provider": "cerebras", "strengths": ["distinct model lineage", "second opinion"],
++    # --- OpenRouter: EO Panel Member B (isolated, real key name confirmed in Part 2 §0.2) ---
++    # OR-3f: Cerebras -> OpenRouter. Was EO_PANEL_CEREBRAS_KEY -- renamed to
++    # EO_PANEL_OPENROUTER_KEY (NEW env var, not a reused slot -- this is an
++    # isolated single account, not part of the OPENROUTER_API_KEY_1..9 pool,
++    # so nothing populates it automatically; add it to your real .env before
++    # removing the old Cerebras key). See eo/panel.py's MEMBER_B_CHAIN /
++    # BRIEF_WRITER_CHAIN for the two call sites, and that file's own note on
++    # what this does to Member B's "distinct model lineage" purpose.
++    "EO_PANEL_OPENROUTER_KEY": {
++        "provider": "openrouter", "strengths": ["distinct model lineage", "second opinion"],
+         # Migration Part 12 §4: added "researcher", "fact_checker".
+         "natural_roles": ["panel_member_b", "researcher", "fact_checker"],
+     },
+diff --git a/backend/eo/skill_library.py b/backend/eo/skill_library.py
+index 0a651d9..b5c4520 100644
+--- a/backend/eo/skill_library.py
++++ b/backend/eo/skill_library.py
+@@ -354,7 +354,10 @@ CONDENSE_CHAIN = [
+     # models Groq's decommission notice suggested in its place.
+     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
++    # OR-3f: Cerebras -> OpenRouter, same slot (was CEREBRAS_API_KEY_1).
++    # "openrouter/free" is OpenRouter's own auto-router, not a pinned
++    # model slug (see utils/llm_client.py's OR-1 notes).
++    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_1"},
+ ]
+ 
+ CONDENSE_SYSTEM_PROMPT = (
+diff --git a/backend/utils/llm_client.py b/backend/utils/llm_client.py
+index 2727d3e..94e278f 100644
+--- a/backend/utils/llm_client.py
++++ b/backend/utils/llm_client.py
+@@ -11,13 +11,13 @@ can call with its own ordered fallback chain, drawn from: Groq, Cerebras,
+ Mistral, Gemini, HuggingFace, Cloudflare Workers AI.
+ 
+ Each agent defines its own chain as a list of steps. Most providers
+-(groq, cerebras, mistral, gemini, huggingface) are OpenAI-SDK-shaped and
+-use "key_env":
++(groq, openrouter, mistral, gemini, huggingface) are OpenAI-SDK-shaped
++and use "key_env":
+ 
+     CHAIN = [
+         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
+-        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
++        {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_9"},
+     ]
+ 
+ Cloudflare Workers AI is a plain REST call needing two credentials, so

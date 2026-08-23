@@ -56,13 +56,13 @@ INTL_VENDOR_DOMAINS = ["aliexpress.com", "ebay.com"]
 FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    # FIX — bug audit: "llama-3.3-70b" was retired from Cerebras' catalog
-    # (confirmed via GET /v1/models: only gpt-oss-120b/gemma-4-31b/
-    # zai-glm-4.7 served now). See agents/generic_worker.py's
-    # PROVIDER_DEFAULT_MODEL comment for the full trace.
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
+    # OR-3d: Cerebras -> OpenRouter, same slot (was CEREBRAS_API_KEY_9,
+    # see OR-2's .env.example note) -- "openrouter/free" is OpenRouter's
+    # own auto-router, not a pinned model slug (see utils/llm_client.py's
+    # OR-1 notes), so there's no equivalent of "gpt-oss-120b" to pin here.
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_9"},
     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
-    # its fallback step is removed here, not replaced. The Groq -> Cerebras
+    # its fallback step is removed here, not replaced. The Groq -> OpenRouter
     # redundancy above is unchanged.
 ]
 

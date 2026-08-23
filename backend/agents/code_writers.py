@@ -40,20 +40,26 @@ from eo.output_guard import validate_module_code
 
 load_dotenv()
 
-# Rotation order per worker -- if the first model errors transiently, the
-# same worker (same key) tries the next one before giving up.
+# OR-3e: Cerebras -> OpenRouter. Was a real 3-model rotation
+# (gpt-oss-120b/zai-glm-4.7/gemma-4-31b, see the old NOTE below, kept for
+# history) because Cerebras' catalog has several distinct production
+# models. OpenRouter's free tier is auto-routed -- "openrouter/free" (not
+# a pinned model slug, see utils/llm_client.py's OR-1 notes) picks the
+# underlying model itself, so there's no equivalent per-model variety to
+# preserve. What still matters, and is still preserved, is 3 STEPS: each
+# one gets its own live account from _model_rotation_chain()'s pool below,
+# so a cooldown on one account still only takes out one step, not the
+# whole worker.
 #
-# NOTE (updated): Cerebras's public-endpoint catalog only guarantees
-# gpt-oss-120b as a production model as of mid-2026; the qwen-3-235b and
-# llama-4-scout models this list previously rotated to have been removed
-# from the public endpoint (they now 404). zai-glm-4.7 and gemma-4-31b are
-# the current preview-tier models -- preview means "may be pulled on short
-# notice," so re-check https://inference-docs.cerebras.ai/models/overview
-# if this rotation starts 404-ing again.
+# OLD NOTE (Cerebras-era, kept for history): Cerebras's public-endpoint
+# catalog only guaranteed gpt-oss-120b as a production model as of
+# mid-2026; the qwen-3-235b and llama-4-scout models this list previously
+# rotated to had been removed from the public endpoint (they 404'd).
+# zai-glm-4.7 and gemma-4-31b were the preview-tier models at the time.
 MODELS = [
-    "gpt-oss-120b",
-    "zai-glm-4.7",
-    "gemma-4-31b",
+    "openrouter/free",
+    "openrouter/free",
+    "openrouter/free",
 ]
 
 # Migration Part 9 §2: replaces the old static KEY_ENVS + RESERVE_KEY_ENVS
@@ -154,9 +160,15 @@ def _model_rotation_chain(primary_key_env: str) -> list:
     from eo.registry import AGENT_CAPABILITIES
 
     quota_status = get_quota_snapshot()
+    # OR-3e: was "cerebras" -- see eo/registry.py's matching migration of
+    # this same pool's account entries. cerebras_pool is kept as the local
+    # variable name (not renamed to openrouter_pool) since it's only ever
+    # read a few lines below and renaming it added a diff for no
+    # behavioral reason; the docstring above and this comment are the
+    # source of truth on what it actually holds now.
     cerebras_pool = [
         k for k, info in AGENT_CAPABILITIES.items()
-        if info.get("provider") == "cerebras" and ROLE_TAG in info.get("natural_roles", [])
+        if info.get("provider") == "openrouter" and ROLE_TAG in info.get("natural_roles", [])
     ]
     exclude = {primary_key_env}
     key_envs = [primary_key_env]
@@ -171,7 +183,7 @@ def _model_rotation_chain(primary_key_env: str) -> list:
         candidate = _sorted_by_quota(candidates, quota_status)[0]
         exclude.add(candidate)
         key_envs.append(candidate)
-    return [{"provider": "cerebras", "model": m, "key_env": k} for m, k in zip(MODELS, key_envs)]
+    return [{"provider": "openrouter", "model": m, "key_env": k} for m, k in zip(MODELS, key_envs)]
 
 
 SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code

@@ -248,7 +248,13 @@ def _generate_primitives(placement: dict, part: dict, key_env: str,
     if violation_issue:
         payload["previous_attempt_failed_because"] = violation_issue
 
-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
+    # OR-3e: Cerebras -> OpenRouter -- key_env is resolved by
+    # eo/worker_pool.py's _select_workers_for_role() against
+    # eo/registry.py's AGENT_CAPABILITIES, which now hands out
+    # OPENROUTER_API_KEY_N/OPENROUTER_RESERVE_N accounts for this role tag
+    # (mech_primitive) instead of CEREBRAS_*. "openrouter/free" is
+    # OpenRouter's own auto-router, not a pinned model slug.
+    chain = [{"provider": "openrouter", "model": "openrouter/free", "key_env": key_env}]
 
     try:
         raw = generate_text(

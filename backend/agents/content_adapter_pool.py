@@ -143,7 +143,13 @@ def _write_one_variant(platform: str, core_message: str, key_env: str, worker_id
         context_parts.insert(0, f"--- Brand voice & recent context ---\n{conv_context}")
     user_content = "\n\n".join(context_parts)
 
-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
+    # OR-3e: Cerebras -> OpenRouter -- key_env is resolved by
+    # eo/worker_pool.py's _select_workers_for_role() against
+    # eo/registry.py's AGENT_CAPABILITIES, which now hands out
+    # OPENROUTER_API_KEY_N/OPENROUTER_RESERVE_N accounts for this role tag
+    # (content_writer) instead of CEREBRAS_*. "openrouter/free" is
+    # OpenRouter's own auto-router, not a pinned model slug.
+    chain = [{"provider": "openrouter", "model": "openrouter/free", "key_env": key_env}]
 
     try:
         raw = generate_text(
