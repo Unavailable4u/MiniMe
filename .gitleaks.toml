@@ -18,6 +18,11 @@ description = "Global allowlist"
 paths = [
   '''\.next/''',
   '''node_modules/''',
+  # Unit test fixtures use plausible-looking but fake key IDs / model
+  # names (e.g. "GROQ_TEST_KEY", "llama-3.3-70b-versatile" side by side
+  # in an assert tuple) that trip generic-api-key's key-name-plus-nearby-
+  # string heuristic. No real secret material lives under tests/.
+  '''backend/tests/''',
 ]
 regexes = [
   '''^[-+ ]?[A-Z][A-Z0-9_]*_KEY_\d+=?$''',
