@@ -14,6 +14,27 @@ separate tag registry — the blueprint is explicit that one shouldn't be
 pre-built before there's evidence a scan-and-dedupe approach is too
 slow, and at workspace scale (dozens to low hundreds of chats/nodes)
 it isn't.
+
+BUGFIX (found while writing this module's test coverage): both public
+functions here previously called chat_workspace.get_workspace(),
+chat_store.chat_exists(), chat_store.get_chat(), and
+chat_store.list_chats_by_tag() with only the positional args those
+functions took *before* the Postgres/RLS migration. Every one of those
+now requires an explicit user_id/owner_id (see eo/db.py's "fail loudly,
+not silently" design — db.cursor() scopes every query to the calling
+user via RLS, so there's no such thing as an unscoped read anymore).
+This module was never updated to match, so both distinct_tags_for_workspace()
+and chats_with_tag() raised TypeError unconditionally, on every call,
+regardless of input. Nothing caught this because eo.tags has zero
+callers anywhere else in the codebase.
+
+Fix: both public functions now take a required user_id (workspace-scoped
+autocomplete) / owner_id (tag search, since it isn't workspace-scoped)
+parameter and thread it through to every downstream call. This is a
+public-API change for this module -- any future caller needs the
+current user's id in hand already, which every route handler already
+requires for its own auth, so this doesn't add a new requirement, it
+just makes an existing one explicit here too.
 """
 import os
 import sys
@@ -30,21 +51,27 @@ from eo import knowledge_graph
 NODE_TAG_SAMPLE_SIZE = 200
 
 
-def distinct_tags_for_workspace(workspace_id: str) -> list[str]:
+def distinct_tags_for_workspace(workspace_id: str, user_id: str) -> list[str]:
     """Every distinct tag seen so far in this workspace, across both
     chats (linked into the workspace via eo/chat_workspace.py) and nodes
     (eo/knowledge_graph.py). This is what a tag-input autocomplete calls
-    — no separate registry to keep in sync, just scan-and-dedupe on read."""
+    — no separate registry to keep in sync, just scan-and-dedupe on read.
+
+    user_id is required and forwarded to every downstream call —
+    chat_workspace.get_workspace()'s RLS-backed access check is what
+    turns "workspace doesn't exist" and "workspace exists but this user
+    can't see it" into the same FileNotFoundError, so a caller can't
+    fish for tags in a workspace they don't have access to."""
     tags = set()
 
     try:
-        ws = chat_workspace.get_workspace(workspace_id)
+        ws = chat_workspace.get_workspace(workspace_id, user_id)
     except FileNotFoundError:
         ws = None
     if ws:
         for chat_id in ws["chat_ids"]:
-            if chat_store.chat_exists(chat_id):
-                tags.update(chat_store.get_chat(chat_id).get("tags") or [])
+            if chat_store.chat_exists(chat_id, user_id):
+                tags.update(chat_store.get_chat(chat_id, user_id).get("tags") or [])
 
     # query_text is just the workspace_id itself — the query text barely
     # matters here since every result is going to be inspected for its
@@ -58,8 +85,15 @@ def distinct_tags_for_workspace(workspace_id: str) -> list[str]:
     return sorted(tags)
 
 
-def chats_with_tag(tag: str) -> list[dict]:
-    """Every chat (any workspace) carrying this exact tag — the chat-side
-    half of "tag Q3-launch shows up everywhere at once." The node-side
-    half is eo/knowledge_graph.py's search_nodes(tags=[tag])."""
-    return chat_store.list_chats_by_tag(tag)
+def chats_with_tag(tag: str, owner_id: str) -> list[dict]:
+    """Every chat owned by owner_id (any of their workspaces) carrying
+    this exact tag — the chat-side half of "tag Q3-launch shows up
+    everywhere at once." The node-side half is
+    eo/knowledge_graph.py's search_nodes(tags=[tag]).
+
+    Scoped to owner_id, not workspace_id — chat_store.list_chats_by_tag()
+    was already owner-scoped rather than workspace-scoped before this
+    fix (matching chat_store's other list_* functions), so this keeps
+    that same scope rather than narrowing behavior as a side effect of
+    the bugfix."""
+    return chat_store.list_chats_by_tag(owner_id, tag)
