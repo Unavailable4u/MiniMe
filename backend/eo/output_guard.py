@@ -71,6 +71,7 @@ Place this file at: eo/output_guard.py
 
 import asyncio
 import importlib.metadata
+import json
 
 from guardrails import Guard
 from guardrails.types import OnFailAction
@@ -283,9 +284,40 @@ class ArtifactEntryWellFormed(Validator):
     Sandpack for react -- a non-string value there (list/dict/int a role
     emitted by mistake) is what this backstops against; the pre-Part-4
     `if not entry.get("code")` check in collect_artifacts() would have let
-    any truthy non-string through."""
+    any truthy non-string through.
+
+    BUGFIX (found while writing Patch 7c's tests): guardrails-ai==0.10.2's
+    Guard.validate() is typed `validate(self, llm_output: str, ...)` and
+    builds a pydantic Inputs(llm_output=...) model that requires a str --
+    handing it a dict directly (as validate_artifact_entry() originally
+    did below) raises pydantic_core.ValidationError on every single call,
+    for both malformed AND perfectly well-formed entries. That directly
+    contradicts this module's own documented contract ("OnFailAction.NOOP
+    means this never raises... the caller decides"): in production this
+    meant collect_artifacts() either crashed outright or (if unguarded
+    upstream) propagated an unhandled exception, not the "skip anything
+    malformed" degradation Part 4 was written to provide. Confirmed
+    against a real, valid entry -- {"type": "html", "code": "<b>hi</b>",
+    "title": "Demo"} -- which raised before this fix.
+
+    Fix: validate_artifact_entry() now JSON-serializes the entry before
+    handing it to Guard.validate() (a plain string keeps Guard happy),
+    and this validator JSON-decodes it back before running the exact same
+    checks as before. Guardrails passes the raw string straight through
+    to a custom Validator's `value` here rather than parsing it itself
+    (there's no output_schema registered on this Guard to parse against),
+    so decoding is this validator's own responsibility. No change to
+    what's actually accepted or rejected -- decode-then-check produces
+    the same PassResult/FailResult decisions the pre-fix dict-based
+    checks did for every case exercised in tests/unit/test_eo_output_guard.py."""
 
     def _validate(self, value, metadata):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return FailResult(error_message="artifact entry is not valid JSON")
+
         if not isinstance(value, dict):
             return FailResult(error_message="artifact entry is not an object")
 
@@ -332,9 +364,21 @@ def validate_artifact_entry(entry) -> tuple[bool, str]:
     erroring the whole run over one entry from one role" behavior is what
     Part 4 wires this into; it just replaces the old truthiness-only
     check with a real shape check.
+
+    entry is JSON-serialized before being handed to Guard.validate() --
+    see the BUGFIX note on ArtifactEntryWellFormed above for why a raw
+    dict can't be passed to this guardrails-ai version's Guard.validate()
+    directly. If entry itself can't be JSON-serialized (e.g. it contains
+    a non-JSON-safe object a role emitted by mistake), that is itself a
+    malformed entry -- this returns (False, reason) for that case too,
+    same fail-without-raising contract as everything else here.
     """
     _ensure_event_loop()
-    outcome = get_artifact_guard().validate(entry)
+    try:
+        serialized = json.dumps(entry, default=str)
+    except (TypeError, ValueError) as exc:
+        return False, f"artifact entry is not JSON-serializable: {exc}"
+    outcome = get_artifact_guard().validate(serialized)
     if outcome.validation_passed:
         return True, ""
     reasons = "; ".join(
