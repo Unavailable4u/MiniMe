@@ -53,6 +53,13 @@ from eo.registry import resolve, resolve_role, list_known_roles
 from eo.structure import PATH_TO_TIER
 from eo.errors import MissingDependencyError
 from eo.agent_dependencies import AGENT_DEPENDENCIES
+# Phase 6b: distinguishes "every provider in this role's fallback chain
+# was genuinely tried and failed" (degrade this one role, keep the rest
+# of the task running) from any other exception a role's dispatch can
+# raise (a real bug — still propagates and fails the whole task, same as
+# before this phase). See utils/llm_client.py's ChainExhaustedError
+# docstring for exactly which raise sites this is and isn't.
+from utils.llm_client import ChainExhaustedError
 import logging
 
 from eo.tracing import get_tracer, TRACING_ENABLED, truncate_for_trace
@@ -891,6 +898,13 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # flat, anonymous sibling of every other role's generations. See
         # _open_role_span()'s own docstring above for the nesting and
         # no-op contract.
+        role_failed = False   # Phase 6b — set True only by the
+                               # ChainExhaustedError branch below; gates
+                               # the "success-only" bookkeeping after the
+                               # `with` block (agent_done event, image
+                               # extraction, approval/pause checkpoint) —
+                               # none of those make sense for a role that
+                               # just degraded instead of completing.
         with _open_role_span(role, current_name, session_id, task_text, domain) as _role_span:
             try:
                 if current_name == "prompt_writer_lean" and task_text:
@@ -1073,6 +1087,20 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 continue   # re-enter the loop at the same idx, now pointing at
                            # the newly inserted prerequisite step instead of
                            # the one that raised (which got shifted to idx+1).
+            except ChainExhaustedError as exc:
+                # Phase 6b (fixes Bug 5): every provider in THIS role's
+                # fallback chain was genuinely tried and failed — degrade
+                # this one role instead of taking down the whole task.
+                # Must be caught ahead of the generic `except Exception`
+                # below, since ChainExhaustedError is a RuntimeError
+                # subclass and Python matches the first applicable clause.
+                role_failed = True
+                result = {"status": "failed", "role": role, "reason": str(exc)}
+                emit_event("error", session_id=session_id, agent=current_name, path=path,
+                            payload={"message": f"{exc.__class__.__name__}: {exc}"})
+                print(f"  [Executor] {current_name} (role={role}) exhausted its "
+                      f"fallback chain — recording as failed, continuing to "
+                      f"whatever doesn't depend on this role's output.")
             except Exception as exc:
                 emit_event("error", session_id=session_id, agent=current_name, path=path,
                             payload={"message": f"{exc.__class__.__name__}: {exc}"})
@@ -1082,99 +1110,101 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # would otherwise silently overwrite itself across multiple
             # generic_worker hires in the same plan.
             results[role] = result
-            print(f"  [Executor] done: {current_name}")
+            print(f"  [Executor] done: {current_name}" if not role_failed
+                  else f"  [Executor] failed (degraded): {current_name}")
             if _role_span is not None:
                 try:
                     _role_span.update(output=_summarize(result, role=role))
                 except Exception as trace_exc:
                     print(f"  [executor] Langfuse role span failed to update "
                           f"output for role={role!r} (non-fatal): {trace_exc}")
-        image = _extract_image(result)
-        # Text budget shrinks when an image rides along in the same
-        # event, so the two together still fit Pusher's ~10KB cap
-        # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
-        summary_limit = 9000 - len(image) if image else 9000
-        payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
-        if image:
-            payload["image"] = image
-        emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
+        if not role_failed:
+            image = _extract_image(result)
+            # Text budget shrinks when an image rides along in the same
+            # event, so the two together still fit Pusher's ~10KB cap
+            # (image is capped separately at MAX_IMAGE_DATA_URI_CHARS above).
+            summary_limit = 9000 - len(image) if image else 9000
+            payload = {"summary": _summarize(result, role=role, limit=summary_limit), "duration_ms": duration_ms}
+            if image:
+                payload["image"] = image
+            emit_event("agent_done", session_id=session_id, agent=current_name, path=path, payload=payload)
 
-        # Human-in-the-loop pause point. See this function's own
-        # docstring above for exactly what state has and hasn't advanced
-        # by this point.
-        #
-        # CO3: widened from the original approval_roles-only check to
-        # also fire on an on-demand pause_requested:{session_id} flag —
-        # someone hitting "Pause" mid-run, rather than a role pre-listed
-        # at task start. Same checkpoint, same snapshot shape, same
-        # return value either way, so resume_graph() below needs no
-        # changes at all to handle either trigger.
-        from memory.bus import read as bus_read, delete as bus_delete
-        pause_requested = bus_read(f"pause_requested:{session_id}", default=False) if session_id else False
-        if role in approval_roles or pause_requested:
-            from memory.bus import write, get_current_app_slug
-            if pause_requested:
-                # Consume the flag now, same lifecycle as the snapshot
-                # itself: a one-shot trigger, not a sticky state that
-                # would otherwise re-pause every subsequent role once a
-                # resumed run reaches this checkpoint again.
-                bus_delete(f"pause_requested:{session_id}")
-            # Bug fix, found while wiring CO3: this event type existed on
-            # the frontend (WorkspaceDockContext.jsx's eventType ===
-            # "awaiting_approval" handler) but was never in
-            # VALID_EVENT_TYPES and never emitted here — so the "resume
-            # affordance already wired" step list never actually lit up
-            # live for EITHER trigger, approval_roles or on-demand. This
-            # call is what completes it. `reason` lets the frontend show
-            # different copy for "this role needs sign-off" vs "someone
-            # hit pause" without needing a second event type.
-            emit_event(
-                "awaiting_approval", session_id=session_id, agent=current_name, path=path,
-                payload={"role": role, "reason": "approval" if role in approval_roles else "manual_pause"},
-            )
-            snapshot = {
-                "agent_names": agent_names,
-                "role_names": role_names,
-                "idx": idx,
-                "results": results,
-                "key_overrides": key_overrides,
-                "auto_inserted": auto_inserted,
-                "stage_revisits": stage_revisits,
-                "path": path,
-                "task_text": task_text,
-                "project_unique_name": project_unique_name,
-                "mode": mode,
-                "approval_roles": list(approval_roles),
-                # Part 2 §2.6: carried through so a resumed run keeps
-                # applying the same scoped-memory opt-outs to every role
-                # still ahead of it in the plan — without this, resuming
-                # from a snapshot would silently revert every later role
-                # back to include_conversation_context=True.
-                "no_conversation_context_roles": list(no_conversation_context_roles),
-                # Part 2 §2.6: same carry-through reasoning as
-                # no_conversation_context_roles above, so usage logged
-                # after a resume still attributes to the same domain the
-                # run started with, instead of silently losing that tag.
-                "domain": domain,
-                # Task 13d/13e: same carry-through reasoning as domain
-                # directly above, so a resumed run's web_researcher step
-                # (if that's what it pauses/resumes at) still uses the
-                # scope the original dispatch was given, instead of
-                # silently falling back to "general" on resume.
-                "scope": scope,
-                # MiniMe Blueprint fix — same carry-through reasoning as
-                # scope/domain above, so a resumed run's hardware_speccer
-                # step (if that's what it pauses/resumes at) still has the
-                # workspace_id it hard-requires, instead of raising
-                # ValueError on resume.
-                "workspace_id": workspace_id,
-                # Captured so resume_graph() can restore the exact bus
-                # namespace this run was writing under before touching
-                # anything else.
-                "app_slug": get_current_app_slug(),
-            }
-            write(f"paused_execution:{session_id}", snapshot)
-            return {"status": "paused", "paused_at_role": role}
+            # Human-in-the-loop pause point. See this function's own
+            # docstring above for exactly what state has and hasn't advanced
+            # by this point.
+            #
+            # CO3: widened from the original approval_roles-only check to
+            # also fire on an on-demand pause_requested:{session_id} flag —
+            # someone hitting "Pause" mid-run, rather than a role pre-listed
+            # at task start. Same checkpoint, same snapshot shape, same
+            # return value either way, so resume_graph() below needs no
+            # changes at all to handle either trigger.
+            from memory.bus import read as bus_read, delete as bus_delete
+            pause_requested = bus_read(f"pause_requested:{session_id}", default=False) if session_id else False
+            if role in approval_roles or pause_requested:
+                from memory.bus import write, get_current_app_slug
+                if pause_requested:
+                    # Consume the flag now, same lifecycle as the snapshot
+                    # itself: a one-shot trigger, not a sticky state that
+                    # would otherwise re-pause every subsequent role once a
+                    # resumed run reaches this checkpoint again.
+                    bus_delete(f"pause_requested:{session_id}")
+                # Bug fix, found while wiring CO3: this event type existed on
+                # the frontend (WorkspaceDockContext.jsx's eventType ===
+                # "awaiting_approval" handler) but was never in
+                # VALID_EVENT_TYPES and never emitted here — so the "resume
+                # affordance already wired" step list never actually lit up
+                # live for EITHER trigger, approval_roles or on-demand. This
+                # call is what completes it. `reason` lets the frontend show
+                # different copy for "this role needs sign-off" vs "someone
+                # hit pause" without needing a second event type.
+                emit_event(
+                    "awaiting_approval", session_id=session_id, agent=current_name, path=path,
+                    payload={"role": role, "reason": "approval" if role in approval_roles else "manual_pause"},
+                )
+                snapshot = {
+                    "agent_names": agent_names,
+                    "role_names": role_names,
+                    "idx": idx,
+                    "results": results,
+                    "key_overrides": key_overrides,
+                    "auto_inserted": auto_inserted,
+                    "stage_revisits": stage_revisits,
+                    "path": path,
+                    "task_text": task_text,
+                    "project_unique_name": project_unique_name,
+                    "mode": mode,
+                    "approval_roles": list(approval_roles),
+                    # Part 2 §2.6: carried through so a resumed run keeps
+                    # applying the same scoped-memory opt-outs to every role
+                    # still ahead of it in the plan — without this, resuming
+                    # from a snapshot would silently revert every later role
+                    # back to include_conversation_context=True.
+                    "no_conversation_context_roles": list(no_conversation_context_roles),
+                    # Part 2 §2.6: same carry-through reasoning as
+                    # no_conversation_context_roles above, so usage logged
+                    # after a resume still attributes to the same domain the
+                    # run started with, instead of silently losing that tag.
+                    "domain": domain,
+                    # Task 13d/13e: same carry-through reasoning as domain
+                    # directly above, so a resumed run's web_researcher step
+                    # (if that's what it pauses/resumes at) still uses the
+                    # scope the original dispatch was given, instead of
+                    # silently falling back to "general" on resume.
+                    "scope": scope,
+                    # MiniMe Blueprint fix — same carry-through reasoning as
+                    # scope/domain above, so a resumed run's hardware_speccer
+                    # step (if that's what it pauses/resumes at) still has the
+                    # workspace_id it hard-requires, instead of raising
+                    # ValueError on resume.
+                    "workspace_id": workspace_id,
+                    # Captured so resume_graph() can restore the exact bus
+                    # namespace this run was writing under before touching
+                    # anything else.
+                    "app_slug": get_current_app_slug(),
+                }
+                write(f"paused_execution:{session_id}", snapshot)
+                return {"status": "paused", "paused_at_role": role}
 
         next_idx, reason = next_step(
             result if isinstance(result, dict) else {}, role_names, idx, session_id=session_id,
