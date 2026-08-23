@@ -161,10 +161,20 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     # own dedicated CEREBRAS_API_KEY_4 so a cooldown on _1 (which still
     # takes out idea_planner.py/prompt_writer_lean.py/
     # reviewer_fixer_lean.py at once) doesn't also take Responder with it.
+    #
+    # OR-3c (reliability_overhaul_plan.md): Cerebras retired to a paid
+    # tier (see OR-2's .env.example note) -- was CEREBRAS_API_KEY_4,
+    # "openrouter/free" now (not a pinned model slug -- see
+    # utils/llm_client.py's OPENROUTER_BASE_URL comment). Responder is
+    # registry-free by design (Part 5.1 -- tier 0 never touches Upstash),
+    # so unlike the other OR-3c files this step was never gated behind
+    # build_fallback_chain() at all -- it's a real, regularly-reachable
+    # 3rd hop whenever the shared EO_INSPECTOR_GROQ_KEY_1 primary/2nd
+    # steps both fail, not an occasional-overflow last resort.
     chain = [
         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": primary_key_env},
         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": primary_key_env},
-        {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_4"},
+        {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_4"},
     ]
 
     conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23 fix

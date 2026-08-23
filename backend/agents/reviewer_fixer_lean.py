@@ -59,15 +59,28 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
 # instead of one shared key, plus a genuine second-provider step (Gemini,
 # its own key/account/infrastructure) appended after so a Cerebras-wide
 # outage doesn't take this agent down entirely either.
-MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
-MODEL_KEYS = ["CEREBRAS_API_KEY_1", "CEREBRAS_API_KEY_2", "CEREBRAS_API_KEY_3"]
+#
+# OR-3b (reliability_overhaul_plan.md): Cerebras retired to a paid tier
+# (see OR-2's .env.example note) -- the 3-step rotation above is now
+# OpenRouter instead. "openrouter/free" for all three steps (not a pinned
+# model slug -- see utils/llm_client.py's OPENROUTER_BASE_URL comment on
+# why OpenRouter's free roster rotates too fast to hardcode a slug
+# safely); the redundancy here is across 3 separate OpenRouter accounts
+# (key_env), same role the 3 distinct Cerebras models used to play. Same
+# key slots (OPENROUTER_API_KEY_1/_2/_3) as prompt_writer_lean.py's
+# identical fix -- deliberate, matching how both files shared
+# CEREBRAS_API_KEY_1/_2/_3 before. idea_planner.py and responder.py still
+# read CEREBRAS_API_KEY_1 for now -- separate, not-yet-migrated files
+# (OR-3d audit), unaffected by this change.
+OPENROUTER_MODEL = "openrouter/free"
+OPENROUTER_KEYS = ["OPENROUTER_API_KEY_1", "OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY_3"]
 
 CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
 ] + [
-    {"provider": "cerebras", "model": m, "key_env": k}
-    for m, k in zip(MODELS, MODEL_KEYS)
+    {"provider": "openrouter", "model": OPENROUTER_MODEL, "key_env": k}
+    for k in OPENROUTER_KEYS
 ] + [
     {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_1"},
 ]
