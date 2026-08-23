@@ -354,7 +354,10 @@ CONDENSE_CHAIN = [
     # models Groq's decommission notice suggested in its place.
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+    # OR-3f: Cerebras -> OpenRouter, same slot (was CEREBRAS_API_KEY_1).
+    # "openrouter/free" is OpenRouter's own auto-router, not a pinned
+    # model slug (see utils/llm_client.py's OR-1 notes).
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_1"},
 ]
 
 CONDENSE_SYSTEM_PROMPT = (

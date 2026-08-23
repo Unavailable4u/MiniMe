@@ -20,7 +20,7 @@ paths = [
   '''node_modules/''',
 ]
 regexes = [
-  '''^[A-Z][A-Z0-9_]*_KEY_\d+=?$''',
+  '''^[-+ ]?[A-Z][A-Z0-9_]*_KEY_\d+=?$''',
 ]
 # One narrow regex exception: MiniMe's own account_id_env / token_env
 # NAMES (e.g. "CLOUDFLARE_API_KEY_4") appear as plain strings throughout

@@ -221,17 +221,30 @@ AGENT_CAPABILITIES = {
     # since nothing else in this audit confirmed another live reader of the
     # "fixer" tag. Out of scope for OR-3d/3e; revisit separately if this
     # table needs a dead-entry cleanup pass.
-    "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
-    "CEREBRAS_API_KEY_7": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
-    "CEREBRAS_API_KEY_8": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
+    # --- Fixer Pool: no registry entries needed ---
+    # OR-3f: removed the 3 CEREBRAS_API_KEY_6/7/8 entries that used to sit
+    # here. Confirmed dead as of OR-3a: agents/fixer_pool.py hardcodes its
+    # own OPENROUTER_KEY_ENVS list directly and has never read this table
+    # for key selection, and nothing else in the codebase reads the
+    # "fixer" natural_roles tag. If a future agent needs a registry-driven
+    # fixer pool, add fresh entries rather than reviving these -- the old
+    # CEREBRAS_API_KEY_6/7/8 slots are being retired along with the rest
+    # of the Cerebras roster.
     # Note: "report_writer" is no longer tagged on CEREBRAS_API_KEY_1 as it
     # was pre-Part-9 -- GROQ_API_KEY above already covers that role, and
     # Part 9's real account table ties CEREBRAS_API_KEY_1-5/RESERVE_1-3
     # to "implementer" only, matching code_writers.py's actual pool.
 
-    # --- Cerebras: EO Panel Member B (isolated, real key name confirmed in Part 2 §0.2) ---
-    "EO_PANEL_CEREBRAS_KEY": {
-        "provider": "cerebras", "strengths": ["distinct model lineage", "second opinion"],
+    # --- OpenRouter: EO Panel Member B (isolated, real key name confirmed in Part 2 §0.2) ---
+    # OR-3f: Cerebras -> OpenRouter. Was EO_PANEL_CEREBRAS_KEY -- renamed to
+    # EO_PANEL_OPENROUTER_KEY (NEW env var, not a reused slot -- this is an
+    # isolated single account, not part of the OPENROUTER_API_KEY_1..9 pool,
+    # so nothing populates it automatically; add it to your real .env before
+    # removing the old Cerebras key). See eo/panel.py's MEMBER_B_CHAIN /
+    # BRIEF_WRITER_CHAIN for the two call sites, and that file's own note on
+    # what this does to Member B's "distinct model lineage" purpose.
+    "EO_PANEL_OPENROUTER_KEY": {
+        "provider": "openrouter", "strengths": ["distinct model lineage", "second opinion"],
         # Migration Part 12 §4: added "researcher", "fact_checker".
         "natural_roles": ["panel_member_b", "researcher", "fact_checker"],
     },

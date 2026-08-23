@@ -57,6 +57,13 @@ PROVIDER_DEFAULT_MODEL = {
     # comment for the full trace) -- kept in sync deliberately.
     "groq": "openai/gpt-oss-120b",
     "cerebras": "gpt-oss-120b",
+    # OR-3f: kept in sync with agents/generic_worker.py's own addition of
+    # this entry (see that file for the full reasoning) -- needed for the
+    # same reason there: this module's own _chain_step_for()-equivalent
+    # looks up PROVIDER_DEFAULT_MODEL.get(provider, "") for whatever
+    # AGENT_CAPABILITIES-selected account it lands on, and OpenRouter
+    # accounts are now a real possibility in that pool.
+    "openrouter": "openrouter/free",
     "mistral": "mistral-large-latest",
     "gemini": "gemini-3.1-flash-lite",
     "huggingface": "openai/gpt-oss-120b:fastest",
