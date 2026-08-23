@@ -1841,6 +1841,111 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
     return "next-step", user_content, accumulated_text, same_step_shrinks
 
 
+def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model: str, key,
+                     label: str, system_prompt: str, user_content: str, accumulated_text: str,
+                     continuations_used: int, allow_continuation: bool, agent_name: str,
+                     session_id, tier, path, domain, call_fn) -> "tuple[str, str, str, int, object]":
+    """3f-5 -- the single shared per-step retry loop, replacing the two
+    duplicated `while True:` blocks in generate_text() (the cloudflare
+    and SDK-shaped branches). Wires together 3f-1..3f-4's helpers in the
+    exact order both branches already used: pre-flight ledger gate
+    (_ledger_gate(), 3f-1) -> traced call (_traced_generation()/
+    _end_traced_generation(), unchanged since D1 patch 2) -> the one
+    remaining per-branch difference (`call_fn`, see below) -> post-call
+    bookkeeping (_record_ledger_bookkeeping(), 3f-2) -> finish_reason/
+    continuation handling (_handle_finish_reason(), 3f-3) -> transient
+    error dispatch (_handle_transient_error(), 3f-4).
+
+    `call_fn` is a one-argument closure the caller builds right before
+    calling this function, taking `prompt_for_step` and returning the
+    same 4-tuple _call_step()/_call_cloudflare_step() already return --
+    (text, usage, finish_reason, headroom_headers), the 4-tuple contract
+    from 3c's message. Everything else that differs between the two
+    call sites (creds vs. client, json_mode, the model's max_tokens) is
+    already baked into the closure by the caller, so this function
+    itself doesn't need to know which branch it's running for.
+
+    `key` is whichever identifier this call site uses to key the
+    ledger/cooldown (key_id for cloudflare, key_env for the SDK-shaped
+    branch) -- unchanged from how 3f-1/3f-2/3f-4 already take it.
+
+    `same_step_shrinks` (Fix D2) is NOT a parameter here: unlike
+    accumulated_text/continuations_used, it never needs to survive past
+    a single chain step, so it's initialized fresh to 0 on every call to
+    this function -- exactly matching the old `same_step_shrinks = 0`
+    that used to sit just above each branch's `while True:` in
+    generate_text(), which reset on every new `for i, step in
+    enumerate(chain)` iteration.
+
+    Returns (action, full_text, accumulated_text, continuations_used, last_exc):
+      action == "return"    -- this step produced a complete answer.
+                                Caller should `return full_text`
+                                immediately, unchanged.
+      action == "next-step" -- caller should reassign its own
+                                accumulated_text/continuations_used loop
+                                variables to the returned values, update
+                                its own last_exc if the returned last_exc
+                                isn't None, and let its `for` loop fall
+                                through to the next chain step (this
+                                function has already done the internal
+                                `break` -- there's nothing left for the
+                                caller to break out of). full_text is
+                                unused/stale in this case.
+    A bare `raise` inside the _TRANSIENT_ERRORS handler (MALFORMED_REQUEST
+    only, per _handle_transient_error()) propagates straight out of this
+    function -- the caller doesn't need a try/except of its own for that,
+    same as before 3f-5.
+    """
+    last_exc = None
+    same_step_shrinks = 0  # Fix D2: scoped to retries-in-place on THIS step only
+    while True:  # Fix D2: retry loop scoped to THIS step only
+        prompt_for_step = (
+            _continuation_prompt(user_content, accumulated_text)
+            if accumulated_text else user_content
+        )
+        _gate = _ledger_gate(chain, index, provider, key, model,
+                              system_prompt, prompt_for_step, label, agent_name)
+        if _gate == "reroute":
+            break  # skip this step, fall through to the next chain step
+        if _gate == "waited-retry":
+            continue  # retry the SAME step now that we've waited
+        try:
+            # D1 patch 2 -- tracing wraps the real network call; it runs
+            # exactly once regardless of whether tracing itself succeeds.
+            _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
+                                          agent_name, session_id, tier, path, domain)
+            try:
+                text, usage, finish_reason, headroom_headers = call_fn(prompt_for_step)
+            except BaseException:
+                _end_traced_generation(_traced, agent_name, label, None, None, None,
+                                        exc_info=sys.exc_info())
+                raise
+            _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
+            _log_usage(provider, key, usage, session_id, tier, path, agent_name, domain=domain, model=model)
+            _record_ledger_bookkeeping(provider, key, model, usage, headroom_headers)
+            full_text = accumulated_text + text
+            _action, accumulated_text, continuations_used = _handle_finish_reason(
+                accumulated_text, full_text, finish_reason, allow_continuation,
+                continuations_used, is_last, label, agent_name)
+            if _action == "next-step":
+                break  # move on to next chain step (or fall through to
+                # end-of-chain truncated-output handling, if is_last)
+            return "return", full_text, accumulated_text, continuations_used, last_exc
+        except _TRANSIENT_ERRORS as exc:
+            last_exc = exc
+            _action, user_content, accumulated_text, same_step_shrinks = \
+                _handle_transient_error(
+                    exc, provider, key, model, chain, index, is_last, label,
+                    agent_name, system_prompt, prompt_for_step, user_content,
+                    accumulated_text, same_step_shrinks)
+            if _action == "raise":
+                raise
+            if _action == "retry-in-place":
+                continue  # retry the SAME step now
+            break  # move on to next chain step (or fall off the end, if is_last)
+    return "next-step", "", accumulated_text, continuations_used, last_exc
+
+
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
                    session_id: str = None, tier: int = None, path: str = None,
                    domain: str = None, allow_continuation: bool = True) -> str:
@@ -1950,11 +2055,13 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         # just gave up immediately with the same 413 as last_exc, even
         # though this exact provider/model would likely have accepted
         # the very same request at a smaller size. same_step_shrinks
-        # below lets a too-large request be retried against the SAME
-        # step, shrunk each time from that step's own stated Limit/
-        # Requested figures, before generate_text() ever falls through
-        # to "next step" (or gives up, on the last step) logic.
-        same_step_shrinks = 0
+        # lets a too-large request be retried against the SAME step,
+        # shrunk each time from that step's own stated Limit/Requested
+        # figures, before falling through to "next step" (or giving up,
+        # on the last step) logic. 3f-5: same_step_shrinks itself is no
+        # longer initialized here -- it moved inside _run_chain_step(),
+        # which is called fresh once per chain step below and so resets
+        # it to 0 on every call, same as this loop used to do by hand.
 
         if provider == "cloudflare":
             account_id_env = step["account_id_env"]
@@ -1971,74 +2078,28 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                       f"(see cooldown_until:{provider}:{key_id}).")
                 continue
             json_mode = step.get("json_mode", False)
+            _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
 
-            while True:  # Fix D2: retry loop scoped to THIS step only
-                prompt_for_step = (
-                    _continuation_prompt(user_content, accumulated_text)
-                    if accumulated_text else user_content
-                )
-                # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3f-1:
-                # extracted into _ledger_gate(), shared with the
-                # SDK-shaped branch below. See that function's docstring
-                # for exactly how the reroute-vs-wait choice is made.
-                _gate = _ledger_gate(chain, i, provider, key_id, model,
-                                      system_prompt, prompt_for_step, label, agent_name)
-                if _gate == "reroute":
-                    break  # skip this step, fall through to the next chain step
-                if _gate == "waited-retry":
-                    continue  # retry the SAME step now that we've waited
-                try:
-                    # D1 patch 2 -- tracing wraps the real network call. See
-                    # _traced_generation()/_end_traced_generation() docstrings:
-                    # the provider call below runs exactly once regardless of
-                    # whether tracing itself succeeds.
-                    _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
-                                                  agent_name, session_id, tier, path, domain)
-                    try:
-                        text, usage, finish_reason, headroom_headers = _call_cloudflare_step(
-                            creds, model, system_prompt, prompt_for_step, json_mode=json_mode,
-                            max_tokens=_max_tokens_for(model, step))  # Root Cause A fix
-                    except BaseException:
-                        _end_traced_generation(_traced, agent_name, label, None, None, None,
-                                                exc_info=sys.exc_info())
-                        raise
-                    _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
-                    _log_usage(provider, key_id, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-                    # Phase 3c -- post-call ledger bookkeeping. 3f-2:
-                    # extracted into _record_ledger_bookkeeping(), shared
-                    # with the SDK-shaped branch below. See that
-                    # function's docstring for what each signal feeds.
-                    _record_ledger_bookkeeping(provider, key_id, model, usage, headroom_headers)
-                    full_text = accumulated_text + text
-                    # Fix C -- truncation/continuation handling. 3f-3:
-                    # extracted into _handle_finish_reason(), shared with
-                    # the SDK-shaped branch below. See that function's
-                    # docstring for the action/state-passing contract.
-                    _action, accumulated_text, continuations_used = _handle_finish_reason(
-                        accumulated_text, full_text, finish_reason, allow_continuation,
-                        continuations_used, is_last, label, agent_name)
-                    if _action == "next-step":
-                        break  # move on to next chain step (or fall through to
-                        # end-of-chain truncated-output handling, if is_last)
-                    return full_text
-                except _TRANSIENT_ERRORS as exc:
-                    last_exc = exc
-                    # Phase 3d/3e -- classify_error() dispatch. 3f-4:
-                    # extracted into _handle_transient_error(), shared
-                    # with the SDK-shaped branch below. See that
-                    # function's docstring for the action/state-passing
-                    # contract (it can't `raise`/`continue`/`break` this
-                    # loop directly, so it hands back a sentinel instead).
-                    _action, user_content, accumulated_text, same_step_shrinks = \
-                        _handle_transient_error(
-                            exc, provider, key_id, model, chain, i, is_last, label,
-                            agent_name, system_prompt, prompt_for_step, user_content,
-                            accumulated_text, same_step_shrinks)
-                    if _action == "raise":
-                        raise
-                    if _action == "retry-in-place":
-                        continue  # retry the SAME step now
-                    break  # move on to next chain step (or fall off the end, if is_last)
+            def _call_fn(prompt_for_step, _creds=creds, _model=model, _jm=json_mode, _mt=_max_tok):
+                return _call_cloudflare_step(_creds, _model, system_prompt, prompt_for_step,
+                                              json_mode=_jm, max_tokens=_mt)
+
+            # 3f-5 -- the whole retry loop (pre-flight gate -> traced call
+            # -> dispatch -> bookkeeping -> finish_reason handling ->
+            # exception dispatch) now lives in the single shared
+            # _run_chain_step(), also called from the SDK-shaped branch
+            # below. This branch differs only in `key_id` vs. `key_env`
+            # and in `_call_fn` (which wraps _call_cloudflare_step() vs.
+            # _call_step()) -- see that function's docstring.
+            _action, full_text, accumulated_text, continuations_used, _step_exc = \
+                _run_chain_step(chain, i, is_last, provider, model, key_id, label,
+                                 system_prompt, user_content, accumulated_text,
+                                 continuations_used, allow_continuation, agent_name,
+                                 session_id, tier, path, domain, _call_fn)
+            if _step_exc is not None:
+                last_exc = _step_exc
+            if _action == "return":
+                return full_text
             continue
 
         key_env = step["key_env"]
@@ -2062,76 +2123,24 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
             continue
 
-        while True:  # Fix D2: retry loop scoped to THIS step only
-            prompt_for_step = (
-                _continuation_prompt(user_content, accumulated_text)
-                if accumulated_text else user_content
-            )
-            # Phase 3 (§PHASE 3) -- pre-flight ledger gate. 3f-1:
-            # extracted into _ledger_gate(), shared with the cloudflare
-            # branch above. See that function's docstring for exactly how
-            # the reroute-vs-wait choice is made.
-            _gate = _ledger_gate(chain, i, provider, key_env, model,
-                                  system_prompt, prompt_for_step, label, agent_name)
-            if _gate == "reroute":
-                break  # skip this step, fall through to the next chain step
-            if _gate == "waited-retry":
-                continue  # retry the SAME step now that we've waited
-            try:
-                # D1 patch 2 -- same traced-call pattern as the cloudflare
-                # branch above; see _traced_generation()/_end_traced_generation().
-                _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
-                                              agent_name, session_id, tier, path, domain)
-                try:
-                    text, usage, finish_reason, headroom_headers = _call_step(
-                        client, model, system_prompt, prompt_for_step,
-                        max_tokens=_max_tokens_for(model, step))  # Root Cause A fix
-                except BaseException:
-                    _end_traced_generation(_traced, agent_name, label, None, None, None,
-                                            exc_info=sys.exc_info())
-                    raise
-                _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
-                _log_usage(provider, key_env, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-                # Phase 3c -- post-call ledger bookkeeping. 3f-2:
-                # extracted into _record_ledger_bookkeeping(), shared
-                # with the cloudflare branch above. groq/cerebras/
-                # mistral/gemini/huggingface are all confirmed to expose
-                # the standard x-ratelimit-* headers this module's SDKs
-                # surface via .with_raw_response (see _call_step()'s
-                # Phase 3c docstring note), so this branch is the one
-                # where record_headroom() actually has real data most
-                # calls.
-                _record_ledger_bookkeeping(provider, key_env, model, usage, headroom_headers)
-                full_text = accumulated_text + text
-                # Fix C -- truncation/continuation handling. 3f-3:
-                # extracted into _handle_finish_reason(), shared with the
-                # cloudflare branch above. See that function's docstring
-                # for the action/state-passing contract.
-                _action, accumulated_text, continuations_used = _handle_finish_reason(
-                    accumulated_text, full_text, finish_reason, allow_continuation,
-                    continuations_used, is_last, label, agent_name)
-                if _action == "next-step":
-                    break  # move on to next chain step (or fall through to
-                    # end-of-chain truncated-output handling, if is_last)
-                return full_text
-            except _TRANSIENT_ERRORS as exc:
-                last_exc = exc
-                # Phase 3d/3e -- classify_error() dispatch. 3f-4:
-                # extracted into _handle_transient_error(), shared with
-                # the cloudflare branch above. See that function's
-                # docstring for the action/state-passing contract (it
-                # can't `raise`/`continue`/`break` this loop directly,
-                # so it hands back a sentinel instead).
-                _action, user_content, accumulated_text, same_step_shrinks = \
-                    _handle_transient_error(
-                        exc, provider, key_env, model, chain, i, is_last, label,
-                        agent_name, system_prompt, prompt_for_step, user_content,
-                        accumulated_text, same_step_shrinks)
-                if _action == "raise":
-                    raise
-                if _action == "retry-in-place":
-                    continue  # retry the SAME step now
-                break  # move on to next chain step (or fall off the end, if is_last)
+        _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
+
+        def _call_fn(prompt_for_step, _client=client, _model=model, _mt=_max_tok):
+            return _call_step(_client, _model, system_prompt, prompt_for_step, max_tokens=_mt)
+
+        # 3f-5 -- same shared _run_chain_step() as the cloudflare branch
+        # above; this branch differs only in `key_env` vs. `key_id` and
+        # in `_call_fn` (which wraps _call_step() vs.
+        # _call_cloudflare_step()) -- see that function's docstring.
+        _action, full_text, accumulated_text, continuations_used, _step_exc = \
+            _run_chain_step(chain, i, is_last, provider, model, key_env, label,
+                             system_prompt, user_content, accumulated_text,
+                             continuations_used, allow_continuation, agent_name,
+                             session_id, tier, path, domain, _call_fn)
+        if _step_exc is not None:
+            last_exc = _step_exc
+        if _action == "return":
+            return full_text
 
     if accumulated_text:
         # Fix C: the chain ran out (or hit _MAX_CONTINUATIONS) while a
