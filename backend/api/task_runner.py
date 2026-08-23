@@ -746,6 +746,55 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
                   f"path={rel_path!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
 
 
+def _quota_summary(response: dict, session_id: str) -> dict:
+    """Phase 8c — per-task summary of quota-related outcomes, attached
+    to every run_task() response as response["quota_summary"].
+
+    - "roles_succeeded"/"roles_degraded"/"failed_roles": derived from
+      the same {role: {"status": "failed", ...}} marker shape Phase
+      6b/6c's degradation path writes into `results` (see the
+      failed_roles scan in _run_tier3_hires() above). Only tier-3's
+      hires-driven adaptive path ever produces that shape — every
+      other tier/path (cache, SGA, tier-1 fixed/direct, tier-2) has no
+      "roles" concept at all, so these come back None there rather
+      than 0: "nothing to report" is a different fact from "zero roles
+      degraded" and collapsing the two would make an empty run look
+      like a clean one.
+    - "ledger_waits"/"ledger_reroutes"/"provider_failures": from
+      eo/quota_sentinel.get_ledger_event_counts(session_id) — these
+      ARE meaningful for every tier/path, since every one of them
+      eventually calls utils/llm_client.py's generate_text() with this
+      same session_id, regardless of whether that path has a "roles"
+      concept.
+
+    Never raises — a summary this is, not a task-completion gate; any
+    failure here must never take down the actual response it's
+    summarizing."""
+    try:
+        from eo.quota_sentinel import get_ledger_event_counts
+        counts = get_ledger_event_counts(session_id)
+    except Exception as exc:
+        print(f"  [task_runner] quota summary: ledger event read failed (non-fatal): {exc}")
+        counts = {"wait": 0, "reroute": 0, "provider_failure": 0}
+
+    output = (response.get("result") or {}).get("output")
+    roles_succeeded = roles_degraded = failed_roles = None
+    if isinstance(output, dict):
+        failed_roles = [role for role, r in output.items()
+                         if isinstance(r, dict) and r.get("status") == "failed"]
+        roles_degraded = len(failed_roles)
+        roles_succeeded = len(output) - roles_degraded
+
+    return {
+        "roles_succeeded": roles_succeeded,
+        "roles_degraded": roles_degraded,
+        "failed_roles": failed_roles,
+        "ledger_waits": counts.get("wait", 0),
+        "ledger_reroutes": counts.get("reroute", 0),
+        "provider_failures": counts.get("provider_failure", 0),
+    }
+
+
 def run_task(task_text: str, tier_override: int = None, directed_task_type_override: str = None,
              app_slug: str = None, run_tests: bool = False, session_id: str = None,
              mode: str = "auto", project_unique_name: str = None,
@@ -796,6 +845,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     )
     _write_plan_panels(response, session_id, owner_id)   # NEW — chat-to-panel writes, patch 2
     _write_code_files(response, session_id, owner_id)   # NEW — Code sub-tab write-back, patch 9
+    response["quota_summary"] = _quota_summary(response, session_id)   # NEW — Phase 8c
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
 

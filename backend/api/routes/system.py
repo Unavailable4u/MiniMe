@@ -18,7 +18,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import require_auth
-from eo.quota_sentinel import get_quota_snapshot, get_usage_history, get_usage_history_scoped
+from eo.quota_sentinel import (
+    get_quota_snapshot,
+    get_rate_window_snapshot,
+    get_usage_history,
+    get_usage_history_scoped,
+)
 
 router = APIRouter()
 
@@ -30,7 +35,16 @@ def health():
 
 @router.get("/api/quota", dependencies=[Depends(require_auth)])
 def quota():
-    return get_quota_snapshot()
+    # Phase 8a — today's daily-quota figures (existing) plus a
+    # `rate_windows` section keyed by the same agent_key, giving the
+    # dashboard the live minute/daily headroom state from rate_ledger.py
+    # (token-based providers and OpenRouter-style request-based
+    # providers both covered, per get_rate_window_snapshot()'s
+    # docstring) alongside the once-a-day usage figures already here.
+    return {
+        **get_quota_snapshot(),
+        "rate_windows": get_rate_window_snapshot(),
+    }
 
 
 @router.get("/api/usage/history", dependencies=[Depends(require_auth)])
