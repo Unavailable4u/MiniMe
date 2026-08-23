@@ -1,0 +1,432 @@
+diff --git a/backend/tests/unit/test_eo_node_summaries.py b/backend/tests/unit/test_eo_node_summaries.py
+new file mode 100644
+index 0000000..325ca06
+--- /dev/null
++++ b/backend/tests/unit/test_eo_node_summaries.py
+@@ -0,0 +1,142 @@
++"""
++tests/unit/test_eo_node_summaries.py — Patch 7e-2.
++
++eo/node_summaries.py had zero test coverage before this. The one
++piece of behavior actually worth pinning down here is the MERGE
++semantics of set_summaries(): a concept_linker run scoped to a few
++sources must only refresh the nodes it actually read this pass, never
++blank out every other node's summary in the workspace (see the
++module's own set_summaries() docstring). A regression back to a plain
++overwrite would silently wipe the Backlinks graph's node-click detail
++for every node outside whatever scope happened to run last.
++
++Isolation: this module reads/writes a real JSON file on disk
++(SUMMARIES_PATH), not memory.bus -- tests monkeypatch SUMMARIES_PATH
++itself to a path under tmp_path so nothing here ever touches the real
++data/graph/_node_summaries.json.
++"""
++import json
++
++import eo.node_summaries as node_summaries
++
++
++def _use_tmp_summaries_path(monkeypatch, tmp_path):
++    monkeypatch.setattr(node_summaries, "SUMMARIES_PATH", str(tmp_path / "_node_summaries.json"))
++
++
++# ---------------------------------------------------------------------
++# _read / _write
++# ---------------------------------------------------------------------
++
++def test_read_returns_empty_dict_when_file_does_not_exist(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    assert node_summaries._read() == {}
++
++
++def test_write_creates_parent_directories_that_dont_exist_yet(monkeypatch, tmp_path):
++    nested_path = tmp_path / "nested" / "dir" / "_node_summaries.json"
++    monkeypatch.setattr(node_summaries, "SUMMARIES_PATH", str(nested_path))
++
++    node_summaries._write({"ws_1": {"n1": "summary"}})
++
++    assert nested_path.exists()
++    assert json.loads(nested_path.read_text()) == {"ws_1": {"n1": "summary"}}
++
++
++# ---------------------------------------------------------------------
++# set_summaries
++# ---------------------------------------------------------------------
++
++def test_set_summaries_requires_workspace_id(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    try:
++        node_summaries.set_summaries("", {"n1": "x"})
++        assert False, "expected ValueError"
++    except ValueError:
++        pass
++
++
++def test_set_summaries_writes_and_returns_the_full_merged_map(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    result = node_summaries.set_summaries("ws_1", {"n1": "first node summary"})
++    assert result == {"n1": "first node summary"}
++    assert node_summaries.get_summaries("ws_1") == {"n1": "first node summary"}
++
++
++def test_set_summaries_merges_new_nodes_without_dropping_existing_ones(monkeypatch, tmp_path):
++    """The core regression case: a second, scoped run touching only
++    n2 must not erase n1's summary from the first run."""
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "first summary"})
++
++    result = node_summaries.set_summaries("ws_1", {"n2": "second summary"})
++
++    assert result == {"n1": "first summary", "n2": "second summary"}
++
++
++def test_set_summaries_overwrites_an_existing_node_when_reprocessed(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "old summary"})
++
++    result = node_summaries.set_summaries("ws_1", {"n1": "updated summary"})
++
++    assert result == {"n1": "updated summary"}
++
++
++def test_set_summaries_skips_falsy_summary_values(monkeypatch, tmp_path):
++    """A node with an empty/None summary in the incoming batch must not
++    overwrite (or create) an entry -- the node keeps its last real
++    summary, per the module's own docstring."""
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "real summary"})
++
++    result = node_summaries.set_summaries("ws_1", {"n1": "", "n2": None})
++
++    assert result == {"n1": "real summary"}
++
++
++def test_set_summaries_skips_falsy_node_ids(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    result = node_summaries.set_summaries("ws_1", {"": "orphan summary"})
++    assert result == {}
++
++
++def test_set_summaries_with_none_summaries_arg_is_a_no_op_merge(monkeypatch, tmp_path):
++    """summaries=None (via the `(summaries or {}).items()` guard) must
++    behave like an empty batch, not raise on NoneType.items()."""
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "kept summary"})
++
++    result = node_summaries.set_summaries("ws_1", None)
++
++    assert result == {"n1": "kept summary"}
++
++
++def test_set_summaries_does_not_leak_across_different_workspaces(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "ws1 summary"})
++    node_summaries.set_summaries("ws_2", {"n1": "ws2 summary"})
++
++    assert node_summaries.get_summaries("ws_1") == {"n1": "ws1 summary"}
++    assert node_summaries.get_summaries("ws_2") == {"n1": "ws2 summary"}
++
++
++# ---------------------------------------------------------------------
++# get_summaries / get_summary
++# ---------------------------------------------------------------------
++
++def test_get_summaries_returns_empty_dict_for_unknown_workspace(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    assert node_summaries.get_summaries("nonexistent_ws") == {}
++
++
++def test_get_summary_returns_none_for_unknown_node(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "summary"})
++    assert node_summaries.get_summary("ws_1", "n_missing") is None
++
++
++def test_get_summary_returns_the_stored_summary_for_a_known_node(monkeypatch, tmp_path):
++    _use_tmp_summaries_path(monkeypatch, tmp_path)
++    node_summaries.set_summaries("ws_1", {"n1": "the actual summary text"})
++    assert node_summaries.get_summary("ws_1", "n1") == "the actual summary text"
+diff --git a/backend/tests/unit/test_eo_timeline_node_blurbs.py b/backend/tests/unit/test_eo_timeline_node_blurbs.py
+new file mode 100644
+index 0000000..fa5dd17
+--- /dev/null
++++ b/backend/tests/unit/test_eo_timeline_node_blurbs.py
+@@ -0,0 +1,140 @@
++"""
++tests/unit/test_eo_timeline_node_blurbs.py — Patch 7e-2.
++
++eo/timeline_node_blurbs.py had zero test coverage before this. Same
++JSON-file-on-disk shape as eo/node_summaries.py, but with a different
++merge contract worth its own coverage: DEFAULT_BLURBS must always be
++present as a fallback (a fresh checkout has real content on first
++request), stored overrides win over defaults, and a kind never
++explicitly overridden still gets its default rather than disappearing
++-- exactly the behavior the module's own _read() comment describes.
++
++Isolation: same as node_summaries.py -- this reads/writes a real JSON
++file (BLURBS_PATH), not memory.bus. Tests monkeypatch BLURBS_PATH to a
++path under tmp_path so nothing here ever touches the real
++data/timeline/_node_blurbs.json.
++"""
++import json
++
++import eo.timeline_node_blurbs as timeline_node_blurbs
++
++
++def _use_tmp_blurbs_path(monkeypatch, tmp_path):
++    monkeypatch.setattr(timeline_node_blurbs, "BLURBS_PATH", str(tmp_path / "_node_blurbs.json"))
++
++
++# ---------------------------------------------------------------------
++# _read — defaults, no file yet
++# ---------------------------------------------------------------------
++
++def test_read_returns_default_blurbs_when_file_does_not_exist(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    assert timeline_node_blurbs._read() == timeline_node_blurbs.DEFAULT_BLURBS
++
++
++# ---------------------------------------------------------------------
++# get_blurbs / get_blurb
++# ---------------------------------------------------------------------
++
++def test_get_blurbs_on_a_fresh_checkout_has_real_default_content(monkeypatch, tmp_path):
++    """A fresh checkout with no stored file yet must still return real
++    blurb text for every default kind, not an empty store."""
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    result = timeline_node_blurbs.get_blurbs()
++    assert result["cache_hit"] == timeline_node_blurbs.DEFAULT_BLURBS["cache_hit"]
++    assert result["__input__"]
++    assert result["__output__"]
++
++
++def test_get_blurb_returns_none_for_an_unknown_kind(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    assert timeline_node_blurbs.get_blurb("some_unmapped_role") is None
++
++
++def test_get_blurb_returns_the_default_for_a_default_kind(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    assert timeline_node_blurbs.get_blurb("worker_pool_selection") == \
++        timeline_node_blurbs.DEFAULT_BLURBS["worker_pool_selection"]
++
++
++# ---------------------------------------------------------------------
++# set_blurb
++# ---------------------------------------------------------------------
++
++def test_set_blurb_requires_kind(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    try:
++        timeline_node_blurbs.set_blurb("", "some blurb")
++        assert False, "expected ValueError"
++    except ValueError:
++        pass
++
++
++def test_set_blurb_adds_an_override_for_a_new_kind(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    result = timeline_node_blurbs.set_blurb("new_custom_role", "A custom step description.")
++    assert result["new_custom_role"] == "A custom step description."
++    assert timeline_node_blurbs.get_blurb("new_custom_role") == "A custom step description."
++
++
++def test_set_blurb_overrides_a_default_blurb(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    timeline_node_blurbs.set_blurb("cache_hit", "Custom override text.")
++    assert timeline_node_blurbs.get_blurb("cache_hit") == "Custom override text."
++
++
++def test_set_blurb_a_stored_override_persists_across_separate_reads(monkeypatch, tmp_path):
++    """Stored overrides must win over defaults on a fresh _read(), not
++    just within the same in-memory call."""
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    timeline_node_blurbs.set_blurb("cache_hit", "Persisted override.")
++
++    # A brand-new call path -- get_blurbs() -> _read() -> re-opens the file.
++    assert timeline_node_blurbs.get_blurbs()["cache_hit"] == "Persisted override."
++
++
++def test_set_blurb_falsy_blurb_reverts_a_default_kind_to_its_default(monkeypatch, tmp_path):
++    """Regression coverage for the module's own set_blurb() docstring:
++    clearing an override on a kind that IS a default must fall back to
++    DEFAULT_BLURBS, not disappear or return an empty string."""
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    timeline_node_blurbs.set_blurb("cache_hit", "Custom override text.")
++
++    timeline_node_blurbs.set_blurb("cache_hit", "")
++
++    assert timeline_node_blurbs.get_blurb("cache_hit") == \
++        timeline_node_blurbs.DEFAULT_BLURBS["cache_hit"]
++
++
++def test_set_blurb_falsy_blurb_on_a_non_default_kind_removes_it_entirely(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    timeline_node_blurbs.set_blurb("custom_role", "Some text.")
++
++    timeline_node_blurbs.set_blurb("custom_role", None)
++
++    assert timeline_node_blurbs.get_blurb("custom_role") is None
++
++
++def test_set_blurb_does_not_disturb_other_stored_overrides(monkeypatch, tmp_path):
++    _use_tmp_blurbs_path(monkeypatch, tmp_path)
++    timeline_node_blurbs.set_blurb("role_a", "Blurb A.")
++    timeline_node_blurbs.set_blurb("role_b", "Blurb B.")
++
++    timeline_node_blurbs.set_blurb("role_a", "Updated blurb A.")
++
++    assert timeline_node_blurbs.get_blurb("role_a") == "Updated blurb A."
++    assert timeline_node_blurbs.get_blurb("role_b") == "Blurb B."
++
++
++# ---------------------------------------------------------------------
++# _write
++# ---------------------------------------------------------------------
++
++def test_write_creates_parent_directories_that_dont_exist_yet(monkeypatch, tmp_path):
++    nested_path = tmp_path / "nested" / "dir" / "_node_blurbs.json"
++    monkeypatch.setattr(timeline_node_blurbs, "BLURBS_PATH", str(nested_path))
++
++    timeline_node_blurbs._write({"cache_hit": "override"})
++
++    assert nested_path.exists()
++    assert json.loads(nested_path.read_text()) == {"cache_hit": "override"}
+diff --git a/backend/tests/unit/test_eo_tracing.py b/backend/tests/unit/test_eo_tracing.py
+new file mode 100644
+index 0000000..1e8f4a6
+--- /dev/null
++++ b/backend/tests/unit/test_eo_tracing.py
+@@ -0,0 +1,132 @@
++"""
++tests/unit/test_eo_tracing.py — Patch 7e-2.
++
++eo/tracing.py had zero test coverage before this. Two things worth
++pinning down: truncate_for_trace()'s "never raises" contract (the
++module's own docstring is explicit about this being load-bearing --
++callers in utils/llm_client.py and eo/executor.py rely on it not
++needing their own try/except), and TRACING_ENABLED's dependency on
++os.environ being read AFTER load_dotenv() runs, not against whatever
++the process environment happened to look like at interpreter start.
++
++Isolation for TRACING_ENABLED: it's a module-level constant computed
++once at import time from os.getenv(), so testing its behavior under
++different env-var combinations means reloading the module with a
++patched environment via importlib.reload(). Each such test reloads
++the module again at the end (env cleared) to avoid leaking a
++non-default TRACING_ENABLED value into whatever test runs next in the
++same pytest process -- same class of cross-test state leak
++tests/conftest.py's own _reset_role_prompts_cache/_reset_app_slug_context
++fixtures exist to close for other modules.
++
++get_tracer() is a thin pass-through to langfuse.get_client() (the SDK
++provides its own no-op fallback per the module's docstring) -- mocked
++here rather than exercised against the real SDK, since verifying "did
++we call the one function this delegates to" is the only thing this
++module is actually responsible for getting right.
++"""
++import importlib
++
++import eo.tracing as tracing
++
++
++# ---------------------------------------------------------------------
++# truncate_for_trace
++# ---------------------------------------------------------------------
++
++def test_truncate_for_trace_returns_short_text_unchanged():
++    assert tracing.truncate_for_trace("hello world") == "hello world"
++
++
++def test_truncate_for_trace_returns_none_for_none_input():
++    assert tracing.truncate_for_trace(None) is None
++
++
++def test_truncate_for_trace_coerces_non_str_input_via_str():
++    assert tracing.truncate_for_trace(12345, limit=10) == "12345"
++
++
++def test_truncate_for_trace_truncates_text_over_the_limit_with_omitted_count():
++    text = "a" * 50
++    result = tracing.truncate_for_trace(text, limit=10)
++    assert result.startswith("a" * 10)
++    assert "truncated" in result
++    assert "40 more chars" in result
++
++
++def test_truncate_for_trace_uses_module_default_limit_when_not_specified():
++    text = "a" * (tracing.TRACE_TEXT_CHAR_LIMIT + 100)
++    result = tracing.truncate_for_trace(text)
++    assert result.startswith("a" * tracing.TRACE_TEXT_CHAR_LIMIT)
++    assert "100 more chars" in result
++
++
++def test_truncate_for_trace_text_exactly_at_limit_is_not_truncated():
++    text = "a" * 10
++    assert tracing.truncate_for_trace(text, limit=10) == text
++
++
++def test_truncate_for_trace_never_raises_even_on_a_broken_limit():
++    """The module's own docstring: "Never raises -- a tracing-side
++    truncation failure must not look like a real error to the
++    caller." A non-comparable `limit` (e.g. None, where `len(s) <=
++    limit` raises TypeError) must fall through to the except-block
++    and return the original text, not propagate."""
++    text = "some text"
++    assert tracing.truncate_for_trace(text, limit=None) == text
++
++
++# ---------------------------------------------------------------------
++# get_tracer
++# ---------------------------------------------------------------------
++
++def test_get_tracer_delegates_to_langfuse_get_client(monkeypatch):
++    sentinel = object()
++    monkeypatch.setattr(tracing, "get_client", lambda: sentinel)
++    assert tracing.get_tracer() is sentinel
++
++
++# ---------------------------------------------------------------------
++# TRACING_ENABLED — computed at import time from LANGFUSE_* env vars
++# ---------------------------------------------------------------------
++
++def _reload_tracing_with_env(monkeypatch, public_key, secret_key):
++    if public_key is None:
++        monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
++    else:
++        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", public_key)
++    if secret_key is None:
++        monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
++    else:
++        monkeypatch.setenv("LANGFUSE_SECRET_KEY", secret_key)
++    return importlib.reload(tracing)
++
++
++def test_tracing_enabled_true_when_both_keys_are_set(monkeypatch):
++    try:
++        reloaded = _reload_tracing_with_env(monkeypatch, "pub_123", "secret_456")
++        assert reloaded.TRACING_ENABLED is True
++    finally:
++        # Leave no non-default state behind for whatever test runs next.
++        _reload_tracing_with_env(monkeypatch, None, None)
++
++
++def test_tracing_enabled_false_when_only_public_key_is_set(monkeypatch):
++    try:
++        reloaded = _reload_tracing_with_env(monkeypatch, "pub_123", None)
++        assert reloaded.TRACING_ENABLED is False
++    finally:
++        _reload_tracing_with_env(monkeypatch, None, None)
++
++
++def test_tracing_enabled_false_when_only_secret_key_is_set(monkeypatch):
++    try:
++        reloaded = _reload_tracing_with_env(monkeypatch, None, "secret_456")
++        assert reloaded.TRACING_ENABLED is False
++    finally:
++        _reload_tracing_with_env(monkeypatch, None, None)
++
++
++def test_tracing_enabled_false_when_neither_key_is_set(monkeypatch):
++    reloaded = _reload_tracing_with_env(monkeypatch, None, None)
++    assert reloaded.TRACING_ENABLED is False
