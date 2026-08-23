@@ -21,8 +21,9 @@ from datetime import date, timedelta, datetime, timezone
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory.bus import read_many as bus_read_many
+from memory.bus import read as bus_read, read_many as bus_read_many
 from utils.llm_client import QUOTA_CONFIG
+from utils.rate_ledger import headroom_snapshot
 from relay.emitter import emit_event
 TAVILY_MONTHLY_QUOTA = 1000  # Tavily's free tier: 1,000 searches/MONTH, not
 # daily like every other provider in QUOTA_CONFIG. Deliberately NOT added
@@ -198,18 +199,102 @@ def get_quota_snapshot() -> dict:
     return snapshot
 
 
+def get_rate_window_snapshot() -> dict:
+    """Phase 8a — {agent_key: headroom_snapshot()-shaped dict} for every
+    account in AGENT_CAPABILITIES, read straight from rate_ledger.py's
+    live gating state rather than the once-a-day usage: records
+    get_quota_snapshot() above reads. This is the "how close is this
+    org to its ceiling right now" companion to that function's "how
+    much of today's quota is left" -- Phase 8's GET /api/quota goal.
+
+    Deliberately a separate function/key (`rate_windows`) rather than
+    folded into get_quota_snapshot()'s own per-agent dict: that dict's
+    {used, quota, pct, unit_mismatch, cooldown_until, cooling_down}
+    shape is a real, depended-on contract (Panel's quota-aware hiring
+    reads it directly), and headroom_snapshot()'s token-vs-request
+    gating_mode split doesn't fit cleanly into those existing fields
+    without conditionals leaking into every caller of that function.
+
+    Same model-resolution rule as get_quota_snapshot(): today's usage
+    record's own "model" field when a call has landed today, else
+    _model_for()'s best-guess default -- headroom_snapshot() needs a
+    concrete model to resolve gating_mode and the right QUOTA_CONFIG
+    limits, same as get_quota_snapshot()'s QUOTA_CONFIG lookup does.
+
+    Tavily is skipped here (unlike get_quota_snapshot()'s one-off extra
+    entry): it isn't an LLM agent, has no AGENT_CAPABILITIES entry, and
+    rate_ledger.py's token-bucket/sliding-window gating doesn't apply to
+    it at all -- its only quota concept is the monthly figure
+    get_quota_snapshot() already reports.
+
+    Read pattern mirrors get_quota_snapshot()'s own MGET-first-then-loop
+    discipline for the usage records (one round trip for `today`'s
+    per-account records, purely to resolve `model`); headroom_snapshot()
+    itself does its own reads per account since it pulls from several
+    distinct bus keys per (provider, key_id, model) and Phase 2 didn't
+    expose a batched form of that read.
+    """
+    from eo.registry import AGENT_CAPABILITIES
+    today = date.today().isoformat()
+    agent_infos = [
+        (agent_key, info.get("provider"), _key_id_for(agent_key, info.get("provider")))
+        for agent_key, info in AGENT_CAPABILITIES.items()
+    ]
+    usage_keys = [f"usage:{provider}:{key_id}:{today}" for _, provider, key_id in agent_infos]
+    usage_records = bus_read_many(usage_keys, default={"requests": 0, "tokens": 0})
+
+    rate_windows = {}
+    for agent_key, provider, key_id in agent_infos:
+        record = usage_records[f"usage:{provider}:{key_id}:{today}"]
+        model = record.get("model") or _model_for(agent_key, provider)
+        rate_windows[agent_key] = headroom_snapshot(provider, key_id, model)
+
+    return rate_windows
+
+
 def check_and_alert(session_id: str = None) -> None:
     """Call this periodically (or after each generate_text() call, if you
     want it real-time) to fire quota_alert for anything that's crossed
     80%. Deliberately separate from get_quota_snapshot() so reading a
     snapshot for hiring decisions (Part 6) never has an alerting side
-    effect."""
+    effect.
+
+    Phase 8b: alongside the existing daily-quota check (unchanged below,
+    now tagged "window": "daily" so a listener can tell the two apart),
+    this also walks get_rate_window_snapshot()'s per-account minute-
+    window state and fires the same quota_alert event, tagged "window":
+    "minute", the moment sliding_window.pct_used crosses ~80% -- before
+    can_proceed() actually starts blocking requests for that account.
+    Uses sliding_window.pct_used directly rather than re-deriving it, so
+    this fires correctly for both gating_mode shapes (tpm-limited
+    providers and OpenRouter-style rpm-limited ones) without a
+    token-vs-request branch here -- headroom_snapshot() already picked
+    the right limit and unit for whichever mode the account is in.
+    pct_used is None (skipped, same as the daily check below) wherever
+    QUOTA_CONFIG has no verified per-minute figure for that
+    provider/model -- an honest "no verified number" rather than a
+    fabricated percentage, same posture as get_quota_snapshot()'s own
+    unit_mismatch/pct handling."""
     snapshot = get_quota_snapshot()
     for agent_key, info in snapshot.items():
         if info["pct"] is not None and info["pct"] >= 0.8:
             emit_event("quota_alert", session_id, agent="quota_sentinel",
                        payload={"agent_key": agent_key, "used": info["used"],
-                                "quota": info["quota"], "pct": round(info["pct"], 3)})
+                                "quota": info["quota"], "pct": round(info["pct"], 3),
+                                "window": "daily"})
+
+    rate_windows = get_rate_window_snapshot()
+    for agent_key, window in rate_windows.items():
+        sliding = window.get("sliding_window") or {}
+        pct = sliding.get("pct_used")
+        if pct is not None and pct >= 0.8:
+            emit_event("quota_alert", session_id, agent="quota_sentinel",
+                       payload={"agent_key": agent_key,
+                                "used": sliding.get("used_last_60s"),
+                                "quota": sliding.get("tpm_limit"),
+                                "pct": round(pct, 3),
+                                "gating_mode": window.get("gating_mode"),
+                                "window": "minute"})
 
 
 def get_usage_history(days: int = 7) -> dict:
@@ -357,3 +442,31 @@ def get_usage_history_scoped(days: int = 7, domain: str = None, workspace_id: st
         "domain": _series_for("usage_by_domain", domain),
         "workspace": _series_for("usage_by_workspace", workspace_id),
     }
+
+
+def get_ledger_event_counts(session_id: str) -> dict:
+    """Phase 8c -- reads back the ledger_events:{session_id} counter
+    utils/llm_client.py's _record_ledger_event() writes during the run,
+    for api/task_runner.py's end-of-run_task() per-task summary. Pure
+    read, no side effect (mirrors get_quota_snapshot()/
+    get_rate_window_snapshot()'s own "no alerting/mutation on a plain
+    read" posture).
+
+    Returns {"wait": int, "reroute": int, "provider_failure": int} --
+    "wait"/"reroute" are ledger-caused gating decisions (no call went
+    out, or a call went out and hit a rate-limit response that the
+    ledger then routed around); "provider_failure" is a call that
+    actually went out and came back with a transient provider error.
+    Keeping them apart is the whole point of this counter: a run that's
+    slow because the ledger is being cautious is a very different
+    signal from a run that's slow because providers are actually
+    erroring.
+
+    Zero counts (rather than missing) for a session_id with no calls
+    yet, or where session_id is falsy -- same "empty dict/default
+    rather than raising" posture bus_read's own default= param already
+    gives every other reader in this module."""
+    if not session_id:
+        return {"wait": 0, "reroute": 0, "provider_failure": 0}
+    return bus_read(f"ledger_events:{session_id}",
+                     default={"wait": 0, "reroute": 0, "provider_failure": 0})

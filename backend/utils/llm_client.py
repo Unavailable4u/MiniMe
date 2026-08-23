@@ -1217,6 +1217,45 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
     return text.strip(), usage, finish_reason, response.headers
 
 
+def _record_ledger_event(session_id: str, kind: str) -> None:
+    """Phase 8c -- best-effort per-task counter of how the ledger's
+    gating actually behaved during this run, read back at the end of
+    api/task_runner.py's run_task() via
+    eo/quota_sentinel.get_ledger_event_counts(). `kind` is one of:
+      "wait"             -- _run_chain_step() slept and retried the
+                             same step in place (_ledger_gate()
+                             returned "waited-retry").
+      "reroute"          -- a step was skipped in favor of a later
+                             step with headroom (_ledger_gate()
+                             returned "reroute").
+      "provider_failure" -- a call actually went out and came back
+                             with a transient provider error (rate
+                             limit/5xx/timeout) -- a genuine failure,
+                             not a ledger gating decision, and the
+                             thing the per-task summary needs to
+                             distinguish from the two above.
+
+    Session-scoped and short-TTL'd (1h -- generously longer than any
+    single task run) since this is a per-task-run signal, not a
+    durable metric like usage:{provider}:{key_id}:{date} above; no
+    caller reads it past the run it was recorded for. Same non-atomic
+    read-modify-write as log_usage()'s own counter above -- a lost
+    increment under concurrent same-session calls (a fan-out group)
+    undercounts a best-effort dashboard figure by at most a handful,
+    not something worth a distributed lock for. Never raises -- an
+    accounting miss here must never take down the actual call it's
+    counting."""
+    if not session_id or kind not in ("wait", "reroute", "provider_failure"):
+        return
+    try:
+        db_key = f"ledger_events:{session_id}"
+        current = bus_read(db_key, default={"wait": 0, "reroute": 0, "provider_failure": 0})
+        current[kind] = current.get(kind, 0) + 1
+        bus_write(db_key, current, ex=3600)
+    except Exception as exc:
+        print(f"  [llm_client] _record_ledger_event failed (non-fatal): {exc}")
+
+
 def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
               path: str = None, agent_name: str = "Agent", domain: str = None,
               model: str = None) -> None:
@@ -1657,6 +1696,86 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
     return results
 
 
+# Phase 9 -- separate, larger ceiling than _LEDGER_WAIT_CAP_SECONDS above.
+# That constant bounds a single step's in-place retry wait; this one
+# bounds the ONE bounded wait-and-recheck-the-whole-chain attempt made
+# only after every step has already been tried and none worked. Kept as
+# a distinct constant (not reused) since the two waits answer different
+# questions -- "is it worth waiting on THIS step" vs. "is it worth
+# waiting at all before giving up entirely" -- and tuning one shouldn't
+# silently retune the other. Configurable per the plan's own "e.g.
+# 30-60s" framing; 45s splits the difference.
+_EXHAUSTIVE_WAIT_CAP_SECONDS = 45.0
+
+
+def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set) -> bool:
+    """Phase 9a -- the "never fail until everything is truly exhausted"
+    verdict, called once generate_text()/stream_completion()'s main
+    loop has fallen off the end of `chain` with nothing returned (every
+    step tried, none produced output). Pure decision + the bounded
+    sleep as a side effect; does NOT re-run the chain itself -- that's
+    the caller's job (Phase 9b/9c), since this function has no access
+    to the loop's own retry machinery and shouldn't need it.
+
+    `step_buckets`: the set of ErrorBucket values classify_error()
+    returned across every step that fell through to "next-step" during
+    this call (built by the caller -- see 9b/9c's docstrings for
+    exactly where). Only steps that actually failed contribute a
+    bucket; a step skipped pre-dispatch for missing creds/active
+    cooldown never raised an exception at all, so it contributes
+    nothing here (same "only count what was actually tried" posture
+    _remaining_chain_headroom() already takes for its own skip
+    conditions below).
+
+    Returns True when it's worth the caller re-trying the whole chain
+    once more, False when the caller should give up and raise
+    immediately. Per the plan's own acceptance criteria:
+      - every step's failure classified RATE_LIMIT_WINDOW (the set is
+        exactly {RATE_LIMIT_WINDOW}, never empty) -- worth a bounded
+        wait: this function computes the minimum wait_seconds across
+        every step via _remaining_chain_headroom(chain, -1, ...)
+        (from_index=-1 -- unlike its normal 3b call site, which only
+        looks AHEAD of the current step, this needs every step in the
+        chain, since by now every step has already been tried), caps
+        it at _EXHAUSTIVE_WAIT_CAP_SECONDS, sleeps, and returns True.
+      - ANY step's failure classified PERMANENT_AUTH -- a permanently
+        broken key waiting never fixes, mixed in with any other
+        outcome -- returns False immediately, no sleep. (Chain steps
+        that raise MALFORMED_REQUEST never reach this function at all;
+        _handle_transient_error()'s "raise" action already propagates
+        that one straight out of the loop -- see its own docstring.)
+      - step_buckets is empty, or contains TRANSIENT_NETWORK/
+        CONTEXT_LENGTH_EXCEEDED alongside RATE_LIMIT_WINDOW -- also
+        False. This is a deliberately conservative default beyond what
+        the plan's own bullet spells out verbatim (it only names the
+        two pure cases): a mixed bag of failure reasons means at least
+        one step failed for a reason a wait can't fix either, so
+        waiting on the CHANCE that only the rate-limited ones matter
+        would be optimistic rather than principled. Revisit only with
+        real data showing mixed-bucket exhaustion is common enough to
+        be worth a more granular (per-step, not whole-chain) verdict.
+    """
+    if step_buckets != {ErrorBucket.RATE_LIMIT_WINDOW}:
+        return False
+
+    look_ahead = _remaining_chain_headroom(chain, -1, estimated_tokens)
+    if not look_ahead:
+        # Nothing left that's even dispatchable (every step missing
+        # creds or mid-cooldown) -- waiting changes nothing here either.
+        return False
+
+    wait_seconds = min(w for (_j, _p, _k, _m, _ok, w) in look_ahead)
+    wait_seconds = min(wait_seconds, _EXHAUSTIVE_WAIT_CAP_SECONDS)
+    print(f"  [llm_client] chain exhausted -- every step is rate-limited "
+          f"with no immediate headroom anywhere, but the soonest reset "
+          f"is ~{wait_seconds:.1f}s away -- waiting that long "
+          f"(capped at {_EXHAUSTIVE_WAIT_CAP_SECONDS:.0f}s) before "
+          f"re-checking the whole chain once more, instead of failing "
+          f"outright.")
+    time.sleep(wait_seconds)
+    return True
+
+
 def _decide_ledger_action(chain: list, index: int, current_wait: float,
                            estimated_tokens: int) -> "tuple[str, float]":
     """Phase 3 (§PHASE 3, the 'If NOT OK' branch) -- shared by both the
@@ -1884,7 +2003,7 @@ def _handle_finish_reason(accumulated_text: str, full_text: str, finish_reason,
 def _handle_transient_error(exc, provider: str, key, model: str, chain: list, index: int,
                              is_last: bool, label: str, agent_name: str, system_prompt: str,
                              prompt_for_step: str, user_content: str, accumulated_text: str,
-                             same_step_shrinks: int) -> "tuple[str, str, str, int]":
+                             same_step_shrinks: int, session_id: str = None) -> "tuple[str, str, str, int]":
     """3f-4 -- shared classify_error() exception dispatch, extracted
     from the duplicated `except _TRANSIENT_ERRORS as exc:` bodies in
     generate_text() (cloudflare/SDK-shaped branches), including the 3e
@@ -1903,6 +2022,15 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
     `key` is whichever identifier this call site uses to key the
     ledger/cooldown (key_id for cloudflare, key_env for the SDK-shaped
     branch) -- this function is agnostic to which one it's given.
+
+    `session_id` (Phase 8c, optional): forwarded to
+    _record_ledger_event() for the RATE_LIMIT_WINDOW bucket's own
+    reroute-vs-wait decision below -- same counter _run_chain_step()'s
+    pre-flight _ledger_gate() call already feeds for the two decisions
+    made before a call goes out; this covers the third, made in
+    reaction to an actual rate-limit response instead. None is a safe
+    default (_record_ledger_event() is itself a no-op on None), so
+    every existing caller that doesn't pass one is unaffected.
 
     Returns (action, user_content, accumulated_text, same_step_shrinks):
       action == "raise"          -- caller should bare `raise` (re-raise
@@ -1959,6 +2087,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"({exc.__class__.__name__}) -- a later chain step "
                   f"already has headroom, rerouting immediately instead "
                   f"of waiting.")
+            _record_ledger_event(session_id, "reroute")
             return "next-step", user_content, accumulated_text, same_step_shrinks
         # 3e: no headroom anywhere in the remaining chain -- this is the
         # one RATE_LIMIT_WINDOW case that DOES cool this key down, using
@@ -1969,6 +2098,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
               f"({exc.__class__.__name__}), and neither does anything "
               f"else remaining in the chain -- sleeping "
               f"{_wait_seconds:.1f}s before retrying {label} in place.")
+        _record_ledger_event(session_id, "wait")
         time.sleep(_wait_seconds)
         return "retry-in-place", user_content, accumulated_text, same_step_shrinks
     if _bucket == ErrorBucket.MALFORMED_REQUEST:
@@ -2072,8 +2202,10 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
         _gate, _reservation_id = _ledger_gate(chain, index, provider, key, model,
                                                system_prompt, prompt_for_step, label, agent_name)
         if _gate == "reroute":
+            _record_ledger_event(session_id, "reroute")
             break  # skip this step, fall through to the next chain step
         if _gate == "waited-retry":
+            _record_ledger_event(session_id, "wait")
             continue  # retry the SAME step now that we've waited
         try:
             # D1 patch 2 -- tracing wraps the real network call; it runs
@@ -2113,11 +2245,12 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             # the authoritative signal regardless.
             rate_ledger.release_reservation(_reservation_id)
             last_exc = exc
+            _record_ledger_event(session_id, "provider_failure")
             _action, user_content, accumulated_text, same_step_shrinks = \
                 _handle_transient_error(
                     exc, provider, key, model, chain, index, is_last, label,
                     agent_name, system_prompt, prompt_for_step, user_content,
-                    accumulated_text, same_step_shrinks)
+                    accumulated_text, same_step_shrinks, session_id=session_id)
             if _action == "raise":
                 raise
             if _action == "retry-in-place":
