@@ -16,8 +16,12 @@ resolution path instead of a dead constant:
   - code_writers: no longer has its own eligible-pool helper (it delegates
     entirely to eo.worker_pool._select_workers), so we import that
     module's _eligible_pool("implementer") directly.
-  - fixer_pool: CEREBRAS_KEY_ENVS is still a real static list (this
-    module was never moved onto the registry-driven pool), unchanged.
+  - fixer_pool: still has its own real static list, unchanged in shape --
+    OPENROUTER_KEY_ENVS (this module was never moved onto the
+    registry-driven pool). OR-3a (reliability_overhaul_plan.md) renamed
+    this from CEREBRAS_KEY_ENVS when fixer_pool.py's provider migrated;
+    the assertion below is updated to match the current attribute name
+    (it was raising AttributeError against the old one).
   - reviewer: still has its own private _eligible_pool() (ROLE_TAG =
     "verifier"), just called instead of reading the old GROQ_KEY_ENVS.
   - security_scanner: its pool is {account_id_env, token_env} slot pairs,
@@ -115,7 +119,7 @@ def test_fixer_pool_none_uses_default_pool(mock_llm):
     setup_common_memory()
     fixer_pool.run_fixer_pool(key_override=None)
     used = {chain_primary(c) for c in _calls(mock_llm)}
-    assert used <= set(fixer_pool.CEREBRAS_KEY_ENVS), used
+    assert used <= set(fixer_pool.OPENROUTER_KEY_ENVS), used
 
 def test_fixer_pool_single_override(mock_llm):
     mock_llm.mock.side_effect = _fake_generate_text

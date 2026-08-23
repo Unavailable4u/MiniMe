@@ -17,12 +17,16 @@ completely independent of utils/llm_client.py, so a broken key shows up
 here even if the app's own fallback chain would currently skip past it.
 
 Key discovery: scans os.environ for every var name matching the naming
-patterns already used in backend/.env.example (GROQ_*, CEREBRAS_*,
+patterns already used in backend/.env.example (GROQ_*, OPENROUTER_*,
 CLOUDFLARE_ACCOUNT_ID_*/CLOUDFLARE_API_KEY_*, GEMINI_*, MISTRAL_*,
 HUGGINGFACE_*, CF_SCANNER_RESERVE_*, EO_INSPECTOR_GROQ_KEY_*,
 EO_PANEL_*). Add a pattern to KEY_PATTERNS below if you introduce a new
 provider or naming scheme later — nothing here needs to know your actual
 key values, just their env-var names.
+
+OR-4 (reliability_overhaul_plan.md): Cerebras is fully retired, not kept
+in parallel -- this script tests OPENROUTER_* in Cerebras' old slot,
+straight swap, not an addition alongside a still-live Cerebras entry.
 """
 
 import os
@@ -48,7 +52,11 @@ except ImportError:
 # separately below. Every other provider here is a single bearer key.
 SIMPLE_KEY_PATTERNS = {
     "groq": re.compile(r"^(GROQ_API_KEY(_\d+)?|GROQ_RESERVE_\d+|SGA_GROQ_\d+|EO_INSPECTOR_GROQ_KEY_\d+)$"),
-    "cerebras": re.compile(r"^(CEREBRAS_API_KEY_\d+|CEREBRAS_RESERVE_\d+|EO_PANEL_CEREBRAS_KEY)$"),
+    # OR-4: was CEREBRAS_API_KEY_\d+/CEREBRAS_RESERVE_\d+/EO_PANEL_CEREBRAS_KEY --
+    # renamed to match .env.example's OPENROUTER_API_KEY_1..9 / OPENROUTER_RESERVE_1..3 /
+    # EO_PANEL_OPENROUTER_KEY pool (see OR-2/OR-3g). Cerebras keys no longer exist
+    # anywhere in .env.example, so there's nothing left for a "cerebras" pattern to match.
+    "openrouter": re.compile(r"^(OPENROUTER_API_KEY_\d+|OPENROUTER_RESERVE_\d+|EO_PANEL_OPENROUTER_KEY)$"),
     "gemini": re.compile(r"^GEMINI_API_KEY_\d+$"),
     "mistral": re.compile(r"^MISTRAL_API_KEY(_\d+)?$"),
     "huggingface": re.compile(r"^HUGGINGFACE_API_KEY(_\d+)?$"),
@@ -69,7 +77,12 @@ PROVIDER_DEFAULT_MODEL = {
     # below fires a single request), so gpt-oss-120b was picked as the
     # closer capability match of the two suggested replacements.
     "groq": "openai/gpt-oss-120b",
-    "cerebras": "gpt-oss-120b",
+    # OR-4: was "cerebras": "gpt-oss-120b". OpenRouter's free-model roster
+    # rotates fast enough that a pinned "<vendor>/<model>:free" slug isn't
+    # safe (see utils/llm_client.py's OPENROUTER_BASE_URL comment) -- use
+    # the same "openrouter/free" auto-router every live CHAIN in this repo
+    # routes through, not a pinned slug.
+    "openrouter": "openrouter/free",
     "gemini": "gemini-3.1-flash-lite",
     "mistral": "mistral-medium-latest",
     "huggingface": "openai/gpt-oss-120b:fastest",
@@ -79,6 +92,9 @@ PROVIDER_DEFAULT_MODEL = {
 MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
+# OR-4: same OpenAI-SDK-via-base_url trick as Mistral/Gemini/HF above --
+# matches utils/llm_client.py's OPENROUTER_BASE_URL exactly.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 TEST_PROMPT = "Reply with exactly one word: pong"
 REQUEST_TIMEOUT = 20  # seconds — small prompt, should be fast if the key is healthy
@@ -123,17 +139,14 @@ def discover_keys():
 # ---------------------------------------------------------------------------
 
 def test_openai_shaped(key_env, base_url=None, model=None, sdk="openai"):
-    """Covers groq, cerebras, mistral, gemini, huggingface — all either
-    the openai SDK pointed at a base_url, or (for groq/cerebras) their
-    own SDK with the same chat.completions.create shape."""
+    """Covers groq, openrouter, mistral, gemini, huggingface — all either
+    the openai SDK pointed at a base_url, or (for groq) its own SDK with
+    the same chat.completions.create shape."""
     key = os.environ[key_env]
     try:
         if sdk == "groq":
             from groq import Groq
             client = Groq(api_key=key, timeout=REQUEST_TIMEOUT)
-        elif sdk == "cerebras":
-            from cerebras.cloud.sdk import Cerebras
-            client = Cerebras(api_key=key, timeout=REQUEST_TIMEOUT)
         else:
             from openai import OpenAI
             kwargs = {"api_key": key, "timeout": REQUEST_TIMEOUT}
@@ -183,8 +196,9 @@ def test_cloudflare(account_id_env, token_env):
 def run_test(provider, key_env, extra):
     if provider == "groq":
         return test_openai_shaped(key_env, model=PROVIDER_DEFAULT_MODEL["groq"], sdk="groq")
-    if provider == "cerebras":
-        return test_openai_shaped(key_env, model=PROVIDER_DEFAULT_MODEL["cerebras"], sdk="cerebras")
+    if provider == "openrouter":
+        return test_openai_shaped(key_env, base_url=OPENROUTER_BASE_URL,
+                                   model=PROVIDER_DEFAULT_MODEL["openrouter"], sdk="openai")
     if provider == "gemini":
         return test_openai_shaped(key_env, base_url=GEMINI_BASE_URL,
                                    model=PROVIDER_DEFAULT_MODEL["gemini"], sdk="openai")
@@ -205,7 +219,7 @@ def run_test(provider, key_env, extra):
 
 def main():
     parser = argparse.ArgumentParser(description="Ping every configured LLM key.")
-    parser.add_argument("--provider", help="Only test this provider (groq/cerebras/gemini/mistral/huggingface/cloudflare)")
+    parser.add_argument("--provider", help="Only test this provider (groq/openrouter/gemini/mistral/huggingface/cloudflare)")
     parser.add_argument("--key", help="Only test this one key_env / account_id_env name")
     args = parser.parse_args()
 
