@@ -94,3 +94,21 @@ def test_every_tier0_tier1_and_directed_task_agent_resolves_to_a_real_callable()
 
 def test_registry_covers_every_referenced_agent_name():
     validate_registry_coverage()  # raises AssertionError on any gap
+
+
+def test_validate_registry_coverage_raises_on_a_real_gap(monkeypatch):
+    # The happy-path test above only proves today's roster is fully
+    # covered -- it can never fail loudly again if a future edit
+    # reintroduces a gap, since an AssertionError would just look like
+    # any other test failure rather than confirming this function's own
+    # detection actually works. Force a gap by adding a bogus agent name
+    # to TIERS[0] that REGISTRY has never heard of, and confirm the
+    # function raises with that exact name surfaced in the message.
+    import eo.router as router_module
+    patched_tiers = {
+        0: {"agents": list(TIERS[0]["agents"]) + ["totally_unregistered_agent_xyz"]},
+        1: TIERS[1],
+    }
+    monkeypatch.setattr(router_module, "TIERS", patched_tiers)
+    with pytest.raises(AssertionError, match="totally_unregistered_agent_xyz"):
+        validate_registry_coverage()
