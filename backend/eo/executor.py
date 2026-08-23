@@ -232,7 +232,9 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     actually needs either.
     """
     import time as _time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import functools
+    from concurrent.futures import as_completed
+    from eo.concurrency_gate import GatedTask, run_gated
 
     no_conversation_context_roles = no_conversation_context_roles or set()
     fn = resolve("generic_worker")
@@ -293,7 +295,7 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     # pin, per generic_worker.run()'s key_override semantics) but still
     # seed `reserved` up front, so an auto-reserved sibling can't
     # double-book an account a pinned sibling is already using.
-    from eo.dynamic_chain import build_fallback_chain_excluding
+    from eo.dynamic_chain import build_fallback_chain_excluding, chain_step_for
     from eo.quota_sentinel import get_quota_snapshot
 
     quota_status = get_quota_snapshot()
@@ -351,13 +353,48 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
             otel_context.detach(token)
 
     member_results = {}
-    with ThreadPoolExecutor(max_workers=len(group_roles)) as pool:
-        futures = {
-            pool.submit(_dispatch_member, member_role): member_role
-            for member_role in group_roles
-        }
-        for future in as_completed(futures):
-            member_results[futures[future]] = future.result()
+    # Reliability-overhaul fix (Phase 4, Patch D): same run_gated() swap
+    # as agents/hardware_speccer.py's _populate_prices() (Patch C) --
+    # each member's dispatch is gated on its own OUTER reservation
+    # (Patch B's coarser "is there room for one more concurrent attempt"
+    # check) before its thread starts, instead of every member's thread
+    # starting at once via a fixed-size ThreadPoolExecutor and each one
+    # individually discovering rate-limit pressure only after dispatch.
+    # This is layered on top of, not instead of, the reserved/
+    # chain_overrides collision-avoidance above (Patch D gates WHETHER a
+    # member starts yet; the chain_overrides logic above already decided
+    # WHICH account each member starts on and keeps siblings off of each
+    # other's first choice) — both mechanisms address different halves
+    # of the same "N members pile onto accounts at once" problem.
+    tasks = []
+    for member_role in group_roles:
+        if member_role in chain_overrides:
+            # Same first_step already reserved above, for the same
+            # reason: the account this member is ACTUALLY about to try
+            # first, not its whole fallback chain.
+            step = chain_overrides[member_role][0]
+        elif key_overrides.get(member_role):
+            # Explicit single-account pin — generic_worker.run() handles
+            # the override itself, but there's still a real account to
+            # gate this member's start against, so it doesn't overshoot
+            # THAT account's own ledger headroom either.
+            pinned = key_overrides[member_role]
+            agent_key = pinned if isinstance(pinned, str) else pinned[0]
+            step = chain_step_for(agent_key)
+        else:
+            # Whole pool excluded/cooling for this role (see the
+            # `if not member_chain: continue` case above) — nothing
+            # coordinated to gate on, so this member falls through to
+            # its own uncoordinated fallback chain inside
+            # generic_worker.run(), same as before this patch, and is
+            # admitted immediately (step=None).
+            step = None
+        tasks.append(GatedTask(functools.partial(_dispatch_member, member_role),
+                                step=step, label=member_role))
+
+    futures = dict(zip((f for f in run_gated(tasks, session_id=session_id)), group_roles))
+    for future in as_completed(futures):
+        member_results[futures[future]] = future.result()
 
     votes = []
     for member_role in group_roles:
