@@ -38,6 +38,59 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install ruff
       - run: ruff check .
+  daemon-test:
+    # Was untested by CI entirely -- daemon/tests/ (test_config.py,
+    # test_path_guard.py) existed but nothing here ever ran it, which is
+    # how test_config.py's fixture silently fell out of sync with
+    # config.py's Part 2 additions (MINIME_BACKEND_WS_URL/
+    # MINIME_WORKSPACE_ID) without CI ever noticing.
+    #
+    # No working-directory override (unlike test/lint above): daemon's
+    # own test files import it as `from daemon.config import ...` /
+    # `from daemon.path_guard import ...`, i.e. as a package relative to
+    # the repo root, not from inside daemon/ itself -- so pytest needs
+    # to run from the repo root for those imports to resolve.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.11" }
+      - run: pip install -r daemon/requirements.txt
+      - run: pytest daemon/tests -v
+  frontend-lint:
+    # Was entirely unwired: package.json's own "lint" script (`next lint`)
+    # existed but nothing in CI ever called it, and it wasn't even
+    # runnable as shipped -- this repo had no eslint/eslint-config-next in
+    # devDependencies and no .eslintrc, so `next lint` in a non-interactive
+    # CI shell would drop into its "how would you like to configure
+    # ESLint?" setup wizard and hang rather than fail cleanly. Fixed by
+    # adding eslint@8.57.1 + eslint-config-next@14.2.5 (matching this
+    # repo's next@14.2.5) as devDependencies and a checked-in
+    # .eslintrc.json (next/core-web-vitals) so `next lint` now runs
+    # non-interactively here exactly as it would locally.
+    #
+    # continue-on-error: true, same pattern as the promptfoo job below --
+    # wiring lint in surfaced a real, pre-existing backlog of
+    # react/no-unescaped-entities errors (raw apostrophes/quotes in JSX
+    # text) across a couple dozen components, not introduced by this
+    # change. Blocking the build on those today would turn every unrelated
+    # PR red for a pre-existing issue; this still runs and reports on
+    # every push so the backlog is visible and trackable, without being a
+    # hard gate until that cleanup lands separately.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.0"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: CI=true npm run lint
   secrets-scan:
     runs-on: ubuntu-latest
     steps:

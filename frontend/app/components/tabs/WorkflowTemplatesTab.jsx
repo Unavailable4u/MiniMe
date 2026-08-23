@@ -137,7 +137,7 @@ function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeIniti
 
       {error && (
         <p className="text-xs text-red-400">
-          Couldn't load templates: {error}. Check that{" "}
+          Couldn&apos;t load templates: {error}. Check that{" "}
           <code className="font-mono">GET /api/workflow-templates</code> is reachable.
         </p>
       )}
@@ -145,7 +145,7 @@ function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeIniti
       {!error && templates !== null && templates.length === 0 && !showBuilder && (
         <p className="text-xs text-[var(--neutral-500)]">
           No saved templates yet. Build one from the Role Library, or
-          click "New template" above.
+          click &quot;New template&quot; above.
         </p>
       )}
 

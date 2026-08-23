@@ -307,6 +307,13 @@ def execute_command(
     actual_timeout = min(requested_timeout, MAX_EXECUTE_TIMEOUT_SECONDS)
 
     try:
+        # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
+        # shell=True is required here, not incidental: `command` is an
+        # arbitrary shell string (may contain pipes/redirects/etc.) that
+        # this tool's whole purpose is to execute -- see the module and
+        # execute_command() docstrings. It only ever reaches this call
+        # after the backend's own explicit propose/confirm gate (Part 4),
+        # so this isn't unsanitized input silently reaching a shell.
         proc = subprocess.Popen(
             command,
             shell=True,

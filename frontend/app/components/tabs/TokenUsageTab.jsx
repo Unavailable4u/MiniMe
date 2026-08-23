@@ -99,7 +99,7 @@ function QuotaPanel({ apiUrl }) {
     >
       {error && (
         <p className="text-xs text-rose-400">
-          Couldn't load quota: {error}. Check that <code className="font-mono">GET /api/quota</code> is reachable.
+          Couldn&apos;t load quota: {error}. Check that <code className="font-mono">GET /api/quota</code> is reachable.
         </p>
       )}
       {!error && loading && !snapshot && <p className="text-xs text-cyber-dim">Loading…</p>}
@@ -110,7 +110,7 @@ function QuotaPanel({ apiUrl }) {
         <>
           {anyNearLimit && (
             <p className="text-[11px] text-amber-500 mb-2">
-              One or more accounts are at 80%+ of today's quota.
+              One or more accounts are at 80%+ of today&apos;s quota.
             </p>
           )}
           <div className="space-y-1.5">
@@ -230,8 +230,8 @@ function UsageHistoryPanel({ apiUrl }) {
       {loading && <p className="text-xs text-cyber-dim">Loading history...</p>}
       {error && (
         <p className="text-xs text-rose-400">
-          Couldn't load usage history: {error}. Check that <code className="font-mono">GET /api/usage/history</code> is
-          reachable and that you're signed in with a valid session.
+          Couldn&apos;t load usage history: {error}. Check that <code className="font-mono">GET /api/usage/history</code> is
+          reachable and that you&apos;re signed in with a valid session.
         </p>
       )}
       {!loading && !error && providerNames.length === 0 && (
@@ -387,13 +387,13 @@ function ProjectSectionUsagePanel({ apiUrl }) {
       </div>
       {!domain && !workspaceId && (
         <p className="text-xs text-cyber-dim">
-          Pick a domain and/or paste a project's workspace_id to see its usage breakdown.
+          Pick a domain and/or paste a project&apos;s workspace_id to see its usage breakdown.
         </p>
       )}
       {loading && <p className="text-xs text-cyber-dim">Loading...</p>}
       {error && (
         <p className="text-xs text-rose-400">
-          Couldn't load: {error}. Make sure <code className="font-mono">GET /api/usage/history</code> accepts{" "}
+          Couldn&apos;t load: {error}. Make sure <code className="font-mono">GET /api/usage/history</code> accepts{" "}
           <code className="font-mono">domain</code> / <code className="font-mono">workspace_id</code> query params.
         </p>
       )}
@@ -511,9 +511,9 @@ function OverallRollup({ byProvider }) {
       )}
       {unmeasuredProviders.length > 0 && (
         <p className="text-[11px] text-cyber-dim mt-2">
-          This session's estimate excludes {unmeasuredProviders.join(", ")} — no verified
+          This session&apos;s estimate excludes {unmeasuredProviders.join(", ")} — no verified
           daily limit configured for {unmeasuredProviders.length === 1 ? "it" : "them"} yet
-          (see <code className="font-mono">utils/llm_client.py</code>'s <code className="font-mono">QUOTA_CONFIG</code>).
+          (see <code className="font-mono">utils/llm_client.py</code>&apos;s <code className="font-mono">QUOTA_CONFIG</code>).
           For real cross-session numbers, see the Quota panel above.
         </p>
       )}

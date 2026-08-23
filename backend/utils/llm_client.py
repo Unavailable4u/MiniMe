@@ -2259,6 +2259,178 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
     return "next-step", "", accumulated_text, continuations_used, last_exc
 
 
+def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_name: str,
+                      session_id, tier, path, domain, allow_continuation: bool) -> "tuple[str, str, str, int, object, set]":
+    """Phase 9b -- one full pass over `chain`, exactly the loop body
+    generate_text() always ran directly (unchanged in substance; this
+    is a pure extraction). Pulled out so generate_text() can run it a
+    second time -- via _chain_exhaustion_wait()'s "worth one more pass"
+    verdict -- without duplicating ~130 lines of per-step dispatch, same
+    "extract the shared loop, wire it from the caller" seam 3f-5 already
+    used for _run_chain_step().
+
+    Returns (action, full_text, accumulated_text, continuations_used,
+    last_exc, step_buckets):
+      action == "return"    -- full_text is a finished answer; caller
+                                should return it as-is, unchanged from
+                                generate_text()'s old inline behavior.
+      action == "exhausted" -- every step in `chain` was either tried
+                                and failed, or skipped pre-dispatch
+                                (missing creds/cooling down), and none
+                                produced output this pass. full_text is
+                                unused/stale in this case; accumulated_text
+                                may still hold Fix C partial output --
+                                the caller decides what to do with that,
+                                same as before this extraction.
+
+    `step_buckets` -- the set of ErrorBucket values classify_error()
+    returned for every step whose call actually raised during this pass.
+    A step skipped before dispatch (missing creds, active cooldown)
+    never raises, so it contributes nothing here -- see
+    _chain_exhaustion_wait()'s docstring, which this feeds.
+    """
+    last_exc = None
+    accumulated_text = ""   # Fix C: partial output carried across a
+    # "length" truncation handoff. Empty string means "nothing generated
+    # yet" -- distinct from a step that legitimately returns "".
+    continuations_used = 0
+    step_buckets = set()
+    _original_user_content = user_content  # Bug fix (2026-08-16), see below
+
+    for i, step in enumerate(chain):
+        provider = step["provider"]
+        model = step["model"]
+        is_last = i == len(chain) - 1
+        # Bug fix (2026-08-16): Fix D2's same_step_shrinks loop below
+        # reassigns the shared `user_content` variable in place. That's
+        # correct WITHIN one step's retry loop, but this is a plain
+        # function-local variable shared across the whole `for` loop --
+        # nothing previously reset it between chain steps, so a 413 on
+        # step 1 silently handed every later fallback provider the
+        # ALREADY-shrunk prompt too, compounding data loss across
+        # providers instead of giving each one a fresh full attempt.
+        # Resetting here scopes a shrink strictly to retries-in-place on
+        # THIS step, matching what same_step_shrinks' own name implies.
+        user_content = _original_user_content
+        # Fix D2 (reliability guide, §3 "Fix D2" -- retry-in-place for a
+        # too-large request): the first cut of Fix D only ever handed a
+        # shrunk prompt to the *next* chain step. That's fine when there
+        # IS a next step, but the traceback that motivated this fix hit
+        # the 413 on the chain's LAST step -- back then `if is_last:
+        # break` fired before Fix D's shrink logic ever ran, so the
+        # request was never actually retried smaller; generate_text()
+        # just gave up immediately with the same 413 as last_exc, even
+        # though this exact provider/model would likely have accepted
+        # the very same request at a smaller size. same_step_shrinks
+        # lets a too-large request be retried against the SAME step,
+        # shrunk each time from that step's own stated Limit/Requested
+        # figures, before falling through to "next step" (or giving up,
+        # on the last step) logic. 3f-5: same_step_shrinks itself is no
+        # longer initialized here -- it moved inside _run_chain_step(),
+        # which is called fresh once per chain step below and so resets
+        # it to 0 on every call, same as this loop used to do by hand.
+
+        if provider == "cloudflare":
+            account_id_env = step["account_id_env"]
+            token_env = step["token_env"]
+            creds = _get_cloudflare_creds(account_id_env, token_env)
+            if creds is None:
+                print(f"  [{agent_name}] cloudflare:{model} skipped — "
+                      f"{account_id_env}/{token_env} not set.")
+                continue
+            key_id = account_id_env  # what identifies this "account" in the usage dashboard
+            label = f"cloudflare:{model}"
+            if _is_cooling_down(provider, key_id):
+                print(f"  [{agent_name}] {label} skipped — still cooling down "
+                      f"(see cooldown_until:{provider}:{key_id}).")
+                continue
+            json_mode = step.get("json_mode", False)
+            _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
+
+            def _call_fn(prompt_for_step, _creds=creds, _model=model, _jm=json_mode, _mt=_max_tok):
+                return _call_cloudflare_step(_creds, _model, system_prompt, prompt_for_step,
+                                              json_mode=_jm, max_tokens=_mt)
+
+            # 3f-5 -- the whole retry loop (pre-flight gate -> traced call
+            # -> dispatch -> bookkeeping -> finish_reason handling ->
+            # exception dispatch) now lives in the single shared
+            # _run_chain_step(), also called from the SDK-shaped branch
+            # below. This branch differs only in `key_id` vs. `key_env`
+            # and in `_call_fn` (which wraps _call_cloudflare_step() vs.
+            # _call_step()) -- see that function's docstring.
+            _action, full_text, accumulated_text, continuations_used, _step_exc = \
+                _run_chain_step(chain, i, is_last, provider, model, key_id, label,
+                                 system_prompt, user_content, accumulated_text,
+                                 continuations_used, allow_continuation, agent_name,
+                                 session_id, tier, path, domain, _call_fn)
+            if _step_exc is not None:
+                last_exc = _step_exc
+                step_buckets.add(classify_error(_step_exc))  # Phase 9b
+            if _action == "return":
+                return "return", full_text, accumulated_text, continuations_used, last_exc, step_buckets
+            continue
+
+        key_env = step["key_env"]
+        timeout = step.get("timeout")
+        getter = {
+            "groq": _get_groq,
+            "mistral": _get_mistral, "gemini": _get_gemini,
+            "huggingface": _get_huggingface,
+            "openrouter": _get_openrouter,  # OR-1a
+        }.get(provider)
+        if getter is None:
+            raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
+
+        label = f"{provider}:{model}"
+        if _is_cooling_down(provider, key_env):
+            print(f"  [{agent_name}] {label} skipped — still cooling down "
+                  f"(see cooldown_until:{provider}:{key_env}).")
+            continue
+
+        client = getter(key_env, timeout)
+        if client is None:
+            print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
+            continue
+
+        _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
+
+        def _call_fn(prompt_for_step, _client=client, _model=model, _mt=_max_tok, _provider=provider):
+            try:
+                return _call_step(_client, _model, system_prompt, prompt_for_step,
+                                   max_tokens=_mt, provider=_provider)
+            except _EmptyReasoningBudgetError as _empty_exc:
+                # OR-1c: whole budget went to hidden reasoning, nothing left
+                # for visible output, even with reasoning={"exclude": True}
+                # sent. Retry this SAME step once with a much larger budget
+                # rather than letting an empty string reach the caller as if
+                # it were a real (if unhelpful) answer. 4x is a starting
+                # point, not a tuned constant -- revisit if this fires often
+                # enough in practice to be worth reading real reasoning_tokens
+                # counts off of _empty_exc.usage and sizing off that instead.
+                print(f"  [{agent_name}] {label} returned empty text "
+                      f"(reasoning burned the budget) — retrying once with "
+                      f"max_tokens={_mt * 4} instead of {_mt}.")
+                return _call_step(_client, _model, system_prompt, prompt_for_step,
+                                   max_tokens=_mt * 4, provider=_provider)
+
+        # 3f-5 -- same shared _run_chain_step() as the cloudflare branch
+        # above; this branch differs only in `key_env` vs. `key_id` and
+        # in `_call_fn` (which wraps _call_step() vs.
+        # _call_cloudflare_step()) -- see that function's docstring.
+        _action, full_text, accumulated_text, continuations_used, _step_exc = \
+            _run_chain_step(chain, i, is_last, provider, model, key_env, label,
+                             system_prompt, user_content, accumulated_text,
+                             continuations_used, allow_continuation, agent_name,
+                             session_id, tier, path, domain, _call_fn)
+        if _step_exc is not None:
+            last_exc = _step_exc
+            step_buckets.add(classify_error(_step_exc))  # Phase 9b
+        if _action == "return":
+            return "return", full_text, accumulated_text, continuations_used, last_exc, step_buckets
+
+    return "exhausted", "", accumulated_text, continuations_used, last_exc, step_buckets
+
+
 def generate_text(system_prompt: str, user_content: str, chain: list, agent_name: str = "Agent",
                    session_id: str = None, tier: int = None, path: str = None,
                    domain: str = None, allow_continuation: bool = True) -> str:
@@ -2335,142 +2507,20 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     text is discarded and the *original* prompt (not a continuation
     prompt) is retried fresh, with a full token budget, on the next chain
     step -- rather than being spliced together.
+
+    Phase 9b: if the chain runs all the way out with nothing returned and
+    nothing salvaged by Fix C, this no longer raises immediately -- see
+    _chain_exhaustion_wait(). When every step's failure this pass was
+    RATE_LIMIT_WINDOW, it waits once (bounded by
+    _EXHAUSTIVE_WAIT_CAP_SECONDS) and re-walks the whole chain exactly
+    once more before raising. Any other outcome (including a mix of
+    failure reasons) raises immediately, same as before this phase.
     """
-    last_exc = None
-    accumulated_text = ""   # Fix C: partial output carried across a
-    # "length" truncation handoff. Empty string means "nothing generated
-    # yet" -- distinct from a step that legitimately returns "".
-    continuations_used = 0
-    _original_user_content = user_content  # Bug fix (2026-08-16), see below
-
-    for i, step in enumerate(chain):
-        provider = step["provider"]
-        model = step["model"]
-        is_last = i == len(chain) - 1
-        # Bug fix (2026-08-16): Fix D2's same_step_shrinks loop below
-        # reassigns the shared `user_content` variable in place. That's
-        # correct WITHIN one step's retry loop, but this is a plain
-        # function-local variable shared across the whole `for` loop --
-        # nothing previously reset it between chain steps, so a 413 on
-        # step 1 silently handed every later fallback provider the
-        # ALREADY-shrunk prompt too, compounding data loss across
-        # providers instead of giving each one a fresh full attempt.
-        # Resetting here scopes a shrink strictly to retries-in-place on
-        # THIS step, matching what same_step_shrinks' own name implies.
-        user_content = _original_user_content
-        # Fix D2 (reliability guide, §3 "Fix D2" -- retry-in-place for a
-        # too-large request): the first cut of Fix D only ever handed a
-        # shrunk prompt to the *next* chain step. That's fine when there
-        # IS a next step, but the traceback that motivated this fix hit
-        # the 413 on the chain's LAST step -- back then `if is_last:
-        # break` fired before Fix D's shrink logic ever ran, so the
-        # request was never actually retried smaller; generate_text()
-        # just gave up immediately with the same 413 as last_exc, even
-        # though this exact provider/model would likely have accepted
-        # the very same request at a smaller size. same_step_shrinks
-        # lets a too-large request be retried against the SAME step,
-        # shrunk each time from that step's own stated Limit/Requested
-        # figures, before falling through to "next step" (or giving up,
-        # on the last step) logic. 3f-5: same_step_shrinks itself is no
-        # longer initialized here -- it moved inside _run_chain_step(),
-        # which is called fresh once per chain step below and so resets
-        # it to 0 on every call, same as this loop used to do by hand.
-
-        if provider == "cloudflare":
-            account_id_env = step["account_id_env"]
-            token_env = step["token_env"]
-            creds = _get_cloudflare_creds(account_id_env, token_env)
-            if creds is None:
-                print(f"  [{agent_name}] cloudflare:{model} skipped — "
-                      f"{account_id_env}/{token_env} not set.")
-                continue
-            key_id = account_id_env  # what identifies this "account" in the usage dashboard
-            label = f"cloudflare:{model}"
-            if _is_cooling_down(provider, key_id):
-                print(f"  [{agent_name}] {label} skipped — still cooling down "
-                      f"(see cooldown_until:{provider}:{key_id}).")
-                continue
-            json_mode = step.get("json_mode", False)
-            _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
-
-            def _call_fn(prompt_for_step, _creds=creds, _model=model, _jm=json_mode, _mt=_max_tok):
-                return _call_cloudflare_step(_creds, _model, system_prompt, prompt_for_step,
-                                              json_mode=_jm, max_tokens=_mt)
-
-            # 3f-5 -- the whole retry loop (pre-flight gate -> traced call
-            # -> dispatch -> bookkeeping -> finish_reason handling ->
-            # exception dispatch) now lives in the single shared
-            # _run_chain_step(), also called from the SDK-shaped branch
-            # below. This branch differs only in `key_id` vs. `key_env`
-            # and in `_call_fn` (which wraps _call_cloudflare_step() vs.
-            # _call_step()) -- see that function's docstring.
-            _action, full_text, accumulated_text, continuations_used, _step_exc = \
-                _run_chain_step(chain, i, is_last, provider, model, key_id, label,
-                                 system_prompt, user_content, accumulated_text,
-                                 continuations_used, allow_continuation, agent_name,
-                                 session_id, tier, path, domain, _call_fn)
-            if _step_exc is not None:
-                last_exc = _step_exc
-            if _action == "return":
-                return full_text
-            continue
-
-        key_env = step["key_env"]
-        timeout = step.get("timeout")
-        getter = {
-            "groq": _get_groq,
-            "mistral": _get_mistral, "gemini": _get_gemini,
-            "huggingface": _get_huggingface,
-            "openrouter": _get_openrouter,  # OR-1a
-        }.get(provider)
-        if getter is None:
-            raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
-
-        label = f"{provider}:{model}"
-        if _is_cooling_down(provider, key_env):
-            print(f"  [{agent_name}] {label} skipped — still cooling down "
-                  f"(see cooldown_until:{provider}:{key_env}).")
-            continue
-
-        client = getter(key_env, timeout)
-        if client is None:
-            print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
-            continue
-
-        _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
-
-        def _call_fn(prompt_for_step, _client=client, _model=model, _mt=_max_tok, _provider=provider):
-            try:
-                return _call_step(_client, _model, system_prompt, prompt_for_step,
-                                   max_tokens=_mt, provider=_provider)
-            except _EmptyReasoningBudgetError as _empty_exc:
-                # OR-1c: whole budget went to hidden reasoning, nothing left
-                # for visible output, even with reasoning={"exclude": True}
-                # sent. Retry this SAME step once with a much larger budget
-                # rather than letting an empty string reach the caller as if
-                # it were a real (if unhelpful) answer. 4x is a starting
-                # point, not a tuned constant -- revisit if this fires often
-                # enough in practice to be worth reading real reasoning_tokens
-                # counts off of _empty_exc.usage and sizing off that instead.
-                print(f"  [{agent_name}] {label} returned empty text "
-                      f"(reasoning burned the budget) — retrying once with "
-                      f"max_tokens={_mt * 4} instead of {_mt}.")
-                return _call_step(_client, _model, system_prompt, prompt_for_step,
-                                   max_tokens=_mt * 4, provider=_provider)
-
-        # 3f-5 -- same shared _run_chain_step() as the cloudflare branch
-        # above; this branch differs only in `key_env` vs. `key_id` and
-        # in `_call_fn` (which wraps _call_step() vs.
-        # _call_cloudflare_step()) -- see that function's docstring.
-        _action, full_text, accumulated_text, continuations_used, _step_exc = \
-            _run_chain_step(chain, i, is_last, provider, model, key_env, label,
-                             system_prompt, user_content, accumulated_text,
-                             continuations_used, allow_continuation, agent_name,
-                             session_id, tier, path, domain, _call_fn)
-        if _step_exc is not None:
-            last_exc = _step_exc
-        if _action == "return":
-            return full_text
+    _action, full_text, accumulated_text, continuations_used, last_exc, step_buckets = \
+        _walk_chain_once(system_prompt, user_content, chain, agent_name,
+                          session_id, tier, path, domain, allow_continuation)
+    if _action == "return":
+        return full_text
 
     if accumulated_text:
         # Fix C: the chain ran out (or hit _MAX_CONTINUATIONS) while a
@@ -2484,6 +2534,26 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
               f"instead of discarding it.")
         return accumulated_text
 
+    # Phase 9b: every step in this pass failed outright and Fix C had
+    # nothing to salvage. Before giving up, ask _chain_exhaustion_wait()
+    # whether every failure this pass was RATE_LIMIT_WINDOW (worth one
+    # bounded wait-and-recheck of the whole chain) or something a wait
+    # can't fix (PERMANENT_AUTH mixed in, or any other/empty mix) -- in
+    # which case it returns False immediately and behavior is unchanged
+    # from before this phase.
+    _estimated_tokens = _estimate_tokens_for_call(system_prompt, user_content)
+    if _chain_exhaustion_wait(chain, _estimated_tokens, step_buckets):
+        _action, full_text, accumulated_text, continuations_used, last_exc, step_buckets = \
+            _walk_chain_once(system_prompt, user_content, chain, agent_name,
+                              session_id, tier, path, domain, allow_continuation)
+        if _action == "return":
+            return full_text
+        if accumulated_text:
+            print(f"  [{agent_name}] chain exhausted while still truncated -- "
+                  f"returning {len(accumulated_text)} chars of partial output "
+                  f"instead of discarding it.")
+            return accumulated_text
+
     # Phase 6a: this is the genuine "tried everything, nothing worked"
     # terminal case -- ChainExhaustedError, not a bare RuntimeError, so
     # eo/executor.py's role-level catch (Phase 6b) can degrade this
@@ -2495,14 +2565,47 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         f"Last error: {last_exc}"
     )
 
-async def stream_completion(system_prompt: str, user_content: str, chain: list,
-                             agent_name: str = "Agent", session_id: str = None,
-                             tier=None, path=None, domain=None):
-    """
-    CO5 patch 2 -- streaming twin of generate_text() above. Built for
-    agents/output_organizer.py's organize_final_answer_stream(), which
-    imports this by name; see that function's docstring for the caller
-    side of this contract.
+
+async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: list,
+                                   agent_name: str, session_id, tier, path, domain,
+                                   outcome: dict):
+    """Phase 9c -- streaming twin of _walk_chain_once() (9b): one full
+    pass over `chain`, exactly the loop body stream_completion() always
+    ran directly (unchanged in substance; this is a pure extraction).
+
+    Unlike _walk_chain_once(), this is an async GENERATOR -- it yields
+    chunks straight through to the caller as they arrive, same as
+    stream_completion() always did directly. Python doesn't allow
+    `return <value>` inside an async generator, so there's no
+    return-tuple contract to mirror 9b's; instead the caller passes a
+    mutable `outcome` dict that this function fills in before it stops
+    yielding:
+      outcome["exhausted"]     -- False if some step produced real
+                                   output this pass (the generator ended
+                                   via the same `return` the "done"
+                                   branch always used); True if every
+                                   step in `chain` was tried (or skipped
+                                   pre-dispatch) and none produced any
+                                   streamed output this pass.
+      outcome["last_exc"]      -- same bookkeeping generate_text() keeps.
+      outcome["step_buckets"]  -- the set of ErrorBucket values
+                                   classify_error() returned for every
+                                   step whose call actually raised AND
+                                   fell through to "next step" this pass
+                                   (mirrors _walk_chain_once()'s
+                                   step_buckets exactly -- see
+                                   _chain_exhaustion_wait()'s docstring,
+                                   which this feeds).
+    A mid-stream failure (RuntimeError, raised once `started` is already
+    True) or a non-transient pre-chunk failure (RuntimeError, nothing
+    classified) still propagates straight out of this generator via
+    `raise`, exactly as before this extraction -- neither one reaches
+    `outcome` at all, same as generate_text()'s MALFORMED_REQUEST bare
+    `raise` never reaching _walk_chain_once()'s step_buckets.
+
+    Docstring below is stream_completion()'s original, describing the
+    per-step behavior this function now runs -- see stream_completion()
+    itself for the public contract (including the Phase 9c addendum).
 
     SCOPE -- read before wiring another chain into this:
 
@@ -2613,6 +2716,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
     """
     loop = asyncio.get_event_loop()
     last_exc = None
+    step_buckets = set()  # Phase 9c
 
     for i, step in enumerate(chain):
         provider = step["provider"]
@@ -2762,6 +2866,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                     await stream_task
                     break
                 await stream_task
+                outcome["exhausted"] = False  # Phase 9c
                 return
             else:  # "error"
                 last_exc = payload
@@ -2785,6 +2890,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                     ) from last_exc
                 if isinstance(payload, _TRANSIENT_ERRORS):
                     _set_cooldown(provider, key_env, payload)  # Fix B
+                    step_buckets.add(classify_error(payload))  # Phase 9c
                     print(f"  [{agent_name}] {label} failed before first chunk "
                           f"({payload.__class__.__name__}), falling back to next in chain...")
                     break
@@ -2792,12 +2898,87 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                 # still a real bug, don't mask it by falling through.
                 raise RuntimeError(f"[{agent_name}] {label} failed: {last_exc}") from last_exc
 
+    # Phase 9c: every step in `chain` was tried (or skipped pre-dispatch)
+    # this pass and none produced any streamed output. Report back to
+    # the caller instead of raising directly -- stream_completion()
+    # decides whether _chain_exhaustion_wait() makes a second pass worth
+    # running before it raises ChainExhaustedError (see that function's
+    # own terminal raise, the streaming twin of generate_text()'s).
+    outcome["exhausted"] = True
+    outcome["last_exc"] = last_exc
+    outcome["step_buckets"] = step_buckets
+
+
+async def stream_completion(system_prompt: str, user_content: str, chain: list,
+                             agent_name: str = "Agent", session_id: str = None,
+                             tier=None, path=None, domain=None):
+    """
+    CO5 patch 2 -- streaming twin of generate_text() above. Built for
+    agents/output_organizer.py's organize_final_answer_stream(), which
+    imports this by name; see that function's docstring for the caller
+    side of this contract. The actual per-step walk now lives in
+    _walk_chain_once_stream() (Phase 9c extraction, mirroring 9b's
+    _walk_chain_once()) -- see that function's docstring for the
+    per-step SCOPE notes (Cloudflare skip, Fix-A/Fix-C boundaries,
+    tracing, OR-1c-stream); this docstring covers this function's own
+    public contract.
+
+    Phase 9c: if the chain runs all the way out with nothing streamed,
+    this no longer raises immediately -- see _chain_exhaustion_wait().
+    When every step's failure this pass was RATE_LIMIT_WINDOW, it waits
+    once (bounded by _EXHAUSTIVE_WAIT_CAP_SECONDS, run off the event
+    loop via asyncio.to_thread since the wait itself is a blocking
+    time.sleep()) and re-walks the whole chain exactly once more before
+    raising. Any other outcome (including a mix of failure reasons)
+    raises immediately, same as before this phase.
+
+    Yields: str delta-text chunks only (not raw SSE payloads/JSON --
+    api/routes/tasks.py's endpoint layer, CO5 step 3, is what wraps each
+    chunk in its own `data: {...}` envelope).
+
+    Raises RuntimeError if every attempted step fails before yielding
+    anything, mirroring generate_text()'s all-exhausted failure mode.
+    Raises mid-stream (see _walk_chain_once_stream()'s docstring point 2)
+    if a step fails after it already yielded real text -- callers should
+    treat that as "the answer the user is already seeing stopped early,"
+    not as a clean failure they can silently retry.
+    """
+    outcome = {"exhausted": False, "last_exc": None, "step_buckets": set()}
+    async for chunk in _walk_chain_once_stream(system_prompt, user_content, chain, agent_name,
+                                                session_id, tier, path, domain, outcome):
+        yield chunk
+    if not outcome["exhausted"]:
+        return
+
+    # Phase 9c: same "worth one more pass" verdict 9b wires into
+    # generate_text(), asked here before the streaming twin's terminal
+    # raise. _chain_exhaustion_wait() does a blocking time.sleep()
+    # internally, so it's run in a worker thread -- same "blocking work
+    # off the event loop" pattern this module already uses for
+    # _run_stream_sync() -- rather than stalling every other in-flight
+    # request for up to _EXHAUSTIVE_WAIT_CAP_SECONDS.
+    _estimated_tokens = _estimate_tokens_for_call(system_prompt, user_content)
+    _worth_retry = await asyncio.to_thread(
+        _chain_exhaustion_wait, chain, _estimated_tokens, outcome["step_buckets"])
+    if _worth_retry:
+        outcome2 = {"exhausted": False, "last_exc": None, "step_buckets": set()}
+        async for chunk in _walk_chain_once_stream(system_prompt, user_content, chain, agent_name,
+                                                    session_id, tier, path, domain, outcome2):
+            yield chunk
+        if not outcome2["exhausted"]:
+            return
+        last_exc = outcome2["last_exc"]
+    else:
+        last_exc = outcome["last_exc"]
+
     # Phase 6a: streaming twin of generate_text()'s sync-path terminal
     # raise above -- every provider tried, none produced any streamed
     # output. ChainExhaustedError on purpose (see that raise site's
-    # comment); the two RuntimeErrors just above this one (mid-stream
-    # failure after partial output, and non-transient pre-chunk failure)
-    # are deliberately left as plain RuntimeError, not converted.
+    # comment); the two RuntimeErrors _walk_chain_once_stream() can
+    # still raise directly (mid-stream failure after partial output, and
+    # non-transient pre-chunk failure) are deliberately left as plain
+    # RuntimeError, not converted, and never reach this function at all
+    # -- they propagate straight through the `async for` loops above.
     raise ChainExhaustedError(
         f"[{agent_name}] All providers in fallback chain exhausted or unavailable "
         f"before any streamed output. Last error: {last_exc}"
