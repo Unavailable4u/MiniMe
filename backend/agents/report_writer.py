@@ -27,7 +27,15 @@ load_dotenv()
 FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_9"},
+    # OR-3c (reliability_overhaul_plan.md): Cerebras retired to a paid
+    # tier (see OR-2's .env.example note) -- was CEREBRAS_API_KEY_9,
+    # "openrouter/free" now (not a pinned model slug -- see
+    # utils/llm_client.py's OPENROUTER_BASE_URL comment). "report_writer"
+    # IS tagged in AGENT_CAPABILITIES (GROQ keys), so build_fallback_chain()
+    # normally succeeds and this really is the rare last-resort step this
+    # comment describes -- low-traffic, but still real Cerebras spend
+    # whenever every registered account is cooling down at once.
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_9"},
 ]
 
 SYSTEM_PROMPT = """You are a report writer for an autonomous coding pipeline.

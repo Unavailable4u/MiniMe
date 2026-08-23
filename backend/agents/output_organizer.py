@@ -77,7 +77,21 @@ from eo.tracing import get_tracer, TRACING_ENABLED
 FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+    # OR-3c (reliability_overhaul_plan.md): Cerebras retired to a paid
+    # tier (see OR-2's .env.example note) -- was CEREBRAS_API_KEY_1,
+    # "openrouter/free" now (not a pinned model slug -- see
+    # utils/llm_client.py's OPENROUTER_BASE_URL comment). Note this one
+    # is NOT a rarely-hit last resort like the other OR-3c files: no key
+    # in eo/registry.py's AGENT_CAPABILITIES is tagged with the
+    # "output_organizer" role, so build_fallback_chain("output_organizer")
+    # below always returns empty and FALLBACK_CHAIN is the ONLY chain
+    # this file ever actually uses -- this step carried real, regular
+    # Cerebras traffic, not occasional overflow. Also: this file's own
+    # stream_completion() call site is covered by the streaming guard
+    # (reliability_overhaul_plan.md Priority 3), confirmed done, so this
+    # migration doesn't reintroduce the empty-output/reasoning bug in the
+    # streaming path either.
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_1"},
     # Env-audit fix: the account is named MISTRAL_API_KEY (bare, "account 1"
     # per .env.example's own comment), not MISTRAL_API_KEY_1 -- that name
     # was never provisioned, so this third fallback step always resolved

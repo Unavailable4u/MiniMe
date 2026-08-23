@@ -5,9 +5,14 @@ Blueprint).
 Replaces the fixing half of the old agents/fixer_tester.py. Testing is now
 a separate agent: agents/sandbox_tester.py (#10).
 
-- Provider: Cerebras `gpt-oss-120b`, 3 genuinely parallel workers.
-- Keys: CEREBRAS_API_KEY_6, CEREBRAS_API_KEY_7, CEREBRAS_API_KEY_8 -- kept
-  isolated from the Code Writer Pool's keys #1-#5.
+- Provider: OpenRouter `openrouter/free` (auto-router across OpenRouter's
+  current free-model roster -- see utils/llm_client.py's OPENROUTER_BASE_URL
+  comment for why a pinned model slug isn't safe here), 3 genuinely parallel
+  workers. Migrated off Cerebras per reliability_overhaul_plan.md OR-3a
+  (Cerebras moved to a paid tier; see OR-2's .env.example note).
+- Keys: OPENROUTER_API_KEY_6, OPENROUTER_API_KEY_7, OPENROUTER_API_KEY_8 --
+  kept isolated from the Code Writer Pool's keys #1-#5, same numbering
+  convention the old CEREBRAS_API_KEY_6/7/8 slots used.
 - Fallback: Cloudflare Workers AI, key #3 (CLOUDFLARE_ACCOUNT_ID_3 /
   CLOUDFLARE_API_KEY_3), same pattern as reviewer.py's key #2 fallback.
 - Unlike the Reviewer Pool (all 3 workers independently look at ALL code,
@@ -52,8 +57,11 @@ from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
-CEREBRAS_MODEL = "gpt-oss-120b"
-CEREBRAS_KEY_ENVS = ["CEREBRAS_API_KEY_6", "CEREBRAS_API_KEY_7", "CEREBRAS_API_KEY_8"]
+# OR-3a: Cerebras -> OpenRouter. "openrouter/free" (not a pinned model slug)
+# per utils/llm_client.py's OPENROUTER_BASE_URL comment -- OpenRouter's free
+# roster rotates fast enough that hardcoding a slug isn't safe.
+OPENROUTER_MODEL = "openrouter/free"
+OPENROUTER_KEY_ENVS = ["OPENROUTER_API_KEY_6", "OPENROUTER_API_KEY_7", "OPENROUTER_API_KEY_8"]
 
 # Cloudflare fallback -- key #3 in the production roster.
 # Using llama-3.3-70b-instruct-fp8-fast rather than the smaller
@@ -170,10 +178,12 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
                      session_id: str = None, path: str = None,
                      domain: str = None) -> tuple:
     """
-    Runs on one thread with one fixed Cerebras key. Fixes only the modules
+    Runs on one thread with one fixed OpenRouter key. Fixes only the modules
     assigned to this worker. Falls back to the shared Cloudflare account #3
-    (via generate_text()'s chain) if Cerebras is unavailable or errors
-    transiently. Returns (modules_dict, next_destination) -- modules_dict
+    (via generate_text()'s chain) if OpenRouter is unavailable or errors
+    transiently -- including the request-count-cliff case, since OR-1d's
+    ledger gating + the existing empty-output retry cover that path.
+    Returns (modules_dict, next_destination) -- modules_dict
     is the fixed modules (or unchanged, not a crash, if both providers
     fail) so one bad worker doesn't lose the rest of the pool's output.
     next_destination is this worker's own NEXT: vote, or None if both
@@ -211,7 +221,7 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
     )
 
     chain = [
-        {"provider": "cerebras", "model": CEREBRAS_MODEL, "key_env": key_env},
+        {"provider": "openrouter", "model": OPENROUTER_MODEL, "key_env": key_env},
         {"provider": "cloudflare", "model": CLOUDFLARE_MODEL,
          "account_id_env": CLOUDFLARE_ACCOUNT_ID_ENV, "token_env": CLOUDFLARE_TOKEN_ENV},
     ]
@@ -265,15 +275,17 @@ def run_fixer_pool(session_id: str = None, path: str = None, key_override=None,
 
     Note: fixer_pool.py has no expanded/reserve-pool concept today (unlike
     code_writers.py/reviewer.py), so "default" here just means
-    CEREBRAS_KEY_ENVS as before -- key_override doesn't interact with any
+    OPENROUTER_KEY_ENVS as before -- key_override doesn't interact with any
     mode-based sizing, there's nothing to fall back to but the fixed
-    3-key list.
+    3-key list. (OR-3a: was CEREBRAS_KEY_ENVS; renamed when the provider
+    moved off Cerebras, OPENROUTER_RESERVE_1-3 exist in .env.example if a
+    real reserve tier gets built later.)
 
-    key_override: None (default) -> today's exact behavior, CEREBRAS_KEY_ENVS.
+    key_override: None (default) -> today's exact behavior, OPENROUTER_KEY_ENVS.
     key_override: a single key_env string -> use ONLY that account; all
         modules go through one worker.
     key_override: a list of key_env strings -> use exactly those accounts
-        as the parallel fixer pool for this call, instead of CEREBRAS_KEY_ENVS.
+        as the parallel fixer pool for this call, instead of OPENROUTER_KEY_ENVS.
 
     Migration Part 11 §2: return shape changed from the bare
     {module_name: {...}} dict to {"fixed_code": {...}, "next_destination": ...}
@@ -293,7 +305,7 @@ def run_fixer_pool(session_id: str = None, path: str = None, key_override=None,
         review_notes = {"issues": [], "summary": ""}
 
     if key_override is None:
-        key_envs = CEREBRAS_KEY_ENVS
+        key_envs = OPENROUTER_KEY_ENVS
     elif isinstance(key_override, list):
         key_envs = key_override
     else:

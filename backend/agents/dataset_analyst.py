@@ -69,7 +69,17 @@ load_dotenv()
 FALLBACK_CHAIN = [
     {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
     {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "GROQ_API_KEY"},
-    {"provider": "cerebras", "model": "gpt-oss-120b", "key_env": "CEREBRAS_API_KEY_1"},
+    # OR-3c (reliability_overhaul_plan.md): Cerebras retired to a paid
+    # tier (see OR-2's .env.example note) -- was CEREBRAS_API_KEY_1,
+    # "openrouter/free" now (not a pinned model slug -- see
+    # utils/llm_client.py's OPENROUTER_BASE_URL comment). Note this one
+    # is NOT a rarely-hit last resort like idea_planner.py/report_writer.py
+    # above: no key in eo/registry.py's AGENT_CAPABILITIES is tagged with
+    # the "dataset_analyst" role, so build_fallback_chain("dataset_analyst")
+    # below always returns empty and FALLBACK_CHAIN is the ONLY chain this
+    # file ever actually uses -- this step carried real, regular Cerebras
+    # traffic, not occasional overflow.
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": "OPENROUTER_API_KEY_1"},
 ]
 
 # 2MB raw (before base64's ~33% inflation) -- generous for a CSV/TSV/JSON
