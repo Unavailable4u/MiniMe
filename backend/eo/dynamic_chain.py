@@ -78,6 +78,70 @@ MAX_CHAIN_STEPS = 3
 MAX_CHAIN_STEPS_CEILING = 6
 
 
+def _headroom_score(key: str) -> float:
+    """Phase 5, Patch A — pure read helper, no behavior change yet:
+    _rank_accounts() doesn't consult this until Patch B wires it in.
+
+    Returns 0.0 (fully open) .. 1.0 (no headroom left) for how close
+    THIS account is, right now, to whichever ceiling
+    rate_ledger.can_proceed()/reserve() would actually gate it against
+    for its default model (PROVIDER_DEFAULT_MODEL above) — the "live
+    headroom" signal Phase 5's plan calls for, as opposed to the
+    static/daily quota_status figure eo/panel.py's _best_match() and
+    _usage_fraction() already rank by.
+
+    Derives (provider, key_id, model) the same way chain_step_for() and
+    eo/concurrency_gate.py's _candidate_identity() both already do:
+    key_id is the AGENT_CAPABILITIES key itself (key_env) for every
+    provider except cloudflare, where it's that account's own
+    account_id_env (info["key_id"], falling back to the key itself if
+    somehow absent).
+
+    Precedence mirrors rate_ledger.can_proceed()'s own rule ordering
+    (provider-reported over the self-tracked window): an exact
+    remaining_tokens/remaining_requests == 0 from a live provider
+    response is the strongest possible "no headroom" signal available,
+    so that short-circuits straight to 1.0 before falling back to the
+    sliding window's own pct_used, then ("requests" gating mode only)
+    the daily pct_used. Any provider/model with no verified
+    QUOTA_CONFIG limit to compute a pct against, or with no usage
+    recorded for it yet at all, reads as 0.0 -- fully open -- matching
+    rate_ledger.py's own fail-open posture everywhere else in that
+    module's family, and keeping an unconfigured/never-used account
+    from being unfairly penalized just for having no history.
+    """
+    from utils import rate_ledger  # deferred — see module docstring
+
+    info = AGENT_CAPABILITIES.get(key)
+    if info is None:
+        return 0.0
+    provider = info.get("provider")
+    if provider is None:
+        return 0.0
+    model = PROVIDER_DEFAULT_MODEL.get(provider, "")
+    key_id = info.get("key_id", key) if provider == "cloudflare" else key
+
+    snapshot = rate_ledger.headroom_snapshot(provider, key_id, model)
+
+    reported = snapshot.get("provider_reported")
+    if reported is not None:
+        remaining = (reported.get("remaining_requests")
+                     if snapshot.get("gating_mode") == "requests"
+                     else reported.get("remaining_tokens"))
+        if remaining is not None and remaining <= 0:
+            return 1.0
+
+    window_pct = (snapshot.get("sliding_window") or {}).get("pct_used")
+    if window_pct is not None:
+        return max(0.0, min(1.0, window_pct))
+
+    daily = snapshot.get("daily")
+    if daily is not None and daily.get("pct_used") is not None:
+        return max(0.0, min(1.0, daily["pct_used"]))
+
+    return 0.0
+
+
 def _cloudflare_token_env_for(account_id_env: str) -> str:
     """Same derivation as agents/generic_worker.py's own
     _cloudflare_token_env_for() -- mirrored, not imported, for the same

@@ -526,20 +526,31 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     1-2 hardcoded accounts (part_price_finder.py's old module-level
     CHAIN) -- the root cause of hardware_speccer sitting for 2-3 minutes
     on a large parts list before finally rate-limiting itself out. Now
-    parallelized with a ThreadPoolExecutor, same pattern
-    agents/code_writers.py already uses for module writes: pick up to
-    `worker_count` distinct, quota-ranked accounts tagged
-    "part_price_finder" (eo/worker_pool.py's shared role_tag-parameterized
-    selector -- see eo/registry.py's AGENT_CAPABILITIES), and hand each
-    worker thread its OWN find_price(chain_override=...) chain (built via
+    parallelized: pick up to `worker_count` distinct, quota-ranked
+    accounts tagged "part_price_finder" (eo/worker_pool.py's shared
+    role_tag-parameterized selector -- see eo/registry.py's
+    AGENT_CAPABILITIES), and hand each worker thread its OWN
+    find_price(chain_override=...) chain (built via
     eo/dynamic_chain.py's build_fallback_chain_excluding(), so a worker's
     fallback steps also skip whatever its sibling workers are already
     using) instead of every part racing for one shared key.
+
+    Reliability-overhaul fix (Phase 4, Patch C): dispatch no longer goes
+    through a raw ThreadPoolExecutor sized to a fixed worker count.
+    Every task now goes through eo/concurrency_gate.py's run_gated(),
+    which reserves each worker's designated (provider, key, model)
+    candidate against utils/rate_ledger.py BEFORE starting its thread,
+    and re-admits queued tasks the instant a slot frees up -- so actual
+    in-flight concurrency tracks live ledger headroom instead of
+    starting all `len(key_envs)` threads at once and letting each one
+    individually discover there wasn't room.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import functools
+    from concurrent.futures import as_completed
     from agents.part_price_finder import find_price
     from eo.worker_pool import _select_workers
-    from eo.dynamic_chain import build_fallback_chain_excluding
+    from eo.dynamic_chain import build_fallback_chain_excluding, chain_step_for
+    from eo.concurrency_gate import GatedTask, run_gated
 
     if not parts:
         return parts
@@ -597,21 +608,32 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
         # I/O (web_search fan-out inside find_price() already helps), but
         # every worker shares find_price()'s own static FALLBACK_CHAIN
         # (chain_override=None) since there's nothing to spread them
-        # across account-wise.
-        with ThreadPoolExecutor(max_workers=min(len(parts), 4)) as executor:
-            futures = [executor.submit(_price_one, part, None, i + 1)
-                       for i, part in enumerate(parts)]
-            for future in as_completed(futures):
-                future.result()
-        return parts
-
-    with ThreadPoolExecutor(max_workers=len(key_envs)) as executor:
-        futures = [
-            executor.submit(_price_one, part, key_envs[i % len(key_envs)], (i % len(key_envs)) + 1)
+        # across account-wise. Nothing to gate a reservation against
+        # either, so each task's step is None and run_gated() admits
+        # them immediately, same as the old plain ThreadPoolExecutor did.
+        tasks = [
+            GatedTask(functools.partial(_price_one, part, None, i + 1), step=None,
+                      label=f"{ROLE_TAG}_{i + 1}")
             for i, part in enumerate(parts)
         ]
+        futures = run_gated(tasks, session_id=session_id)
         for future in as_completed(futures):
             future.result()
+        return parts
+
+    tasks = []
+    for i, part in enumerate(parts):
+        key_env = key_envs[i % len(key_envs)]
+        worker_id = (i % len(key_envs)) + 1
+        step = chain_step_for(key_env) if key_env else None
+        tasks.append(GatedTask(
+            functools.partial(_price_one, part, key_env, worker_id),
+            step=step,
+            label=f"{ROLE_TAG}_{worker_id}",
+        ))
+    futures = run_gated(tasks, session_id=session_id)
+    for future in as_completed(futures):
+        future.result()
 
     return parts
 
