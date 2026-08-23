@@ -392,6 +392,15 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     results = looped["results"]
     final_role = looped["final_role"]
 
+    # NEW — Phase 6d: surface Phase 6b/6c's failure-marker dicts to the
+    # API response instead of leaving them silently buried inside
+    # `results`. Only tier-3's hires-driven adaptive path ever produces
+    # this shape — tiers 0/1/2 don't dispatch through
+    # AGENT_DEPENDENCIES-aware _run_loop() at all, so this scan is a
+    # no-op (empty failed_roles) for every other path, same as today.
+    failed_roles = [r["role"] for r in results.values()
+                    if isinstance(r, dict) and r.get("status") == "failed"]
+
     # "answer" is just the final role's human-readable text — "output" is
     # kept alongside it so the agent-trace/working panel still has full
     # detail to show. render_agent_result() is the same renderer
@@ -527,6 +536,14 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
             "final_role": final_role,
             "artifacts": artifacts,
             "dedup_notes": dedup_notes,  # NEW — CO4 patch 2
+            # NEW — Phase 6d: `status` above stays "ok" — a degraded-but-
+            # completed run is still a 200, not a different top-level
+            # status. `partial` is the signal the frontend keys off of
+            # (e.g. "your device spec is ready, but the write-up failed —
+            # retry?"); `failed_roles` names which role(s) degraded so it
+            # can offer a targeted retry instead of redoing the whole task.
+            "partial": bool(failed_roles),
+            "failed_roles": failed_roles,
         },
         "message": None,
     }
