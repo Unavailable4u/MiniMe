@@ -728,7 +728,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
 
         <div>
           <label htmlFor="test-target" className="text-[11px] text-[var(--neutral-500)]">
-            What's being tested
+            What&apos;s being tested
           </label>
           <textarea
             id="test-target"
@@ -740,7 +740,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
             className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)]"
           />
           <p className="text-[10px] text-[var(--neutral-600)] mt-1">
-            No auto-fill from the Build cycle's handoff summary yet — paste or describe it manually.
+            No auto-fill from the Build cycle&apos;s handoff summary yet — paste or describe it manually.
           </p>
         </div>
 
@@ -759,7 +759,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
         </button>
       </div>
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Runs the chosen persona set in this project's own chat — watch the parallel branches live
+        Runs the chosen persona set in this project&apos;s own chat — watch the parallel branches live
         in the dock on the right, then check the Friction Reports tab once it finishes.
       </p>
     </div>
@@ -948,8 +948,8 @@ function PersonasPanel({ fetchRoles, updateRolePrompt, setRolePinned }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-[11px] text-[var(--neutral-600)]">
-          The role briefs this tab's simulations hire from — same store as the Role Library panel,
-          filtered to the simulate domain's own roles.
+          The role briefs this tab&apos;s simulations hire from — same store as the Role Library panel,
+          filtered to the simulate domain&apos;s own roles.
         </p>
         <button
           onClick={load}
@@ -1094,7 +1094,7 @@ function RedTeamPanel({ wsId, sessionId, fetchSimulationResults }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] text-[var(--neutral-600)]">Showing red_team's pass for the selected run.</p>
+        <p className="text-[11px] text-[var(--neutral-600)]">Showing red_team&apos;s pass for the selected run.</p>
         <button
           onClick={load}
           className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1"

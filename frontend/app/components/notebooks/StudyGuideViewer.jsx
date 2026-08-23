@@ -15,7 +15,7 @@ import Markdown from "../Markdown";
 // to keep in sync with the writer role's actual output grammar.
 export default function StudyGuideViewer({ markdownText }) {
   if (!markdownText || !markdownText.trim()) {
-    return <p className="text-xs text-[var(--neutral-500)]">Couldn't parse a study guide from this text.</p>;
+    return <p className="text-xs text-[var(--neutral-500)]">Couldn&apos;t parse a study guide from this text.</p>;
   }
   return (
     <div className="max-w-none [&_.markdown-body]:text-xs">

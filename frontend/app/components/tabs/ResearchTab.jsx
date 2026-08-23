@@ -312,7 +312,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
         <div className="flex-1 overflow-y-auto">
           {researchProjects.length === 0 && (
             <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
-              No research projects yet — create one above, promote a notebook from the Notebooks tab, or use the chat sidebar's <FolderOpen size={11} className="inline" /> button.
+              No research projects yet — create one above, promote a notebook from the Notebooks tab, or use the chat sidebar&apos;s <FolderOpen size={11} className="inline" /> button.
             </p>
           )}
           {researchProjects.map((ws) => {
@@ -974,7 +974,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
             ))}
             {fields.length === 0 && (
               <span className="text-[11px] text-[var(--neutral-600)]">
-                e.g. "sample size", "methodology", "key finding"
+                e.g. &quot;sample size&quot;, &quot;methodology&quot;, &quot;key finding&quot;
               </span>
             )}
           </div>
@@ -1131,7 +1131,7 @@ function ContradictionsPanel({ workspaceId, fetchPanelContent, savePanelContent 
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste a contradiction_detector or consensus_meter run's output below. Saved per
+        Paste a contradiction_detector or consensus_meter run&apos;s output below. Saved per
         project — pasting here again for the same project overwrites the previous paste.
       </p>
       <textarea
@@ -1194,8 +1194,8 @@ function DatasetPanel({ wsId, onDispatched }) {
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Describe the dataset (by filename) and the question — e.g. "analyze sales.csv: show the
-        trend by region for Q3". There's no file-upload step for this yet; the dataset needs to
+        Describe the dataset (by filename) and the question — e.g. &quot;analyze sales.csv: show the
+        trend by region for Q3&quot;. There&apos;s no file-upload step for this yet; the dataset needs to
         already be a readable file the task can name.
       </p>
       <textarea

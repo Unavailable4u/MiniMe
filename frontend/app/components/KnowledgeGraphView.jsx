@@ -411,7 +411,7 @@ export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSum
           </p>
           {rationaleNeighbors.length > 0 ? (
             <div className="space-y-1.5 border-t border-[var(--neutral-800)] pt-2">
-              <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Why it's linked</p>
+              <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Why it&apos;s linked</p>
               {rationaleNeighbors.map((n) => (
                 <div key={n.edge_id} className="flex flex-col">
                   <span className="text-[var(--neutral-300)] truncate">{n.node.title}</span>

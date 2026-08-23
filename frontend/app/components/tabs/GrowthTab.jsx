@@ -729,7 +729,7 @@ function ContentView({ wsId, onDispatched }) {
         </div>
         <p className="text-[10px] text-[var(--neutral-600)] mt-1">
           Unrecognized platforms still work -- the pool falls back to a
-          generic format if it doesn't have specific rules on file for one.
+          generic format if it doesn&apos;t have specific rules on file for one.
         </p>
       </div>
 
@@ -1032,7 +1032,7 @@ function CalendarView() {
   if (notConnected) {
     return (
       <div className="max-w-md text-sm text-[var(--neutral-400)] space-y-3">
-        <p>Google Calendar isn't connected yet.</p>
+        <p>Google Calendar isn&apos;t connected yet.</p>
         {error && <p className="text-xs text-red-400">{error}</p>}
         <button
           onClick={handleConnect}
@@ -1364,8 +1364,8 @@ function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelConte
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste seo_structure_auditor's output below. Saved per project --
-        pasting again overwrites the previous paste, same as Plan's
+        Paste seo_structure_auditor&apos;s output below. Saved per project --
+        pasting again overwrites the previous paste, same as Plan&apos;s
         PRD/Feasibility tabs.
       </p>
       <textarea
@@ -1403,7 +1403,7 @@ function ComingSoonPanel({ subTabId }) {
   const label = SUB_TABS.find((t) => t.id === subTabId)?.label || subTabId;
   return (
     <div className="text-sm text-[var(--neutral-500)]">
-      {label} isn't built yet — see build order §4 (design spec). Brand
+      {label} isn&apos;t built yet — see build order §4 (design spec). Brand
       Voice, Content Fan-out, Calendar, and Content Audit are done; next up
       is Analytics (step 6).
     </div>

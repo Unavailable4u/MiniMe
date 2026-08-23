@@ -92,7 +92,7 @@ export default function QuizRunner({ quizText, workspaceId, quizNodeId, topicId 
     .filter((i) => !missedOnly || missedOnly.has(questions[i].question));
 
   if (questions.length === 0) {
-    return <p className="text-xs text-[var(--neutral-500)]">Couldn't parse any questions from this quiz.</p>;
+    return <p className="text-xs text-[var(--neutral-500)]">Couldn&apos;t parse any questions from this quiz.</p>;
   }
 
   // BUGFIX (bug #2): missedIndices can legitimately be [] (e.g. a
@@ -246,7 +246,7 @@ export default function QuizRunner({ quizText, workspaceId, quizNodeId, topicId 
         </span>
       </div>
       {missedOnly && (
-        <p className="text-[11px] text-amber-400">Showing only questions you've most recently missed.</p>
+        <p className="text-[11px] text-amber-400">Showing only questions you&apos;ve most recently missed.</p>
       )}
 
       <div className="rounded-lg border border-[var(--neutral-800)] bg-black/20 px-4 py-4 space-y-3">

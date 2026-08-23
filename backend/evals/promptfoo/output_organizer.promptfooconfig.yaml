@@ -20,5 +20,19 @@ providers:
 prompts:
   - "{{user_request}}"
 
+# Mirrors promptfooconfig.yaml's own defaultTest (patch 9 there): without
+# this, any llm-rubric assert added to tests/output_organizer.yaml would
+# fall back to promptfoo's OpenAI grading default, which this project
+# never configures a key for (see that file's comment for the full
+# reasoning -- same GROQ_API_KEY_GRADING split from the generation-side
+# GROQ_API_KEY, same reason: a grading call and a generation call in
+# flight together shouldn't compete for one key's per-minute limit).
+defaultTest:
+  options:
+    provider:
+      id: groq:openai/gpt-oss-120b
+      config:
+        apiKeyEnvar: GROQ_API_KEY_GRADING
+
 tests:
   - file://tests/output_organizer.yaml

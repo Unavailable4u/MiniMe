@@ -52,7 +52,7 @@ function SettingsTab() {
             <p className="text-xs text-[var(--neutral-300)]">Proactive suggestions</p>
             <p className="text-[var(--neutral-600)] text-xs mt-0.5">
               Offer a follow-up generation after one finishes (e.g. a quiz
-              after flashcards), and mention related topics you haven't
+              after flashcards), and mention related topics you haven&apos;t
               covered yet. Always a one-tap offer — nothing generates
               without you accepting it.
             </p>

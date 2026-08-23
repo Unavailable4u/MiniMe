@@ -78,7 +78,7 @@ export default function ExtractionTableView({ text, data }) {
   if (!parsed) {
     return (
       <p className="text-xs text-[var(--neutral-500)]">
-        Paste the extraction table's markdown output above to view it here.
+        Paste the extraction table&apos;s markdown output above to view it here.
       </p>
     );
   }

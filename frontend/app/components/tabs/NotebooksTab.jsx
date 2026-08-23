@@ -507,7 +507,7 @@ function BacklinksView({ nodes, edges, pulsingIds, loading, onSelectNode }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-[var(--neutral-500)]">
-        Topic tree for this notebook — hover a link to see its relation, click a node to see its summary and why it's connected.
+        Topic tree for this notebook — hover a link to see its relation, click a node to see its summary and why it&apos;s connected.
       </p>
       <div className="h-[420px] rounded-lg border border-[var(--neutral-800)] overflow-hidden">
         {loading ? (
@@ -814,7 +814,7 @@ function WorkflowsView({ workspaceId, results, onOpenSubChat, onDismiss }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-[var(--neutral-500)]">
-        Step-by-step workflows generated for the topics you've clicked in the Mind Map above.
+        Step-by-step workflows generated for the topics you&apos;ve clicked in the Mind Map above.
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {results.map((r) => (
@@ -1276,7 +1276,7 @@ function StudyView({ workspaceId }) {
       {kind === "video_overview" && (
         <p className="text-xs text-[var(--neutral-500)]">
           Paste the Markdown from a <code className="text-amber-300">slide_planner</code> chat run, then build a
-          narrated slideshow using audio from a podcast you've already synthesized under the same title below.
+          narrated slideshow using audio from a podcast you&apos;ve already synthesized under the same title below.
         </p>
       )}
       {kind === "podcast" && (
@@ -1495,7 +1495,7 @@ function ClustersView({ candidates, loading, scanning, onScan, onAccept, onRejec
       {loading ? (
         <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>
       ) : candidates.length === 0 ? (
-        <p className="text-xs text-[var(--neutral-600)]">No suggested clusters right now — click "Detect clusters" to scan (needs at least 4 sources with embeddings).</p>
+        <p className="text-xs text-[var(--neutral-600)]">No suggested clusters right now — click &quot;Detect clusters&quot; to scan (needs at least 4 sources with embeddings).</p>
       ) : (
         <div className="space-y-2">
           {candidates.map((c) => (
@@ -1612,7 +1612,7 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
     <div className="space-y-6 max-w-lg">
       <div className="space-y-3">
         <p className="text-xs text-[var(--neutral-500)]">
-          Durable facts about this notebook — folded into every agent prompt automatically, so you don't have to re-explain brand voice, audience, or stack in every chat.
+          Durable facts about this notebook — folded into every agent prompt automatically, so you don&apos;t have to re-explain brand voice, audience, or stack in every chat.
         </p>
         <div>
           <label htmlFor="notebook-facts-brand-voice" className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Brand voice</label>
@@ -1710,7 +1710,7 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
           )}
         </div>
         {candidates.length === 0 ? (
-          <p className="text-xs text-[var(--neutral-600)]">Nothing pending — agents propose a fact here when they spot something durable worth remembering, without overwriting what's above.</p>
+          <p className="text-xs text-[var(--neutral-600)]">Nothing pending — agents propose a fact here when they spot something durable worth remembering, without overwriting what&apos;s above.</p>
         ) : (
           <div className="space-y-2">
             {/* FIX — bug audit §9: accept/reject address by the stable
@@ -1914,9 +1914,9 @@ function CorrectionCaptureView({ workspaceId, nodes, edges, submitCorrection, on
     <div className="space-y-4">
       <div className="space-y-2">
         <p className="text-xs text-[var(--neutral-500)]">
-          Tell us what's wrong — a wrong fact, a missing connection, anything
-          that doesn't match the source. Scope it to one file, or leave it as
-          "All files" if it's about the notebook as a whole.
+          Tell us what&apos;s wrong — a wrong fact, a missing connection, anything
+          that doesn&apos;t match the source. Scope it to one file, or leave it as
+          &quot;All files&quot; if it&apos;s about the notebook as a whole.
         </p>
         <select
           id="notebook-correction-scope"
@@ -1964,7 +1964,7 @@ function CorrectionCaptureView({ workspaceId, nodes, edges, submitCorrection, on
               {c.status === "queued" ? (
                 <p className="text-[10px] text-green-400">Located a match — see Patch Review below to accept or discard it.</p>
               ) : (
-                <p className="text-[10px] text-[var(--neutral-500)]">Couldn't locate a match: {c.reason}</p>
+                <p className="text-[10px] text-[var(--neutral-500)]">Couldn&apos;t locate a match: {c.reason}</p>
               )}
             </div>
           ))}
@@ -2059,7 +2059,7 @@ function PatchReviewView({ workspaceId, fetchPatchCandidates, acceptPatchCandida
         const after = c.op?.value || {};
         return (
           <div key={c.candidate_id} className="rounded-lg border border-[var(--neutral-800)] p-3 space-y-2">
-            <p className="text-xs text-[var(--neutral-400)] italic">"{c.correction_text}"</p>
+            <p className="text-xs text-[var(--neutral-400)] italic">&quot;{c.correction_text}&quot;</p>
             <p className="text-[10px] text-[var(--neutral-600)]">{c.scope_label}</p>
             <div className="space-y-1.5">
               <FieldDiff label="Name" before={before.name} after={after.name} />
@@ -2161,11 +2161,11 @@ function CreateFirstChatPrompt({ workspace, creating, onCreateChat }) {
     <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-10 text-center space-y-3 max-w-md mx-auto mt-6">
       <MessageSquare size={22} className="mx-auto text-[var(--neutral-600)]" />
       <p className="text-sm text-[var(--neutral-300)]">
-        "{workspace?.name}" doesn't have a chat yet.
+        &quot;{workspace?.name}&quot; doesn&apos;t have a chat yet.
       </p>
       <p className="text-xs text-[var(--neutral-500)]">
         Sources, Diagrams, Study, Insights, and Corrections all live inside a
-        chat's context here — create one first so anything you upload or
+        chat&apos;s context here — create one first so anything you upload or
         submit lands in the right place, instead of nowhere in particular.
       </p>
       <button
@@ -2191,12 +2191,12 @@ function SelectChatPrompt({ workspace }) {
     <div className="rounded-lg border border-dashed border-[var(--neutral-800)] p-10 text-center space-y-3 max-w-md mx-auto mt-6">
       <MessageSquare size={22} className="mx-auto text-[var(--neutral-600)]" />
       <p className="text-sm text-[var(--neutral-300)]">
-        No chat selected in "{workspace?.name}".
+        No chat selected in &quot;{workspace?.name}&quot;.
       </p>
       <p className="text-xs text-[var(--neutral-500)]">
         Sources, Diagrams, Study, Insights, and Corrections are all scoped to
         one chat at a time — pick one from the list on the left (or start a
-        new one with the "+" beside the project name) to see them.
+        new one with the &quot;+&quot; beside the project name) to see them.
       </p>
     </div>
   );

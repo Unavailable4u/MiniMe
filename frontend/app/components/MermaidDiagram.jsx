@@ -329,7 +329,7 @@ function MermaidDiagram({
       // handing back something that reaches this component at all.
       return (
         <div className="text-[11px] text-[var(--neutral-500)]">
-          Couldn't render this as a diagram — try Regenerate.
+          Couldn&apos;t render this as a diagram — try Regenerate.
         </div>
       );
     }
@@ -339,7 +339,7 @@ function MermaidDiagram({
     // for non-mermaid code, since this is effectively the same case.
     return (
       <div className="text-[11px] text-[var(--neutral-500)] space-y-1.5">
-        <div>Couldn't render this diagram — showing the raw source instead:</div>
+        <div>Couldn&apos;t render this diagram — showing the raw source instead:</div>
         <pre className="overflow-x-auto p-3 text-xs bg-black/30 rounded-md border border-[var(--neutral-800)]">
           <code>{mermaidText}</code>
         </pre>
