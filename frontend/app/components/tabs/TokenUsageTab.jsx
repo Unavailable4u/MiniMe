@@ -10,11 +10,12 @@ import { useIsVisible } from "../../hooks/useIsVisible";   // FIX — defer char
 // the cyan/magenta UI accent palette rather than being folded into it.
 const PROVIDER_COLOR = {
   groq: "#f97316",
-  cerebras: "#3b82f6",
+  openrouter: "#3b82f6",
   cloudflare: "#fb923c",
   mistral: "#ef4444",
   github: "#a1a1aa",
   huggingface: "#eab308",
+  gemini: "#10b981",
 };
 const colorFor = (provider) => PROVIDER_COLOR[provider] || "#a78bfa";
 

@@ -7,7 +7,7 @@ retirement on 2026-07-30 (quota-reality fix, §4) -- every chain that
 stepped through it has since been moved onto a different provider or had
 that step removed outright; nothing in this module routes to it anymore.
 This module provides one generic generate_text() function that any agent
-can call with its own ordered fallback chain, drawn from: Groq, Cerebras,
+can call with its own ordered fallback chain, drawn from: Groq,
 Mistral, Gemini, HuggingFace, Cloudflare Workers AI.
 
 Each agent defines its own chain as a list of steps. Most providers
@@ -57,13 +57,6 @@ abstract:
     tool calls. openai/gpt-oss-120b and qwen/qwen3.6-27b (the models
     most chains use now that llama-3.3-70b-versatile is decommissioned)
     support it.
-  - Cerebras: yes. gpt-oss-120b (the model most chains use) supports
-    tools, but REJECTS a request that sets both "tools" and
-    "response_format" in the same call -- a step that wants both will
-    have to drop one. (Unrelated to tool calling, but noted while
-    checking this model: qwen-3-32b and llama-3.3-70b are being
-    deprecated on Cerebras -- not a concern today since no chain here
-    uses either, just don't reach for them later without checking.)
   - Mistral: yes. mistral-medium-latest (the model most chains use) is
     on Mistral's own confirmed tool-calling model list.
   - Gemini: yes, natively documented on the OpenAI-compat endpoint
@@ -83,7 +76,7 @@ abstract:
 Two gaps this leaves for Phase 2 step 2.2 (converting the capability
 manifest into a tools array) and beyond, not yet addressed by anything
 in this module:
-  1. _call_step() (groq/cerebras/mistral/gemini/huggingface) doesn't
+  1. _call_step() (groq/mistral/gemini/huggingface) doesn't
      pass "tools" into client.chat.completions.create(...) today, and
      only ever reads choice.message.content -- it has no path back for
      choice.message.tool_calls.
@@ -105,11 +98,6 @@ from datetime import date, datetime, timezone
 
 import requests
 from groq import Groq, RateLimitError as GroqRateLimitError, APIStatusError as GroqAPIStatusError
-from cerebras.cloud.sdk import Cerebras
-from cerebras.cloud.sdk import (
-    RateLimitError as CerebrasRateLimitError,
-    APIStatusError as CerebrasAPIStatusError,
-)
 from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusError as OpenAIAPIStatusError
 
 from memory.bus import read as bus_read, write as bus_write
@@ -136,7 +124,7 @@ from utils.llm_errors import ErrorBucket, classify_error
 
 # Part 26 §4 re-export: embed_text() used to be defined directly in this
 # module, but eo/routing_memory.py wanted it without the heavy groq/
-# cerebras/openai SDK imports above, so it now lives in
+# openai SDK imports above, so it now lives in
 # utils/embedding.py (zero heavy imports) and this is just a re-export
 # so existing callers can keep doing `from utils.llm_client import
 # embed_text` / `embed_text_with_fallback` (agents/memory_search.py,
@@ -178,11 +166,6 @@ QUOTA_CONFIG = {
         # model list at all (see the reality guide §3). Don't add a number
         # for a model that may already be 404ing.
     },
-    "cerebras": {
-        # confirmed against cloud.cerebras.ai/.../models, 2026-07-30
-        "gpt-oss-120b": {"rpm": 5, "rpd": 2400, "tpm": 30000, "tpd": 1000000},
-        "gemma-4-31b":  {"rpm": 5, "rpd": 2400, "tpm": 30000, "tpd": 1000000},
-    },
     "gemini": {
         # confirmed against Google AI Studio > Rate Limit page, 2026-07-30.
         # gemini-2.5-pro / gemini-3.1-pro deliberately absent -- 0/0 on the
@@ -192,9 +175,10 @@ QUOTA_CONFIG = {
         "gemini-3.1-flash-lite": {"rpm": 15, "rpd": 500,   "tpm": 250000},
         "gemini-3.5-flash-lite": {"rpm": 15, "rpd": 500,   "tpm": 250000},
         "gemma-4-31b":           {"rpm": 30, "rpd": 14400, "tpm": 16000},
-        # NOTE: same model family as Cerebras' gemma-4-31b, different
-        # provider/base_url -- verify the exact model id string Gemini's
-        # OpenAI-compat layer expects before wiring it into a CHAIN.
+        # NOTE: same model family as the "gemma-4-31b" name used
+        # elsewhere, different provider/base_url -- verify the exact
+        # model id string Gemini's OpenAI-compat layer expects before
+        # wiring it into a CHAIN.
     },
     "mistral": {
         # confirmed against admin.mistral.ai > Limits, 2026-07-30. Mistral
@@ -295,7 +279,7 @@ HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 #
 # OR-1's manual header check (test_openrouter.py) confirmed OpenRouter never
 # sends x-ratelimit-* headers on chat completions, on any model tried --
-# unlike groq/cerebras/mistral/gemini, so record_headroom() will just get an
+# unlike groq/mistral/gemini, so record_headroom() will just get an
 # empty `headers` back for this provider every time. That's expected, not a
 # bug; the request-count-based gating this implies is a separate rate_ledger
 # extension (OR-1c note in the plan) and is NOT part of this patch.
@@ -314,7 +298,6 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _TRANSIENT_SDK_ERRORS = (
     GroqRateLimitError, GroqAPIStatusError,
     OpenAIRateLimitError, OpenAIAPIStatusError,
-    CerebrasRateLimitError, CerebrasAPIStatusError,
 )
 
 
@@ -370,8 +353,8 @@ _PERMANENT_ERROR_COOLDOWN_SECONDS = 6 * 60 * 60.0  # 6 hours
 
 def _status_code_from_exc(exc):
     """Best-effort extraction of the HTTP status code an SDK exception
-    carries. Groq/Cerebras/OpenAI's APIStatusError subclasses all expose
-    this directly as exc.status_code (confirmed against all three SDKs'
+    carries. Groq/OpenAI's APIStatusError subclasses all expose
+    this directly as exc.status_code (confirmed against both SDKs'
     own _exceptions.py source); fall back to exc.response.status_code
     for anything that only carries it on the underlying response object.
     Returns None if neither is present -- e.g. _CloudflareTransientError,
@@ -626,19 +609,6 @@ def _get_groq(key_env: str, timeout: float = None) -> Groq:
     return _client_cache[cache_key]
 
 
-def _get_cerebras(key_env: str, timeout: float = None) -> Cerebras:
-    key = os.getenv(key_env)
-    if not key:
-        return None
-    cache_key = ("cerebras", key_env, timeout)
-    if cache_key not in _client_cache:
-        kwargs = {"api_key": key}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        _client_cache[cache_key] = Cerebras(**kwargs)
-    return _client_cache[cache_key]
-
-
 def _get_mistral(key_env: str, timeout: float = None) -> OpenAI:
     key = os.getenv(key_env)
     if not key:
@@ -822,9 +792,9 @@ def _usage_details_from_usage(usage) -> dict | None:
 
 def _call_step(client, model: str, system_prompt: str, user_content: str,
                 max_tokens: int = None, provider: str = None):
-    """OpenAI-SDK-shaped call, used for groq/cerebras/mistral/gemini/
+    """OpenAI-SDK-shaped call, used for groq/mistral/gemini/
     openrouter. Returns (text, usage, finish_reason) — usage is the
-    provider SDK's usage object (has .total_tokens on all three, since
+    provider SDK's usage object (has .total_tokens on all of them, since
     they're all OpenAI-compatible chat.completions responses) or None if
     the response didn't include one for some reason.
 
@@ -840,7 +810,7 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     specifically check for it.
 
     Fix here is two-part, both gated on provider == "openrouter" so
-    groq/cerebras/mistral/gemini call behavior is unchanged:
+    groq/mistral/gemini call behavior is unchanged:
       1. Send `extra_body={"reasoning": {"exclude": true}}` so OpenRouter
          suppresses reasoning-token spend on models that support the
          param, leaving the full max_tokens budget for visible output.
@@ -877,8 +847,8 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     rate_ledger's module docstring) after every call. Getting at the
     headers means going through .with_raw_response.create(...) instead
     of .create(...) directly and parsing the body ourselves --
-    confirmed present on all three SDKs used here (groq, cerebras,
-    openai, the last of which mistral/gemini/huggingface also ride via
+    confirmed present on both SDKs used here (groq,
+    openai, the latter of which mistral/gemini/huggingface also ride via
     _get_mistral()/_get_gemini()/_get_huggingface()'s base_url trick).
     `headers` is best-effort like everything else in this tuple: a
     missing/empty mapping is a normal "this provider didn't send
@@ -1364,7 +1334,7 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
     provider returned (SDK object with .total_tokens, or a plain dict
     with "total_tokens"), then delegates to the public log_usage() above.
 
-    usage may be an SDK object (groq/cerebras/mistral -- has
+    usage may be an SDK object (groq/mistral -- has
     .total_tokens as an attribute) or a plain dict (cloudflare, when
     present at all -- has "total_tokens" as a key), or None entirely.
     Any of these still result in the request being logged now -- only the
@@ -1383,14 +1353,14 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
               agent_name=agent_name, domain=domain, model=model)
 
 
-# CO5 follow-up -- spot-check probe for the groq/cerebras
+# CO5 follow-up -- spot-check probe for the groq
 # stream_options={"include_usage": True} question flagged in
 # stream_completion()'s docstring point 4. This does NOT fix anything by
 # itself (there's nothing to fix without seeing a real response); it just
 # makes the spot-check loud and easy to run once live keys are flipped on,
 # instead of the shape mismatch silently resulting in tokens=None the way
 # _log_usage() above degrades by design for every other caller.
-_USAGE_SHAPE_PROVIDERS_TO_WATCH = ("groq", "cerebras")
+_USAGE_SHAPE_PROVIDERS_TO_WATCH = ("groq",)
 
 
 def _probe_usage_shape(provider: str, model: str, usage, agent_name: str) -> None:
@@ -1538,7 +1508,7 @@ def _extract_total_tokens(usage) -> "int | None":
 
 
 # Phase 3c -- provider-reported rate-limit header names this module has
-# actually seen (Groq, Cerebras, and the OpenAI-compatible providers
+# actually seen (Groq, and the OpenAI-compatible providers
 # riding _get_mistral()/_get_gemini()/_get_huggingface()'s base_url
 # trick all use the same OpenAI-style x-ratelimit-* header names).
 # Cloudflare's REST response isn't confirmed to send any of these --
@@ -2088,8 +2058,8 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
                    session_id: str = None, tier: int = None, path: str = None,
                    domain: str = None, allow_continuation: bool = True) -> str:
     """
-    Walks `chain` in order. Each step is a dict. For groq/cerebras/mistral/gemini:
-        {"provider": "groq"|"cerebras"|"mistral"|"gemini", "model": "...", "key_env": "..."}
+    Walks `chain` in order. Each step is a dict. For groq/mistral/gemini:
+        {"provider": "groq"|"mistral"|"gemini", "model": "...", "key_env": "..."}
     For cloudflare:
         {"provider": "cloudflare", "model": "...", "account_id_env": "...", "token_env": "..."}
 
@@ -2243,7 +2213,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
         key_env = step["key_env"]
         timeout = step.get("timeout")
         getter = {
-            "groq": _get_groq, "cerebras": _get_cerebras,
+            "groq": _get_groq,
             "mistral": _get_mistral, "gemini": _get_gemini,
             "huggingface": _get_huggingface,
             "openrouter": _get_openrouter,  # OR-1a
@@ -2325,7 +2295,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
 
     SCOPE -- read before wiring another chain into this:
 
-    1. OpenAI-SDK-shaped providers only (groq/cerebras/mistral/gemini/
+    1. OpenAI-SDK-shaped providers only (groq/mistral/gemini/
        huggingface). Cloudflare Workers AI's step shape is a plain,
        non-streaming REST call (_call_cloudflare_step) -- a cloudflare
        step in `chain` is skipped here with a log line, same pattern
@@ -2363,15 +2333,15 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
        numbers instead of silently logging nothing for every streamed
        call -- confirmed accepted by the `openai` SDK (mistral/gemini/
        huggingface steps go through that client). NOT independently
-       confirmed against the `groq` / `cerebras` SDKs' own stream
-       kwargs as of this patch -- both are OpenAI-compatible but that
-       specific kwarg needs checking against their current SDK
-       versions before relying on usage numbers for those two
-       providers; if the kwarg is rejected, the call fails BEFORE
+       confirmed against the `groq` SDK's own stream
+       kwargs as of this patch -- it's OpenAI-compatible but that
+       specific kwarg needs checking against its current SDK
+       version before relying on usage numbers for that
+       provider; if the kwarg is rejected, the call fails BEFORE
        yielding a chunk, so it falls through to the next chain step
        via the normal Fix-A path rather than breaking the stream.
        _probe_usage_shape() (just above _MAX_CONTINUATIONS below) logs
-       a loud [USAGE-PROBE][...] line for every groq/cerebras streamed
+       a loud [USAGE-PROBE][...] line for every groq streamed
        step so this can be spot-checked from real logs once live keys
        are running, instead of a shape mismatch silently degrading to
        tokens=None inside _log_usage() with nothing to grep for.
@@ -2445,7 +2415,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
         key_env = step["key_env"]
         timeout = step.get("timeout")
         getter = {
-            "groq": _get_groq, "cerebras": _get_cerebras,
+            "groq": _get_groq,
             "mistral": _get_mistral, "gemini": _get_gemini,
             "huggingface": _get_huggingface,
             "openrouter": _get_openrouter,  # OR-1c-stream
@@ -2625,7 +2595,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
 # instruction not to duplicate it.
 #
 # Part 26 §4 — this used to be defined here directly, but embed_text()
-# only needs os/requests, while this module also imports groq/cerebras/
+# only needs os/requests, while this module also imports groq/
 # openai at load time. eo/routing_memory.py wanted embed_text() without
 # that SDK weight, so the function now lives in utils/embedding.py (zero
 # heavy imports); the re-export itself now lives at the top of this
