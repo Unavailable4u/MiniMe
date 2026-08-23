@@ -100,10 +100,13 @@ def test_usage_key_written_with_correct_provider_key_id_date(monkeypatch):
 def test_usage_increments_on_repeated_calls(monkeypatch):
     fake_bus, _ = _patch_bus_and_emitter(monkeypatch)
 
-    llm_client.log_usage("cerebras", "CEREBRAS_API_KEY_1", 100, agent_name="Test Agent")
-    llm_client.log_usage("cerebras", "CEREBRAS_API_KEY_1", 200, agent_name="Test Agent")
+    # OR-4 (reliability_overhaul_plan.md): was "cerebras"/"CEREBRAS_API_KEY_1" --
+    # log_usage() is provider-agnostic, this is arbitrary test data, renamed to
+    # match Cerebras' full retirement rather than testing a retired provider.
+    llm_client.log_usage("openrouter", "OPENROUTER_API_KEY_1", 100, agent_name="Test Agent")
+    llm_client.log_usage("openrouter", "OPENROUTER_API_KEY_1", 200, agent_name="Test Agent")
 
-    key = f"usage:cerebras:CEREBRAS_API_KEY_1:{TODAY}"
+    key = f"usage:openrouter:OPENROUTER_API_KEY_1:{TODAY}"
     assert fake_bus.store[key] == {"requests": 2, "tokens": 300}
 
 
@@ -205,22 +208,43 @@ def test_log_usage_adapter_handles_missing_usage_entirely(monkeypatch):
 # ---------------------------------------------------------------------------
 
 class _FakeUsage:
-    """Mimics an OpenAI-SDK-shaped usage object (groq/cerebras/github/
-    mistral all return this shape) -- .total_tokens as an attribute, not
-    a dict key."""
+    """Mimics an OpenAI-SDK-shaped usage object (groq/openrouter/mistral/
+    gemini/huggingface all return this shape) -- .total_tokens as an
+    attribute, not a dict key."""
     def __init__(self, total_tokens):
         self.total_tokens = total_tokens
 
 
 class _FakeChoice:
-    def __init__(self, content):
+    def __init__(self, content, finish_reason="stop"):
         self.message = type("M", (), {"content": content})
+        self.finish_reason = finish_reason
 
 
 class _FakeChatResponse:
-    def __init__(self, content, total_tokens):
-        self.choices = [_FakeChoice(content)]
+    def __init__(self, content, total_tokens, finish_reason="stop"):
+        self.choices = [_FakeChoice(content, finish_reason)]
         self.usage = _FakeUsage(total_tokens)
+
+
+class _FakeRawResponse:
+    """Bug fix: Phase 3c (reliability_overhaul_plan.md) changed
+    _call_step() to call client.chat.completions.WITH_RAW_RESPONSE.create(
+    ...) instead of .create(...) directly, so it can read response
+    headers for the rate ledger (see llm_client.py's own docstring on
+    that change). The two fakes below used to only define a plain
+    .create() staticmethod, which .with_raw_response.create(...) doesn't
+    have -- these two end-to-end tests were raising AttributeError under
+    current code (found while doing the OR-4 provider-swap pass; the
+    fake's shape had simply gone stale against Phase 3c, unrelated to
+    any provider migration). Matches what real .with_raw_response.create()
+    actually returns: a .headers mapping and a .parse() method."""
+    def __init__(self, parsed, headers=None):
+        self._parsed = parsed
+        self.headers = headers or {}
+
+    def parse(self):
+        return self._parsed
 
 
 def _make_fake_client(content, total_tokens):
@@ -229,9 +253,10 @@ def _make_fake_client(content, total_tokens):
     class _FakeClient:
         class chat:
             class completions:
-                @staticmethod
-                def create(**kwargs):
-                    return _FakeChatResponse(content, total_tokens)
+                class with_raw_response:
+                    @staticmethod
+                    def create(**kwargs):
+                        return _FakeRawResponse(_FakeChatResponse(content, total_tokens))
     return _FakeClient()
 
 
@@ -264,7 +289,7 @@ def test_generate_text_logs_usage_after_mocked_chat_completion(monkeypatch):
 
 
 def test_generate_text_logs_zero_tokens_when_usage_object_missing(monkeypatch):
-    """Rare for groq/cerebras/github in practice, but generate_text()'s
+    """Rare for groq/openrouter in practice, but generate_text()'s
     own getattr(response, "usage", None) fallback must hold either way --
     same "request-only logging" contract as the Cloudflare-missing-usage
     case in the module docstring."""
@@ -278,9 +303,10 @@ def test_generate_text_logs_zero_tokens_when_usage_object_missing(monkeypatch):
     class _NoUsageClient:
         class chat:
             class completions:
-                @staticmethod
-                def create(**kwargs):
-                    return _NoUsageResponse("hi")
+                class with_raw_response:
+                    @staticmethod
+                    def create(**kwargs):
+                        return _FakeRawResponse(_NoUsageResponse("hi"))
 
     monkeypatch.setattr(llm_client, "_get_groq", lambda key_env, timeout=None: _NoUsageClient())
 

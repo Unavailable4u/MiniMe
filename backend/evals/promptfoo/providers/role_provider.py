@@ -226,7 +226,7 @@ def _build_live_chain(role_name: str) -> list:
 # with a different `provider_override` in its config. When set,
 # call_api() below builds a single forced one-step chain instead of
 # calling _build_live_chain()'s quota-ranked live chain -- that's what
-# lets the identical role/task run against Groq vs Cerebras vs Mistral
+# lets the identical role/task run against Groq vs OpenRouter vs Mistral
 # vs Gemini side by side in one promptfoo run (promptfoo's normal
 # test-case x provider matrix does the actual comparison automatically
 # once multiple `providers:` entries exist; nothing special needed on
@@ -235,11 +235,20 @@ def _build_live_chain(role_name: str) -> list:
 # Model/key_env pairs below are copied directly from real production
 # chains already in this codebase, not guessed -- utils/llm_client.py's
 # own module docstring for groq; agents/documentation_agent.py for
-# mistral; agents/code_writer_lean.py for gemini; agents/dataset_analyst
-# .py / agents/report_writer.py / agents/idea_planner.py (among others)
-# for cerebras -- so a comparison run exercises models this codebase
+# mistral; agents/code_writer_lean.py for gemini; agents/idea_planner.py /
+# agents/output_organizer.py / agents/report_writer.py (among others) for
+# openrouter -- so a comparison run exercises models this codebase
 # actually calls in production, not a placeholder that might not even
 # be enabled on your account.
+#
+# OR-4 (reliability_overhaul_plan.md): this dict's "cerebras" entry is
+# SWAPPED to "openrouter" below, not kept alongside it. Cerebras is fully
+# retired -- no CEREBRAS_API_KEY_* left in .env.example, no live CHAIN
+# anywhere in agents/ references it -- so leaving a "cerebras" key here
+# would offer a provider_override that fails with an unset key every
+# time, not a real A/B comparison option. A comparison run that still
+# wants to test the old Cerebras behavior should check out the
+# pre-migration revision instead of resurrecting a config here.
 #
 # Cloudflare and HuggingFace are deliberately NOT included here: both
 # need a different step shape than the other four (Cloudflare needs
@@ -253,10 +262,10 @@ def _build_live_chain(role_name: str) -> list:
 # closer capability match of the two suggested replacements, same as
 # agents/generic_worker.py's PROVIDER_DEFAULT_MODEL.
 PROVIDER_OVERRIDE_DEFAULTS = {
-    "groq":     {"provider": "groq",     "model": "openai/gpt-oss-120b",     "key_env": "GROQ_API_KEY"},
-    "cerebras": {"provider": "cerebras", "model": "gpt-oss-120b",            "key_env": "CEREBRAS_API_KEY_1"},
-    "mistral":  {"provider": "mistral",  "model": "mistral-medium-latest",   "key_env": "MISTRAL_API_KEY"},
-    "gemini":   {"provider": "gemini",   "model": "gemini-3.6-flash",        "key_env": "GEMINI_API_KEY_1"},
+    "groq":       {"provider": "groq",       "model": "openai/gpt-oss-120b",   "key_env": "GROQ_API_KEY"},
+    "openrouter": {"provider": "openrouter", "model": "openrouter/free",       "key_env": "OPENROUTER_API_KEY_1"},
+    "mistral":    {"provider": "mistral",    "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY"},
+    "gemini":     {"provider": "gemini",     "model": "gemini-3.6-flash",      "key_env": "GEMINI_API_KEY_1"},
 }
 # --------------------------------------------------------------------
 
