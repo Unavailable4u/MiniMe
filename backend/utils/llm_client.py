@@ -312,6 +312,29 @@ class _CloudflareTransientError(Exception):
 
 _TRANSIENT_ERRORS = _TRANSIENT_SDK_ERRORS + (_CloudflareTransientError,)
 
+
+class ChainExhaustedError(RuntimeError):
+    """Phase 6a: raised by generate_text() (both the sync and streaming
+    paths) ONLY when every provider in the fallback chain has genuinely
+    been tried and failed/was unavailable, with no output produced at
+    all -- i.e. the two terminal "ran out of chain" raise sites, not
+    generate_text()'s other bare-RuntimeError sites.
+
+    Deliberately NOT used for:
+      - a step that fails mid-stream after partial output was already
+        sent to the caller (that's a real failure mid-flight, not an
+        exhausted chain -- content already left the building)
+      - a step that fails pre-first-chunk with a non-transient,
+        unclassified error (still a real bug; masking it as "chain
+        exhausted" would hide it instead of surfacing it)
+
+    Not underscore-prefixed, unlike _CloudflareTransientError/
+    _EmptyReasoningBudgetError above -- eo/executor.py's _run_loop()
+    (Phase 6b) needs to import and catch this one specifically, so it's
+    part of this module's public surface, not an internal implementation
+    detail."""
+    pass
+
 # Fix B (reliability guide, §3 "Fix B"): quota tracking (QUOTA_CONFIG /
 # eo/quota_sentinel.py) only ever answered "how many tokens has this
 # account used TODAY" -- it had no concept of a provider's own
@@ -2328,7 +2351,13 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
               f"instead of discarding it.")
         return accumulated_text
 
-    raise RuntimeError(
+    # Phase 6a: this is the genuine "tried everything, nothing worked"
+    # terminal case -- ChainExhaustedError, not a bare RuntimeError, so
+    # eo/executor.py's role-level catch (Phase 6b) can degrade this
+    # specific outcome gracefully without also swallowing the other
+    # bare-RuntimeError sites below in stream_completion(), which stay
+    # RuntimeError on purpose (see their own comments).
+    raise ChainExhaustedError(
         f"[{agent_name}] All providers in fallback chain exhausted or unavailable. "
         f"Last error: {last_exc}"
     )
@@ -2630,7 +2659,13 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                 # still a real bug, don't mask it by falling through.
                 raise RuntimeError(f"[{agent_name}] {label} failed: {last_exc}") from last_exc
 
-    raise RuntimeError(
+    # Phase 6a: streaming twin of generate_text()'s sync-path terminal
+    # raise above -- every provider tried, none produced any streamed
+    # output. ChainExhaustedError on purpose (see that raise site's
+    # comment); the two RuntimeErrors just above this one (mid-stream
+    # failure after partial output, and non-transient pre-chunk failure)
+    # are deliberately left as plain RuntimeError, not converted.
+    raise ChainExhaustedError(
         f"[{agent_name}] All providers in fallback chain exhausted or unavailable "
         f"before any streamed output. Last error: {last_exc}"
     )
