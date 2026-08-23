@@ -398,6 +398,409 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int) -
         return True, 0.0
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 -- reservation primitive (reliability_overhaul_plan.md §PHASE 4).
+#
+# The race can_proceed()/record_usage() actually leaves open: can_proceed()
+# only READS, and the corresponding booking (record_usage()) doesn't happen
+# until the LLM call that used the headroom has already finished -- seconds,
+# sometimes tens of seconds, later. Two callers racing through can_proceed()
+# in that gap both see the same "headroom free" answer and both dispatch,
+# because neither one's read ever caused the other's read to change.
+#
+# reserve()/release_reservation() fold the check and the provisional booking
+# into a single function call: reserve() reads current state and, if there's
+# headroom, WRITES the provisional booking back before returning -- no LLM
+# call happens between the read and the write anymore. That doesn't make the
+# read-modify-write atomic (this module still has no cross-process lock, by
+# design -- see the module docstring's "never raise"/fail-open philosophy),
+# but it shrinks the window a second caller could race into from "the full
+# duration of one LLM call" down to "one bus round trip", which is the
+# concrete guarantee Patch A/B/C's acceptance test (Patch E) checks.
+#
+# release_reservation() corrects the provisional entry once the real
+# outcome is known: the true token count for tokens-mode calls (requests
+# mode already costs exactly the 1 unit it reserved -- nothing to true up),
+# or a full rollback if the call never actually went out at all (rerouted
+# to a different chain step by _decide_ledger_action(), or the gate chose
+# not to dispatch it).
+# ---------------------------------------------------------------------------
+import uuid
+
+# A reservation has to outlive the real call it was made for -- which can
+# run considerably longer than the 60s sliding window itself (retries,
+# continuations, a slow provider). 15 minutes is a generous upper bound on
+# "how long a single gated call should ever legitimately take before
+# something else (a timeout elsewhere in the stack) has already killed it" --
+# a reservation record surviving past that just means release_reservation()
+# fails open on a missing key (see its docstring) instead of correcting a
+# now-stale booking, same "costs at most one wasted attempt" trade the rest
+# of this module already makes.
+_RESERVATION_TTL_SECONDS = 900
+
+
+def _reservation_key(reservation_id: str) -> str:
+    return f"rate_ledger:reservation:{reservation_id}"
+
+
+def _headroom_write_ttl(headroom: dict, now: float) -> int:
+    """Best-effort TTL for re-writing a headroom record reserve()/
+    release_reservation() just mutated in place. bus.read() doesn't
+    surface a key's remaining Redis TTL, so this recomputes one from
+    reset_at the same way record_headroom() originally derived it --
+    rather than either omitting `ex` (which would make the record
+    non-expiring, letting a stale reservation decrement linger forever
+    past the real reset) or resetting to the full _HEADROOM_DEFAULT_TTL
+    (which could incorrectly extend an about-to-expire record's life)."""
+    reset_at = headroom.get("reset_at")
+    if reset_at is not None:
+        return max(5, int(reset_at - now) + 30)
+    return _HEADROOM_DEFAULT_TTL
+
+
+def _bump_window(provider: str, key_id: str, model: str, amount: int, now: float) -> str:
+    """Shared read-modify-write of the self-tracked sliding window,
+    factored out of record_usage() so reserve() can call the identical
+    increment logic for its provisional booking. Returns the slice key
+    that was incremented, so the caller can store it and correct that
+    EXACT slice later via _adjust_window_slice() -- release_reservation()
+    can run well after the 5s slice that was originally booked has
+    rolled over, so "whatever the current slice is now" would be wrong."""
+    key = _window_key(provider, key_id, model)
+    record = bus_read(key, default=None) or {"slices": {}}
+    slices = _prune_window(record.get("slices", {}), now)
+    slice_start = str(int(now // _SLICE_SECONDS) * _SLICE_SECONDS)
+    slices[slice_start] = slices.get(slice_start, 0) + amount
+    bus_write(key, {"slices": slices}, ex=_WINDOW_TTL)
+    return slice_start
+
+
+def _adjust_window_slice(provider: str, key_id: str, model: str, slice_key: "str | None", delta: int) -> None:
+    """Adds `delta` (positive or negative) to one already-recorded slice,
+    floored at 0. Only touches that specific slice, never "the current
+    slice" -- release_reservation() is a correction of something
+    reserve() already wrote, not a new increment. A missing slice
+    (pruned by TTL, or the whole window record expired between reserve()
+    and release) is a silent no-op: fail-open, same as everywhere else in
+    this module -- the window self-corrects on the next real
+    record_usage()/reserve() regardless."""
+    if not slice_key or not delta:
+        return
+    key = _window_key(provider, key_id, model)
+    record = bus_read(key, default=None)
+    if record is None:
+        return
+    slices = record.get("slices", {})
+    if slice_key not in slices:
+        return
+    slices[slice_key] = max(0, slices[slice_key] + delta)
+    bus_write(key, {"slices": slices}, ex=_WINDOW_TTL)
+
+
+def _adjust_headroom(provider: str, key_id: str, model: str, field: str, delta: int, now: float) -> None:
+    """Adds `delta` to headroom[field] (field is "remaining_tokens" or
+    "remaining_requests"), floored at 0. Best-effort: by the time
+    release_reservation() runs, the real response has usually already
+    landed and record_headroom() has already overwritten this record
+    with fresh provider-reported numbers -- correcting stale data at
+    that point is a no-op in spirit (the fresh write already superseded
+    it) and harmless in practice, not a new risk beyond what this module
+    already accepts elsewhere."""
+    if not delta:
+        return
+    key = _headroom_key(provider, key_id, model)
+    headroom = bus_read(key, default=None)
+    if headroom is None or headroom.get(field) is None:
+        return
+    headroom[field] = max(0, headroom[field] + delta)
+    bus_write(key, headroom, ex=_headroom_write_ttl(headroom, now))
+
+
+def _decrement_daily_count(day_key: str, now: float) -> None:
+    """Full-rollback undo for the rpd counter. Decrements the EXACT day
+    bucket key reserve() incremented (passed in verbatim from the
+    reservation record, never recomputed from "now") so a reservation
+    made just before UTC midnight and rolled back just after still
+    corrects the day it actually belongs to, instead of decrementing
+    whatever the new day's counter happens to be."""
+    try:
+        record = bus_read(day_key, default=None)
+        if record is None:
+            return
+        record["count"] = max(0, record.get("count", 0) - 1)
+        ttl = int(_seconds_until_next_utc_day(now)) + _DAY_TTL_BUFFER_SECONDS
+        bus_write(day_key, record, ex=max(ttl, 5))
+    except Exception as write_exc:
+        print(f"  [rate_ledger] _decrement_daily_count write failed (non-fatal): {write_exc}")
+
+
+def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units: int, now: float):
+    """Tokens-mode body of reserve(). Same decision precedence as
+    can_proceed()'s "tokens" branch (provider-reported headroom first,
+    self-tracked window fallback) -- but where can_proceed() only reads,
+    this writes the provisional booking back immediately, in the same
+    call, before returning. Returns (ok, wait_seconds, booking), where
+    `booking` is None on ok=False and otherwise a dict recording exactly
+    what was mutated so release_reservation() can invert it precisely:
+
+      {"headroom_field": "remaining_tokens" | None,
+       "headroom_decrement": int | None,
+       "window_slice_key": str | None,
+       "window_increment": int | None,
+       "day_key": None}   # tokens mode has no rpd concept
+
+    A None value for any field means "nothing was written there, don't
+    touch it on release" -- e.g. headroom_field is None whenever the
+    decision fell through to the self-tracked window instead.
+    """
+    headroom = bus_read(_headroom_key(provider, key_id, model), default=None)
+    if headroom is not None and headroom.get("remaining_tokens") is not None:
+        remaining = headroom["remaining_tokens"]
+        if estimated_units <= remaining:
+            headroom["remaining_tokens"] = remaining - estimated_units
+            bus_write(_headroom_key(provider, key_id, model), headroom,
+                      ex=_headroom_write_ttl(headroom, now))
+            # Also fold the estimate into the self-tracked window, even
+            # though the DECISION here was driven by provider-reported
+            # headroom -- can_proceed()'s window fallback and
+            # headroom_snapshot()'s dashboard reporting both need this to
+            # stay accurate for whenever provider headroom next goes
+            # stale/absent, not just while it's fresh.
+            slice_key = _bump_window(provider, key_id, model, estimated_units, now)
+            return True, 0.0, {
+                "headroom_field": "remaining_tokens",
+                "headroom_decrement": estimated_units,
+                "window_slice_key": slice_key,
+                "window_increment": estimated_units,
+                "day_key": None,
+            }
+        reset_at = headroom.get("reset_at")
+        wait = max(0.0, reset_at - now) if reset_at is not None else 5.0
+        return False, wait, None
+
+    tpm_limit = _tpm_limit_for(provider, model)
+    if tpm_limit is None:
+        # No verified figure to gate against -- fail open (unchanged from
+        # can_proceed()'s behavior), but still book the estimate into the
+        # window for dashboard/snapshot accuracy; there's just no ceiling
+        # to check it against here.
+        slice_key = _bump_window(provider, key_id, model, estimated_units, now)
+        return True, 0.0, {
+            "headroom_field": None, "headroom_decrement": None,
+            "window_slice_key": slice_key, "window_increment": estimated_units,
+            "day_key": None,
+        }
+
+    window_record = bus_read(_window_key(provider, key_id, model), default=None) or {"slices": {}}
+    slices = _prune_window(window_record.get("slices", {}), now)
+    current_usage = sum(slices.values())
+    if current_usage + estimated_units <= tpm_limit:
+        slice_key = _bump_window(provider, key_id, model, estimated_units, now)
+        return True, 0.0, {
+            "headroom_field": None, "headroom_decrement": None,
+            "window_slice_key": slice_key, "window_increment": estimated_units,
+            "day_key": None,
+        }
+
+    if slices:
+        oldest_slice_start = min(float(k) for k in slices.keys())
+        wait = max(0.5, (oldest_slice_start + _WINDOW_SECONDS) - now)
+    else:
+        wait = _WINDOW_SECONDS
+    return False, wait, None
+
+
+def _reserve_requests_mode(provider: str, key_id: str, model: str, now: float):
+    """Requests-mode body of reserve() -- OR-1d's rpm/rpd gating, same
+    precedence as can_proceed()'s "requests" branch, immediately booked
+    (provider-headroom decrement, or window+day increment) instead of
+    only read. See _reserve_tokens_mode() for the booking dict shape;
+    requests mode never sets window_increment to anything but 1 (or
+    None, when nothing was booked because rpm has no verified limit),
+    since a request-count ceiling costs exactly 1 unit per call
+    regardless of size -- there's no `estimated_units` magnitude to book
+    here the way tokens mode has."""
+    headroom_key = _headroom_key(provider, key_id, model)
+    headroom = bus_read(headroom_key, default=None)
+    if headroom is not None and headroom.get("remaining_requests") is not None:
+        remaining = headroom["remaining_requests"]
+        if remaining >= 1:
+            headroom["remaining_requests"] = remaining - 1
+            bus_write(headroom_key, headroom, ex=_headroom_write_ttl(headroom, now))
+            return True, 0.0, {
+                "headroom_field": "remaining_requests", "headroom_decrement": 1,
+                "window_slice_key": None, "window_increment": None, "day_key": None,
+            }
+        reset_at = headroom.get("reset_at")
+        wait = max(0.0, reset_at - now) if reset_at is not None else 5.0
+        return False, wait, None
+
+    rpm_limit = _rpm_limit_for(provider, model)
+    rpd_limit = _rpd_limit_for(provider, model)
+    if rpm_limit is None and rpd_limit is None:
+        return True, 0.0, {
+            "headroom_field": None, "headroom_decrement": None,
+            "window_slice_key": None, "window_increment": None, "day_key": None,
+        }
+
+    if rpd_limit is not None:
+        daily_count = _read_daily_count(provider, key_id, model, now)
+        if daily_count >= rpd_limit:
+            return False, _seconds_until_next_utc_day(now), None
+
+    if rpm_limit is not None:
+        window_record = bus_read(_window_key(provider, key_id, model), default=None) or {"slices": {}}
+        slices = _prune_window(window_record.get("slices", {}), now)
+        current_requests = sum(slices.values())
+        if current_requests + 1 > rpm_limit:
+            if slices:
+                oldest_slice_start = min(float(k) for k in slices.keys())
+                wait = max(0.5, (oldest_slice_start + _WINDOW_SECONDS) - now)
+            else:
+                wait = _WINDOW_SECONDS
+            return False, wait, None
+
+    # Every check that applied has headroom -- book it now.
+    slice_key = None
+    if rpm_limit is not None:
+        slice_key = _bump_window(provider, key_id, model, 1, now)
+    day_key = None
+    if rpd_limit is not None:
+        _increment_daily_count(provider, key_id, model, now)
+        day_key = _day_bucket_key(provider, key_id, model, now)
+    return True, 0.0, {
+        "headroom_field": None, "headroom_decrement": None,
+        "window_slice_key": slice_key,
+        "window_increment": (1 if slice_key is not None else None),
+        "day_key": day_key,
+    }
+
+
+def reserve(provider: str, key_id: str, model: str, estimated_units: int) -> "tuple[bool, float, str | None]":
+    """Atomic-enough check-and-book, replacing a bare can_proceed() call
+    at dispatch time wherever a caller needs the race closed (Patch B's
+    concurrency gate; llm_client.py's _ledger_gate(), same seam). Returns
+    (ok, wait_seconds, reservation_id):
+
+      ok=True   -- headroom was confirmed AND the provisional booking has
+                   already been written; reservation_id is a real id the
+                   caller MUST eventually pass to release_reservation()
+                   (with the real token count once known, or with no
+                   actual_units at all if the call ends up not going out)
+                   so the provisional entry gets corrected rather than
+                   permanently overcounting.
+      ok=False  -- no headroom; wait_seconds as in can_proceed().
+                   reservation_id is None -- nothing was booked, nothing
+                   to release.
+
+    `estimated_units` is a token estimate in "tokens" gating mode and
+    ignored (every call costs exactly 1 unit) in "requests" mode --
+    identical convention to can_proceed()'s `estimated_tokens` param; see
+    _gating_mode_for()'s docstring.
+
+    Fails open (True, 0.0, None) on any error, matching can_proceed()'s
+    own fail-open contract. A reservation_id of None is always safe to
+    pass straight through to release_reservation() -- it's defined as a
+    no-op in that case, so callers don't need to special-case a failed-
+    open reserve() differently from a real one.
+    """
+    try:
+        now = _now()
+        mode = _gating_mode_for(provider, model)
+        if mode == "requests":
+            ok, wait, booking = _reserve_requests_mode(provider, key_id, model, now)
+        else:
+            ok, wait, booking = _reserve_tokens_mode(provider, key_id, model, estimated_units, now)
+
+        if not ok:
+            return False, wait, None
+
+        reservation_id = uuid.uuid4().hex
+        booking.update({
+            "provider": provider,
+            "key_id": key_id,
+            "model": model,
+            "mode": mode,
+            "estimated_units": estimated_units,
+            "created_at": now,
+            "released": False,
+        })
+        bus_write(_reservation_key(reservation_id), booking, ex=_RESERVATION_TTL_SECONDS)
+        return True, 0.0, reservation_id
+    except Exception as write_exc:
+        print(f"  [rate_ledger] reserve failed, failing open (non-fatal): {write_exc}")
+        return True, 0.0, None
+
+
+def release_reservation(reservation_id: "str | None", actual_units: "int | None" = None) -> None:
+    """Corrects a reserve() booking once the real outcome is known.
+    Replaces the plain record_usage() call at the same call site (see
+    llm_client.py's _record_ledger_bookkeeping()) wherever the dispatch
+    went through reserve() rather than a bare can_proceed(), so a
+    reserved-then-completed call doesn't get double-booked (estimate at
+    reserve() time, actual again at the old post-call record_usage()).
+
+    - `actual_units` given: adjusts the provisional booking from its
+      original estimate to the real count. Only meaningful in "tokens"
+      mode (a "requests" mode reservation already cost exactly the 1 real
+      unit it reserved -- see _reserve_requests_mode() -- so
+      actual_units is accepted but ignored for those).
+    - `actual_units` is None: full rollback. The call never actually went
+      out -- rerouted to a different chain step by
+      _decide_ledger_action()'s "reroute" branch, or the gate chose not
+      to dispatch it at all -- so the entire provisional booking (window
+      slice, headroom decrement, day counter) is undone.
+
+    reservation_id may be None (reserve() itself failed open and never
+    created one) -- a no-op, since nothing was booked in the first
+    place. Also a no-op if the reservation has already expired (TTL) or
+    already been released once (idempotency guard against a caller
+    releasing twice, e.g. once in a `finally` and once on an explicit
+    success path).
+
+    Never raises -- same "ledger bookkeeping must never take down the
+    real call" contract as every write in this module.
+    """
+    if reservation_id is None:
+        return
+    try:
+        key = _reservation_key(reservation_id)
+        booking = bus_read(key, default=None)
+        if booking is None or booking.get("released"):
+            return
+
+        provider = booking["provider"]
+        key_id = booking["key_id"]
+        model = booking["model"]
+        mode = booking["mode"]
+        estimated_units = booking["estimated_units"]
+        now = _now()
+
+        if actual_units is None:
+            # Full rollback -- undo the provisional booking entirely.
+            if booking.get("window_slice_key") and booking.get("window_increment"):
+                _adjust_window_slice(provider, key_id, model,
+                                      booking["window_slice_key"], -booking["window_increment"])
+            if booking.get("headroom_field") and booking.get("headroom_decrement"):
+                _adjust_headroom(provider, key_id, model,
+                                  booking["headroom_field"], booking["headroom_decrement"], now)
+            if booking.get("day_key"):
+                _decrement_daily_count(booking["day_key"], now)
+        elif mode == "tokens":
+            delta = actual_units - estimated_units
+            if delta != 0:
+                _adjust_window_slice(provider, key_id, model, booking.get("window_slice_key"), delta)
+                if booking.get("headroom_field"):
+                    _adjust_headroom(provider, key_id, model, booking["headroom_field"], -delta, now)
+        # mode == "requests": actual_units, if given, is a no-op -- see
+        # docstring above.
+
+        booking["released"] = True
+        bus_write(key, booking, ex=60)  # short tombstone, just enough to catch a racing double-release
+    except Exception as release_exc:
+        print(f"  [rate_ledger] release_reservation failed (non-fatal): {release_exc}")
+
+
 def headroom_snapshot(provider: str, key_id: str, model: str) -> dict:
     """For Phase 5 (chain ordering) and Phase 8 (dashboard) to read
     current state without mutating it. Returns both signals side by side

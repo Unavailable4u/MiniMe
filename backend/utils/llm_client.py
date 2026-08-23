@@ -1665,30 +1665,48 @@ def _decide_ledger_action(chain: list, index: int, current_wait: float,
 
 def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
                   system_prompt: str, prompt_for_step: str, label: str,
-                  agent_name: str) -> str:
+                  agent_name: str) -> "tuple[str, str | None]":
     """3f-1 -- shared pre-flight ledger gate, extracted verbatim from the
     duplicated cloudflare/SDK-shaped blocks in generate_text(). Reads
-    ledger state only (estimate -> can_proceed() -> _decide_ledger_action()),
+    ledger state AND books the provisional reservation in the same call
+    (estimate -> rate_ledger.reserve() -> _decide_ledger_action()),
     sleeping in the "wait" case as a side effect, but never touches any
     of generate_text()'s own loop-scoped state -- so unlike 3f-3/3f-4
     this can return a plain sentinel with no state to hand back.
+
+    Phase 4: swaps the old read-only rate_ledger.can_proceed() for
+    rate_ledger.reserve() -- same decision logic, but reserve() also
+    writes the provisional booking back before returning, closing the
+    race can_proceed()'s read-only check left open (see rate_ledger.py's
+    Phase 4 section docstring). _decide_ledger_action()'s own
+    look-ahead (_remaining_chain_headroom()) still calls the read-only
+    can_proceed() for every OTHER step in the chain -- it's a cheap
+    "does anything else have headroom" probe, not itself booking
+    anything, so it doesn't need to reserve.
 
     `key` is whichever identifier this call site uses to key the ledger
     (key_id for cloudflare, key_env for the SDK-shaped branch) -- this
     function is agnostic to which one it's given.
 
-    Returns one of:
-      "proceed"      -- headroom confirmed, caller should make the call.
-      "reroute"      -- caller should `break` out of this step's retry
-                         loop and fall through to the next chain step.
-      "waited-retry" -- caller already slept the decided duration and
-                         should `continue` to retry THIS step now.
+    Returns (action, reservation_id):
+      ("proceed", reservation_id) -- headroom confirmed and booked;
+                         caller should make the call, then pass
+                         reservation_id straight through to
+                         _record_ledger_bookkeeping() afterwards so the
+                         provisional booking gets corrected rather than
+                         left as a permanent overcount.
+      ("reroute", None) -- caller should `break` out of this step's
+                         retry loop and fall through to the next chain
+                         step. Nothing was booked for this step.
+      ("waited-retry", None) -- caller already slept the decided
+                         duration and should `continue` to retry THIS
+                         step now. Nothing was booked yet either.
     """
     _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
-    _ledger_ok, _ledger_wait = rate_ledger.can_proceed(
+    _ledger_ok, _ledger_wait, _reservation_id = rate_ledger.reserve(
         provider, key, model, _estimated_tokens)
     if _ledger_ok:
-        return "proceed"
+        return "proceed", _reservation_id
     _action, _wait_seconds = _decide_ledger_action(
         chain, index, _ledger_wait, _estimated_tokens)
     if _action == "reroute":
@@ -1696,7 +1714,7 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
               f"~{_estimated_tokens} estimated tokens -- a later chain "
               f"step already has headroom, rerouting immediately "
               f"instead of waiting.")
-        return "reroute"
+        return "reroute", None
     print(f"  [{agent_name}] {label} has no headroom for "
           f"~{_estimated_tokens} estimated tokens, and neither does "
           f"anything else remaining in the chain -- sleeping "
@@ -1704,26 +1722,41 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
           f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
           f"in place.")
     time.sleep(_wait_seconds)
-    return "waited-retry"
+    return "waited-retry", None
 
 
-def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_headers) -> None:
+def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_headers,
+                                reservation_id: "str | None" = None) -> None:
     """3f-2 -- shared post-call ledger bookkeeping, extracted verbatim
     from the duplicated cloudflare/SDK-shaped blocks in generate_text().
     Called right after _log_usage() in both branches.
 
-    Both signals get fed regardless of which one can_proceed() ends up
-    trusting on the next call: record_headroom() with whatever this
-    response's headers carried (often nothing at all for Cloudflare --
-    see _call_cloudflare_step()'s Phase 3c docstring note, and
+    Both signals get fed regardless of which one can_proceed()/reserve()
+    ends up trusting on the next call: record_headroom() with whatever
+    this response's headers carried (often nothing at all for Cloudflare
+    -- see _call_cloudflare_step()'s Phase 3c docstring note, and
     record_headroom() itself no-ops cleanly on an all-None reading), and
-    record_usage() with the real token count this call actually cost,
-    feeding the sliding-window fallback that's the ONLY signal available
-    whenever provider-reported headroom is absent or stale.
+    the real token count this call actually cost feeding the
+    sliding-window fallback that's the ONLY signal available whenever
+    provider-reported headroom is absent or stale.
 
-    Purely side-effecting (rate_ledger.record_headroom()/record_usage()
-    calls on already-computed `usage`/`headroom_headers`) -- no control
-    flow, no loop-scoped state to hand back, unlike 3f-3/3f-4.
+    Phase 4: that real token count is now reconciled via
+    rate_ledger.release_reservation(reservation_id, actual_tokens)
+    rather than a bare rate_ledger.record_usage() call, whenever
+    `reservation_id` is given -- _ledger_gate() already booked an
+    ESTIMATE into the ledger at dispatch time (Phase 4's whole point:
+    closing the race between the pre-flight check and the post-hoc
+    booking), so calling record_usage() again here on top of that would
+    double-count the same call. release_reservation() corrects the
+    existing provisional entry to the real figure instead of adding a
+    second one. reservation_id is None only for a caller that bypassed
+    _ledger_gate()'s reserve() entirely (none currently do -- this is a
+    defensive fallback, not a live path), in which case this still falls
+    back to the old plain record_usage() so bookkeeping never silently
+    goes missing.
+
+    Purely side-effecting -- no control flow, no loop-scoped state to
+    hand back, unlike 3f-3/3f-4.
 
     `key` is whichever identifier this call site uses to key the ledger
     (key_id for cloudflare, key_env for the SDK-shaped branch) -- this
@@ -1734,7 +1767,9 @@ def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_h
     rate_ledger.record_headroom(provider, key, model,
                                  _remaining_tokens, _remaining_requests, _reset_seconds)
     _actual_tokens = _extract_total_tokens(usage)
-    if _actual_tokens is not None:
+    if reservation_id is not None:
+        rate_ledger.release_reservation(reservation_id, _actual_tokens)
+    elif _actual_tokens is not None:
         rate_ledger.record_usage(provider, key, model, _actual_tokens)
 
 
@@ -2011,8 +2046,8 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _continuation_prompt(user_content, accumulated_text)
             if accumulated_text else user_content
         )
-        _gate = _ledger_gate(chain, index, provider, key, model,
-                              system_prompt, prompt_for_step, label, agent_name)
+        _gate, _reservation_id = _ledger_gate(chain, index, provider, key, model,
+                                               system_prompt, prompt_for_step, label, agent_name)
         if _gate == "reroute":
             break  # skip this step, fall through to the next chain step
         if _gate == "waited-retry":
@@ -2030,7 +2065,8 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
                 raise
             _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
             _log_usage(provider, key, usage, session_id, tier, path, agent_name, domain=domain, model=model)
-            _record_ledger_bookkeeping(provider, key, model, usage, headroom_headers)
+            _record_ledger_bookkeeping(provider, key, model, usage, headroom_headers,
+                                        reservation_id=_reservation_id)
             full_text = accumulated_text + text
             _action, accumulated_text, continuations_used = _handle_finish_reason(
                 accumulated_text, full_text, finish_reason, allow_continuation,
@@ -2040,6 +2076,19 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
                 # end-of-chain truncated-output handling, if is_last)
             return "return", full_text, accumulated_text, continuations_used, last_exc
         except _TRANSIENT_ERRORS as exc:
+            # Phase 4: the call went out but never produced a usable
+            # token count on this branch (that's what makes it land
+            # here instead of the success path above) -- there's no
+            # real figure to correct the reservation TO, so this is
+            # treated the same as "never went out": a full rollback,
+            # same call _decide_ledger_action()'s "reroute" case makes
+            # for a step that was skipped before dispatch. Undercounting
+            # here (some providers do consume tokens server-side even on
+            # a request that ultimately errors) is the same fail-open
+            # trade the rest of this module already makes -- the very
+            # next successful call's provider-reported headers correct
+            # the authoritative signal regardless.
+            rate_ledger.release_reservation(_reservation_id)
             last_exc = exc
             _action, user_content, accumulated_text, same_step_shrinks = \
                 _handle_transient_error(
