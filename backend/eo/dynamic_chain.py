@@ -39,11 +39,19 @@ By the time an agent's run_*() function is actually CALLED (not just
 imported), eo.registry has always finished loading, so a deferred,
 inside-the-function import is safe.
 """
+import logging
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.registry import AGENT_CAPABILITIES
+
+# Phase 5, Patch C: loud, non-fatal "we have no redundancy for this role
+# right now" signal -- same posture as eo/executor.py's _trace_logger
+# (a warning, never a raise; chain building must never fail just because
+# logging did). Feeds Phase 8's observability work later; for now this is
+# the whole signal.
+_logger = logging.getLogger("eo.dynamic_chain")
 
 # Kept in sync with agents/generic_worker.py's own PROVIDER_DEFAULT_MODEL
 # (see that file for the full per-provider pinning history/reasoning).
@@ -181,15 +189,80 @@ def _dynamic_max_chain_steps(quota_status: dict) -> int:
     return max(MAX_CHAIN_STEPS, min(MAX_CHAIN_STEPS_CEILING, len(live_providers)))
 
 
+def _rank_by_live_headroom(candidates: list, quota_status: dict) -> list:
+    """Phase 5, Patch B — the new ranking rule: live headroom (Patch A's
+    _headroom_score(), ascending -- least-full account first) as the
+    primary signal, daily quota fraction (eo/panel.py's own
+    _usage_fraction(), ascending) as the tiebreaker for whenever live
+    data is equal or absent, e.g. a fresh account with nothing recorded
+    yet reads 0.0 on both and falls back to daily-quota ordering same
+    as before this patch."""
+    from eo.panel import _usage_fraction   # deferred — see module docstring
+
+    return sorted(
+        candidates,
+        key=lambda k: (_headroom_score(k), _usage_fraction(k, quota_status)),
+    )
+
+
+def _candidate_pool(role: str, quota_status: dict, exclude: set) -> list:
+    """Phase 5, Patch B — replaces the old per-step delegation to
+    eo/panel.py's _best_match(). _best_match() only ever ranks by daily
+    quota_status (see its own docstring), so it has no way to prefer an
+    account with real headroom *this minute* over one that merely looks
+    good on a whole-day aggregate. This builds the same natural-role-
+    tagged-first-then-full-pool candidate set _best_match() would, with
+    the same cooldown/exclude filtering, but leaves the ranking itself
+    to _rank_by_live_headroom() above instead of _best_match()'s own
+    80%-cutoff logic -- Patch B's ordering already IS the selection
+    rule, so there's no separate cutoff check layered on top here.
+
+    Returns the full ranked candidate list (best first), not just the
+    winner -- Patch C needs to see the rest of the pool to find a
+    second-org candidate the provider-spread loop didn't reach."""
+    from eo.panel import _is_cooling_down   # deferred — see module docstring
+
+    natural_candidates = [
+        key for key, info in AGENT_CAPABILITIES.items()
+        if role in info.get("natural_roles", []) and key not in exclude
+        and not _is_cooling_down(key, quota_status)
+    ]
+    if natural_candidates:
+        return _rank_by_live_headroom(natural_candidates, quota_status)
+
+    # No natural-role match at all (as opposed to _best_match()'s other
+    # fall-through case -- every natural match over-cutoff -- which no
+    # longer exists now that there's no cutoff check): fall back to the
+    # full account pool, same three-tier "nothing left" ladder
+    # _best_match() itself uses, so a caller mid-migration off that
+    # function sees identical degenerate-case behavior.
+    all_candidates = [
+        k for k in AGENT_CAPABILITIES.keys()
+        if k not in exclude and not _is_cooling_down(k, quota_status)
+    ]
+    if not all_candidates:
+        all_candidates = [k for k in AGENT_CAPABILITIES.keys() if not _is_cooling_down(k, quota_status)]
+    if not all_candidates:
+        all_candidates = list(AGENT_CAPABILITIES.keys())
+
+    return _rank_by_live_headroom(all_candidates, quota_status)
+
+
 def _rank_accounts(role: str, quota_status: dict, exclude: set, max_steps: int) -> list:
     """Shared core of build_fallback_chain()/build_fallback_chain_excluding()
     below: same provider-spreading algorithm as agents/generic_worker.py's
     _build_fallback_chain(), generalized over a caller-supplied starting
     `exclude` set so a parallel worker pool can hand each of its own
     threads a chain that also skips whichever accounts its SIBLING
-    threads already claimed (see build_fallback_chain_excluding())."""
-    from eo.panel import _best_match   # deferred — see module docstring
+    threads already claimed (see build_fallback_chain_excluding()).
 
+    Phase 5, Patch B: the per-step candidate pick now comes from
+    _candidate_pool()/_rank_by_live_headroom() (live headroom first,
+    daily quota as tiebreaker) instead of delegating to eo/panel.py's
+    _best_match(). The provider-spreading loop structure itself --
+    prefer a fresh provider this round, fall back to a repeat provider
+    only if nothing fresh is left, stop when the whole pool is
+    exhausted -- is unchanged."""
     chain_keys = []
     used_providers = {
         AGENT_CAPABILITIES[k].get("provider") for k in exclude if k in AGENT_CAPABILITIES
@@ -201,17 +274,128 @@ def _rank_accounts(role: str, quota_status: dict, exclude: set, max_steps: int) 
             key for key, info in AGENT_CAPABILITIES.items()
             if info.get("provider") in used_providers
         }
-        candidate = _best_match(role, quota_status, exclude=provider_exclude)
-        if candidate is None:
+        pool = _candidate_pool(role, quota_status, exclude=provider_exclude)
+        if not pool:
             # No fresh-provider candidate left this round -- allow a
             # repeat provider rather than leaving this chain slot empty.
-            candidate = _best_match(role, quota_status, exclude=exclude)
-        if candidate is None:
+            pool = _candidate_pool(role, quota_status, exclude=exclude)
+        if not pool:
             break  # genuinely nothing left in the whole account pool
+        candidate = pool[0]
         chain_keys.append(candidate)
         exclude.add(candidate)
         used_providers.add(AGENT_CAPABILITIES[candidate].get("provider"))
 
+    return chain_keys
+
+
+def _org_for(provider: str, key: str) -> str:
+    """Phase 5, Patch C — the identity used to count "genuinely distinct
+    organizations" for the cross-org redundancy guarantee below.
+
+    Default: the AGENT_CAPABILITIES key itself. Every multi-key
+    provider in this pool other than OpenRouter follows the same
+    "N separate accounts, N separate keys" convention OR-0 (Phase 3g)
+    confirmed specifically for Cerebras ("9 separate keys, from what
+    the code's comments describe as genuinely separate accounts") --
+    so, absent evidence otherwise, each key here defaults to counting
+    as its own org. This deliberately does NOT collapse same-provider
+    keys together: the provider-spread loop in _rank_accounts() above
+    already tracks provider-level diversity for its own (outage-
+    avoidance) purposes, and org-scoped-cap redundancy is a related
+    but separate property from provider diversity.
+
+    OpenRouter is the one deliberate exception, and this is the whole
+    reason this helper exists rather than just using the key directly:
+    OR-0 (Phase 3g) has NOT yet confirmed whether OpenRouter's
+    50-1000/day, 20/min free-tier limits are scoped per API key or per
+    account -- ASSUMPTION FLAGGED, ungrounded either way until OR-0's
+    10-minute verification check (generate 2 keys under one account,
+    exhaust one, see if the other is independently usable) actually
+    runs. Until then, every OPENROUTER_* key collapses to the SAME org
+    identity here -- the conservative default, since crediting N
+    independent orgs for N keys that might actually share one
+    account-level quota would silently reproduce the exact
+    single-shared-key bug this codebase already paid to fix once (see
+    output_organizer.py's and report_writer.py's comments on that
+    prior Cerebras incident). Revisit this the moment OR-0 lands with
+    a real answer -- see OR-5's note in the plan for the update this
+    function will need either way (either it stays exactly as-is,
+    confirmed-conservative-and-correct, or every OPENROUTER_* key gets
+    its own real per-account org id once that's known)."""
+    if provider == "openrouter":
+        return "openrouter"
+    return key
+
+
+def _ensure_cross_org_redundancy(role: str, chain_keys: list, quota_status: dict,
+                                  start_exclude: set) -> list:
+    """Phase 5, Patch C — post-pass on a chain _rank_accounts() already
+    built: guarantee at least 2 chain entries from genuinely distinct
+    orgs (per _org_for() above) whenever the pool actually allows it.
+
+    Multiple keys within the SAME org don't provide real redundancy
+    against an org-scoped cap (this module's own docstring traces the
+    2026-08-12 incident this whole file exists to prevent a repeat of)
+    -- so a chain that only ever reached one distinct org, even if it
+    already has 2+ entries (e.g. two OPENROUTER_* keys, which _org_for()
+    treats as the same org), is not actually redundant yet.
+
+    An empty chain_keys (build_fallback_chain() found NOTHING at all
+    for this role) is left untouched -- that's a total build failure,
+    not a redundancy gap, and belongs to whatever the caller's own
+    empty-chain handling already does, not this function's log line.
+
+    If the pool has a second-org candidate the provider-spread loop
+    in _rank_accounts() didn't reach (e.g. it stopped after max_steps,
+    or every fresh-provider candidate that round happened to be
+    excluded), force-append it -- deliberately allowed to push the
+    chain one entry past max_steps, since real redundancy here matters
+    more than the round-count heuristic. If genuinely no second-org
+    candidate exists anywhere in the pool, emit a loud
+    chain_redundancy_gap warning instead of silently returning a
+    chain with no real redundancy -- a real signal worth surfacing at
+    chain-build time (feeds Phase 8) rather than discovering it only
+    when the sole org's accounts all fail together."""
+    if not chain_keys:
+        return chain_keys
+
+    orgs_in_chain = {
+        _org_for(AGENT_CAPABILITIES[k].get("provider"), k) for k in chain_keys
+    }
+    if len(orgs_in_chain) >= 2:
+        return chain_keys
+
+    exclude = set(start_exclude) | set(chain_keys)
+    # Whole-pool search, not provider-restricted -- _rank_accounts()'s
+    # provider-spread loop already had its shot at spreading and came
+    # up short (that's how we got here); this is the belt-and-suspenders
+    # pass, not a repeat of the same search with the same blind spots.
+    #
+    # _candidate_pool()'s own last-resort fallback tier (mirroring
+    # _best_match()'s degenerate case) deliberately IGNORES `exclude`
+    # as a last resort, on the theory that a repeat account beats no
+    # account at all for _rank_accounts()'s own retry loop. That's the
+    # wrong instinct here -- an account this function was explicitly
+    # told to skip (already in the chain, or a sibling worker's claimed
+    # account) must never come back via this search -- so the exclude
+    # filter is re-applied explicitly rather than trusted to the pool.
+    pool = [k for k in _candidate_pool(role, quota_status, exclude=exclude) if k not in exclude]
+    second_org_candidate = next(
+        (k for k in pool
+         if _org_for(AGENT_CAPABILITIES[k].get("provider"), k) not in orgs_in_chain),
+        None,
+    )
+    if second_org_candidate is not None:
+        return chain_keys + [second_org_candidate]
+
+    _logger.warning(
+        "chain_redundancy_gap: role=%r has no second-org candidate available "
+        "right now -- chain=%r is running with only ONE distinct org's worth "
+        "of redundancy (orgs=%r). Every account belonging to any other org "
+        "is either excluded, cooling down, or not provisioned for this role.",
+        role, chain_keys, sorted(orgs_in_chain),
+    )
     return chain_keys
 
 
@@ -249,6 +433,7 @@ def build_fallback_chain(role: str, quota_status: dict = None, max_steps: int = 
         max_steps = _dynamic_max_chain_steps(quota_status)
 
     chain_keys = _rank_accounts(role, quota_status, exclude=set(), max_steps=max_steps)
+    chain_keys = _ensure_cross_org_redundancy(role, chain_keys, quota_status, start_exclude=set())
     return [chain_step_for(k) for k in chain_keys]
 
 
@@ -268,4 +453,6 @@ def build_fallback_chain_excluding(role: str, exclude_keys, quota_status: dict =
     max_steps = _dynamic_max_chain_steps(quota_status)
 
     chain_keys = _rank_accounts(role, quota_status, exclude=set(exclude_keys), max_steps=max_steps)
+    chain_keys = _ensure_cross_org_redundancy(role, chain_keys, quota_status,
+                                               start_exclude=set(exclude_keys))
     return [chain_step_for(k) for k in chain_keys]
