@@ -193,16 +193,34 @@ AGENT_CAPABILITIES = {
     # section's own anchor subsection at once), same genuinely-parallel,
     # independent-per-item shape one level further up, so it reuses this
     # same pool instead of provisioning its own.
-    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
-    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    # OR-3e: Cerebras -> OpenRouter (registry-level). This pool feeds
+    # eo/worker_pool.py's _select_workers_for_role() for every agent tagged
+    # "implementer"/"content_writer"/"mech_primitive"/"mech_subsection"/
+    # "mech_section" (agents/code_writers.py, content_adapter_pool.py,
+    # mech_primitive_pool.py, mech_section_pool.py, mech_subsection_pool.py).
+    # Editing each agent file's own chain-building line isn't enough on its
+    # own -- key_env is handed out by THIS table before any of those files
+    # even run, so the account itself has to change here, not just the
+    # provider string each file writes into its chain step. Reliability
+    # overhaul plan OR-3d flagged this as the risky, non-blind-swap part of
+    # the audit; this closes it out. Key numbering carried over 1:1 from the
+    # Cerebras slots it replaces, matching OR-2's .env.example naming.
+    "OPENROUTER_API_KEY_1": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_API_KEY_2": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_API_KEY_3": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_API_KEY_4": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_API_KEY_5": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_RESERVE_1": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_RESERVE_2": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+    "OPENROUTER_RESERVE_3": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
 
     # --- Cerebras: Fixer Pool (fixed 3, no reserve tier defined anywhere in Parts 1-8) ---
+    # NOTE: agents/fixer_pool.py stopped reading this table for its own keys
+    # as of OR-3a (it hardcodes OPENROUTER_KEY_ENVS directly) -- these three
+    # entries are dead weight for that agent specifically, but left in place
+    # since nothing else in this audit confirmed another live reader of the
+    # "fixer" tag. Out of scope for OR-3d/3e; revisit separately if this
+    # table needs a dead-entry cleanup pass.
     "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
     "CEREBRAS_API_KEY_7": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
     "CEREBRAS_API_KEY_8": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},

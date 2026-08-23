@@ -1,0 +1,217 @@
+diff --git a/backend/agents/code_writers.py b/backend/agents/code_writers.py
+index ca755f4..704576d 100644
+--- a/backend/agents/code_writers.py
++++ b/backend/agents/code_writers.py
+@@ -40,20 +40,26 @@ from eo.output_guard import validate_module_code
+ 
+ load_dotenv()
+ 
+-# Rotation order per worker -- if the first model errors transiently, the
+-# same worker (same key) tries the next one before giving up.
++# OR-3e: Cerebras -> OpenRouter. Was a real 3-model rotation
++# (gpt-oss-120b/zai-glm-4.7/gemma-4-31b, see the old NOTE below, kept for
++# history) because Cerebras' catalog has several distinct production
++# models. OpenRouter's free tier is auto-routed -- "openrouter/free" (not
++# a pinned model slug, see utils/llm_client.py's OR-1 notes) picks the
++# underlying model itself, so there's no equivalent per-model variety to
++# preserve. What still matters, and is still preserved, is 3 STEPS: each
++# one gets its own live account from _model_rotation_chain()'s pool below,
++# so a cooldown on one account still only takes out one step, not the
++# whole worker.
+ #
+-# NOTE (updated): Cerebras's public-endpoint catalog only guarantees
+-# gpt-oss-120b as a production model as of mid-2026; the qwen-3-235b and
+-# llama-4-scout models this list previously rotated to have been removed
+-# from the public endpoint (they now 404). zai-glm-4.7 and gemma-4-31b are
+-# the current preview-tier models -- preview means "may be pulled on short
+-# notice," so re-check https://inference-docs.cerebras.ai/models/overview
+-# if this rotation starts 404-ing again.
++# OLD NOTE (Cerebras-era, kept for history): Cerebras's public-endpoint
++# catalog only guaranteed gpt-oss-120b as a production model as of
++# mid-2026; the qwen-3-235b and llama-4-scout models this list previously
++# rotated to had been removed from the public endpoint (they 404'd).
++# zai-glm-4.7 and gemma-4-31b were the preview-tier models at the time.
+ MODELS = [
+-    "gpt-oss-120b",
+-    "zai-glm-4.7",
+-    "gemma-4-31b",
++    "openrouter/free",
++    "openrouter/free",
++    "openrouter/free",
+ ]
+ 
+ # Migration Part 9 §2: replaces the old static KEY_ENVS + RESERVE_KEY_ENVS
+@@ -154,9 +160,15 @@ def _model_rotation_chain(primary_key_env: str) -> list:
+     from eo.registry import AGENT_CAPABILITIES
+ 
+     quota_status = get_quota_snapshot()
++    # OR-3e: was "cerebras" -- see eo/registry.py's matching migration of
++    # this same pool's account entries. cerebras_pool is kept as the local
++    # variable name (not renamed to openrouter_pool) since it's only ever
++    # read a few lines below and renaming it added a diff for no
++    # behavioral reason; the docstring above and this comment are the
++    # source of truth on what it actually holds now.
+     cerebras_pool = [
+         k for k, info in AGENT_CAPABILITIES.items()
+-        if info.get("provider") == "cerebras" and ROLE_TAG in info.get("natural_roles", [])
++        if info.get("provider") == "openrouter" and ROLE_TAG in info.get("natural_roles", [])
+     ]
+     exclude = {primary_key_env}
+     key_envs = [primary_key_env]
+@@ -171,7 +183,7 @@ def _model_rotation_chain(primary_key_env: str) -> list:
+         candidate = _sorted_by_quota(candidates, quota_status)[0]
+         exclude.add(candidate)
+         key_envs.append(candidate)
+-    return [{"provider": "cerebras", "model": m, "key_env": k} for m, k in zip(MODELS, key_envs)]
++    return [{"provider": "openrouter", "model": m, "key_env": k} for m, k in zip(MODELS, key_envs)]
+ 
+ 
+ SYSTEM_PROMPT = """You are a focused implementer. Write complete, runnable Python code
+diff --git a/backend/agents/content_adapter_pool.py b/backend/agents/content_adapter_pool.py
+index 72ea36a..8d806da 100644
+--- a/backend/agents/content_adapter_pool.py
++++ b/backend/agents/content_adapter_pool.py
+@@ -143,7 +143,13 @@ def _write_one_variant(platform: str, core_message: str, key_env: str, worker_id
+         context_parts.insert(0, f"--- Brand voice & recent context ---\n{conv_context}")
+     user_content = "\n\n".join(context_parts)
+ 
+-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
++    # OR-3e: Cerebras -> OpenRouter -- key_env is resolved by
++    # eo/worker_pool.py's _select_workers_for_role() against
++    # eo/registry.py's AGENT_CAPABILITIES, which now hands out
++    # OPENROUTER_API_KEY_N/OPENROUTER_RESERVE_N accounts for this role tag
++    # (content_writer) instead of CEREBRAS_*. "openrouter/free" is
++    # OpenRouter's own auto-router, not a pinned model slug.
++    chain = [{"provider": "openrouter", "model": "openrouter/free", "key_env": key_env}]
+ 
+     try:
+         raw = generate_text(
+diff --git a/backend/agents/generic_worker.py b/backend/agents/generic_worker.py
+index 2f53b6c..4a75303 100644
+--- a/backend/agents/generic_worker.py
++++ b/backend/agents/generic_worker.py
+@@ -91,6 +91,20 @@ PROVIDER_DEFAULT_MODEL = {
+     # model used directly by idea_planner.py/dataset_analyst.py/
+     # deploy_config_writer.py/reviewer_fixer_lean.py's own CHAINs.
+     "cerebras": "gpt-oss-120b",
++    # OR-3e: added alongside the cerebras entry above (not replacing it --
++    # CEREBRAS_API_KEY_6/7/8 and EO_PANEL_CEREBRAS_KEY are still live
++    # Cerebras accounts in the registry, just outside this pool). Needed
++    # because code_writers.py's _extra_fallback_chain_steps() ->
++    # _chain_step_for() builds a chain step from PROVIDER_DEFAULT_MODEL.get(
++    # provider, "") for whatever account eo/panel.py's _best_match() picks
++    # as a "different provider" fallback -- now that the implementer/
++    # content_writer/mech_* pool has OpenRouter accounts in it (see
++    # eo/registry.py), that picker can land on one, and without this entry
++    # the resulting step would carry model="" (empty string) straight into
++    # generate_text(). "openrouter/free" is OpenRouter's own auto-router,
++    # not a pinned slug (see utils/llm_client.py's OR-1 notes), same as
++    # every other OR-3 agent's chain.
++    "openrouter": "openrouter/free",
+     "mistral": "mistral-large-latest",
+     # Quota-reality fix, §4 (2026-07-30): "github" entry removed --
+     # GitHub Models retired in full today and no CHAIN or tag-driven
+diff --git a/backend/agents/mech_primitive_pool.py b/backend/agents/mech_primitive_pool.py
+index fba418d..56643b6 100644
+--- a/backend/agents/mech_primitive_pool.py
++++ b/backend/agents/mech_primitive_pool.py
+@@ -248,7 +248,13 @@ def _generate_primitives(placement: dict, part: dict, key_env: str,
+     if violation_issue:
+         payload["previous_attempt_failed_because"] = violation_issue
+ 
+-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
++    # OR-3e: Cerebras -> OpenRouter -- key_env is resolved by
++    # eo/worker_pool.py's _select_workers_for_role() against
++    # eo/registry.py's AGENT_CAPABILITIES, which now hands out
++    # OPENROUTER_API_KEY_N/OPENROUTER_RESERVE_N accounts for this role tag
++    # (mech_primitive) instead of CEREBRAS_*. "openrouter/free" is
++    # OpenRouter's own auto-router, not a pinned model slug.
++    chain = [{"provider": "openrouter", "model": "openrouter/free", "key_env": key_env}]
+ 
+     try:
+         raw = generate_text(
+diff --git a/backend/agents/mech_section_pool.py b/backend/agents/mech_section_pool.py
+index f8231f9..90d3fb4 100644
+--- a/backend/agents/mech_section_pool.py
++++ b/backend/agents/mech_section_pool.py
+@@ -247,7 +247,13 @@ def _generate_section_offsets(section_id: str, anchor_id: str, non_anchor_ids: l
+         payload["previous_attempt_failed_because"] = violation_issue
+     user_content = json.dumps(payload)
+ 
+-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
++    # OR-3e: Cerebras -> OpenRouter -- key_env is resolved by
++    # eo/worker_pool.py's _select_workers_for_role() against
++    # eo/registry.py's AGENT_CAPABILITIES, which now hands out
++    # OPENROUTER_API_KEY_N/OPENROUTER_RESERVE_N accounts for this role tag
++    # (mech_section) instead of CEREBRAS_*. "openrouter/free" is
++    # OpenRouter's own auto-router, not a pinned model slug.
++    chain = [{"provider": "openrouter", "model": "openrouter/free", "key_env": key_env}]
+ 
+     try:
+         raw = generate_text(
+diff --git a/backend/agents/mech_subsection_pool.py b/backend/agents/mech_subsection_pool.py
+index e5136cf..46f1d09 100644
+--- a/backend/agents/mech_subsection_pool.py
++++ b/backend/agents/mech_subsection_pool.py
+@@ -200,7 +200,13 @@ def _generate_relative_placement(part_placement: dict, mount_placement: dict,
+         payload["previous_attempt_failed_because"] = violation_issue
+     user_content = json.dumps(payload)
+ 
+-    chain = [{"provider": "cerebras", "model": "gpt-oss-120b", "key_env": key_env}]
++    # OR-3e: Cerebras -> OpenRouter -- key_env is resolved by
++    # eo/worker_pool.py's _select_workers_for_role() against
++    # eo/registry.py's AGENT_CAPABILITIES, which now hands out
++    # OPENROUTER_API_KEY_N/OPENROUTER_RESERVE_N accounts for this role tag
++    # (mech_subsection) instead of CEREBRAS_*. "openrouter/free" is
++    # OpenRouter's own auto-router, not a pinned model slug.
++    chain = [{"provider": "openrouter", "model": "openrouter/free", "key_env": key_env}]
+ 
+     try:
+         raw = generate_text(
+diff --git a/backend/eo/registry.py b/backend/eo/registry.py
+index 5494e08..6878201 100644
+--- a/backend/eo/registry.py
++++ b/backend/eo/registry.py
+@@ -193,16 +193,34 @@ AGENT_CAPABILITIES = {
+     # section's own anchor subsection at once), same genuinely-parallel,
+     # independent-per-item shape one level further up, so it reuses this
+     # same pool instead of provisioning its own.
+-    "CEREBRAS_API_KEY_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_4": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_API_KEY_5": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_RESERVE_1": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_RESERVE_2": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+-    "CEREBRAS_RESERVE_3": {"provider": "cerebras", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    # OR-3e: Cerebras -> OpenRouter (registry-level). This pool feeds
++    # eo/worker_pool.py's _select_workers_for_role() for every agent tagged
++    # "implementer"/"content_writer"/"mech_primitive"/"mech_subsection"/
++    # "mech_section" (agents/code_writers.py, content_adapter_pool.py,
++    # mech_primitive_pool.py, mech_section_pool.py, mech_subsection_pool.py).
++    # Editing each agent file's own chain-building line isn't enough on its
++    # own -- key_env is handed out by THIS table before any of those files
++    # even run, so the account itself has to change here, not just the
++    # provider string each file writes into its chain step. Reliability
++    # overhaul plan OR-3d flagged this as the risky, non-blind-swap part of
++    # the audit; this closes it out. Key numbering carried over 1:1 from the
++    # Cerebras slots it replaces, matching OR-2's .env.example naming.
++    "OPENROUTER_API_KEY_1": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_2": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_3": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_4": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_API_KEY_5": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_RESERVE_1": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_RESERVE_2": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
++    "OPENROUTER_RESERVE_3": {"provider": "openrouter", "strengths": ["code generation"], "natural_roles": ["implementer", "content_writer", "mech_primitive", "mech_subsection", "mech_section"]},
+ 
+     # --- Cerebras: Fixer Pool (fixed 3, no reserve tier defined anywhere in Parts 1-8) ---
++    # NOTE: agents/fixer_pool.py stopped reading this table for its own keys
++    # as of OR-3a (it hardcodes OPENROUTER_KEY_ENVS directly) -- these three
++    # entries are dead weight for that agent specifically, but left in place
++    # since nothing else in this audit confirmed another live reader of the
++    # "fixer" tag. Out of scope for OR-3d/3e; revisit separately if this
++    # table needs a dead-entry cleanup pass.
+     "CEREBRAS_API_KEY_6": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
+     "CEREBRAS_API_KEY_7": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},
+     "CEREBRAS_API_KEY_8": {"provider": "cerebras", "strengths": ["bug fixing"], "natural_roles": ["fixer"]},

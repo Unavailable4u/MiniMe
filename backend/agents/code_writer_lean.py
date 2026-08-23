@@ -46,26 +46,28 @@ from memory.bus import read, write, KEYS
 from utils.llm_client import generate_text
 from eo.errors import MissingDependencyError   # NEW — bug fix
 
-# Same rotation as agents/code_writers.py — see that file's docstring for
-# why this list isn't the blueprint's original one (model deprecations).
-MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
+# OR-3d: Cerebras -> OpenRouter. Was a 3-model rotation (gpt-oss-120b /
+# zai-glm-4.7 / gemma-4-31b), each pinned to its own Cerebras account so a
+# cooldown on one account didn't kill all three steps at once (see the
+# 2026-08-12 fix note below, kept for history). OpenRouter's free tier is
+# auto-routed -- "openrouter/free" (not a pinned model slug, see
+# utils/llm_client.py's OR-1 notes) picks the underlying model itself, so
+# there's no equivalent of a 3-model rotation to preserve here. What DOES
+# still need preserving is the account independence: three steps on three
+# different OPENROUTER_API_KEY_N accounts, so one account's rpm/rpd
+# cooldown (OR-1d's request-count gating) still only takes out one step,
+# not all three. This module bypasses eo/registry.py's
+# build_fallback_chain() by design (eo/registry.py:110), same as before,
+# so these keys are hardcoded siblings rather than registry-selected.
+MODEL_KEYS = ["OPENROUTER_API_KEY_1", "OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY_3"]
 
-# 2026-08-12 fix: was a single KEY_ENV = "CEREBRAS_API_KEY_1" shared by
-# every step above -- three models, one account, so one cooldown killed
-# the whole "rotation" at once. Now each model step gets its own real
-# Cerebras account (siblings of the production 5-key pool, see
-# eo/registry.py), so the three steps actually fail independently.
-MODEL_KEYS = ["CEREBRAS_API_KEY_1", "CEREBRAS_API_KEY_2", "CEREBRAS_API_KEY_3"]
-
-# Expressed as a llm_client chain: model AND key now both change per step
-# (see MODEL_KEYS fix above), plus a hardcoded, genuinely different
-# provider as a last resort -- same fix as prompt_writer_lean.py, since
-# this lean-pipeline agent bypasses eo/registry.py's
-# build_fallback_chain() by design (eo/registry.py:110) and can't lean on
-# the registry the way code_writer.py's own fix does.
+# Expressed as a llm_client chain: same key-independence fix as before,
+# now on OpenRouter, plus the same hardcoded genuinely-different provider
+# as a last resort (Gemini) -- unchanged, so a total OpenRouter outage
+# doesn't take this agent down entirely.
 CHAIN = [
-    {"provider": "cerebras", "model": m, "key_env": k}
-    for m, k in zip(MODELS, MODEL_KEYS)
+    {"provider": "openrouter", "model": "openrouter/free", "key_env": k}
+    for k in MODEL_KEYS
 ] + [
     {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_1"},
 ]
