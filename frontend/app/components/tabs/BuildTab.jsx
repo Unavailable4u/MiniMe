@@ -210,7 +210,7 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep 
   if (!hasPhases) {
     return (
       <p className="text-xs text-[var(--neutral-600)]">
-        No build instructions generated yet — run hardware_speccer from this project's chat once a PRD exists.
+        No build instructions generated yet — run hardware_speccer from this project&apos;s chat once a PRD exists.
       </p>
     );
   }
@@ -512,7 +512,7 @@ function CodeView({ workspaceId, apiUrl }) {
           <p className="text-xs text-red-400 px-1">{error}</p>
         ) : fileCount === 0 ? (
           <p className="text-xs text-[var(--neutral-600)] px-1">
-            No files yet — ask this project's chat to build something and generated files will show up here.
+            No files yet — ask this project&apos;s chat to build something and generated files will show up here.
           </p>
         ) : (
           <TreeNode
@@ -635,7 +635,7 @@ function DeployPanel({ sessionId, apiUrl, deployConfigPlan, lastDeployConfigSumm
         {hasConfig && (
           <p className="text-cyber-cyan">
             Config written to disk ({lastDeployConfigSummary.config_filename}) --
-            ready for a manual deploy, or for "Go Live" once that's wired up.
+            ready for a manual deploy, or for &quot;Go Live&quot; once that&apos;s wired up.
           </p>
         )}
         {error && <p className="text-rose-400">{error}</p>}
@@ -1308,9 +1308,9 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
         ) : error ? (
           <div className="px-4 py-6 max-w-4xl mx-auto">
             <p className="text-xs text-rose-400">
-              Couldn't load the task board: {error}. Check that{" "}
+              Couldn&apos;t load the task board: {error}. Check that{" "}
               <code className="font-mono">GET /api/tasks/workspace/{"{ws_id}"}</code> is reachable
-              and that you're signed in with a valid session.
+              and that you&apos;re signed in with a valid session.
             </p>
           </div>
         ) : (

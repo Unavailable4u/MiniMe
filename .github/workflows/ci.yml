@@ -50,7 +50,20 @@ jobs:
     # `from daemon.path_guard import ...`, i.e. as a package relative to
     # the repo root, not from inside daemon/ itself -- so pytest needs
     # to run from the repo root for those imports to resolve.
+    #
+    # timeout-minutes added for consistency with promptfoo's job below
+    # (a hung/runaway step here would otherwise only stop at the
+    # runner-wide default, same gap that job's own comment flagged).
+    # continue-on-error deliberately NOT added, unlike frontend-lint and
+    # promptfoo: both of those are non-blocking for a stated reason
+    # specific to them (a pre-existing lint backlog; external LLM-call
+    # flakiness that can't distinguish a real regression from
+    # infra/grading misconfiguration). daemon/tests is a small,
+    # deterministic unit-test suite same as the `test` job above -- a
+    # failure here means the code is actually broken, so it should keep
+    # blocking the build the same way `test` and `lint` do.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -302,5 +315,27 @@ jobs:
           # same package's whole-run cap (same source file), set here as
           # a second backstop underneath this job's own timeout-minutes
           # above.
+          PROMPTFOO_EVAL_TIMEOUT_MS: "120000"
+          PROMPTFOO_MAX_EVAL_TIME_MS: "600000"
+
+      # tests/output_organizer.yaml existed but, unlike
+      # tests/contradiction_detector.yaml above, was never wired into any
+      # CI step -- it runs under its own config
+      # (output_organizer.promptfooconfig.yaml, not promptfooconfig.yaml;
+      # see that file's own header comment for why the two configs are
+      # kept separate) via package.json's `eval:organizer` script.
+      # Same CI-scoped keys/timeouts as the eval:ci step above and for
+      # the same reasons (see that step's env comments) -- the grading
+      # side now has somewhere to land because output_organizer.
+      # promptfooconfig.yaml's own defaultTest mirrors promptfooconfig.
+      # yaml's GROQ_API_KEY_GRADING override (patch 9 there; mirrored
+      # here in this same patch).
+      - name: Run output_organizer promptfoo evals
+        run: npm run eval:organizer -- --no-cache --no-share
+        env:
+          GROQ_API_KEY_GRADING: ${{ secrets.CI_GROQ_API_KEY_1 }}
+          GROQ_API_KEY: ${{ secrets.CI_GROQ_API_KEY_2 }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.CI_UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.CI_UPSTASH_REDIS_REST_TOKEN }}
           PROMPTFOO_EVAL_TIMEOUT_MS: "120000"
           PROMPTFOO_MAX_EVAL_TIME_MS: "600000"

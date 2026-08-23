@@ -58,7 +58,7 @@ export default function FlashcardFlipper({ markdownText }) {
   const [flipped, setFlipped] = useState(false);
 
   if (cards.length === 0) {
-    return <p className="text-xs text-[var(--neutral-500)]">Couldn't parse any cards from this set.</p>;
+    return <p className="text-xs text-[var(--neutral-500)]">Couldn&apos;t parse any cards from this set.</p>;
   }
 
   const card = cards[index];

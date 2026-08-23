@@ -17,7 +17,7 @@ export default function AttachChatToWorkspaceModal({ chat, workspaces, onClose }
         className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-3">Add "{chat.title}" to a project</h3>
+        <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-3">Add &quot;{chat.title}&quot; to a project</h3>
         <div className="space-y-1">
           {candidates.map((workspace) => (
             <button

@@ -550,7 +550,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
           </div>
           <p className="text-[var(--neutral-600)] text-[10px] mt-1.5">
             Export downloads a portable backup of your own chats in this
-            workspace. Import restores a backup's chats as new chats owned
+            workspace. Import restores a backup&apos;s chats as new chats owned
             by you, attached to this workspace.
           </p>
         </section>
@@ -622,7 +622,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
             {isOwner ? (
               <>
                 <p className="text-xs text-[var(--neutral-400)] mb-2">
-                  You're the owner. Hand ownership to a partner, or leave the project jointly owned.
+                  You&apos;re the owner. Hand ownership to a partner, or leave the project jointly owned.
                 </p>
                 {eligiblePartners.length > 0 && (
                   <select
@@ -641,7 +641,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
               </>
             ) : (
               <p className="text-xs text-[var(--neutral-400)] mb-3">
-                Leave "{workspace.name}"? You lose access to every chat in this project.
+                Leave &quot;{workspace.name}&quot;? You lose access to every chat in this project.
               </p>
             )}
             <div className="flex justify-end gap-2 mt-1">

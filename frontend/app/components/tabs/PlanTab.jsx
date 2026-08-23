@@ -101,7 +101,7 @@ function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
     <div className="space-y-4 max-w-lg">
       <div>
         <label htmlFor="plan-handoff-pasted" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
-          Paste handoff_packager's chat response (optional — auto-fills the fields below)
+          Paste handoff_packager&apos;s chat response (optional — auto-fills the fields below)
         </label>
         <textarea
           id="plan-handoff-pasted"
@@ -459,7 +459,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
         <div className="flex-1 overflow-y-auto">
           {planProjects.length === 0 && (
             <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
-              No plan projects yet — create one above, promote a research project from the Research tab, or use the chat sidebar's <FolderOpen size={11} className="inline" /> button.
+              No plan projects yet — create one above, promote a research project from the Research tab, or use the chat sidebar&apos;s <FolderOpen size={11} className="inline" /> button.
             </p>
           )}
           {planProjects.map((ws) => {
@@ -935,7 +935,7 @@ function MarkdownPastePanel({ workspaceId, panelKey, fetchPanelContent, savePane
       <p className="text-[11px] text-[var(--neutral-600)]">
         {placeholder} Saved per project — the box below updates live when a matching chat
         run finishes, or you can paste or edit it here yourself; either way, saving here
-        overwrites whatever was there before, same as Research's Extraction Table/
+        overwrites whatever was there before, same as Research&apos;s Extraction Table/
         Contradictions tabs.
         {paste_hint && <> {paste_hint}</>}
       </p>
@@ -1029,7 +1029,7 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        {roleLabel}'s diagram lands here automatically once it runs in this project's chat.
+        {roleLabel}&apos;s diagram lands here automatically once it runs in this project&apos;s chat.
         You can also paste it yourself below — either the raw Mermaid syntax or a fenced
         <code className="mx-1 text-[var(--neutral-400)]">```mermaid</code> block copied from a chat message — or edit it after the fact.
       </p>
@@ -1117,10 +1117,10 @@ function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, ses
   return (
     <div className="space-y-3">
       <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste wireframe_sketcher's HTML output below (raw or a fenced <code>```html</code> block).
-        "Send edit" below re-sends the edit instruction into whichever chat is currently open
+        Paste wireframe_sketcher&apos;s HTML output below (raw or a fenced <code>```html</code> block).
+        &quot;Send edit&quot; below re-sends the edit instruction into whichever chat is currently open
         (session <code>{sessionId ? sessionId.slice(0, 8) : "none"}</code>) — this only produces a
-        real follow-up wireframe if that's the same chat that generated this one (§5.5/§5.7).
+        real follow-up wireframe if that&apos;s the same chat that generated this one (§5.5/§5.7).
       </p>
       <textarea
         id="plan-wireframe-paste-raw"
@@ -1280,7 +1280,7 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
   if (!hasSpec) {
     return (
       <p className="text-xs text-[var(--neutral-600)]">
-        No device spec generated yet — run hardware_speccer from this project's chat once a PRD exists.
+        No device spec generated yet — run hardware_speccer from this project&apos;s chat once a PRD exists.
       </p>
     );
   }

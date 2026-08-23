@@ -301,8 +301,8 @@ function RoleLibraryTab({ onStartTemplate }) {
           <div>
             <h2 className="text-sm font-medium text-[var(--neutral-200)]">Role Library</h2>
             <p className="text-xs text-[var(--neutral-500)] mt-1">
-              Every role the system has ever briefed — a role's brief is
-              reused as-is the next time it's hired, unless it's edited here.
+              Every role the system has ever briefed — a role&apos;s brief is
+              reused as-is the next time it&apos;s hired, unless it&apos;s edited here.
             </p>
           </div>
           <button
@@ -331,7 +331,7 @@ function RoleLibraryTab({ onStartTemplate }) {
 
         {error && (
           <p className="text-xs text-red-400">
-            Couldn't load the Role Library: {error}. Check that{" "}
+            Couldn&apos;t load the Role Library: {error}. Check that{" "}
             <code className="font-mono">GET /api/roles</code> is reachable.
           </p>
         )}

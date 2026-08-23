@@ -278,7 +278,7 @@ function ArtifactRenderer({ artifact }) {
         // no crash.
         <div className="p-2.5 space-y-1.5">
           <div className="text-[11px] text-[var(--neutral-500)]">
-            Live preview for {TYPE_LABELS[type] || type} artifacts isn't wired up yet — showing source.
+            Live preview for {TYPE_LABELS[type] || type} artifacts isn&apos;t wired up yet — showing source.
           </div>
           <pre className="overflow-x-auto p-2 text-xs text-[var(--neutral-300)] bg-black/50 rounded max-h-[400px]">
             <code>{code}</code>

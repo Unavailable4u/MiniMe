@@ -79,7 +79,7 @@ export default function SaveRunAsTemplate({ apiUrl, roles, domainHint }) {
     <div className="rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-950-a50)] p-2.5 space-y-1.5 text-xs">
       <div className="flex items-center justify-between">
         <span className="text-[var(--neutral-400)]">
-          Save this run's {roles.length}-role pipeline as a template
+          Save this run&apos;s {roles.length}-role pipeline as a template
         </span>
         <button type="button" onClick={() => setOpen(false)} className="text-[var(--neutral-600)] hover:text-[var(--neutral-300)]">
           <X size={12} />

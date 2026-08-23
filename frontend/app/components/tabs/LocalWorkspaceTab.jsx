@@ -225,7 +225,7 @@ function FilePreview({ file }) {
           <>
             {file.truncated && (
               <div className="px-3 pt-2 text-[10px] text-amber-500">
-                File is larger than the daemon's read limit -- showing the first part only.
+                File is larger than the daemon&apos;s read limit -- showing the first part only.
               </div>
             )}
             <pre className="text-[11px] text-[var(--neutral-300)] p-3 whitespace-pre-wrap break-all font-mono">

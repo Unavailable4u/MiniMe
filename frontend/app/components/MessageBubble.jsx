@@ -504,7 +504,7 @@ function PrerequisiteSuggestions({ suggestions }) {
             <div className="flex items-start gap-1.5 text-[var(--neutral-300)]">
               <Sparkles size={12} className="mt-0.5 shrink-0 text-amber-400" />
               <span>
-                <strong>{s.name}</strong> is a prerequisite of {s.for_topic_name}, which you're
+                <strong>{s.name}</strong> is a prerequisite of {s.for_topic_name}, which you&apos;re
                 asking about — want a study guide for it too?
               </span>
             </div>

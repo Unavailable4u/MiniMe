@@ -224,7 +224,7 @@ export default function RolePickerOverlay({
           />
 
           {knownError && (
-            <p className="text-[11px] text-red-400">Couldn't load known roles: {knownError}</p>
+            <p className="text-[11px] text-red-400">Couldn&apos;t load known roles: {knownError}</p>
           )}
 
           {showCustomOption && (
@@ -234,7 +234,7 @@ export default function RolePickerOverlay({
               className="w-full flex items-center gap-1.5 text-left text-xs rounded-md px-2 py-1.5 text-[var(--neutral-300)] hover:bg-[var(--neutral-800)] border border-dashed border-[var(--neutral-700)]"
             >
               <Plus size={12} />
-              Add "{trimmedSearch}" as a new role
+              Add &quot;{trimmedSearch}&quot; as a new role
             </button>
           )}
 

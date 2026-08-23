@@ -442,9 +442,9 @@ function LinkChatsModal({ chatId, allChats, onClose }) {
         className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] rounded-lg p-4 w-80 max-h-[70vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-1">Share memory with "{current?.title}"</h3>
+        <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-1">Share memory with &quot;{current?.title}&quot;</h3>
         <p className="text-xs text-[var(--neutral-500)] mb-3">
-          Pick chats to group with this one — they'll all share memory with each other as a batch.
+          Pick chats to group with this one — they&apos;ll all share memory with each other as a batch.
         </p>
         <div className="space-y-1">
           {allChats.filter((c) => c.id !== chatId).map((c) => (
