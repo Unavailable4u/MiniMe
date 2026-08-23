@@ -47,7 +47,7 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write, KEYS
-from utils.llm_client import generate_text
+from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
 from relay.emitter import emit_event
 
 load_dotenv()
@@ -354,7 +354,19 @@ def _no_code_plan(task_text: str, session_id: str, tier: int, domain: str = None
     if idea:
         user_prompt += f"\n\nOriginal idea: {idea}"
     if current_plan:
-        user_prompt += f"\n\nPlan produced for this task so far:\n{json.dumps(current_plan, indent=2)}"
+        # Phase 7: current_plan is genuinely optional trailing context --
+        # this function's own docstring already frames it as "whatever
+        # idea/plan context this session has produced so far", not
+        # something the call structurally needs (task_text above it is
+        # what it needs). It's also the LAST thing appended to
+        # user_prompt, same shape as hardware_speccer.py's
+        # hw_reference_context -- so on a genuine CONTEXT_LENGTH_EXCEEDED,
+        # utils.llm_client's _shrink_prompt_for_retry() can drop exactly
+        # this block first (a large in-progress plan can get sizeable)
+        # instead of guessing which raw characters are safe to cut from
+        # the end of user_prompt.
+        user_prompt += (DROPPABLE_CONTEXT_MARKER +
+                         f"Plan produced for this task so far:\n{json.dumps(current_plan, indent=2)}")
 
     raw = generate_text(NO_CODE_SYSTEM_PROMPT, user_prompt, CHAIN,
                          agent_name="Structure Architect (no-code)",

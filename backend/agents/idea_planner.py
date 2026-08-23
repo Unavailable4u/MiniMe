@@ -4,7 +4,7 @@ import json
 from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import write, read_many, KEYS
-from utils.llm_client import generate_text
+from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
 load_dotenv()
 
 # FALLBACK_CHAIN: last-resort static chain, used ONLY if
@@ -71,7 +71,16 @@ def run(session_id: str = None, domain: str = None):
     user_content = f"Original idea: {idea}"
     user_content += f"\n\nCurrent feature_status: {json.dumps(feature_status)}"
     if prior_report:
-        user_content += f"\n\nPrior cycle report: {json.dumps(prior_report)}"
+        # Phase 7: prior_report is genuinely optional trailing context --
+        # SYSTEM_PROMPT above already tells the model "any prior report",
+        # explicitly allowing for none. It's also the last thing appended
+        # to user_content, same shape as hardware_speccer.py's
+        # hw_reference_context -- so on a genuine CONTEXT_LENGTH_EXCEEDED,
+        # utils.llm_client's _shrink_prompt_for_retry() can drop exactly
+        # this block first (full report JSON can be sizeable across many
+        # build cycles) instead of guessing which raw characters are safe
+        # to cut from the end of user_content.
+        user_content += DROPPABLE_CONTEXT_MARKER + f"Prior cycle report: {json.dumps(prior_report)}"
     else:
         user_content += "\n\nThis is cycle 1. No prior report exists yet."
     # perf audit §4.4 / priority #7: was double-wrapped in call_with_retry

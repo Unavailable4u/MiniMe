@@ -845,8 +845,22 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # caught and self-healed there.
         if path == "adaptive":
             given_roles = set(_flatten_role_names(role_names[:idx]))
+            # Phase 6c: being in given_roles only means that prerequisite's
+            # slot RAN, not that it succeeded. Walk the dependency list
+            # looking for that distinction before deciding whether to
+            # insert anything.
+            failed_prereq = None
             for needed_role in AGENT_DEPENDENCIES.get(role, ()):
                 if needed_role in given_roles:
+                    prior = results.get(needed_role)
+                    if isinstance(prior, dict) and prior.get("status") == "failed":
+                        # Already ran and already proved its own fallback
+                        # chain exhausted (Phase 6b) — re-inserting/
+                        # re-running it here would just repeat that same
+                        # failure. Stop walking dependencies; this role
+                        # can't be dispatched.
+                        failed_prereq = needed_role
+                        break
                     continue
                 pair = (role, needed_role)
                 if auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP:
@@ -860,6 +874,34 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 role_names.insert(idx, needed_role)
                 agent_names.insert(idx, resolve_role(needed_role))
                 given_roles.add(needed_role)
+            if failed_prereq is not None:
+                # Phase 6c: skip dispatch entirely for this role — no fn
+                # call, no role span, no approval/pause checkpoint, no
+                # self-heal insert. Record the same failure-marker shape
+                # 6b uses so 6d's failed_roles scan, and any later role
+                # that in turn depends on THIS one, treat it identically
+                # to a ChainExhaustedError-degraded role.
+                results[role] = {"status": "failed", "role": role,
+                                  "reason": f"prerequisite '{failed_prereq}' failed"}
+                print(f"  [Executor] {current_name} (role={role}) skipped — "
+                      f"prerequisite '{failed_prereq}' already failed.")
+                emit_event("error", session_id=session_id, agent=current_name, path=path,
+                            payload={"message": f"skipped: prerequisite '{failed_prereq}' failed"})
+                # Same advancement path a normal completed step uses below
+                # (next_step() fed the dict-shaped result, escalation
+                # bookkeeping via _apply_recheck_retry, agent_names grown
+                # in lockstep if next_step() escalated to a brand-new
+                # role) — duplicated here in miniature since this role
+                # never reaches that shared tail below.
+                next_idx, reason = next_step(
+                    results[role], role_names, idx, session_id=session_id,
+                    known_roles=set(list_known_roles()) | _flatten_role_names(role_names),
+                )
+                _apply_recheck_retry(key_overrides, role_names, next_idx, reason)
+                if next_idx is not None and next_idx >= len(agent_names):
+                    agent_names.append(resolve_role(role_names[next_idx]))
+                idx = next_idx
+                continue
             if role_names[idx] != role:
                 # A prerequisite got spliced in ahead of this step — re-enter
                 # the loop at the same idx, now pointing at the newly
@@ -1072,21 +1114,40 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 pair = (role, needed_role)
                 already_ran = needed_role in _flatten_role_names(role_names[:idx])
                 over_budget = auto_inserted.get(pair, 0) >= MAX_AUTO_INSERTS_PER_STEP
-                if path != "adaptive" or already_ran or over_budget:
+                # Phase 6c: already_ran alone doesn't distinguish "ran and
+                # succeeded" from "ran and Phase 6b recorded it failed" —
+                # the latter would otherwise fall into the hard-raise
+                # branch just below (already_ran is True either way),
+                # turning a degraded role into a full task crash. Check
+                # the failure-marker shape first and handle it on its own:
+                # don't self-heal (its chain is already proven exhausted),
+                # but don't re-raise as a hard crash either.
+                prereq_result = results.get(needed_role)
+                prereq_failed = isinstance(prereq_result, dict) and prereq_result.get("status") == "failed"
+                if prereq_failed:
+                    role_failed = True
+                    result = {"status": "failed", "role": role,
+                              "reason": f"prerequisite '{needed_role}' failed"}
+                    emit_event("error", session_id=session_id, agent=current_name, path=path,
+                                payload={"message": f"skipped: prerequisite '{needed_role}' failed"})
+                    print(f"  [Executor] {current_name} (role={role}) skipped — "
+                          f"prerequisite '{needed_role}' already failed.")
+                elif path != "adaptive" or already_ran or over_budget:
                     emit_event("error", session_id=session_id, agent=current_name, path=path,
                                 payload={"message": f"{dep_exc.__class__.__name__}: {dep_exc}"})
                     raise
-                auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
-                print(f"  [Executor] {current_name} (role={role}) requested prerequisite "
-                      f"role '{needed_role}' — inserting it and retrying.")
-                emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
-                            payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
-                                     "requested_role": needed_role})
-                role_names.insert(idx, needed_role)
-                agent_names.insert(idx, resolve_role(needed_role))
-                continue   # re-enter the loop at the same idx, now pointing at
-                           # the newly inserted prerequisite step instead of
-                           # the one that raised (which got shifted to idx+1).
+                else:
+                    auto_inserted[pair] = auto_inserted.get(pair, 0) + 1
+                    print(f"  [Executor] {current_name} (role={role}) requested prerequisite "
+                          f"role '{needed_role}' — inserting it and retrying.")
+                    emit_event("agent_requested_role", session_id=session_id, agent=current_name, path=path,
+                                payload={"label": f"{role} needs '{needed_role}' first — adding it to the plan",
+                                         "requested_role": needed_role})
+                    role_names.insert(idx, needed_role)
+                    agent_names.insert(idx, resolve_role(needed_role))
+                    continue   # re-enter the loop at the same idx, now pointing at
+                               # the newly inserted prerequisite step instead of
+                               # the one that raised (which got shifted to idx+1).
             except ChainExhaustedError as exc:
                 # Phase 6b (fixes Bug 5): every provider in THIS role's
                 # fallback chain was genuinely tried and failed — degrade
