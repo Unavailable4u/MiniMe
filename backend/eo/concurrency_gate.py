@@ -45,7 +45,6 @@ A's job, one layer down.
 """
 import os
 import sys
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event, Lock, Thread
 

@@ -4,6 +4,13 @@
 # Deliberately tiny for Part 1 (config + path safety only).
 python-dotenv==1.2.2
 
+# Test-only dependency for daemon/tests/ (test_config.py, test_path_guard.py).
+# Not needed to run the daemon itself, only to test it -- kept in this
+# same file rather than a separate requirements-dev.txt since the daemon's
+# dependency set is small enough that the split isn't worth the extra file.
+pytest==8.4.1
+
+
 # NEW — Part 2: the websocket client the daemon uses to connect OUT to
 # eo/local_workspace.py's /ws/daemon/{workspace_id} route. Pinned to
 # the same version backend/requirements.txt already uses server-side,

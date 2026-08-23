@@ -30,6 +30,7 @@ import io
 import json
 import shutil
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,8 +71,16 @@ _NUMERIC_COLUMNS = ("dimensions_w_mm", "dimensions_h_mm", "dimensions_d_mm")
 
 
 def _fetch_csv(url: str) -> str:
+    # Restrict to http(s) before it ever reaches urlopen -- urllib also
+    # honors file:// (and ftp://) schemes, which would let a bad/mistaken
+    # `url` read local files instead of fetching a sheet. This script's
+    # url always comes from a hardcoded/CLI sheet link, but the check
+    # costs nothing and closes off that class of surprise.
+    scheme = urllib.parse.urlsplit(url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(f"refusing to fetch non-http(s) URL scheme: {scheme!r}")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         raw = resp.read()
     return raw.decode("utf-8-sig")  # -sig strips a possible BOM Sheets adds
 

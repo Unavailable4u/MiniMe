@@ -89,6 +89,10 @@ def load_config(env_path: Path | None = None) -> DaemonConfig:
     # than surfacing later as a confusing first-connect failure.
     if not backend_ws_url:
         raise ConfigError("MINIME_BACKEND_WS_URL is not set in daemon/.env")
+    # nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
+    # This is scheme *validation*, not a connection -- both ws:// (local
+    # dev, see daemon/.env.example) and wss:// (production) are accepted
+    # on purpose; it isn't forcing an insecure connection.
     if not (backend_ws_url.startswith("ws://") or backend_ws_url.startswith("wss://")):
         raise ConfigError(
             f"MINIME_BACKEND_WS_URL must start with ws:// or wss:// "

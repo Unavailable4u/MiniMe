@@ -70,6 +70,7 @@ behavior change for groq/cerebras/mistral/gemini/huggingface.
 """
 import sys
 import os
+import uuid
 from datetime import datetime, timezone, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -425,7 +426,6 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int) -
 # to a different chain step by _decide_ledger_action(), or the gate chose
 # not to dispatch it).
 # ---------------------------------------------------------------------------
-import uuid
 
 # A reservation has to outlive the real call it was made for -- which can
 # run considerably longer than the 60s sliding window itself (retries,

@@ -361,8 +361,8 @@ def test_rate_limit_window_reroutes_when_a_later_step_has_headroom(harness):
     rate_limit_exc = _FakeProviderError(
         "Rate limit exceeded", status_code=429, body_text="requests per minute")
     client1 = harness["make_client"]("OPENROUTER_API_KEY_TEST_1", script=[rate_limit_exc])
-    client2 = harness["make_client"]("OPENROUTER_API_KEY_TEST_2",
-                                      script=[("rerouted", "stop", 30)])
+    harness["make_client"]("OPENROUTER_API_KEY_TEST_2",
+                            script=[("rerouted", "stop", 30)])
     chain = [_chain_step("OPENROUTER_API_KEY_TEST_1"),
              _chain_step("OPENROUTER_API_KEY_TEST_2")]
 
