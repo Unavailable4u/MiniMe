@@ -224,6 +224,38 @@ QUOTA_CONFIG = {
     # product. It's a monthly CREDIT pool ($0.10/month free tier), so a
     # "rpd" style number here would be a unit fabrication no matter what
     # went in it. See the reality guide §5.
+    "openrouter": {
+        # OR-1b (reliability_overhaul_plan.md). No "tpm"/"tpd" here,
+        # deliberately -- OR-1's live header check (test_openrouter.py)
+        # confirmed OpenRouter never sends x-ratelimit-* headers on any
+        # model, and its own docs describe the free tier as a REQUEST
+        # count ceiling (not token-based) in the first place, so a "tpm"
+        # entry would be fabricating a number nothing actually enforces.
+        # rate_ledger._gating_mode_for() reads the absence of "tpm" here
+        # as the signal to gate this provider on request count instead
+        # (OR-1d) -- don't add a "tpm" figure later without re-checking
+        # that function's docstring, it would silently switch this
+        # provider back to token-based gating.
+        #
+        # rpm=20, rpd=50 confirmed against OpenRouter's published free-tier
+        # limits as of 2026-08-23 (per-key, applies at $0 account balance):
+        # 20 requests/minute, 50 requests/day. Buying >=$10 of credit once
+        # raises the DAILY figure to 1000 (the per-minute 20 rpm cap is
+        # fixed regardless of credit) -- if/when this account's balance
+        # changes, update "rpd" here to match, or the ledger will start
+        # blocking calls the account could actually still make.
+        #
+        # "openrouter/free" is OpenRouter's own auto-router across
+        # whatever free models are currently live (see llm_client.py's
+        # OPENROUTER_BASE_URL comment for why CHAINs should route through
+        # this rather than a pinned "<vendor>/<model>:free" slug -- two
+        # different pinned slugs 404'd within one debugging session).
+        # Limits are enforced per underlying model in principle, but this
+        # codebase has no way to know in advance which model the router
+        # will pick for a given call, so key_id-level rpm/rpd here is the
+        # best available approximation, not a per-model guarantee.
+        "openrouter/free": {"rpm": 20, "rpd": 50},
+    },
 }
 
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
@@ -257,6 +289,27 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # lists what's actually live right now -- re-check there if a model:provider
 # pair below starts 404ing, HF's provider roster shifts over time.
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
+
+# OpenRouter -- also OpenAI-SDK-compatible (same base_url trick as
+# Mistral/Gemini/HF above), added per reliability_overhaul_plan.md OR-1a.
+#
+# OR-1's manual header check (test_openrouter.py) confirmed OpenRouter never
+# sends x-ratelimit-* headers on chat completions, on any model tried --
+# unlike groq/cerebras/mistral/gemini, so record_headroom() will just get an
+# empty `headers` back for this provider every time. That's expected, not a
+# bug; the request-count-based gating this implies is a separate rate_ledger
+# extension (OR-1c note in the plan) and is NOT part of this patch.
+#
+# Also per OR-1's live testing: OpenRouter's free-model roster rotates fast
+# enough that hardcoding any specific "<vendor>/<model>:free" slug is not
+# safe -- two different slugs 404'd within the same debugging session.
+# CHAINs in this codebase should route through "openrouter/free" (OpenRouter's
+# own auto-router across whatever free models are currently live) rather than
+# a pinned slug. See _call_step()'s _is_openrouter_reasoning_guard branch
+# below for the failure mode that showed up under that router (a reasoning
+# model silently burning the whole max_tokens budget on hidden reasoning,
+# returning empty text with finish_reason == "length").
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 _TRANSIENT_SDK_ERRORS = (
     GroqRateLimitError, GroqAPIStatusError,
@@ -636,6 +689,24 @@ def _get_huggingface(key_env: str, timeout: float = None) -> OpenAI:
     return _client_cache[cache_key]
 
 
+def _get_openrouter(key_env: str, timeout: float = None) -> OpenAI:
+    """Same OpenAI-SDK-via-base_url trick as _get_mistral()/_get_gemini()/
+    _get_huggingface() above -- OpenRouter's API is OpenAI-compatible, so no
+    new SDK dependency and no new branch needed in the OpenAI-shaped half of
+    _call_step(). Reasoning-suppression for this provider specifically is
+    handled in _call_step() via extra_body, not here."""
+    key = os.getenv(key_env)
+    if not key:
+        return None
+    cache_key = ("openrouter", key_env, timeout)
+    if cache_key not in _client_cache:
+        kwargs = {"base_url": OPENROUTER_BASE_URL, "api_key": key}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        _client_cache[cache_key] = OpenAI(**kwargs)
+    return _client_cache[cache_key]
+
+
 def _get_cloudflare_creds(account_id_env: str, token_env: str):
     """Not a real client object (Cloudflare has no SDK client here, just
     a REST call) -- returns (account_id, token) or None if either is
@@ -750,12 +821,37 @@ def _usage_details_from_usage(usage) -> dict | None:
 
 
 def _call_step(client, model: str, system_prompt: str, user_content: str,
-                max_tokens: int = None):
-    """OpenAI-SDK-shaped call, used for groq/cerebras/mistral/gemini. Returns
-    (text, usage, finish_reason) — usage is the provider SDK's usage
-    object (has .total_tokens on all three, since they're all
-    OpenAI-compatible chat.completions responses) or None if the
-    response didn't include one for some reason.
+                max_tokens: int = None, provider: str = None):
+    """OpenAI-SDK-shaped call, used for groq/cerebras/mistral/gemini/
+    openrouter. Returns (text, usage, finish_reason) — usage is the
+    provider SDK's usage object (has .total_tokens on all three, since
+    they're all OpenAI-compatible chat.completions responses) or None if
+    the response didn't include one for some reason.
+
+    OR-1c (reliability_overhaul_plan.md, empty-output guard): OpenRouter's
+    free-tier auto-router ("openrouter/free") can land a call on a
+    reasoning model. When that happens with a small max_tokens budget, the
+    model spends the entire budget on hidden reasoning tokens and returns
+    finish_reason == "length" with an EMPTY message.content -- confirmed
+    live against openai/gpt-oss-120b:free (whole budget went to
+    reasoning_tokens in the usage object, zero completion text). This is
+    silent: no exception, no error field, just an empty string that looks
+    like a normal (if unhelpful) response to any caller that doesn't
+    specifically check for it.
+
+    Fix here is two-part, both gated on provider == "openrouter" so
+    groq/cerebras/mistral/gemini call behavior is unchanged:
+      1. Send `extra_body={"reasoning": {"exclude": true}}` so OpenRouter
+         suppresses reasoning-token spend on models that support the
+         param, leaving the full max_tokens budget for visible output.
+      2. If the response still comes back with empty text AND
+         finish_reason == "length" (some models on the free rotation may
+         not honor `exclude`), raise _EmptyReasoningBudgetError so the
+         caller (generate_text()) can retry with a larger budget instead
+         of silently propagating an empty string downstream. Callers that
+         call _call_step() directly (bypassing generate_text()) will see
+         this exception rather than a swallowed empty string -- that's
+         intentional; there's no safe default text to return here.
 
     Fix C (reliability guide, §3 "Fix C", truncation handoff):
     finish_reason is the third element of the tuple now — it's
@@ -786,7 +882,13 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     _get_mistral()/_get_gemini()/_get_huggingface()'s base_url trick).
     `headers` is best-effort like everything else in this tuple: a
     missing/empty mapping is a normal "this provider didn't send
-    rate-limit headers on this call" outcome, not an error."""
+    rate-limit headers on this call" outcome, not an error.
+
+    OR-1: confirmed OpenRouter never sends x-ratelimit-* headers on any
+    model tried, so `headers` will be an empty/near-empty mapping for
+    every openrouter call, same as a provider that just didn't include
+    them -- record_headroom() already treats that as a normal no-op, no
+    special-casing needed here for that part."""
     kwargs = dict(
         model=model,
         messages=[
@@ -796,6 +898,11 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     )
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
+    if provider == "openrouter":
+        # Suppress reasoning-token spend -- see docstring above. Ignored
+        # (harmlessly, per OpenRouter's docs) by models that don't expose
+        # a reasoning budget at all.
+        kwargs["extra_body"] = {"reasoning": {"exclude": True}}
     raw_response = client.chat.completions.with_raw_response.create(**kwargs)
     headers = getattr(raw_response, "headers", None) or {}
     response = raw_response.parse()
@@ -803,7 +910,38 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     text = (choice.message.content or "").strip()
     usage = getattr(response, "usage", None)
     finish_reason = getattr(choice, "finish_reason", None)
+    if provider == "openrouter" and not text and finish_reason == "length":
+        raise _EmptyReasoningBudgetError(
+            model=model, usage=usage, finish_reason=finish_reason,
+        )
     return text, usage, finish_reason, headers
+
+
+class _EmptyReasoningBudgetError(RuntimeError):
+    """OR-1c: raised by _call_step() when an openrouter call comes back with
+    empty message.content and finish_reason == "length" -- i.e. the whole
+    max_tokens budget went to hidden reasoning tokens and nothing was left
+    for visible output, even after requesting reasoning={"exclude": True}.
+    generate_text() catches this specifically (see its dispatch wrapper) and
+    retries the same step once with a larger max_tokens budget rather than
+    letting an empty string propagate downstream as if it were a real,
+    if unhelpful, response."""
+
+    def __init__(self, model: str, usage, finish_reason: str):
+        self.model = model
+        self.usage = usage
+        self.finish_reason = finish_reason
+        reasoning_tokens = getattr(
+            getattr(usage, "completion_tokens_details", None),
+            "reasoning_tokens", None,
+        )
+        super().__init__(
+            f"openrouter model '{model}' returned empty text with "
+            f"finish_reason=length (reasoning_tokens={reasoning_tokens!r}, "
+            f"full usage={usage!r}) -- entire max_tokens budget was likely "
+            f"consumed by hidden reasoning; caller should retry with a "
+            f"larger max_tokens"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -2108,6 +2246,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
             "groq": _get_groq, "cerebras": _get_cerebras,
             "mistral": _get_mistral, "gemini": _get_gemini,
             "huggingface": _get_huggingface,
+            "openrouter": _get_openrouter,  # OR-1a
         }.get(provider)
         if getter is None:
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
@@ -2125,8 +2264,24 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
 
         _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
 
-        def _call_fn(prompt_for_step, _client=client, _model=model, _mt=_max_tok):
-            return _call_step(_client, _model, system_prompt, prompt_for_step, max_tokens=_mt)
+        def _call_fn(prompt_for_step, _client=client, _model=model, _mt=_max_tok, _provider=provider):
+            try:
+                return _call_step(_client, _model, system_prompt, prompt_for_step,
+                                   max_tokens=_mt, provider=_provider)
+            except _EmptyReasoningBudgetError as _empty_exc:
+                # OR-1c: whole budget went to hidden reasoning, nothing left
+                # for visible output, even with reasoning={"exclude": True}
+                # sent. Retry this SAME step once with a much larger budget
+                # rather than letting an empty string reach the caller as if
+                # it were a real (if unhelpful) answer. 4x is a starting
+                # point, not a tuned constant -- revisit if this fires often
+                # enough in practice to be worth reading real reasoning_tokens
+                # counts off of _empty_exc.usage and sizing off that instead.
+                print(f"  [{agent_name}] {label} returned empty text "
+                      f"(reasoning burned the budget) — retrying once with "
+                      f"max_tokens={_mt * 4} instead of {_mt}.")
+                return _call_step(_client, _model, system_prompt, prompt_for_step,
+                                   max_tokens=_mt * 4, provider=_provider)
 
         # 3f-5 -- same shared _run_chain_step() as the cloudflare branch
         # above; this branch differs only in `key_env` vs. `key_id` and
@@ -2244,6 +2399,26 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
        thread via asyncio.to_thread, and chunks are handed back across
        an asyncio.Queue.
 
+    6. OR-1c-stream (reliability_overhaul_plan.md): same empty-output
+       risk _call_step() documents for generate_text() applies here too
+       -- an "openrouter" step can land on a reasoning model that burns
+       the entire max_tokens budget on hidden reasoning tokens and never
+       emits a single content delta, ending finish_reason == "length"
+       having yielded nothing. `extra_body={"reasoning": {"exclude":
+       True}}` is sent for openrouter steps (mirrors _call_step()) to
+       suppress that spend in the first place. If it still happens
+       anyway (`started` is False when the "done" event arrives, same
+       provider, same finish_reason), this falls through to the NEXT
+       chain step rather than the retry-with-larger-budget
+       generate_text() does -- deliberately simpler: retrying the SAME
+       step here would mean either restructuring this generator into a
+       nested retry loop or duplicating the whole _run_stream_sync/
+       consumer-loop pair, and per point 2 above this codebase already
+       only allows step-level fallback (not in-place retry) before the
+       first chunk goes out, so falling through is consistent with the
+       function's existing Fix-A scope rather than a new retry pattern
+       bolted on for one provider.
+
     Yields: str delta-text chunks only (not raw SSE payloads/JSON --
     api/routes/tasks.py's endpoint layer, CO5 step 3, is what wraps each
     chunk in its own `data: {...}` envelope).
@@ -2273,6 +2448,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
             "groq": _get_groq, "cerebras": _get_cerebras,
             "mistral": _get_mistral, "gemini": _get_gemini,
             "huggingface": _get_huggingface,
+            "openrouter": _get_openrouter,  # OR-1c-stream
         }.get(provider)
         if getter is None:
             raise ValueError(f"[{agent_name}] Unknown provider '{provider}' in chain.")
@@ -2301,7 +2477,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
 
         chunk_queue: asyncio.Queue = asyncio.Queue()
 
-        def _run_stream_sync(client=client, model=model):
+        def _run_stream_sync(client=client, model=model, provider=provider):
             """Runs in a worker thread (blocking SDK iteration). Pushes
             ("chunk", text) / ("done", (usage, finish_reason)) /
             ("error", exc) onto chunk_queue via call_soon_threadsafe so
@@ -2310,16 +2486,27 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
             # generate_text() now uses -- this streaming path had the
             # identical "max_tokens never set" gap.
             _stream_max_tokens = _max_tokens_for(model, step)
+            # OR-1c-stream: see docstring point 6 -- suppress reasoning-
+            # token spend for openrouter steps the same way _call_step()
+            # does for the non-streaming path. `create_kwargs` built once
+            # so both the with-stream_options and without-stream_options
+            # attempts below stay in sync rather than drifting if only one
+            # gets this added later.
+            create_kwargs = dict(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=_stream_max_tokens,
+                stream=True,
+            )
+            if provider == "openrouter":
+                create_kwargs["extra_body"] = {"reasoning": {"exclude": True}}
             try:
                 try:
                     response_stream = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        max_tokens=_stream_max_tokens,
-                        stream=True,
+                        **create_kwargs,
                         stream_options={"include_usage": True},
                     )
                 except TypeError:
@@ -2327,15 +2514,7 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                     # stream_options. Retry once without it rather than
                     # losing the whole step over a usage-tracking extra;
                     # usage will just be None for this call in that case.
-                    response_stream = client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        max_tokens=_stream_max_tokens,
-                        stream=True,
-                    )
+                    response_stream = client.chat.completions.create(**create_kwargs)
                 usage = None
                 finish_reason = None
                 for event in response_stream:
@@ -2385,6 +2564,22 @@ async def stream_completion(system_prompt: str, user_content: str, chain: list,
                     print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
                           f"mid-stream -- Fix C continuation is NOT implemented for "
                           f"streaming (see docstring point 3); stream ends here.")
+                # OR-1c-stream (docstring point 6): nothing was ever
+                # streamed AND the step stopped because it hit max_tokens
+                # -- on openrouter specifically this means the whole
+                # budget went to hidden reasoning tokens, same failure
+                # _call_step() guards against for generate_text(). Since
+                # no chunk has reached the caller yet, it's still safe to
+                # fall through to the next chain step (Fix-A's own "before
+                # first chunk" scope, see docstring point 2) instead of
+                # ending the stream having yielded nothing at all.
+                if provider == "openrouter" and not started and finish_reason == "length":
+                    print(f"  [{agent_name}] {label} yielded no output before "
+                          f"exhausting its budget (reasoning-token burn) -- "
+                          f"falling back to next in chain instead of ending "
+                          f"the stream empty.")
+                    await stream_task
+                    break
                 await stream_task
                 return
             else:  # "error"
