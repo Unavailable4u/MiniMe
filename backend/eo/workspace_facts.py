@@ -79,14 +79,31 @@ CATEGORY_TO_SECTION = {
     "context": "context",
 }
 
-EMPTY_FACTS = {
-    "brand_voice": "",
-    "target_user": "",
-    "tech_stack": [],
-    "custom": {},
-    "sections": {},
-    "ledger": [],
-}
+def _empty_facts() -> dict:
+    """Builds a brand-new dict with its own independent nested
+    containers every call. get_facts()'s two early-return branches
+    (no workspace_id / nothing stored yet) MUST call this rather than
+    `dict(EMPTY_FACTS)` — `dict(...)` only shallow-copies the top
+    level, so every never-written workspace would otherwise share the
+    exact same `custom`/`sections`/`ledger` dict/list objects as the
+    module-level EMPTY_FACTS constant. The first call anywhere in the
+    process to update_custom_fact()/record_section_entries() on ANY
+    workspace mutates those shared containers in place (see
+    update_custom_fact()'s `facts["custom"][key] = value`), silently
+    leaking that fact into every other workspace's "empty" facts for
+    the rest of the process's lifetime — a real cross-workspace data
+    leak, found via test_eo_workspace_facts.py."""
+    return {
+        "brand_voice": "",
+        "target_user": "",
+        "tech_stack": [],
+        "custom": {},
+        "sections": {},
+        "ledger": [],
+    }
+
+
+EMPTY_FACTS = _empty_facts()
 
 
 def _key(workspace_id: str) -> str:
@@ -296,11 +313,11 @@ def get_facts(workspace_id: str) -> dict:
     custom), even if nothing's been set yet — callers never need to
     check for missing keys."""
     if not workspace_id:
-        return dict(EMPTY_FACTS)
+        return _empty_facts()
     stored = read(_key(workspace_id), default=None)
     if not stored:
-        return dict(EMPTY_FACTS)
-    merged = dict(EMPTY_FACTS)
+        return _empty_facts()
+    merged = _empty_facts()
     merged.update(stored)
     merged["custom"] = dict(merged.get("custom") or {})
     merged["sections"] = _merge_sections({}, merged.get("sections") or {}) if merged.get("sections") else {}
