@@ -113,7 +113,7 @@ import urllib.parse
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read_stage_output_text
+from memory.bus import read_stage_output_text, read as bus_read
 from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
 from relay.emitter import emit_event, EventType
 from eo.errors import MissingDependencyError
@@ -247,6 +247,221 @@ next call references these ids verbatim in wiring edges, mech \
 placements, and instruction tool_ids/part_ids, so they must be stable \
 and unique.
 """
+
+# Phase A, Patch A.4 (Mech View standalone implementation guide):
+# `partial`-mode variant -- selected when mech["archetype"]["enclosure_mode"]
+# == "partial" (a structural chassis/frame with no full enclosing shell,
+# e.g. a wheeled robot base, a drone airframe, a legged walking robot --
+# see eo/device_archetype.py's own docstring for the full archetype
+# vocabulary). Differs from SYSTEM_PROMPT_PARTS (the `full` variant,
+# just above -- left byte-for-byte unchanged, per this patch's own
+# regression-safety requirement) in exactly one place: the second
+# paragraph swaps the housing/lid/gasket decomposition instructions for
+# a baseplate instead, and the worked JSON example swaps housing_1/
+# lid_1 for a baseplate_1 entry to match. Every other paragraph (part_
+# number sourcing, pricing fields, generic_name/aliases, the trailing
+# category-enum note) is identical prose to the `full` variant --
+# those instructions have nothing to do with enclosure shape.
+SYSTEM_PROMPT_PARTS_PARTIAL = """You are a hardware bill-of-materials planner. \
+You read a finished (or in-progress) hardware PRD/feasibility note and \
+propose the parts list only -- a separate call, given your parts list \
+as input, will handle wiring, physical layout, and assembly \
+instructions, so do not attempt any of that here.
+
+Never invent a part the PRD gives you no reason to include.
+
+This device has a structural chassis/frame, not a sealed enclosure --
+do NOT include a housing part, a lid part, or a gasket/seal part of \
+any kind. Instead, decompose the structure into: a single baseplate \
+part (category "3D_PRINT") that every subsystem mounts to; one mount \
+part per subsystem that needs standoff/bracket mounting -- the MCU, \
+any display, and any other part with exposed leads (category \
+"3D_PRINT", one mount per such subsystem, not one mount for the whole \
+board); and a realistic fastener count -- screws and heat-set \
+inserts, as a quantity on one or a few "MISC" parts, not a single \
+"screws" line with qty 1.
+
+For every electrical part (category "mcu", "sensor", "actuator", or \
+"power"), fill in "part_number" with a real, specific manufacturer \
+part number when you know one with confidence -- e.g. a specific \
+Espressif module SKU/variant for an ESP32 dev module (not just the \
+bare chip family name), "DS18B20" for a common 1-Wire temperature \
+sensor. This is looked up against real distributor data after you \
+respond, so it must be an actual part number, never a plausible-\
+looking guess -- leave it null whenever you're not confident, and \
+always leave it null for generic passives (resistors, capacitors) and \
+for purely mechanical "3D_PRINT"/"MISC" parts, which don't have \
+distributor part numbers in the first place.
+
+Leave "estimated_price_bdt", "vendor_name", "vendor_url", and \
+"price_checked_at" as null for every part -- pricing is looked up \
+separately after you respond, not something you should guess at.
+
+For every part, also fill in "generic_name" -- a short, distributor-\
+agnostic canonical name for what kind of part this is (e.g. "ESP32 \
+Dev Board", "DHT22 Temperature/Humidity Sensor", "18650 Li-ion \
+Battery", "5V Boost Converter"), independent of whatever specific \
+"name" you gave it or any "part_number". Later steps use this as the \
+shared vocabulary to look up known dimensions for this exact kind of \
+part and to search real reference designs that used one -- it needs \
+to describe the part itself, not a specific listing, product page, or \
+one distributor's wording for it. Also fill in "aliases" -- a list of \
+1-4 other real names/spellings that same generic part commonly goes \
+by (e.g. for a DHT22: ["DHT-22", "AM2302"]), so that lookup still \
+matches when a distributor or datasheet uses a different name for the \
+same part. Leave "aliases" as an empty list when you don't know any \
+real alternates -- do not invent plausible-sounding ones just to fill \
+the list.
+
+Respond with ONLY valid JSON, no markdown fences, no explanation, in \
+exactly this shape:
+{
+  "parts": [
+    {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
+     "description": "Main microcontroller", "qty": 1,
+     "part_number": "ESP32-WROOM-32U-N4",
+     "generic_name": "ESP32 Dev Board",
+     "aliases": ["ESP32 Development Board", "ESP32-WROOM-32 Dev Kit"],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "baseplate_1", "name": "Chassis baseplate", "category": "3D_PRINT",
+     "description": "Structural baseplate all subsystems mount to", "qty": 1,
+     "part_number": null,
+     "generic_name": "3D-Printed Chassis Baseplate",
+     "aliases": [],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "mount_mcu_1", "name": "MCU standoff mount", "category": "3D_PRINT",
+     "description": "Standoff bracket for mcu_1", "qty": 1,
+     "part_number": null,
+     "generic_name": "Standoff Mount Bracket",
+     "aliases": [],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "fastener_1", "name": "M3 heat-set insert + screw", "category": "MISC",
+     "description": "Baseplate/mount fastening", "qty": 4,
+     "part_number": null,
+     "generic_name": "M3 Heat-Set Insert and Screw",
+     "aliases": ["M3 Threaded Insert"],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null}
+  ]
+}
+"category" is one of: "mcu", "sensor", "actuator", "power", "module", \
+"3D_PRINT", "MISC". Use short lowercase_with_underscores ids -- the \
+next call references these ids verbatim in wiring edges, mech \
+placements, and instruction tool_ids/part_ids, so they must be stable \
+and unique.
+"""
+
+# `none`-mode variant -- selected when mech["archetype"]["enclosure_mode"]
+# == "none" (no shared structural part at all, e.g. a bare single-board
+# add-on with no housing/chassis of its own). Differs from the `full`
+# variant in the same single paragraph as the `partial` variant above,
+# but goes further: no baseplate either, only per-part mounts for a
+# part that specifically needs one. The worked JSON example drops the
+# housing_1/lid_1 pair entirely and keeps only mount_mcu_1/fastener_1,
+# so the model isn't shown a shared-structural-part shape to imitate.
+SYSTEM_PROMPT_PARTS_NONE = """You are a hardware bill-of-materials planner. \
+You read a finished (or in-progress) hardware PRD/feasibility note and \
+propose the parts list only -- a separate call, given your parts list \
+as input, will handle wiring, physical layout, and assembly \
+instructions, so do not attempt any of that here.
+
+Never invent a part the PRD gives you no reason to include.
+
+This device has no shared structural part at all -- do NOT include a \
+housing part, a lid part, a gasket/seal part, or a baseplate/chassis \
+part of any kind. Only include a per-part mount (category "3D_PRINT") \
+for a specific part that genuinely needs standoff/bracket mounting -- \
+the MCU, any display, and any other part with exposed leads -- never \
+a mount for the whole assembly. A realistic fastener count for those \
+individual mounts only, as a quantity on one or a few "MISC" parts, \
+not a single "screws" line with qty 1.
+
+For every electrical part (category "mcu", "sensor", "actuator", or \
+"power"), fill in "part_number" with a real, specific manufacturer \
+part number when you know one with confidence -- e.g. a specific \
+Espressif module SKU/variant for an ESP32 dev module (not just the \
+bare chip family name), "DS18B20" for a common 1-Wire temperature \
+sensor. This is looked up against real distributor data after you \
+respond, so it must be an actual part number, never a plausible-\
+looking guess -- leave it null whenever you're not confident, and \
+always leave it null for generic passives (resistors, capacitors) and \
+for purely mechanical "3D_PRINT"/"MISC" parts, which don't have \
+distributor part numbers in the first place.
+
+Leave "estimated_price_bdt", "vendor_name", "vendor_url", and \
+"price_checked_at" as null for every part -- pricing is looked up \
+separately after you respond, not something you should guess at.
+
+For every part, also fill in "generic_name" -- a short, distributor-\
+agnostic canonical name for what kind of part this is (e.g. "ESP32 \
+Dev Board", "DHT22 Temperature/Humidity Sensor", "18650 Li-ion \
+Battery", "5V Boost Converter"), independent of whatever specific \
+"name" you gave it or any "part_number". Later steps use this as the \
+shared vocabulary to look up known dimensions for this exact kind of \
+part and to search real reference designs that used one -- it needs \
+to describe the part itself, not a specific listing, product page, or \
+one distributor's wording for it. Also fill in "aliases" -- a list of \
+1-4 other real names/spellings that same generic part commonly goes \
+by (e.g. for a DHT22: ["DHT-22", "AM2302"]), so that lookup still \
+matches when a distributor or datasheet uses a different name for the \
+same part. Leave "aliases" as an empty list when you don't know any \
+real alternates -- do not invent plausible-sounding ones just to fill \
+the list.
+
+Respond with ONLY valid JSON, no markdown fences, no explanation, in \
+exactly this shape:
+{
+  "parts": [
+    {"id": "mcu_1", "name": "ESP32 DevKit", "category": "mcu",
+     "description": "Main microcontroller", "qty": 1,
+     "part_number": "ESP32-WROOM-32U-N4",
+     "generic_name": "ESP32 Dev Board",
+     "aliases": ["ESP32 Development Board", "ESP32-WROOM-32 Dev Kit"],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "mount_mcu_1", "name": "MCU standoff mount", "category": "3D_PRINT",
+     "description": "Standoff bracket for mcu_1", "qty": 1,
+     "part_number": null,
+     "generic_name": "Standoff Mount Bracket",
+     "aliases": [],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null},
+    {"id": "fastener_1", "name": "M3 heat-set insert + screw", "category": "MISC",
+     "description": "Mount fastening", "qty": 4,
+     "part_number": null,
+     "generic_name": "M3 Heat-Set Insert and Screw",
+     "aliases": ["M3 Threaded Insert"],
+     "estimated_price_bdt": null, "vendor_name": null, "vendor_url": null,
+     "price_checked_at": null}
+  ]
+}
+"category" is one of: "mcu", "sensor", "actuator", "power", "module", \
+"3D_PRINT", "MISC". Use short lowercase_with_underscores ids -- the \
+next call references these ids verbatim in wiring edges, mech \
+placements, and instruction tool_ids/part_ids, so they must be stable \
+and unique.
+"""
+
+# Phase A, Patch A.4: selects which of the three variants above Call 1
+# uses, keyed on mech["archetype"]["enclosure_mode"]. An unrecognized
+# or missing enclosure_mode (e.g. no archetype ever landed on the bus --
+# session_id was None, or Patch A.3's classify/resolve pair somehow
+# never ran for this session) falls back to `full`, the same safe
+# default eo/device_archetype.py's own classify_archetype() uses for a
+# no-signal PRD -- never a silent guess toward the more exotic
+# partial/none variants.
+_SYSTEM_PROMPT_PARTS_BY_MODE = {
+    "full": SYSTEM_PROMPT_PARTS,
+    "partial": SYSTEM_PROMPT_PARTS_PARTIAL,
+    "none": SYSTEM_PROMPT_PARTS_NONE,
+}
+
+
+def _select_parts_prompt(enclosure_mode: str) -> str:
+    return _SYSTEM_PROMPT_PARTS_BY_MODE.get(enclosure_mode, SYSTEM_PROMPT_PARTS)
 
 
 SYSTEM_PROMPT_WIRING = """You are a hardware wiring/layout/assembly \
@@ -1928,16 +2143,30 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.dynamic_chain import build_fallback_chain
     chain = build_fallback_chain("hardware_speccer") or FALLBACK_CHAIN
 
+    # Phase A, Patch A.4 (Mech View standalone implementation guide):
+    # read the archetype Patch A.3 already stashed on the bus (in
+    # eo/executor.py's hardware_speccer dispatch branch, immediately
+    # before this function was ever called) and use it to pick which of
+    # the three SYSTEM_PROMPT_PARTS variants Call 1 gets below. Missing
+    # entirely (e.g. session_id was None, or A.3 never ran for this
+    # session) reads back as {} from bus_read's own default, which
+    # .get("enclosure_mode", "full") -- and _select_parts_prompt()'s own
+    # fallback below it -- both resolve to the same safe `full` default.
+    archetype = bus_read(f"device_archetype:{session_id}", default={}) or {}
+    enclosure_mode = archetype.get("enclosure_mode", "full")
+    parts_prompt = _select_parts_prompt(enclosure_mode)
+
     # F3 Part 4: split into two calls. Call 1 proposes parts only (each
     # optionally carrying a part_number); real dimensions get looked up
     # and merged in before Call 2 ever runs, so Call 2's wiring/mech/
     # instructions reasoning can be told which parts already have
     # ground-truth sizing vs. which still need LLM estimation.
-    raw_parts = generate_text(SYSTEM_PROMPT_PARTS, user_prompt, chain,
+    raw_parts = generate_text(parts_prompt, user_prompt, chain,
                                agent_name="Hardware Speccer Parts",
                                session_id=session_id, tier=tier, domain=domain,
                                allow_continuation=False)  # Root Cause B fix:
-    # SYSTEM_PROMPT_PARTS demands "ONLY valid JSON" -- letting a "length"
+    # SYSTEM_PROMPT_PARTS (or its A.4 partial/none sibling -- all three
+    # demand "ONLY valid JSON") -- letting a "length"
     # truncation get a continuation prompt spliced onto it from
     # (possibly) a different provider corrupts the JSON (mismatched
     # braces/formatting), which the json.loads() below can't parse, and
@@ -2039,6 +2268,19 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
             "mech": {"enclosure": {"w": 0, "h": 0, "d": 0}, "placements": []},
             "instructions": {"phases": []},
         }
+
+    # Phase A, Patch A.4: stash the archetype fetched above onto
+    # spec["mech"] -- setdefault first since a successful Call 2 parse
+    # isn't guaranteed to have included a "mech" key at all (a model
+    # that emitted valid JSON but genuinely produced no mech content),
+    # same defensive shape the fail-safe branch just above already
+    # models for that key. Every later phase in this guide (B's
+    # swept-volume modeling, C's mass/CoG check, D's access mechanisms,
+    # E's material defaults, Patch A.5's own downstream gating of
+    # eo/mech_enclosure.py and eo/mech_cutouts.py, none of that this
+    # patch) reads mech["archetype"] off exactly this dict from here on.
+    spec.setdefault("mech", {"enclosure": {"w": 0, "h": 0, "d": 0}, "placements": []})
+    spec["mech"]["archetype"] = archetype
 
     spec["parts"] = parts
     spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
