@@ -1006,6 +1006,48 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 elif current_name in ("architecture_diagrammer", "schema_diagrammer", "handoff_packager"):
                     result = fn(session_id=session_id, tier=PATH_TO_TIER.get(path), task_text=task_text, domain=domain)
                 elif current_name == "hardware_speccer":
+                    # Phase A, Patch A.3 (Mech View standalone implementation
+                    # guide): classify the device archetype from the PRD --
+                    # A.1's deterministic classify_archetype() first,
+                    # escalating to A.2's resolve_ambiguous_archetype() ONLY
+                    # on a genuine `{"status": "ambiguous"}` result -- and
+                    # stash it on the bus BEFORE run_hardware_speccer() is
+                    # ever invoked, so that module's own future mode-gated
+                    # prompt variants (Patch A.4, NOT this patch) have
+                    # something real to read when it builds its own local
+                    # `spec["mech"]` dict. There's no single shared, mutable
+                    # `mech` object living in this executor's own scope for
+                    # this branch to write onto directly (hardware_speccer.py
+                    # builds and owns that dict entirely inside its own
+                    # run_hardware_speccer() call, only persisting it to
+                    # workspace_facts.custom["mech"] at the very end of that
+                    # run) -- a session-scoped bus key is this codebase's own
+                    # existing convention for exactly this shape of
+                    # "upstream step hands a value to a downstream step"
+                    # (memory/bus.py's own stage_output:{session_id}:{role}
+                    # convention, which _read_prd_context() below this same
+                    # branch already relies on for the PRD text itself).
+                    #
+                    # prd_writer is guaranteed to have already completed by
+                    # this point in the resolved role order --
+                    # eo/agent_dependencies.py's static dependency graph
+                    # already declares hardware_speccer depends on
+                    # prd_writer, the same guarantee run_hardware_speccer()'s
+                    # own _read_prd_context() relies on -- so reading it here,
+                    # immediately before hardware_speccer's own dispatch, is
+                    # equivalent to hooking "right after prd_writer
+                    # completes" without needing a dedicated prd_writer
+                    # branch of its own in this dispatch chain (prd_writer
+                    # runs through the generic "generic_worker" branch above,
+                    # not a named branch here).
+                    from eo.device_archetype import classify_archetype, resolve_ambiguous_archetype
+                    from memory.bus import read_stage_output_text, write as bus_write
+                    _prd_text_for_archetype = read_stage_output_text(session_id, "prd_writer") or ""
+                    _archetype = classify_archetype({"text": _prd_text_for_archetype})
+                    if _archetype.get("status") == "ambiguous":
+                        _archetype = resolve_ambiguous_archetype({"text": _prd_text_for_archetype})
+                    bus_write(f"device_archetype:{session_id}", _archetype)
+
                     # MiniMe Blueprint fix — same call shape as
                     # architecture_diagrammer/schema_diagrammer just above, plus
                     # workspace_id: run_hardware_speccer() hard-requires it (raises
