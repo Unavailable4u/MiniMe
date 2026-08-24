@@ -178,12 +178,29 @@ def _modules_with_bound_generate_text():
     generate_text`). Only catches modules already in sys.modules at call
     time, which is why mock_llm patches lazily on first use inside a test
     rather than once at conftest-collection time — by then the agent
-    module under test has actually been imported."""
+    module under test has actually been imported.
+
+    getattr(mod, ..., None) is NOT a safe way to probe an arbitrary
+    module here: it only swallows AttributeError, but some third-party
+    packages install lazy-import module proxies (e.g. yt_dlp's
+    dependencies.Cryptodome, via compat_utils.passthrough_module) whose
+    __getattr__ raises ModuleNotFoundError/ImportError instead for any
+    attribute that isn't the one thing it's a shim for. Once such a
+    module lands in sys.modules (pulled in transitively by an unrelated
+    test), this sweep would crash on it and take down every OTHER test
+    that depends on mock_llm in the same session. Skip modules that
+    raise on attribute access rather than letting the sweep die."""
     hits = []
     for name, mod in list(sys.modules.items()):
         if mod is None:
             continue
-        if getattr(mod, "generate_text", None) is not None and name != "utils.llm_client":
+        if name == "utils.llm_client":
+            continue
+        try:
+            has_it = getattr(mod, "generate_text", None) is not None
+        except Exception:
+            continue
+        if has_it:
             hits.append(mod)
     return hits
 
@@ -272,11 +289,22 @@ def mock_llm(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _modules_with_bound_static_scan():
+    """Same lazy-import-proxy hazard as _modules_with_bound_generate_text()
+    above — getattr(..., None) alone isn't enough, since some modules'
+    __getattr__ raises something other than AttributeError. See that
+    function's docstring for the concrete case (yt_dlp's Cryptodome
+    shim)."""
     hits = []
     for name, mod in list(sys.modules.items()):
         if mod is None:
             continue
-        if getattr(mod, "run_static_scan", None) is not None and name != "agents.static_scan":
+        if name == "agents.static_scan":
+            continue
+        try:
+            has_it = getattr(mod, "run_static_scan", None) is not None
+        except Exception:
+            continue
+        if has_it:
             hits.append(mod)
     return hits
 
