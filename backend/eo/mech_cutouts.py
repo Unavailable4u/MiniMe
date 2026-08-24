@@ -44,6 +44,7 @@ already share it.
 from eo.enclosure_spec import CUTOUT_TABLE, CUTOUT_ELIGIBLE_CATEGORIES, ENCLOSURE_SPEC
 from eo.mech_sections import subsections_for_section
 from eo.mech_subsections import members_for_subsection
+from eo.mech_swept_volume import is_exclusion
 
 # ---------------------------------------------------------------------------
 # Patch 5.2 -- nearest_exterior_face()
@@ -688,6 +689,21 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
 
     cutouts = []
     for member in _joined_cutout_members(mech, parts):
+        # Patch B.6 (Mech View standalone implementation guide, Phase B)
+        # leakage guard: a swept-volume exclusion box (eo/
+        # mech_swept_volume.py's own Patch B.3/B.4/B.5 output, tagged
+        # "shape_kind": "exclusion") is never a real, printable part
+        # and must never become a cutout target. Exclusions are never
+        # actually written into `mech["placements"]` today (see
+        # eo/mech_swept_volume.py's own top docstring on why they live
+        # on the separate `mech["exclusions"]` key instead), so this
+        # check is currently defensive insurance against a future
+        # refactor rather than something the CURRENT data flow can
+        # trigger -- same "cheap, always-correct-to-call guard against
+        # a future change" posture eo/mech_swept_volume.py's own
+        # is_exclusion() docstring already documents for itself.
+        if is_exclusion(member):
+            continue
         match = _match_cutout_descriptor(member)
         if match is None:
             continue
