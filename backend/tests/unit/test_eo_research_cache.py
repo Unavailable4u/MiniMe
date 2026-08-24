@@ -27,8 +27,7 @@ side is that get_cached_research() passes the key straight through
 to read(), which the "looks up by scope-qualified key" test below
 covers directly.
 """
-import eo.research_cache as research_cache
-
+from eo import research_cache
 
 # ---------------------------------------------------------------------
 # _key

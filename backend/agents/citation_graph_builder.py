@@ -44,17 +44,17 @@ Result written to KEYS["citation_graph"]:
             module doesn't need any executor.py-side special case.
 }
 """
-import os
-import sys
+import base64
 import json
 import math
-import base64
+import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, get_current_app_slug
-from eo.knowledge_graph import get_node
-from eo.graph_edges import list_edges
 from eo.errors import MissingDependencyError
+from eo.graph_edges import list_edges
+from eo.knowledge_graph import get_node
+from memory.bus import KEYS, get_current_app_slug, read, write
 
 # Cited by at least this many other papers already in the workspace's
 # graph to count as a "hub" -- 1 is just "someone happened to cite you

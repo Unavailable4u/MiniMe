@@ -30,10 +30,8 @@ log_usage()/research_cache.py need underneath.
 """
 import pytest
 
-import eo.hw_reference as hw_reference
-import agents.web_researcher as web_researcher
-import agents.hardware_speccer as hardware_speccer
-
+from agents import hardware_speccer, web_researcher
+from eo import hw_reference
 
 # ---------------------------------------------------------------------------
 # Fakes -- stand in for the real Upstash Vector Index and the HF embed call.

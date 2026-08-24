@@ -14,12 +14,13 @@ retired role, this catches it instead of the import just quietly failing
 the way the old test would have under pytest collection.
 """
 
-import agents.generic_worker as generic_worker  # noqa: F401  (ensures mock_llm patches this module)
+from agents import generic_worker
 
 
 def test_changelog_writer_role_resolves_to_generic_worker(mock_llm, monkeypatch):
     # No dedicated agents.changelog_writer module should exist anymore.
     import importlib
+
     import pytest as _pytest
     with _pytest.raises(ModuleNotFoundError):
         importlib.import_module("agents.changelog_writer")

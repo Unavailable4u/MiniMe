@@ -33,7 +33,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests as real_requests
 
-import agents.calendar_agent as calendar_agent
+from agents import calendar_agent
 
 
 class _FakeResponse:

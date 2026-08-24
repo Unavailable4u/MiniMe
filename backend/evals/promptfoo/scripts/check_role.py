@@ -43,8 +43,8 @@ def check(role_name: str) -> bool:
     # promptfoo always imports eo.registry (via _reject_real_action_role)
     # before agents.generic_worker (via _build_live_chain) in the same
     # order used here.
-    from eo.registry import REGISTRY, ROLE_PROMPTS_SEED
     from agents.generic_worker import run as generic_worker_run
+    from eo.registry import REGISTRY, ROLE_PROMPTS_SEED
 
     in_seed = role_name in ROLE_PROMPTS_SEED
     entry = REGISTRY.get(role_name)

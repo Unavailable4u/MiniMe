@@ -24,8 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import require_auth
-from eo import chat_workspace
-from eo import workspace_code_files
+from eo import chat_workspace, workspace_code_files
 
 router = APIRouter()
 

@@ -22,8 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.academic_search as academic_search
-
+from agents import academic_search
 
 # ---------------------------------------------------------------------------
 # Helpers

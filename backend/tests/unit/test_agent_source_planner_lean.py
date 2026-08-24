@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.source_planner_lean as source_planner_lean
+from agents import source_planner_lean
 
 # Captured before the autouse fixture below ever runs (module import
 # happens at collection time), so TestEnsureRoleRegistered can call the

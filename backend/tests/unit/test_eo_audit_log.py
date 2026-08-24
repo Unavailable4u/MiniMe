@@ -20,9 +20,9 @@ db.cursor() is a context manager -- FakeCursor/fake_cursor_cm below is
 a minimal stand-in that records every execute() call and returns a
 canned fetchall() result, without touching a real Postgres connection.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import eo.audit_log as audit_log
+from eo import audit_log
 
 
 class FakeCursor:
@@ -142,7 +142,7 @@ def test_list_for_target_filters_by_target_type_and_id_with_limit(monkeypatch):
 
 
 def test_list_for_target_maps_rows_through_row_to_entry(monkeypatch):
-    created = datetime(2026, 8, 24, 12, 0, 0, tzinfo=timezone.utc)
+    created = datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC)
     row = {
         "id": 1, "user_id": "user_1", "action": "workspace.rename",
         "target_type": "workspace", "target_id": "ws_1",
@@ -186,7 +186,7 @@ def test_list_for_user_filters_by_user_id_with_limit(monkeypatch):
 # ---------------------------------------------------------------------
 
 def test_row_to_entry_converts_created_at_to_isoformat():
-    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 1, 1, tzinfo=UTC)
     row = {
         "id": 5, "user_id": "u", "action": "a", "target_type": "t",
         "target_id": "tid", "detail": {}, "created_at": created,

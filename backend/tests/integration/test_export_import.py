@@ -13,8 +13,10 @@ import os
 
 import pytest
 
-from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORT_FORMATS
-from agents.importer import import_artifact, SUPPORTED_FORMATS as IMPORT_FORMATS
+from agents.exporter import SUPPORTED_FORMATS as EXPORT_FORMATS
+from agents.exporter import export_artifact
+from agents.importer import SUPPORTED_FORMATS as IMPORT_FORMATS
+from agents.importer import import_artifact
 
 ARTIFACT = {
     "title": "Q3 Launch Research Summary",

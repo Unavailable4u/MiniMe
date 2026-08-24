@@ -68,14 +68,15 @@ mode and immediately fail open in it (tpm_limit is None), identical to
 this module's behavior before OR-1d -- so this is additive, not a
 behavior change for groq/cerebras/mistral/gemini/huggingface.
 """
-import sys
 import os
+import sys
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory.bus import read as bus_read, write as bus_write
+from memory.bus import read as bus_read
+from memory.bus import write as bus_write
 
 # Sliding-window tuning. 5-second slices, 60-second trailing sum -- matches
 # the plan's own numbers (§PHASE 2 "Algorithm", point 2). Reused as-is for
@@ -112,13 +113,13 @@ def _day_bucket_key(provider: str, key_id: str, model: str, now: float = None) -
     providers like OpenRouter actually describe their daily cap ("50/day",
     reset at a fixed point), not a trailing-24h sum."""
     ts = now if now is not None else _now()
-    day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    day = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
     return f"rate_ledger:{provider}:{key_id}:{model}:day:{day}"
 
 
 def _seconds_until_next_utc_day(now: float = None) -> float:
     ts = now if now is not None else _now()
-    current = datetime.fromtimestamp(ts, tz=timezone.utc)
+    current = datetime.fromtimestamp(ts, tz=UTC)
     tomorrow = (current + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0)
     return max(0.0, (tomorrow - current).total_seconds())
@@ -216,7 +217,7 @@ def _increment_daily_count(provider: str, key_id: str, model: str, now: float = 
 
 
 def _now() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return datetime.now(UTC).timestamp()
 
 
 def _prune_window(slices: dict, now: float) -> dict:

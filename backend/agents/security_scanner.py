@@ -18,20 +18,21 @@ Output, written to KEYS["security_scan_results"]:
   "module_name": {"findings": [{"severity": "...", "description": "..."}]}
 }
 """
+import json
 import os
 import sys
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from agents.static_scan import run_static_scan
+from eo.quota_sentinel import get_quota_snapshot
+from eo.registry import AGENT_CAPABILITIES
+from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from eo.registry import AGENT_CAPABILITIES
-from eo.quota_sentinel import get_quota_snapshot
-from agents.static_scan import run_static_scan
 
 load_dotenv()
 
@@ -117,8 +118,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

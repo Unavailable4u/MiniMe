@@ -13,7 +13,6 @@ notebooks routes still in api/server.py — moving it alone would either
 duplicate that manifest or force an awkward import back into
 api.server (circular). It moves later, alongside the notebooks split.
 """
-from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -50,8 +49,8 @@ def quota():
 @router.get("/api/usage/history", dependencies=[Depends(require_auth)])
 def usage_history(
     days: int = Query(7, ge=1, le=90),
-    domain: Optional[str] = Query(None),
-    workspace_id: Optional[str] = Query(None),
+    domain: str | None = Query(None),
+    workspace_id: str | None = Query(None),
 ):
     # Cross-session, persisted day-by-day usage -- reads the same
     # usage:{provider}:{key_id}:{date} records /api/quota already reads

@@ -27,8 +27,8 @@ Read by RoutingTraceGraph.jsx's node-click detail panel.
 
 Place this file at: eo/timeline_node_blurbs.py
 """
-import os
 import json
+import os
 import threading
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -35,7 +35,7 @@ migrations that landed since the original file was written:
 """
 import os
 
-import eo.inspector as inspector
+from eo import inspector
 
 # ---------------------------------------------------------------------------
 # 1. Schema validation — no network.
@@ -188,7 +188,7 @@ def test_fallback_chain_engages_when_both_groq_accounts_fail(monkeypatch):
     """CHAIN is Groq KEY_1 -> Groq KEY_2 -> Gemini KEY_10 -> Gemini KEY_11
     now (GitHub Models retired) -- both Groq steps must be exhausted
     before the Gemini fallback engages."""
-    import utils.llm_client as llm_client
+    from utils import llm_client
 
     def fake_get_groq(key_env, timeout=None):
         return _FakeFailingClient()
@@ -209,7 +209,7 @@ def test_fallback_chain_engages_when_both_groq_accounts_fail(monkeypatch):
 
 
 def test_raises_when_every_provider_in_chain_fails(monkeypatch):
-    import utils.llm_client as llm_client
+    from utils import llm_client
 
     def fake_get_groq(key_env, timeout=None):
         return _FakeFailingClient()

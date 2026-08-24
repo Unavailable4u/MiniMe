@@ -23,12 +23,12 @@ bound into this module's own namespace" reason those files document.
 """
 import io
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-import eo.workspace_code_files as workspace_code_files
+from eo import workspace_code_files
 
 
 class FakeCursor:
@@ -75,7 +75,7 @@ def _install_fake_cursor(monkeypatch, cursor, calls_log=None):
 
 
 def _now():
-    return datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _file_row(workspace_id="ws_1", file_path="src/app.py", content="print(1)",

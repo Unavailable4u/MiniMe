@@ -19,13 +19,14 @@ Unlike most agents, this one is allowed to touch the filesystem directly
 (README.md only, never code) -- same trust level file_manager.py already
 gives itself for README skeleton generation on cycle 1.
 """
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import write, read_many, KEYS
+from memory.bus import KEYS, read_many, write
 from utils.llm_client import generate_text
 
 load_dotenv()
@@ -75,8 +76,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

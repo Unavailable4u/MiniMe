@@ -16,8 +16,7 @@ for chat_workspace.
 """
 import time
 
-import eo.spec_cache as spec_cache
-
+from eo import spec_cache
 
 # ---------------------------------------------------------------------
 # _key

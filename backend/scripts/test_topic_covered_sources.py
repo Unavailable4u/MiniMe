@@ -33,10 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _scratch = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
 _scratch.close()
 
-import eo.secondary_data as secondary_data  # noqa: E402
+from eo import secondary_data
+
 secondary_data.SECONDARY_DATA_PATH = _scratch.name
 
-from eo.source_index import get_topic_covered_sources  # noqa: E402
+from eo.source_index import get_topic_covered_sources
 
 WORKSPACE_ID = "ws_test_6_11_d"
 

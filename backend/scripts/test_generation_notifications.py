@@ -49,7 +49,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eo.notify import notify  # the exact function notebooks_generate() calls
-import relay.emitter as emitter
+from relay import emitter
 
 
 class FakeChannelClient:

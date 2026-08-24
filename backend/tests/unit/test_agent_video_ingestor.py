@@ -26,10 +26,9 @@ that's this finding made concrete, not a workaround for a test-only
 quirk.
 """
 import pytest
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-
-import agents.video_ingestor as video_ingestor
+from agents import video_ingestor
 
 
 class FakeYDL:

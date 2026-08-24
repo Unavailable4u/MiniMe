@@ -49,10 +49,15 @@ import sys
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.registry import resolve, resolve_role, list_known_roles
-from eo.structure import PATH_TO_TIER
-from eo.errors import MissingDependencyError
+import logging
+
 from eo.agent_dependencies import AGENT_DEPENDENCIES
+from eo.errors import MissingDependencyError
+from eo.registry import list_known_roles, resolve, resolve_role
+from eo.structure import PATH_TO_TIER
+from eo.tracing import TRACING_ENABLED, get_tracer, truncate_for_trace
+from relay.emitter import emit_event
+
 # Phase 6b: distinguishes "every provider in this role's fallback chain
 # was genuinely tried and failed" (degrade this one role, keep the rest
 # of the task running) from any other exception a role's dispatch can
@@ -60,10 +65,6 @@ from eo.agent_dependencies import AGENT_DEPENDENCIES
 # before this phase). See utils/llm_client.py's ChainExhaustedError
 # docstring for exactly which raise sites this is and isn't.
 from utils.llm_client import ChainExhaustedError
-import logging
-
-from eo.tracing import get_tracer, TRACING_ENABLED, truncate_for_trace
-from relay.emitter import emit_event
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
 # failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
@@ -238,9 +239,10 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     one" — real additional work, left for later if a group member ever
     actually needs either.
     """
-    import time as _time
     import functools
+    import time as _time
     from concurrent.futures import as_completed
+
     from eo.concurrency_gate import GatedTask, run_gated
 
     no_conversation_context_roles = no_conversation_context_roles or set()
@@ -957,9 +959,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     # `if` above, which already passes both session_id/path.)
                     result = fn(task_text, key_override=override, session_id=session_id, path=path,
                                 domain=domain)
-                elif current_name == "code_writer_lean":
-                    result = fn(session_id=session_id, path=path, domain=domain)
-                elif current_name == "reviewer_fixer_lean":
+                elif current_name == "code_writer_lean" or current_name == "reviewer_fixer_lean":
                     result = fn(session_id=session_id, path=path, domain=domain)
                 elif current_name == "code_writers":
                     # Needs task_text as a fallback seed for its own
@@ -1040,8 +1040,12 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     # branch of its own in this dispatch chain (prd_writer
                     # runs through the generic "generic_worker" branch above,
                     # not a named branch here).
-                    from eo.device_archetype import classify_archetype, resolve_ambiguous_archetype
-                    from memory.bus import read_stage_output_text, write as bus_write
+                    from eo.device_archetype import (
+                        classify_archetype,
+                        resolve_ambiguous_archetype,
+                    )
+                    from memory.bus import read_stage_output_text
+                    from memory.bus import write as bus_write
                     _prd_text_for_archetype = read_stage_output_text(session_id, "prd_writer") or ""
                     _archetype = classify_archetype({"text": _prd_text_for_archetype})
                     if _archetype.get("status") == "ambiguous":
@@ -1242,10 +1246,11 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # at task start. Same checkpoint, same snapshot shape, same
             # return value either way, so resume_graph() below needs no
             # changes at all to handle either trigger.
-            from memory.bus import read as bus_read, delete as bus_delete
+            from memory.bus import delete as bus_delete
+            from memory.bus import read as bus_read
             pause_requested = bus_read(f"pause_requested:{session_id}", default=False) if session_id else False
             if role in approval_roles or pause_requested:
-                from memory.bus import write, get_current_app_slug
+                from memory.bus import get_current_app_slug, write
                 if pause_requested:
                     # Consume the flag now, same lifecycle as the snapshot
                     # itself: a one-shot trigger, not a sticky state that
@@ -1377,8 +1382,8 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     macro_loop_num (the plain adaptive-pass case, still the common one)
     behaves exactly as before: _run_loop()'s result is returned as-is.
     """
-    from memory.bus import read, write, delete, set_app_slug
     from eo.dispatcher import next_step
+    from memory.bus import delete, read, set_app_slug, write
 
     snapshot = read(f"paused_execution:{session_id}", default=None)
     if snapshot is None:
@@ -1543,7 +1548,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     # possibly continue into further execute_graph() passes — the same
     # sequence run_with_looping() itself would run, just resumed from
     # loop_num/current_order instead of starting at loop_num=1.
-    from eo.loop_controller import _run_gatekeeper, MAX_MACRO_LOOPS
+    from eo.loop_controller import MAX_MACRO_LOOPS, _run_gatekeeper
     from eo.router import build_execution_graph_from_hires
 
     pass_results = result

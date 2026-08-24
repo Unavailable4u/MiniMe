@@ -26,8 +26,6 @@ not a document meant for docx/pptx/pdf.
 
 Place this file at: eo/role_marketplace.py
 """
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Role briefs
@@ -147,7 +145,7 @@ def export_workflow_template(template_id: str, output_dir: str) -> str:
     return export_artifact(artifact, "json", output_dir, filename=filename)
 
 
-def import_workflow_template(path: str, created_by: Optional[str] = None) -> dict:
+def import_workflow_template(path: str, created_by: str | None = None) -> dict:
     """Reads a workflow-template JSON file and saves it as a NEW template
     via eo.structure.save_workflow_template() -- always a fresh
     template_id, never overwriting an existing one. Unlike role briefs,

@@ -24,9 +24,8 @@ grade_quiz() are pure functions over real Markdown text and are
 exercised directly (through the real agents.importer.parse_markdown_text()
 dependency, not mocked) rather than through the store.
 """
-import json
 
-import eo.quiz_progress as quiz_progress
+from eo import quiz_progress
 
 
 def _use_tmp_path(monkeypatch, tmp_path):

@@ -21,12 +21,11 @@ same "swap the constant, not the I/O" approach
 test_agent_documentation_agent.py takes with APPS_ROOT.
 """
 import json
-
 from unittest.mock import MagicMock
 
 import pytest
 
-import agents.note_clusterer as note_clusterer
+from agents import note_clusterer
 
 
 @pytest.fixture(autouse=True)

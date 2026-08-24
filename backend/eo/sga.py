@@ -25,17 +25,18 @@ check that short-circuits straight to escalation -- zero SGA calls spent
 or iteration by another agent. SYSTEM_PROMPT is also updated as a
 secondary defense for phrasings the keyword check doesn't catch.
 """
+import itertools
+import json
+import logging
 import os
 import re
 import sys
 import time
-import json
-import logging
-import itertools
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.llm_client import generate_text
+from eo import conversation_memory  # NEW — Part 23 fix, see _call_one() below
 from relay.emitter import emit_event
-from eo import conversation_memory   # NEW — Part 23 fix, see _call_one() below
+from utils.llm_client import generate_text
 
 logger = logging.getLogger(__name__)
 

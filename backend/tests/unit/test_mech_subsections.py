@@ -17,7 +17,6 @@ need no mock_llm/fake_bus fixtures at all.
 """
 import eo.mech_subsections as ms
 
-
 # ---------------------------------------------------------------------------
 # group_into_subsections
 # ---------------------------------------------------------------------------

@@ -25,12 +25,11 @@ in sys.modules, same shape test_agent_podcast_scriptwriter.py already
 uses for that exact import pattern.
 """
 import sys
-
 from unittest.mock import MagicMock
 
 import pytest
 
-import agents.topic_note_writer as topic_note_writer
+from agents import topic_note_writer
 
 
 def _topic(name="Some Topic", covers=None, summary="", content_hint=""):

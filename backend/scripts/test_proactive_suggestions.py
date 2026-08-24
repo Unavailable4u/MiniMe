@@ -47,7 +47,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import eo.prerequisite_suggestions as ps
 from eo.prerequisite_suggestions import find_prerequisite_suggestions
 
-
 # ----------------------------------------------------------------------
 # Fixed fake packet — shaped exactly like eo/source_index.py:get_packet()
 # would return for a small workspace with:

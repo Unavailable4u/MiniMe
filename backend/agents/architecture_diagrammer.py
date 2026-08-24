@@ -31,17 +31,22 @@ Two diagram shapes, model's choice (see SYSTEM_PROMPT):
 Place this file at: agents/architecture_diagrammer.py
 """
 
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read_stage_output_text
-from utils.llm_client import generate_text
-from relay.emitter import emit_event, EventType
+from agents.structure_architect import (  # reuse, don't reimplement
+    _mermaid_id,
+    _sanitize_mermaid_label,
+    _strip_fences,
+)
 from eo.errors import MissingDependencyError
-from agents.structure_architect import _mermaid_id, _sanitize_mermaid_label, _strip_fences  # reuse, don't reimplement
+from memory.bus import read_stage_output_text
+from relay.emitter import EventType, emit_event
+from utils.llm_client import generate_text
 
 load_dotenv()
 

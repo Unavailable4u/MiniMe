@@ -13,8 +13,8 @@ gets the plain modules dict, but any DIRECT caller of this function
 (exactly what the old test did) silently got the wrong shape back. This
 test asserts the current, correct contract instead.
 """
-import agents.fixer_pool as fixer_pool  # noqa: F401  (ensures mock_llm patches this module)
-from memory.bus import write, read, KEYS
+from agents import fixer_pool
+from memory.bus import KEYS, read, write
 
 SUBMITTED_CODE = {
     "todo_storage": {
@@ -100,8 +100,9 @@ def test_rejects_syntactically_invalid_python_and_keeps_the_original(mock_llm):
 
 
 def test_raises_missing_dependency_when_no_submitted_code(mock_llm):
-    from eo.errors import MissingDependencyError
     import pytest
+
+    from eo.errors import MissingDependencyError
 
     with pytest.raises(MissingDependencyError):
         fixer_pool.run_fixer_pool()

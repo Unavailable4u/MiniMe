@@ -26,8 +26,7 @@ JSON round-trip.
 """
 import pytest
 
-import eo.routing_memory as routing_memory
-
+from eo import routing_memory
 
 # ---------------------------------------------------------------------
 # Fake Upstash Vector Index harness (matches the shape this module

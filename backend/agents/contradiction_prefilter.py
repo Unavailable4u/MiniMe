@@ -38,17 +38,17 @@ Result also written to KEYS["contradiction_candidates"]:
   "summary": "...",
 }
 """
-import os
-import sys
-import re
 import json
+import os
+import re
+import sys
 from collections import defaultdict
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, get_current_app_slug
-from eo.knowledge_graph import write_node
-from eo.graph_edges import create_edge
 from eo.errors import MissingDependencyError
+from eo.graph_edges import create_edge
+from eo.knowledge_graph import write_node
+from memory.bus import KEYS, get_current_app_slug, read, write
 
 # Deliberately small and literal -- a false negative here just means
 # contradiction_detector's LLM pass never sees that pair (safe: the LLM

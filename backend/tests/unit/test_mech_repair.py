@@ -42,7 +42,6 @@ no real sandbox, LLM, or network call anywhere in this file.
 """
 import eo.mech_repair as mr
 
-
 LEVEL = "0->1"
 
 

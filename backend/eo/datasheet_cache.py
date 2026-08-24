@@ -24,10 +24,11 @@ failure, non-PDF response, parse error) is cheap enough, and
 transient enough (a flaky fetch, a momentarily-down vendor CDN), not
 to be worth caching as a standing negative result.
 """
+import hashlib
 import os
 import sys
-import hashlib
 import time
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 

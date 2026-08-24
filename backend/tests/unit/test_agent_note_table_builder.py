@@ -30,7 +30,6 @@ are all bound names in this module's own namespace and are
 monkeypatched directly.
 """
 import json
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -47,7 +46,7 @@ def _fixed_pool(monkeypatch):
         for i in range(1, 6)
     }
     monkeypatch.setattr(ntb, "AGENT_CAPABILITIES", pool)
-    monkeypatch.setattr(ntb, "get_quota_snapshot", lambda: {})
+    monkeypatch.setattr(ntb, "get_quota_snapshot", dict)
     return pool
 
 

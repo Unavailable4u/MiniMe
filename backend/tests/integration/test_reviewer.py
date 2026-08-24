@@ -11,8 +11,8 @@ we want here: assert the merge/shape contract, not per-worker variation
 (review_aggregator.py's own dedup logic is out of scope, covered
 separately if/when it gets its own unit test).
 """
-import agents.reviewer as reviewer  # noqa: F401  (ensures mock_llm patches this module)
-from memory.bus import write, read, KEYS
+from agents import reviewer
+from memory.bus import KEYS, read, write
 
 SUBMITTED_CODE = {
     "todo_storage": (

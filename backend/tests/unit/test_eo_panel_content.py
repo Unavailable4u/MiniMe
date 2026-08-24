@@ -26,12 +26,12 @@ patched as `panel_content.write_audit` for the same "already bound
 into this module's own namespace at import time" reason those files'
 own docstrings give.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-import eo.panel_content as panel_content
+from eo import panel_content
 
 
 class FakeCursor:
@@ -78,7 +78,7 @@ def _install_fake_cursor(monkeypatch, cursor, calls_log=None):
 
 
 def _now():
-    return datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _content_row(workspace_id="ws_1", panel_key="mindmap", content="hello",

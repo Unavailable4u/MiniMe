@@ -29,11 +29,11 @@ in parallel -- this script tests OPENROUTER_* in Cerebras' old slot,
 straight swap, not an addition alongside a still-live Cerebras entry.
 """
 
+import argparse
 import os
 import re
 import sys
 import time
-import argparse
 
 # Load .env the same way the rest of the backend does, if python-dotenv
 # is available. Harmless no-op if you already export vars another way.

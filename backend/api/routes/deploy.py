@@ -31,22 +31,21 @@ URL (agents/deploy_agent.py's trigger_live_deploy() has no real
 deployed URL to read automatically yet -- see that module's
 docstring).
 """
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.deps import require_auth
-from memory.bus import set_app_slug
-from eo.errors import MissingDependencyError
-from agents import deploy_config_writer as deploy_config_writer_agent
 from agents import deploy_agent as deploy_agent_module
+from agents import deploy_config_writer as deploy_config_writer_agent
+from api.deps import require_auth
+from eo.errors import MissingDependencyError
+from memory.bus import set_app_slug
 
 router = APIRouter()
 
 
 class DeployActionRequest(BaseModel):
-    project_unique_name: Optional[str] = None
+    project_unique_name: str | None = None
 
 
 class UptimeRobotKeyRequest(BaseModel):
@@ -55,7 +54,7 @@ class UptimeRobotKeyRequest(BaseModel):
 
 class UptimeRobotRegisterRequest(BaseModel):
     url: str
-    friendly_name: Optional[str] = None
+    friendly_name: str | None = None
 
 
 @router.post("/api/deploy/{session_id}/propose", dependencies=[Depends(require_auth)])

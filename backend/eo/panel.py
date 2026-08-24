@@ -32,17 +32,22 @@ Synthesis rule (Part 2.2, restated exactly):
     to 3 in that specific case, per the blueprint's own wording, even if
     the max-tier rule above would have landed lower).
 """
+import json
 import os
 import sys
-import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.inspector import SYSTEM_PROMPT, _strip_fences, _validate
-from eo.structure import build_reference_structure_addition, PATH_TO_TIER, TIER_TO_PATH
-from utils.llm_client import generate_text
-from eo.registry import AGENT_CAPABILITIES, get_role_prompt, add_role_prompt, record_role_hire
 from eo.quota_sentinel import get_quota_snapshot
+from eo.registry import (
+    AGENT_CAPABILITIES,
+    add_role_prompt,
+    get_role_prompt,
+    record_role_hire,
+)
+from eo.structure import PATH_TO_TIER, TIER_TO_PATH, build_reference_structure_addition
 from relay.emitter import emit_event
+from utils.llm_client import generate_text
 
 MEMBER_B_CHAIN = [
     # OR-3f: Cerebras -> OpenRouter. Was EO_PANEL_CEREBRAS_KEY -- see

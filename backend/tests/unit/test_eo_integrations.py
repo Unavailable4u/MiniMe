@@ -33,14 +33,13 @@ happens -- an autouse fixture sets a real, valid test key via
 monkeypatch.setenv AND resets `_fernet` to None before every test, so
 no test's key choice/prior _fernet instance leaks into the next.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 from cryptography.fernet import Fernet
 
-import eo.integrations as integrations
-
+from eo import integrations
 
 _TEST_KEY = Fernet.generate_key().decode()
 
@@ -104,9 +103,9 @@ def _row(**overrides):
         "access_token": integrations._encrypt("live-access-token"),
         "refresh_token": integrations._encrypt("live-refresh-token"),
         "scope": "calendar.readonly",
-        "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(UTC) + timedelta(hours=1),
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
     }
     base.update(overrides)
     return base
@@ -206,7 +205,7 @@ def test_get_credentials_decrypts_tokens_back_to_plaintext(monkeypatch):
 def test_list_connected_never_includes_tokens(monkeypatch):
     fake_cursor = FakeCursor(fetchone_result=[
         {"provider": "google_calendar", "account_label": "work@example.com",
-         "expires_at": datetime.now(timezone.utc), "created_at": datetime.now(timezone.utc)},
+         "expires_at": datetime.now(UTC), "created_at": datetime.now(UTC)},
     ])
     _install_fake_cursor(monkeypatch, fake_cursor)
     result = integrations.list_connected("user_1")
@@ -242,7 +241,7 @@ def test_refresh_returns_none_when_nothing_connected(monkeypatch):
 
 
 def test_refresh_returns_stored_token_unchanged_when_not_expiring(monkeypatch):
-    row = _row(expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    row = _row(expires_at=datetime.now(UTC) + timedelta(hours=1))
     _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
     mock_post = MagicMock()
     monkeypatch.setattr(integrations.requests, "post", mock_post)
@@ -266,14 +265,14 @@ def test_refresh_assumes_valid_when_provider_never_gave_an_expiry(monkeypatch):
 
 
 def test_refresh_returns_none_when_expired_with_no_refresh_token(monkeypatch):
-    row = _row(expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1),
                refresh_token=None)
     _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
     assert integrations.refresh_if_needed("user_1", "google_calendar") is None
 
 
 def test_refresh_returns_none_for_a_provider_with_no_refresh_config(monkeypatch):
-    row = _row(provider="slack", expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    row = _row(provider="slack", expires_at=datetime.now(UTC) - timedelta(hours=1))
     _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
     assert integrations.refresh_if_needed("user_1", "slack") is None
 
@@ -281,7 +280,7 @@ def test_refresh_returns_none_for_a_provider_with_no_refresh_config(monkeypatch)
 def test_refresh_returns_none_when_client_credentials_env_vars_missing(monkeypatch):
     monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_ID", raising=False)
     monkeypatch.delenv("GOOGLE_OAUTH_CLIENT_SECRET", raising=False)
-    row = _row(expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1))
     _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
     assert integrations.refresh_if_needed("user_1", "google_calendar") is None
 
@@ -289,7 +288,7 @@ def test_refresh_returns_none_when_client_credentials_env_vars_missing(monkeypat
 def test_refresh_calls_the_providers_token_endpoint_and_persists_new_token(monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
-    row = _row(expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1))
 
     fake_cursor = FakeCursor(fetchone_result=row)
     calls_log = _install_fake_cursor(monkeypatch, fake_cursor)
@@ -319,7 +318,7 @@ def test_refresh_calls_the_providers_token_endpoint_and_persists_new_token(monke
 def test_refresh_returns_none_when_provider_returns_non_200(monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
-    row = _row(expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1))
     _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
 
     mock_response = MagicMock()
@@ -332,7 +331,7 @@ def test_refresh_returns_none_when_provider_returns_non_200(monkeypatch):
 def test_refresh_returns_none_when_response_has_no_access_token(monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
-    row = _row(expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1))
     _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
 
     mock_response = MagicMock()
@@ -346,7 +345,7 @@ def test_refresh_returns_none_when_response_has_no_access_token(monkeypatch):
 def test_refresh_preserves_old_refresh_token_when_provider_doesnt_rotate_it(monkeypatch):
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "client-id")
     monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "client-secret")
-    row = _row(expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1))
     fake_cursor = FakeCursor(fetchone_result=row)
     _install_fake_cursor(monkeypatch, fake_cursor)
 

@@ -51,22 +51,25 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
-from eo.local_workspace import ToolCallError, call_daemon  # noqa: F401 -- re-exported for callers
+from eo.local_workspace import (
+    ToolCallError,
+    call_daemon,
+)
 from relay.emitter import EventType, emit_workspace_event  # NEW — Part 5
 
 __all__ = [
-    "ToolCallError",
-    "list_workspace_dir",
-    "read_workspace_file",
-    "local_workspace_tools",
-    "PendingActionError",
     "PENDING_ACTION_TTL_SECONDS",
-    "propose_action",
+    "PendingActionError",
+    "ToolCallError",
     "confirm_action",
     "deny_action",
     "get_pending_action",
+    "list_workspace_dir",
+    "local_workspace_tools",
+    "propose_action",
+    "read_workspace_file",
 ]
 
 
@@ -99,7 +102,7 @@ def _preview(value: Any) -> Any:
     return value
 
 
-def _tool_event_payload(tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def _tool_event_payload(tool: str, params: dict[str, Any]) -> dict[str, Any]:
     """The small, display-oriented subset of a tool call's params worth
     putting on the wire for a log chip -- notably never `content` (
     write_file's full new file body), which is exactly the kind of
@@ -107,7 +110,7 @@ def _tool_event_payload(tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
     failure must never be load-bearing for, and which would otherwise
     make every write_file proposal balloon the event payload with data
     the timeline UI has no use for."""
-    payload: Dict[str, Any] = {"tool": tool}
+    payload: dict[str, Any] = {"tool": tool}
     if "path" in params:
         payload["path"] = _preview(params.get("path"))
     if "command" in params:
@@ -122,7 +125,7 @@ def _emit_tool_event(
     event_type: EventType,
     workspace_id: str,
     tool: str,
-    params: Dict[str, Any],
+    params: dict[str, Any],
     action_id: str | None = None,
     ok: bool | None = None,
     error: str | None = None,
@@ -141,7 +144,7 @@ def _emit_tool_event(
     emit_workspace_event(event_type, workspace_id=workspace_id, agent="local_workspace", payload=payload)
 
 
-async def list_workspace_dir(workspace_id: str, path: str = ".") -> Dict[str, Any]:
+async def list_workspace_dir(workspace_id: str, path: str = ".") -> dict[str, Any]:
     """Raises eo.local_workspace.ToolCallError if no daemon is
     connected for this workspace, the call times out, or the daemon
     reports a failure (bad path, not a directory, etc.) -- callers
@@ -160,7 +163,7 @@ async def list_workspace_dir(workspace_id: str, path: str = ".") -> Dict[str, An
     return result
 
 
-async def read_workspace_file(workspace_id: str, path: str) -> Dict[str, Any]:
+async def read_workspace_file(workspace_id: str, path: str) -> dict[str, Any]:
     """Same error contract as list_workspace_dir() above."""
     params = {"path": path}
     _emit_tool_event(EventType.LOCAL_TOOL_EXECUTED, workspace_id, "read_file", params)
@@ -182,7 +185,7 @@ async def read_workspace_file(workspace_id: str, path: str) -> Dict[str, Any]:
 # malformed proposal is rejected immediately with a clear message
 # rather than surfacing as a confusing daemon-side ToolError only once
 # someone confirms it minutes later.
-_MUTATING_TOOL_REQUIRED_PARAMS: Dict[str, tuple[str, ...]] = {
+_MUTATING_TOOL_REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
     "write_file": ("path", "content"),
     "delete": ("path",),
     "execute_command": ("command",),
@@ -209,7 +212,7 @@ class PendingAction:
     action_id: str
     workspace_id: str
     tool: str
-    params: Dict[str, Any]
+    params: dict[str, Any]
     created_at: float = field(default_factory=time.time)
 
 
@@ -219,7 +222,7 @@ class PendingAction:
 # available (the route path already carries workspace_id), so a single
 # flat dict keeps confirm_action()/deny_action() O(1) without needing
 # a nested structure just to mirror the connection registry's shape.
-_pending_actions: Dict[str, PendingAction] = {}
+_pending_actions: dict[str, PendingAction] = {}
 
 
 def _prune_expired() -> None:
@@ -233,7 +236,7 @@ def _prune_expired() -> None:
         _pending_actions.pop(action_id, None)
 
 
-def propose_action(workspace_id: str, tool: str, params: Dict[str, Any]) -> PendingAction:
+def propose_action(workspace_id: str, tool: str, params: dict[str, Any]) -> PendingAction:
     """Validates a mutating tool call and stores it as pending --
     nothing is sent to the daemon here. Raises ValueError for an
     unknown tool name or a missing required param, so a bad proposal
@@ -276,7 +279,7 @@ def get_pending_action(workspace_id: str, action_id: str) -> PendingAction:
     return action
 
 
-async def confirm_action(workspace_id: str, action_id: str) -> Dict[str, Any]:
+async def confirm_action(workspace_id: str, action_id: str) -> dict[str, Any]:
     """The only path by which a write_file/delete/execute_command
     tool_call ever actually reaches call_daemon(). Pops the pending
     action (so it can't be confirmed twice) *before* calling the
@@ -322,7 +325,7 @@ def deny_action(workspace_id: str, action_id: str) -> None:
     _emit_tool_event(EventType.LOCAL_TOOL_DENIED, workspace_id, action.tool, action.params, action_id=action_id)
 
 
-def local_workspace_tools() -> List[Dict[str, Any]]:
+def local_workspace_tools() -> list[dict[str, Any]]:
     """Hand-written, not manifest-driven -- same reasoning
     utils/capability_tools.py's study_progress_tools() docstring
     already gives for its own non-manifest tools: this isn't a

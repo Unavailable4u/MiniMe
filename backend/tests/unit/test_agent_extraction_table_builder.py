@@ -53,7 +53,7 @@ def _fixed_pool(monkeypatch):
         for i in range(1, 6)
     }
     monkeypatch.setattr(etb, "AGENT_CAPABILITIES", pool)
-    monkeypatch.setattr(etb, "get_quota_snapshot", lambda: {})
+    monkeypatch.setattr(etb, "get_quota_snapshot", dict)
     return pool
 
 
@@ -82,13 +82,13 @@ class TestMissingDependency:
         assert mock_llm.mock.call_count == 0
 
     def test_report_with_no_papers_key_raises(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], {})
         with pytest.raises(MissingDependencyError):
             etb.run()
 
     def test_report_with_empty_papers_list_raises(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], _report([]))
         with pytest.raises(MissingDependencyError):
             etb.run()
@@ -152,7 +152,7 @@ class TestSelectWorkers:
 # ---------------------------------------------------------------------------
 class TestRunDedupAndAssembly:
     def test_exact_doi_duplicate_is_collapsed_to_one_row(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], _report([
             _paper(paper_id="p1", doi="10.1/abc", title="First"),
             _paper(paper_id="p2", doi="10.1/abc", title="First (dup)"),
@@ -164,7 +164,7 @@ class TestRunDedupAndAssembly:
         assert len(result["papers"]) == 1
 
     def test_distinct_papers_are_never_collapsed(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], _report([
             _paper(paper_id="p1", doi="10.1/aaa", title="One"),
             _paper(paper_id="p2", doi="10.1/bbb", title="Two"),
@@ -176,7 +176,7 @@ class TestRunDedupAndAssembly:
         assert len(result["papers"]) == 2
 
     def test_rows_preserve_deduped_input_order_not_completion_order(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         papers = [_paper(paper_id=f"p{i}", doi=f"10.1/{i}", title=f"Paper {i}") for i in range(6)]
         write(KEYS["academic_search_report"], _report(papers))
         mock_llm.set_json_response({name: None for name in etb.FIELD_NAMES})
@@ -186,7 +186,7 @@ class TestRunDedupAndAssembly:
         assert [row["paper_id"] for row in result["papers"]] == [f"p{i}" for i in range(6)]
 
     def test_row_carries_paper_metadata_plus_extracted_fields(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], _report([
             _paper(paper_id="p1", node_id="n1", title="T", authors=["X"], year=2021, doi="10.1/x"),
         ]))
@@ -207,7 +207,7 @@ class TestRunDedupAndAssembly:
         assert row["effect_size"] == "d=0.3"
 
     def test_field_names_and_summary_shape(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], _report([_paper()]))
         mock_llm.set_json_response({name: None for name in etb.FIELD_NAMES})
 
@@ -217,7 +217,7 @@ class TestRunDedupAndAssembly:
         assert "1 paper" in result["summary"]
 
     def test_result_written_to_bus(self, fake_bus, mock_llm):
-        from memory.bus import write, read, KEYS
+        from memory.bus import KEYS, read, write
         write(KEYS["academic_search_report"], _report([_paper()]))
         mock_llm.set_json_response({name: None for name in etb.FIELD_NAMES})
 
@@ -226,7 +226,7 @@ class TestRunDedupAndAssembly:
         assert read(KEYS["extraction_table"]) == result
 
     def test_expanded_flag_does_not_error_with_more_workers_than_papers(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["academic_search_report"], _report([_paper()]))
         mock_llm.set_json_response({name: None for name in etb.FIELD_NAMES})
 
@@ -238,7 +238,7 @@ class TestRunDedupAndAssembly:
         """More papers than workers is the exact code_writers.py round-robin
         shape this module's docstring says it copies -- confirmed here by
         just checking it completes cleanly with a 2-key pool and 5 papers."""
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         papers = [_paper(paper_id=f"p{i}", doi=f"10.1/{i}") for i in range(5)]
         write(KEYS["academic_search_report"], _report(papers))
         mock_llm.set_json_response({name: None for name in etb.FIELD_NAMES})

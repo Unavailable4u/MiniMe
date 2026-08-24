@@ -22,15 +22,16 @@ Runs after file_manager.py, once code actually exists on disk to inspect
 Place this file at: agents/deploy_config_writer.py
 """
 
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, get_current_app_slug
+from memory.bus import KEYS, get_current_app_slug, read, write
+from relay.emitter import EventType, emit_event
 from utils.llm_client import generate_text
-from relay.emitter import emit_event, EventType
 
 load_dotenv()
 
@@ -119,8 +120,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

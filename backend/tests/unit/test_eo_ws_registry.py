@@ -28,7 +28,7 @@ import asyncio
 
 import pytest
 
-import eo.ws_registry as ws_registry
+from eo import ws_registry
 
 
 @pytest.fixture

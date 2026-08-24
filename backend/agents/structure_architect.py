@@ -39,16 +39,17 @@ Now genuinely two modes:
 Place this file at: agents/structure_architect.py
 """
 
+import json
 import os
 import re
 import sys
-import json
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
-from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
+from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
+from utils.llm_client import DROPPABLE_CONTEXT_MARKER, generate_text
 
 load_dotenv()
 
@@ -187,8 +188,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

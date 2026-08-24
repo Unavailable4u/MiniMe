@@ -50,11 +50,11 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.registry import add_role_prompt, get_role_prompt
 from memory.bus import vector_index
 from utils.embedding import embed_text
 from utils.llm_client import log_usage
-from utils.similarity import similarity, DEFAULT_STOPWORDS
-from eo.registry import get_role_prompt, add_role_prompt
+from utils.similarity import DEFAULT_STOPWORDS, similarity
 
 ID_PREFIX = "topic"                 # own prefix — never collides with
                                      # knowledge_graph.py's "node:" or

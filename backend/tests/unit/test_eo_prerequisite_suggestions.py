@@ -34,7 +34,7 @@ implementations.
 """
 import pytest
 
-import eo.prerequisite_suggestions as prerequisite_suggestions
+from eo import prerequisite_suggestions
 
 
 @pytest.fixture(autouse=True)

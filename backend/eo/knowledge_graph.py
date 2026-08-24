@@ -31,11 +31,11 @@ toward HF/Vector failures.
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import vector_index
-from utils.llm_client import log_usage, embed_text
+from utils.llm_client import embed_text, log_usage
 
 ID_PREFIX = "node"
 
@@ -101,7 +101,7 @@ def write_node(
         "section": section,
         "node_type": node_type,
         "created_by": created_by,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "title": title,
         "tags": tags or [],
         # Stored, not just embedded: a node exists to be re-read

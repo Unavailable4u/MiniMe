@@ -11,7 +11,7 @@ together, against build_fallback_chain() end to end) is Patch D's job,
 not this file's -- this file exercises _org_for()/
 _ensure_cross_org_redundancy() directly and in isolation.
 """
-import eo.dynamic_chain as dynamic_chain
+from eo import dynamic_chain
 
 
 def _patch_pool(monkeypatch, capabilities):
@@ -19,7 +19,7 @@ def _patch_pool(monkeypatch, capabilities):
 
 
 def _patch_no_cooldowns(monkeypatch):
-    import eo.panel as panel
+    from eo import panel
     monkeypatch.setattr(panel, "_is_cooling_down", lambda key, quota_status: False)
 
 
@@ -27,7 +27,7 @@ def _patch_flat_headroom_and_usage(monkeypatch):
     """No preference among candidates -- isolates the redundancy logic
     from Patch B's ranking so ordering doesn't interfere with these
     assertions."""
-    import eo.panel as panel
+    from eo import panel
     monkeypatch.setattr(dynamic_chain, "_headroom_score", lambda key: 0.0)
     monkeypatch.setattr(panel, "_usage_fraction", lambda key_env, quota_status: 0.0)
 

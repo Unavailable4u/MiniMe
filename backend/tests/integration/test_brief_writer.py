@@ -18,9 +18,9 @@ integration tests since it's the one role-resolution path that makes its
 own LLM call.
 """
 
+from eo import panel
+from eo.registry import ROLE_PROMPTS_KEY, get_role_prompt
 from memory.bus import read
-from eo.registry import get_role_prompt, ROLE_PROMPTS_KEY
-import eo.panel as panel  # noqa: F401  (ensures mock_llm patches this module)
 
 TEST_ROLE = "diagram_designer_test_role"  # deliberately not in ROLE_PROMPTS_SEED
 

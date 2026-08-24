@@ -57,12 +57,12 @@ to depend on it).
 Place this file at: eo/skill_library.py
 """
 import os
-import sys
 import re
+import sys
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, vector_index
+from memory.bus import read, vector_index, write
 from utils.embedding import embed_text
 from utils.llm_client import generate_text
 
@@ -415,7 +415,7 @@ def ensure_skill_for_task(task_text: str) -> str:
             # wrote a matching skill since the caller's own miss.
             return ""
 
-        from agents import web_researcher   # deferred -- agents/ modules
+        from agents import web_researcher  # deferred -- agents/ modules
         # commonly import FROM eo/, so importing an agents/ module at
         # this eo/ module's own top level risks inverting/looping that
         # dependency direction the way agents/generic_worker.py's own

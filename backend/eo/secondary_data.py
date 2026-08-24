@@ -66,8 +66,8 @@ topic's own provenance history only grows.
 
 Place this file at: eo/secondary_data.py
 """
-import os
 import json
+import os
 import re
 import threading
 

@@ -104,23 +104,27 @@ What's different from schema/architecture_diagrammer.py:
 Place this file at: agents/hardware_speccer.py
 """
 
+import json
+import logging
 import os
 import re
 import sys
-import json
-import logging
 import urllib.parse
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read_stage_output_text, read as bus_read
-from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
-from relay.emitter import emit_event, EventType
-from eo.errors import MissingDependencyError
-from eo import workspace_facts
 from agents.structure_architect import (
-    _strip_fences, _mermaid_id, _sanitize_mermaid_label,
+    _mermaid_id,
+    _sanitize_mermaid_label,
+    _strip_fences,
 )  # reuse, don't reimplement
+from eo import workspace_facts
+from eo.errors import MissingDependencyError
+from memory.bus import read as bus_read
+from memory.bus import read_stage_output_text
+from relay.emitter import EventType, emit_event
+from utils.llm_client import DROPPABLE_CONTEXT_MARKER, generate_text
 
 load_dotenv()
 
@@ -762,10 +766,11 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     """
     import functools
     from concurrent.futures import as_completed
+
     from agents.part_price_finder import find_price
-    from eo.worker_pool import _select_workers
-    from eo.dynamic_chain import build_fallback_chain_excluding, chain_step_for
     from eo.concurrency_gate import GatedTask, run_gated
+    from eo.dynamic_chain import build_fallback_chain_excluding, chain_step_for
+    from eo.worker_pool import _select_workers
 
     if not parts:
         return parts
@@ -1079,6 +1084,7 @@ def _populate_dimensions(parts: list, session_id: str = None) -> list:
     without dimensions_mm, exactly as if it had no part_number.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from agents.component_spec_lookup import get_real_spec
 
     if not parts:
@@ -1155,6 +1161,7 @@ def _populate_datasheet_details(parts: list, session_id: str = None) -> dict:
     if no part in `parts` has a datasheet_url at all.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from agents.component_spec_lookup import get_datasheet_detail
 
     candidates = [p for p in parts if p.get("datasheet_url")]
@@ -2366,7 +2373,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # first use -- stays warm from this very first validate_layout()
     # call through Level 3->4's, instead of being closed and reopened
     # between Level 0->1 and Level 1->2.
-    from eo.mech_repair import run_level_0_1_repair
+    from agents.mech_section_pool import run as run_mech_section_pool
 
     # G3i (Master Guide, "G3/G4. Hierarchical parallel build + validate",
     # pipeline wiring): the previously-standalone Level 1->2 -> 2->3 ->
@@ -2442,14 +2449,18 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # last step), "success or abort," per the Master Guide, regardless of
     # which level (if any) a mid-run exception came from.
     from agents.mech_subsection_pool import run as run_mech_subsection_pool
-    from agents.mech_section_pool import run as run_mech_section_pool
-    from eo.mech_repair import run_level_1_2_repair, run_level_2_3_repair, run_level_3_4_repair
+    from eo.mech_cutouts import apply_cutout_generation
     from eo.mech_device import apply_device_merge
     from eo.mech_enclosure import apply_enclosure_generation
+    from eo.mech_manufacturability import build_manufacturability_report
+    from eo.mech_repair import (
+        run_level_0_1_repair,
+        run_level_1_2_repair,
+        run_level_2_3_repair,
+        run_level_3_4_repair,
+    )
     from eo.mech_supports import apply_supports_generation
     from eo.mech_swept_volume import apply_swept_volume_generation
-    from eo.mech_cutouts import apply_cutout_generation
-    from eo.mech_manufacturability import build_manufacturability_report
     from eo.mech_validator import close_session as close_mech_validator_session
     from eo.mech_validator import find_unresolved_inferred_pins
     try:

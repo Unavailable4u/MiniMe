@@ -21,8 +21,7 @@ over call args/exceptions per test).
 """
 import pytest
 
-import eo.fact_summarizer as fact_summarizer
-
+from eo import fact_summarizer
 
 # ---------------------------------------------------------------------
 # _parse

@@ -21,7 +21,6 @@ import pytest
 import agents.hardware_speccer  # noqa: F401 -- ensure importable before mech_primitive_pool's lazy imports
 import agents.mech_primitive_pool as mpp
 
-
 # ---------------------------------------------------------------------------
 # _clamp_primitive
 # ---------------------------------------------------------------------------

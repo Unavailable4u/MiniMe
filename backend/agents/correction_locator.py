@@ -42,16 +42,16 @@ reason to defer it again" reasoning that patch gave for its own tag.
 
 Place this file at: agents/correction_locator.py
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.registry import get_role_prompt, add_role_prompt
-from eo.source_index import get_packet
-from eo.secondary_data import get_secondary_data
 from eo.knowledge_graph import get_node
+from eo.registry import add_role_prompt, get_role_prompt
+from eo.secondary_data import get_secondary_data
+from eo.source_index import get_packet
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
@@ -187,7 +187,7 @@ def _parse_decision(raw: str, valid_topic_ids) -> dict:
 
 def _call_role(task_text: str, session_id: str = None, domain: str = None) -> str:
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason as
                                                           # agents/source_manager.py,

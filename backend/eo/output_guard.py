@@ -75,7 +75,12 @@ import json
 
 from guardrails import Guard
 from guardrails.types import OnFailAction
-from guardrails.validator_base import FailResult, PassResult, Validator, register_validator
+from guardrails.validator_base import (
+    FailResult,
+    PassResult,
+    Validator,
+    register_validator,
+)
 
 
 def _ensure_event_loop() -> None:

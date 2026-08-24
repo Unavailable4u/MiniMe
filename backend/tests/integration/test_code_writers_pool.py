@@ -11,8 +11,8 @@ contract: one result per module spec, module_specs auto-derived from
 task_text when prompt_writer never ran, and code fences stripped from the
 model's raw output.
 """
-import agents.code_writers as code_writers  # noqa: F401  (ensures mock_llm patches this module)
-from memory.bus import write, read, KEYS
+from agents import code_writers
+from memory.bus import KEYS, read, write
 
 MODULE_SPECS = {
     "modules": [

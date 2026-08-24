@@ -15,8 +15,7 @@ control the ceiling table patch it on `modes.MODE_CEILINGS`, not on
 `eo.router.MODE_CEILINGS`, or the patch would never be seen by
 apply_mode().
 """
-import eo.modes as modes
-
+from eo import modes
 
 # ---------------------------------------------------------------------
 # non-ceiling modes (expert / anything below its ceiling)

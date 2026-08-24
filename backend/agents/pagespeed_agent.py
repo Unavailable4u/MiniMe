@@ -11,6 +11,7 @@ IntegrationNotConnectedError case. Closer in shape to how
 calendar_agent.py's own docstring describes agents/academic_search.py.
 """
 import os
+
 import requests
 
 PAGESPEED_API_BASE = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"

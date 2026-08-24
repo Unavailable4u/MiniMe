@@ -22,15 +22,13 @@ rather than on agents.documentation_agent, since no bound copy of
 either name exists on this module until run() actually executes.
 """
 import json
-import os
-
 from unittest.mock import MagicMock
 
 import pytest
 
-import agents.documentation_agent as documentation_agent
-import eo.knowledge_graph as knowledge_graph
 import memory.bus as bus_module
+from agents import documentation_agent
+from eo import knowledge_graph
 
 
 def _doc_response(readme_markdown="# My App\n\nDoes things."):

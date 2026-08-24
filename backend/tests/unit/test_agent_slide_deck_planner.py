@@ -21,12 +21,11 @@ plan() and the deferred agents.generic_worker.run import are both
 patched directly (this module never calls generate_text itself).
 """
 import sys
-
 from unittest.mock import MagicMock
 
 import pytest
 
-import agents.slide_deck_planner as slide_deck_planner
+from agents import slide_deck_planner
 
 
 def _topic(name="Topic A", summary="summary A", content_hint="hint A", covers=None, excerpts=None):

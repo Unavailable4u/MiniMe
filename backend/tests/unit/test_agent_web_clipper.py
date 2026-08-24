@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-import agents.web_clipper as web_clipper
+from agents import web_clipper
 
 
 def _extracted_json(text="Some real article body.", title="Article Title",

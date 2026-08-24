@@ -64,29 +64,30 @@ since neither is silently assumed:
 Place this file at: agents/deploy_agent.py
 """
 
+import json
 import os
 import sys
-import json
+
 import requests  # NEW -- Part 7 §7.5, same lib + timeout/error-handling
+
                  # convention utils/llm_client.py's Cloudflare path uses
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, get_current_app_slug
-from eo.project_registry import resolve_project_root
-from eo.errors import MissingDependencyError
-from relay.emitter import emit_event, EventType
+from agents.deploy_config_writer import DEPLOY_CONFIG_PLAN_KEY
+
 # Reuse, don't reimplement -- same root-confinement/path-safety functions
 # file_manager.py already enforces for every other write in this system.
 # A deploy config file is still a file write, same risk class as any
 # other file_manager.py operation.
-from agents.file_manager import _safe_relpath, _confine_to_root, APPS_ROOT
-
-from agents.deploy_config_writer import DEPLOY_CONFIG_PLAN_KEY
+from agents.file_manager import APPS_ROOT, _confine_to_root, _safe_relpath
 
 # NEW -- Part 7 §7.5: session_id -> workspace_id resolution, identical
 # call shape to eo/conversation_memory.py's own _workspace_facts_text().
-from eo import chat_workspace
-from eo import workspace_facts
+from eo import chat_workspace, workspace_facts
+from eo.errors import MissingDependencyError
+from eo.project_registry import resolve_project_root
+from memory.bus import get_current_app_slug, read, write
+from relay.emitter import EventType, emit_event
 
 LAST_DEPLOY_CONFIG_SUMMARY_KEY = "last_deploy_config_summary"
 LAST_UPTIMEROBOT_REGISTRATION_KEY = "last_uptimerobot_registration"

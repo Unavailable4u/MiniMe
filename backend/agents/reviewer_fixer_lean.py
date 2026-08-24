@@ -27,14 +27,14 @@ fix agents/code_writer_lean.py already proved out and agents/
 prompt_writer_lean.py's Patch 8.8 already applied for the same reason --
 see this file's own CHAIN comment below.
 """
+import json
 import os
 import sys
-import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from eo.errors import MissingDependencyError  # NEW — bug fix
+from memory.bus import KEYS, read, write
 from utils.llm_client import generate_text
-from eo.errors import MissingDependencyError   # NEW — bug fix
 
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
 # its fallback step is removed here, not replaced. The Groq -> Cerebras
@@ -107,8 +107,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

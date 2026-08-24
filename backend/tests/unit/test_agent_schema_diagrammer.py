@@ -12,9 +12,9 @@ import json
 
 import pytest
 
-import agents.schema_diagrammer as schema_diagrammer
-from memory.bus import write, read
+from agents import schema_diagrammer
 from eo.errors import MissingDependencyError
+from memory.bus import read, write
 
 
 def _seed_prd(session_id, text):

@@ -31,10 +31,8 @@ mock.
 """
 import json
 
-import pytest
-
-import agents.content_adapter_pool as content_adapter_pool
-from memory.bus import write, read, KEYS
+from agents import content_adapter_pool
+from memory.bus import KEYS, read, write
 
 
 # ---------------------------------------------------------------------------

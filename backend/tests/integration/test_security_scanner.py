@@ -14,8 +14,8 @@ a real E2B sandbox). The LLM call is gated on that step returning at least
 one finding; a module the tools found clean never reaches generate_text()
 at all.
 """
-import agents.security_scanner as security_scanner  # noqa: F401
-from memory.bus import write, read, KEYS
+from agents import security_scanner
+from memory.bus import KEYS, read, write
 
 FIXED_CODE = {
     "config_loader": {

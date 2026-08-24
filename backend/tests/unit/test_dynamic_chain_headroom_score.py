@@ -8,7 +8,7 @@ Patch B. No chain-building behavior is exercised here (that's Patch B's
 own test) -- just that this function reads rate_ledger.headroom_snapshot()
 correctly and applies the right precedence/fail-open rules.
 """
-import eo.dynamic_chain as dynamic_chain
+from eo import dynamic_chain
 
 
 def _snapshot(gating_mode="tokens", provider_reported=None,

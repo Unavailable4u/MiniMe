@@ -32,7 +32,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.skill_library as skill_library
+from eo import skill_library
 
 
 class FakeMatch:

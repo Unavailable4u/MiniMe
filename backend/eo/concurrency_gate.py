@@ -94,7 +94,7 @@ class GatedTask:
 
     label: optional, for logging only.
     """
-    __slots__ = ("call", "step", "label")
+    __slots__ = ("call", "label", "step")
 
     def __init__(self, call, step: "dict | None" = None, label: str = None):
         self.call = call
@@ -185,7 +185,7 @@ def run_gated(tasks: "list[GatedTask]", session_id: str = None) -> "list[Future]
     if not tasks:
         return []
 
-    futures: "list[Future]" = [Future() for _ in tasks]
+    futures: list[Future] = [Future() for _ in tasks]
     pending = list(range(len(tasks)))  # indices into tasks/futures still waiting on admission
     pending_lock = Lock()
     wake = Event()

@@ -19,8 +19,8 @@ Unlike the old script, this writes real files under pytest's tmp_path
 apps/__test_file_manager_scratch/ -- no scratch directory left behind on
 disk, and safe to run concurrently / on every commit.
 """
-import agents.file_manager as file_manager
-from memory.bus import write, KEYS
+from agents import file_manager
+from memory.bus import KEYS, write
 
 FAKE_FIXED_CODE = {
     "Sandbox Engine": {

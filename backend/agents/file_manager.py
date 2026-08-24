@@ -10,14 +10,14 @@ Runs after structure_architect.py, before report_writer.py.
 Place this file at: agents/file_manager.py (overwrite the previous version)
 """
 
+import json
 import os
 import sys
-import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, read_many, KEYS
+from eo.errors import MissingDependencyError  # NEW — bug fix
 from eo.project_registry import resolve_project_root
-from eo.errors import MissingDependencyError   # NEW — bug fix
+from memory.bus import KEYS, read, read_many, write
 
 FILE_MAP_KEY = KEYS.get("file_map", "file_map")
 APP_SLUG_KEY = KEYS.get("app_slug", "app_slug")

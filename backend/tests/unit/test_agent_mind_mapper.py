@@ -21,8 +21,7 @@ mocking needed) -- see that module for what it does and doesn't catch.
 """
 import pytest
 
-import agents.mind_mapper as mind_mapper
-
+from agents import mind_mapper
 
 VALID_FLOWCHART = "flowchart TD\n  A[Start] --> B[End]"
 BROKEN_FLOWCHART_NO_EDGES = "flowchart TD\n  A[Just one node]"

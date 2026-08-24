@@ -38,13 +38,12 @@ i.e. bound directly into chat_store's own namespace) is patched as
 write_audit` would not reach the name chat_store already resolved at
 import time.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-import eo.chat_store as chat_store
-
+from eo import chat_store
 
 # ---------------------------------------------------------------------
 # Fake db.cursor() harness
@@ -106,8 +105,8 @@ def _install_fake_cursor(monkeypatch, cursor, calls_log=None):
 def _row(id="chat_1", title="New Chat", tags=None, linked=None, template_id=None,
          workspace_id=None, message_count=None, last_status=None, is_private=None,
          owner_id=None):
-    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    updated = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    updated = datetime(2026, 1, 2, tzinfo=UTC)
     row = {
         "id": id, "title": title, "created_at": created, "updated_at": updated,
         "linked_chat_ids": linked or [], "tags": tags or [], "template_id": template_id,
@@ -657,7 +656,7 @@ def test_resolve_chat_access_returns_none_when_requester_has_no_workspace_role(m
         {"owner_id": "owner_1", "workspace_id": "ws_1", "is_private": False}])
     _install_fake_cursor(monkeypatch, cursor)
 
-    import eo.chat_workspace as chat_workspace
+    from eo import chat_workspace
     monkeypatch.setattr(chat_workspace, "member_role", lambda ws_id, uid: None)
 
     assert chat_store.resolve_chat_access("chat_1", "requester_1") is None
@@ -669,7 +668,7 @@ def test_resolve_chat_access_returns_real_owner_and_role_for_a_workspace_collabo
         {"owner_id": "owner_1", "workspace_id": "ws_1", "is_private": False}])
     _install_fake_cursor(monkeypatch, cursor)
 
-    import eo.chat_workspace as chat_workspace
+    from eo import chat_workspace
     monkeypatch.setattr(chat_workspace, "member_role", lambda ws_id, uid: "editor")
 
     result = chat_store.resolve_chat_access("chat_1", "requester_1")

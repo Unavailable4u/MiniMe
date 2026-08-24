@@ -40,7 +40,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.conversation_memory as conversation_memory
+from eo import conversation_memory
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +63,7 @@ def _no_note_taker_dispatch(monkeypatch):
     agents.note_taker import note_from_latest_turn_async` inside the
     function body -- patch the real module attribute so tests don't
     depend on (or trigger) the real note-taking pipeline."""
-    import agents.note_taker as note_taker
+    from agents import note_taker
     monkeypatch.setattr(note_taker, "note_from_latest_turn_async", MagicMock())
 
 
@@ -114,7 +114,7 @@ def test_append_turn_caps_at_max_stored_turns_keeping_the_most_recent(fake_bus):
 
 
 def test_append_turn_dispatches_note_taker_only_for_assistant_turns(fake_bus):
-    import agents.note_taker as note_taker
+    from agents import note_taker
 
     conversation_memory.append_turn("sess_1", "user", "question")
     note_taker.note_from_latest_turn_async.assert_not_called()
@@ -125,7 +125,7 @@ def test_append_turn_dispatches_note_taker_only_for_assistant_turns(fake_bus):
 
 
 def test_append_turn_note_taker_dispatch_failure_never_propagates(fake_bus, monkeypatch):
-    import agents.note_taker as note_taker
+    from agents import note_taker
     monkeypatch.setattr(note_taker, "note_from_latest_turn_async",
                          MagicMock(side_effect=RuntimeError("dispatch failed")))
 

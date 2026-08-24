@@ -17,7 +17,7 @@ similarity via utils.similarity.similarity(). Locks down:
   5. run() overwrites KEYS["security_scan_results"] in place with the
      deduped shape, preserving non-dict module results as-is.
 """
-import agents.security_aggregator as security_aggregator
+from agents import security_aggregator
 
 
 # ---------------------------------------------------------------------------

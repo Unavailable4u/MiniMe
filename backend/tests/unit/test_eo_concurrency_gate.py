@@ -34,12 +34,18 @@ Style/isolation notes:
 """
 import threading
 import time
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
-import eo.concurrency_gate as concurrency_gate
-from eo.concurrency_gate import GatedTask, run_gated, _candidate_identity, _admit, _release
+from eo import concurrency_gate
+from eo.concurrency_gate import (
+    GatedTask,
+    _admit,
+    _candidate_identity,
+    _release,
+    run_gated,
+)
 
 FAKE_STEP = {"provider": "groq", "model": "llama-3", "key_env": "GROQ_KEY_1"}
 FAKE_STEP_CF = {"provider": "cloudflare", "model": "llama-3", "account_id_env": "CF_ACCT_1"}

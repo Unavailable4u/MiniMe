@@ -29,14 +29,15 @@ Output, written to KEYS["duplication_report"]:
   "summary": "1 likely-duplicate module found."
 }
 """
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, read_many, KEYS, vector_index
-from utils.llm_client import log_usage, embed_text_with_fallback
+from memory.bus import KEYS, read, read_many, vector_index, write
+from utils.llm_client import embed_text_with_fallback, log_usage
 
 load_dotenv()
 

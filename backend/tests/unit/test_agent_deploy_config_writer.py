@@ -22,8 +22,8 @@ import sys
 
 import pytest
 
-import agents.deploy_config_writer as deploy_config_writer
-from memory.bus import write, read, KEYS, set_app_slug
+from agents import deploy_config_writer
+from memory.bus import KEYS, read, set_app_slug, write
 
 
 @pytest.fixture(autouse=True)

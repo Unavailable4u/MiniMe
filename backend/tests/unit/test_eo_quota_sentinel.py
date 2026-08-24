@@ -52,13 +52,12 @@ Style/isolation notes:
     key shapes exactly. This is safe for a normal test run and avoids
     adding a new test-only dependency for one module.
 """
-from datetime import date, timedelta, datetime, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 import eo.quota_sentinel as qs
 from memory.bus import write as bus_write
-
 
 # ---------------------------------------------------------------------
 # Fixtures — small, fixed fake registry/config in place of the real one
@@ -88,8 +87,8 @@ FAKE_PROVIDER_DEFAULT_MODEL = {
 
 @pytest.fixture(autouse=True)
 def _fake_registry_and_quota(monkeypatch):
-    import eo.registry as registry_module
     import agents.generic_worker as generic_worker_module
+    import eo.registry as registry_module
 
     monkeypatch.setattr(registry_module, "AGENT_CAPABILITIES", dict(FAKE_CAPS))
     monkeypatch.setattr(qs, "QUOTA_CONFIG", FAKE_QUOTA_CONFIG)
@@ -236,7 +235,7 @@ def test_get_quota_snapshot_cloudflare_reports_unit_mismatch_and_no_pct():
 
 
 def test_get_quota_snapshot_cooling_down_true_for_future_timestamp():
-    future = datetime.now(timezone.utc).timestamp() + 300
+    future = datetime.now(UTC).timestamp() + 300
     _seed_cooldown("groq", "GROQ_TEST_KEY", future)
     snapshot = qs.get_quota_snapshot()
     entry = snapshot["GROQ_TEST_KEY"]
@@ -245,7 +244,7 @@ def test_get_quota_snapshot_cooling_down_true_for_future_timestamp():
 
 
 def test_get_quota_snapshot_cooling_down_false_for_past_timestamp():
-    past = datetime.now(timezone.utc).timestamp() - 300
+    past = datetime.now(UTC).timestamp() - 300
     _seed_cooldown("groq", "GROQ_TEST_KEY", past)
     snapshot = qs.get_quota_snapshot()
     entry = snapshot["GROQ_TEST_KEY"]
@@ -333,7 +332,7 @@ def test_check_and_alert_fires_daily_alert_at_80_percent(monkeypatch):
         qs, "get_quota_snapshot",
         lambda: {"GROQ_TEST_KEY": {"used": 800, "quota": 1000, "pct": 0.8}},
     )
-    monkeypatch.setattr(qs, "get_rate_window_snapshot", lambda: {})
+    monkeypatch.setattr(qs, "get_rate_window_snapshot", dict)
     monkeypatch.setattr(
         qs, "emit_event",
         lambda event_type, session_id, agent=None, payload=None: events.append(
@@ -358,7 +357,7 @@ def test_check_and_alert_does_not_fire_below_80_percent(monkeypatch):
         qs, "get_quota_snapshot",
         lambda: {"GROQ_TEST_KEY": {"used": 799, "quota": 1000, "pct": 0.799}},
     )
-    monkeypatch.setattr(qs, "get_rate_window_snapshot", lambda: {})
+    monkeypatch.setattr(qs, "get_rate_window_snapshot", dict)
     monkeypatch.setattr(qs, "emit_event", lambda *a, **k: events.append((a, k)))
 
     qs.check_and_alert()
@@ -376,7 +375,7 @@ def test_check_and_alert_skips_accounts_with_no_verified_pct(monkeypatch):
         qs, "get_quota_snapshot",
         lambda: {"MISTRAL_TEST_KEY": {"used": 0, "quota": None, "pct": None}},
     )
-    monkeypatch.setattr(qs, "get_rate_window_snapshot", lambda: {})
+    monkeypatch.setattr(qs, "get_rate_window_snapshot", dict)
     monkeypatch.setattr(qs, "emit_event", lambda *a, **k: events.append((a, k)))
 
     qs.check_and_alert()  # must not raise
@@ -386,7 +385,7 @@ def test_check_and_alert_skips_accounts_with_no_verified_pct(monkeypatch):
 
 def test_check_and_alert_fires_minute_alert_from_sliding_window(monkeypatch):
     events = []
-    monkeypatch.setattr(qs, "get_quota_snapshot", lambda: {})
+    monkeypatch.setattr(qs, "get_quota_snapshot", dict)
     monkeypatch.setattr(
         qs, "get_rate_window_snapshot",
         lambda: {
@@ -425,7 +424,7 @@ def test_check_and_alert_fires_minute_alert_from_sliding_window(monkeypatch):
 
 def test_check_and_alert_skips_minute_alert_when_pct_used_is_none(monkeypatch):
     events = []
-    monkeypatch.setattr(qs, "get_quota_snapshot", lambda: {})
+    monkeypatch.setattr(qs, "get_quota_snapshot", dict)
     monkeypatch.setattr(
         qs, "get_rate_window_snapshot",
         lambda: {

@@ -17,14 +17,16 @@ same fix; see llm_client.py's own comment at that call site.
 """
 import os
 import sys
-from datetime import date, timedelta, datetime, timezone
+from datetime import UTC, date, datetime, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory.bus import read as bus_read, read_many as bus_read_many
+from memory.bus import read as bus_read
+from memory.bus import read_many as bus_read_many
+from relay.emitter import emit_event
 from utils.llm_client import QUOTA_CONFIG
 from utils.rate_ledger import headroom_snapshot
-from relay.emitter import emit_event
+
 TAVILY_MONTHLY_QUOTA = 1000  # Tavily's free tier: 1,000 searches/MONTH, not
 # daily like every other provider in QUOTA_CONFIG. Deliberately NOT added
 # to utils/llm_client.py's QUOTA_CONFIG -- that dict's own docstring
@@ -152,7 +154,7 @@ def get_quota_snapshot() -> dict:
     cooldown_keys = [f"cooldown_until:{provider}:{key_id}" for _, provider, key_id in agent_infos]
     usage_records = bus_read_many(usage_keys, default={"requests": 0, "tokens": 0})
     cooldown_records = bus_read_many(cooldown_keys, default=None)
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(UTC).timestamp()
 
     snapshot = {}
     for agent_key, provider, key_id in agent_infos:

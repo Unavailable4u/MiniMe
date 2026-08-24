@@ -30,16 +30,16 @@ put the "backlink" and "topic reconciliation" ideas in the same place.
 Place this file at: agents/backlink_detector.py
 """
 
+import json
 import os
 import re
 import sys
-import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
 from eo.graph_edges import create_edge, edges_between
-from eo.registry import get_role_prompt, add_role_prompt
-from eo.secondary_data import get_secondary_data, apply_patch
+from eo.knowledge_graph import list_nodes
+from eo.registry import add_role_prompt, get_role_prompt
+from eo.secondary_data import apply_patch, get_secondary_data
 
 RELATION = "references"
 MIN_TITLE_LENGTH = 4
@@ -270,7 +270,7 @@ def _run_self_connect_pass(topics: dict, session_id: str = None) -> str:
     see this section's own top-of-block note.
     """
     _ensure_self_connect_role_registered()
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # reasoning as
                                                           # _run_incremental_pass()
 
@@ -326,10 +326,10 @@ def _run_self_connect_and_apply(workspace_id: str, new_topics: dict, doc: dict,
     return stays a one-line change rather than duplicating all of phase
     2's plumbing inline.
     """
-    from relay.emitter import emit_event   # deferred, same reasoning as
-                                            # run_after_source_manager()'s
-                                            # own import below
-    from eo.notify import notify           # deferred, same reasoning
+    # run_after_source_manager()'s
+    # own import below
+    from eo.notify import notify  # deferred, same reasoning
+    from relay.emitter import emit_event  # deferred, same reasoning as
 
     if len(new_topics) < 2:
         return []  # nothing to connect a single topic to
@@ -374,7 +374,7 @@ def _run_incremental_pass(new_topics: dict, existing_topics: dict, session_id: s
     seeing unrelated chat history, just these two topic lists.
     """
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred -- same
+    from agents.generic_worker import run as run_role  # deferred -- same
                                                           # circular-import
                                                           # reason as
                                                           # agents/source_manager.py
@@ -741,8 +741,8 @@ def detect_backlinks(workspace_id: str, created_by: str = "system") -> list[dict
 
 
 if __name__ == "__main__":
-    import sys
     import json
+    import sys
     for ws in sys.argv[1:]:
         edges = detect_backlinks(ws)
         print(f"--- {ws}: {len(edges)} new backlink(s) ---")

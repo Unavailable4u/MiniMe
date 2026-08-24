@@ -179,7 +179,7 @@ def chain_step_for(agent_key: str) -> dict:
 
 
 def _dynamic_max_chain_steps(quota_status: dict) -> int:
-    from eo.panel import _is_cooling_down   # deferred — see module docstring
+    from eo.panel import _is_cooling_down  # deferred — see module docstring
 
     live_providers = {
         info.get("provider")
@@ -197,7 +197,7 @@ def _rank_by_live_headroom(candidates: list, quota_status: dict) -> list:
     data is equal or absent, e.g. a fresh account with nothing recorded
     yet reads 0.0 on both and falls back to daily-quota ordering same
     as before this patch."""
-    from eo.panel import _usage_fraction   # deferred — see module docstring
+    from eo.panel import _usage_fraction  # deferred — see module docstring
 
     return sorted(
         candidates,
@@ -220,7 +220,7 @@ def _candidate_pool(role: str, quota_status: dict, exclude: set) -> list:
     Returns the full ranked candidate list (best first), not just the
     winner -- Patch C needs to see the rest of the pool to find a
     second-org candidate the provider-spread loop didn't reach."""
-    from eo.panel import _is_cooling_down   # deferred — see module docstring
+    from eo.panel import _is_cooling_down  # deferred — see module docstring
 
     natural_candidates = [
         key for key, info in AGENT_CAPABILITIES.items()
@@ -425,7 +425,7 @@ def build_fallback_chain(role: str, quota_status: dict = None, max_steps: int = 
     cooling down -- callers should fall back to their own static CHAIN
     in that case (belt-and-suspenders, should be very rare).
     """
-    from eo.quota_sentinel import get_quota_snapshot   # deferred — see module docstring
+    from eo.quota_sentinel import get_quota_snapshot  # deferred — see module docstring
 
     if quota_status is None:
         quota_status = get_quota_snapshot()
@@ -446,7 +446,7 @@ def build_fallback_chain_excluding(role: str, exclude_keys, quota_status: dict =
     already using (and their providers, same provider-spreading logic),
     not just the one account that thread started on.
     """
-    from eo.quota_sentinel import get_quota_snapshot   # deferred — see module docstring
+    from eo.quota_sentinel import get_quota_snapshot  # deferred — see module docstring
 
     if quota_status is None:
         quota_status = get_quota_snapshot()

@@ -22,11 +22,10 @@ Two-pass posture (module docstring §8b):
   6. _candidate_topics(): scope_node_ids=None means every topic;
      otherwise only topics whose `covers` intersects scope_node_ids.
 """
-from unittest.mock import MagicMock
 
 import pytest
 
-import agents.correction_locator as correction_locator
+from agents import correction_locator
 
 
 def _topic(name="Topic A", summary="summary A", content_hint="hint", covers=None):

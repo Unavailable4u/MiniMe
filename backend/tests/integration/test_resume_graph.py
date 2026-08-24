@@ -31,7 +31,7 @@ caught again the same way.
 """
 import pytest
 
-import agents.generic_worker as generic_worker  # noqa: F401  (ensures mock_llm patches this module)
+from agents import generic_worker
 from eo.executor import execute_graph, resume_graph
 from eo.registry import resolve_role
 from memory.bus import read as bus_read

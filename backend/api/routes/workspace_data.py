@@ -32,26 +32,28 @@ import os
 import secrets
 import urllib.parse
 import zipfile
-from typing import Any, Optional
+from typing import Any
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
-from api.deps import require_auth
-from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FORMATS
-from agents.correction_locator import locate_correction
-from agents.part_price_finder import find_price
-from agents import calendar_agent
+from agents import calendar_agent, pagespeed_agent
 from agents.calendar_agent import IntegrationNotConnectedError
-from agents import pagespeed_agent
-from eo import chat_workspace
-from eo import correction_candidates
-from eo import integrations
-from eo import panel_content
-from eo import study_progress
-from eo import workspace_facts
+from agents.correction_locator import locate_correction
+from agents.exporter import SUPPORTED_FORMATS as EXPORTABLE_FORMATS
+from agents.exporter import export_artifact
+from agents.part_price_finder import find_price
+from api.deps import require_auth
+from eo import (
+    chat_workspace,
+    correction_candidates,
+    integrations,
+    panel_content,
+    study_progress,
+    workspace_facts,
+)
 from graph.adapters import chat_to_artifact
 
 router = APIRouter()
@@ -94,10 +96,10 @@ class WorkspaceFactsRequest(BaseModel):
     # a settings-panel save can send just the fields it's touching;
     # set_facts() merges rather than requiring the full object every
     # time.
-    brand_voice: Optional[str] = None
-    target_user: Optional[str] = None
-    tech_stack: Optional[list[str]] = None
-    custom: Optional[dict[str, Any]] = None
+    brand_voice: str | None = None
+    target_user: str | None = None
+    tech_stack: list[str] | None = None
+    custom: dict[str, Any] | None = None
 
 
 class PanelContentRequest(BaseModel):
@@ -108,13 +110,13 @@ class ProgressUpdateRequest(BaseModel):
     # Manual override body (step 6.5) — mirrors set_progress()'s optional,
     # independent args: pass only what you're changing. Both are optional
     # so a caller can e.g. edit notes without touching status.
-    status: Optional[str] = None
-    notes: Optional[str] = None
+    status: str | None = None
+    notes: str | None = None
 
 
 class SubmitCorrectionRequest(BaseModel):  # NEW — Data Layer architecture §8c
     text: str
-    scope_node_id: Optional[str] = None  # None == "All files", same convention
+    scope_node_id: str | None = None  # None == "All files", same convention
                                           # get_packet()'s own scope arg uses
 
 
@@ -630,7 +632,7 @@ def put_workspace_panel_content(ws_id: str, panel_key: str, req: PanelContentReq
 # get_workspace_facts()/list_workspace_panel_content() above.
 
 @router.get("/api/workspaces/{ws_id}/progress", dependencies=[Depends(require_auth)])
-def get_workspace_progress(ws_id: str, topic_id: Optional[str] = Query(None),
+def get_workspace_progress(ws_id: str, topic_id: str | None = Query(None),
                             owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)

@@ -16,7 +16,7 @@ needed updating, or classify()'s own _validate() rejects the response
 outright (KeyError on parsed["path"] via the "path not in VALID_PATHS"
 check) before any event ever fires.
 """
-import relay.emitter as emitter
+from relay import emitter
 
 
 class _FakePusher:
@@ -143,7 +143,7 @@ def test_notify_unknown_kind_is_skipped_not_raised(caplog):
     to degrade past' -- but that contradicts relay/emitter.py's own
     stated design rule for this whole subsystem. It now logs a warning
     and returns None, same posture as emit_event()."""
-    import eo.notify as notify
+    from eo import notify
     result = notify.notify("sess_abc", "not_a_real_kind")
     assert result is None
     assert any("not_a_real_kind" in rec.message for rec in caplog.records)
@@ -155,7 +155,7 @@ def test_notify_valid_kinds_derive_from_emitter_notify_kinds():
     relay/emitter.py:VALID_EVENT_TYPES by hand -- exactly the drift
     that let 'notification' silently fail for a period after Part 8.4
     landed. It's now derived from relay.emitter.NOTIFY_KINDS instead."""
-    import eo.notify as notify
+    from eo import notify
     assert notify.VALID_KINDS == {k.value for k in emitter.NOTIFY_KINDS}
     # sanity: a real EventType member that is NOT notify()-eligible
     # (e.g. a plain agent-lifecycle event) must stay excluded here --
@@ -237,7 +237,7 @@ def test_inspector_emits_start_and_routing_decision_and_done(monkeypatch):
     monkeypatch.setattr(emitter, "_pusher_client", fake_client)
     monkeypatch.setattr(emitter, "_pusher_unavailable", False)
 
-    import eo.inspector as inspector
+    from eo import inspector
     monkeypatch.setattr(inspector, "generate_text", lambda **kwargs: GOOD_JSON)
 
     result = inspector.classify("what's 2+2", session_id="sess_xyz")
@@ -259,7 +259,7 @@ def test_inspector_without_session_id_emits_nothing(monkeypatch):
     monkeypatch.setattr(emitter, "_pusher_client", fake_client)
     monkeypatch.setattr(emitter, "_pusher_unavailable", False)
 
-    import eo.inspector as inspector
+    from eo import inspector
     monkeypatch.setattr(inspector, "generate_text", lambda **kwargs: GOOD_JSON)
 
     inspector.classify("what's 2+2")  # no session_id

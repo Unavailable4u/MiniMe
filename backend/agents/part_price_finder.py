@@ -16,14 +16,16 @@ other agent in this codebase defines its own module-level CHAIN
 (see utils/llm_client.py's own docstring example); this one does the
 same rather than relying on a "default" that doesn't exist.
 """
+import logging
 import os
 import sys
-import logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from datetime import UTC
+
+from eo.price_cache import get_cached_price, set_cached_price
 from utils.llm_client import generate_text
 from utils.web_search import search as web_search
-from eo.price_cache import get_cached_price, set_cached_price
 
 # Bug fix (pricing-audit root cause 2): every failure in this module used
 # to be silently swallowed -- a genuine "no listing exists" and a broken
@@ -234,14 +236,14 @@ def _find_international_fallback(part_name: str, chain_override: list, agent_nam
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from datetime import datetime
+    return datetime.now(UTC).isoformat()
 
 
 def _safe_json(text: str) -> dict | None:
     import json
     import re
-    match = re.search(r"\{.*\}", text, re.S)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         return None
     try:

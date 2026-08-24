@@ -31,7 +31,6 @@ from starlette.websockets import WebSocketDisconnect
 
 import eo.local_workspace as lw
 
-
 # ---------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------

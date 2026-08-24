@@ -41,7 +41,7 @@ that same shape -- eo/mech_enclosure.py's own compute_housing_footprint()
 already share it.
 """
 
-from eo.enclosure_spec import CUTOUT_TABLE, CUTOUT_ELIGIBLE_CATEGORIES, ENCLOSURE_SPEC
+from eo.enclosure_spec import CUTOUT_ELIGIBLE_CATEGORIES, CUTOUT_TABLE, ENCLOSURE_SPEC
 from eo.mech_sections import subsections_for_section
 from eo.mech_subsections import members_for_subsection
 from eo.mech_swept_volume import is_exclusion

@@ -54,7 +54,7 @@ def main() -> None:
 
     workspace_id, topic_title, topic_summary = sys.argv[1], sys.argv[2], sys.argv[3]
 
-    from eo.note_candidates import propose_note, accept_candidate
+    from eo.note_candidates import accept_candidate, propose_note
 
     title = f"Notes: {topic_title}"
     content = (

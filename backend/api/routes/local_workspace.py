@@ -28,7 +28,7 @@ Place this file at: api/routes/local_workspace.py
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -107,13 +107,13 @@ async def local_read_file(
 
 class ProposeActionRequest(BaseModel):
     tool: str  # one of "write_file" | "delete" | "execute_command"
-    params: Dict[str, Any] = {}
+    params: dict[str, Any] = {}
 
 
 class ProposeActionResponse(BaseModel):
     action_id: str
     tool: str
-    params: Dict[str, Any]
+    params: dict[str, Any]
     expires_in_seconds: int
 
 

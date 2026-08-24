@@ -17,14 +17,14 @@ why it can't be a top-level import), so it's faked via a sys.modules
 substitute the same way test_agent_source_planner_lean.py fakes
 agents.generic_worker.
 """
-import sys
 import json
+import sys
 from unittest.mock import MagicMock
 
 import pytest
 
-import agents.idea_planner as idea_planner
-from memory.bus import write, read, KEYS
+from agents import idea_planner
+from memory.bus import KEYS, read, write
 
 
 def _fake_dynamic_chain(chain):

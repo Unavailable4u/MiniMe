@@ -14,7 +14,7 @@ against the real store via the autouse `fake_bus` fixture.
 """
 import pytest
 
-import agents.concept_linker as concept_linker
+from agents import concept_linker
 
 
 def _packet(topics=None, connections=None):

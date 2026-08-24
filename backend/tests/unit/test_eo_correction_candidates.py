@@ -40,7 +40,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.correction_candidates as correction_candidates
+from eo import correction_candidates
 
 
 def _op(path="/topics/t1", value=None, kind="replace"):

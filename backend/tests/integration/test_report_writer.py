@@ -11,8 +11,8 @@ memory_search.py both read report["summary"], which used to always be
 empty since only "text" was ever written).
 """
 
-from memory.bus import write, read, KEYS
-import agents.report_writer as report_writer  # noqa: F401  (ensures mock_llm patches this module)
+from agents import report_writer
+from memory.bus import KEYS, read, write
 
 FIXED_CODE = {
     "todo_storage": {"language": "python", "code": "def add_todo(todos, item):\n    todos.append(item)\n"},
@@ -89,8 +89,9 @@ def test_falls_back_to_submitted_code_when_fixed_code_is_absent(mock_llm):
 
 
 def test_raises_missing_dependency_when_no_code_ran_at_all(mock_llm):
-    from eo.errors import MissingDependencyError
     import pytest
+
+    from eo.errors import MissingDependencyError
 
     with pytest.raises(MissingDependencyError):
         report_writer.run_report_writer()

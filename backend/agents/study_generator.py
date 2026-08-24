@@ -111,7 +111,7 @@ def generate_study_content(panel_key: str, workspace_id: str, source_node_ids: l
     if not context:
         raise LookupError("no readable topic content in scope")
 
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason as
                                                           # agents/note_taker.py

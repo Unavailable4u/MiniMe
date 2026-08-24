@@ -15,8 +15,7 @@ non-existent category names. Existing ENCLOSURE_SPEC/SUPPORT_CATEGORIES
 keys already have their own coverage via test_mech_enclosure.py/
 test_mech_supports.py and aren't re-tested here.
 """
-from eo.enclosure_spec import ENCLOSURE_SPEC, CUTOUT_TABLE, CUTOUT_ELIGIBLE_CATEGORIES
-
+from eo.enclosure_spec import CUTOUT_ELIGIBLE_CATEGORIES, CUTOUT_TABLE, ENCLOSURE_SPEC
 
 _VALID_SHAPES = {"rectangular", "circular", "port"}
 _EXPECTED_KEYWORDS = {"display", "buzzer", "mic", "button", "usb",

@@ -9,7 +9,7 @@ key instead of raising, read_many() batches multiple keys through one
 MGET and keys its result by the ORIGINAL (un-namespaced) key names, and
 delete() actually removes a key rather than leaving an empty record.
 """
-from memory.bus import write, read, read_many, delete, KEYS
+from memory.bus import KEYS, delete, read, read_many, write
 
 
 def test_write_read_round_trips_a_string():

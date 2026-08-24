@@ -12,6 +12,7 @@ tighten this before deploying anywhere real.
 """
 import os
 import sys
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -32,18 +33,38 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # NEW — Data Layer architecture §9b: capturing the running
-                 # event loop at startup for eo/ws_registry.py's thread-safe push
+
+# event loop at startup for eo/ws_registry.py's thread-safe push
 from contextlib import asynccontextmanager  # NEW — §9b: lifespan startup hook
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect  # NEW — §9b
+from fastapi import (  # NEW — §9b
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
 
 # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
 # _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
 # so api/routes/* modules can import it without a circular import back
 # into this file. See api/deps.py's module docstring for why.
 from api.deps import _verify_supabase_jwt
+from api.routes.chats import router as chats_router
+from api.routes.code import router as code_router
+from api.routes.deploy import router as deploy_router
+from api.routes.graph_and_notes import router as graph_and_notes_router
+
+# F2 Part 3 — local_workspace_data_router owns the HTTP surface over the
+# read-only list_dir/read_file tool calls (+ /local/status). A separate
+# router/file from local_workspace_router above (which is the websocket
+# route + registry) since this one follows the plain require_auth +
+# ws_id-ownership shape every other api/routes/*.py file uses, unlike
+# the websocket route's pairing-token auth.
+from api.routes.local_workspace import router as local_workspace_data_router
+from api.routes.notebooks import router as notebooks_router
+from api.routes.system import router as system_router
 
 # B6 — routers split out of this file. tasks_router owns /api/task*,
 # /api/resume, /api/roles*, /api/workflow-templates*, and (as of piece 6)
@@ -60,27 +81,16 @@ from api.deps import _verify_supabase_jwt
 # per workspace file path, see api/routes/code.py's own docstring for
 # why it's a separate file rather than folded into workspace_data.py.
 from api.routes.tasks import router as tasks_router
-from api.routes.system import router as system_router
-from api.routes.chats import router as chats_router
-from api.routes.workspaces import router as workspaces_router
 from api.routes.workspace_data import router as workspace_data_router
-from api.routes.graph_and_notes import router as graph_and_notes_router
-from api.routes.notebooks import router as notebooks_router
-from api.routes.deploy import router as deploy_router
-from api.routes.code import router as code_router
+from api.routes.workspaces import router as workspaces_router
+from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
+
 # F2 Part 2 — local_workspace_router owns /ws/daemon/{workspace_id}, the
 # daemon's own websocket route. Included as a router (not a bare
 # @app.websocket like /ws/{session_id} below) purely so its handshake
 # logic lives in eo/local_workspace.py alongside the registry it shares
 # module state with, rather than split across two files.
 from eo.local_workspace import router as local_workspace_router
-# F2 Part 3 — local_workspace_data_router owns the HTTP surface over the
-# read-only list_dir/read_file tool calls (+ /local/status). A separate
-# router/file from local_workspace_router above (which is the websocket
-# route + registry) since this one follows the plain require_auth +
-# ws_id-ownership shape every other api/routes/*.py file uses, unlike
-# the websocket route's pairing-token auth.
-from api.routes.local_workspace import router as local_workspace_data_router
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:

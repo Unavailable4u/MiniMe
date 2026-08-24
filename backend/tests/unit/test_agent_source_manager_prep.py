@@ -15,8 +15,7 @@ _run_sequential_pass, _run_parallel_passes, and _run_mode_a_topic_extraction
 verified against known-good building blocks before the execution half
 (concurrency, generic_worker calls) is exercised.
 """
-import agents.source_manager as source_manager
-
+from agents import source_manager
 
 # ---------------------------------------------------------------------------
 # 1. _ensure_role_registered

@@ -13,14 +13,14 @@ The production 19-agent roster (tier 3, Part 4 of the blueprint), plus
 Tier 0's Responder and Tier 1's lean pipeline (Part 2.3-2.4, added in
 Stage 4 steps 2-4 of the roadmap), are all wired up here.
 """
-import sys
-import os
 import contextvars
-import difflib
 import datetime as _datetime
+import difflib
+import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
-
 
 AGENT_CAPABILITIES = {
     # --- Groq: sequential low-volume roles ---
@@ -1446,7 +1446,7 @@ ROLE_PROMPTS_SEED["prd_writer"] += ROLE_PROMPTS_SEED.pop("prd_writer_hardware_sc
 
 
 def _utcnow_iso() -> str:
-    return _datetime.datetime.now(_datetime.timezone.utc).isoformat()
+    return _datetime.datetime.now(_datetime.UTC).isoformat()
 
 
 def _wrap_legacy_entry(role_name: str, brief: str) -> dict:
@@ -1862,43 +1862,43 @@ def resolve_role(role_name: str) -> str:
 # agents.* modules' own `from eo.registry import ...` would fail with
 # ImportError. Placing it here, after every symbol agents/*.py needs is
 # already defined, breaks that cycle without restructuring either side.
-from agents import (  # noqa: E402
-    memory_search,
-    idea_planner,
-    prompt_writer,
-    code_writers,
-    dependency_mapper,
-    test_writer,
-    reviewer,
-    duplication_checker,
-    fixer_pool,
-    sandbox_tester,
-    structure_architect,
-    security_scanner,
-    security_aggregator,
-    file_manager,
-    documentation_agent,
-    report_writer,
-    responder,
-    architecture_diagrammer,
-    schema_diagrammer,
-    handoff_packager,  # Part 5 §5.6
-    prompt_writer_lean,
-    code_writer_lean,
-    reviewer_fixer_lean,
-    generic_worker,
+from agents import (
     academic_search,  # Part 3 §3.3 — was missing from this block, see fix note
-    web_researcher,  # Task 13c — E1 research role, general/forum/news/hackernews scopes
-    extraction_table_builder,  # Part 3 §3.5
+    architecture_diagrammer,
+    citation_graph_builder,  # Part 3
+    code_writer_lean,
+    code_writers,
+    content_adapter_pool,  # Part 6 §6.2
     contradiction_prefilter,  # Part 3 §3.6
     dataset_analyst,  # Part 3 §3.7
-    source_quality_flagger,  # Part 3 §3.8
-    citation_graph_builder,  # Part 3
-    content_adapter_pool,  # Part 6 §6.2
+    dependency_mapper,
     deploy_config_writer,  # Part 7 §7.4
-    performance_reviewer,  # Patch 8 (rollout guide §3)
+    documentation_agent,
+    duplication_checker,
+    extraction_table_builder,  # Part 3 §3.5
+    file_manager,
+    fixer_pool,
+    generic_worker,
+    handoff_packager,  # Part 5 §5.6
     hardware_speccer,  # MiniMe Blueprint — was never imported, so REGISTRY
     # below couldn't reference it either. See REAL_ACTION_ROLES entry above.
+    idea_planner,
+    memory_search,
+    performance_reviewer,  # Patch 8 (rollout guide §3)
+    prompt_writer,
+    prompt_writer_lean,
+    report_writer,
+    responder,
+    reviewer,
+    reviewer_fixer_lean,
+    sandbox_tester,
+    schema_diagrammer,
+    security_aggregator,
+    security_scanner,
+    source_quality_flagger,  # Part 3 §3.8
+    structure_architect,
+    test_writer,
+    web_researcher,  # Task 13c — E1 research role, general/forum/news/hackernews scopes
 )
 
 # name -> {"callable": fn, "needs_cycle_num": bool}

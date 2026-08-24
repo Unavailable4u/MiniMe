@@ -41,13 +41,13 @@ import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, set_app_slug, slugify, read_stage_output_text
-from relay.emitter import emit_event, EventType
-from eo.errors import MissingDependencyError
 # Reuse, don't reimplement — same bus keys architecture_diagrammer.py/
 # schema_diagrammer.py already write their rendered Mermaid to.
 from agents.architecture_diagrammer import ARCHITECTURE_DIAGRAM_KEY
 from agents.schema_diagrammer import SCHEMA_DIAGRAM_KEY
+from eo.errors import MissingDependencyError
+from memory.bus import KEYS, read, read_stage_output_text, set_app_slug, slugify, write
+from relay.emitter import EventType, emit_event
 
 PLAN_HANDOFF_PACKAGE_KEY = "plan_handoff_package"
 

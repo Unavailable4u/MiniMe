@@ -5,9 +5,10 @@ Same memory.bus read/write mechanism the rest of the system already uses
 for persistence — no new storage layer.
 """
 import os
-import sys
 import re
+import sys
 import time
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 

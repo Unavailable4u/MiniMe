@@ -12,7 +12,7 @@ session_id=session_id)) must never diverge on the brief a novel role
 gets written.
 """
 from eo.panel import staff_task
-from eo.registry import get_role_prompt, ROLE_PROMPTS_KEY
+from eo.registry import ROLE_PROMPTS_KEY, get_role_prompt
 from memory.bus import read
 
 NOVEL_ROLE = "cli_api_symmetry_test_role"

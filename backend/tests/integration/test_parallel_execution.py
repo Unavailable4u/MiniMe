@@ -59,15 +59,16 @@ import json
 import time
 from unittest.mock import patch
 
-import eo.panel as panel
-import eo.executor as executor
-import eo.dispatcher as dispatcher
-import memory.bus as bus
-from eo.panel import run_panel
-from eo.router import sanitize_parallel_groups, build_execution_graph_from_hires, MAX_PARALLEL_GROUP_SIZE
-from eo.errors import MissingDependencyError
+from eo import dispatcher, executor, panel
 from eo.agent_dependencies import AGENT_DEPENDENCIES
-
+from eo.errors import MissingDependencyError
+from eo.panel import run_panel
+from eo.router import (
+    MAX_PARALLEL_GROUP_SIZE,
+    build_execution_graph_from_hires,
+    sanitize_parallel_groups,
+)
+from memory import bus
 
 # ---------------------------------------------------------------------------
 # Shared fakes used by the executor scenarios (C/D/E below).
@@ -225,7 +226,7 @@ def test_executor_dispatches_independent_roles_concurrently():
     agent_names = ["generic_worker", "generic_worker", "generic_worker"]
 
     with patch.object(executor, "resolve", fake_resolve), \
-         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "list_known_roles", list), \
          patch.object(executor, "emit_event", fake_emit_event), \
          patch.object(dispatcher, "next_step", fake_next_step):
         t0 = time.monotonic()
@@ -272,7 +273,7 @@ def test_approval_role_never_grouped_even_if_it_slips_through():
 
     with patch.object(executor, "resolve", fake_resolve4), \
          patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
-         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "list_known_roles", list), \
          patch.object(executor, "emit_event", fake_emit_event4), \
          patch.object(dispatcher, "next_step", fake_next_step4), \
          patch.object(bus, "write", lambda *a, **kw: None), \
@@ -319,7 +320,7 @@ def test_full_pipeline_sanitize_build_execute_against_adversarial_output():
 
     fake_resolve5, fake_next_step5, fake_emit_event5, call_log5, start_times5, events5 = _make_fakes(0.0)
     with patch.object(executor, "resolve", fake_resolve5), \
-         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "list_known_roles", list), \
          patch.object(executor, "emit_event", fake_emit_event5), \
          patch.object(dispatcher, "next_step", fake_next_step5), \
          patch.object(bus, "write", lambda *a, **kw: None), \
@@ -358,7 +359,7 @@ def test_proactive_dependency_insertion_for_known_edge():
 
     with patch.object(executor, "resolve", fake_resolve6), \
          patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
-         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "list_known_roles", list), \
          patch.object(executor, "emit_event", fake_emit_event6), \
          patch.object(dispatcher, "next_step", fake_next_step6):
         result6 = executor.execute_graph(
@@ -423,7 +424,7 @@ def test_reactive_self_heal_still_works_for_edge_not_in_static_graph():
 
     with patch.object(executor, "resolve", fake_resolve7), \
          patch.object(executor, "resolve_role", lambda r: "generic_worker"), \
-         patch.object(executor, "list_known_roles", lambda: []), \
+         patch.object(executor, "list_known_roles", list), \
          patch.object(executor, "emit_event", fake_emit_event7), \
          patch.object(dispatcher, "next_step", fake_next_step7):
         result7 = executor.execute_graph(

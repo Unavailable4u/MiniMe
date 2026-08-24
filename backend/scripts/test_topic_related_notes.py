@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _list_available_topics():
-    from eo.secondary_data import _read   # deferred, see note_candidates.py's
+    from eo.secondary_data import _read  # deferred, see note_candidates.py's
     # own precedent for late-importing store internals from a script
     doc = _read()
     if not doc:

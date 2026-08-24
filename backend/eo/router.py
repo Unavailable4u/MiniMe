@@ -10,6 +10,7 @@ not call anything itself — see eo/registry.py for name->callable
 resolution, and a later-stage executor for actually running the graph.
 """
 from eo.registry import REGISTRY, resolve_role
+
 # ---------------------------------------------------------------------------
 # Tier 3 — full roster, Part 4 of the blueprint.
 #

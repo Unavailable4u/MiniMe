@@ -26,13 +26,13 @@ same filter chat_store.set_linked_chats already applies elsewhere.
 -----------------------------------------------------------------------------
 """
 import uuid
-from datetime import datetime, timezone
-from eo import db
-from eo import chat_store
+from datetime import UTC, datetime
+
+from eo import chat_store, db
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value):

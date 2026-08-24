@@ -27,11 +27,11 @@ research agent's run.
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import vector_index
-from utils.llm_client import log_usage, embed_text
+from utils.llm_client import embed_text, log_usage
 
 ID_PREFIX = "hw_ref"
 
@@ -126,7 +126,7 @@ def write_hw_reference(mech_ref: dict) -> str | None:
         "dimension_ref_id": mech_ref.get("dimension_ref_id"),
         "aliases": mech_ref.get("aliases") or [],
         "created_by": mech_ref.get("created_by") or "web_researcher",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     try:

@@ -61,7 +61,7 @@ logging.basicConfig(level=logging.INFO, format="[role_provider] %(levelname)s: %
 # So catching UpstashError separately from the transport-level
 # exception classes is a real, confirmed distinction, not a guess at
 # an unstable exception shape.
-from upstash_redis.errors import UpstashError  # noqa: E402
+from upstash_redis.errors import UpstashError
 
 
 def _reject_real_action_role(role_name: str) -> str | None:
@@ -80,8 +80,8 @@ def _reject_real_action_role(role_name: str) -> str | None:
     .REGISTRY is the actual name -> callable dispatch table and is keyed
     the right way -- confirmed by checking both dicts directly against
     a running import, not assumed from the guide."""
-    from eo.registry import REGISTRY
     from agents.generic_worker import run as generic_worker_run
+    from eo.registry import REGISTRY
 
     entry = REGISTRY.get(role_name)
     if entry is not None and entry["callable"] is not generic_worker_run:
@@ -106,7 +106,7 @@ def _get_brief_live_or_seed(role_name: str) -> tuple[str | None, str]:
     back to ROLE_PROMPTS_SEED and logs a warning rather than failing the
     case outright, so CI without UPSTASH_* secrets still runs, just
     against seed briefs instead of whatever's live."""
-    from eo.registry import get_role_prompt, ROLE_PROMPTS_SEED
+    from eo.registry import ROLE_PROMPTS_SEED, get_role_prompt
 
     try:
         brief = get_role_prompt(role_name)
@@ -161,7 +161,9 @@ def _build_live_chain(role_name: str) -> list:
     lookup above), rather than raising and failing every test case in
     a CI run with no Upstash secrets configured."""
     from agents.generic_worker import (
-        _build_fallback_chain, _chain_step_for, _dynamic_max_chain_steps,
+        _build_fallback_chain,
+        _chain_step_for,
+        _dynamic_max_chain_steps,
     )
     from eo.quota_sentinel import get_quota_snapshot
     from eo.registry import AGENT_CAPABILITIES

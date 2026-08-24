@@ -10,11 +10,11 @@ Does NOT delete any files on disk under apps/ -- only clears memory keys.
 
 Run: python scripts/reset_memory.py
 """
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import redis, KEYS
+from memory.bus import KEYS, redis
 
 KEYS_TO_CLEAR = [
     "original_idea", "current_plan", "module_specs", "submitted_code",

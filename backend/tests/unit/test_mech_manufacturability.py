@@ -39,13 +39,12 @@ No LLM, no FreeCAD -- pure data reshaping (same as eo/mech_cutouts.py's
 own check_min_wall_thickness() tests), so no mock_llm/fake_bus fixtures
 needed.
 """
-from eo.enclosure_spec import ENCLOSURE_SPEC
-import eo.mech_manufacturability as mm
 import eo.mech_cutouts as mc
 import eo.mech_device as md
 import eo.mech_enclosure as me
+import eo.mech_manufacturability as mm
 import eo.mech_supports as msup
-
+from eo.enclosure_spec import ENCLOSURE_SPEC
 
 # A generous, fixed cavity every test below measures a post against --
 # same "one shared inner box, only the post moves" shape

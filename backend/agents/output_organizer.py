@@ -58,11 +58,10 @@ import json
 import os
 import sys
 
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.llm_client import generate_text, stream_completion
 from eo.result_render import render_agent_result
-from eo.tracing import get_tracer, TRACING_ENABLED
+from eo.tracing import TRACING_ENABLED, get_tracer
+from utils.llm_client import generate_text, stream_completion
 
 # FALLBACK_CHAIN: last-resort static chain, used ONLY if
 # eo/dynamic_chain.py's build_fallback_chain() comes back empty (every

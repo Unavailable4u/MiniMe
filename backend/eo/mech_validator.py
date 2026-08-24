@@ -155,9 +155,10 @@ import threading
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from relay.emitter import emit_event
 from e2b_code_interpreter import Sandbox
+
 from eo.mech_subsections import group_into_subsections, members_for_subsection
+from relay.emitter import emit_event
 
 # Level vocabulary matches the arrow notation the Master Guide and this
 # codebase's own docstrings already use ("Level 0->1" in agents/

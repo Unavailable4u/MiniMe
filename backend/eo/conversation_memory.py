@@ -20,11 +20,14 @@ reliably tied to one app_slug across its lifetime.
 """
 import os
 import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo import (
+    chat_store,  # NEW — cross-chat memory sharing (see §4)
+    chat_workspace,  # NEW — Part 0 §0.3, session_id -> workspace_id
+    workspace_facts,  # NEW — Part 0 §0.3, tier-3 memory
+)
 from memory.bus import read, write
-from eo import chat_store   # NEW — cross-chat memory sharing (see §4)
-from eo import chat_workspace   # NEW — Part 0 §0.3, session_id -> workspace_id
-from eo import workspace_facts  # NEW — Part 0 §0.3, tier-3 memory
 
 MAX_STORED_TURNS = 20      # hard cap on raw storage growth per session
 FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see

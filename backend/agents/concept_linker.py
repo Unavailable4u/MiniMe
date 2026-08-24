@@ -47,16 +47,17 @@ shape).
 
 Place this file at: agents/concept_linker.py
 """
+import hashlib
+import json
 import os
 import sys
-import json
-import hashlib
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.source_index import get_packet
+from datetime import UTC
+
+from eo import node_summaries, workspace_facts
 from eo.graph_edges import create_edge, edges_between
-from eo import node_summaries
-from eo import workspace_facts
+from eo.source_index import get_packet
 
 # workspace_facts.py `custom` keys -- see that module's docstring for
 # why a free-form custom bucket is the right home for this instead of a
@@ -181,9 +182,9 @@ def link_concepts(workspace_id: str, source_node_ids: list[str] | None = None,
     workspace_facts.update_custom_fact(
         workspace_id, CONNECTIONS_SIGNATURE_KEY, _connections_signature(connections)
     )
-    from datetime import datetime, timezone
+    from datetime import datetime
     workspace_facts.update_custom_fact(
-        workspace_id, LAST_RUN_AT_KEY, datetime.now(timezone.utc).isoformat()
+        workspace_id, LAST_RUN_AT_KEY, datetime.now(UTC).isoformat()
     )
 
     return {"status": "done", "edges_created": created, "summaries": written_summaries}

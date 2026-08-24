@@ -39,7 +39,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _scratch = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
 _scratch.close()
 
-import eo.secondary_data as secondary_data  # noqa: E402
+from eo import secondary_data
+
 secondary_data.SECONDARY_DATA_PATH = _scratch.name
 
 WORKSPACE_ID = "ws_test_6_11_h"
@@ -131,7 +132,7 @@ def main() -> None:
     # Import AFTER the store is monkeypatched (same ordering
     # test_topic_covered_sources.py relies on) and INSIDE main() so the
     # patch decorators below can target task_runner's own bound names.
-    import api.task_runner as task_runner
+    from api import task_runner
 
     task_text = 'Let\'s work through: "Salient Pole Rotor"'
 
@@ -189,7 +190,7 @@ def main() -> None:
         # Per the 6.11.g decision: this path must never invoke
         # agents/topic_note_writer.py — it's read-only grounding, not
         # note drafting. Patch it to raise if touched at all.
-        import agents.topic_note_writer as topic_note_writer
+        from agents import topic_note_writer
         with patch.object(task_runner, "get_node", side_effect=_fake_get_node), \
              patch.object(task_runner, "get_topic_related_notes", side_effect=_fake_get_topic_related_notes), \
              patch.object(topic_note_writer, "generate_topic_note",

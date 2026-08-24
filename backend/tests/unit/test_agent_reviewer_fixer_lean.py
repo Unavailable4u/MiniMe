@@ -24,9 +24,8 @@ import json
 
 import pytest
 
-import agents.reviewer_fixer_lean as reviewer_fixer_lean
+from agents import reviewer_fixer_lean
 from eo.errors import MissingDependencyError
-
 
 SAMPLE_MODULE = {"name": "validator", "language": "python", "code": "def validate(x):\n    return x"}
 
@@ -38,11 +37,11 @@ class TestModuleResolution:
     def test_explicit_module_arg_is_written_to_tier1_code(self, fake_bus, mock_llm):
         mock_llm.set_json_response({"issues_found": [], "code": SAMPLE_MODULE["code"]})
         reviewer_fixer_lean.run(module=SAMPLE_MODULE)
-        from memory.bus import read, KEYS
+        from memory.bus import KEYS, read
         assert read(KEYS["tier1_code"]) == SAMPLE_MODULE
 
     def test_no_module_arg_falls_back_to_reading_tier1_code(self, fake_bus, mock_llm):
-        from memory.bus import write, KEYS
+        from memory.bus import KEYS, write
         write(KEYS["tier1_code"], SAMPLE_MODULE)
         mock_llm.set_json_response({"issues_found": [], "code": SAMPLE_MODULE["code"]})
         result = reviewer_fixer_lean.run()
@@ -154,13 +153,13 @@ class TestOutputAndBusWrites:
     def test_tier1_review_notes_written_with_only_issues_found(self, fake_bus, mock_llm):
         mock_llm.set_json_response({"issues_found": ["issue one"], "code": "x = 1"})
         reviewer_fixer_lean.run(module=SAMPLE_MODULE)
-        from memory.bus import read, KEYS
+        from memory.bus import KEYS, read
         assert read(KEYS["tier1_review_notes"]) == {"issues_found": ["issue one"]}
 
     def test_tier1_fixed_code_matches_return_value(self, fake_bus, mock_llm):
         mock_llm.set_json_response({"issues_found": [], "code": "x = 1"})
         result = reviewer_fixer_lean.run(module=SAMPLE_MODULE)
-        from memory.bus import read, KEYS
+        from memory.bus import KEYS, read
         assert read(KEYS["tier1_fixed_code"]) == result
 
     def test_session_id_and_path_and_domain_are_forwarded(self, fake_bus, mock_llm):

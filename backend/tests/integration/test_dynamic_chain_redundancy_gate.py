@@ -37,8 +37,7 @@ Two scenarios:
     identical daily quota but different mocked live headroom must come
     out of the PUBLIC chain in headroom order.
 """
-import eo.dynamic_chain as dynamic_chain
-
+from eo import dynamic_chain
 
 AGENT_CAPABILITIES = {
     # 4 Groq accounts tagged for technical_writer -- the "most Groq keys

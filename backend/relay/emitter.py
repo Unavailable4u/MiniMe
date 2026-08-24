@@ -25,7 +25,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -594,7 +594,7 @@ def emit_event(
         "session_id": session_id,
         "agent": agent,
         "path": path,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "payload": payload or {},
     }
 
@@ -671,7 +671,7 @@ def emit_user_event(
         "type": event_type,
         "user_id": user_id,
         "agent": agent,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "payload": payload or {},
     }
 
@@ -739,7 +739,7 @@ def emit_workspace_event(
         "type": event_type,
         "workspace_id": workspace_id,
         "agent": agent,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "payload": payload or {},
     }
 

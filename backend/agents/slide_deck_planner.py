@@ -101,7 +101,7 @@ def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = N
     if not context:
         raise LookupError("no readable topic content in scope")
 
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason
                                                           # agents/podcast_scriptwriter.py

@@ -38,10 +38,9 @@ just makes an existing one explicit here too.
 """
 import os
 import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo import chat_store
-from eo import chat_workspace
-from eo import knowledge_graph
+from eo import chat_store, chat_workspace, knowledge_graph
 
 # Upstash Vector has no cheap "list everything" op, so collecting node
 # tags is a similarity query with a broad top_k rather than an exhaustive

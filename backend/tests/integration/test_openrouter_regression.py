@@ -40,11 +40,11 @@ real infra or real wall-clock time.
 Run standalone:
     python -m pytest tests/integration/test_openrouter_regression.py -v
 """
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
-import utils.llm_client as llm_client
+from utils import llm_client
 from utils.llm_client import OpenAIAPIStatusError
 
 TODAY = date.today().isoformat()
@@ -264,7 +264,7 @@ def test_permanent_auth_cools_down_and_falls_through(harness):
     chain = [_chain_step("OPENROUTER_API_KEY_TEST_1"),
              _chain_step("OPENROUTER_API_KEY_TEST_2")]
 
-    before = datetime.now(timezone.utc).timestamp()
+    before = datetime.now(UTC).timestamp()
     result = llm_client.generate_text(
         "system prompt", "user content", chain, agent_name="OR-6 Test Agent")
 

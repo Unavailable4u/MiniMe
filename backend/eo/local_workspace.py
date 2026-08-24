@@ -82,9 +82,9 @@ class _PendingCall:
     reads better than `entry[1]`/`entry[2]` once there's more than one
     non-workspace_id field to carry."""
 
-    __slots__ = ("workspace_id", "future", "action_id")
+    __slots__ = ("action_id", "future", "workspace_id")
 
-    def __init__(self, workspace_id: str, future: "asyncio.Future[dict]", action_id: str | None):
+    def __init__(self, workspace_id: str, future: asyncio.Future[dict], action_id: str | None):
         self.workspace_id = workspace_id
         self.future = future
         self.action_id = action_id
@@ -280,7 +280,7 @@ async def call_daemon(
         raise ToolCallError(f"no daemon is currently connected for workspace {workspace_id}")
 
     request_id = str(uuid.uuid4())
-    future: "asyncio.Future[dict]" = asyncio.get_running_loop().create_future()
+    future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
     _pending[request_id] = _PendingCall(workspace_id, future, action_id)
 
     try:
@@ -292,7 +292,7 @@ async def call_daemon(
         })
         try:
             result_msg = await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise ToolCallError(
                 f"daemon did not respond to {tool!r} within {timeout:.0f}s"
             ) from None

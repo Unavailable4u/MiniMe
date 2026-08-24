@@ -47,13 +47,13 @@ Only the text actually sent to the model gets this prefix -- the stored
 tier1_task_text stays the raw task text, unmodified, so anything else
 that reads it later still gets a clean value.
 """
+import json
 import os
 import sys
-import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
-from eo import conversation_memory   # NEW — Part 23
+from eo import conversation_memory  # NEW — Part 23
+from memory.bus import KEYS, read, write
 from utils.llm_client import generate_text
 
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
@@ -125,8 +125,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

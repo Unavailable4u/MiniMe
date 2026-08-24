@@ -22,11 +22,10 @@ monkeypatch that path to a location under tmp_path rather than ever
 touching data/graph/_secondary_data.json.
 """
 import json
-from unittest.mock import MagicMock
 
 import pytest
 
-import eo.secondary_data as secondary_data
+from eo import secondary_data
 
 
 def _use_tmp_path(monkeypatch, tmp_path):

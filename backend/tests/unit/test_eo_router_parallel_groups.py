@@ -23,7 +23,11 @@ adversarial input must always degrade to the flat, sequential order --
 never raise, never silently do something unsafe -- so every test below
 asserts the SAFE outcome, not just "no exception."
 """
-from eo.router import sanitize_parallel_groups, _flatten_role_names, MAX_PARALLEL_GROUP_SIZE
+from eo.router import (
+    MAX_PARALLEL_GROUP_SIZE,
+    _flatten_role_names,
+    sanitize_parallel_groups,
+)
 
 
 def _hires(*roles):

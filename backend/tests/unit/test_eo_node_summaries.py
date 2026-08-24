@@ -17,7 +17,7 @@ data/graph/_node_summaries.json.
 """
 import json
 
-import eo.node_summaries as node_summaries
+from eo import node_summaries
 
 
 def _use_tmp_summaries_path(monkeypatch, tmp_path):

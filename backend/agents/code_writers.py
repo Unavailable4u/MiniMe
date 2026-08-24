@@ -23,20 +23,20 @@ as code_writer_lean.py. session_id/tier are optional passthroughs from
 run() -- leaving them unset keeps behavior identical to before.
 """
 
+import json
 import os
 import sys
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from eo.output_guard import validate_module_code
+from eo.worker_pool import _select_workers as _select_workers_for_role
+from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from eo.worker_pool import _select_workers as _select_workers_for_role
-from eo.output_guard import validate_module_code
 
 load_dotenv()
 
@@ -112,9 +112,9 @@ EXTRA_FALLBACK_STEPS = 2
 
 
 def _extra_fallback_chain_steps(primary_key_env: str, already_used: set = None) -> list:
+    from agents.generic_worker import _chain_step_for
     from eo.panel import _best_match
     from eo.quota_sentinel import get_quota_snapshot
-    from agents.generic_worker import _chain_step_for
 
     quota_status = get_quota_snapshot()
     # already_used (NEW): the keys _model_rotation_chain() below already
@@ -211,8 +211,7 @@ def _strip_fences(code: str) -> str:
     code = code.strip()
     if code.startswith("```"):
         code = code.split("```")[1]
-        if code.startswith("python"):
-            code = code[6:]
+        code = code.removeprefix("python")
         code = code.strip()
     return code
 
@@ -348,8 +347,7 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
         ).strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
+            raw_text = raw_text.removeprefix("json")
             raw_text = raw_text.strip()
         specs = json.loads(raw_text)
         if not specs.get("modules"):

@@ -26,7 +26,7 @@ What this step deliberately does NOT do yet (later Phase 2 steps):
     Phase 6/3 give them something real to call.
 """
 
-from typing import Any, Dict, List
+from typing import Any
 
 
 # Manifest entries that aren't real yet (Phase 1.5's disabled/hidden
@@ -43,7 +43,7 @@ from typing import Any, Dict, List
 # exactly what the Phase 2.4 findings say must never happen. Checking
 # `enabled` too (defaulting missing/absent to True, so the fixture keeps
 # behaving exactly as before) covers both conventions.
-def _is_enabled(capability: Dict[str, Any]) -> bool:
+def _is_enabled(capability: dict[str, Any]) -> bool:
     return (
         capability.get("enabled", True)
         and not capability.get("disabled")
@@ -51,7 +51,7 @@ def _is_enabled(capability: Dict[str, Any]) -> bool:
     )
 
 
-def _parameters_for_scope(capability: Dict[str, Any]) -> Dict[str, Any]:
+def _parameters_for_scope(capability: dict[str, Any]) -> dict[str, Any]:
     """
     Build the JSON-schema `parameters` block for one capability, based on
     its scopeAllowed value ("whole" | "sources" | "topic").
@@ -65,8 +65,8 @@ def _parameters_for_scope(capability: Dict[str, Any]) -> Dict[str, Any]:
     - "whole": operates over the whole notebook; no extra arguments.
     """
     scope = capability.get("scopeAllowed")
-    properties: Dict[str, Any] = {}
-    required: List[str] = []
+    properties: dict[str, Any] = {}
+    required: list[str] = []
 
     if scope == "topic":
         properties["topic_id"] = {
@@ -114,7 +114,7 @@ def _parameters_for_scope(capability: Dict[str, Any]) -> Dict[str, Any]:
 # topic done is meaningless without knowing which topic, exactly like
 # the "workflow" capability's own scopeAllowed: "topic" -- so the same
 # {"topic_id": {...}} required-argument shape applies here too.
-def study_progress_tools() -> List[Dict[str, Any]]:
+def study_progress_tools() -> list[dict[str, Any]]:
     """
     Hand-written (not manifest-derived) tools for eo/study_progress.py
     actions. Currently just "mark_topic_done" (step 6.8); append here,
@@ -141,10 +141,10 @@ def study_progress_tools() -> List[Dict[str, Any]]:
 
 
 def manifest_to_tools(
-    manifest: List[Dict[str, Any]],
+    manifest: list[dict[str, Any]],
     *,
     name_prefix: str = "generate_",
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Convert a Phase 1 capability manifest into an OpenAI-style tools array.
 

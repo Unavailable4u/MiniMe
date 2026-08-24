@@ -23,12 +23,11 @@ repo's test dependencies.
 """
 import asyncio
 import os
-
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import agents.tts_synthesizer as tts_synthesizer
+from agents import tts_synthesizer
 
 
 @pytest.fixture(autouse=True)
@@ -293,7 +292,6 @@ class TestSynthesizeSilence:
             # Simulate ffmpeg actually producing the file before exiting.
             with open(out_path, "wb") as f:
                 f.write(b"\x00")
-            return None
 
         fake_proc.wait = _fake_wait
 
@@ -330,7 +328,7 @@ class TestSynthesizePodcast:
 
         async def _fake_synthesize_silence(seconds, out_path):
             with open(out_path, "wb") as f:
-                f.write(f"SILENCE:{seconds}".encode("utf-8"))
+                f.write(f"SILENCE:{seconds}".encode())
 
         monkeypatch.setattr(tts_synthesizer, "_synthesize_line", _fake_synthesize_line)
         monkeypatch.setattr(tts_synthesizer, "_synthesize_silence", _fake_synthesize_silence)

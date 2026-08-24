@@ -28,7 +28,7 @@ un-patched and used for real, since it's a plain constant.
 """
 import pytest
 
-import eo.source_index as source_index
+from eo import source_index
 
 
 def _topic(name=None, summary=None, parent=None, content_hint=None,

@@ -9,12 +9,13 @@ non-namespaced, system-wide key (fixed alongside this file, Part 3 step
 6) -- otherwise this registry would silently fragment per active
 app_slug instead of tracking projects across the whole system.
 """
+import json
 import os
 import sys
 import uuid
-import json
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import write, read
+from memory.bus import read, write
 
 CONTROL_UNIT_FILENAME = ".minime_control"
 

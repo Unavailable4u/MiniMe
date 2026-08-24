@@ -29,7 +29,7 @@ anywhere in this file.
 """
 import pytest
 
-import agents.contradiction_prefilter as contradiction_prefilter
+from agents import contradiction_prefilter
 from eo.errors import MissingDependencyError
 
 

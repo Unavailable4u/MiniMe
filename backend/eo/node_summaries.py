@@ -16,8 +16,8 @@ GET /api/workspaces/{ws_id}/graph/node_summaries (api/server.py).
 
 Place this file at: eo/node_summaries.py
 """
-import os
 import json
+import os
 import threading
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

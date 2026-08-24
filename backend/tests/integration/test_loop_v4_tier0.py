@@ -17,7 +17,7 @@ so the classify() stub here must supply "path", not "tier" — supplying
 the old "tier"-only draft raises KeyError on draft["path"] before the
 test gets anywhere near the assertions it's actually checking.
 """
-import eo.loop_v4 as loop_v4
+from eo import loop_v4
 
 TIER0_DRAFT = {
     "path": "instant", "directed_task_type": None, "confidence": 0.95,

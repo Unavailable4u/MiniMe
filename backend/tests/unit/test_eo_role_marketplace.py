@@ -23,10 +23,9 @@ import json
 
 import pytest
 
-import eo.role_marketplace as role_marketplace
-from eo.registry import update_role_prompt, get_role_prompt, get_role_metadata
-from eo.structure import save_workflow_template, get_workflow_template
-
+from eo import role_marketplace
+from eo.registry import get_role_metadata, get_role_prompt, update_role_prompt
+from eo.structure import save_workflow_template
 
 # ---------------------------------------------------------------------
 # Role briefs

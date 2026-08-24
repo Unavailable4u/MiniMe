@@ -12,9 +12,10 @@ domain-specific branching.
 """
 import os
 import sys
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from eo.router import build_execution_graph_from_hires
 from eo.executor import execute_graph
+from eo.router import build_execution_graph_from_hires
 from memory.bus import read, write
 from relay.emitter import emit_event
 

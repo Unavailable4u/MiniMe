@@ -6,10 +6,11 @@ Run this once, THEN submit the tier-2 task through the frontend/CLI.
 Usage:
     python scripts/seed_tier2_test.py
 """
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import write, read, KEYS, slugify
+from memory.bus import KEYS, read, slugify, write
 
 APP_SLUG = slugify("tier2 routing test")  # -> "tier2_routing_test"
 

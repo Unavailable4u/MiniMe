@@ -15,8 +15,7 @@ patch `read`/`write` on the datasheet_cache module object.
 import hashlib
 import time
 
-import eo.datasheet_cache as datasheet_cache
-
+from eo import datasheet_cache
 
 # ---------------------------------------------------------------------
 # _key

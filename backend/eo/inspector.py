@@ -48,16 +48,20 @@ module's — keeping the Inspector's own output uncorrupted is what makes
 it possible to validate classification quality against real traffic
 before it affects anything.
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.llm_client import generate_text
-from relay.emitter import emit_event
 from eo.structure import (
-    STRUCTURE_TEMPLATES, build_reference_structure_addition, _rough_domain_guess,
+    STRUCTURE_TEMPLATES,
+    _rough_domain_guess,
+    build_reference_structure_addition,
 )
+from relay.emitter import emit_event
+from utils.llm_client import generate_text
+
 VALID_DIRECTED_TASK_TYPES = {
     "debug", "review", "add_tests", "refactor",
     "security_scan", "write_docs", "explain_code", None,
@@ -316,8 +320,7 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 VALID_PATHS = {"instant", "direct", "fixed", "adaptive"}
 

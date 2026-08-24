@@ -9,18 +9,21 @@ MAX_WORKERS at once. Your E2B Hobby account supports 20 concurrent
 sandboxes, so this stays well within that even at tier-3 scale (5 code
 modules per cycle by default).
 """
+import json
 import os
 import sys
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from relay.emitter import emit_event
+
 from dotenv import load_dotenv
 from e2b_code_interpreter import Sandbox
 
+from relay.emitter import emit_event
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
-from eo.errors import MissingDependencyError   # NEW — bug fix
+from eo.errors import MissingDependencyError  # NEW — bug fix
+from memory.bus import KEYS, read, write
+
 load_dotenv()
 e2b_api_key = os.getenv("E2B_API_KEY")
 if e2b_api_key:

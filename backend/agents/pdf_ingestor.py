@@ -43,7 +43,6 @@ import pdfplumber
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.pii_scrub import scrub
 
-
 SUPPORTED_EXTENSIONS = (".pdf",)
 PAGE_JOIN = "\n\n"
 

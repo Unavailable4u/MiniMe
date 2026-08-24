@@ -12,8 +12,13 @@ asserted against the now-deleted TIERS[3]/EXPECTED_TIER3_ORDER.
 """
 import pytest
 
-from eo.router import TIERS, DIRECTED_TASK_MAP, build_execution_graph, validate_registry_coverage
 from eo.registry import resolve
+from eo.router import (
+    DIRECTED_TASK_MAP,
+    TIERS,
+    build_execution_graph,
+    validate_registry_coverage,
+)
 
 
 def test_tier3_is_no_longer_a_static_graph():

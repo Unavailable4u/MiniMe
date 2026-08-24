@@ -9,9 +9,9 @@ dropped entirely, since it could silently swallow the module's own
 AssertionError and turn a genuinely failing test into a falsely
 "passing" one.
 """
-import agents.test_writer as test_writer  # noqa: F401  (ensures mock_llm patches this module)
-from memory.bus import write, read, KEYS
+from agents import test_writer
 from eo.errors import MissingDependencyError
+from memory.bus import KEYS, read, write
 
 SUBMITTED_CODE = {
     "math_utils": {

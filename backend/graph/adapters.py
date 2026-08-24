@@ -52,10 +52,9 @@ stored it, so get_node() had no text to return.)
 Place this file at: graph/adapters.py
 """
 
-from typing import Optional
 
 
-def node_to_artifact(node: dict, related_nodes: Optional[list] = None) -> dict:
+def node_to_artifact(node: dict, related_nodes: list | None = None) -> dict:
     """Builds the common export shape from a single node plus, optionally,
     a list of related nodes (typically everything one hop out via
     data/graph/_edges.json — e.g. all Research findings a Plan requirement
@@ -78,7 +77,7 @@ def node_to_artifact(node: dict, related_nodes: Optional[list] = None) -> dict:
     actually reference -- falls back to constructing it from node_id/
     workspace_id if a caller passes a node dict without vector_id set.
     """
-    def _ref(n: dict) -> Optional[str]:
+    def _ref(n: dict) -> str | None:
         if n.get("vector_id"):
             return n["vector_id"]
         if n.get("node_id") and n.get("workspace_id"):
@@ -112,9 +111,9 @@ def node_to_artifact(node: dict, related_nodes: Optional[list] = None) -> dict:
 
 
 def markdown_text_to_artifact(text: str, title_fallback: str = "Untitled",
-                               workspace_id: Optional[str] = None,
-                               tags: Optional[list] = None,
-                               created_by: Optional[str] = None) -> dict:
+                               workspace_id: str | None = None,
+                               tags: list | None = None,
+                               created_by: str | None = None) -> dict:
     """Part 4 §4.4 — the adapter for generic_worker's generator roles
     (mapper, report_writer, slide_planner, podcast_scriptwriter): every
     one of them returns Markdown (generic_worker.py's own
@@ -216,7 +215,7 @@ def artifact_to_candidate_node(artifact: dict, workspace_id: str, section: str,
     }
 
 
-def write_imported_node(candidate: dict, relation: str = "imported_from") -> Optional[str]:
+def write_imported_node(candidate: dict, relation: str = "imported_from") -> str | None:
     """Convenience wrapper for the common case where the caller wants to
     accept a candidate immediately (e.g. a CLI/script import rather than
     an interactive UI accept step). Late-imports eo.knowledge_graph /

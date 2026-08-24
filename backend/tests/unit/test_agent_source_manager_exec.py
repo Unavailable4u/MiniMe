@@ -21,11 +21,8 @@ import threading
 
 import pytest
 
-import agents.source_manager as source_manager
-import agents.generic_worker as generic_worker
-import agents.overlapping_checker as overlapping_checker
 import eo.notify as notify_module
-
+from agents import generic_worker, overlapping_checker, source_manager
 
 # ---------------------------------------------------------------------------
 # 1. _run_sequential_pass

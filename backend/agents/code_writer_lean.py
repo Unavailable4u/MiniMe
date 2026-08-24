@@ -37,14 +37,14 @@ fix used in prompt_writer_lean.py and already present in
 reviewer_fixer_lean.py, so a Cerebras-wide outage doesn't take this agent
 down entirely.
 """
+import json
 import os
 import sys
-import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from eo.errors import MissingDependencyError  # NEW — bug fix
+from memory.bus import KEYS, read, write
 from utils.llm_client import generate_text
-from eo.errors import MissingDependencyError   # NEW — bug fix
 
 # OR-3d: Cerebras -> OpenRouter. Was a 3-model rotation (gpt-oss-120b /
 # zai-glm-4.7 / gemma-4-31b), each pinned to its own Cerebras account so a
