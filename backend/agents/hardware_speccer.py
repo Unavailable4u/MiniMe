@@ -959,7 +959,8 @@ def _populate_curated_dimensions(parts: list) -> list:
     return parts
 
 
-def _build_hw_reference_context(parts: list, matches_per_part: int = 2) -> str:
+def _build_hw_reference_context(parts: list, matches_per_part: int = 2,
+                                 mobility_type: str = None) -> str:
     """G2 (Master Guide Phase 0, Patch 0.4): before Call 2's prompt is
     built, pull top hw_ref: precedent per part via
     eo/hw_reference.search_hw_references() -- querying each part's own
@@ -967,6 +968,16 @@ def _build_hw_reference_context(parts: list, matches_per_part: int = 2) -> str:
     _ensure_generic_names() already guarantees are present and
     normalized by this point (never an ad-hoc name from Call 1's own
     wording, and never re-derived here).
+
+    Patch A.5 (Mech View standalone implementation guide, Phase A):
+    `mobility_type` is the archetype's own `mobility_type` (fetched by
+    Call 1 above, before this function is ever called -- see this
+    function's own call site's comment), forwarded straight through to
+    every search_hw_references() call below so a wheeled robot's
+    precedent search doesn't pull handheld-gadget reference builds for
+    the same generic part. Omitted (or "static") leaves every call's
+    own query text -- and this function's resulting prompt text --
+    byte-for-byte unchanged from before this patch.
 
     Returns "" when nothing matched for ANY part -- so a spec run
     where Phase 0 has no indexed precedent yet produces byte-identical
@@ -993,7 +1004,8 @@ def _build_hw_reference_context(parts: list, matches_per_part: int = 2) -> str:
             continue
         try:
             matches = search_hw_references(generic_name, part.get("aliases"),
-                                            top_k=matches_per_part)
+                                            top_k=matches_per_part,
+                                            mobility_type=mobility_type)
         except Exception as exc:
             # Belt-and-suspenders: search_hw_references() already
             # catches its own embed/query failures and returns [], but
@@ -2242,7 +2254,11 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     # handling drop exactly this block first on a 413, instead of blind
     # end-of-string slicing that could just as easily cut into the parts
     # JSON above it (see that module's own comment on this fix).
-    hw_reference_context = _build_hw_reference_context(parts)
+    # Patch A.5: forward the same `mobility_type` Call 1 already fetched
+    # (above, alongside `enclosure_mode`) into the hw_ref query context --
+    # see _build_hw_reference_context()'s own docstring.
+    hw_reference_context = _build_hw_reference_context(
+        parts, mobility_type=archetype.get("mobility_type"))
     if hw_reference_context:
         wiring_user_prompt += DROPPABLE_CONTEXT_MARKER + hw_reference_context
 

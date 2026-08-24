@@ -40,10 +40,20 @@ def _hw_ref_vector_id(workspace_id: str, ref_id: str) -> str:
     return f"{ID_PREFIX}:{workspace_id}:{ref_id}"
 
 
-def _query_text(generic_name: str, aliases: list | None) -> str:
+def _query_text(generic_name: str, aliases: list | None, mobility_type: str | None = None) -> str:
+    text = generic_name
     if aliases:
-        return f"{generic_name} ({', '.join(a for a in aliases if isinstance(a, str))})"
-    return generic_name
+        text = f"{text} ({', '.join(a for a in aliases if isinstance(a, str))})"
+    # Patch A.5 (Mech View standalone implementation guide, Phase A):
+    # fold `mobility_type` into the query text so a wheeled robot's
+    # reference-design matches aren't drawn from handheld-gadget
+    # precedent -- same generic_name/aliases-only vocabulary as before
+    # when `mobility_type` is absent or the "static" default (Part 1's
+    # own safe-default posture), so a `full`/`static` caller's query
+    # text is byte-for-byte unchanged from before this patch.
+    if mobility_type and mobility_type != "static":
+        text = f"{text} -- {mobility_type} device"
+    return text
 
 
 def write_hw_reference(mech_ref: dict) -> str | None:
@@ -128,8 +138,19 @@ def write_hw_reference(mech_ref: dict) -> str | None:
     return ref_id
 
 
-def search_hw_references(generic_name: str, aliases: list = None, top_k: int = 5) -> list:
+def search_hw_references(generic_name: str, aliases: list = None, top_k: int = 5,
+                          mobility_type: str = None) -> list:
     """Patch 0.3: similarity search restricted to hw_ref: entries only.
+
+    Patch A.5 (Mech View standalone implementation guide, Phase A):
+    `mobility_type` (the device's own `mech["archetype"]["mobility_type"]`,
+    e.g. "wheeled"/"handheld"/"wearable") is optional and folded into
+    the retrieval query text via `_query_text()` above alongside
+    `generic_name`/`aliases`, so a wheeled robot's own precedent search
+    doesn't surface handheld-gadget reference builds for the same
+    generic part. Omitted (or the "static" default) leaves the query
+    text -- and therefore this function's own results -- unchanged
+    from before this patch.
 
     Deliberately NOT workspace-scoped (unlike knowledge_graph.py's
     search_nodes()) -- a reference build/app-note for a given component
@@ -169,7 +190,7 @@ def search_hw_references(generic_name: str, aliases: list = None, top_k: int = 5
         return []
 
     try:
-        vector = embed_text(_query_text(generic_name, aliases))
+        vector = embed_text(_query_text(generic_name, aliases, mobility_type))
     except Exception as exc:
         print(f"  [HW Reference] search embed failed: {exc}")
         return []

@@ -653,7 +653,28 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
     an exterior face against) -- same "nothing to derive from yet"
     no-op posture `apply_supports_generation()` already takes toward
     `mech["sections"]`.
+
+    Patch A.5 (Mech View standalone implementation guide, Phase A):
+    also returns `[]` outright whenever
+    `mech["archetype"]["enclosure_mode"]` is anything other than
+    `full` (missing archetype reads back as `full`, same default every
+    other A.5 call site uses) -- a part on an open frame (`partial`) or
+    with no shared structural part at all (`none`) has no wall to cut a
+    window into, so this is checked BEFORE the `mech["housing"]["inner"]`
+    no-op below rather than left to fall out of it incidentally: in
+    `partial` mode eo/mech_enclosure.py's own compute_baseplate_footprint()
+    populates `mech["housing"]["outer"]` with no "inner" key, which
+    would already no-op the check below, but gating explicitly here
+    keeps that outcome a stated contract of this function rather than
+    an accident of what the `partial`-mode housing shape happens to
+    omit.
     """
+    archetype = (mech or {}).get("archetype") or {}
+    if archetype.get("enclosure_mode", "full") != "full":
+        if isinstance(mech, dict):
+            mech["cutouts"] = []
+        return []
+
     if not isinstance(mech, dict) or not mech.get("sections"):
         if isinstance(mech, dict):
             mech["cutouts"] = []

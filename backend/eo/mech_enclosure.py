@@ -119,6 +119,67 @@ def compute_housing_footprint(device_footprint: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Patch A.5 (Mech View standalone implementation guide, Phase A): the
+# `partial`-mode sibling of compute_housing_footprint() above -- a
+# wheeled/legged/flying device (Part 1, gap #1) gets a structural
+# baseplate its subsystems mount to, never a sealed housing/lid pair.
+# ---------------------------------------------------------------------------
+
+
+def compute_baseplate_footprint(device_footprint: dict) -> dict:
+    """Returns {"outer": {...}}, an {"x","y","z","w","h","d"} dict --
+    the `partial`-mode analog of compute_housing_footprint()'s own
+    "outer" box, sized for a single flat structural plate rather than a
+    shell that fully encloses the device.
+
+    Unlike the `full`-mode housing, an open frame has no wall to expand
+    x/y/z by -- there's no shell material to leave room for, only the
+    same `clearance_mm` dimensional-tolerance margin
+    compute_housing_footprint()'s own "inner" cavity already pads by
+    (Part 1's own "no dead space beyond wall_thickness + clearance"
+    reasoning applies here minus the wall_thickness term, since a
+    baseplate never gets a matching lid). The plate's own thickness
+    (its "d") is `wall_thickness_mm` -- the same shell-thickness number
+    every other structural part in this pipeline already resolves
+    through ENCLOSURE_SPEC, reused here rather than inventing a second
+    "how thick is 3D-printed structural plastic" constant.
+
+    The plate sits directly beneath `device_footprint` (its own z is
+    `device_footprint`'s z minus the plate's own thickness, so parts
+    are placed resting on top of it, not overlapping it) and is padded
+    by `clearance_mm` in x/y only -- z is left unpadded since there is
+    no ceiling to clear, only a mounting surface.
+
+    Missing x/y/z/w/h/d keys on `device_footprint` default to 0, same
+    tolerant-of-a-partial-dict posture compute_housing_footprint()
+    already takes toward its own input.
+
+    Pure function: no I/O, no LLM call, no mutation of
+    `device_footprint` -- same purity guarantee every other function in
+    this module already holds itself to.
+    """
+    clearance = ENCLOSURE_SPEC["clearance_mm"]
+    wall = ENCLOSURE_SPEC["wall_thickness_mm"]
+
+    x = float(device_footprint.get("x") or 0)
+    y = float(device_footprint.get("y") or 0)
+    z = float(device_footprint.get("z") or 0)
+    w = float(device_footprint.get("w") or 0)
+    h = float(device_footprint.get("h") or 0)
+
+    outer = {
+        "x": round(x - clearance, 3),
+        "y": round(y - clearance, 3),
+        "z": round(z - wall, 3),
+        "w": round(w + 2 * clearance, 3),
+        "h": round(h + 2 * clearance, 3),
+        "d": wall,
+    }
+
+    return {"outer": outer}
+
+
+# ---------------------------------------------------------------------------
 # Patch 1.3 -- pipeline-integration half of Phase 1.
 # ---------------------------------------------------------------------------
 #
@@ -140,6 +201,12 @@ def compute_housing_footprint(device_footprint: dict) -> dict:
 # match exactly.
 _HOUSING_ID_PREFIX = "housing"
 _LID_ID_PREFIX = "lid"
+
+# Patch A.5: the `partial`-mode part id -- matches agents/
+# hardware_speccer.py's SYSTEM_PROMPT_PARTS `partial`-mode worked
+# example (`"id": "baseplate_1"`, Patch A.4), same prefix-not-literal
+# match convention _HOUSING_ID_PREFIX/_LID_ID_PREFIX already use above.
+_BASEPLATE_ID_PREFIX = "baseplate"
 
 # The one section every housing/lid placement lives in -- same constant
 # eo/mech_device.py's own _CONTAINER_SECTION_ID names, duplicated here
@@ -213,13 +280,73 @@ def apply_enclosure_generation(mech: dict, parts: list) -> dict:
     `mech["device"]` itself is missing or has no `footprint` -- nothing
     to derive a housing from yet, same "nothing to merge yet" no-op
     posture apply_device_merge() already takes.
+
+    Patch A.5 (Mech View standalone implementation guide, Phase A):
+    gated on `mech["archetype"]["enclosure_mode"]` (stashed by A.3/A.4,
+    read the same "missing reads back as the safe `full` default" way
+    agents/hardware_speccer.py's own Call 1 already reads it) --
+
+      - `full` (or archetype absent entirely, e.g. a `mech` dict this
+        function's own pre-Phase-A test suite already builds by hand):
+        everything below this note is byte-for-byte the pre-Patch-A.5
+        behavior -- housing/lid pair, regression-safe per this whole
+        guide's own "full mode must not drift" posture (Patch A.4's
+        own done-when).
+      - `partial`: computes a baseplate via
+        compute_baseplate_footprint() instead of a housing/lid pair,
+        stashes it on `mech["housing"]` in the SAME `{"outer": ...}`
+        shape (just without an "inner"/"lid" key -- a baseplate has
+        neither a cavity nor a matching lid), and overwrites a
+        baseplate_1-prefixed placement (Patch A.4's own worked
+        parts-prompt example) instead of housing_1/lid_1.
+      - `none`: no shared structural part at all (Part 1, gap #1) --
+        skips entirely. `mech["housing"]` is stashed None (same
+        "device missing" no-op shape above) and any stale
+        `mech["enclosure"]` key from an earlier run is removed rather
+        than left in place, so a `none`-mode run genuinely produces no
+        enclosure output, not just an unrefreshed leftover from before
+        the archetype was known.
     """
+    archetype = (mech or {}).get("archetype") or {}
+    enclosure_mode = archetype.get("enclosure_mode", "full")
+
     device = (mech or {}).get("device")
     if not isinstance(device, dict) or not isinstance(device.get("footprint"), dict):
         if isinstance(mech, dict):
             mech["housing"] = None
         return None
 
+    if enclosure_mode == "none":
+        if isinstance(mech, dict):
+            mech["housing"] = None
+            mech.pop("enclosure", None)
+        return None
+
+    if enclosure_mode == "partial":
+        result = compute_baseplate_footprint(device["footprint"])
+
+        if isinstance(mech, dict):
+            mech["housing"] = result
+            outer = result["outer"]
+            mech["enclosure"] = {"w": outer["w"], "h": outer["h"], "d": outer["d"]}
+
+        section = next(
+            (s for s in (mech.get("sections") or [])
+             if isinstance(s, dict) and s.get("section_id") == _CONTAINER_SECTION_ID),
+            None,
+        )
+        if section is not None:
+            for subsection in subsections_for_section(mech, section):
+                for member in members_for_subsection(mech, subsection):
+                    if not isinstance(member, dict):
+                        continue
+                    part_id = member.get("part_id") or ""
+                    if part_id.startswith(_BASEPLATE_ID_PREFIX):
+                        _apply_dims(member, result["outer"])
+
+        return result
+
+    # `full` (or no archetype recorded yet) -- unchanged from before A.5.
     result = compute_housing_footprint(device["footprint"])
 
     if isinstance(mech, dict):

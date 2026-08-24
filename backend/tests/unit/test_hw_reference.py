@@ -284,7 +284,7 @@ def test_hw_reference_scope_without_generic_name_falls_back_to_general(monkeypat
 def test_build_hw_reference_context_frames_matches_as_anecdotal(monkeypatch):
     monkeypatch.setattr(
         hw_reference, "search_hw_references",
-        lambda generic_name, aliases=None, top_k=2: (
+        lambda generic_name, aliases=None, top_k=2, mobility_type=None: (
             [{"title": "Forum build log", "content": "Drove it fine off 5V.",
               "source_url": "https://example.com/x", "generic_name": generic_name}]
             if generic_name == "28BYJ-48 Stepper" else []
@@ -305,7 +305,7 @@ def test_build_hw_reference_context_frames_matches_as_anecdotal(monkeypatch):
 
 def test_build_hw_reference_context_empty_when_nothing_matches(monkeypatch):
     monkeypatch.setattr(hw_reference, "search_hw_references",
-                         lambda generic_name, aliases=None, top_k=2: [])
+                         lambda generic_name, aliases=None, top_k=2, mobility_type=None: [])
     parts = [{"generic_name": "ESP32 Dev Board", "aliases": []}]
     # "" means wiring_user_prompt += "" is a no-op -- same prompt as
     # before this phase existed (the "no regression" done-when).
@@ -313,7 +313,7 @@ def test_build_hw_reference_context_empty_when_nothing_matches(monkeypatch):
 
 
 def test_build_hw_reference_context_degrades_on_search_failure(monkeypatch):
-    def _boom(generic_name, aliases=None, top_k=2):
+    def _boom(generic_name, aliases=None, top_k=2, mobility_type=None):
         raise RuntimeError("Vector unreachable")
 
     monkeypatch.setattr(hw_reference, "search_hw_references", _boom)
@@ -325,8 +325,39 @@ def test_build_hw_reference_context_skips_parts_without_generic_name(monkeypatch
     calls = []
     monkeypatch.setattr(
         hw_reference, "search_hw_references",
-        lambda generic_name, aliases=None, top_k=2: calls.append(generic_name) or [],
+        lambda generic_name, aliases=None, top_k=2, mobility_type=None: calls.append(generic_name) or [],
     )
     parts = [{"generic_name": ""}, {"generic_name": None}, "not a dict"]
     assert hardware_speccer._build_hw_reference_context(parts) == ""
     assert calls == []  # never even queried for the gap-having parts
+
+
+def test_build_hw_reference_context_forwards_mobility_type(monkeypatch):
+    """Patch A.5 (Mech View standalone implementation guide, Phase A):
+    the archetype's own mobility_type must reach every
+    search_hw_references() call so a wheeled robot's own precedent
+    search doesn't pull handheld-gadget reference builds for the same
+    generic part."""
+    seen = []
+    monkeypatch.setattr(
+        hw_reference, "search_hw_references",
+        lambda generic_name, aliases=None, top_k=2, mobility_type=None: (
+            seen.append((generic_name, mobility_type)) or []
+        ),
+    )
+    parts = [{"generic_name": "28BYJ-48 Stepper", "aliases": []}]
+    hardware_speccer._build_hw_reference_context(parts, mobility_type="wheeled")
+    assert seen == [("28BYJ-48 Stepper", "wheeled")]
+
+
+def test_query_text_includes_mobility_type_except_static_default():
+    """Patch A.5: mobility_type folds into the embedding query text only
+    when set and not the safe "static" default, so a `full`/`static`
+    caller's query text is byte-for-byte unchanged from before this
+    patch (no regression for the common case)."""
+    base = hw_reference._query_text("28BYJ-48 Stepper", ["28byj48"])
+    assert hw_reference._query_text("28BYJ-48 Stepper", ["28byj48"], None) == base
+    assert hw_reference._query_text("28BYJ-48 Stepper", ["28byj48"], "static") == base
+    wheeled = hw_reference._query_text("28BYJ-48 Stepper", ["28byj48"], "wheeled")
+    assert wheeled != base
+    assert "wheeled" in wheeled
