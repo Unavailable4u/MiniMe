@@ -1,0 +1,408 @@
+diff --git a/backend/tests/unit/test_agent_source_manager_prep.py b/backend/tests/unit/test_agent_source_manager_prep.py
+new file mode 100644
+index 0000000..444c1df
+--- /dev/null
++++ b/backend/tests/unit/test_agent_source_manager_prep.py
+@@ -0,0 +1,402 @@
++"""
++tests/unit/test_agent_source_manager_prep.py — Patch 7f-4a-1.
++
++Covers the "prep pipeline" half of agents/source_manager.py (lines
++1-349): _ensure_role_registered, _zipped_sections, _build_context,
++_chunk_pairs, _parse_mode_a_topics, _topics_to_ops.
++
++These six functions have no LLM calls and no I/O side effects of their
++own (registry writes in _ensure_role_registered are the one exception,
++and that's mocked below) -- they take the sequential (§2c) and
++parallel/chunked (§2d) paths' raw inputs and turn them into the
++context string / id_map / parsed-topics / ops shape that
++_run_sequential_pass, _run_parallel_passes, and _run_mode_a_topic_extraction
++(7f-4a-2) consume. Tested in isolation here so that half can be
++verified against known-good building blocks before the execution half
++(concurrency, generic_worker calls) is exercised.
++"""
++import agents.source_manager as source_manager
++
++
++# ---------------------------------------------------------------------------
++# 1. _ensure_role_registered
++# ---------------------------------------------------------------------------
++
++class TestEnsureRoleRegistered:
++    def test_registers_role_when_missing(self, monkeypatch):
++        monkeypatch.setattr(source_manager, "get_role_prompt", lambda role: None)
++        captured = {}
++
++        def fake_add(role_name, brief, source=None):
++            captured["role_name"] = role_name
++            captured["brief"] = brief
++            captured["source"] = source
++
++        monkeypatch.setattr(source_manager, "add_role_prompt", fake_add)
++        source_manager._ensure_role_registered()
++        assert captured["role_name"] == "source_manager"
++        assert captured["brief"] == source_manager.SOURCE_MANAGER_TOPIC_BRIEF
++        assert captured["source"] == "source_manager_seed"
++
++    def test_does_not_register_when_already_present(self, monkeypatch):
++        monkeypatch.setattr(source_manager, "get_role_prompt", lambda role: "existing brief")
++        called = {"count": 0}
++
++        def fake_add(*a, **k):
++            called["count"] += 1
++
++        monkeypatch.setattr(source_manager, "add_role_prompt", fake_add)
++        source_manager._ensure_role_registered()
++        assert called["count"] == 0
++
++    def test_checks_the_source_manager_role_specifically(self, monkeypatch):
++        seen = {}
++
++        def fake_get(role):
++            seen["role"] = role
++            return "already there"
++
++        monkeypatch.setattr(source_manager, "get_role_prompt", fake_get)
++        monkeypatch.setattr(source_manager, "add_role_prompt", lambda *a, **k: None)
++        source_manager._ensure_role_registered()
++        assert seen["role"] == "source_manager"
++
++
++# ---------------------------------------------------------------------------
++# 2. _zipped_sections
++# ---------------------------------------------------------------------------
++
++class TestZippedSections:
++    def test_zips_non_empty_sections_with_node_ids_in_order(self):
++        artifact = {
++            "sections": [
++                {"heading": "Intro", "content": "some real content"},
++                {"heading": "Body", "content": "more content"},
++            ]
++        }
++        result = source_manager._zipped_sections(artifact, ["node-1", "node-2"])
++        assert result == [
++            ("node-1", artifact["sections"][0]),
++            ("node-2", artifact["sections"][1]),
++        ]
++
++    def test_filters_out_sections_with_empty_or_blank_content(self):
++        artifact = {
++            "sections": [
++                {"heading": "Empty", "content": ""},
++                {"heading": "Whitespace", "content": "   "},
++                {"heading": "Missing key"},
++                {"heading": "Real", "content": "actual text"},
++            ]
++        }
++        result = source_manager._zipped_sections(artifact, ["node-1"])
++        assert result == [("node-1", artifact["sections"][3])]
++
++    def test_missing_node_id_drops_that_section_pair(self):
++        # write_ingested_source() only appends a node_id on write success;
++        # zip() naturally truncates when node_ids runs shorter than sections.
++        artifact = {
++            "sections": [
++                {"heading": "A", "content": "content a"},
++                {"heading": "B", "content": "content b"},
++            ]
++        }
++        result = source_manager._zipped_sections(artifact, ["node-1"])
++        assert result == [("node-1", artifact["sections"][0])]
++
++    def test_falsy_node_id_in_list_is_excluded(self):
++        artifact = {
++            "sections": [
++                {"heading": "A", "content": "content a"},
++                {"heading": "B", "content": "content b"},
++            ]
++        }
++        result = source_manager._zipped_sections(artifact, ["node-1", None])
++        assert result == [("node-1", artifact["sections"][0])]
++
++    def test_no_sections_key_returns_empty_list(self):
++        assert source_manager._zipped_sections({}, ["node-1"]) == []
++
++    def test_empty_node_ids_returns_empty_list(self):
++        artifact = {"sections": [{"heading": "A", "content": "text"}]}
++        assert source_manager._zipped_sections(artifact, []) == []
++
++
++# ---------------------------------------------------------------------------
++# 3. _build_context
++# ---------------------------------------------------------------------------
++
++class TestBuildContext:
++    def test_builds_bracketed_context_and_id_map(self):
++        pairs = [
++            ("node-1", {"heading": "Intro", "content": "hello world"}),
++            ("node-2", {"heading": "Body", "content": "more text"}),
++        ]
++        context, id_map = source_manager._build_context(pairs, "Default Title")
++        assert "--- [node-1] Intro ---\nhello world" in context
++        assert "--- [node-2] Body ---\nmore text" in context
++        assert id_map == {"node-1": pairs[0][1], "node-2": pairs[1][1]}
++
++    def test_empty_pairs_returns_empty_string_and_empty_map(self):
++        context, id_map = source_manager._build_context([], "Title")
++        assert context == ""
++        assert id_map == {}
++
++    def test_missing_heading_falls_back_to_title(self):
++        pairs = [("node-1", {"content": "no heading here"})]
++        context, _ = source_manager._build_context(pairs, "Fallback Title")
++        assert "--- [node-1] Fallback Title ---" in context
++
++    def test_content_is_stripped_and_truncated_to_max_chars(self):
++        long_content = "x" * (source_manager.MODE_A_MAX_CONTENT_CHARS + 500)
++        pairs = [("node-1", {"heading": "H", "content": f"  {long_content}  "})]
++        context, _ = source_manager._build_context(pairs, "Title")
++        # stripped of surrounding whitespace, then capped
++        body = context.split("---\n", 1)[1]
++        assert len(body) == source_manager.MODE_A_MAX_CONTENT_CHARS
++
++    def test_sections_joined_with_blank_line(self):
++        pairs = [
++            ("node-1", {"heading": "A", "content": "first"}),
++            ("node-2", {"heading": "B", "content": "second"}),
++        ]
++        context, _ = source_manager._build_context(pairs, "Title")
++        assert "\n\n" in context
++        first_part, second_part = context.split("\n\n")
++        assert first_part.endswith("first")
++        assert second_part.startswith("--- [node-2]")
++
++
++# ---------------------------------------------------------------------------
++# 4. _chunk_pairs
++# ---------------------------------------------------------------------------
++
++class TestChunkPairs:
++    def test_splits_into_contiguous_chunks_of_chunk_size(self):
++        pairs = [(f"node-{i}", {}) for i in range(10)]
++        chunks = source_manager._chunk_pairs(pairs, 4)
++        assert len(chunks) == 3
++        assert chunks[0] == pairs[0:4]
++        assert chunks[1] == pairs[4:8]
++        assert chunks[2] == pairs[8:10]
++
++    def test_exact_multiple_produces_no_trailing_partial_chunk(self):
++        pairs = [(f"node-{i}", {}) for i in range(8)]
++        chunks = source_manager._chunk_pairs(pairs, 4)
++        assert len(chunks) == 2
++        assert all(len(c) == 4 for c in chunks)
++
++    def test_chunk_size_larger_than_pairs_returns_one_chunk(self):
++        pairs = [(f"node-{i}", {}) for i in range(3)]
++        chunks = source_manager._chunk_pairs(pairs, 8)
++        assert chunks == [pairs]
++
++    def test_empty_pairs_returns_empty_list(self):
++        assert source_manager._chunk_pairs([], 4) == []
++
++    def test_preserves_document_order_within_and_across_chunks(self):
++        pairs = [(f"node-{i}", {}) for i in range(6)]
++        chunks = source_manager._chunk_pairs(pairs, 2)
++        flattened = [p for chunk in chunks for p in chunk]
++        assert flattened == pairs
++
++
++# ---------------------------------------------------------------------------
++# 5. _parse_mode_a_topics
++# ---------------------------------------------------------------------------
++
++class TestParseModeATopics:
++    def _fenced(self, payload_json):
++        return f"```json\n{payload_json}\n```"
++
++    def test_valid_single_topic_parses_correctly(self):
++        raw = self._fenced(
++            '{"topics": [{"name": "Motors", "summary": "about motors", '
++            '"content_hint": "conceptual", "source_section_ids": ["n1"], '
++            '"parent": null}]}'
++        )
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert len(result) == 1
++        assert result[0] == {
++            "name": "Motors", "summary": "about motors", "parent_name": None,
++            "source_section_ids": ["n1"], "content_hint": "conceptual",
++        }
++
++    def test_no_fenced_json_block_returns_empty_list(self):
++        assert source_manager._parse_mode_a_topics("just plain text, no fence", {"n1"}) == []
++
++    def test_malformed_json_inside_fence_returns_empty_list(self):
++        raw = self._fenced("{not valid json,,,")
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_top_level_non_dict_returns_empty_list(self):
++        raw = self._fenced('["just", "a", "list"]')
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_missing_topics_key_returns_empty_list(self):
++        raw = self._fenced('{"not_topics": []}')
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_topics_not_a_list_returns_empty_list(self):
++        raw = self._fenced('{"topics": "not a list"}')
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_non_dict_topic_items_are_dropped(self):
++        raw = self._fenced('{"topics": ["not a dict", 42]}')
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_topic_missing_name_is_dropped(self):
++        raw = self._fenced('{"topics": [{"summary": "no name here"}]}')
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_blank_name_is_dropped(self):
++        raw = self._fenced('{"topics": [{"name": "   ", "summary": "s"}]}')
++        assert source_manager._parse_mode_a_topics(raw, {"n1"}) == []
++
++    def test_invalid_content_hint_falls_back_to_default(self):
++        raw = self._fenced(
++            '{"topics": [{"name": "T", "summary": "s", "content_hint": "made_up"}]}'
++        )
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["content_hint"] == source_manager._DEFAULT_CONTENT_HINT
++
++    def test_missing_content_hint_falls_back_to_default(self):
++        raw = self._fenced('{"topics": [{"name": "T", "summary": "s"}]}')
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["content_hint"] == source_manager._DEFAULT_CONTENT_HINT
++
++    def test_section_ids_outside_valid_set_are_filtered_out(self):
++        raw = self._fenced(
++            '{"topics": [{"name": "T", "summary": "s", '
++            '"source_section_ids": ["n1", "not-valid", "n2"]}]}'
++        )
++        result = source_manager._parse_mode_a_topics(raw, {"n1", "n2"})
++        assert result[0]["source_section_ids"] == ["n1", "n2"]
++
++    def test_non_string_section_ids_are_filtered_out(self):
++        raw = self._fenced(
++            '{"topics": [{"name": "T", "summary": "s", '
++            '"source_section_ids": ["n1", 42, null]}]}'
++        )
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["source_section_ids"] == ["n1"]
++
++    def test_missing_source_section_ids_defaults_to_empty_list(self):
++        raw = self._fenced('{"topics": [{"name": "T", "summary": "s"}]}')
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["source_section_ids"] == []
++
++    def test_blank_parent_normalizes_to_none(self):
++        raw = self._fenced('{"topics": [{"name": "T", "summary": "s", "parent": "   "}]}')
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["parent_name"] is None
++
++    def test_non_string_parent_normalizes_to_none(self):
++        raw = self._fenced('{"topics": [{"name": "T", "summary": "s", "parent": 42}]}')
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["parent_name"] is None
++
++    def test_valid_parent_name_is_preserved(self):
++        raw = self._fenced(
++            '{"topics": [{"name": "Child", "summary": "s", "parent": "Parent Topic"}]}'
++        )
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["parent_name"] == "Parent Topic"
++
++    def test_missing_summary_defaults_to_empty_string(self):
++        raw = self._fenced('{"topics": [{"name": "T"}]}')
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert result[0]["summary"] == ""
++
++    def test_multiple_topics_all_parsed_in_order(self):
++        raw = self._fenced(
++            '{"topics": [{"name": "First", "summary": "a"}, '
++            '{"name": "Second", "summary": "b"}]}'
++        )
++        result = source_manager._parse_mode_a_topics(raw, {"n1"})
++        assert [t["name"] for t in result] == ["First", "Second"]
++
++    def test_empty_raw_string_returns_empty_list(self):
++        assert source_manager._parse_mode_a_topics("", {"n1"}) == []
++
++    def test_none_raw_returns_empty_list(self):
++        assert source_manager._parse_mode_a_topics(None, {"n1"}) == []
++
++
++# ---------------------------------------------------------------------------
++# 6. _topics_to_ops
++# ---------------------------------------------------------------------------
++
++class TestTopicsToOps:
++    def test_single_top_level_topic_produces_one_add_op(self):
++        topics = [{
++            "name": "Motors", "summary": "about motors", "parent_name": None,
++            "source_section_ids": ["n1"], "content_hint": "conceptual",
++        }]
++        ops, topic_ids = source_manager._topics_to_ops(topics)
++        assert len(ops) == 1
++        assert len(topic_ids) == 1
++        op = ops[0]
++        assert op["op"] == "add"
++        assert op["path"] == f"/topics/{topic_ids[0]}"
++        assert op["value"]["name"] == "Motors"
++        assert op["value"]["parent"] is None
++        assert op["value"]["source_section_ids"] == ["n1"]
++        assert op["value"]["content_hint"] == "conceptual"
++
++    def test_child_topic_resolves_parent_id_from_same_batch(self):
++        topics = [
++            {"name": "Parent", "summary": "p", "parent_name": None,
++             "source_section_ids": [], "content_hint": "conceptual"},
++            {"name": "Child", "summary": "c", "parent_name": "Parent",
++             "source_section_ids": [], "content_hint": "conceptual"},
++        ]
++        ops, topic_ids = source_manager._topics_to_ops(topics)
++        parent_id = topic_ids[0]
++        child_op = ops[1]
++        assert child_op["value"]["parent"] == parent_id
++
++    def test_parent_name_matching_is_case_insensitive(self):
++        topics = [
++            {"name": "PARENT", "summary": "p", "parent_name": None,
++             "source_section_ids": [], "content_hint": "conceptual"},
++            {"name": "Child", "summary": "c", "parent_name": "parent",
++             "source_section_ids": [], "content_hint": "conceptual"},
++        ]
++        ops, topic_ids = source_manager._topics_to_ops(topics)
++        assert ops[1]["value"]["parent"] == topic_ids[0]
++
++    def test_unresolvable_parent_name_falls_back_to_top_level(self):
++        topics = [{
++            "name": "Orphan", "summary": "s", "parent_name": "Nonexistent Parent",
++            "source_section_ids": [], "content_hint": "conceptual",
++        }]
++        ops, _ = source_manager._topics_to_ops(topics)
++        assert ops[0]["value"]["parent"] is None
++
++    def test_returns_one_topic_id_per_topic_in_order(self):
++        topics = [
++            {"name": "A", "summary": "", "parent_name": None,
++             "source_section_ids": [], "content_hint": "conceptual"},
++            {"name": "B", "summary": "", "parent_name": None,
++             "source_section_ids": [], "content_hint": "conceptual"},
++        ]
++        _, topic_ids = source_manager._topics_to_ops(topics)
++        assert len(topic_ids) == 2
++        assert len(set(topic_ids)) == 2  # both unique uuids
++
++    def test_empty_topics_list_returns_empty_ops_and_ids(self):
++        ops, topic_ids = source_manager._topics_to_ops([])
++        assert ops == []
++        assert topic_ids == []
++
++    def test_never_resolves_parent_against_topic_outside_this_batch(self):
++        # single-source/single-chunk scoping: a parent_name that happens to
++        # match nothing in THIS batch falls back to top-level even if such
++        # a topic name could exist elsewhere in Secondary Data.
++        topics = [{
++            "name": "Solo", "summary": "s", "parent_name": "Some Other Source's Topic",
++            "source_section_ids": [], "content_hint": "conceptual",
++        }]
++        ops, _ = source_manager._topics_to_ops(topics)
++        assert ops[0]["value"]["parent"] is None
