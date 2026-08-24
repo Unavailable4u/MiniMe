@@ -196,7 +196,7 @@ def trigger_live_deploy(project_unique_name: str = None, session_id: str = None)
     return result
 
 
-def _resolve_workspace_id(session_id: str) -> str:
+def _resolve_workspace_id(session_id: str, owner_id: str = None) -> str:
     """Identical shape to eo/conversation_memory.py's own
     _workspace_facts_text() helper -- session_id and chat_id are the
     same string everywhere in this system, so a session's workspace is
@@ -204,14 +204,29 @@ def _resolve_workspace_id(session_id: str) -> str:
     (not "") for a session with no workspace, since callers here need to
     tell "no workspace" apart from "workspace has an empty custom dict"
     rather than treating both as an empty-string no-op the way a prompt
-    prepend would."""
-    if not session_id:
+    prepend would.
+
+    owner_id: FIXED -- chat_workspace.workspace_for_chat() is now
+    owner_id-scoped (same migration eo/conversation_memory.py's own
+    _workspace_facts_text() already documents and was updated for; this
+    call site was missed). Without an owner_id there's no ownership
+    context to check, so -- same fail-quiet convention that function
+    uses -- skip the lookup and return None rather than calling
+    workspace_for_chat() with a missing required argument, which would
+    raise TypeError instead of the intended "no workspace" outcome.
+    Every current caller of this module (api/routes/deploy.py) still
+    only wires session_id through, not the authenticated owner_id, so
+    this makes that gap fail gracefully (into the existing "no
+    workspace" ValueError/None paths below) instead of crashing outright
+    -- fully wiring owner_id from the API layer is a separate, later
+    change, not made here."""
+    if not session_id or not owner_id:
         return None
-    ws = chat_workspace.workspace_for_chat(session_id)
+    ws = chat_workspace.workspace_for_chat(session_id, owner_id)
     return ws["id"] if ws else None
 
 
-def set_uptimerobot_api_key(session_id: str, api_key: str) -> dict:
+def set_uptimerobot_api_key(session_id: str, api_key: str, owner_id: str = None) -> dict:
     """Part 7 §7.5. Stores the user's UptimeRobot free-tier API key via
     eo/workspace_facts.py's update_custom_fact() -- the exact precedent
     that module's own docstring gives. Plain, unencrypted storage, same
@@ -223,7 +238,7 @@ def set_uptimerobot_api_key(session_id: str, api_key: str) -> dict:
     to put a per-workspace fact for an ad-hoc chat that isn't a member
     of one, and silently no-op'ing here (unlike a context-prepend
     read) would make the user think their key was saved when it wasn't."""
-    workspace_id = _resolve_workspace_id(session_id)
+    workspace_id = _resolve_workspace_id(session_id, owner_id)
     if not workspace_id:
         raise ValueError(
             "This session isn't part of a workspace, so there's nowhere "
@@ -233,8 +248,8 @@ def set_uptimerobot_api_key(session_id: str, api_key: str) -> dict:
     return workspace_facts.update_custom_fact(workspace_id, UPTIMEROBOT_API_KEY_FACT, api_key)
 
 
-def get_uptimerobot_api_key(session_id: str) -> str:
-    workspace_id = _resolve_workspace_id(session_id)
+def get_uptimerobot_api_key(session_id: str, owner_id: str = None) -> str:
+    workspace_id = _resolve_workspace_id(session_id, owner_id)
     if not workspace_id:
         return None
     facts = workspace_facts.get_facts(workspace_id)
@@ -242,7 +257,7 @@ def get_uptimerobot_api_key(session_id: str) -> str:
 
 
 def register_uptimerobot_monitor(url: str, session_id: str = None,
-                                  friendly_name: str = None) -> dict:
+                                  friendly_name: str = None, owner_id: str = None) -> dict:
     """Part 7 §7.5. Registers `url` as a new HTTP(s) monitor on
     UptimeRobot's free-tier API. Deliberately takes `url` as an explicit
     argument rather than reading one off trigger_live_deploy()'s result
@@ -263,7 +278,7 @@ def register_uptimerobot_monitor(url: str, session_id: str = None,
     if not url:
         raise ValueError("register_uptimerobot_monitor() requires a url.")
 
-    api_key = get_uptimerobot_api_key(session_id)
+    api_key = get_uptimerobot_api_key(session_id, owner_id)
     if not api_key:
         raise MissingDependencyError(
             "deploy_agent",
