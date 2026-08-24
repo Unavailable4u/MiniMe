@@ -100,6 +100,30 @@ touched by (or aware of) the mech/hardware pipeline at all.
 Still no OVERHANG/draft-angle check -- deliberately deferred to Phase
 9, per the reasoning above (no drafted geometry exists yet anywhere in
 this tree to check an angle against); Phase 6 is otherwise complete.
+
+Mech View standalone implementation guide, Phase B, Patch B.6 ("Wire
+into collision checking + guard against leakage") extends
+check_feature_collisions() again, a third time, with the swept-volume
+exclusion boxes eo/mech_swept_volume.py's own Patch B.3/B.4/B.5
+functions produce (via that module's own Patch B.6 wiring,
+compute_swept_volumes()/apply_swept_volume_generation(), stashed on the
+new mech["exclusions"] key -- see that module's own top docstring for
+why that wiring lives there and not here). Per that patch's own literal
+wording, exclusion boxes participate in the SAME box-vs-box checks
+already defined above -- check_standoff_cutout_clearance() (a
+point+radius support against ANY {"x","y","w","h"} rectangle, not
+specifically a cutout's own owning-part footprint -- it never assumed
+that) and check_cutout_overlap() (two plain rectangles) both already
+accept an exclusion box's own {"x","y","w","h"} shape with zero
+changes, exactly the "no new collision code needed" the patch text
+promises. The one genuinely new function this patch adds,
+check_exclusion_wall_clearance() below, covers the one check those two
+reused functions cannot: an exclusion box (unlike a standoff/boss) has
+no single "diameter" to project a wall margin from, so it needs its
+own small box-edge-to-boundary version of check_standoff_wall_clearance()'s
+own margin math -- this is that patch's own worked "done when" example
+("A housing wall generated too close to a servo's swept arc is flagged
+as a violation").
 """
 
 import math
@@ -175,6 +199,65 @@ def check_standoff_wall_clearance(support: dict, housing_inner: dict) -> dict:
     ):
         low_margin = round((post_pos - radius) - inner_pos, 3)
         high_margin = round((inner_pos + inner_extent) - (post_pos + radius), 3)
+        margins[axis] = {"low": low_margin, "high": high_margin}
+
+        if low_margin < min_feature:
+            violations.append({"axis": axis, "side": "low", "margin_mm": low_margin})
+        if high_margin < min_feature:
+            violations.append({"axis": axis, "side": "high", "margin_mm": high_margin})
+
+    return {"ok": not violations, "margins": margins, "violations": violations}
+
+
+def check_exclusion_wall_clearance(exclusion: dict, housing_inner: dict) -> dict:
+    """Patch B.6: the box-edge equivalent of check_standoff_wall_clearance()
+    above, for a swept-volume exclusion box (eo/mech_swept_volume.py's
+    own {"x","y","z","w","h","d","shape_kind":"exclusion",...} output)
+    rather than a point+radius standoff/boss primitive. An exclusion
+    box has no single "diameter" to project a margin from -- it already
+    IS a plan-view rectangle, same shape as `housing_inner` itself --
+    so the margin math compares box EDGE to box EDGE directly instead
+    of check_standoff_wall_clearance()'s own "post center +/- radius"
+    step.
+
+    Margin math, per axis (mirrors check_standoff_wall_clearance()'s
+    own shape one level up, with the post's own "center +/- radius"
+    term simply replaced by the exclusion box's own "position, position
+    + size" edges):
+      - low-side margin  = exclusion_x - housing_inner_x
+      - high-side margin = (housing_inner_x + housing_inner_w) -
+                            (exclusion_x + exclusion_w)
+      -- and the same shape again for y/h.
+
+    Returns the identical {"ok", "margins", "violations"} shape
+    check_standoff_wall_clearance() returns, so a caller (this module's
+    own check_feature_collisions() below) can fold both into the same
+    flat violations list without a shape-specific branch. Missing
+    "x"/"y"/"w"/"h" on `exclusion`, or missing "x"/"y"/"w"/"h" on
+    `housing_inner`, default to 0, same "tolerant of a partial dict"
+    posture this whole module holds itself to.
+
+    Pure function: never mutates `exclusion` or `housing_inner`.
+    """
+    min_feature = ENCLOSURE_SPEC["min_feature_mm"]
+
+    ex_x = float((exclusion or {}).get("x") or 0)
+    ex_y = float((exclusion or {}).get("y") or 0)
+    ex_w = float((exclusion or {}).get("w") or 0)
+    ex_h = float((exclusion or {}).get("h") or 0)
+    inner_x = float((housing_inner or {}).get("x") or 0)
+    inner_y = float((housing_inner or {}).get("y") or 0)
+    inner_w = float((housing_inner or {}).get("w") or 0)
+    inner_h = float((housing_inner or {}).get("h") or 0)
+
+    margins = {}
+    violations = []
+    for axis, ex_pos, ex_extent, inner_pos, inner_extent in (
+        ("x", ex_x, ex_w, inner_x, inner_w),
+        ("y", ex_y, ex_h, inner_y, inner_h),
+    ):
+        low_margin = round(ex_pos - inner_pos, 3)
+        high_margin = round((inner_pos + inner_extent) - (ex_pos + ex_extent), 3)
         margins[axis] = {"low": low_margin, "high": high_margin}
 
         if low_margin < min_feature:
@@ -338,7 +421,14 @@ def check_feature_collisions(mech: dict) -> list:
     [the placements] join." That join is `_footprint_by_part_id()`
     above; this function is the one that actually consumes it.
 
-    Two passes:
+    Patch B.6 (Mech View standalone implementation guide, Phase B) adds
+    a third pass below, reusing the SAME check_standoff_cutout_clearance()/
+    check_cutout_overlap() functions for exclusion boxes (they already
+    accept any {"x","y","w","h"} rectangle -- see this module's own
+    Patch B.6 docstring addition at the top of this file), plus the one
+    genuinely new function that scope needs, check_exclusion_wall_clearance().
+
+    Four passes:
       1. STANDOFF/BOSS vs CUTOUT: every primitive in
          `mech["supports"]["standoffs"]`/`["bosses"]` against every
          entry in `mech["cutouts"]` (via that cutout's own owning-part
@@ -350,20 +440,37 @@ def check_feature_collisions(mech: dict) -> list:
          share the same `"face"` (see check_cutout_overlap()'s own
          docstring for why cross-face pairs are never compared),
          excluding a part paired against itself.
+      3. (Patch B.6) EXCLUSION vs HOUSING WALL / STANDOFF / CUTOUT /
+         another EXCLUSION: every entry in `mech["exclusions"]` (eo/
+         mech_swept_volume.py's own Patch B.3/B.4/B.5 output) checked
+         against `mech["housing"]["inner"]` (check_exclusion_wall_clearance()),
+         every standoff/boss (check_standoff_cutout_clearance(), the
+         exclusion box standing in for that function's own
+         "cutout_footprint" argument -- it never assumed that argument
+         was specifically a cutout), every cutout's own owning-part
+         footprint (check_cutout_overlap()), and every OTHER exclusion
+         box (check_cutout_overlap() again, pairwise) -- each pass
+         skipping a pairing that shares the same `part_id` (a part's
+         own swept arm colliding with its own already-placed static
+         footprint, or with its own standoff/cutout, is not a real
+         cross-feature collision), same skip posture passes 1/2 above
+         already hold toward a part's own features.
 
     A cutout whose own `part_id` has no resolvable footprint (missing
     from `_footprint_by_part_id(mech)`'s own output -- should not
     happen in practice, but never assumed) is skipped entirely from
-    both passes rather than defaulting to a zero-sized footprint, which
-    would falsely report every such cutout as colliding with
-    everything near the origin.
+    every pass that needs one rather than defaulting to a zero-sized
+    footprint, which would falsely report every such cutout as
+    colliding with everything near the origin.
 
     Returns a flat list of violation dicts, each tagged `"check"`
-    ("standoff_cutout_clearance" or "cutout_overlap") plus the
+    ("standoff_cutout_clearance", "cutout_overlap",
+    "exclusion_wall_clearance", "exclusion_standoff_clearance",
+    "exclusion_cutout_overlap", or "exclusion_overlap") plus the
     part_id(s) involved -- same flat, mixed, attributable-back shape
     build_manufacturability_report() already established for Patch
     6.1/6.2's own violations. Returns `[]` (never raises) for a `mech`
-    with no cutouts, no supports, or neither.
+    with no cutouts, no supports, no exclusions, or none of the above.
 
     Pure function: never mutates `mech`.
     """
@@ -372,50 +479,113 @@ def check_feature_collisions(mech: dict) -> list:
         return violations
 
     cutouts = [c for c in (mech.get("cutouts") or []) if isinstance(c, dict)]
-    if not cutouts:
+    exclusions = [e for e in (mech.get("exclusions") or []) if isinstance(e, dict)]
+    if not cutouts and not exclusions:
         return violations
 
     footprints = _footprint_by_part_id(mech)
-
     supports = mech.get("supports")
-    if isinstance(supports, dict):
-        for group in ("standoffs", "bosses"):
-            for support in supports.get(group) or []:
-                if not isinstance(support, dict):
-                    continue
-                support_part_id = support.get("part_id")
-                for cutout in cutouts:
-                    cutout_part_id = cutout.get("part_id")
-                    if cutout_part_id == support_part_id:
-                        continue
-                    footprint = footprints.get(cutout_part_id)
-                    if not isinstance(footprint, dict):
-                        continue
-                    check = check_standoff_cutout_clearance(support, footprint)
-                    for violation in check["violations"]:
-                        violations.append({
-                            "check": "standoff_cutout_clearance",
-                            "standoff_part_id": support_part_id,
-                            "cutout_part_id": cutout_part_id,
-                            **violation,
-                        })
+    support_groups = (
+        [s for group in ("standoffs", "bosses") for s in (supports.get(group) or [])
+         if isinstance(s, dict)]
+        if isinstance(supports, dict) else []
+    )
 
-    comparable = [c for c in cutouts if isinstance(footprints.get(c.get("part_id")), dict)]
-    for i in range(len(comparable)):
-        for j in range(i + 1, len(comparable)):
-            cutout_a, cutout_b = comparable[i], comparable[j]
-            part_a, part_b = cutout_a.get("part_id"), cutout_b.get("part_id")
-            if part_a == part_b or cutout_a.get("face") != cutout_b.get("face"):
-                continue
-            check = check_cutout_overlap(footprints[part_a], footprints[part_b])
-            for violation in check["violations"]:
-                violations.append({
-                    "check": "cutout_overlap",
-                    "part_id_a": part_a,
-                    "part_id_b": part_b,
-                    "face": cutout_a.get("face"),
-                    **violation,
-                })
+    if cutouts:
+        for support in support_groups:
+            support_part_id = support.get("part_id")
+            for cutout in cutouts:
+                cutout_part_id = cutout.get("part_id")
+                if cutout_part_id == support_part_id:
+                    continue
+                footprint = footprints.get(cutout_part_id)
+                if not isinstance(footprint, dict):
+                    continue
+                check = check_standoff_cutout_clearance(support, footprint)
+                for violation in check["violations"]:
+                    violations.append({
+                        "check": "standoff_cutout_clearance",
+                        "standoff_part_id": support_part_id,
+                        "cutout_part_id": cutout_part_id,
+                        **violation,
+                    })
+
+        comparable = [c for c in cutouts if isinstance(footprints.get(c.get("part_id")), dict)]
+        for i in range(len(comparable)):
+            for j in range(i + 1, len(comparable)):
+                cutout_a, cutout_b = comparable[i], comparable[j]
+                part_a, part_b = cutout_a.get("part_id"), cutout_b.get("part_id")
+                if part_a == part_b or cutout_a.get("face") != cutout_b.get("face"):
+                    continue
+                check = check_cutout_overlap(footprints[part_a], footprints[part_b])
+                for violation in check["violations"]:
+                    violations.append({
+                        "check": "cutout_overlap",
+                        "part_id_a": part_a,
+                        "part_id_b": part_b,
+                        "face": cutout_a.get("face"),
+                        **violation,
+                    })
+
+    if exclusions:
+        housing = mech.get("housing")
+        housing_inner = housing.get("inner") if isinstance(housing, dict) else None
+
+        for exclusion in exclusions:
+            exclusion_part_id = exclusion.get("part_id")
+
+            if isinstance(housing_inner, dict):
+                check = check_exclusion_wall_clearance(exclusion, housing_inner)
+                for violation in check["violations"]:
+                    violations.append({
+                        "check": "exclusion_wall_clearance",
+                        "part_id": exclusion_part_id,
+                        **violation,
+                    })
+
+            for support in support_groups:
+                support_part_id = support.get("part_id")
+                if support_part_id == exclusion_part_id:
+                    continue
+                check = check_standoff_cutout_clearance(support, exclusion)
+                for violation in check["violations"]:
+                    violations.append({
+                        "check": "exclusion_standoff_clearance",
+                        "standoff_part_id": support_part_id,
+                        "exclusion_part_id": exclusion_part_id,
+                        **violation,
+                    })
+
+            for cutout in cutouts:
+                cutout_part_id = cutout.get("part_id")
+                if cutout_part_id == exclusion_part_id:
+                    continue
+                footprint = footprints.get(cutout_part_id)
+                if not isinstance(footprint, dict):
+                    continue
+                check = check_cutout_overlap(exclusion, footprint)
+                for violation in check["violations"]:
+                    violations.append({
+                        "check": "exclusion_cutout_overlap",
+                        "exclusion_part_id": exclusion_part_id,
+                        "cutout_part_id": cutout_part_id,
+                        **violation,
+                    })
+
+        for i in range(len(exclusions)):
+            for j in range(i + 1, len(exclusions)):
+                exclusion_a, exclusion_b = exclusions[i], exclusions[j]
+                part_a, part_b = exclusion_a.get("part_id"), exclusion_b.get("part_id")
+                if part_a == part_b:
+                    continue
+                check = check_cutout_overlap(exclusion_a, exclusion_b)
+                for violation in check["violations"]:
+                    violations.append({
+                        "check": "exclusion_overlap",
+                        "part_id_a": part_a,
+                        "part_id_b": part_b,
+                        **violation,
+                    })
 
     return violations
 

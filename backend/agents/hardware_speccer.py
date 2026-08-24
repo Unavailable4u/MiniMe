@@ -2447,6 +2447,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     from eo.mech_device import apply_device_merge
     from eo.mech_enclosure import apply_enclosure_generation
     from eo.mech_supports import apply_supports_generation
+    from eo.mech_swept_volume import apply_swept_volume_generation
     from eo.mech_cutouts import apply_cutout_generation
     from eo.mech_manufacturability import build_manufacturability_report
     from eo.mech_validator import close_session as close_mech_validator_session
@@ -2489,6 +2490,19 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # after, precisely because housing sizing does NOT depend on
         # per-part final positions the way a per-part standoff does).
         apply_supports_generation(spec.get("mech") or {}, spec["parts"])
+        # Mech View standalone implementation guide, Phase B's own
+        # wiring glue (see eo/mech_swept_volume.py's own top docstring
+        # for why this call lives there and not in a numbered Phase B
+        # patch of its own): sequenced AFTER apply_supports_generation()
+        # for the same "act only on placements the validator has
+        # already signed off on" reason apply_supports_generation()
+        # itself sits after run_level_3_4_repair(), and BEFORE
+        # apply_cutout_generation() so mech["exclusions"] already
+        # exists by the time that call's own Patch B.6 leakage guard
+        # (eo/mech_cutouts.py's own is_exclusion() check) and
+        # build_manufacturability_report()'s own Patch B.6 exclusion
+        # passes below both run.
+        apply_swept_volume_generation(spec.get("mech") or {}, spec["parts"])
         # Patch 5.6: Phase 5's own pipeline wiring. Sequenced AFTER
         # apply_supports_generation() per that patch's own breakdown
         # note ("needs standoff positions available for the overlap
