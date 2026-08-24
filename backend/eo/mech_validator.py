@@ -148,6 +148,7 @@ since it has no way to know a run is "done" from inside a single call.
 """
 
 import json
+import math
 import os
 import sys
 import threading
@@ -1253,6 +1254,160 @@ def find_unresolved_inferred_pins(mech: dict) -> list:
                 "pin_hint": from_pin, "edge": edge,
             })
     return unresolved
+
+
+# Mobility types this module's own C.4 balance check runs for -- every
+# OTHER mobility_type (static/handheld/wearable/flying) skips the check
+# entirely, per Patch C.4's own wording ("runs only when
+# mech['archetype']['mobility_type'] in {'wheeled', 'legged'} -- every
+# other archetype skips this entirely"). A device that never touches
+# the ground on wheels/legs (or is carried/held) has no ground-contact
+# support polygon to balance over in the first place.
+_BALANCE_CHECKED_MOBILITY_TYPES = {"wheeled", "legged"}
+
+# How far inside the support polygon the center of gravity must land,
+# not just technically inside it -- same "a boundary case is still a
+# real-world tip-over risk, not a pass" reasoning
+# eo/mech_manufacturability.py's own wall-clearance checks already
+# apply via ENCLOSURE_SPEC["min_feature_mm"] for a physical margin
+# rather than a bare zero-clearance test. Kept as a small, clearly-
+# labeled module constant (not pulled from ENCLOSURE_SPEC, which has
+# no balance-specific entry) rather than a magic number inline.
+BALANCE_MARGIN_MM = 5.0
+
+
+def _cog_clearance_mm(cog: dict, support_polygon: list) -> float:
+    """The minimum perpendicular distance from `cog`'s own (x, y) to
+    every edge of `support_polygon` (eo/mech_balance.py's own
+    compute_support_polygon() output, a counter-clockwise-ordered convex
+    hull) -- POSITIVE when `cog` sits inside the hull (the usual "point
+    is to the left of every edge" convex-polygon interior test),
+    NEGATIVE once `cog` has crossed outside any single edge. The
+    signed minimum (not the unsigned minimum) is what Patch C.4's own
+    "how far outside" violation detail (below, in check_balance())
+    needs -- an unsigned distance would report the same small number
+    whether the CoG is barely inside or barely outside, discarding
+    exactly the information a repair step (Patch C.5, not this patch)
+    would need to know which direction to push weight.
+
+    A degenerate `support_polygon` (fewer than 3 points -- a single
+    ground-contact point, or two collinear ones, has no real interior
+    region at all) returns a large negative sentinel rather than
+    computing a meaningless edge-distance, so a caller always treats
+    "not enough ground-contact points to form a real support base" as
+    a clear failure rather than an accidental pass.
+    """
+    if len(support_polygon) < 3:
+        return -math.inf
+
+    cog_point = (float(cog.get("x") or 0), float(cog.get("y") or 0))
+    min_clearance = math.inf
+
+    n = len(support_polygon)
+    for i in range(n):
+        a = support_polygon[i]
+        b = support_polygon[(i + 1) % n]
+        edge_dx = float(b["x"]) - float(a["x"])
+        edge_dy = float(b["y"]) - float(a["y"])
+        edge_len = math.hypot(edge_dx, edge_dy)
+        if edge_len == 0:
+            continue
+        point_dx = cog_point[0] - float(a["x"])
+        point_dy = cog_point[1] - float(a["y"])
+        # Signed area (cross product) of the edge vs. the vector from
+        # the edge's own start to the CoG, divided by edge length --
+        # the perpendicular signed distance, positive on the polygon's
+        # own "inside" side for a CCW-ordered hull.
+        signed_area = edge_dx * point_dy - edge_dy * point_dx
+        min_clearance = min(min_clearance, signed_area / edge_len)
+
+    return min_clearance
+
+
+def check_balance(mech: dict, parts: list) -> dict:
+    """Patch C.4 (Phase C, Mech View standalone implementation guide) --
+    pure scan, no mutation, no I/O, no FreeCAD: verifies eo/mech_balance.py's
+    own Patch C.3 center-of-gravity (compute_cog()) projects inside the
+    same module's Patch C.4 support polygon (compute_support_polygon())
+    with at least `BALANCE_MARGIN_MM` of clearance on every side -- Part
+    1's own gap #3 ("nothing checks whether a mobile device
+    (wheeled/legged) would actually balance").
+
+    Gated EXCLUSIVELY on `mech["archetype"]["mobility_type"]` (missing
+    archetype reads back as the pipeline's own "full"/"static" default,
+    same missing-archetype convention every other archetype-gated call
+    site in this tree already uses -- see eo/mech_cutouts.py's own
+    Patch A.5 gate) -- literal Patch C.4 wording: "runs only when
+    mech['archetype']['mobility_type'] in {'wheeled', 'legged'} --
+    every other archetype skips this entirely." A `static`/`handheld`/
+    `wearable`/`flying` mech NEVER reaches eo/mech_balance.py at all
+    (not even to compute a CoG that then gets discarded) -- the
+    deferred import below is the only place either of that module's
+    functions gets called from this module, and it sits strictly after
+    the gate.
+
+    Returns `{"ok": bool, "skipped": bool, "violations": [...], "cog":
+    dict or None, "support_polygon": list}`:
+      - `skipped=True` (and `ok=True`, `violations=[]`, `cog=None`,
+        `support_polygon=[]`) for every non-wheeled/legged mobility_type
+        -- same "the gate itself is the test" posture Patch C.4's own
+        "done when" wording asks for ("a static/handheld/wearable/flying
+        archetype never triggers this check at all").
+      - `skipped=False` otherwise, with `cog`/`support_polygon` always
+        populated from the real eo/mech_balance.py computation (even on
+        a passing result, so a caller/report can always show the actual
+        numbers, not just a boolean).
+      - A violation is a single dict tagged `"reason"`, one of:
+          "insufficient_ground_contact_points" (fewer than 3 hull
+          points -- no real support base to balance over at all) or
+          "cog_outside_support_polygon" (CoG failed the margin check),
+        the latter carrying `"clearance_mm"` (the signed value from
+        `_cog_clearance_mm()` above -- negative once truly outside, so
+        the SAME violation shape distinguishes "barely failed the
+        margin" from "genuinely off the polygon" without a second
+        field) and `"required_margin_mm"`.
+      - A `mech` with sections but zero total placed mass (eo/
+        mech_balance.py's own compute_cog() "nothing to derive from
+        yet" sentinel, `total_mass_g == 0`) is treated the same as
+        having insufficient ground-contact points -- there's nothing
+        real to check balance against yet either way.
+
+    Pure function: never mutates `mech` or `parts`.
+    """
+    archetype = (mech or {}).get("archetype") or {}
+    mobility_type = archetype.get("mobility_type", "static")
+
+    if mobility_type not in _BALANCE_CHECKED_MOBILITY_TYPES:
+        return {"ok": True, "skipped": True, "violations": [],
+                "cog": None, "support_polygon": []}
+
+    from eo.mech_balance import compute_cog, compute_support_polygon
+
+    cog = compute_cog(mech, parts)
+    support_polygon = compute_support_polygon(mech, parts)
+
+    violations = []
+
+    if cog.get("total_mass_g", 0) <= 0 or len(support_polygon) < 3:
+        violations.append({"reason": "insufficient_ground_contact_points"})
+        return {"ok": False, "skipped": False, "violations": violations,
+                "cog": cog, "support_polygon": support_polygon}
+
+    clearance_mm = round(_cog_clearance_mm(cog, support_polygon), 3)
+    if clearance_mm < BALANCE_MARGIN_MM:
+        violations.append({
+            "reason": "cog_outside_support_polygon",
+            "clearance_mm": clearance_mm,
+            "required_margin_mm": BALANCE_MARGIN_MM,
+        })
+
+    return {
+        "ok": not violations,
+        "skipped": False,
+        "violations": violations,
+        "cog": cog,
+        "support_polygon": support_polygon,
+    }
 
 
 if __name__ == "__main__":
