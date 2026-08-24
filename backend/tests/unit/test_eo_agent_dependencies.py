@@ -20,8 +20,7 @@ and the three deploy_agent.py exclusions the docstring explicitly
 calls out as deliberate, so a future edit doesn't quietly re-add or
 drop one of them without the change being visible in a diff here.
 """
-import eo.agent_dependencies as agent_dependencies
-
+from eo import agent_dependencies
 
 # ---------------------------------------------------------------------
 # Shape contract — every entry must already be safely iterable by

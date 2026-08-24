@@ -42,8 +42,7 @@ import threading
 
 import pytest
 
-import eo.output_guard as output_guard
-
+from eo import output_guard
 
 # ---------------------------------------------------------------------
 # Fixtures

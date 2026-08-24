@@ -21,8 +21,8 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.registry import AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
+from eo.registry import AGENT_CAPABILITIES
 from relay.emitter import emit_event  # NEW — CO4 patch 3
 
 

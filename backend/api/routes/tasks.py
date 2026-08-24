@@ -12,35 +12,51 @@ whole reason this piece was split out first, ahead of the rest of
 server.py's other route groups.
 """
 import asyncio  # NEW — CO5 gap fix: paced replay of the already-synthesized answer in stream_answer()
-import json   # NEW — B6 cleanup: _parse_fenced_json (get_tasks' Part 7 §7.3 integrations parse)
-import re     # NEW — B6 cleanup: _parse_fenced_json
+import json  # NEW — B6 cleanup: _parse_fenced_json (get_tasks' Part 7 §7.3 integrations parse)
+import re  # NEW — B6 cleanup: _parse_fenced_json
 import traceback
-from typing import Optional, Union
 
 import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from api.deps import require_auth, _resolve_chat_or_404, _verify_supabase_jwt   # NEW — CO5 Finding B
-from api.task_runner import run_task, preview_task, confirm_task, run_task_from_template
-from agents import deploy_config_writer as deploy_config_writer_agent   # NEW — B6 cleanup: get_tasks' Part 7 §7.5 deploy-status read
-from agents import deploy_agent as deploy_agent_module                  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
-
-from eo import chat_store
-from eo import chat_workspace   # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
-from eo import timeline_node_blurbs   # NEW — CO4 patch 5
+from agents import (
+    deploy_agent as deploy_agent_module,  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 monitoring-status read
+)
+from agents import (
+    deploy_config_writer as deploy_config_writer_agent,  # NEW — B6 cleanup: get_tasks' Part 7 §7.5 deploy-status read
+)
+from api.deps import (  # NEW — CO5 Finding B
+    _resolve_chat_or_404,
+    _verify_supabase_jwt,
+    require_auth,
+)
+from api.task_runner import confirm_task, preview_task, run_task, run_task_from_template
+from eo import (
+    chat_store,
+    chat_workspace,  # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
+    timeline_node_blurbs,  # NEW — CO4 patch 5
+)
 from eo.executor import resume_graph
 from eo.registry import (
-    get_role_metadata, update_role_prompt, set_role_pinned,
+    get_role_metadata,
     list_role_metadata,
+    set_role_pinned,
+    update_role_prompt,
 )
-from eo.skill_library import list_skills   # NEW — Part 6 §E2, task 14, patch 4
+from eo.skill_library import list_skills  # NEW — Part 6 §E2, task 14, patch 4
 from eo.structure import (
-    save_workflow_template, list_workflow_templates, delete_workflow_template,
+    delete_workflow_template,
+    list_workflow_templates,
+    save_workflow_template,
     update_workflow_template,
 )
-from memory.bus import read_many as bus_read_many, set_app_slug, KEYS, write, read, delete as bus_delete, read_stage_output_text   # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup; bus_delete is CO5 Step 7 follow-up's cleanup of that same key; read_stage_output_text is Bug 7 (0b)'s new re-fetch route's full-text lookup
+from memory.bus import KEYS, read, read_stage_output_text, set_app_slug, write
+from memory.bus import delete as bus_delete
+from memory.bus import (  # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup; bus_delete is CO5 Step 7 follow-up's cleanup of that same key; read_stage_output_text is Bug 7 (0b)'s new re-fetch route's full-text lookup
+    read_many as bus_read_many,
+)
 
 router = APIRouter()
 
@@ -54,29 +70,29 @@ class AttachmentIn(BaseModel):
                           # "pdf" | "import" | "voice" | "video" | "web_clip"
     payload: str          # local file path (already saved to disk by this
                           # request) or a url, depending on kind
-    fmt: Optional[str] = None
-    default_title: Optional[str] = None
+    fmt: str | None = None
+    default_title: str | None = None
 
 
 class TaskRequest(BaseModel):
     task_text: str
-    tier_override: Optional[int] = None
-    directed_task_type: Optional[str] = None
-    app_slug: Optional[str] = None
+    tier_override: int | None = None
+    directed_task_type: str | None = None
+    app_slug: str | None = None
     run_tests: bool = False
-    session_id: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-    approval_roles: Optional[list[str]] = None   # NEW — Part 2 §2.4: role
+    session_id: str | None = None
+    mode: str | None = "auto"
+    project_unique_name: str | None = None
+    approval_roles: list[str] | None = None   # NEW — Part 2 §2.4: role
     # names that require a human approval pause after they finish
     # (tier-3 hires-driven path only). None/empty = full-auto, unchanged
     # default behavior.
-    attachment: Optional[AttachmentIn] = None   # NEW — Data Layer §4a: a
+    attachment: AttachmentIn | None = None   # NEW — Data Layer §4a: a
     # file/url attached to THIS chat turn. Its mere presence bypasses
     # Inspector classification entirely and hires Source Manager (which,
     # per §3a, hires the Backlink Detector right after itself) — see
     # api/task_runner.py's _resolve_decision_and_hires() docstring.
-    topic_id: Optional[str] = None   # Step 6.11.c/6.11.f: the Notebooks
+    topic_id: str | None = None   # Step 6.11.c/6.11.f: the Notebooks
     # topic (if any) this chat turn is scoped to, e.g. from a "Work
     # through: <step title>" click on a per-topic workflow step. As of
     # 6.11.f, forwarded to run_task() -> task_runner.py's
@@ -85,7 +101,7 @@ class TaskRequest(BaseModel):
     # same "presence is the signal" posture `attachment` above uses,
     # but without short-circuiting routing/cache/SGA/classification the
     # way attachment does.
-    scope: Optional[str] = None   # NEW — task 13d/13e: Sources sub-tab's
+    scope: str | None = None   # NEW — task 13d/13e: Sources sub-tab's
     # scope selector ("general" | "forum" | "news" | "hackernews").
     # Forwarded unchanged to run_task() -> ... -> execute_graph(), where
     # only web_researcher's dispatch branch reads it. None (the default
@@ -99,8 +115,8 @@ class TaskResponse(BaseModel):
     # loosened from `int` to fix a latent validation bug that would have
     # 500'd on every real SGA-resolved HTTP request.
     decision: dict
-    tier: Union[int, str]
-    session_id: Optional[str] = None
+    tier: int | str
+    session_id: str | None = None
     # status values: "ok" | "error" | "needs_app" | "needs_directed_task_type"
     # | "not_wired_yet" | "needs_beast_mode_confirmation" | "needs_beast_mode_choice"
     # | "paused" (Part 2 §2.4 — a role in approval_roles just finished;
@@ -110,8 +126,8 @@ class TaskResponse(BaseModel):
     #   hires list is sitting in result.hires. POST /api/task/confirm
     #   with this same session_id, decision, and hires to dispatch.)
     status: str
-    result: Optional[dict] = None
-    message: Optional[str] = None
+    result: dict | None = None
+    message: str | None = None
 
 
 @router.post("/api/task", response_model=TaskResponse, dependencies=[Depends(require_auth)])
@@ -148,13 +164,13 @@ class PreviewTaskRequest(BaseModel):
     # only meaningful once a run actually dispatches (confirm_task()/
     # run_task()), not at the preview stage.
     task_text: str
-    tier_override: Optional[int] = None
-    directed_task_type: Optional[str] = None
-    app_slug: Optional[str] = None
+    tier_override: int | None = None
+    directed_task_type: str | None = None
+    app_slug: str | None = None
     run_tests: bool = False
-    session_id: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
+    session_id: str | None = None
+    mode: str | None = "auto"
+    project_unique_name: str | None = None
 
 
 class HireEdit(BaseModel):
@@ -163,7 +179,7 @@ class HireEdit(BaseModel):
     role: str
     agent_key: str
     brief: str
-    update_library: Optional[bool] = False   # "just this once" (default)
+    update_library: bool | None = False   # "just this once" (default)
     # vs "update the library" (True — calls eo/registry.py's
     # update_role_prompt(), making this edit the new stored default for
     # every future hire of this role).
@@ -175,10 +191,10 @@ class ConfirmTaskRequest(BaseModel):
                              # matching preview_task() response
     hires: list[HireEdit]   # possibly user-edited hires from that same response
     session_id: str
-    app_slug: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-    approval_roles: Optional[list[str]] = None   # same meaning as on /api/task
+    app_slug: str | None = None
+    mode: str | None = "auto"
+    project_unique_name: str | None = None
+    approval_roles: list[str] | None = None   # same meaning as on /api/task
 
 
 @router.post("/api/task/preview", response_model=TaskResponse, dependencies=[Depends(require_auth)])
@@ -395,15 +411,15 @@ class ResumeRequest(BaseModel):
     # Part 2 §2.4
     session_id: str
     action: str          # "approve" | "edit" | "reject_redo"
-    text: Optional[str] = None   # required when action == "edit"
+    text: str | None = None   # required when action == "edit"
 
 
 class ResumeResponse(BaseModel):
     session_id: str
     # status values: "ok" | "paused" | "error"
     status: str
-    result: Optional[dict] = None
-    message: Optional[str] = None
+    result: dict | None = None
+    message: str | None = None
 
 
 @router.post("/api/resume", response_model=ResumeResponse)
@@ -608,10 +624,10 @@ class SaveWorkflowTemplateRequest(BaseModel):
                   # concurrent group (eo/structure.py §2.6) — validated
                   # by save_workflow_template() itself.
     description: str = ""
-    domain_hint: Optional[str] = None
-    approval_roles: Optional[list[str]] = None
-    no_conversation_context_roles: Optional[list[str]] = None
-    created_by: Optional[str] = None
+    domain_hint: str | None = None
+    approval_roles: list[str] | None = None
+    no_conversation_context_roles: list[str] | None = None
+    created_by: str | None = None
 
 
 @router.get("/api/workflow-templates", dependencies=[Depends(require_auth)])
@@ -674,10 +690,10 @@ def delete_workflow_template_endpoint(template_id: str):
 class RunFromTemplateRequest(BaseModel):
     template_id: str
     task_text: str
-    session_id: Optional[str] = None
-    mode: Optional[str] = "auto"
-    project_unique_name: Optional[str] = None
-    scope: Optional[str] = None   # NEW — task 13e: closes the gap flagged
+    session_id: str | None = None
+    mode: str | None = "auto"
+    project_unique_name: str | None = None
+    scope: str | None = None   # NEW — task 13e: closes the gap flagged
     # in 13d — without this, a template built around web_researcher
     # silently fell back to "general" on every dispatch through this
     # path. Same semantics as TaskRequest.scope above: forwarded

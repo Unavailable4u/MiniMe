@@ -122,8 +122,8 @@ def ingest_voice(path: str) -> dict:
 
 
 if __name__ == "__main__":
-    import sys
     import json
+    import sys
     for p in sys.argv[1:]:
         artifact = ingest_voice(p)
         print(f"--- {p} ---")

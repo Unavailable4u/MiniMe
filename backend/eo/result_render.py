@@ -42,7 +42,7 @@ param existed.
 """
 import json
 
-from eo.output_guard import validate_artifact_entry   # NEW — D3 Part 4
+from eo.output_guard import validate_artifact_entry  # NEW — D3 Part 4
 
 
 def _render_code_modules(modules: dict) -> str:

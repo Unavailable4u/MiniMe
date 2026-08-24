@@ -68,16 +68,16 @@ a real, active filter on this fallback path -- ResearchTab.jsx's
 
 Place this file at: agents/note_table_builder.py
 """
+import json
 import os
 import sys
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.source_planner_lean import plan
 from eo.knowledge_graph import list_nodes
-from eo.registry import AGENT_CAPABILITIES
 from eo.quota_sentinel import get_quota_snapshot
+from eo.registry import AGENT_CAPABILITIES
 from utils.llm_client import generate_text
 
 # Two-model fallback per worker, same shorter-than-code_writers.py
@@ -117,8 +117,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
         text = text.strip()
     return text
 

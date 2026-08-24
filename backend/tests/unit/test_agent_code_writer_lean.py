@@ -21,10 +21,9 @@ Code Writer). Things worth locking down per its own docstring/history:
 """
 import pytest
 
-import agents.code_writer_lean as code_writer_lean
+from agents import code_writer_lean
 from eo.errors import MissingDependencyError
-from memory.bus import read, write, KEYS
-
+from memory.bus import KEYS, read, write
 
 # ---------------------------------------------------------------------------
 # 1. _strip_fences

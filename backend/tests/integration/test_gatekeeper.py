@@ -25,10 +25,9 @@ import importlib
 
 import pytest
 
-import agents.generic_worker as generic_worker  # noqa: F401  (ensures mock_llm patches this module)
-import eo.loop_controller as loop_controller
-from eo.loop_controller import MAX_MACRO_LOOPS, FORCED_CHECKPOINT_EVERY
-
+from agents import generic_worker  # noqa: F401  (ensures mock_llm patches this module)
+from eo import loop_controller
+from eo.loop_controller import FORCED_CHECKPOINT_EVERY, MAX_MACRO_LOOPS
 
 CRITICAL_ISSUE_RESULTS = {
     "verifier": {

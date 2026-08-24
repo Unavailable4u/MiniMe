@@ -52,16 +52,16 @@ its own description. eo/mech_repair.py's new run_level_0_1_repair()
 (same patch as this addition) is the driver that calls it.
 """
 
+import json
 import os
 import sys
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.worker_pool import _select_workers as _select_workers_for_role
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from eo.worker_pool import _select_workers as _select_workers_for_role
 
 ROLE_TAG = "mech_primitive"
 
@@ -119,8 +119,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
         text = text.strip()
     return text
 

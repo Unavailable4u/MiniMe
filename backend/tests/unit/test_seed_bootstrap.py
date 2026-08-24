@@ -10,9 +10,14 @@ into the next test's "should it reseed or just read?" assertion.
 """
 import pytest
 
-import eo.registry as registry
+from eo import registry
+from eo.registry import (
+    ROLE_PROMPTS_KEY,
+    ROLE_PROMPTS_SEED,
+    get_role_metadata,
+    get_role_prompt,
+)
 from memory.bus import read, write
-from eo.registry import get_role_prompt, get_role_metadata, ROLE_PROMPTS_KEY, ROLE_PROMPTS_SEED
 
 
 @pytest.fixture(autouse=True)

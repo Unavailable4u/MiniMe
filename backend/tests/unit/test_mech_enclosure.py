@@ -23,10 +23,9 @@ from device footprint"): covers eo/mech_enclosure.py --
 No LLM, no FreeCAD -- pure data reshaping (same as eo/mech_sections.py's
 own tests), so no mock_llm/fake_bus fixtures needed.
 """
-from eo.enclosure_spec import ENCLOSURE_SPEC
-import eo.mech_enclosure as me
 import eo.mech_device as md
-
+import eo.mech_enclosure as me
+from eo.enclosure_spec import ENCLOSURE_SPEC
 
 # ---------------------------------------------------------------------------
 # compute_housing_footprint (Patch 1.2)

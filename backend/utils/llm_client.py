@@ -90,21 +90,25 @@ in this module:
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import requests
-from groq import Groq, RateLimitError as GroqRateLimitError, APIStatusError as GroqAPIStatusError
-from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIStatusError as OpenAIAPIStatusError
-
-from memory.bus import read as bus_read, write as bus_write
-from relay.emitter import emit_event
-import logging
+from groq import APIStatusError as GroqAPIStatusError
+from groq import Groq
+from groq import RateLimitError as GroqRateLimitError
+from openai import APIStatusError as OpenAIAPIStatusError
+from openai import OpenAI
+from openai import RateLimitError as OpenAIRateLimitError
 
 from eo.tracing import get_tracer, truncate_for_trace
+from memory.bus import read as bus_read
+from memory.bus import write as bus_write
+from relay.emitter import emit_event
 
 # Phase 3 (reliability_overhaul_plan.md §PHASE 3) -- rate_ledger.py's
 # QUOTA_CONFIG lookup (_tpm_limit_for) imports *this* module lazily,
@@ -113,14 +117,6 @@ from eo.tracing import get_tracer, truncate_for_trace
 # comment on _tpm_limit_for). Safe to import at module level here as
 # long as that stays one-directional.
 from utils import rate_ledger
-
-# Phase 3d (§PHASE 3, "If NOT OK" / exception-path dispatch) -- the error
-# taxonomy Phase 1 built. Replaces the old single _TRANSIENT_ERRORS +
-# _is_request_too_large_error() dispatch in generate_text()'s except
-# blocks below with the five-bucket recovery table classify_error()'s
-# own docstring documents; see llm_errors.py's module docstring for the
-# full table this dispatch must respect.
-from utils.llm_errors import ErrorBucket, classify_error
 
 # Part 26 §4 re-export: embed_text() used to be defined directly in this
 # module, but eo/routing_memory.py wanted it without the heavy groq/
@@ -132,6 +128,14 @@ from utils.llm_errors import ErrorBucket, classify_error
 # eo/knowledge_graph.py, eo/semantic_cache.py). Not used directly in
 # this file, hence the noqa.
 from utils.embedding import embed_text, embed_text_with_fallback  # noqa: F401
+
+# Phase 3d (§PHASE 3, "If NOT OK" / exception-path dispatch) -- the error
+# taxonomy Phase 1 built. Replaces the old single _TRANSIENT_ERRORS +
+# _is_request_too_large_error() dispatch in generate_text()'s except
+# blocks below with the five-bucket recovery table classify_error()'s
+# own docstring documents; see llm_errors.py's module docstring for the
+# full table this dispatch must respect.
+from utils.llm_errors import ErrorBucket, classify_error
 
 # D1 audit fix -- see eo/executor.py's matching _trace_logger; same
 # TRACE_EXPORT_FAILED marker convention so tracing-side failures from
@@ -307,7 +311,6 @@ class _CloudflareTransientError(Exception):
     can sit in the same _TRANSIENT_ERRORS tuple as the SDK exceptions
     without generate_text() needing to know Cloudflare uses requests
     instead of an SDK under the hood."""
-    pass
 
 
 _TRANSIENT_ERRORS = _TRANSIENT_SDK_ERRORS + (_CloudflareTransientError,)
@@ -333,7 +336,6 @@ class ChainExhaustedError(RuntimeError):
     (Phase 6b) needs to import and catch this one specifically, so it's
     part of this module's public surface, not an internal implementation
     detail."""
-    pass
 
 # Fix B (reliability guide, §3 "Fix B"): quota tracking (QUOTA_CONFIG /
 # eo/quota_sentinel.py) only ever answered "how many tokens has this
@@ -554,7 +556,7 @@ def _set_cooldown(provider: str, key_id: str, exc) -> None:
     cooling it down was never the correct signal for them.
     """
     try:
-        cooldown_until = datetime.now(timezone.utc).timestamp() + _retry_after_seconds(exc)
+        cooldown_until = datetime.now(UTC).timestamp() + _retry_after_seconds(exc)
         bus_write(f"cooldown_until:{provider}:{key_id}", cooldown_until)
     except Exception as write_exc:
         print(f"  [llm_client] cooldown write failed (non-fatal): {write_exc}")
@@ -578,7 +580,7 @@ def _set_ledger_cooldown(provider: str, key_id: str, wait_seconds: float) -> Non
     generate_text() call that's already decided to wait and retry.
     """
     try:
-        cooldown_until = datetime.now(timezone.utc).timestamp() + wait_seconds
+        cooldown_until = datetime.now(UTC).timestamp() + wait_seconds
         bus_write(f"cooldown_until:{provider}:{key_id}", cooldown_until)
     except Exception as write_exc:
         print(f"  [llm_client] ledger cooldown write failed (non-fatal): {write_exc}")
@@ -613,7 +615,7 @@ def _is_cooling_down(provider: str, key_id: str) -> bool:
         return False
     if not cooldown_until:
         return False
-    return cooldown_until > datetime.now(timezone.utc).timestamp()
+    return cooldown_until > datetime.now(UTC).timestamp()
 
 
 _client_cache = {}

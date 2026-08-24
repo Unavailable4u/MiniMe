@@ -16,7 +16,7 @@ Place this file at: agents/video_ingestor.py
 
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 
 # Segments are chunked into sections by elapsed time rather than kept as
 # one giant block or one node per caption line (a caption line is a
@@ -92,8 +92,8 @@ def ingest_video(url: str) -> dict:
 
 
 if __name__ == "__main__":
-    import sys
     import json
+    import sys
     for u in sys.argv[1:]:
         artifact = ingest_video(u)
         print(f"--- {u} ---")

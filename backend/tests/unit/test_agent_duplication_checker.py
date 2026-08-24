@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.duplication_checker as duplication_checker
+from agents import duplication_checker
 
 
 class _Match:

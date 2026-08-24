@@ -45,7 +45,7 @@ import io
 import os
 import re
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from eo import db
 from eo.audit_log import write_audit
@@ -115,7 +115,7 @@ def _infer_language(file_path: str) -> str:
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value):

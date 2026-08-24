@@ -19,18 +19,17 @@ import pytest
 
 import eo.registry as registry_module
 from eo.registry import (
+    ROLE_PROMPTS_KEY,
     _role_prompts_key,
-    get_role_prompt,
-    get_role_metadata,
     add_role_prompt,
-    update_role_prompt,
-    record_role_hire,
-    set_role_pinned,
+    get_role_metadata,
+    get_role_prompt,
     list_known_roles,
     list_role_metadata,
-    ROLE_PROMPTS_KEY,
+    record_role_hire,
+    set_role_pinned,
+    update_role_prompt,
 )
-
 
 # ---------------------------------------------------------------------------
 # _role_prompts_key() -- global vs. per-user scoping

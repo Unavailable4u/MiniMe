@@ -24,8 +24,7 @@ import json
 
 import pytest
 
-import agents.backlink_detector as backlink_detector
-
+from agents import backlink_detector
 
 # ---------------------------------------------------------------------------
 # 1. detect_backlinks() — deterministic substring pass

@@ -30,8 +30,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.memory_search as memory_search
-from memory.bus import write, read, KEYS
+from agents import memory_search
+from memory.bus import KEYS, read, write
 
 
 class _Match:

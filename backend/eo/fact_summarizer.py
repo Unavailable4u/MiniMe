@@ -19,8 +19,8 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.llm_client import generate_text
 from eo.workspace_facts import CATEGORY_TO_SECTION
+from utils.llm_client import generate_text
 
 # Generic fallback chain. Deliberately NOT eo/sga.py's dedicated
 # per-account SGA_GROQ_1/2/3 keys (SGA is latency-sensitive; this call

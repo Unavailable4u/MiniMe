@@ -11,9 +11,11 @@ the entire payoff of this part: domain expertise now lives in data, not
 in a new agents/*.py file per role.
 """
 import uuid as _uuid
-from datetime import datetime as _datetime, timezone as _timezone
-from memory.bus import read as _bus_read, write as _bus_write
+from datetime import UTC
+from datetime import datetime as _datetime
 
+from memory.bus import read as _bus_read
+from memory.bus import write as _bus_write
 
 # Migration Part 26 §4c: shared home for the "path" (str, eo/inspector.py's
 # Part 12 output) <-> "tier" (int, what every other collaborator in this
@@ -334,7 +336,7 @@ WORKFLOW_TEMPLATES_KEY = "workflow_templates"
 
 
 def _utcnow_iso() -> str:
-    return _datetime.now(_timezone.utc).isoformat()
+    return _datetime.now(UTC).isoformat()
 
 
 def _load_templates() -> dict:

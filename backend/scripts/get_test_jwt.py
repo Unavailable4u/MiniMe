@@ -25,9 +25,9 @@ Prints:
     user_id       -- the sub claim / owner_id you'll see server-side
     access_token  -- paste into Authorization: Bearer <token>
 """
+import argparse
 import os
 import sys
-import argparse
 
 import requests
 

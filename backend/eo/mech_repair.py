@@ -120,8 +120,14 @@ import sys
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.mech_validator import (
+    LEVEL_0_1,
+    LEVEL_1_2,
+    LEVEL_2_3,
+    LEVEL_3_4,
+    validate_layout,
+)
 from relay.emitter import emit_event
-from eo.mech_validator import validate_layout, LEVEL_0_1, LEVEL_1_2, LEVEL_2_3, LEVEL_3_4
 
 # Master Guide: "Retry cap: 2 attempts per node."
 DEFAULT_MAX_RETRIES = 2
@@ -444,8 +450,8 @@ def run_level_0_1_repair(spec: dict, parts: list, session_id: str = None, path: 
     drives the full Level 0->1 through Level 3->4 run is responsible for
     closing it once, at the very end.
     """
-    from eo.mech_validator import LEVEL_0_1 as _LEVEL_0_1
     from agents.mech_primitive_pool import regenerate_primitives
+    from eo.mech_validator import LEVEL_0_1 as _LEVEL_0_1
 
     mech = spec.get("mech") or {}
     parts_by_id = {p.get("id"): p for p in (parts or []) if isinstance(p, dict)}
@@ -516,9 +522,9 @@ def run_level_1_2_repair(spec: dict, parts: list, session_id: str = None, path: 
     full Level 0->1 through Level 3->4 run is responsible for closing it
     once, at the very end, not this one level's driver.
     """
+    from agents.mech_subsection_pool import regenerate_subsection
     from eo.mech_subsections import apply_subsection_grouping
     from eo.mech_validator import LEVEL_1_2 as _LEVEL_1_2
-    from agents.mech_subsection_pool import regenerate_subsection
 
     mech = spec.get("mech") or {}
 
@@ -606,9 +612,9 @@ def run_level_2_3_repair(spec: dict, parts: list, session_id: str = None, path: 
     responsible for closing it once, at the very end, not this one
     level's driver.
     """
+    from agents.mech_section_pool import regenerate_section
     from eo.mech_sections import apply_section_grouping
     from eo.mech_validator import LEVEL_2_3 as _LEVEL_2_3
-    from agents.mech_section_pool import regenerate_section
 
     mech = spec.get("mech") or {}
 
@@ -837,9 +843,9 @@ def run_level_3_4_repair(spec: dict, parts: list, session_id: str = None, path: 
     responsible for closing it once, at the very end, not this last
     level's driver either.
     """
+    from eo.mech_device import apply_device_merge
     from eo.mech_sections import apply_section_grouping
     from eo.mech_validator import LEVEL_3_4 as _LEVEL_3_4
-    from eo.mech_device import apply_device_merge
 
     mech = spec.get("mech") or {}
 
@@ -878,6 +884,7 @@ if __name__ == "__main__":
         print(f"    [demo] regenerating {node_id} (attempt {attempt}): {violation['issue']}")
 
     import json
+
     from eo.mech_validator import LEVEL_0_1, close_session
     try:
         print(json.dumps(run_repair_loop(_demo_mech, LEVEL_0_1, _demo_regenerate), indent=2))

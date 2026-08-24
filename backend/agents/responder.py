@@ -64,8 +64,8 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo import conversation_memory  # NEW — Part 23 fix
 from utils.llm_client import generate_text
-from eo import conversation_memory   # NEW — Part 23 fix
 
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
 # its fallback step is removed here, not replaced.

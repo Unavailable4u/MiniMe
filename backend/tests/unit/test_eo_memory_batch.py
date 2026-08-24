@@ -27,13 +27,12 @@ chat_store` (module imports, not bound names), so tests patch
 is copied from test_eo_chat_store.py's own db.cursor() stand-in --
 same shape, reused rather than reinvented.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-import eo.memory_batch as memory_batch
-
+from eo import memory_batch
 
 # ---------------------------------------------------------------------
 # Fake db.cursor() harness (same shape as test_eo_chat_store.py's own)
@@ -83,8 +82,8 @@ def _install_fake_cursor(monkeypatch, cursor, calls_log=None):
 
 
 def _batch_row(id="batch_1", name="My Batch", member_chat_ids=None):
-    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    updated = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    updated = datetime(2026, 1, 2, tzinfo=UTC)
     return {
         "id": id, "name": name, "created_at": created, "updated_at": updated,
         "member_chat_ids": member_chat_ids or [],

@@ -22,8 +22,7 @@ builds and passes to it, not on real LLM behavior.
 """
 import pytest
 
-import agents.responder as responder
-
+from agents import responder
 
 # ---------------------------------------------------------------------------
 # 1. task_text is mandatory

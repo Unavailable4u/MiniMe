@@ -32,7 +32,7 @@ import shutil
 import sys
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Matches the convention in scripts/backfill_chat_messages.py -- this
@@ -242,7 +242,7 @@ def main():
 
     if _TABLE_PATH.exists():
         backup_path = _TABLE_PATH.with_name(
-            f"{_TABLE_PATH.stem}.bak.{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
+            f"{_TABLE_PATH.stem}.bak.{datetime.now(UTC):%Y%m%dT%H%M%SZ}.json"
         )
         shutil.copy2(_TABLE_PATH, backup_path)
         print(f"Backed up previous file to: {backup_path}")

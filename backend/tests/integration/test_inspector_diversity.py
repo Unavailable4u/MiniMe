@@ -22,8 +22,8 @@ deterministic assertion over canned-but-varied responses.
 """
 import json
 
-from eo.inspector import classify, VALID_PATHS
-import eo.inspector as inspector  # noqa: F401  (ensures mock_llm patches this module)
+from eo import inspector  # noqa: F401  (ensures mock_llm patches this module)
+from eo.inspector import VALID_PATHS, classify
 
 TASKS = [
     "Write a Python function that reverses a linked list.",

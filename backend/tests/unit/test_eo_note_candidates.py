@@ -42,8 +42,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.note_candidates as note_candidates
-
+from eo import note_candidates
 
 # ---------------------------------------------------------------------
 # _key
@@ -353,7 +352,6 @@ def test_reject_candidate_never_calls_write_node():
     # No knowledge_graph.write_node patch installed at all: if
     # reject_candidate() ever called it, this test would raise on the
     # real (network-touching) import/call path instead of passing quietly.
-    pass
 
 
 # ---------------------------------------------------------------------

@@ -20,17 +20,18 @@ Result written to KEYS["academic_search_report"]:
   "summary": "...",
 }
 """
+import json
 import os
 import re
 import sys
-import json
 import xml.etree.ElementTree as ET
+
 import requests
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, get_current_app_slug
-from eo.knowledge_graph import write_node
 from eo.graph_edges import create_edge
+from eo.knowledge_graph import write_node
+from memory.bus import KEYS, get_current_app_slug, read, write
 
 REQUEST_TIMEOUT = 15
 MAX_RESULTS_PER_SOURCE = 10

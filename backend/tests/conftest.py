@@ -40,9 +40,9 @@ or, if a test wants raw control:
         with patch_generate_text(return_value="...") as mock:
             ...
 """
-import sys
-import json
 import contextlib
+import json
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,8 +63,7 @@ import pytest
 #    but tests need to run today, so: force the known-safe order once,
 #    here, before pytest imports any test module that might import an
 #    agent directly.
-import eo.registry  # noqa: E402,F401
-
+import eo.registry  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # 1. Fake Redis (in-memory stand-in for upstash_redis.Redis)

@@ -21,6 +21,7 @@ surface that clearly, not look like "you have zero events today."
 """
 import os
 import sys
+
 import requests
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

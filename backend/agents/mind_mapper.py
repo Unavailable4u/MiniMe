@@ -58,8 +58,8 @@ topic granularity instead of node granularity.
 Place this file at: agents/mind_mapper.py
 """
 import os
-import sys
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo.source_index import get_packet
@@ -110,7 +110,7 @@ def _context_for(topics: dict, connections: list[dict]) -> str:
 
 def _attempt(task_text: str) -> dict:
     """One role call, classified into the typed {kind, text} shape."""
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason as
                                                           # agents/note_taker.py,

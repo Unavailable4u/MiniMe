@@ -34,11 +34,11 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 import vcr
-from openai import OpenAI, APIStatusError
+from openai import APIStatusError, OpenAI
 
 from utils.capability_tools import manifest_to_tools
 
@@ -242,7 +242,7 @@ def test_tool_calling_classification_coverage(monkeypatch):
     print(f"Repeats per message: {repeats} (set TOOL_TEST_REPEATS to change)\n")
 
     # message -> list of per-run outcome dicts, for the summary table
-    results: Dict[str, List[Dict[str, Any]]] = {}
+    results: dict[str, list[dict[str, Any]]] = {}
 
     for message, expected in TEST_CASES:
         results[message] = []

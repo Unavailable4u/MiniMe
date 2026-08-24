@@ -48,7 +48,8 @@ added by migrations/0005_add_panel_content_source.sql):
     )
 """
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from eo import db
 from eo.audit_log import write_audit
 from utils.mermaid_lint import looks_valid_mermaid
@@ -172,7 +173,7 @@ GENERATED_PANEL_KEYS = {
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value):

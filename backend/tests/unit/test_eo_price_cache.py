@@ -15,8 +15,7 @@ does `from memory.bus import read, write`, so tests patch `read`/
 """
 import time
 
-import eo.price_cache as price_cache
-
+from eo import price_cache
 
 # ---------------------------------------------------------------------
 # _key

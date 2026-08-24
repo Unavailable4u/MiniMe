@@ -32,11 +32,11 @@ pin moviepy>=2.0 in requirements.txt or these calls will fail against 1.x.
 Place this file at: agents/video_overview_builder.py
 """
 import os
-import textwrap
 import tempfile
+import textwrap
 
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
-from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
 
 FRAME_SIZE = (1280, 720)
 BG_COLOR = (255, 255, 255)

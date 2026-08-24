@@ -12,11 +12,11 @@ gives for generate_text) rather than on their origin modules, so every
 test controls node persistence/edge creation without touching real
 Upstash Vector or the fake bus.
 """
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
-import agents.source_ingestor as source_ingestor
+from agents import source_ingestor
 
 
 def _artifact(title="Doc Title", sections=None, tags=None):
@@ -280,7 +280,7 @@ class TestIngestPdfToGraph:
     ):
         fake_artifact = _artifact(title="PDF Doc", sections=[_section(content="page text")])
         fake_ingest_pdf = MagicMock(return_value=fake_artifact)
-        import agents.pdf_ingestor as pdf_ingestor
+        from agents import pdf_ingestor
         monkeypatch.setattr(pdf_ingestor, "ingest_pdf", fake_ingest_pdf)
 
         result = source_ingestor.ingest_pdf_to_graph(

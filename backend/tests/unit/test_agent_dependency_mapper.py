@@ -34,8 +34,8 @@ import sys
 
 import pytest
 
-import agents.dependency_mapper as dependency_mapper
-from memory.bus import write, read, KEYS
+from agents import dependency_mapper
+from memory.bus import KEYS, read, write
 
 
 @pytest.fixture(autouse=True)

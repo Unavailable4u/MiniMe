@@ -38,7 +38,8 @@ Place this file at: eo/note_candidates.py
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 
@@ -48,7 +49,7 @@ def _key(workspace_id: str) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def propose_note(workspace_id: str, title: str, content: str,
@@ -129,7 +130,7 @@ def accept_candidate(workspace_id: str, candidate_id: str, section: str = "notes
     accepted = candidates.pop(match_index)
     write(_key(workspace_id), candidates)
 
-    from eo.knowledge_graph import write_node   # deferred — same reasoning
+    from eo.knowledge_graph import write_node  # deferred — same reasoning
     # graph/adapters.py's write_imported_node() already gives for
     # late-importing this: keeps this module importable/testable without
     # the Vector stack wired up.
@@ -216,7 +217,7 @@ def get_topic_related_notes(
     if not query_text:
         return []
 
-    from eo.knowledge_graph import search_nodes   # deferred — same
+    from eo.knowledge_graph import search_nodes  # deferred — same
     # reasoning accept_candidate() above already gives for its own
     # write_node import: keeps this module importable/testable without
     # the Vector stack wired up.

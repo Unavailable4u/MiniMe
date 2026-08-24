@@ -43,11 +43,13 @@ change for this to land.
 Place this file at: eo/notify.py
 """
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from eo.ws_registry import push as _ws_push
-from relay.emitter import emit_event as _emit_pusher_event   # NEW — Phase 4 step 4.2
-from relay.emitter import NOTIFY_KINDS  # PATCH-B: single source of truth, see relay/emitter.py
+from relay.emitter import (
+    NOTIFY_KINDS,  # PATCH-B: single source of truth, see relay/emitter.py
+)
+from relay.emitter import emit_event as _emit_pusher_event  # NEW — Phase 4 step 4.2
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +108,7 @@ def notify(session_id: str, kind: str, payload: dict = None) -> dict | None:
     event = {
         "kind": kind,
         "session_id": session_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "payload": payload or {},
     }
     _deliver(event)

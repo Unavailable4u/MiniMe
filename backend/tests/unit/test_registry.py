@@ -8,7 +8,7 @@ upstream of this.
 """
 import pytest
 
-from eo.registry import REGISTRY, REAL_ACTION_ROLES, resolve, resolve_role
+from eo.registry import REAL_ACTION_ROLES, REGISTRY, resolve, resolve_role
 
 
 def test_every_real_action_role_target_resolves_to_a_real_callable():

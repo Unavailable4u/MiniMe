@@ -26,10 +26,8 @@ actually call generate_text().
 import json
 
 import eo.device_archetype as da
-import eo.mech_enclosure as me
 import eo.mech_cutouts as mc
-from eo.enclosure_spec import ENCLOSURE_SPEC
-
+import eo.mech_enclosure as me
 
 # ---------------------------------------------------------------------------
 # classify_archetype (Patch A.1)

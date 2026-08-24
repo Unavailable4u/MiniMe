@@ -29,25 +29,21 @@ graph/adapters.py for examples of that adapter layer.
 Place this file at: agents/exporter.py
 """
 
-import os
 import csv
-import json
-import re
 import datetime as _dt
+import json
+import os
+import re
 
 from docx import Document
 from docx.shared import Pt
-
+from openpyxl import Workbook
 from pptx import Presentation
 from pptx.util import Pt as PptxPt
-
-from openpyxl import Workbook
-
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
-
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 SUPPORTED_FORMATS = ("docx", "pptx", "xlsx", "csv", "pdf", "md", "json")
 
@@ -394,7 +390,7 @@ def _write_calendar_ics(entries: list, output_path: str, title: str) -> None:
         "PRODID:-//Growth Domain//Content Calendar//EN",
         "CALSCALE:GREGORIAN",
     ]
-    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     for i, row in enumerate(entries):
         event_date = _resolve_calendar_date(row["date"], i, anchor)
         dtstart = event_date.strftime("%Y%m%d")

@@ -24,16 +24,14 @@ find those docs pin the app_slug context to the same slug run() will
 itself compute (title/session_id are fully controlled in each test), then
 seed everything under that context before calling run().
 """
-from unittest.mock import MagicMock
 
 import pytest
 
-import agents.handoff_packager as handoff_packager
+from agents import handoff_packager
 from agents.architecture_diagrammer import ARCHITECTURE_DIAGRAM_KEY
 from agents.schema_diagrammer import SCHEMA_DIAGRAM_KEY
-from memory.bus import write, read, KEYS, set_app_slug, slugify
 from eo.errors import MissingDependencyError
-
+from memory.bus import KEYS, read, set_app_slug, slugify, write
 
 # ---------------------------------------------------------------------------
 # 1. Deterministic PRD-parsing helpers

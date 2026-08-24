@@ -53,27 +53,35 @@ Usage:
     python eo/loop_v4.py --register-project /path/to/folder "My Project"
     python eo/loop_v4.py --project my_project_a1b2c3 --tier 2 --directed-task-type debug --app my_app "fix the bug"
 """
+import json
 import os
 import sys
-import json
-
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.modes import apply_mode
-from eo.inspector import classify
-from eo.router import build_execution_graph, build_execution_graph_from_hires, EXPLAIN_CODE_ROUTE
-from eo.executor import execute_graph
-from eo.loop_controller import run_with_looping
+from eo import (
+    code_loader,
+    conversation_memory,  # NEW — Part 23
+    routing_memory,
+)
 from eo import panel as eo_panel
+from eo.executor import execute_graph
+from eo.inspector import classify
+from eo.loop_controller import run_with_looping
+from eo.modes import apply_mode
 from eo.panel import staff_task
-from eo.sga import attempt as sga_attempt
+from eo.router import (
+    EXPLAIN_CODE_ROUTE,
+    build_execution_graph,
+    build_execution_graph_from_hires,
+)
 from eo.semantic_cache import check_cache, write_cache
-from eo import code_loader
-from eo import routing_memory
-from eo import conversation_memory   # NEW — Part 23
-from eo.structure import PATH_TO_TIER, TIER_TO_PATH   # CHANGED — Part 26 §4c, was defined locally
-from relay.emitter import emit_event
+from eo.sga import attempt as sga_attempt
+from eo.structure import (  # CHANGED — Part 26 §4c, was defined locally
+    PATH_TO_TIER,
+    TIER_TO_PATH,
+)
 from memory.bus import write
+from relay.emitter import emit_event
 
 # Part 8.3 — starting guess, not a measured value. Recalibrate manually
 # once eo:routing_outcome has enough entries.
@@ -246,7 +254,7 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None
         # hiring decision to make for a read-only lookup, and nothing
         # here touches disk (same reasoning as router.py's "review"
         # directed task having only one possible reviewer).
-        from memory.bus import read, KEYS
+        from memory.bus import KEYS, read
         submitted_code = read(KEYS["submitted_code"], default={})
         combined = (
             f"{task_text}\n\nHere is the codebase (module_name -> code):\n"
@@ -310,8 +318,9 @@ def _run_tier3_hires(task_text: str, decision: dict, hires: list,
     without this, two separate CLI runs back to back would share the
     same module_specs/current_plan/submitted_code/etc. exactly like the
     HTTP path did before this fix."""
-    from memory.bus import set_app_slug, slugify
     import uuid
+
+    from memory.bus import set_app_slug, slugify
     set_app_slug(f"{slugify(task_text)}_{uuid.uuid4().hex[:8]}")
 
     looped = run_with_looping(

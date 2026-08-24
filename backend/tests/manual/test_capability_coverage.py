@@ -68,7 +68,7 @@ Usage:
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 import vcr
@@ -185,7 +185,7 @@ REAL_MANIFEST = [
 #
 # Restored to full coverage as a B1 followup -- see module docstring.
 # --------------------------------------------------------------------------
-TEST_CASES: List[tuple] = [
+TEST_CASES: list[tuple] = [
 
     # --- clusters ---
     ("Can you group my sources into related topic clusters?", "generate_clusters"),
@@ -270,7 +270,7 @@ MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 2
 
 
-def _classify_with_retries(message: str, tools: list) -> Dict[str, Any]:
+def _classify_with_retries(message: str, tools: list) -> dict[str, Any]:
     """
     classify_tool_intent() itself is deliberately single-shot / fail-open
     (see its docstring in utils/llm_client.py) -- a real chat send should
@@ -322,7 +322,7 @@ def test_capability_coverage_classification(monkeypatch):
     )
     print(f"Repeats per message: {repeats} (set TOOL_TEST_REPEATS to change)\n")
 
-    results: Dict[str, List[Dict[str, Any]]] = {}
+    results: dict[str, list[dict[str, Any]]] = {}
 
     for message, expected in TEST_CASES:
         results[message] = []

@@ -22,13 +22,13 @@ about.
 
 Place this file at: eo/quiz_progress.py
 """
-import os
-import sys
 import json
+import os
 import re
-import uuid
+import sys
 import threading
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 
 # Same bootstrap as eo/knowledge_graph.py — this module cross-imports
 # agents.importer (see parse_quiz() below), so it needs the repo root on
@@ -54,7 +54,7 @@ _EXPLANATION_RE = re.compile(r"^Explanation:\s*(.*)$", re.IGNORECASE)
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _read():

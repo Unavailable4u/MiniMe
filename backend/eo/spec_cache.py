@@ -21,9 +21,10 @@ number, not to be worth caching as a standing negative result the way
 price_cache.py caches an empty listings=[] search.
 """
 import os
-import sys
 import re
+import sys
 import time
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import read, write
 

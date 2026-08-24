@@ -13,11 +13,12 @@ same category of tool.
 Run from the project root, same venv as eo/loop_v4.py:
     python scripts/inspect_test_code.py
 """
-import sys
-import os
 import json
+import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, KEYS
+from memory.bus import KEYS, read
 
 app_slug = read(KEYS["app_slug"])
 print(f"active app_slug: {app_slug!r}\n")

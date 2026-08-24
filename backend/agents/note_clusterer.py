@@ -23,16 +23,16 @@ present -- neither is used anywhere else in this codebase yet).
 
 Place this file at: agents/note_clusterer.py
 """
+import json
 import os
 import sys
-import json
-import uuid
 import threading
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import list_nodes
 from eo.graph_edges import create_edge
+from eo.knowledge_graph import list_nodes
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CANDIDATES_PATH = os.path.join(BASE_DIR, "data", "graph", "_cluster_candidates.json")
@@ -44,7 +44,7 @@ DEFAULT_MAX_CLUSTERS = 6
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _read():
@@ -88,8 +88,8 @@ def propose_clusters(workspace_id: str, max_clusters: int = DEFAULT_MAX_CLUSTERS
     if len(nodes) < MIN_NODES_TO_CLUSTER:
         candidates = []
     else:
-        from sklearn.cluster import KMeans
         import numpy as np
+        from sklearn.cluster import KMeans
 
         k = max(2, min(max_clusters, len(nodes) // 2))
         vectors = np.array([n["vector"] for n in nodes])

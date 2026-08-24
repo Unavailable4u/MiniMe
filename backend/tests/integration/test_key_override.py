@@ -46,10 +46,9 @@ automatically after each test.
 Run standalone:
     python -m pytest tests/integration/test_key_override.py -v
 """
-from memory.bus import write, KEYS
-
 from agents import code_writers, fixer_pool, reviewer, security_scanner
 from eo.worker_pool import _eligible_pool as _wp_eligible_pool
+from memory.bus import KEYS, write
 
 
 def _fake_generate_text(system_prompt, user_content, chain, agent_name=None,

@@ -30,9 +30,10 @@ calls that endpoint, or anything like it.
 
 Place this file at: eo/prerequisite_suggestions.py
 """
+import json  # NEW — step 3.5
+
+from eo import panel_content  # NEW — Notebooks Chat-First refinement, Phase 3 step 3.5
 from eo.source_index import get_packet
-from eo import panel_content   # NEW — Notebooks Chat-First refinement, Phase 3 step 3.5
-import json   # NEW — step 3.5
 
 _PREREQ_RELATION = "prerequisite-of"
 

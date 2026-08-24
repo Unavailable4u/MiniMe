@@ -51,20 +51,22 @@ Result written to KEYS["source_quality_report"]:
   "summary": "...",
 }
 """
+import json
 import os
 import sys
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, vector_index, get_current_app_slug
-from utils.llm_client import log_usage, embed_text
-from eo.knowledge_graph import write_node
-from eo.graph_edges import create_edge
+from agents.duplication_checker import (
+    SIMILARITY_THRESHOLD,  # literal reuse, not a re-derived constant
+)
 from eo.errors import MissingDependencyError
-from agents.duplication_checker import SIMILARITY_THRESHOLD  # literal reuse, not a re-derived constant
+from eo.graph_edges import create_edge
+from eo.knowledge_graph import write_node
+from memory.bus import KEYS, get_current_app_slug, read, vector_index, write
+from utils.llm_client import embed_text, log_usage
 
 load_dotenv()
 
@@ -132,7 +134,7 @@ def run(session_id: str = None, tier: int = None, domain: str = None) -> dict:
         raise MissingDependencyError(required_role="academic_search")
 
     workspace_id = _workspace_id()
-    current_year = datetime.now(timezone.utc).year
+    current_year = datetime.now(UTC).year
 
     # --- 1. Quality flags ---
     quality_flags = []

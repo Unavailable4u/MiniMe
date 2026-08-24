@@ -29,7 +29,7 @@ original file, which never depended on loop.py at all.
 """
 from unittest.mock import patch
 
-import eo.loop_v4 as loop_v4
+from eo import loop_v4
 
 TIER3_DECISION = {
     "path": "adaptive", "tier": 3, "directed_task_type": None, "confidence": 0.9,

@@ -26,13 +26,14 @@ actual judgment of whether a routing decision was later found to be
 under/over-routed is exactly the human-in-the-loop step Part 8.3 wants,
 not something this module should guess at automatically.
 """
+import json
 import os
 import sys
-import json
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import write, vector_index
+from memory.bus import vector_index, write
+
 # Part 26 §4 — was a hand-copied _embed() duplicating utils/llm_client's
 # embed_text() (same URL, same model, same mean-pooling), kept separate
 # so routing-outcome logging wouldn't pull in llm_client.py's groq/

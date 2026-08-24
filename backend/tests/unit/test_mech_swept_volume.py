@@ -43,7 +43,6 @@ import eo.mech_enclosure as me
 import eo.mech_supports as msup
 import eo.mech_swept_volume as msv
 
-
 # ---------------------------------------------------------------------------
 # swept_aabb_rotational (Patch B.3) -- cylinder case
 # ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ isolated in-memory store (nothing production-adjacent to accidentally
 wipe), and mock_llm patches eo.panel's own generate_text so brief
 writing needs zero real network/keys.
 """
-import eo.panel as panel  # noqa: F401  (ensures mock_llm patches this module)
+from eo import panel  # noqa: F401  (ensures mock_llm patches this module)
 from eo.panel import staff_task
 from eo.registry import get_role_prompt
 

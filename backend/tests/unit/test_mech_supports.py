@@ -19,9 +19,8 @@ mocked) -- same "build a real mech dict, let the real pipeline resolve
 it" approach test_mech_enclosure.py's own _mech_with_device() fixture
 already uses for apply_enclosure_generation().
 """
-from eo.enclosure_spec import ENCLOSURE_SPEC, SUPPORT_CATEGORIES
 import eo.mech_supports as ms
-
+from eo.enclosure_spec import ENCLOSURE_SPEC, SUPPORT_CATEGORIES
 
 STANDOFF_DIA = ENCLOSURE_SPEC["standoff_dia_mm"]
 BORE_DIA = ENCLOSURE_SPEC["screw_boss_dia_mm"]

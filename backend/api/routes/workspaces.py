@@ -24,14 +24,12 @@ GET /api/audit/me is included even though it isn't under /api/workspaces
 -- it shares audit_log with GET /api/workspaces/{ws_id}/audit immediately
 above it in the original file, and doesn't fit any other piece.
 """
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from api.deps import require_auth, _lookup_user_id_by_email, _lookup_users_by_ids
-from eo import chat_workspace
-from eo import audit_log
+from api.deps import _lookup_user_id_by_email, _lookup_users_by_ids, require_auth
+from eo import audit_log, chat_workspace
 
 router = APIRouter()
 
@@ -40,7 +38,7 @@ class CreateWorkspaceRequest(BaseModel):
     name: str
     # NEW — item #10 / B0: lets a caller specify which stage tab this
     # project should natively belong to. Omitted = old behavior ("note").
-    stage: Optional[str] = None
+    stage: str | None = None
 
 
 class RenameWorkspaceRequest(BaseModel):
@@ -48,26 +46,26 @@ class RenameWorkspaceRequest(BaseModel):
 
 
 class PromoteWorkspaceRequest(BaseModel):
-    to_stage: Optional[str] = None
+    to_stage: str | None = None
     # NEW — §2.2: "complete" (default) is today's unchanged behavior —
     # workspace leaves the old tab entirely. "partial" keeps it active
     # in both the old and new tab (see chat_workspace.promote()).
-    mode: Optional[str] = "complete"
+    mode: str | None = "complete"
     # NEW — §10d: when set, this request is understood to be the
     # chat-triggered path (a person explicitly agreeing, mid chat-turn,
     # to add a tab) rather than a plain settings-panel promote. Only
     # meaningful together with mode="partial" — see promote_workspace()
     # below for the branch this drives.
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 class WorkspaceChatRequest(BaseModel):
     chat_id: str
-    delete_chat: Optional[bool] = False
+    delete_chat: bool | None = False
 
 
 class CreateWorkspaceChatRequest(BaseModel):
-    title: Optional[str] = "New Chat"
+    title: str | None = "New Chat"
 
 
 class AddWorkspaceMemberRequest(BaseModel):
@@ -80,11 +78,11 @@ class UpdateWorkspaceMemberRequest(BaseModel):
 
 
 class LeaveWorkspaceRequest(BaseModel):
-    successor_id: Optional[str] = None  # owner-only; must be a current partner
+    successor_id: str | None = None  # owner-only; must be a current partner
 
 
 class CastVoteRequest(BaseModel):
-    vote_target: Optional[str] = None  # another partner's user_id, or None = "stay joint"
+    vote_target: str | None = None  # another partner's user_id, or None = "stay joint"
 
 
 class SetAttributionRequest(BaseModel):

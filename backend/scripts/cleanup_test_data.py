@@ -1,9 +1,10 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from memory.bus import read, write, redis, _namespaced
 from eo.registry import ROLE_PROMPTS_KEY
+from memory.bus import _namespaced, read, redis, write
 
 # ---- 1. Remove the stray top-level key from Test 1 ----
 raw = redis.get(_namespaced("registry:test"))

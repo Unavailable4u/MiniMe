@@ -36,7 +36,7 @@ from datetime import date
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import utils.llm_client as llm_client
+from utils import llm_client
 
 TODAY = date.today().isoformat()
 

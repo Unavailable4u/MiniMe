@@ -40,8 +40,8 @@ Place this file at: eo/correction_candidates.py
 """
 import uuid
 
+from eo.secondary_data import apply_patch, get_secondary_data
 from memory.bus import read, write
-from eo.secondary_data import get_secondary_data, apply_patch
 
 
 def _key(workspace_id: str) -> str:

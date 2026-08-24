@@ -14,9 +14,9 @@ import json
 
 import pytest
 
-import agents.architecture_diagrammer as architecture_diagrammer
-from memory.bus import write
+from agents import architecture_diagrammer
 from eo.errors import MissingDependencyError
+from memory.bus import write
 
 
 def _seed_prd(session_id, text):

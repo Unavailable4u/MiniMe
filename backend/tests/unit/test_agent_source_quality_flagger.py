@@ -18,12 +18,12 @@ same posture test_agent_duplication_checker.py takes with its own
 sibling functions -- no real Upstash Vector or knowledge-graph call
 under test.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-import agents.source_quality_flagger as source_quality_flagger
+from agents import source_quality_flagger
 from eo.errors import MissingDependencyError
 
 
@@ -36,7 +36,7 @@ class _Match:
 def _paper(paper_id="p1", title="Some Paper", node_id="n1", abstract="an abstract",
            venue="ACM", citation_count=5, year=None, source="semantic_scholar", doi="10.1/x"):
     if year is None:
-        year = datetime.now(timezone.utc).year
+        year = datetime.now(UTC).year
     return {
         "paper_id": paper_id, "title": title, "node_id": node_id, "abstract": abstract,
         "venue": venue, "citation_count": citation_count, "year": year,
@@ -84,7 +84,7 @@ def _seed_report(monkeypatch, papers):
     )
 
 
-CURRENT_YEAR = datetime.now(timezone.utc).year
+CURRENT_YEAR = datetime.now(UTC).year
 
 
 # ---------------------------------------------------------------------------

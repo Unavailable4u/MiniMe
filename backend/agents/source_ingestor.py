@@ -30,8 +30,8 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.knowledge_graph import write_node
 from eo.graph_edges import create_edge
+from eo.knowledge_graph import write_node
 
 NODE_TYPE = "source"
 

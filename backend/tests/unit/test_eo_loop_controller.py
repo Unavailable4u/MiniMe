@@ -35,15 +35,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.loop_controller as loop_controller
+import agents.generic_worker as generic_worker_module
+from eo import loop_controller
 from eo.loop_controller import (
-    run_with_looping,
+    FORCED_CHECKPOINT_EVERY,
+    MAX_MACRO_LOOPS,
     _extract_critical_issue,
     _hard_safety_check,
-    MAX_MACRO_LOOPS,
-    FORCED_CHECKPOINT_EVERY,
+    run_with_looping,
 )
-import agents.generic_worker as generic_worker_module
 
 
 @pytest.fixture(autouse=True)
@@ -237,7 +237,8 @@ def test_run_with_looping_paused_status_does_not_pollute_results(mock_graph_buil
 
 
 def test_run_with_looping_paused_enriches_existing_snapshot(mock_graph_build, monkeypatch):
-    from memory.bus import write as bus_write, read as bus_read
+    from memory.bus import read as bus_read
+    from memory.bus import write as bus_write
     bus_write("paused_execution:s6", {"agent_names": ["generic_worker"], "idx": 0})
     _mock_execute_graph(monkeypatch, [{"status": "paused", "paused_at_role": "reviewer"}])
 

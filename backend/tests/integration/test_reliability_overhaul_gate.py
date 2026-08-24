@@ -39,14 +39,14 @@ Two scenarios, both against the same MockLedger:
     and pricing I/O around it -- this is "the one the acceptance test
     targets" per the plan.
 """
-import time
 import threading
+import time
 import uuid
 from collections import defaultdict
 
 import pytest
 
-import eo.concurrency_gate as concurrency_gate
+from eo import concurrency_gate
 from eo.concurrency_gate import GatedTask, run_gated
 
 
@@ -69,8 +69,8 @@ class MockLedger:
         self.limit = limit
         self.window = window_seconds
         self._lock = threading.Lock()
-        self.history: "dict[tuple, list[float]]" = defaultdict(list)
-        self._reservations: "dict[str, tuple]" = {}
+        self.history: dict[tuple, list[float]] = defaultdict(list)
+        self._reservations: dict[str, tuple] = {}
 
     def reserve(self, provider, key_id, model, estimated_units):
         key = (provider, key_id, model)
@@ -185,10 +185,8 @@ def test_populate_prices_seven_parts_never_exceeds_ledger_budget(mock_ledger, mo
     construction, and the pricing I/O itself) -- run_gated() and its
     reserve()/release_reservation() calls are the real Patch B/A code,
     talking to the mocked ledger via the mock_ledger fixture."""
-    import agents.hardware_speccer as hardware_speccer
-    import eo.worker_pool as worker_pool
-    import eo.dynamic_chain as dynamic_chain
-    import agents.part_price_finder as part_price_finder
+    from agents import hardware_speccer, part_price_finder
+    from eo import dynamic_chain, worker_pool
 
     key_envs = ["GROQ_KEY_0", "GROQ_KEY_1"]
 

@@ -9,7 +9,7 @@ actually invoking run() itself (that requires an LLM call and belongs
 in the mocked-LLM agent-integration suite, alongside the other agent
 per-role JSON-shape checks).
 """
-from memory.bus import write, read, read_many, KEYS
+from memory.bus import KEYS, read, read_many, write
 
 
 def test_original_idea_round_trips():

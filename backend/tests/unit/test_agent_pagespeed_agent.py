@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.pagespeed_agent as pagespeed_agent
+from agents import pagespeed_agent
 
 
 class _FakeResponse:

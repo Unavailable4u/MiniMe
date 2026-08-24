@@ -26,13 +26,13 @@ Exit code 0 = both checks passed. Non-zero = something's still broken.
 You can also point this at the OLD/unpatched file to confirm the test
 itself is meaningful (it should FAIL loudly with a NameError on that one).
 """
-import sys
-import os
+import contextlib
 import io
-import types
+import os
 import runpy
 import subprocess
-import contextlib
+import sys
+import types
 
 
 def check_static(target: str) -> bool:

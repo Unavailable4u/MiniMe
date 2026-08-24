@@ -43,21 +43,27 @@ unconditionally regardless of whether it had any business seeing it. A
 narrow persona or single-purpose role can now be marked, in a workflow
 template (eo/structure.py's `no_conversation_context_roles`), to skip it.
 """
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.registry import get_role_prompt, AGENT_CAPABILITIES
-from eo.quota_sentinel import get_quota_snapshot
-from eo import conversation_memory   # NEW — Part 23
-from eo.skill_library import get_relevant_skill, ensure_skill_for_task   # Part 6 §E2, task 14
-from utils.llm_client import generate_text
-from memory.bus import read as bus_read, write as bus_write, KEYS
 # Part 6 §6.4 bridge — see LEGACY_BUS_KEY_MAP below. No circularity risk:
 # agents/handoff_packager.py imports only memory.bus/relay.emitter/
 # eo.errors/agents.architecture_diagrammer/agents.schema_diagrammer, none
 # of which import this module or eo.registry.
 from agents.handoff_packager import PLAN_HANDOFF_PACKAGE_KEY
+from eo import conversation_memory  # NEW — Part 23
+from eo.quota_sentinel import get_quota_snapshot
+from eo.registry import AGENT_CAPABILITIES, get_role_prompt
+from eo.skill_library import (  # Part 6 §E2, task 14
+    ensure_skill_for_task,
+    get_relevant_skill,
+)
+from memory.bus import KEYS
+from memory.bus import read as bus_read
+from memory.bus import write as bus_write
+from utils.llm_client import generate_text
+
 # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
 # module level here. eo.registry.py now imports this module (generic_worker)
 # at load time so resolve("generic_worker") works, and eo.panel.py imports
@@ -397,7 +403,7 @@ MAX_CHAIN_STEPS_CEILING = 6
 
 
 def _dynamic_max_chain_steps(quota_status: dict) -> int:
-    from eo.panel import _is_cooling_down   # deferred — see module-level note above
+    from eo.panel import _is_cooling_down  # deferred — see module-level note above
 
     live_providers = {
         info.get("provider")
@@ -430,7 +436,7 @@ def _build_fallback_chain(role: str, quota_status: dict, max_steps: int = MAX_CH
     order they should be attempted. An empty list means no account is
     available at all, same meaning as _best_match() returning None today.
     """
-    from eo.panel import _best_match   # deferred — see module-level note above
+    from eo.panel import _best_match  # deferred — see module-level note above
 
     chain_keys = []
     used_providers = set()

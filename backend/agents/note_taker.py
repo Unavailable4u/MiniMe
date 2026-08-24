@@ -37,16 +37,15 @@ Both funnel through _propose_from_context(), the shared core.
 
 Place this file at: agents/note_taker.py
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
 import threading
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eo import chat_workspace
-from eo import note_candidates
+from eo import chat_workspace, note_candidates
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
@@ -83,7 +82,7 @@ def _propose_from_context(session_id: str, workspace_id: str, context_text: str)
     if not workspace_id or not context_text:
         return None
 
-    from agents.generic_worker import run as run_role   # deferred, see above
+    from agents.generic_worker import run as run_role  # deferred, see above
 
     task_text = (
         "Decide whether the conversation excerpt below contains anything "

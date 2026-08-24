@@ -240,9 +240,9 @@ def estimate_mass(part: dict) -> dict:
     # imported by eo.registry today, but keeping this deferred costs
     # nothing and keeps this module safe to import from anywhere
     # without relitigating this later.
+    from agents.structure_architect import _strip_fences  # reuse, don't reimplement
     from eo.dynamic_chain import build_fallback_chain
     from utils.llm_client import generate_text
-    from agents.structure_architect import _strip_fences  # reuse, don't reimplement
 
     chain = build_fallback_chain("mech_mass") or FALLBACK_CHAIN
 

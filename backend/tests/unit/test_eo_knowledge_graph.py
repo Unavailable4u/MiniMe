@@ -24,8 +24,7 @@ never a real Upstash connection.
 """
 import pytest
 
-import eo.knowledge_graph as knowledge_graph
-
+from eo import knowledge_graph
 
 # ---------------------------------------------------------------------
 # Fake Upstash Vector Index harness

@@ -31,8 +31,7 @@ re-stubbing every internal call site by hand would be.
 """
 import pytest
 
-import eo.workspace_facts as workspace_facts
-
+from eo import workspace_facts
 
 # ---------------------------------------------------------------------
 # _key / _slug
@@ -364,7 +363,7 @@ def test_set_facts_still_succeeds_when_cache_invalidation_raises(monkeypatch):
     """A fact write must never be blocked by cache-invalidation failing
     -- fire-and-forget, per the module's own docstring for
     _invalidate_facts_cache()."""
-    import eo.semantic_cache as semantic_cache
+    from eo import semantic_cache
 
     def boom(text, workspace_id=None):
         raise RuntimeError("Vector unavailable")
@@ -377,7 +376,7 @@ def test_set_facts_still_succeeds_when_cache_invalidation_raises(monkeypatch):
 
 
 def test_update_custom_fact_still_succeeds_when_cache_invalidation_raises(monkeypatch):
-    import eo.semantic_cache as semantic_cache
+    from eo import semantic_cache
 
     def boom(text, workspace_id=None):
         raise RuntimeError("Vector unavailable")

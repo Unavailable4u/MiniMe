@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.overlapping_checker as overlapping_checker
+from agents import overlapping_checker
 
 
 class _Match:

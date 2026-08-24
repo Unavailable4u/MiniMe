@@ -20,8 +20,7 @@ pytest's tmp_path fixture for that, never a real project directory.
 import json
 import os
 
-import eo.project_registry as project_registry
-
+from eo import project_registry
 
 # ---------------------------------------------------------------------
 # _slugify

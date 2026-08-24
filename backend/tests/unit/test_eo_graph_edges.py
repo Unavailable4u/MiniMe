@@ -28,7 +28,7 @@ import os
 
 import pytest
 
-import eo.graph_edges as graph_edges
+from eo import graph_edges
 
 
 @pytest.fixture(autouse=True)

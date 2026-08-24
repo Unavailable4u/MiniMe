@@ -18,7 +18,6 @@ autouse ones tests/conftest.py already provides for the whole tree.
 """
 import agents.hardware_speccer as hs
 
-
 # ---------------------------------------------------------------------------
 # Level-0 primitive templates
 # ---------------------------------------------------------------------------

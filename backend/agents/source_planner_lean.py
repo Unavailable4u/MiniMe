@@ -42,15 +42,15 @@ now that the precedent's established.
 
 Place this file at: agents/source_planner_lean.py
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.registry import get_role_prompt, add_role_prompt
-from eo.source_index import get_packet, get_packet_depth
 from eo.knowledge_graph import get_node
+from eo.registry import add_role_prompt, get_role_prompt
+from eo.source_index import get_packet, get_packet_depth
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
@@ -215,7 +215,7 @@ def plan(workspace_id: str, task_text: str, scope: str = "project",
         return packet
 
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred -- same
+    from agents.generic_worker import run as run_role  # deferred -- same
                                                           # circular-import
                                                           # reason as
                                                           # agents/source_manager.py
@@ -291,7 +291,7 @@ def plan_depth(workspace_id: str, starting_topic_id: str, requested_depth: int,
         return walk
 
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason as
                                                           # plan() above

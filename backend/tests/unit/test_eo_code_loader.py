@@ -19,9 +19,8 @@ from the file's own location at import time -- tests monkeypatch it
 to a tmp_path-based apps root so nothing here ever touches the real
 backend/apps/ directory.
 """
-import os
 
-import eo.code_loader as code_loader
+from eo import code_loader
 
 
 def _use_tmp_apps_root(monkeypatch, tmp_path):

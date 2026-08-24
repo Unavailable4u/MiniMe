@@ -20,17 +20,17 @@ out AND its own generated tests don't raise AssertionError.
   so it shares the default GROQ_API_KEY.
 """
 
-import os
-import sys
 import json
+import os
 import re
+import sys
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from eo.errors import MissingDependencyError  # NEW — bug fix
+from memory.bus import KEYS, read, write
 from utils.llm_client import generate_text
-from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
@@ -111,8 +111,7 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

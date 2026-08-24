@@ -19,10 +19,10 @@ in step 6.2, and get_progress()/set_progress() helpers land in step 6.3.
 
 Place this file at: eo/study_progress.py
 """
-import os
 import json
+import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROGRESS_PATH = os.path.join(BASE_DIR, "data", "study", "_study_progress.json")
@@ -30,7 +30,7 @@ _lock = threading.Lock()
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _read():

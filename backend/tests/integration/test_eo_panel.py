@@ -16,7 +16,7 @@ that translates eo/inspector.py's Part 12 "path" output back into
 "tier" for this module and eo/loop_v4.py, both not yet renamed). So
 these fixtures and assertions are still correct as written.
 """
-import eo.panel as panel
+from eo import panel
 
 
 def _vote(tier, directed=None, confidence=0.8, agents=None, reasoning=""):

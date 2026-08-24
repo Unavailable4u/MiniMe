@@ -18,7 +18,7 @@ eo/study_progress.py had zero test coverage before this. Priorities:
 Isolation follows test_eo_node_summaries.py's convention: a real JSON
 file on disk (PROGRESS_PATH), monkeypatched to a tmp_path location.
 """
-import eo.study_progress as study_progress
+from eo import study_progress
 
 
 def _use_tmp_path(monkeypatch, tmp_path):

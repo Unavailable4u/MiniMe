@@ -39,21 +39,21 @@ function (including the __main__ demo below) need the ["fixed_code"]
 update.
 """
 
+import ast
+import json
 import os
 import sys
-import json
 import time
-import ast
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
-from relay.emitter import emit_event
 from agents.generic_worker import NEXT_TAG_INSTRUCTION, parse_next_tag
+from eo.errors import MissingDependencyError  # NEW — bug fix
+from memory.bus import KEYS, read, write
+from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from eo.errors import MissingDependencyError   # NEW — bug fix
 
 load_dotenv()
 
@@ -94,8 +94,7 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        text = text.removeprefix("json")
     return text.strip()
 
 

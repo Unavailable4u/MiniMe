@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-import agents.dataset_analyst as dataset_analyst
+from agents import dataset_analyst
 
 
 @pytest.fixture(autouse=True)

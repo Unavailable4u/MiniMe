@@ -53,10 +53,10 @@ specific label to a specific voice on purpose.
 
 Place this file at: agents/tts_synthesizer.py
 """
-import os
-import re
 import asyncio
 import hashlib
+import os
+import re
 import tempfile
 
 import edge_tts

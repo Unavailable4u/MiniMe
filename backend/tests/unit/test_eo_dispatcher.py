@@ -30,8 +30,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.dispatcher as dispatcher
-from eo.dispatcher import next_step, MAX_STAGE_REVISITS
+from eo import dispatcher
+from eo.dispatcher import MAX_STAGE_REVISITS, next_step
 from memory.bus import read as bus_read
 
 

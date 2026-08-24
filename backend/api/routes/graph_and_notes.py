@@ -24,21 +24,24 @@ Notebooks generate/podcast/video/table/simulate endpoints and the
 into propose_clusters()/chat_workspace.get_workspace()/panel_content
 too, so server.py keeps its own imports of those for piece 7's sake.
 """
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from agents.backlink_detector import cleanup_for_removed_source, detect_backlinks
+from agents.note_clusterer import accept_candidate as accept_cluster_candidate
+from agents.note_clusterer import list_candidates as list_cluster_candidates
+from agents.note_clusterer import propose_clusters
+from agents.note_clusterer import reject_candidate as reject_cluster_candidate
 from api.deps import require_auth
-from agents.backlink_detector import detect_backlinks, cleanup_for_removed_source
-from agents.note_clusterer import propose_clusters, list_candidates as list_cluster_candidates, \
-    accept_candidate as accept_cluster_candidate, reject_candidate as reject_cluster_candidate
-from eo import chat_workspace
-from eo import graph_edges
-from eo import note_candidates
-from eo import node_summaries
-from eo import panel_content
-from eo.knowledge_graph import list_nodes, delete_node, rename_node
+from eo import (
+    chat_workspace,
+    graph_edges,
+    node_summaries,
+    note_candidates,
+    panel_content,
+)
+from eo.knowledge_graph import delete_node, list_nodes, rename_node
 from eo.secondary_data import get_secondary_data
 
 router = APIRouter()
@@ -60,7 +63,7 @@ class CreateEdgeRequest(BaseModel):
 # agent involvement.
 
 @router.get("/api/graph/edges", dependencies=[Depends(require_auth)])
-def get_graph_edges(workspace_id: Optional[str] = Query(None)):
+def get_graph_edges(workspace_id: str | None = Query(None)):
     return graph_edges.list_edges(workspace_id=workspace_id)
 
 
@@ -169,7 +172,7 @@ def get_topics_graph(ws_id: str, owner_id: str = Depends(require_auth)):
 # list_nodes() call rather than each inventing their own fetch.
 
 @router.get("/api/workspaces/{ws_id}/nodes")
-def get_workspace_nodes(ws_id: str, node_type: Optional[str] = Query(None),
+def get_workspace_nodes(ws_id: str, node_type: str | None = Query(None),
                          owner_id: str = Depends(require_auth)):
     try:
         chat_workspace.get_workspace(ws_id, owner_id)

@@ -1,11 +1,14 @@
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, read_many, KEYS
+from eo.errors import MissingDependencyError  # NEW — bug fix
+from memory.bus import KEYS, read, read_many, write
 from utils.llm_client import generate_text
-from eo.errors import MissingDependencyError   # NEW — bug fix
+
 load_dotenv()
 
 # FALLBACK_CHAIN: last-resort static chain per Part 4, agent #17 of the

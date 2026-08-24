@@ -43,8 +43,8 @@ import requests
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.spec_cache import get_cached_spec, set_cached_spec
 from eo.datasheet_cache import get_cached_datasheet, set_cached_datasheet
+from eo.spec_cache import get_cached_spec, set_cached_spec
 
 # Permanent fix (2026-08-13): load_dotenv() at MODULE level, not just
 # inside __main__. The __main__-only version only covered
@@ -549,6 +549,7 @@ def get_datasheet_detail(datasheet_url: str) -> dict | None:
         }
 
     import tempfile
+
     from agents.pdf_ingestor import ingest_pdf
 
     tmp_path = None

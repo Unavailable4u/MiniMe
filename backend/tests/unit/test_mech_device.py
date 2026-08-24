@@ -28,8 +28,8 @@ itself against.
 No LLM, no FreeCAD -- pure data reshaping (same as eo/mech_enclosure.py's
 own tests), so no mock_llm/fake_bus fixtures needed.
 """
-from eo.mech_wiring_weight import build_section_adjacency_weights
 import eo.mech_device as md
+from eo.mech_wiring_weight import build_section_adjacency_weights
 
 
 def _demo_mech(wiring_edges=None):

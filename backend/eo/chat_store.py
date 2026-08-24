@@ -38,14 +38,14 @@ the owner_id filter from any query on the assumption RLS has you covered.
 -----------------------------------------------------------------------------
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from eo import db
 from eo.audit_log import write_audit
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value):

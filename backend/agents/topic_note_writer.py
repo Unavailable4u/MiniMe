@@ -39,16 +39,16 @@ agents/note_taker.py's _propose_from_context() both already use.
 
 Place this file at: agents/topic_note_writer.py
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.source_index import get_packet_depth
-from eo.knowledge_graph import get_node
-from eo.registry import get_role_prompt, add_role_prompt
 from eo import note_candidates
+from eo.knowledge_graph import get_node
+from eo.registry import add_role_prompt, get_role_prompt
+from eo.source_index import get_packet_depth
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
@@ -132,7 +132,7 @@ def generate_topic_note(workspace_id: str, topic_id: str, scope: str = "project"
         return None
 
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason
                                                           # agents/fact_detector.py's

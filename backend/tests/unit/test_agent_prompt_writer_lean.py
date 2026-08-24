@@ -20,9 +20,8 @@ import json
 
 import pytest
 
-import agents.prompt_writer_lean as prompt_writer_lean
-from memory.bus import read, write, KEYS
-
+from agents import prompt_writer_lean
+from memory.bus import KEYS, read, write
 
 # ---------------------------------------------------------------------------
 # 1. _strip_fences

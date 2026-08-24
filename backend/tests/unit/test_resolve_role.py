@@ -18,11 +18,11 @@ instead -- no exception, no log a caller would notice, just a task that
 quietly never produces the artifact it was supposed to.
 """
 from eo.registry import (
-    resolve_role,
     REAL_ACTION_ROLES,
     ROLE_ALIASES,
     _fuzzy_resolve_specialized_role,
     _normalize_role_label,
+    resolve_role,
 )
 
 

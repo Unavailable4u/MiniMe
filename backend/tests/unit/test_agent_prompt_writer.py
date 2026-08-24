@@ -20,11 +20,8 @@ tests/conftest.py), so nothing here touches real Upstash Redis.
 """
 import json
 
-import pytest
-
-import agents.prompt_writer as prompt_writer
-from memory.bus import read, write, KEYS
-
+from agents import prompt_writer
+from memory.bus import KEYS, read, write
 
 # ---------------------------------------------------------------------------
 # 1. _parse_fenced_json

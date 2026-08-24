@@ -23,7 +23,6 @@ import pytest
 import agents.hardware_speccer  # noqa: F401 -- ensure importable before mech_subsection_pool's lazy imports
 import agents.mech_subsection_pool as msp
 
-
 # ---------------------------------------------------------------------------
 # _parse_relative_offset / _default_relative_offset
 # ---------------------------------------------------------------------------

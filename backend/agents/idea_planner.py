@@ -1,10 +1,13 @@
+import json
 import os
 import sys
-import json
+
 from dotenv import load_dotenv
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import write, read_many, KEYS
-from utils.llm_client import generate_text, DROPPABLE_CONTEXT_MARKER
+from memory.bus import KEYS, read_many, write
+from utils.llm_client import DROPPABLE_CONTEXT_MARKER, generate_text
+
 load_dotenv()
 
 # FALLBACK_CHAIN: last-resort static chain, used ONLY if
@@ -107,8 +110,7 @@ def run(session_id: str = None, domain: str = None):
     # Strip markdown code fences if the model adds them anyway
     if raw_text.startswith("```"):
         raw_text = raw_text.split("```")[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
+        raw_text = raw_text.removeprefix("json")
         raw_text = raw_text.strip()
     plan = json.loads(raw_text)
     write(KEYS["current_plan"], plan)

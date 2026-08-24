@@ -23,20 +23,20 @@ exact same quota-aware, fairness-ranked account selection code_writers.py
 uses for role_tag="implementer", not a second copy that could drift.
 """
 
+import json
 import os
 import sys
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from eo import conversation_memory
+from eo.worker_pool import _select_workers as _select_workers_for_role
+from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from eo.worker_pool import _select_workers as _select_workers_for_role
-from eo import conversation_memory
 
 load_dotenv()
 
@@ -207,8 +207,7 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
         ).strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
+            raw_text = raw_text.removeprefix("json")
             raw_text = raw_text.strip()
         brief = json.loads(raw_text)
         if not brief.get("platforms"):

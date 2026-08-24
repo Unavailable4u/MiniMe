@@ -15,16 +15,13 @@ though they lived far apart in the original server.py (the GET sat
 down near the deploy routes) — same domain, so they move together
 rather than leaving one half behind.
 """
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from api.deps import require_auth, _resolve_chat_or_404
-from eo.project_registry import list_projects, generate_control_unit, register_project
-from eo import chat_store
-from eo import memory_batch
-from eo import chat_workspace
+from api.deps import _resolve_chat_or_404, require_auth
+from eo import chat_store, chat_workspace, memory_batch
+from eo.project_registry import generate_control_unit, list_projects, register_project
 
 router = APIRouter()
 
@@ -35,8 +32,8 @@ class RegisterProjectRequest(BaseModel):
 
 
 class CreateChatRequest(BaseModel):
-    title: Optional[str] = "New Chat"
-    template_id: Optional[str] = None   # NEW — one chat per template
+    title: str | None = "New Chat"
+    template_id: str | None = None   # NEW — one chat per template
 
 
 class RenameChatRequest(BaseModel):
@@ -102,8 +99,8 @@ def create_chat(req: CreateChatRequest, owner_id: str = Depends(require_auth)):
 def get_chat(
     chat_id: str,
     owner_id: str = Depends(require_auth),
-    limit: Optional[int] = Query(default=None, ge=1, le=200),
-    before_seq: Optional[int] = Query(default=None, ge=0),
+    limit: int | None = Query(default=None, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=0),
 ):
     real_owner_id = _resolve_chat_or_404(chat_id, owner_id)
     try:

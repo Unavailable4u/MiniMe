@@ -10,7 +10,7 @@ pending_synthesis:*) are deliberately shared across every app_slug.
 """
 import pytest
 
-from memory.bus import write, read, KEYS
+from memory.bus import KEYS, read, write
 
 
 def test_ordinary_key_is_isolated_per_app_slug():

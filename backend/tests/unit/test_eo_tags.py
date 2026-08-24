@@ -23,8 +23,7 @@ documents for generate_text). No real DB or vector store involved.
 """
 import pytest
 
-import eo.tags as tags
-
+from eo import tags
 
 # ---------------------------------------------------------------------
 # distinct_tags_for_workspace

@@ -19,9 +19,9 @@ checking" sector 2 calls for:
   - the mermaid string always gets attached and written to FILE_PLAN_KEY
 """
 
-import agents.structure_architect as structure_architect  # noqa: F401
-from memory.bus import write, read, KEYS
+from agents import structure_architect
 from agents.structure_architect import FILE_PLAN_KEY
+from memory.bus import KEYS, read, write
 
 FIXED_CODE = {
     "todo_storage": {"language": "python", "code": "def add_todo(todos, item):\n    return todos\n"},

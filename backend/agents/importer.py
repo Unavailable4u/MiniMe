@@ -16,14 +16,13 @@ follows normal heading/section conventions.
 Place this file at: agents/importer.py
 """
 
-import os
 import csv
 import json
+import os
 
 from docx import Document
-from pptx import Presentation
 from openpyxl import load_workbook
-
+from pptx import Presentation
 
 SUPPORTED_FORMATS = ("docx", "pptx", "xlsx", "csv", "md", "json")
 

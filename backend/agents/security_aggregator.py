@@ -48,7 +48,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from memory.bus import KEYS, read, write
 from utils.similarity import similarity as _fuzzy_similarity
 
 # Ordered worst-to-... no, best-to-worst is more useful here: higher number

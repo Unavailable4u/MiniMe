@@ -27,8 +27,7 @@ module is actually responsible for getting right.
 """
 import importlib
 
-import eo.tracing as tracing
-
+from eo import tracing
 
 # ---------------------------------------------------------------------
 # truncate_for_trace

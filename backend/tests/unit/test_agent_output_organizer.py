@@ -33,11 +33,10 @@ own documented last-resort) keeps this file testing output_organizer's
 own merge/parse/stream logic only, not eo.dynamic_chain's account-
 ranking internals.
 """
-import json
 
 import pytest
 
-import agents.output_organizer as output_organizer
+from agents import output_organizer
 
 
 @pytest.fixture

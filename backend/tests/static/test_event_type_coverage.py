@@ -42,7 +42,7 @@ BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-import relay.emitter as emitter  # noqa: E402
+from relay import emitter
 
 VALID_EVENT_TYPE_VALUES = {e.value for e in emitter.EventType}
 VALID_NOTIFY_KIND_VALUES = {k.value for k in emitter.NOTIFY_KINDS}

@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.podcast_scriptwriter as podcast_scriptwriter
+from agents import podcast_scriptwriter
 
 
 def _topic(name="Topic A", summary="summary A", content_hint="hint A", covers=None, excerpts=None):

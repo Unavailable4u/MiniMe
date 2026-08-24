@@ -54,7 +54,6 @@ happen to equal 5.0g today) so this module's own purity never
 accidentally depends on that other module's own internal fallback
 value changing.
 """
-import math
 
 from eo.mech_mass import lookup_mass
 from eo.mech_sections import subsections_for_section

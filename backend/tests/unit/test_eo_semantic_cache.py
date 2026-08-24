@@ -23,8 +23,7 @@ import time
 
 import pytest
 
-import eo.semantic_cache as semantic_cache
-
+from eo import semantic_cache
 
 # ---------------------------------------------------------------------
 # Fake Upstash Vector Index harness

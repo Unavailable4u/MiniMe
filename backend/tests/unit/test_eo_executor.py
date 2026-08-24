@@ -39,7 +39,7 @@ already no-ops without needing an explicit patch.
 """
 import pytest
 
-import eo.executor as executor
+from eo import executor
 from eo.errors import MissingDependencyError
 from utils.llm_client import ChainExhaustedError
 
@@ -184,7 +184,7 @@ class TestApplyRecheckRetry:
     def test_recheck_with_no_prior_override_excludes_nothing(self, monkeypatch):
         import eo.panel as panel_module
         import eo.quota_sentinel as quota_module
-        monkeypatch.setattr(quota_module, "get_quota_snapshot", lambda: {})
+        monkeypatch.setattr(quota_module, "get_quota_snapshot", dict)
         seen = {}
 
         def fake_best_match(role, snapshot, exclude=None):
@@ -201,7 +201,7 @@ class TestApplyRecheckRetry:
     def test_recheck_with_no_match_found_leaves_override_untouched(self, monkeypatch):
         import eo.panel as panel_module
         import eo.quota_sentinel as quota_module
-        monkeypatch.setattr(quota_module, "get_quota_snapshot", lambda: {})
+        monkeypatch.setattr(quota_module, "get_quota_snapshot", dict)
         monkeypatch.setattr(panel_module, "_best_match", lambda *a, **k: None)
         key_overrides = {"reviewer": "acct_a"}
         executor._apply_recheck_retry(key_overrides, ["reviewer"], 0, "recheck")
@@ -230,7 +230,7 @@ class TestRunLoopHappyPath:
         monkeypatch.setattr(executor, "resolve", lambda name: (
             lambda **kw: {"text": f"output-for-{kw['role']}"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         results = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -251,7 +251,7 @@ class TestRunLoopHappyPath:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -270,7 +270,7 @@ class TestRunLoopHappyPath:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -283,7 +283,7 @@ class TestRunLoopHappyPath:
     def test_agent_start_and_agent_done_events_fire_per_step(self, monkeypatch, _quiet_emit):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs())
 
@@ -310,7 +310,7 @@ class TestRunLoopEscalation:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         agent_names = ["generic_worker"]
         role_names = ["role_a"]
@@ -340,7 +340,7 @@ class TestRunLoopMissingDependencyError:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         results = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["main"], path="adaptive",
@@ -357,7 +357,7 @@ class TestRunLoopMissingDependencyError:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         with pytest.raises(MissingDependencyError):
             executor._run_loop(**_base_run_loop_kwargs(
@@ -372,7 +372,7 @@ class TestRunLoopMissingDependencyError:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         auto_inserted = {("main", "prereq"): executor.MAX_AUTO_INSERTS_PER_STEP}
         with pytest.raises(MissingDependencyError):
@@ -389,7 +389,7 @@ class TestRunLoopMissingDependencyError:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         # "prereq" already ran (idx 0) and is recorded as failed -- "main"
         # (idx 1) should be skipped rather than re-attempting the insert.
@@ -414,7 +414,7 @@ class TestRunLoopChainExhaustedError:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         results = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -432,7 +432,7 @@ class TestRunLoopChainExhaustedError:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["role_a"],
@@ -449,7 +449,7 @@ class TestRunLoopPause:
     def test_approval_role_pauses_before_calling_next_step(self, monkeypatch, _quiet_emit):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         next_step_calls = []
 
@@ -473,7 +473,7 @@ class TestRunLoopPause:
 
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["role_a"],
@@ -486,11 +486,12 @@ class TestRunLoopPause:
         assert snapshot["path"] == "adaptive"
 
     def test_manual_pause_request_flag_pauses_and_is_consumed(self, monkeypatch, fake_bus):
-        from memory.bus import write as bus_write, read as bus_read
+        from memory.bus import read as bus_read
+        from memory.bus import write as bus_write
 
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         bus_write("pause_requested:sess-manual", True)
 
@@ -505,7 +506,7 @@ class TestRunLoopPause:
     def test_non_approval_role_does_not_pause(self, monkeypatch):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         result = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["role_a"],
@@ -524,7 +525,7 @@ class TestRunLoopGroupApprovalBackstop:
         checkpoint (already tested above) covers it."""
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         result = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -553,7 +554,7 @@ class TestRunLoopProactiveDependencyInsertion:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         results = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["main"], path="adaptive",
@@ -573,7 +574,7 @@ class TestRunLoopProactiveDependencyInsertion:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -595,7 +596,7 @@ class TestRunLoopProactiveDependencyInsertion:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         results = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker", "generic_worker"],
@@ -619,7 +620,7 @@ class TestRunLoopProactiveDependencyInsertion:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         results = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["main"], path="fixed",
@@ -651,7 +652,7 @@ class TestRunLoopDispatchCallShapes:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_fn)
         monkeypatch.setattr(executor, "resolve_role", lambda role: current_name)
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
 
         executor._run_loop(**_base_run_loop_kwargs(
             agent_names=[current_name], role_names=[role], task_text=task_text,
@@ -732,7 +733,7 @@ class TestExecuteGraph:
     def test_wires_role_names_defaulting_to_agent_names(self, monkeypatch):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step", _sequential_next_step)
 
@@ -742,7 +743,7 @@ class TestExecuteGraph:
     def test_does_not_mutate_caller_supplied_lists(self, monkeypatch):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step", _sequential_next_step)
 
@@ -799,7 +800,7 @@ class TestResumeGraph:
 
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step",
                               lambda *a, **k: (None, "plan"))
@@ -815,7 +816,7 @@ class TestResumeGraph:
 
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step",
                               lambda *a, **k: (None, "plan"))
@@ -842,7 +843,7 @@ class TestResumeGraph:
 
         monkeypatch.setattr(executor, "resolve", lambda name: fake_generic_worker)
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step",
                               lambda *a, **k: (None, "plan"))
@@ -858,7 +859,7 @@ class TestResumeGraph:
 
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "redone"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step",
                               lambda *a, **k: (None, "plan"))
@@ -874,7 +875,7 @@ class TestResumeGraph:
     def test_reject_redo_that_clears_approval_completes_without_pausing(self, monkeypatch, fake_bus):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "redone"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step",
                               lambda *a, **k: (None, "plan"))
@@ -900,7 +901,7 @@ class TestResumeGraph:
     def test_approve_emits_execution_resumed_event(self, monkeypatch, fake_bus, _quiet_emit):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step",
                               lambda *a, **k: (None, "plan"))
@@ -913,7 +914,7 @@ class TestResumeGraph:
     def test_approve_can_pause_again_on_a_later_role(self, monkeypatch, fake_bus):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
-        monkeypatch.setattr(executor, "list_known_roles", lambda: [])
+        monkeypatch.setattr(executor, "list_known_roles", list)
         import eo.dispatcher as dispatcher_module
         monkeypatch.setattr(dispatcher_module, "next_step", _sequential_next_step)
 

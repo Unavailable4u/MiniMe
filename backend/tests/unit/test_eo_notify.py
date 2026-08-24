@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.notify as notify
+from eo import notify
 
 
 @pytest.fixture(autouse=True)

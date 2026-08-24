@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import agents.rehearsal_scriptwriter as rehearsal_scriptwriter
+from agents import rehearsal_scriptwriter
 
 
 def _topic(name="Topic A", summary="summary A", content_hint="hint A", covers=None, excerpts=None):

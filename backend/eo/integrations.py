@@ -27,7 +27,7 @@ should be flagged if it ever becomes a real operational need.
 """
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -70,7 +70,7 @@ def _decrypt(value: str | None) -> str | None:
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value):
@@ -89,7 +89,7 @@ def save_credentials(user_id: str, provider: str, access_token: str,
     expires_at = None
     if expires_in is not None:
         expires_at = _now().timestamp() + expires_in
-        expires_at = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        expires_at = datetime.fromtimestamp(expires_at, tz=UTC)
 
     with db.cursor(user_id=user_id) as cur:
         cur.execute(

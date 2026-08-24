@@ -43,37 +43,67 @@ import os
 import sys
 import uuid
 
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eo import loop_v4
-from eo.modes import apply_mode
-from eo.router import build_execution_graph, build_execution_graph_from_hires, EXPLAIN_CODE_ROUTE, sanitize_parallel_groups
+from agents.source_manager import (
+    process_upload,  # NEW — Data Layer §4a: the deterministic
+)
+from eo import (
+    chat_workspace,
+    code_loader,
+    conversation_memory,
+    fact_summarizer,  # NEW — Part 3
+    loop_v4,
+    routing_memory,
+    workspace_facts,
+)
 from eo.executor import execute_graph
+from eo.knowledge_graph import (  # NEW — bug #4 fix, notebook grounding;
+    get_node,
+    search_nodes,
+)
 from eo.loop_controller import run_with_looping
-from eo.sga import attempt as sga_attempt
-from eo.semantic_cache import check_cache, write_cache
+from eo.modes import apply_mode
+from eo.note_candidates import (
+    get_topic_related_notes,  # NEW — Step 6.11.f (6.11.e's helper)
+)
+from eo.output_guard import validate_final_answer  # NEW — D3 Part 3
 from eo.panel import staff_task
-from eo.registry import update_role_prompt   # NEW — Part 2 §2.5
-from eo.output_guard import validate_final_answer   # NEW — D3 Part 3
-from agents.source_manager import process_upload   # NEW — Data Layer §4a: the deterministic
+from eo.panel_content import (
+    write_panel_from_role,  # NEW — chat-to-panel writes, patch 2
+)
+
+# get_node NEW — Step 6.11.f, resolving a topic's covered source ids into content
+from eo.prerequisite_suggestions import (
+    find_prerequisite_suggestions,  # NEW — Data Layer §9d
+)
+from eo.registry import update_role_prompt  # NEW — Part 2 §2.5
+from eo.router import (
+    EXPLAIN_CODE_ROUTE,
+    build_execution_graph,
+    build_execution_graph_from_hires,
+    sanitize_parallel_groups,
+)
+from eo.semantic_cache import check_cache, write_cache
+from eo.sga import attempt as sga_attempt
+from eo.source_index import (
+    get_topic_covered_sources,  # NEW — Step 6.11.f (6.11.d's helper)
+)
+
 # "attachment present" short-circuit below hires Source Manager directly,
 # same entry point every upload endpoint already funnels through (§2b).
-from eo.structure import get_workflow_template, classification_from_template, record_template_run   # NEW — Part 2 §2.3/§2.6; record_template_run NEW — recent templates
-from eo import code_loader
-from eo import routing_memory
-from eo import conversation_memory
-from eo import chat_workspace
-from eo import workspace_facts
-from eo import fact_summarizer   # NEW — Part 3
-from eo.knowledge_graph import search_nodes, get_node   # NEW — bug #4 fix, notebook grounding;
-# get_node NEW — Step 6.11.f, resolving a topic's covered source ids into content
-from eo.prerequisite_suggestions import find_prerequisite_suggestions   # NEW — Data Layer §9d
-from eo.source_index import get_topic_covered_sources   # NEW — Step 6.11.f (6.11.d's helper)
-from eo.note_candidates import get_topic_related_notes   # NEW — Step 6.11.f (6.11.e's helper)
-from eo.panel_content import write_panel_from_role   # NEW — chat-to-panel writes, patch 2
-from eo.workspace_code_files import write_file as write_code_file   # NEW — Code sub-tab write-back, patch 9
-from relay.emitter import emit_workspace_event, EventType   # NEW — live-refetch fix, patch 3 follow-up
+from eo.structure import (  # NEW — Part 2 §2.3/§2.6; record_template_run NEW — recent templates
+    classification_from_template,
+    get_workflow_template,
+    record_template_run,
+)
+from eo.workspace_code_files import (
+    write_file as write_code_file,  # NEW — Code sub-tab write-back, patch 9
+)
+from relay.emitter import (  # NEW — live-refetch fix, patch 3 follow-up
+    EventType,
+    emit_workspace_event,
+)
 
 # NEW — bug #4 fix: chat inside a notebook never pulled the notebook's
 # ingested sources into the prompt (task_text had a workspace_id for
@@ -695,7 +725,7 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
     if not session_id or not owner_id:
         return
 
-    from memory.bus import read_many, KEYS
+    from memory.bus import KEYS, read_many
     _vals = read_many([KEYS["fixed_code"], KEYS["submitted_code"], "file_map"], default=None)
     code_source = _vals[KEYS["fixed_code"]] or _vals[KEYS["submitted_code"]]
     file_map = _vals["file_map"]
@@ -1562,8 +1592,9 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, session_id: str, h
         # Fixed single-agent, read-only route — unaffected by hires or
         # project_unique_name. Nothing here touches disk, so there's no
         # root to redirect.
-        from memory.bus import read, KEYS
         import json
+
+        from memory.bus import KEYS, read
         submitted_code = read(KEYS["submitted_code"], default={})
         combined = (
             f"{task_text}\n\nHere is the codebase (module_name -> code):\n"

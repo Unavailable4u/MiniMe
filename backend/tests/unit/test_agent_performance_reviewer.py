@@ -25,12 +25,10 @@ advisory (never gating) result.
      with that harness.
   6. run()'s bus write and emit_event calls happen on every path.
 """
-import json
 
 import pytest
 
-import agents.performance_reviewer as performance_reviewer
-
+from agents import performance_reviewer
 
 PASSING_MODULE = {"name": "validator", "code": "def validate(x): return x"}
 

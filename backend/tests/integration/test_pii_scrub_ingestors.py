@@ -18,9 +18,9 @@ requirements.txt).
 """
 from reportlab.pdfgen import canvas
 
+from agents import voice_ingestor
 from agents.pdf_ingestor import ingest_pdf
 from agents.voice_ingestor import ingest_voice
-import agents.voice_ingestor as voice_ingestor
 
 # NOTE: 123-45-6789 (the "obvious fake" SSN used in most examples) is
 # deliberately excluded by presidio_analyzer.predefined_recognizers

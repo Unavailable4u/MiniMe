@@ -66,19 +66,20 @@ Result written to KEYS["web_researcher_report"]:
   "summary": "...",
 }
 """
+import json
 import os
 import sys
-import json
-import requests
 from urllib.parse import urlparse
 
+import requests
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS, get_current_app_slug
-from eo.knowledge_graph import write_node
-from eo.hw_reference import write_hw_reference
-from eo.research_cache import get_cached_research, set_cached_research
-from utils.web_search import search as web_search
 from agents.component_dimension_table import lookup_curated_dimensions
+from eo.hw_reference import write_hw_reference
+from eo.knowledge_graph import write_node
+from eo.research_cache import get_cached_research, set_cached_research
+from memory.bus import KEYS, get_current_app_slug, read, write
+from utils.web_search import search as web_search
 
 REQUEST_TIMEOUT = 15
 MAX_RESULTS = 8

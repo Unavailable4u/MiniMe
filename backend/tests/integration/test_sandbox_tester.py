@@ -17,8 +17,8 @@ import sys
 
 import pytest
 
-import agents.sandbox_tester as sandbox_tester
-from memory.bus import write, read, KEYS
+from agents import sandbox_tester
+from memory.bus import KEYS, read, write
 
 
 class _FakeExecutionLogs:

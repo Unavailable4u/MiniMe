@@ -1,11 +1,12 @@
+import json
 import os
 import re
 import sys
-import json
+
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from memory.bus import KEYS, read, write
 from utils.llm_client import generate_text
 
 load_dotenv()
@@ -144,8 +145,7 @@ def run(session_id: str = None, tier: int = None, domain: str = None):
     ).strip()
     if raw_text.startswith("```"):
         raw_text = raw_text.split("```")[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
+        raw_text = raw_text.removeprefix("json")
         raw_text = raw_text.strip()
 
     specs = json.loads(raw_text)

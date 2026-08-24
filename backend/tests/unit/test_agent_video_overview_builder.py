@@ -17,8 +17,6 @@ docstring flags as non-local.
 """
 import os
 
-from unittest.mock import MagicMock
-
 import pytest
 from PIL import Image, ImageFont
 

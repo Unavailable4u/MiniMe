@@ -13,7 +13,7 @@ top of it. Provider-spreading/cooldown/exclude behavior is unchanged
 from pre-Patch-B and is covered by Patch D's acceptance test alongside
 Patch C, not here.
 """
-import eo.dynamic_chain as dynamic_chain
+from eo import dynamic_chain
 
 
 def _patch_pool(monkeypatch, capabilities):
@@ -30,7 +30,7 @@ def _patch_headroom(monkeypatch, scores: dict):
 
 
 def _patch_usage_fraction(monkeypatch, fractions: dict):
-    import eo.panel as panel
+    from eo import panel
 
     def fake_usage_fraction(key_env, quota_status):
         return fractions.get(key_env, 0.0)
@@ -38,7 +38,7 @@ def _patch_usage_fraction(monkeypatch, fractions: dict):
 
 
 def _patch_no_cooldowns(monkeypatch):
-    import eo.panel as panel
+    from eo import panel
     monkeypatch.setattr(panel, "_is_cooling_down", lambda key, quota_status: False)
 
 

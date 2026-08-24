@@ -66,14 +66,14 @@ other §6b/§6c retrofit takes.
 
 Place this file at: agents/workflow_suggester.py
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.source_planner_lean import plan
-from eo.registry import get_role_prompt, add_role_prompt
+from eo.registry import add_role_prompt, get_role_prompt
 from utils.mermaid_lint import looks_valid_mermaid
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
@@ -310,7 +310,7 @@ def build_topic_workflow(workspace_id: str, topic_label: str,
     _ensure_topic_role_registered()
     workflow = None
     try:
-        from agents.generic_worker import run as run_role   # deferred,
+        from agents.generic_worker import run as run_role  # deferred,
                                                               # same
                                                               # circular-
                                                               # import
@@ -464,7 +464,7 @@ def suggest_workflows(workspace_id: str, source_node_ids: list[str] | None = Non
         raise LookupError("no readable topic content in scope")
 
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason as
                                                           # agents/mind_mapper.py,

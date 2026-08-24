@@ -15,14 +15,15 @@ Two independent fixes bundled together:
      Callers now pass an explicit (scope_type, scope_id) pair instead
      of a bare app_slug.
 """
+import hashlib
 import os
 import sys
 import time
-import hashlib
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import vector_index
-from utils.llm_client import embed_text, generate_text
 from relay.emitter import emit_event  # NEW — CO4 patch 3
+from utils.llm_client import embed_text, generate_text
 
 SIMILARITY_THRESHOLD = 0.93
 INVALIDATION_THRESHOLD = 0.90

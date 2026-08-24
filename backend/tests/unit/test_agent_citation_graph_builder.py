@@ -11,9 +11,9 @@ memory.bus, so those are exercised for real via the autouse `fake_bus`.
 """
 import pytest
 
-import agents.citation_graph_builder as citation_graph_builder
-from memory.bus import write, read, KEYS
+from agents import citation_graph_builder
 from eo.errors import MissingDependencyError
+from memory.bus import KEYS, read, write
 
 
 def _seed_report(papers):

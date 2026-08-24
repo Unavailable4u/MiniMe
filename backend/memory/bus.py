@@ -1,10 +1,12 @@
-import os
-import json
-import re
 import contextvars
+import json
+import os
+import re
+
 from dotenv import load_dotenv
 from upstash_redis import Redis
 from upstash_vector import Index
+
 load_dotenv()
 redis = Redis(
     url=os.getenv("UPSTASH_REDIS_REST_URL"),

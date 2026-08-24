@@ -16,7 +16,7 @@ data/timeline/_node_blurbs.json.
 """
 import json
 
-import eo.timeline_node_blurbs as timeline_node_blurbs
+from eo import timeline_node_blurbs
 
 
 def _use_tmp_blurbs_path(monkeypatch, tmp_path):

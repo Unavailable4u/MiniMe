@@ -20,8 +20,7 @@ import json
 
 import pytest
 
-import agents.workflow_suggester as workflow_suggester
-
+from agents import workflow_suggester
 
 VALID_MERMAID = (
     "flowchart TD\n"

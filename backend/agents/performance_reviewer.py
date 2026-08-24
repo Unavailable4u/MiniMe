@@ -39,18 +39,18 @@ was instructed to print as its last stdout line, already parsed out for
 fixer to read as structured data instead of re-parsing raw stdout
 itself.
 """
+import json
 import os
 import sys
-import json
 import time
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from agents.sandbox_tester import _run_one_module
+from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from agents.sandbox_tester import _run_one_module
 
 load_dotenv()
 

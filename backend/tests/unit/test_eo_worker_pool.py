@@ -32,9 +32,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.worker_pool as worker_pool
+from eo import worker_pool
 from eo.worker_pool import _eligible_pool, _select_workers
-
 
 FAKE_CAPABILITIES = {
     "KEY_A": {"natural_roles": ["implementer"]},

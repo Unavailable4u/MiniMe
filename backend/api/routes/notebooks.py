@@ -37,15 +37,15 @@ import json
 import os
 import re
 import tempfile
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from api.deps import require_auth, _resolve_chat_or_404
 from agents.concept_linker import link_concepts
-from agents.exporter import export_artifact, SUPPORTED_FORMATS as EXPORTABLE_FORMATS
+from agents.exporter import SUPPORTED_FORMATS as EXPORTABLE_FORMATS
+from agents.exporter import export_artifact
 from agents.fact_detector import detect_facts
 from agents.importer import SUPPORTED_FORMATS as IMPORTABLE_FORMATS
 from agents.mind_mapper import generate_mindmap, generate_suggested_route
@@ -58,16 +58,20 @@ from agents.source_manager import process_upload
 from agents.study_generator import generate_study_content
 from agents.tts_synthesizer import synthesize_podcast
 from agents.video_overview_builder import build_video_overview
-from agents.workflow_suggester import suggest_workflows, build_topic_workflow
-from eo import chat_store
-from eo import chat_workspace
-from eo import panel_content
-from eo import quiz_progress
-from eo import study_progress
-from eo import workspace_facts
+from agents.workflow_suggester import build_topic_workflow, suggest_workflows
+from api.deps import _resolve_chat_or_404, require_auth
+from eo import (
+    chat_store,
+    chat_workspace,
+    panel_content,
+    quiz_progress,
+    study_progress,
+    workspace_facts,
+)
 from eo.structure import STRUCTURE_TEMPLATES
 from graph.adapters import markdown_text_to_artifact
-from memory.bus import read_many as bus_read_many, set_app_slug
+from memory.bus import read_many as bus_read_many
+from memory.bus import set_app_slug
 from utils.capability_tools import manifest_to_tools, study_progress_tools
 from utils.llm_client import classify_tool_intent
 
@@ -97,20 +101,20 @@ class ClipUrlRequest(BaseModel):
     # (§9a/§9b) actually has a session_id to fire on -- until this
     # patch, none of the six ingestion endpoints passed one, so §9b's
     # new /ws/{session_id} transport had nothing to deliver for uploads.
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 class ExportArtifactRequest(BaseModel):
     text: str                    # a generator role's raw Markdown stage_output
     title: str = "Untitled"
     fmt: str                     # one of agents/exporter.py's SUPPORTED_FORMATS
-    workspace_id: Optional[str] = None
-    tags: Optional[list[str]] = None
+    workspace_id: str | None = None
+    tags: list[str] | None = None
 
 
 class BuildTableRequest(BaseModel):
     field_names: list[str]
-    node_type: Optional[str] = None
+    node_type: str | None = None
     expanded: bool = False
 
 
@@ -137,7 +141,7 @@ class RecordQuizAttemptRequest(BaseModel):
     # workflow/study board) actually knows and sends it. An attempt
     # with no topic_id still grades and records exactly as before;
     # it just can't drive study_progress.
-    topic_id: Optional[str] = None
+    topic_id: str | None = None
 
 
 class GradeQuizRequest(BaseModel):
@@ -222,7 +226,7 @@ def _generate_suggested_notes(ws_id: str, scope: dict | None, owner_id: str) -> 
     chat_id = _most_recently_active_chat_id(ws_id, owner_id)
     if not chat_id:
         return {"candidate": None, "note": "no chats in this workspace yet"}
-    from agents.note_taker import scan_conversation   # deferred, same
+    from agents.note_taker import scan_conversation  # deferred, same
                                                         # circular-import
                                                         # reason
                                                         # eo/conversation_memory.py's
@@ -250,7 +254,7 @@ def _generate_topic_notes(ws_id: str, scope: dict | None, owner_id: str) -> dict
     topic_id = (scope or {}).get("topic_id")
     if not topic_id:
         raise ValueError("topic_notes requires scope.topic_id")
-    from agents.topic_note_writer import generate_topic_note   # deferred,
+    from agents.topic_note_writer import generate_topic_note  # deferred,
                                                                   # same
                                                                   # circular-import
                                                                   # reason
@@ -863,7 +867,7 @@ def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depe
 
 class NotebooksGenerateRequest(BaseModel):
     targets: list[str]
-    scope: Optional[dict[str, Any]] = None
+    scope: dict[str, Any] | None = None
     # NEW — Phase 4 step 4.4. Flagged as a gap in the step 4.1 transport
     # decision (decisions/step-4.1-notification-transport.md): this route
     # is keyed on ws_id + owner_id only, but emit_event() needs a
@@ -875,7 +879,7 @@ class NotebooksGenerateRequest(BaseModel):
     # defaulting to None so existing callers that don't pass it yet keep
     # working exactly as before -- notify()/emit_event() both already
     # no-op cleanly on session_id=None (see eo/notify.py).
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/generate")
@@ -1017,8 +1021,8 @@ def notebooks_generate(ws_id: str, req: NotebooksGenerateRequest, owner_id: str 
 # itself.
 
 class NotebooksPodcastRequest(BaseModel):
-    scope: Optional[dict[str, Any]] = None
-    session_id: Optional[str] = None
+    scope: dict[str, Any] | None = None
+    session_id: str | None = None
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/podcast")
@@ -1094,8 +1098,8 @@ def notebooks_podcast(ws_id: str, req: NotebooksPodcastRequest, owner_id: str = 
 # registered in the Phase 1 manifest yet either -- that's step 5.7.
 
 class NotebooksVideoOverviewRequest(BaseModel):
-    scope: Optional[dict[str, Any]] = None
-    session_id: Optional[str] = None
+    scope: dict[str, Any] | None = None
+    session_id: str | None = None
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/video_overview")
@@ -1142,7 +1146,7 @@ def notebooks_video_overview(ws_id: str, req: NotebooksVideoOverviewRequest, own
 
 class TopicWorkflowRequest(BaseModel):
     topic_label: str
-    source_node_ids: Optional[list[str]] = None
+    source_node_ids: list[str] | None = None
 
 
 @router.post("/api/workspaces/{ws_id}/topics/workflow")
@@ -1373,7 +1377,7 @@ def ingest_video_endpoint(req: ClipUrlRequest):
 @router.post("/api/notes/import", dependencies=[Depends(require_auth)])
 async def import_file_endpoint(
     workspace_id: str = Form(...), file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),   # NEW — §9c, see ClipUrlRequest's field comment; Form(...) can't reuse a Pydantic model the way JSON endpoints do, so this is the multipart-endpoint version of the same optional field
+    session_id: str | None = Form(None),   # NEW — §9c, see ClipUrlRequest's field comment; Form(...) can't reuse a Pydantic model the way JSON endpoints do, so this is the multipart-endpoint version of the same optional field
 ):
     """Office/docx/pptx/xlsx/csv/md/json ingestion. No new parsing code —
     agents/importer.py (Part 0 §0.5) already reads every one of these
@@ -1409,7 +1413,7 @@ async def import_file_endpoint(
 @router.post("/api/notes/pdf", dependencies=[Depends(require_auth)])
 async def ingest_pdf_endpoint(
     workspace_id: str = Form(...), file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),   # NEW — §9c, see /api/notes/import's copy of this same field for why it's Form(...) here rather than a Pydantic field
+    session_id: str | None = Form(None),   # NEW — §9c, see /api/notes/import's copy of this same field for why it's Form(...) here rather than a Pydantic field
 ):
     """PDF ingestion -- agents/pdf_ingestor.py (pdfplumber, page-by-page
     extraction) already exists and was fully implemented, it just had no
@@ -1432,7 +1436,7 @@ async def ingest_pdf_endpoint(
 @router.post("/api/notes/voice", dependencies=[Depends(require_auth)])
 async def ingest_voice_endpoint(
     workspace_id: str = Form(...), file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),   # NEW — §9c, see /api/notes/import's copy of this same field for why it's Form(...) here rather than a Pydantic field
+    session_id: str | None = Form(None),   # NEW — §9c, see /api/notes/import's copy of this same field for why it's Form(...) here rather than a Pydantic field
 ):
     """Voice notes / meeting recordings -- agents/voice_ingestor.py
     transcribes locally (faster-whisper, no API key), same temp-file-
@@ -1597,7 +1601,7 @@ def record_quiz_attempt_endpoint(req: RecordQuizAttemptRequest):
 
 @router.get("/api/notes/study/quiz/attempts", dependencies=[Depends(require_auth)])
 def list_quiz_attempts_endpoint(workspace_id: str = Query(...),
-                                 quiz_node_id: Optional[str] = Query(None)):
+                                 quiz_node_id: str | None = Query(None)):
     return quiz_progress.list_attempts(workspace_id, quiz_node_id)
 
 

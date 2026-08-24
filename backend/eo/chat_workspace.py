@@ -104,20 +104,18 @@ under this workspace's chat_ids list, same as any removed member).
 Flagged here rather than silently decided.
 -----------------------------------------------------------------------------
 """
-import uuid
 import json
-from datetime import datetime, timezone
-from eo import db
-from eo import chat_store
-from eo.audit_log import write_audit
+import uuid
+from datetime import UTC, datetime
 
+from eo import chat_store, db
+from eo.audit_log import write_audit
 
 
 class WorkspaceAccessError(PermissionError):
     """Raised when the acting user has some access to a workspace (so it's
     not a 404) but not enough for the attempted operation. Callers
     (api/server.py) map this to HTTP 403."""
-    pass
 
 _STAGE_SEQUENCE = ["note", "research", "plan", "build", "test", "growth"]
 
@@ -413,7 +411,7 @@ _ROLE_RANK = {"viewer": 0, "editor": 1, "moderator": 2, "partner": 3, "owner": 3
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso(value):

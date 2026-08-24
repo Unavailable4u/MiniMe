@@ -35,8 +35,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import eo.sga as sga
-
+from eo import sga
 
 # ---------------------------------------------------------------------
 # _requests_verification

@@ -26,8 +26,7 @@ public render_agent_result() dispatch (its actual call path), not by
 calling the private helper directly, since the ambiguity it resolves
 only matters in the context of the branch order around it.
 """
-import eo.result_render as result_render
-
+from eo import result_render
 
 # ---------------------------------------------------------------------
 # render_agent_result — plain string / calendar entries

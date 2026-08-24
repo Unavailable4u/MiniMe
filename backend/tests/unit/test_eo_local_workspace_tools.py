@@ -32,7 +32,6 @@ import pytest
 import eo.local_workspace_tools as lwt
 from eo.local_workspace import ToolCallError
 
-
 # ---------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------
@@ -171,7 +170,7 @@ def test_tool_event_payload_write_file_reports_content_byte_count_not_content():
 def test_tool_event_payload_write_file_handles_multibyte_content():
     # UTF-8 byte length, not character length -- e.g. "é" is 2 bytes.
     payload = lwt._tool_event_payload("write_file", {"path": "a.py", "content": "héllo"})
-    assert payload["content_bytes"] == len("héllo".encode("utf-8"))
+    assert payload["content_bytes"] == len("héllo".encode())
 
 
 def test_tool_event_payload_write_file_handles_non_string_content():

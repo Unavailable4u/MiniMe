@@ -35,21 +35,21 @@ the generated code was instructed to print as its last stdout line,
 already parsed out for a downstream role to read as structured data
 instead of re-parsing raw stdout itself.
 """
-import os
-import sys
-import re
-import json
-import time
 import base64
+import json
+import os
+import re
+import sys
 import textwrap
+import time
 
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write, KEYS
+from agents.sandbox_tester import _run_one_module
+from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
-from agents.sandbox_tester import _run_one_module
 
 load_dotenv()
 

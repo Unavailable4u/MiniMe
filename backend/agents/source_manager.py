@@ -72,25 +72,25 @@ Still NOT yet doing (later patches):
 Place this file at: agents/source_manager.py
 """
 
-import os
-import sys
 import json
+import os
 import re
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.source_ingestor import write_ingested_source
-from agents.pdf_ingestor import ingest_pdf
-from agents.importer import import_artifact
-from agents.voice_ingestor import ingest_voice
-from agents.video_ingestor import ingest_video
-from agents.web_clipper import clip_url
 from agents.backlink_detector import run_after_source_manager
-from eo.registry import get_role_prompt, add_role_prompt
-from eo.secondary_data import apply_patch, CONTENT_HINTS
+from agents.importer import import_artifact
+from agents.pdf_ingestor import ingest_pdf
+from agents.source_ingestor import write_ingested_source
+from agents.video_ingestor import ingest_video
+from agents.voice_ingestor import ingest_voice
+from agents.web_clipper import clip_url
 from eo.chat_workspace import auto_partial_promote
+from eo.registry import add_role_prompt, get_role_prompt
+from eo.secondary_data import CONTENT_HINTS, apply_patch
 from eo.worker_pool import _select_workers
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
@@ -354,7 +354,7 @@ def _run_sequential_pass(context: str, id_map: dict, session_id: str = None) -> 
     catches it, same as before this refactor.
     """
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred -- same
+    from agents.generic_worker import run as run_role  # deferred -- same
                                                           # circular-import
                                                           # reason as
                                                           # agents/concept_linker.py
@@ -389,7 +389,7 @@ def _run_chunk_worker(context: str, id_map: dict, key_env: str, worker_id: int,
     slice's hiccup break the whole upload" posture as everywhere else
     in this module -- the other chunks' workers are unaffected.
     """
-    from agents.generic_worker import _chain_step_for   # deferred -- same
+    from agents.generic_worker import _chain_step_for  # deferred -- same
                                                           # circular-import
                                                           # reason as above
 

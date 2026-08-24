@@ -30,7 +30,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.secondary_data import get_secondary_data_scoped, SCOPES
+from eo.secondary_data import SCOPES, get_secondary_data_scoped
 
 # Mode C's topic skeleton: every field a generation agent needs to
 # understand the SHAPE of the tree (what a topic is, where it sits,

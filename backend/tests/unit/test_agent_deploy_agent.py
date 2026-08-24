@@ -46,15 +46,13 @@ real functions (not mocked) -- same "isolate the agent under test, not
 its already-tested safety net" approach test_file_manager.py itself
 takes, just imported one level up.
 """
-import json
 
 import pytest
 import requests
 
-import agents.deploy_agent as deploy_agent
-import agents.file_manager as file_manager
+from agents import deploy_agent, file_manager
 from eo.errors import MissingDependencyError
-from memory.bus import write, read, set_app_slug
+from memory.bus import read, set_app_slug, write
 
 
 def _set_apps_root(monkeypatch, path):

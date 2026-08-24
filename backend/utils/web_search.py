@@ -30,6 +30,7 @@ search(query, domains=[single_domain]) in its own loop -- that looping is
 part_price_finder's own choice, not this module's.
 """
 import os
+
 import requests
 
 from utils.llm_client import log_usage

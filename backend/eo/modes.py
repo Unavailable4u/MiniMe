@@ -6,6 +6,7 @@ happens when a mode hits its ceiling.
 """
 from eo.router import MODE_CEILINGS
 
+
 def apply_mode(mode: str, hires: list, assessed_max: int) -> dict:
     """
     Returns {"hires": [...], "ceiling_hit": bool, "action": str|None}.

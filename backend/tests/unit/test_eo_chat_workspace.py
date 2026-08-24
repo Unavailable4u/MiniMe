@@ -45,13 +45,12 @@ deferred `from eo.notify import notify` inside
 chat_triggered_partial_promote() is patched at its source,
 `eo.notify.notify`, since that import happens fresh on every call.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-import eo.chat_workspace as chat_workspace
-
+from eo import chat_workspace
 
 # ---------------------------------------------------------------------
 # Fake db.cursor() harness (same shape as test_eo_chat_store.py's)
@@ -101,7 +100,7 @@ def _install_fake_cursor(monkeypatch, cursor, calls_log=None):
 
 
 def _now():
-    return datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _ws_row(id="ws_1", name="My Project", owner_id="owner_1",

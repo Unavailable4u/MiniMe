@@ -36,15 +36,15 @@ posture plan()'s own docstring describes.
 
 Place this file at: agents/fact_detector.py
 """
-import os
-import sys
 import json
+import os
 import re
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.source_planner_lean import plan
 from eo import workspace_facts
-from eo.registry import get_role_prompt, add_role_prompt
+from eo.registry import add_role_prompt, get_role_prompt
 
 _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
@@ -151,7 +151,7 @@ def detect_facts(workspace_id: str, source_node_ids: list[str] | None = None) ->
         return []
 
     _ensure_role_registered()
-    from agents.generic_worker import run as run_role   # deferred, same
+    from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
                                                           # reason
                                                           # agents/note_taker.py's

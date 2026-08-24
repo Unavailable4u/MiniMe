@@ -33,7 +33,6 @@ import eo.mech_enclosure as me
 import eo.mech_supports as msup
 from eo.enclosure_spec import ENCLOSURE_SPEC
 
-
 # A generous, fixed cavity every nearest_exterior_face()/generate_*()
 # test below measures a part against -- same "one shared inner box,
 # only the part moves" shape eo/mech_enclosure.py's own tests already

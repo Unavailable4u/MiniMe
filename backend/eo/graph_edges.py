@@ -24,11 +24,11 @@ Two ways an edge gets created (matching the blueprint's own distinction):
     to..." picker) hits a `create_edge` endpoint that also just calls
     create_edge() below. No agent involvement needed for this path.
 """
-import os
 import json
-import uuid
+import os
 import threading
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EDGES_PATH = os.path.join(BASE_DIR, "data", "graph", "_edges.json")
@@ -36,7 +36,7 @@ _lock = threading.Lock()
 
 
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _read():

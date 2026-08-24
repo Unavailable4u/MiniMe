@@ -23,9 +23,8 @@ monkeypatched, same "fake out the network boundary, exercise this
 module's own orchestration logic" approach test_mech_repair.py and
 test_mech_validator.py already use.
 """
-import eo.mech_validator as mv
 import agents.hardware_speccer as hs
-
+import eo.mech_validator as mv
 
 # ---------------------------------------------------------------------------
 # find_unresolved_inferred_pins (Patch 3.1)
