@@ -67,6 +67,23 @@ Providers/models with neither figure in QUOTA_CONFIG default to "tokens"
 mode and immediately fail open in it (tpm_limit is None), identical to
 this module's behavior before OR-1d -- so this is additive, not a
 behavior change for groq/cerebras/mistral/gemini/huggingface.
+
+Patch I.2 follow-up (real Cloudflare gating) -- a third mode:
+
+- "neurons" (new) -- QUOTA_CONFIG[provider][model] has a "neurons_rpd"
+  figure (Cloudflare Workers AI only, so far). Workers AI's REST
+  responses carry no x-ratelimit-* style header at all (confirmed --
+  see llm_client.py's _call_cloudflare_step() docstring), so there is no
+  provider-reported signal to prefer the way tokens/requests modes both
+  have; this mode has exactly one check, an account-wide daily NEURON
+  budget, using Cloudflare's own published per-token neuron rates
+  (QUOTA_CONFIG[provider][model]["neurons_per_m_input_tokens"]/
+  ["neurons_per_m_output_tokens"]) to convert a pre-flight token estimate
+  into a real neuron estimate. Deliberately keyed by (provider, key_id)
+  ONLY, with no `model` component the way every other mode's day bucket
+  has -- see _neuron_day_bucket_key()'s own docstring for why: the
+  10,000-Neuron/day free allocation is an ACCOUNT-wide budget, shared
+  across every model that account calls, not a per-model one.
 """
 import os
 import sys
@@ -167,7 +184,8 @@ def _config_for(provider: str, model: str) -> dict:
 def _gating_mode_for(provider: str, model: str) -> str:
     """OR-1d: returns "requests" when QUOTA_CONFIG[provider][model] has an
     "rpm" and/or "rpd" figure but NO "tpm" figure (OpenRouter's shape --
-    request-count is the only ceiling that actually applies), else
+    request-count is the only ceiling that actually applies), "neurons"
+    (Patch I.2 follow-up) when it has a "neurons_rpd" figure instead, else
     "tokens" (the correct default for an unconfigured provider/model too
     -- see module docstring).
 
@@ -180,12 +198,18 @@ def _gating_mode_for(provider: str, model: str) -> str:
     win, regardless of what else is in the config, restores the pre-OR-1d
     tokens-mode gating for every provider that has a verified tpm number,
     and only routes to "requests" mode for the genuinely tpm-less case
-    (OpenRouter) OR-1d was actually built for."""
+    (OpenRouter) OR-1d was actually built for. "neurons_rpd" is checked
+    last, after both -- no provider today publishes it alongside a
+    tpm/rpm/rpd figure, but if one ever did, a real per-minute/per-day
+    token or request ceiling is a more precise signal than the neuron
+    proxy, same precedence logic as the tpm-before-rpm/rpd check above."""
     config = _config_for(provider, model)
     if "tpm" in config:
         return "tokens"
     if "rpm" in config or "rpd" in config:
         return "requests"
+    if "neurons_rpd" in config:
+        return "neurons"
     return "tokens"
 
 
@@ -211,6 +235,126 @@ def _rpd_limit_for(provider: str, model: str):
     mode's per-day ceiling. None means no verified rpd figure -> that half
     of "requests" mode fails open (rpm, if set, still applies)."""
     return _config_for(provider, model).get("rpd")
+
+
+def _neurons_rpd_limit_for(provider: str, model: str):
+    """Patch I.2 follow-up: QUOTA_CONFIG[provider][model]["neurons_rpd"]
+    -- "neurons" gating mode's account-wide daily budget. None means no
+    verified figure -> neurons mode fails open, same convention as every
+    other *_limit_for() in this module."""
+    return _config_for(provider, model).get("neurons_rpd")
+
+
+def _neuron_rates_for(provider: str, model: str) -> "tuple[float | None, float | None]":
+    """Patch I.2 follow-up: QUOTA_CONFIG[provider][model]'s verified
+    (neurons_per_m_input_tokens, neurons_per_m_output_tokens) pair --
+    Workers AI's own published per-token cost rates (developers.
+    cloudflare.com/workers-ai/platform/pricing/), the only per-call cost
+    signal this provider actually exposes (no x-ratelimit-* headers at
+    all -- see the module docstring). Returns (None, None) when either
+    rate is missing so _estimate_neurons() can fail open cleanly rather
+    than computing a partial/wrong estimate off just one rate."""
+    config = _config_for(provider, model)
+    return config.get("neurons_per_m_input_tokens"), config.get("neurons_per_m_output_tokens")
+
+
+def _estimate_neurons(provider: str, model: str, estimated_input_tokens: int,
+                       max_output_tokens: "int | None") -> "float | None":
+    """Patch I.2 follow-up: converts a pre-flight token estimate into a
+    real neuron estimate using Workers AI's own published per-token
+    rates, so "neurons" mode can actually gate on something instead of
+    the request-count proxy quota_sentinel.py used to display.
+
+    Input side uses the same chars/4 pre-flight estimate tokens/requests
+    modes already receive (llm_client.py's _estimate_tokens_for_call()).
+    Output side uses the step's configured max_tokens CEILING, not a
+    guess at the real completion length -- neurons are billed on tokens
+    actually GENERATED, which a pre-flight gate has no way to know in
+    advance, so this deliberately books the worst case (the request
+    literally cannot generate more than max_tokens) and
+    release_reservation() trues the booking up from the real usage
+    figures once they're known, when the provider's response included
+    them (see that function's own docstring -- Cloudflare often doesn't,
+    per llm_client.py's own CLOUDFLARE CAVEAT note).
+
+    `max_output_tokens=None` (a caller that hasn't threaded a real one
+    through) falls back to `estimated_input_tokens` itself as a rough
+    proxy for the output side too -- worse than the real ceiling, but
+    still a real, enforced number instead of the unconditional fail-open
+    this mode replaces.
+
+    Returns None when this model has no verified per-token rates, so
+    callers fail open exactly like every other *_limit_for()-backed
+    check in this module."""
+    in_rate, out_rate = _neuron_rates_for(provider, model)
+    if in_rate is None or out_rate is None:
+        return None
+    output_tokens = max_output_tokens if max_output_tokens is not None else estimated_input_tokens
+    return (estimated_input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
+
+
+def _neuron_day_bucket_key(provider: str, key_id: str, now: float = None) -> str:
+    """Patch I.2 follow-up: today's (UTC) neuron total for this account.
+    Deliberately keyed by (provider, key_id) ONLY -- no `model`, unlike
+    _day_bucket_key() above. Workers AI's 10,000-Neuron/day free
+    allocation is an ACCOUNT-WIDE budget, shared across every model that
+    account calls (confirmed developers.cloudflare.com/workers-ai/
+    platform/pricing/: "Our free allocation allows anyone to use a total
+    of 10,000 Neurons per day"), not a separate budget per model the way
+    OpenRouter's rpd genuinely is. Every cloudflare account wired into
+    this codebase today calls exactly one model each (see
+    llm_client.py's QUOTA_CONFIG comment on the two cloudflare entries),
+    so this doesn't change behavior for anything live today -- but
+    keying this bucket by model too, the way _day_bucket_key() does for
+    genuinely per-model ceilings, would silently let ONE account spend
+    its real 10k/day budget twice over the moment it's ever wired to
+    call two different Workers AI models from two different
+    QUOTA_CONFIG entries."""
+    ts = now if now is not None else _now()
+    day = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
+    return f"rate_ledger:{provider}:{key_id}:neurons:day:{day}"
+
+
+def _read_daily_neurons(provider: str, key_id: str, now: float = None) -> float:
+    """Patch I.2 follow-up: best-effort read of today's (UTC) neuron
+    total. Same fail-open-as-0 posture as _read_daily_count()."""
+    try:
+        record = bus_read(_neuron_day_bucket_key(provider, key_id, now), default=None)
+        return (record or {}).get("neurons", 0.0)
+    except Exception as read_exc:
+        print(f"  [rate_ledger] _read_daily_neurons read failed, treating as 0 (non-fatal): {read_exc}")
+        return 0.0
+
+
+def _adjust_daily_neurons(provider: str, key_id: str, delta: float, now: float = None) -> None:
+    """Patch I.2 follow-up: read-modify-write of today's neuron total,
+    floored at 0. Shared by reserve()'s initial booking (positive delta)
+    and release_reservation()'s correction/rollback (any-sign delta) --
+    same pattern _adjust_window_slice()/_adjust_headroom() already use
+    for tokens/requests mode above. A no-op for delta=0 so callers don't
+    need to guard the common "nothing to correct" case themselves."""
+    if not delta:
+        return
+    try:
+        ts = now if now is not None else _now()
+        key = _neuron_day_bucket_key(provider, key_id, ts)
+        record = bus_read(key, default=None) or {"neurons": 0.0}
+        record["neurons"] = max(0.0, record.get("neurons", 0.0) + delta)
+        ttl = int(_seconds_until_next_utc_day(ts)) + _DAY_TTL_BUFFER_SECONDS
+        bus_write(key, record, ex=max(ttl, 5))
+    except Exception as write_exc:
+        print(f"  [rate_ledger] _adjust_daily_neurons write failed (non-fatal): {write_exc}")
+
+
+def daily_neurons_used(provider: str, key_id: str) -> float:
+    """Patch I.2 follow-up: public read-only accessor so
+    eo/quota_sentinel.py's dashboard can report the EXACT number
+    "neurons" mode's gate actually checks against, instead of a
+    separately-computed proxy that could drift from what's really being
+    enforced. Thin wrapper over _read_daily_neurons() with `now`
+    resolved internally -- no caller outside this module has a reason to
+    backdate a read."""
+    return _read_daily_neurons(provider, key_id, _now())
 
 
 def _read_daily_count(provider: str, key_id: str, model: str, now: float = None) -> int:
@@ -299,10 +443,31 @@ def record_usage(provider: str, key_id: str, model: str, tokens_used: int) -> No
     token count; there's just nothing rpm-shaped to gate it against). The
     rpd side of "requests" mode is a separate UTC-day counter, incremented
     here too via _increment_daily_count().
+
+    Patch I.2 follow-up: "neurons" mode has no sliding window at all (see
+    the module docstring -- Workers AI has no per-minute signal this
+    module tracks), so this skips the window write entirely for it and
+    instead books an ESTIMATED neuron figure straight into the daily
+    neuron total, via _estimate_neurons(provider, model, tokens_used, 0)
+    -- `tokens_used` standing in for the output side (the higher-cost
+    side of the two rates) since this defensive fallback only receives a
+    single combined token count, not the real input/output split.
+    _run_chain_step()'s real dispatch path never reaches this branch in
+    practice (it always goes through reserve()/release_reservation()
+    instead, which book/true-up a real estimate at reserve time -- see
+    llm_client.py's _record_ledger_bookkeeping()); this exists purely so
+    a caller that somehow bypasses reserve() still books SOMETHING
+    against the daily budget rather than silently undercounting it to
+    zero.
     """
     try:
         mode = _gating_mode_for(provider, model)
         now = _now()
+        if mode == "neurons":
+            estimated_neurons = _estimate_neurons(provider, model, 0, tokens_used)
+            if estimated_neurons is not None:
+                _adjust_daily_neurons(provider, key_id, estimated_neurons, now)
+            return
         slice_start = str(int(now // _SLICE_SECONDS) * _SLICE_SECONDS)
         key = _window_key(provider, key_id, model)
         record = bus_read(key, default=None) or {"slices": {}}
@@ -316,7 +481,8 @@ def record_usage(provider: str, key_id: str, model: str, tokens_used: int) -> No
         print(f"  [rate_ledger] record_usage write failed (non-fatal): {write_exc}")
 
 
-def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int) -> "tuple[bool, float]":
+def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int,
+                 max_output_tokens: "int | None" = None) -> "tuple[bool, float]":
     """Returns (ok, suggested_wait_seconds). ok=True means send now.
     ok=False means the estimated request would exceed remaining headroom
     in the current window; wait_seconds is how long until enough headroom
@@ -341,11 +507,38 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int) -
     don't need to know which mode a given provider/model is in; they
     already compute an estimate for every call, it's just unused here
     when it doesn't apply.
+
+    Patch I.2 follow-up: `max_output_tokens` is only meaningful in
+    "neurons" mode (the step's configured max_tokens ceiling, used as
+    the output-side figure for _estimate_neurons() -- see its own
+    docstring for why the ceiling rather than a guess). Every other
+    mode ignores it, same "accepted but unused when it doesn't apply"
+    convention `estimated_tokens` already has for "requests" mode above.
+    Defaults to None so pre-existing callers that haven't been updated
+    (there is currently exactly one -- the look-ahead in
+    llm_client.py's _remaining_chain_headroom(), which now resolves and
+    passes a real one) still fail open via _estimate_neurons()'s own
+    None-safe fallback rather than raising.
     """
     try:
         now = _now()
         mode = _gating_mode_for(provider, model)
         headroom = bus_read(_headroom_key(provider, key_id, model), default=None)
+
+        if mode == "neurons":
+            # Patch I.2 follow-up: no provider-reported headroom signal
+            # exists for this mode at all (see module docstring) -- one
+            # check, the account-wide daily neuron budget.
+            estimated_neurons = _estimate_neurons(provider, model, estimated_tokens, max_output_tokens)
+            if estimated_neurons is None:
+                return True, 0.0  # no verified per-token rates -- fail open
+            neurons_limit = _neurons_rpd_limit_for(provider, model)
+            if neurons_limit is None:
+                return True, 0.0  # no verified daily budget -- fail open
+            used_today = _read_daily_neurons(provider, key_id, now)
+            if used_today + estimated_neurons <= neurons_limit:
+                return True, 0.0
+            return False, _seconds_until_next_utc_day(now)
 
         if mode == "requests":
             # Provider-reported remaining_requests (rule 1) -- OpenRouter
@@ -706,7 +899,53 @@ def _reserve_requests_mode(provider: str, key_id: str, model: str, now: float):
     }
 
 
-def reserve(provider: str, key_id: str, model: str, estimated_units: int) -> "tuple[bool, float, str | None]":
+def _reserve_neurons_mode(provider: str, key_id: str, model: str, estimated_input_tokens: int,
+                           max_output_tokens: "int | None", now: float):
+    """Patch I.2 follow-up: neurons-mode body of reserve() -- same
+    single-check shape as can_proceed()'s "neurons" branch, but writes
+    the provisional booking back immediately instead of only reading.
+    Booking dict shape:
+
+      {"headroom_field": None, "headroom_decrement": None,  # no headroom signal in this mode
+       "window_slice_key": None, "window_increment": None,  # no sliding window in this mode
+       "day_key": str | None,          # the neuron day-bucket key that was touched
+       "neurons_booked": float | None} # the ESTIMATED neuron figure booked, for release_reservation()'s true-up
+
+    `neurons_booked`/`day_key` are both None when nothing was booked
+    (no verified rates or daily budget -- fail-open path), so
+    release_reservation() can tell "nothing to correct" apart from "a
+    real zero-cost booking" the same way the tokens/requests booking
+    dicts already distinguish None from 0 via their own headroom/window
+    fields."""
+    estimated_neurons = _estimate_neurons(provider, model, estimated_input_tokens, max_output_tokens)
+    if estimated_neurons is None:
+        return True, 0.0, {
+            "headroom_field": None, "headroom_decrement": None,
+            "window_slice_key": None, "window_increment": None,
+            "day_key": None, "neurons_booked": None,
+        }
+    neurons_limit = _neurons_rpd_limit_for(provider, model)
+    if neurons_limit is None:
+        return True, 0.0, {
+            "headroom_field": None, "headroom_decrement": None,
+            "window_slice_key": None, "window_increment": None,
+            "day_key": None, "neurons_booked": None,
+        }
+    used_today = _read_daily_neurons(provider, key_id, now)
+    if used_today + estimated_neurons > neurons_limit:
+        return False, _seconds_until_next_utc_day(now), None
+
+    _adjust_daily_neurons(provider, key_id, estimated_neurons, now)
+    day_key = _neuron_day_bucket_key(provider, key_id, now)
+    return True, 0.0, {
+        "headroom_field": None, "headroom_decrement": None,
+        "window_slice_key": None, "window_increment": None,
+        "day_key": day_key, "neurons_booked": estimated_neurons,
+    }
+
+
+def reserve(provider: str, key_id: str, model: str, estimated_units: int,
+            max_output_tokens: "int | None" = None) -> "tuple[bool, float, str | None]":
     """Atomic-enough check-and-book, replacing a bare can_proceed() call
     at dispatch time wherever a caller needs the race closed (Patch B's
     concurrency gate; llm_client.py's _ledger_gate(), same seam). Returns
@@ -726,7 +965,9 @@ def reserve(provider: str, key_id: str, model: str, estimated_units: int) -> "tu
     `estimated_units` is a token estimate in "tokens" gating mode and
     ignored (every call costs exactly 1 unit) in "requests" mode --
     identical convention to can_proceed()'s `estimated_tokens` param; see
-    _gating_mode_for()'s docstring.
+    _gating_mode_for()'s docstring. In "neurons" mode it's the INPUT-side
+    token estimate; `max_output_tokens` (Patch I.2 follow-up, same
+    convention as can_proceed()'s own param) supplies the output side.
 
     Fails open (True, 0.0, None) on any error, matching can_proceed()'s
     own fail-open contract. A reservation_id of None is always safe to
@@ -739,6 +980,9 @@ def reserve(provider: str, key_id: str, model: str, estimated_units: int) -> "tu
         mode = _gating_mode_for(provider, model)
         if mode == "requests":
             ok, wait, booking = _reserve_requests_mode(provider, key_id, model, now)
+        elif mode == "neurons":
+            ok, wait, booking = _reserve_neurons_mode(provider, key_id, model, estimated_units,
+                                                        max_output_tokens, now)
         else:
             ok, wait, booking = _reserve_tokens_mode(provider, key_id, model, estimated_units, now)
 
@@ -762,7 +1006,10 @@ def reserve(provider: str, key_id: str, model: str, estimated_units: int) -> "tu
         return True, 0.0, None
 
 
-def release_reservation(reservation_id: "str | None", actual_units: "int | None" = None) -> None:
+def release_reservation(reservation_id: "str | None", actual_units: "int | None" = None,
+                         actual_input_tokens: "int | None" = None,
+                         actual_output_tokens: "int | None" = None,
+                         dispatched: bool = True) -> None:
     """Corrects a reserve() booking once the real outcome is known.
     Replaces the plain record_usage() call at the same call site (see
     llm_client.py's _record_ledger_bookkeeping()) wherever the dispatch
@@ -770,16 +1017,51 @@ def release_reservation(reservation_id: "str | None", actual_units: "int | None"
     reserved-then-completed call doesn't get double-booked (estimate at
     reserve() time, actual again at the old post-call record_usage()).
 
-    - `actual_units` given: adjusts the provisional booking from its
-      original estimate to the real count. Only meaningful in "tokens"
-      mode (a "requests" mode reservation already cost exactly the 1 real
-      unit it reserved -- see _reserve_requests_mode() -- so
-      actual_units is accepted but ignored for those).
-    - `actual_units` is None: full rollback. The call never actually went
-      out -- rerouted to a different chain step by
-      _decide_ledger_action()'s "reroute" branch, or the gate chose not
-      to dispatch it at all -- so the entire provisional booking (window
-      slice, headroom decrement, day counter) is undone.
+    Patch I.2 follow-up bug fix: rollback-vs-correct used to be decided
+    by `actual_units is None` alone. That was fine as long as every
+    caller that reached this function with actual_units=None really did
+    mean "never dispatched" -- true for the two ORIGINAL call sites
+    (_decide_ledger_action()'s "reroute" branch, and a transient-error
+    branch that treats a failed call like a never-dispatched one). It
+    stopped being true the moment "neurons" mode existed:
+    llm_client.py's _record_ledger_bookkeeping() calls this from the
+    SUCCESS path with whatever _extract_total_tokens(usage) returns --
+    which the module's own CLOUDFLARE CAVEAT docstring says is routinely
+    None, since Cloudflare's REST response frequently omits its usage
+    object entirely even on a real, successful, neuron-consuming call.
+    Under the old signal, every such call rolled its entire reservation
+    back to zero -- silently UNDER-counting real usage on the exact
+    provider this mode exists to protect, the opposite of this module's
+    stated "don't undercount" fail-open bias (see the old docstring,
+    preserved in spirit just below). `dispatched` makes the real
+    question explicit and separates it from `actual_units`/
+    `actual_input_tokens`/`actual_output_tokens`, which now only ever
+    describe HOW MUCH a dispatched call cost, never WHETHER it happened:
+
+    - `dispatched=False` (the two original call sites, now updated to
+      pass this explicitly): the call never went out at all, or went out
+      and errored with nothing usable to correct to -- full rollback,
+      exactly the old "actual_units is None" behavior, for every mode
+      including "neurons" (see PATCH I.2 rollback branch below).
+    - `dispatched=True` (the default -- matches every pre-existing
+      caller's actual intent, since release_reservation() was only ever
+      called from a genuine dispatch or a genuine reroute/error, never
+      from anywhere ambiguous): the call went out. What happens next
+      depends on gating mode and whether a real figure came back:
+        - "tokens": `actual_units` given -> adjusts the provisional
+          booking from its estimate to the real count. `actual_units`
+          None (usage absent) -> no-op, worst-case estimate stands.
+        - "requests": `actual_units` always ignored (a dispatched
+          request already cost exactly the 1 real unit it reserved).
+        - "neurons": `actual_input_tokens`/`actual_output_tokens` both
+          given -> recomputes a real neuron figure via
+          _estimate_neurons() and adjusts the booking to it. Either
+          missing (the common Cloudflare case) -> no-op, the WORST-CASE
+          (max_tokens-ceiling-based) estimate simply stands -- a real,
+          enforced ceiling, just not trued up for that one call. That's
+          the conservative direction to be wrong in (tracked usage >=
+          real usage, never <), same fail-open posture as every other
+          "leave it as-is" branch in this module.
 
     reservation_id may be None (reserve() itself failed open and never
     created one) -- a no-op, since nothing was booked in the first
@@ -806,8 +1088,12 @@ def release_reservation(reservation_id: "str | None", actual_units: "int | None"
         estimated_units = booking["estimated_units"]
         now = _now()
 
-        if actual_units is None:
-            # Full rollback -- undo the provisional booking entirely.
+        if not dispatched:
+            # Full rollback -- undo the provisional booking entirely,
+            # regardless of mode. The call never actually consumed
+            # anything (rerouted before dispatch, or errored out with
+            # nothing usable to correct to), so there's nothing to leave
+            # standing.
             if booking.get("window_slice_key") and booking.get("window_increment"):
                 _adjust_window_slice(provider, key_id, model,
                                       booking["window_slice_key"], -booking["window_increment"])
@@ -816,12 +1102,29 @@ def release_reservation(reservation_id: "str | None", actual_units: "int | None"
                                   booking["headroom_field"], booking["headroom_decrement"], now)
             if booking.get("day_key"):
                 _decrement_daily_count(booking["day_key"], now)
+            if mode == "neurons" and booking.get("day_key") and booking.get("neurons_booked"):
+                _adjust_daily_neurons(provider, key_id, -booking["neurons_booked"], now)
         elif mode == "tokens":
-            delta = actual_units - estimated_units
-            if delta != 0:
-                _adjust_window_slice(provider, key_id, model, booking.get("window_slice_key"), delta)
-                if booking.get("headroom_field"):
-                    _adjust_headroom(provider, key_id, model, booking["headroom_field"], -delta, now)
+            if actual_units is not None:
+                delta = actual_units - estimated_units
+                if delta != 0:
+                    _adjust_window_slice(provider, key_id, model, booking.get("window_slice_key"), delta)
+                    if booking.get("headroom_field"):
+                        _adjust_headroom(provider, key_id, model, booking["headroom_field"], -delta, now)
+            # else: usage absent on a dispatched call -- worst-case
+            # estimate already booked stands, no-op (same conservative
+            # posture "neurons" mode documents below, just rarer here
+            # since OpenAI-SDK-shaped providers almost always send usage).
+        elif mode == "neurons":
+            if (actual_input_tokens is not None and actual_output_tokens is not None
+                    and booking.get("neurons_booked") is not None and booking.get("day_key")):
+                real_neurons = _estimate_neurons(provider, model, actual_input_tokens, actual_output_tokens)
+                if real_neurons is not None:
+                    delta = real_neurons - booking["neurons_booked"]
+                    if delta:
+                        _adjust_daily_neurons(provider, key_id, delta, now)
+            # else: no usable real split (the common Cloudflare case) --
+            # worst-case estimate stands, no-op. See docstring above.
         # mode == "requests": actual_units, if given, is a no-op -- see
         # docstring above.
 
@@ -838,14 +1141,14 @@ def headroom_snapshot(provider: str, key_id: str, model: str) -> dict:
     decision:
 
     {
-      "gating_mode": "tokens" | "requests",
+      "gating_mode": "tokens" | "requests" | "neurons",
       "provider_reported": {"remaining_tokens": int|None,
                              "remaining_requests": int|None,
                              "reset_at": float|None,
                              "recorded_at": float|None} | None,
       "sliding_window": {"used_last_60s": int, "tpm_limit": int|None,
                           "pct_used": float|None},
-      "daily": {"used_today": int, "rpd_limit": int|None,
+      "daily": {"used_today": int|float, "rpd_limit": int|None,
                 "pct_used": float|None} | None,
     }
 
@@ -858,9 +1161,21 @@ def headroom_snapshot(provider: str, key_id: str, model: str) -> dict:
     OR-1d: `sliding_window.used_last_60s` means "requests in the last 60s"
     rather than "tokens in the last 60s" when gating_mode == "requests" --
     same underlying window, different unit, per _gating_mode_for()'s
-    docstring. `daily` is only populated (non-None) in "requests" mode;
-    "tokens"-mode providers have no rpd concept so it stays None rather
-    than reporting a meaningless 0/None pair.
+    docstring. `daily` is only populated (non-None) in "requests" and
+    "neurons" mode; "tokens"-mode providers have no rpd concept so it
+    stays None rather than reporting a meaningless 0/None pair.
+
+    Patch I.2 follow-up: "neurons" mode has no sliding-window concept at
+    all (see the module docstring), so `sliding_window` is always the
+    harmless all-zero/None shape for it (nothing ever writes to that
+    provider/model's window key in this mode) -- `daily` is where the
+    real signal lives, `used_today`/`rpd_limit` holding NEURON figures
+    (a float, not a request count) rather than requests-mode's integer
+    request count. Callers that render this generically (e.g. a
+    "X / Y used today" dashboard row) don't need a gating_mode-specific
+    branch for that reason alone; only a caller that needs to LABEL the
+    unit (as quota_sentinel.get_quota_snapshot() does with `unit_mismatch`)
+    needs to check gating_mode itself.
     """
     try:
         now = _now()
@@ -879,6 +1194,15 @@ def headroom_snapshot(provider: str, key_id: str, model: str) -> dict:
                 "used_today": used_today,
                 "rpd_limit": rpd_limit,
                 "pct_used": (used_today / rpd_limit) if rpd_limit else None,
+            }
+        elif mode == "neurons":
+            window_limit = None  # no per-minute concept in this mode
+            neurons_limit = _neurons_rpd_limit_for(provider, model)
+            used_today = _read_daily_neurons(provider, key_id, now)
+            daily = {
+                "used_today": used_today,
+                "rpd_limit": neurons_limit,
+                "pct_used": (used_today / neurons_limit) if neurons_limit else None,
             }
         else:
             window_limit = _tpm_limit_for(provider, model)

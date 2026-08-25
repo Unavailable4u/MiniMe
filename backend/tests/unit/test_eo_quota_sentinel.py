@@ -223,15 +223,75 @@ def test_get_quota_snapshot_none_quota_and_pct_when_no_verified_rpd():
     assert entry["unit_mismatch"] is False
 
 
-def test_get_quota_snapshot_cloudflare_reports_unit_mismatch_and_no_pct():
-    today = date.today().isoformat()
-    _seed_usage("cloudflare", "CF_ACCOUNT_ID_ENV", today, requests=42)
+def test_get_quota_snapshot_cloudflare_reports_real_neuron_usage_and_pct():
+    """Patch I.2 follow-up (supersedes the old
+    test_get_quota_snapshot_cloudflare_reports_unit_mismatch_and_no_pct):
+    now that rate_ledger's "neurons" gating mode maintains a real daily
+    neuron total (fed by reserve()/release_reservation(), not a request
+    count), get_quota_snapshot()'s cloudflare branch reports `used` in
+    the SAME unit as `quota` -- a genuine percentage, not withheld, and
+    `unit_mismatch: False` since the units now actually match. Seeds the
+    neuron day-bucket directly via rate_ledger._adjust_daily_neurons(),
+    matching the exact key shape reserve()/release_reservation() write
+    in production (see that function's own docstring), rather than the
+    old test's `usage:cloudflare:...` request-count record -- that key
+    is still written by log_usage() for other purposes, but the
+    cloudflare branch no longer reads it for `used`."""
+    import utils.rate_ledger as rate_ledger
+
+    rate_ledger._adjust_daily_neurons("cloudflare", "CF_ACCOUNT_ID_ENV", 4200.0)
     snapshot = qs.get_quota_snapshot()
     entry = snapshot["CF_TEST_KEY"]
-    assert entry["used"] == 42
+    assert entry["used"] == pytest.approx(4200.0)
     assert entry["quota"] == 10000
+    assert entry["pct"] == pytest.approx(0.42)
+    assert entry["unit"] == "neurons"
+    assert entry["unit_mismatch"] is False
+    assert entry["unmetered"] is False
+
+
+def test_get_quota_snapshot_cloudflare_zero_neurons_used_with_no_bookings_yet():
+    """No reserve()/release_reservation() has ever touched this
+    account's neuron bucket -- must read as a real 0, not None/crash,
+    same fail-open-as-0 posture _read_daily_neurons() documents."""
+    snapshot = qs.get_quota_snapshot()
+    entry = snapshot["CF_TEST_KEY"]
+    assert entry["used"] == 0.0
+    assert entry["quota"] == 10000
+    assert entry["pct"] == pytest.approx(0.0)
+    assert entry["unit"] == "neurons"
+
+
+def test_get_quota_snapshot_marks_unmetered_provider_distinctly(monkeypatch):
+    """A provider whose QUOTA_CONFIG entry is the "unmetered_credit_pool"
+    sentinel (Patch I.2's huggingface case) must report `unmetered: True`
+    and a withheld quota/pct -- distinct from mistral's "nobody's
+    published rpd yet" case (same None/None on the surface, different
+    reason, both must be representable without colliding).
+
+    rate_ledger.is_unmetered_provider() imports QUOTA_CONFIG from
+    utils.llm_client directly (lazily, at call time -- see its own
+    docstring), NOT the qs.QUOTA_CONFIG copy this file's autouse fixture
+    patches for get_quota_snapshot()'s other lookups. Patching only
+    qs.QUOTA_CONFIG here would leave is_unmetered_provider() reading the
+    real production dict and silently miss the sentinel -- both need
+    patching for this test to actually exercise the branch it claims to."""
+    import eo.registry as registry_module
+    import utils.llm_client as llm_client_module
+
+    caps = dict(FAKE_CAPS)
+    caps["HF_TEST_KEY"] = {"provider": "huggingface"}
+    monkeypatch.setattr(registry_module, "AGENT_CAPABILITIES", caps)
+    monkeypatch.setitem(llm_client_module.QUOTA_CONFIG, "huggingface", "unmetered_credit_pool")
+
+    snapshot = qs.get_quota_snapshot()
+    entry = snapshot["HF_TEST_KEY"]
+    assert entry["quota"] is None
     assert entry["pct"] is None
-    assert entry["unit_mismatch"] is True
+    assert entry["unmetered"] is True
+    assert entry["unit_mismatch"] is False
+    # Contrast: mistral's None/None is NOT unmetered -- just unpublished.
+    assert snapshot["MISTRAL_TEST_KEY"]["unmetered"] is False
 
 
 def test_get_quota_snapshot_cooling_down_true_for_future_timestamp():

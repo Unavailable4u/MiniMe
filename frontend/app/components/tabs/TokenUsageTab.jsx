@@ -40,6 +40,38 @@ function guessProvider(agentKey) {
   return Object.keys(PROVIDER_COLOR).find((p) => upper.includes(p.toUpperCase())) || null;
 }
 
+// Patch I.2 follow-up: get_quota_snapshot() used to signal cloudflare's
+// request-count/neuron-ceiling unit mismatch with `unit_mismatch: true`
+// and always render the word "requests" everywhere else. Now that
+// backend/eo/quota_sentinel.py reports a real per-row `unit` ("neurons"
+// for cloudflare, "requests" for every other metered provider) and a
+// separate `unmetered` flag (huggingface's credit pool — genuinely no
+// ceiling to render, not just an unpublished one), this reads those
+// fields instead of assuming "requests" everywhere and hardcoding the
+// old mismatch string. `unit` defaults to "requests" for safety against
+// a stale/older snapshot shape that predates this field.
+//
+// Math.round() on `r.used`: unlike every other provider's `used` (a
+// plain request count, always a whole number already), a "neurons" row
+// is rate_ledger's tracked ESTIMATE (see quota_sentinel.py's own
+// docstring) — input tokens × a published per-token rate, so it's a
+// float like 3456.789 that would otherwise render with an ugly decimal
+// tail no other row has. Rounding here is purely a display concern; the
+// backend's own accounting keeps the unrounded float.
+function formatUsedQuota(r) {
+  const unit = r.unit || "requests";
+  const usedDisplay = Math.round(r.used).toLocaleString();
+  if (r.unmetered) {
+    return `${usedDisplay} ${unit} — unmetered (credit pool, no daily ceiling)`;
+  }
+  if (!r.quota) {
+    return `${usedDisplay} ${unit} — no verified limit`;
+  }
+  const pctDisplay = r.pct !== null && r.pct !== undefined ? Math.min(100, Math.round(r.pct * 100)) : null;
+  const pctSuffix = pctDisplay !== null ? ` (${pctDisplay}%)` : "";
+  return `${usedDisplay} / ${r.quota.toLocaleString()} ${unit}${pctSuffix}`;
+}
+
 // The real thing quota_sentinel.py computes and no UI ever showed
 // (§3 of the audit): TODAY's usage per account, cross-session,
 // verified against utils/llm_client.py's QUOTA_CONFIG — not the
@@ -130,12 +162,7 @@ function QuotaPanel({ apiUrl }) {
                       <span className="truncate text-cyber-text">{r.agentKey}</span>
                     </span>
                     <span className={`shrink-0 ${near ? "text-amber-500" : "text-cyber-dim"}`}>
-                      {r.used.toLocaleString()}
-                      {r.unit_mismatch
-                        ? ` requests — cap is ${r.quota ? r.quota.toLocaleString() : "?"} neurons/day`
-                        : r.quota
-                        ? ` / ${r.quota.toLocaleString()} requests (${pctDisplay}%)`
-                        : " requests — no verified limit"}
+                      {formatUsedQuota(r)}
                     </span>
                   </div>
                   {r.quota && pctDisplay !== null && (
