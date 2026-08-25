@@ -224,14 +224,24 @@ def test_run_gated_never_exceeds_max_pool_workers(monkeypatch):
 def test_run_gated_cancelled_future_rolls_back_reservation_without_running_call(monkeypatch):
     """If a future is cancelled before _run_one's done-callback gets to
     set_running_or_notify_cancel(), the task never actually dispatched --
-    that's a full rollback (release_reservation(reservation_id), no
-    actual_units), not the settle-with-1-unit case. This is exercised by
-    directly cancelling the future the instant it's created, racing the
-    background admission thread; both outcomes (won the race and got
-    cancelled, or lost the race and ran normally) are valid depending on
-    scheduling, so this test only asserts internal consistency: exactly
-    one of "the call ran" or "it was rolled back with no actual_units"
+    that's a full rollback (release_reservation(reservation_id,
+    dispatched=False)), not the settle-with-1-unit case. This is
+    exercised by directly cancelling the future the instant it's
+    created, racing the background admission thread; both outcomes (won
+    the race and got cancelled, or lost the race and ran normally) are
+    valid depending on scheduling, so this test only asserts internal
+    consistency: exactly one of "the call ran" or "it was rolled back"
     happened, never both, never neither.
+
+    Bug fix: this used to assert the rollback call was
+    release_reservation("res-cancel") with NO other args, matching the
+    literal code at the time. That call shape stopped actually meaning
+    "roll back" once release_reservation()'s own default changed to
+    dispatched=True (settle) -- this test was locking in the resulting
+    bug (a cancelled task's reservation silently settling instead of
+    rolling back) rather than catching it. dispatched=False is the
+    correct, current rollback signal; see concurrency_gate.py's own
+    _run_one() docstring on this exact fix.
     """
     mock_release = MagicMock()
     monkeypatch.setattr(concurrency_gate.rate_ledger, "reserve",
@@ -249,4 +259,4 @@ def test_run_gated_cancelled_future_rolls_back_reservation_without_running_call(
     if ran.is_set():
         mock_release.assert_called_once_with("res-cancel", actual_units=1)
     else:
-        mock_release.assert_called_once_with("res-cancel")
+        mock_release.assert_called_once_with("res-cancel", dispatched=False)

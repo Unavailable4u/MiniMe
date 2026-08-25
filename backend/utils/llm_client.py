@@ -534,6 +534,124 @@ _REQUEST_TOO_LARGE_LIMIT_PATTERN = re.compile(
 DROPPABLE_CONTEXT_MARKER = "\n\n<<<DROPPABLE_CONTEXT>>>\n\n"
 
 
+# Bug fix (2026-08-26): even after DROPPABLE_CONTEXT_MARKER handles the
+# genuinely optional tail (hw_reference_context), a further shrink on a
+# device with enough parts that PRD text + the finalized `parts` JSON
+# alone exceeds the model's limit still fell through to the blind
+# proportional/flat character cut below -- which can land mid-object
+# inside that JSON array. That doesn't fail loudly: the model just
+# receives a truncated part entry (a real, valid-looking id string cut
+# short, or a part dropped entirely) and produces wiring/mech output
+# that references or omits ids based on what it was actually shown.
+# Downstream, that is indistinguishable from -- and is a plausible
+# second source of -- the Wiring tab's "node not found: undefined"
+# crashes (Phase J), since an edge can end up pointing at an id the
+# model never actually saw as a complete entry.
+#
+# A caller whose prompt embeds a JSON array whose elements are
+# referenced by id elsewhere downstream (agents/hardware_speccer.py's
+# finalized `parts` list, later referenced by wiring.edges) can mark
+# the boundary right before that array with this sentinel. On a shrink,
+# _shrink_prompt_for_retry() then treats everything before the marker
+# as ordinary narrative/framing text (safe to trim first, same as
+# trimming a summary) and, only if that alone isn't enough, drops whole
+# trailing elements from the parsed array -- never a partial one --
+# instead of ever character-slicing the array itself. The array must be
+# the last thing in user_content once DROPPABLE_CONTEXT_MARKER's own
+# optional tail (if any) has already been removed; see
+# _shrink_structured_list_prompt()'s docstring for why a caller with
+# both markers still works correctly (DROPPABLE_CONTEXT_MARKER is
+# always checked, and drops, first).
+STRUCTURED_LIST_MARKER = "\n\n<<<STRUCTURED_JSON_LIST>>>\n\n"
+
+# Minimum fraction of the pre-marker text (PRD/task framing) a shrink is
+# allowed to trim down to before giving up on trimming it further and
+# moving on to dropping list elements instead. Kept well above zero so a
+# heavily-shrunk prompt never loses ALL task context -- an empty prefix
+# in front of a bare parts array gives the model nothing to wire the
+# parts FOR, which is its own kind of starved, low-quality response.
+_STRUCTURED_LIST_PREFIX_FLOOR_RATIO = 0.2
+
+
+def _target_length_for_shrink(user_content: str, exc) -> int:
+    """Shared by the blind character-slice path and
+    _shrink_structured_list_prompt(): how long should the shrunk
+    user_content be, in total? Parses the provider's own "Limit X,
+    Requested Y" figures out of the error message (Groq's actual 413
+    body shape) with a 15% safety margin for framing overhead the SDK
+    adds on top of raw content length; falls back to a flat 40% cut
+    (i.e. keep 60%) if the message doesn't carry those figures. Pure
+    computation, no slicing -- callers decide WHERE to cut to reach this
+    length."""
+    match = _REQUEST_TOO_LARGE_LIMIT_PATTERN.search(str(exc))
+    if match:
+        limit = int(match.group("limit"))
+        requested = int(match.group("requested"))
+        if requested > 0 and limit > 0:
+            keep_ratio = max(0.1, min(1.0, (limit / requested) * 0.85))
+            return max(1, int(len(user_content) * keep_ratio))
+    return max(1, int(len(user_content) * 0.6))
+
+
+def _shrink_structured_list_prompt(user_content: str, exc) -> "str | None":
+    """Bug fix (2026-08-26): see STRUCTURED_LIST_MARKER's own comment
+    above for why this exists. Returns the shrunk prompt, or None if
+    the marker's tail isn't actually a parseable, non-empty JSON list
+    (a caller error, or content that changed shape since the marker was
+    inserted) -- callers should fall back to the ordinary blind-slice
+    path in that case rather than guess.
+
+    Cuts in two stages, stopping as soon as the target length is met:
+      1. Trim the marker's PREFIX (ordinary narrative/task text) down
+         to as little as _STRUCTURED_LIST_PREFIX_FLOOR_RATIO of its
+         original length. This is exactly as safe to lose as any other
+         blind-slice candidate -- it's prose, not an id table -- so
+         it's spent first.
+      2. If trimming the prefix to its floor still isn't enough, drop
+         whole trailing elements from the parsed list, one at a time,
+         re-measuring after each drop -- never a partial element, so
+         every id the model ultimately sees in the array is real and
+         complete.
+    A list already down to its last single element is never shrunk
+    further here (that would risk an empty array); the caller's normal
+    same_step_shrinks cap in _handle_transient_error() still applies on
+    top of this, same as every other shrink path."""
+    prefix, _, tail = user_content.partition(STRUCTURED_LIST_MARKER)
+    try:
+        parsed_list = json.loads(tail)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed_list, list) or not parsed_list:
+        return None
+
+    target_len = _target_length_for_shrink(user_content, exc)
+    if target_len >= len(user_content):
+        return None  # nothing to do -- let the caller's own guard handle this
+
+    serialized_list = json.dumps(parsed_list)
+    current_prefix = prefix
+    current_len = len(current_prefix) + len(STRUCTURED_LIST_MARKER) + len(serialized_list)
+
+    # Stage 1: trim the prefix down to its floor.
+    prefix_floor = int(len(prefix) * _STRUCTURED_LIST_PREFIX_FLOOR_RATIO)
+    if current_len > target_len and len(current_prefix) > prefix_floor:
+        deficit = current_len - target_len
+        new_prefix_len = max(prefix_floor, len(current_prefix) - deficit)
+        current_prefix = current_prefix[:new_prefix_len]
+        current_len = len(current_prefix) + len(STRUCTURED_LIST_MARKER) + len(serialized_list)
+
+    # Stage 2: drop whole trailing elements, never a partial one.
+    while current_len > target_len and len(parsed_list) > 1:
+        parsed_list = parsed_list[:-1]
+        serialized_list = json.dumps(parsed_list)
+        current_len = len(current_prefix) + len(STRUCTURED_LIST_MARKER) + len(serialized_list)
+
+    shrunk = f"{current_prefix}{STRUCTURED_LIST_MARKER}{serialized_list}"
+    if len(shrunk) >= len(user_content):
+        return None  # made no real progress -- let the caller fall back
+    return shrunk
+
+
 def _shrink_prompt_for_retry(user_content: str, exc) -> str:
     """Fix D (reliability guide, §3 "Fix D"): before this fix, a 413
     "request too large" was caught by the same _TRANSIENT_ERRORS branch
@@ -565,28 +683,31 @@ def _shrink_prompt_for_retry(user_content: str, exc) -> str:
     context is what pushed the request over the limit in the first
     place); if a second shrink is still needed on the same step, the
     marker will already be gone from the returned core content, so the
-    next call falls through to the ratio/flat-cut logic below, now
-    operating on the smaller, structurally-intact core only."""
+    next call falls through to the structured-list/ratio/flat-cut logic
+    below, now operating on the smaller, structurally-intact core only.
+
+    Bug fix (2026-08-26): next, check for STRUCTURED_LIST_MARKER (see
+    its own comment above). If present and its tail is a real JSON
+    list, shrink via _shrink_structured_list_prompt() instead -- trims
+    narrative prefix first, then drops whole trailing list elements,
+    but never slices into a real element. Falls through to the blind
+    character cut below only if that helper declines (no marker, or the
+    tail isn't parseable JSON) -- unchanged behavior for every caller
+    that doesn't use this marker."""
     if DROPPABLE_CONTEXT_MARKER in user_content:
         core = user_content.rsplit(DROPPABLE_CONTEXT_MARKER, 1)[0]
         if len(core) < len(user_content):
             return core
-    match = _REQUEST_TOO_LARGE_LIMIT_PATTERN.search(str(exc))
-    if match:
-        limit = int(match.group("limit"))
-        requested = int(match.group("requested"))
-        if requested > 0 and limit > 0:
-            # 15% safety margin below the stated limit: system prompt +
-            # chat-message JSON framing + (if this is a continuation
-            # hop) _continuation_prompt()'s own wrapper text all add
-            # tokens the provider counts that aren't in len(user_content).
-            keep_ratio = max(0.1, min(1.0, (limit / requested) * 0.85))
-            new_len = max(1, int(len(user_content) * keep_ratio))
-            if new_len < len(user_content):
-                return user_content[:new_len]
-    # No parseable limit/requested figures -- take a conservative
-    # across-the-board cut so the next step still gets a materially
-    # smaller request instead of the identical one that just failed.
+    if STRUCTURED_LIST_MARKER in user_content:
+        structured_shrink = _shrink_structured_list_prompt(user_content, exc)
+        if structured_shrink is not None:
+            return structured_shrink
+    # _target_length_for_shrink() already folds in the flat-40%-cut
+    # fallback for the "no parseable limit/requested figures" case, so
+    # target_len below is always a real target, not just the ratio path.
+    target_len = _target_length_for_shrink(user_content, exc)
+    if target_len < len(user_content):
+        return user_content[:target_len]
     return user_content[: max(1, int(len(user_content) * 0.6))]
 
 
