@@ -64,6 +64,7 @@ from relay.emitter import emit_event
 # raise (a real bug — still propagates and fails the whole task, same as
 # before this phase). See utils/llm_client.py's ChainExhaustedError
 # docstring for exactly which raise sites this is and isn't.
+from utils.error_sanitizer import user_facing_message
 from utils.llm_client import ChainExhaustedError
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
@@ -1203,14 +1204,22 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # subclass and Python matches the first applicable clause.
                 role_failed = True
                 result = {"status": "failed", "role": role, "reason": str(exc)}
+                # Patch I.1 — the raw provider/chain exception text used to go
+                # straight out over this Pusher channel to the chat bubble.
+                # Full detail (str(exc), used for `result["reason"]` above)
+                # still flows into logs/results as before; only the
+                # user-visible payload is sanitized here.
                 emit_event("error", session_id=session_id, agent=current_name, path=path,
-                            payload={"message": f"{exc.__class__.__name__}: {exc}"})
+                            payload={"message": user_facing_message(exc)})
                 print(f"  [Executor] {current_name} (role={role}) exhausted its "
                       f"fallback chain — recording as failed, continuing to "
                       f"whatever doesn't depend on this role's output.")
             except Exception as exc:
+                # Patch I.1 — same sanitization for the generic handler.
+                # traceback/Sentry capture of the real exception, if any,
+                # happens upstream of this re-raise exactly as before.
                 emit_event("error", session_id=session_id, agent=current_name, path=path,
-                            payload={"message": f"{exc.__class__.__name__}: {exc}"})
+                            payload={"message": user_facing_message(exc)})
                 raise
             duration_ms = int((time.monotonic() - started) * 1000)
             # results is keyed by ROLE, not module name — results["generic_worker"]
