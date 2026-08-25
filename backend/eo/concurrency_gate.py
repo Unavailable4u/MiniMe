@@ -117,32 +117,131 @@ def _candidate_identity(step: dict) -> "tuple[str, str, str]":
     return provider, key, model
 
 
+def _gating_mode_for_step(step: "dict | None") -> "str | None":
+    """Best-effort gating-mode lookup for a chain step, shared by
+    _outer_reservation_size() and _release() so both agree on whether a
+    given step's outer reservation is "neurons" mode. Returns None (never
+    raises) on step=None, an unrecognized step shape, or `rate_ledger`
+    having been swapped for a test double that doesn't implement the
+    private _gating_mode_for() this reaches into (see
+    tests/integration/test_reliability_overhaul_gate.py's MockLedger,
+    which stands in for the whole `rate_ledger` reference and only
+    implements reserve()/release_reservation()) -- callers treat None
+    the same as "tokens"/"requests" (the pre-existing, already-correct
+    behavior for those modes), so a lookup failure degrades to exactly
+    what this module did before this fix, never to something worse."""
+    if step is None:
+        return None
+    try:
+        provider, _key, model = _candidate_identity(step)
+        return rate_ledger._gating_mode_for(provider, model)
+    except Exception:
+        return None
+
+
+def _outer_reservation_size(step: dict) -> "tuple[int, int | None]":
+    """Bug fix: what _admit() should actually reserve at this outer
+    layer. Returns (estimated_units, max_output_tokens) for
+    rate_ledger.reserve().
+
+    For every mode except "neurons" this is (1, None) -- completely
+    unchanged from before this fix; see _admit()'s docstring for why 1
+    unit is the deliberately-approximate placeholder for those modes
+    (Patch A's own reserve() call, one layer down inside the task's
+    actual LLM call, books the real estimate).
+
+    "neurons" mode has no such placeholder available. reserve()'s own
+    docstring is explicit that `estimated_units` is the real INPUT-side
+    token estimate and `max_output_tokens` the real output ceiling in
+    THIS mode specifically -- there's no "cost of exactly 1" convention
+    the way "requests" mode genuinely has. Reserving the same literal 1
+    every other mode uses meant _estimate_neurons() was handed (1 input
+    token, no output ceiling) on every single admission check,
+    regardless of the step's real size -- producing a fraction-of-a-
+    neuron estimate that reserve() could essentially never refuse, so
+    this outer throttle provided NO real admission control for
+    Cloudflare accounts, no matter how close to their real daily neuron
+    budget they actually were (confirmed by tracing _estimate_neurons()
+    and _reserve_neurons_mode() directly).
+
+    Fix: for "neurons" mode only, resolve the step's real max_tokens
+    ceiling via utils.llm_client._max_tokens_for() -- the exact same
+    lookup the step's own eventual dispatch already uses (see
+    llm_client.py's _remaining_chain_headroom(), same function) -- and
+    reserve using that ceiling on both sides. This mirrors
+    _estimate_neurons()'s own documented worst-case convention
+    (deliberately book the ceiling, not a guess at the real length)
+    instead of inventing a second, divergent heuristic here."""
+    if _gating_mode_for_step(step) != "neurons":
+        return 1, None
+    try:
+        from utils.llm_client import _max_tokens_for
+        _provider, _key, model = _candidate_identity(step)
+        ceiling = _max_tokens_for(model, step)
+    except Exception:
+        return 1, None
+    if not ceiling:
+        return 1, None
+    return ceiling, ceiling
+
+
 def _admit(task: GatedTask) -> "tuple[bool, float, str | None]":
-    """Tries to reserve this task's outer dispatch slot. Always books
-    exactly 1 unit, regardless of gating mode -- in "requests" mode
-    that's the real per-call cost anyway (rate_ledger.reserve() ignores
-    the estimate in that mode); in "tokens" mode this is deliberately
-    NOT an attempt to guess the real token cost (Patch A's own reserve()
-    call, one layer down inside the task's actual LLM call, already
-    books the true estimate for that) -- it's just "one more concurrent
-    attempt starting against this account", which is what this module
-    exists to throttle. A step of None always admits immediately with
-    no reservation (nothing to release later either)."""
+    """Tries to reserve this task's outer dispatch slot. See
+    _outer_reservation_size() for what's actually booked and why it
+    differs for "neurons" mode. A step of None always admits immediately
+    with no reservation (nothing to release later either)."""
     if task.step is None:
         return True, 0.0, None
     provider, key, model = _candidate_identity(task.step)
-    return rate_ledger.reserve(provider, key, model, 1)
+    estimated_units, max_output_tokens = _outer_reservation_size(task.step)
+    if max_output_tokens is None:
+        return rate_ledger.reserve(provider, key, model, estimated_units)
+    return rate_ledger.reserve(provider, key, model, estimated_units,
+                                max_output_tokens=max_output_tokens)
 
 
 def _release(task: GatedTask, reservation_id: "str | None") -> None:
     """Settles (not rolls back) the outer slot once the task's call()
     has finished, success or exception -- the dispatch genuinely
     happened (a real attempt against this account was made and is now
-    done), so this confirms the reservation as final rather than
-    reserve()'s "never went out" full-rollback case, which is reserved
-    (Patch A) for a step that was never dispatched in the first place.
-    actual_units == the same 1 unit that was reserved -- a no-op
-    correction, just releasing the slot back for the next queued task."""
+    done), so this confirms the reservation as final rather than a full
+    rollback, which is reserved for a step that was never dispatched in
+    the first place (see _run_one()'s cancelled-future branch below).
+
+    Bug fix, "neurons" mode: every other mode's outer reservation is a
+    deliberately-approximate placeholder that settling correctly leaves
+    (at most) negligibly booked (1 real token/request, matching
+    _outer_reservation_size()'s own docstring). "neurons" mode's outer
+    reservation is NOT negligible -- it now books a real, worst-case-
+    ceiling-sized estimate (see above) purely so admission control
+    actually works. That estimate was never meant to be a second,
+    independent record of real usage: the task's own dispatch, one
+    layer down inside utils/llm_client.py, already makes its OWN
+    reserve()/release_reservation() call against the same (provider,
+    key_id) neuron budget and trues THAT one up against real usage (see
+    release_reservation()'s own "neurons" branch). Settling this outer
+    reservation the way every other mode's placeholder settles would
+    leave its full worst-case estimate permanently booked ON TOP OF the
+    inner layer's real, trued-up figure -- double-counting every single
+    dispatched Cloudflare call against the account's real daily budget,
+    exhausting it roughly twice as fast as reality. Rolling it back to
+    zero instead leaves the inner layer's own reservation as the one
+    real record, exactly matching this module's own stated intent (the
+    outer layer governs admission only; Patch A does real accounting).
+
+    Falls back to the pre-fix, no-`dispatched`-kwarg call on TypeError
+    so a `rate_ledger` stand-in that only implements the older
+    reserve()/release_reservation(reservation_id, actual_units) shape
+    (see tests/integration/test_reliability_overhaul_gate.py's
+    MockLedger) still works unchanged."""
+    if reservation_id is None:
+        return
+    if _gating_mode_for_step(task.step) == "neurons":
+        try:
+            rate_ledger.release_reservation(reservation_id, dispatched=False)
+        except TypeError:
+            rate_ledger.release_reservation(reservation_id)
+        return
     rate_ledger.release_reservation(reservation_id, actual_units=1)
 
 
@@ -196,10 +295,27 @@ def run_gated(tasks: "list[GatedTask]", session_id: str = None) -> "list[Future]
         if not fut.set_running_or_notify_cancel():
             # Caller cancelled this future before it ever ran -- the
             # task genuinely never dispatched, so this is a full
-            # rollback (no actual_units), not _release()'s "settle"
-            # case, which is for a task that DID run (successfully or
-            # not) and so DID use its reserved slot.
-            rate_ledger.release_reservation(reservation_id)
+            # rollback, not _release()'s "settle" case, which is for a
+            # task that DID run (successfully or not) and so DID use its
+            # reserved slot.
+            #
+            # Bug fix: this used to call release_reservation(reservation_id)
+            # with no other args, which meant "full rollback" back when
+            # release_reservation()'s only rollback signal was
+            # actual_units=None. That's no longer true -- it now defaults
+            # to dispatched=True (settle), so this call was silently
+            # SETTLING a cancelled task's reservation instead of rolling
+            # it back, leaving it permanently occupying ledger budget it
+            # never used. dispatched=False is the real, current rollback
+            # signal (see release_reservation()'s own "Bug fix" docstring
+            # section). Falls back to the old no-kwarg call on TypeError
+            # for a `rate_ledger` stand-in that only implements the older
+            # shape (see MockLedger in
+            # tests/integration/test_reliability_overhaul_gate.py).
+            try:
+                rate_ledger.release_reservation(reservation_id, dispatched=False)
+            except TypeError:
+                rate_ledger.release_reservation(reservation_id)
             return
         try:
             result = tasks[idx].call()

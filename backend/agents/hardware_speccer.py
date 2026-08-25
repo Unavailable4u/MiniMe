@@ -124,7 +124,11 @@ from eo.errors import MissingDependencyError
 from memory.bus import read as bus_read
 from memory.bus import read_stage_output_text
 from relay.emitter import EventType, emit_event
-from utils.llm_client import DROPPABLE_CONTEXT_MARKER, generate_text
+from utils.llm_client import (
+    DROPPABLE_CONTEXT_MARKER,
+    STRUCTURED_LIST_MARKER,
+    generate_text,
+)
 
 load_dotenv()
 
@@ -2239,11 +2243,25 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
 
     # Call 2: wiring/mech/instructions, given the (now dimension-enriched)
     # parts list as fixed input rather than generating parts itself.
+    #
+    # Bug fix (2026-08-26): the parts array is marked with
+    # STRUCTURED_LIST_MARKER (see utils.llm_client's own comment on it)
+    # rather than embedded as plain text. If a shrink is ever needed
+    # beyond dropping hw_reference_context below, this lets
+    # _shrink_prompt_for_retry() trim the narrative text ahead of the
+    # array and, only if that's still not enough, drop whole trailing
+    # part entries -- never slice into one -- so every id the model
+    # actually sees is real and complete. Before this fix, a shrink that
+    # reached this far would blind-cut the raw JSON string, which could
+    # leave a truncated part id in the model's input; wiring.edges built
+    # from that input could then reference an id the model was never
+    # actually shown intact -- a plausible source of the Wiring tab's
+    # "node not found" crashes downstream.
     wiring_user_prompt = (
         f"{user_prompt}\n\n"
         f"Parts (already finalized -- do not add, remove, or rename any; "
         f"some carry a \"dimensions_mm\" field, which is verified ground "
-        f"truth, not an estimate):\n{json.dumps(parts)}"
+        f"truth, not an estimate):{STRUCTURED_LIST_MARKER}{json.dumps(parts)}"
     )
 
     # Phase 0, Patch 0.4: fold in hw_ref: precedent (if any) right
