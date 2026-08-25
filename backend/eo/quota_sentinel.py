@@ -25,7 +25,7 @@ from memory.bus import read as bus_read
 from memory.bus import read_many as bus_read_many
 from relay.emitter import emit_event
 from utils.llm_client import QUOTA_CONFIG
-from utils.rate_ledger import headroom_snapshot, is_unmetered_provider
+from utils.rate_ledger import daily_neurons_used, headroom_snapshot, is_unmetered_provider
 
 TAVILY_MONTHLY_QUOTA = 1000  # Tavily's free tier: 1,000 searches/MONTH, not
 # daily like every other provider in QUOTA_CONFIG. Deliberately NOT added
@@ -103,8 +103,9 @@ def _model_for(agent_key: str, provider: str) -> str | None:
 
 
 def get_quota_snapshot() -> dict:
-    """Returns {agent_key: {"used": int, "quota": int|None, "pct": float|None,
-    "unit_mismatch": bool, "cooldown_until": float|None, "cooling_down": bool}}
+    """Returns {agent_key: {"used": int|float, "quota": int|None,
+    "pct": float|None, "unit": str, "unit_mismatch": bool,
+    "unmetered": bool, "cooldown_until": float|None, "cooling_down": bool}}
     for every account in AGENT_CAPABILITIES, reading TODAY's real usage
     from the exact keys generate_text() already writes.
 
@@ -120,15 +121,45 @@ def get_quota_snapshot() -> dict:
     which only publishes RPS) — an honest "no verified number" rather
     than a guess.
 
-    Cloudflare gets its own branch (reliability guide §10): its real
-    ceiling is neurons/day, not requests, and `used` (a request count) is
-    NOT the same unit as `quota` (a neuron ceiling) -- `pct` is
-    deliberately left None rather than computed from mismatched units,
-    and `unit_mismatch: True` tells the frontend to label this row as
-    "requests so far today, real cap is neurons" instead of rendering a
-    fabricated percentage. Every other provider gets `unit_mismatch:
-    False` so the frontend has one consistent field to check rather than
-    needing a provider-name special case.
+    Cloudflare gets its own branch (reliability guide §10, corrected by
+    Patch I.2's follow-up): originally this compared a REQUEST count
+    against the neuron ceiling (`unit_mismatch: True`, `pct` withheld,
+    since a request count and a neuron ceiling aren't the same unit).
+    Now that rate_ledger's "neurons" gating mode maintains a real running
+    daily neuron total (rate_ledger.daily_neurons_used(), fed from
+    reserve()'s pre-flight estimate and trued up by release_reservation()
+    against actual usage when Cloudflare's response happens to include
+    one), `used` here IS a neuron figure, the same unit as `quota` --
+    `unit_mismatch` is correctly False and `pct` is a real percentage,
+    not withheld. IMPORTANT CAVEAT this snapshot cannot express in a
+    single boolean: `used` is the ledger's tracked estimate, not a number
+    Cloudflare's dashboard independently confirms -- see
+    rate_ledger._estimate_neurons()'s own docstring for why it's a
+    worst-case (max_tokens-ceiling-based) figure that only gets trued up
+    to something more exact on the minority of calls whose response
+    includes a usable prompt/completion split. Structurally the same
+    "tracked usage is our best estimate, verify big anomalies against the
+    provider's own dashboard" caveat every OTHER provider's `used` in
+    this snapshot already carries (they're all self-tracked, none of
+    them poll the provider's dashboard live) -- cloudflare just makes it
+    more visible because its number was previously a request count, an
+    obviously different order of magnitude from a neuron figure.
+
+    `unit` (new): "neurons" for cloudflare, "requests" for every other
+    metered provider, so the frontend can label a row correctly without
+    hardcoding a provider name to guess it (see
+    frontend/app/components/tabs/TokenUsageTab.jsx, updated alongside
+    this to read the field instead of assuming "requests" everywhere).
+
+    `unmetered` (Patch I.2): True for a provider whose QUOTA_CONFIG entry
+    is the explicit "unmetered_credit_pool" sentinel (currently just
+    huggingface) -- `quota`/`pct` are None here too, but for a different
+    reason than mistral's "nobody's published a number yet": there
+    genuinely isn't a request/token ceiling to hit, it's a monthly credit
+    pool instead. Every other provider gets `unmetered: False` so the
+    frontend has one consistent field to check rather than needing a
+    provider-name special case (same reasoning `unit_mismatch` already
+    documented before this fix, extended to cover this second axis).
 
     Fix B (reliability guide, §3 "Fix B"): also reads back
     cooldown_until:{provider}:{key_id} — the UTC timestamp
@@ -164,12 +195,17 @@ def get_quota_snapshot() -> dict:
         cooling_down = bool(cooldown_until and cooldown_until > now)
 
         if provider == "cloudflare":
+            # Patch I.2 follow-up: real neuron accounting, not the
+            # request-count proxy this branch used before -- see this
+            # function's own docstring for the full "why" and its caveat.
             limits = QUOTA_CONFIG.get("cloudflare", {}).get(model, {})
             neuron_quota = limits.get("neurons_rpd")
-            used_requests = record.get("requests", 0)
+            used_neurons = daily_neurons_used(provider, key_id)
+            pct = (used_neurons / neuron_quota) if neuron_quota else None
             snapshot[agent_key] = {
-                "used": used_requests, "quota": neuron_quota, "pct": None,
-                "unit_mismatch": True,  # frontend: label as "requests (cap is neurons)"
+                "used": used_neurons, "quota": neuron_quota, "pct": pct,
+                "unit": "neurons",
+                "unit_mismatch": False,  # units now genuinely match
                 "unmetered": False,
                 "cooldown_until": cooldown_until, "cooling_down": cooling_down,
             }
@@ -187,6 +223,7 @@ def get_quota_snapshot() -> dict:
             used_requests = record.get("requests", 0)
             snapshot[agent_key] = {
                 "used": used_requests, "quota": None, "pct": None,
+                "unit": "requests",
                 "unit_mismatch": False, "unmetered": True,
                 "cooldown_until": cooldown_until, "cooling_down": cooling_down,
             }
@@ -197,7 +234,9 @@ def get_quota_snapshot() -> dict:
         used = record.get("requests", 0)  # FIX (§1a): requests, not tokens
         pct = (used / quota) if quota else None
         snapshot[agent_key] = {
-            "used": used, "quota": quota, "pct": pct, "unit_mismatch": False,
+            "used": used, "quota": quota, "pct": pct,
+            "unit": "requests",
+            "unit_mismatch": False,
             "unmetered": False,
             "cooldown_until": cooldown_until, "cooling_down": cooling_down,
         }

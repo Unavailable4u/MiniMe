@@ -200,43 +200,59 @@ QUOTA_CONFIG = {
         # requests/tokens like every other entry above, so
         # get_quota_snapshot() has a dedicated neurons-aware branch for
         # this provider rather than reusing the requests-based math.
-        "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {"neurons_rpd": 10000},
+        #
+        # Patch I.2 follow-up (real gating, not just reporting):
+        # "neurons_rpd" alone was never enough to actually GATE a
+        # cloudflare call -- rate_ledger._gating_mode_for() only branched
+        # on "tpm" (tokens mode) or "rpm"/"rpd" (requests mode), so both
+        # entries below used to fail open regardless of what
+        # "neurons_rpd" said; it was read solely by
+        # quota_sentinel.get_quota_snapshot()'s dashboard branch. That's
+        # fixed now: rate_ledger.py has a real "neurons" gating mode, and
+        # both entries below now also carry their verified per-token
+        # neuron rates (neurons_per_m_input_tokens/
+        # neurons_per_m_output_tokens), confirmed live against
+        # developers.cloudflare.com/workers-ai/platform/pricing/
+        # ("LLM model pricing" table), 2026-08-26 -- the ONLY per-call
+        # cost signal Workers AI actually publishes; there's no
+        # x-ratelimit-* header on its REST responses (see
+        # _call_cloudflare_step()'s own docstring), so this is what
+        # rate_ledger._estimate_neurons() multiplies a pre-flight token
+        # estimate by to get a real neuron estimate to gate on.
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {
+            "neurons_rpd": 10000,
+            "neurons_per_m_input_tokens": 26668,
+            "neurons_per_m_output_tokens": 204805,
+        },
         # Patch I.2: reviewer.py's cloudflare step actually calls
         # "@cf/meta/llama-3.1-8b-instruct" (see reviewer.py's own
         # CLOUDFLARE_MODEL comment), a different model that had no entry
-        # here -- previously flagged, not fixed. Same 10k/day figure as
-        # the entry above: Workers AI's neuron ceiling is account-wide,
-        # not per-model, and dash.cloudflare.com > AI > Workers AI >
-        # Usage confirms every account on the free tier gets the same
-        # "Neurons used today: 0/10k" ceiling regardless of which model
-        # it calls -- this isn't a second, independently-sourced number,
+        # here -- previously flagged, not fixed. Same 10k/day BUDGET
+        # figure as the entry above: Workers AI's neuron ceiling is
+        # account-wide, not per-model (confirmed
+        # developers.cloudflare.com/workers-ai/platform/pricing/: "Our
+        # free allocation allows anyone to use a total of 10,000 Neurons
+        # per day"), and dash.cloudflare.com > AI > Workers AI > Usage
+        # confirms every account on the free tier gets the same "Neurons
+        # used today: 0/10k" ceiling regardless of which model it calls
+        # -- this isn't a second, independently-sourced BUDGET number,
         # it's the same free-tier ceiling applied to reviewer.py's
-        # account (CLOUDFLARE_ACCOUNT_ID_2). If reviewer.py's account is
-        # ever moved to a paid Workers AI plan with a different ceiling,
-        # update this entry specifically -- it no longer has to move in
-        # lockstep with the fp8-fast entry above once that happens.
-        #
-        # IMPORTANT CAVEAT (found while wiring this in, not part of the
-        # original ask, flagging rather than silently fixing): this entry
-        # closes the QUOTA_CONFIG *coverage* gap -- get_quota_snapshot()
-        # will now report real usage/quota for this model instead of an
-        # empty {} -- but it does NOT give this step pre-flight gating
-        # via can_proceed()/reserve(). Neither function's gating-mode
-        # dispatch (rate_ledger._gating_mode_for()) recognizes
-        # "neurons_rpd" as a signal; it only branches on "tpm" (tokens
-        # mode) or "rpm"/"rpd" (requests mode). "neurons_rpd" is read
-        # solely by quota_sentinel.get_quota_snapshot()'s dedicated
-        # `if provider == "cloudflare"` branch, for dashboard reporting.
-        # That means _tpm_limit_for() still returns None for both
-        # cloudflare entries in this table, and reserve()/can_proceed()
-        # still fail open for every cloudflare call regardless of this
-        # entry -- true of the pre-existing fp8-fast entry too, not a
-        # regression introduced here. Actually blocking cloudflare calls
-        # pre-flight would need a real "neurons" gating mode added to
-        # rate_ledger.py (estimating neurons per call, a third window
-        # type alongside tokens/requests) -- out of scope for this patch;
-        # tracked as a follow-up, not silently claimed as done here.
-        "@cf/meta/llama-3.1-8b-instruct": {"neurons_rpd": 10000},
+        # account (CLOUDFLARE_ACCOUNT_ID_2). The PER-TOKEN rates below
+        # ARE independently sourced, though -- this is a different model
+        # with its own real cost, cheaper per output token than
+        # fp8-fast's 70b figure above (see the pricing table: this is
+        # the un-quantized 8b model, not the fp8-quantized 70b one; don't
+        # assume the smaller model name means a smaller per-token rate,
+        # check the table). If reviewer.py's account is ever moved to a
+        # paid Workers AI plan with a different BUDGET ceiling, update
+        # "neurons_rpd" here specifically -- it no longer has to move in
+        # lockstep with the fp8-fast entry above once that happens; the
+        # per-token rates are independent of plan tier either way.
+        "@cf/meta/llama-3.1-8b-instruct": {
+            "neurons_rpd": 10000,
+            "neurons_per_m_input_tokens": 25608,
+            "neurons_per_m_output_tokens": 75147,
+        },
     },
     # "github" -- retiring/retired, see the reality guide §4. Left out of
     # this rewrite deliberately rather than given a fresh per-model
@@ -1756,7 +1772,22 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
     Returns a list of (index, provider, key_id, model, ok, wait_seconds)
     tuples, one per still-eligible step, so a caller can both look for a
     reroute target (any ok=True) and, failing that, work out which of
-    the remaining steps resets soonest."""
+    the remaining steps resets soonest.
+
+    Patch I.2 follow-up: each step's own max_tokens ceiling is now
+    resolved via _max_tokens_for(model, step) and threaded into
+    can_proceed()'s max_output_tokens param. Before this, every step got
+    max_output_tokens=None regardless of gating mode -- harmless for
+    "tokens"/"requests" steps (they ignore the param entirely), but for
+    a "neurons" step (cloudflare) it meant _estimate_neurons() always
+    fell back to its None-safe default rather than the step's real
+    output ceiling, so the look-ahead either under- or over-stated a
+    cloudflare step's actual headroom depending on that fallback's
+    shape. Each step's own max_tokens is looked up per-step (not once
+    for the whole chain) since different steps can carry different
+    explicit max_tokens overrides -- see _max_tokens_for()'s own
+    docstring for why an explicit step["max_tokens"] always wins over
+    the model-based default."""
     results = []
     for j in range(from_index + 1, len(chain)):
         step = chain[j]
@@ -1773,7 +1804,9 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
             key_id = step["key_env"]
         if _is_cooling_down(provider, key_id):
             continue
-        ok, wait = rate_ledger.can_proceed(provider, key_id, model, estimated_tokens)
+        step_max_tokens = _max_tokens_for(model, step)
+        ok, wait = rate_ledger.can_proceed(provider, key_id, model, estimated_tokens,
+                                            max_output_tokens=step_max_tokens)
         results.append((j, provider, key_id, model, ok, wait))
     return results
 
@@ -1889,7 +1922,7 @@ def _decide_ledger_action(chain: list, index: int, current_wait: float,
 
 def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
                   system_prompt: str, prompt_for_step: str, label: str,
-                  agent_name: str) -> "tuple[str, str | None]":
+                  agent_name: str, max_tokens: "int | None" = None) -> "tuple[str, str | None]":
     """3f-1 -- shared pre-flight ledger gate, extracted verbatim from the
     duplicated cloudflare/SDK-shaped blocks in generate_text(). Reads
     ledger state AND books the provisional reservation in the same call
@@ -1925,10 +1958,19 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
       ("waited-retry", None) -- caller already slept the decided
                          duration and should `continue` to retry THIS
                          step now. Nothing was booked yet either.
+
+    `max_tokens` (Patch I.2 follow-up): the step's configured max_tokens
+    ceiling (both call sites below already resolve this via
+    _max_tokens_for() before building their `_call_fn` closure -- this
+    just threads the same value through one more level). Only meaningful
+    for a "neurons" gating-mode step (currently cloudflare only -- see
+    rate_ledger.reserve()'s own docstring); every other mode ignores it,
+    same "accepted but unused when it doesn't apply" convention this
+    module's estimate params already follow elsewhere.
     """
     _estimated_tokens = _estimate_tokens_for_call(system_prompt, prompt_for_step)
     _ledger_ok, _ledger_wait, _reservation_id = rate_ledger.reserve(
-        provider, key, model, _estimated_tokens)
+        provider, key, model, _estimated_tokens, max_output_tokens=max_tokens)
     if _ledger_ok:
         return "proceed", _reservation_id
     _action, _wait_seconds = _decide_ledger_action(
@@ -1965,10 +2007,10 @@ def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_h
     provider-reported headroom is absent or stale.
 
     Phase 4: that real token count is now reconciled via
-    rate_ledger.release_reservation(reservation_id, actual_tokens)
-    rather than a bare rate_ledger.record_usage() call, whenever
-    `reservation_id` is given -- _ledger_gate() already booked an
-    ESTIMATE into the ledger at dispatch time (Phase 4's whole point:
+    rate_ledger.release_reservation(reservation_id, actual_tokens, ...,
+    dispatched=True) rather than a bare rate_ledger.record_usage() call,
+    whenever `reservation_id` is given -- _ledger_gate() already booked
+    an ESTIMATE into the ledger at dispatch time (Phase 4's whole point:
     closing the race between the pre-flight check and the post-hoc
     booking), so calling record_usage() again here on top of that would
     double-count the same call. release_reservation() corrects the
@@ -1978,6 +2020,26 @@ def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_h
     defensive fallback, not a live path), in which case this still falls
     back to the old plain record_usage() so bookkeeping never silently
     goes missing.
+
+    Patch I.2 follow-up: this function is only ever called from the
+    SUCCESS path (right after a real response came back -- see both
+    dispatch loops below), so it always passes dispatched=True. That
+    distinction used to not exist -- release_reservation() inferred
+    "never dispatched" from actual_units being None, which broke
+    "neurons" mode specifically: `_extract_total_tokens(usage)` is
+    routinely None on a real, successful Cloudflare call (the module's
+    own CLOUDFLARE CAVEAT docstring), so every such call was silently
+    rolling its whole reservation back to zero instead of leaving the
+    worst-case estimate standing. Also now sources
+    actual_input_tokens/actual_output_tokens via
+    _usage_details_from_usage(usage) -- the same tolerant unwrap D1
+    patch 2 already uses for Langfuse -- so a "neurons" mode booking
+    gets trued up to a real figure on the (less common but real) case
+    where Cloudflare's response DOES carry a usable prompt/completion
+    split. Both are None (usage entirely absent, or an SDK-shaped
+    provider whose usage object has a total but no prompt/completion
+    breakdown) -> release_reservation()'s neurons branch no-ops, same
+    conservative fallback as before.
 
     Purely side-effecting -- no control flow, no loop-scoped state to
     hand back, unlike 3f-3/3f-4.
@@ -1992,7 +2054,13 @@ def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_h
                                  _remaining_tokens, _remaining_requests, _reset_seconds)
     _actual_tokens = _extract_total_tokens(usage)
     if reservation_id is not None:
-        rate_ledger.release_reservation(reservation_id, _actual_tokens)
+        _usage_details = _usage_details_from_usage(usage)
+        _actual_input = _usage_details.get("input") if _usage_details else None
+        _actual_output = _usage_details.get("output") if _usage_details else None
+        rate_ledger.release_reservation(
+            reservation_id, _actual_tokens,
+            actual_input_tokens=_actual_input, actual_output_tokens=_actual_output,
+            dispatched=True)
     elif _actual_tokens is not None:
         rate_ledger.record_usage(provider, key, model, _actual_tokens)
 
@@ -2284,7 +2352,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
 def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model: str, key,
                      label: str, system_prompt: str, user_content: str, accumulated_text: str,
                      continuations_used: int, allow_continuation: bool, agent_name: str,
-                     session_id, tier, path, domain, call_fn) -> "tuple[str, str, str, int, object]":
+                     session_id, tier, path, domain, call_fn,
+                     max_tokens: "int | None" = None) -> "tuple[str, str, str, int, object]":
     """3f-5 -- the single shared per-step retry loop, replacing the two
     duplicated `while True:` blocks in generate_text() (the cloudflare
     and SDK-shaped branches). Wires together 3f-1..3f-4's helpers in the
@@ -2308,6 +2377,11 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
     `key` is whichever identifier this call site uses to key the
     ledger/cooldown (key_id for cloudflare, key_env for the SDK-shaped
     branch) -- unchanged from how 3f-1/3f-2/3f-4 already take it.
+
+    `max_tokens` (Patch I.2 follow-up): the step's configured max_tokens
+    ceiling, threaded straight through to _ledger_gate() on every
+    iteration of the retry loop below -- see that function's own
+    docstring for why (only meaningful for a "neurons" gating-mode step).
 
     `same_step_shrinks` (Fix D2) is NOT a parameter here: unlike
     accumulated_text/continuations_used, it never needs to survive past
@@ -2346,7 +2420,8 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             if accumulated_text else user_content
         )
         _gate, _reservation_id = _ledger_gate(chain, index, provider, key, model,
-                                               system_prompt, prompt_for_step, label, agent_name)
+                                               system_prompt, prompt_for_step, label, agent_name,
+                                               max_tokens=max_tokens)
         if _gate == "reroute":
             _record_ledger_event(session_id, "reroute")
             break  # skip this step, fall through to the next chain step
@@ -2389,7 +2464,16 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             # trade the rest of this module already makes -- the very
             # next successful call's provider-reported headers correct
             # the authoritative signal regardless.
-            rate_ledger.release_reservation(_reservation_id)
+            #
+            # Patch I.2 follow-up: dispatched=False passed explicitly
+            # now (previously implied by leaving actual_units at its
+            # None default) -- see release_reservation()'s docstring for
+            # why that inference broke "neurons" mode once a SUCCESSFUL
+            # call could also legitimately reach this function with no
+            # actual_units. This call site's own rollback intent hasn't
+            # changed at all; it's just no longer ambiguous with that
+            # other case.
+            rate_ledger.release_reservation(_reservation_id, dispatched=False)
             last_exc = exc
             _record_ledger_event(session_id, "provider_failure")
             (_action, user_content, accumulated_text, same_step_shrinks,
@@ -2511,7 +2595,8 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
                 _run_chain_step(chain, i, is_last, provider, model, key_id, label,
                                  system_prompt, user_content, accumulated_text,
                                  continuations_used, allow_continuation, agent_name,
-                                 session_id, tier, path, domain, _call_fn)
+                                 session_id, tier, path, domain, _call_fn,
+                                 max_tokens=_max_tok)  # Patch I.2 follow-up: real neurons-mode gating
             if _step_exc is not None:
                 last_exc = _step_exc
                 step_buckets.add(classify_error(_step_exc))  # Phase 9b
@@ -2570,7 +2655,8 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
             _run_chain_step(chain, i, is_last, provider, model, key_env, label,
                              system_prompt, user_content, accumulated_text,
                              continuations_used, allow_continuation, agent_name,
-                             session_id, tier, path, domain, _call_fn)
+                             session_id, tier, path, domain, _call_fn,
+                             max_tokens=_max_tok)  # Patch I.2 follow-up: real neurons-mode gating
         if _step_exc is not None:
             last_exc = _step_exc
             step_buckets.add(classify_error(_step_exc))  # Phase 9b
