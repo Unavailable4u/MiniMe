@@ -2459,6 +2459,7 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         run_level_2_3_repair,
         run_level_3_4_repair,
     )
+    from eo.mech_access import apply_access_generation
     from eo.mech_supports import apply_supports_generation
     from eo.mech_swept_volume import apply_swept_volume_generation
     from eo.mech_validator import close_session as close_mech_validator_session
@@ -2501,6 +2502,19 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
         # after, precisely because housing sizing does NOT depend on
         # per-part final positions the way a per-part standoff does).
         apply_supports_generation(spec.get("mech") or {}, spec["parts"])
+        # Patch D.5: Phase D's own pipeline wiring. Sequenced immediately
+        # after apply_supports_generation() -- same "act only on
+        # placements the validator has already signed off on" reasoning
+        # that call's own comment above already gives for running after
+        # run_level_3_4_repair(), and BEFORE apply_swept_volume_generation()
+        # so an access mechanism's own primitives (hinge knuckles, latch
+        # hooks, slide channels) exist in mech["access"] by the time
+        # Phase B's swept-volume pass below considers what else occupies
+        # space around a moving part. Reads each Enclosure sub-region's
+        # own declared access_type (defaulting to "fastened", a no-op
+        # relative to today) off its anchor BOM part -- see eo/
+        # mech_access.py's own apply_access_generation() docstring.
+        apply_access_generation(spec.get("mech") or {}, spec["parts"])
         # Mech View standalone implementation guide, Phase B's own
         # wiring glue (see eo/mech_swept_volume.py's own top docstring
         # for why this call lives there and not in a numbered Phase B

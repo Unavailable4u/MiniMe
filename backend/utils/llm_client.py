@@ -1682,6 +1682,22 @@ def _extract_headroom_from_headers(headers) -> "tuple[int|None, int|None, float|
 # window's worth) gets capped rather than blocking the caller for real.
 _LEDGER_WAIT_CAP_SECONDS = 20.0
 
+# Bug fix (2026-08-25, CI hang part 2): _MAX_RATE_LIMIT_RETRIES bounds how
+# many times a single step will sleep-and-retry-in-place, but each of
+# those sleeps is independently capped at _LEDGER_WAIT_CAP_SECONDS -- so
+# worst case is _MAX_RATE_LIMIT_RETRIES * _LEDGER_WAIT_CAP_SECONDS (5 *
+# 20s = 100s) of sleeping alone, before any network round-trips, on a
+# single chain step. That's long enough to blow through external
+# harness timeouts (promptfoo's per-test 120s default) with nothing but
+# a bare "Evaluation timed out" and zero diagnostic info -- worse than
+# just failing fast with the real RuntimeError _handle_transient_error()
+# already raises once _MAX_RATE_LIMIT_RETRIES is hit. This is a second,
+# independent ceiling on the SAME loop: total wall-clock time spent
+# sleeping on RATE_LIMIT_WINDOW waits for this step, checked before each
+# sleep so the step can't oversleep its budget even if the retry count
+# alone hasn't been exhausted yet.
+_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS = 45.0
+
 
 def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: int):
     """Phase 3b -- cheap, read-only look-ahead used once the CURRENT
@@ -2026,7 +2042,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                              is_last: bool, label: str, agent_name: str, system_prompt: str,
                              prompt_for_step: str, user_content: str, accumulated_text: str,
                              same_step_shrinks: int, session_id: str = None,
-                             same_step_rate_limit_waits: int = 0) -> "tuple[str, str, str, int, int]":
+                             same_step_rate_limit_waits: int = 0,
+                             same_step_rate_limit_elapsed: float = 0.0) -> "tuple[str, str, str, int, int, float]":
     """3f-4 -- shared classify_error() exception dispatch, extracted
     from the duplicated `except _TRANSIENT_ERRORS as exc:` bodies in
     generate_text() (cloudflare/SDK-shaped branches), including the 3e
@@ -2065,7 +2082,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
     chain.
 
     Returns (action, user_content, accumulated_text, same_step_shrinks,
-    same_step_rate_limit_waits):
+    same_step_rate_limit_waits, same_step_rate_limit_elapsed):
       action == "raise"          -- caller should bare `raise` (re-raise
                                      the exception currently being
                                      handled) -- MALFORMED_REQUEST, or
@@ -2099,12 +2116,14 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"{len(shrunk)} chars and retrying {label} in place "
                   f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
             # stale partial output no longer matches the shrunk prompt
-            return "retry-in-place", shrunk, "", same_step_shrinks, same_step_rate_limit_waits
+            return ("retry-in-place", shrunk, "", same_step_shrinks,
+                    same_step_rate_limit_waits, same_step_rate_limit_elapsed)
         if not is_last:
             print(f"  [{agent_name}] {label} still over context length "
                   f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks, "
                   f"falling back to next in chain...")
-        return "next-step", user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits
+        return ("next-step", user_content, accumulated_text, same_step_shrinks,
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
     if _bucket == ErrorBucket.RATE_LIMIT_WINDOW:
         # Phase 3d: an org-scoped, time-windowed quota problem is never a
         # size problem -- never shrink the prompt here (see llm_errors.py's
@@ -2123,7 +2142,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"already has headroom, rerouting immediately instead "
                   f"of waiting.")
             _record_ledger_event(session_id, "reroute")
-            return "next-step", user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits
+            return ("next-step", user_content, accumulated_text, same_step_shrinks,
+                    same_step_rate_limit_waits, same_step_rate_limit_elapsed)
         # Bug fix (2026-08-25): bounded retry cap, same shape as
         # CONTEXT_LENGTH_EXCEEDED's same_step_shrinks cap above. Without
         # this, a chain step with no reroute headroom anywhere ahead of
@@ -2142,6 +2162,26 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                 f"retries with no reroute headroom available "
                 f"(last error: {exc.__class__.__name__}: {exc})"
             ) from exc
+        # Bug fix (2026-08-25, CI hang part 2): second, independent
+        # ceiling -- checked BEFORE this step's next sleep -- on total
+        # wall-clock time already spent sleeping on this step, so a step
+        # that hasn't hit _MAX_RATE_LIMIT_RETRIES yet still can't oversleep
+        # its wait budget (see _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS' own
+        # comment for why: 5 retries * a 20s cap each is up to 100s, long
+        # enough to blow through external harness timeouts with zero
+        # diagnostic info instead of this clean, immediate RuntimeError).
+        if same_step_rate_limit_elapsed >= _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:
+            print(f"  [{agent_name}] {label} still rate-limited "
+                  f"({exc.__class__.__name__}) after "
+                  f"{same_step_rate_limit_elapsed:.1f}s spent waiting "
+                  f"(budget {_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s), and "
+                  f"nothing else in the chain has headroom -- giving up on "
+                  f"this call instead of continuing to wait.")
+            raise RuntimeError(
+                f"{label} exceeded the {_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:.0f}s "
+                f"rate-limit wait budget with no reroute headroom available "
+                f"(last error: {exc.__class__.__name__}: {exc})"
+            ) from exc
         same_step_rate_limit_waits += 1
         # 3e: no headroom anywhere in the remaining chain -- this is the
         # one RATE_LIMIT_WINDOW case that DOES cool this key down, using
@@ -2155,7 +2195,9 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
               f"(attempt {same_step_rate_limit_waits}/{_MAX_RATE_LIMIT_RETRIES})...")
         _record_ledger_event(session_id, "wait")
         time.sleep(_wait_seconds)
-        return "retry-in-place", user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits
+        same_step_rate_limit_elapsed += _wait_seconds
+        return ("retry-in-place", user_content, accumulated_text, same_step_shrinks,
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
     if _bucket == ErrorBucket.MALFORMED_REQUEST:
         # Our own payload is wrong. Never retry unchanged -- retrying
         # (same step, next step, or after a wait) would just fail
@@ -2165,7 +2207,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
               f"malformed ({exc.__class__.__name__}) -- this is a bug "
               f"in the request itself, not a transient failure. "
               f"Not retrying; raising.")
-        return "raise", user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits
+        return ("raise", user_content, accumulated_text, same_step_shrinks,
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
     if _bucket == ErrorBucket.PERMANENT_AUTH:
         # Bad/revoked key -- no amount of retrying helps. 3e: this is now
         # the ONLY place in this branch that calls _set_cooldown() -- it
@@ -2180,7 +2223,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"auth error ({exc.__class__.__name__}) -- pulling it "
                   f"from rotation for this chain and falling back to "
                   f"next in chain...")
-        return "next-step", user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits
+        return ("next-step", user_content, accumulated_text, same_step_shrinks,
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
     # ErrorBucket.TRANSIENT_NETWORK -- timeout/5xx/connection reset. 3e:
     # no longer cooled down here -- a single network blip doesn't mean
     # this account/key is bad, so standard backoff is just "move to the
@@ -2189,7 +2233,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
     if not is_last:
         print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}, "
               f"TRANSIENT_NETWORK), falling back to next in chain...")
-    return "next-step", user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits
+    return ("next-step", user_content, accumulated_text, same_step_shrinks,
+            same_step_rate_limit_waits, same_step_rate_limit_elapsed)
 
 
 def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model: str, key,
@@ -2250,6 +2295,7 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
     last_exc = None
     same_step_shrinks = 0  # Fix D2: scoped to retries-in-place on THIS step only
     same_step_rate_limit_waits = 0  # Bug fix (2026-08-25): same scoping, for RATE_LIMIT_WINDOW
+    same_step_rate_limit_elapsed = 0.0  # Bug fix (2026-08-25 part 2): total sleep time, same scoping
     while True:  # Fix D2: retry loop scoped to THIS step only
         prompt_for_step = (
             _continuation_prompt(user_content, accumulated_text)
@@ -2302,12 +2348,14 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             rate_ledger.release_reservation(_reservation_id)
             last_exc = exc
             _record_ledger_event(session_id, "provider_failure")
-            _action, user_content, accumulated_text, same_step_shrinks, same_step_rate_limit_waits = \
+            (_action, user_content, accumulated_text, same_step_shrinks,
+             same_step_rate_limit_waits, same_step_rate_limit_elapsed) = \
                 _handle_transient_error(
                     exc, provider, key, model, chain, index, is_last, label,
                     agent_name, system_prompt, prompt_for_step, user_content,
                     accumulated_text, same_step_shrinks, session_id=session_id,
-                    same_step_rate_limit_waits=same_step_rate_limit_waits)
+                    same_step_rate_limit_waits=same_step_rate_limit_waits,
+                    same_step_rate_limit_elapsed=same_step_rate_limit_elapsed)
             if _action == "raise":
                 raise
             if _action == "retry-in-place":
