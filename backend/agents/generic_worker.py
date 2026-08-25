@@ -54,7 +54,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.handoff_packager import PLAN_HANDOFF_PACKAGE_KEY
 from eo import conversation_memory  # NEW — Part 23
 from eo.quota_sentinel import get_quota_snapshot
-from eo.registry import AGENT_CAPABILITIES, get_role_prompt
+# AGENT_CAPABILITIES/get_role_prompt deliberately NOT imported here at the
+# top of the file -- see the matching import at the BOTTOM of this file
+# for why. (eo.quota_sentinel above is fine at the top: its own
+# generic_worker-reaching name, PROVIDER_DEFAULT_MODEL, is resolved via a
+# deferred import inside _model_for(), not eagerly at eo.quota_sentinel's
+# own top level, so it doesn't need anything from this module to already
+# exist yet.)
 from eo.skill_library import (  # Part 6 §E2, task 14
     ensure_skill_for_task,
     get_relevant_skill,
@@ -678,3 +684,23 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
         # code_writers.py etc. keep reading real input, unmodified.
         bus_write(LEGACY_BUS_KEY_MAP[role], body)
     return {"role": role, "text": body, "next_destination": next_destination}
+
+
+# Deliberately imported here, at the bottom of the file, not at the top:
+# eo.registry.py's own bottom-of-file import block (`from agents import
+# (..., generic_worker, ...)`) runs BEFORE this module has finished
+# executing whenever *this* module -- not eo.registry -- is the first one
+# actually imported in the process (confirmed via api/providers/
+# role_provider.py's `from agents.generic_worker import run as
+# generic_worker_run`, one real entry point). At that point eo.registry
+# builds its REGISTRY dict, which references `generic_worker.run` --
+# if the top-level `from eo.registry import AGENT_CAPABILITIES,
+# get_role_prompt` line ran up here instead, Python would still be
+# sitting on THIS line when eo.registry reaches that reference, and
+# `generic_worker.run` (defined only below) wouldn't exist yet:
+# AttributeError: partially initialized module 'agents.generic_worker'
+# has no attribute 'run'. Placing the import down here, after run() and
+# every other name this module defines, guarantees eo.registry always
+# sees a fully-formed module by the time it needs one, regardless of
+# which of the two modules a given process happens to import first.
+from eo.registry import AGENT_CAPABILITIES, get_role_prompt  # noqa: E402

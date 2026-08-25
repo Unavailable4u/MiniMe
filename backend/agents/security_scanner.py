@@ -29,7 +29,8 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.static_scan import run_static_scan
 from eo.quota_sentinel import get_quota_snapshot
-from eo.registry import AGENT_CAPABILITIES
+# AGENT_CAPABILITIES deliberately NOT imported here at the top of the
+# file -- see the matching import at the BOTTOM of this file for why.
 from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
@@ -292,6 +293,21 @@ def run(session_id: str = None, path: str = None, expanded: bool = False,
     write(KEYS["security_scan_results"], results)
     return results
 
+
+# Deliberately imported here, at the bottom of the file, not at the top:
+# eo.registry.py's own bottom-of-file import block registers this module
+# in REGISTRY via `security_scanner.run`, which requires run() to already
+# be defined. If this module is the first one actually imported in a
+# given process -- rather than eo.registry -- a top-level import here
+# would mean Python is still sitting on this line when eo.registry
+# reaches that reference, and run wouldn't exist yet: AttributeError:
+# partially initialized module 'agents.security_scanner' has no
+# attribute 'run'. Placing the import down here, after every name this
+# module defines, guarantees eo.registry always sees a fully-formed
+# module, regardless of which of the two a given process happens to
+# import first. Same reasoning as the matching bottom-of-file import in
+# agents/generic_worker.py.
+from eo.registry import AGENT_CAPABILITIES  # noqa: E402
 
 if __name__ == "__main__":
     print(json.dumps(run(), indent=2))
