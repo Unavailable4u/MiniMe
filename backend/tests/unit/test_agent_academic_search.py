@@ -371,7 +371,7 @@ class TestRunSourceFanout:
 
     def test_sources_param_narrows_which_functions_are_called(self, fake_bus, fake_graph, monkeypatch):
         called = []
-        fixed = {name: (lambda n: (lambda q, l: called.append(n) or []))(name)
+        fixed = {name: (lambda n: (lambda q, _limit: called.append(n) or []))(name)
                  for name in academic_search.SOURCE_FNS}
         monkeypatch.setattr(academic_search, "SOURCE_FNS", fixed)
         academic_search.run(task_text="topic", sources=["arxiv"])

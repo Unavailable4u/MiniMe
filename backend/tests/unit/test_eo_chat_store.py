@@ -573,7 +573,7 @@ def test_get_linked_context_text_formats_user_and_assistant_lines_and_truncates(
 
     assert '[Shared memory from chat "Linked Chat"]' in text
     assert "- user: hello" in text
-    assistant_line = next(l for l in text.split("\n") if l.startswith("- assistant"))
+    assistant_line = next(line for line in text.split("\n") if line.startswith("- assistant"))
     content = assistant_line[len("- assistant: "):]
     assert content == "y" * 400 + "..."  # truncated to char_limit, "..." appended
 

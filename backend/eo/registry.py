@@ -1862,7 +1862,7 @@ def resolve_role(role_name: str) -> str:
 # agents.* modules' own `from eo.registry import ...` would fail with
 # ImportError. Placing it here, after every symbol agents/*.py needs is
 # already defined, breaks that cycle without restructuring either side.
-from agents import (
+from agents import (  # noqa: E402
     academic_search,  # Part 3 §3.3 — was missing from this block, see fix note
     architecture_diagrammer,
     citation_graph_builder,  # Part 3
