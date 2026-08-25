@@ -442,3 +442,27 @@ MATERIAL_PROPERTIES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Patch G.1 (Phase G, Mech View standalone implementation guide): the
+# single global build-plate size every future Phase G module reads from --
+# Patch G.2's own eo/mech_dfm.py check_bed_fit() (which final housing/
+# baseplate dimensions get compared against) and Patch G.3's own auto-split
+# logic (which decides whether a split is even needed). Same "config here,
+# logic in the module/patch that consumes it" split Patch 1.1/2.1/5.1/D.1/
+# E.1's own tables above already establish for ENCLOSURE_SPEC/
+# SUPPORT_CATEGORIES/CUTOUT_TABLE/ACCESS_GEOMETRY/MATERIAL_PROPERTIES
+# respectively -- deliberately zero fit-checking logic in this constant
+# itself.
+#
+# A typical consumer FDM printer's own usable bed area (e.g. a Bambu Lab
+# A1/P1S- or Prusa MK4-class 220x220mm bed, 250mm of vertical Z clearance)
+# -- literal Patch G.1 wording ("a typical consumer-printer default").
+# Deliberately NOT per-project configurable, per this guide's own stated
+# preference for simplicity here ("not per-project configurable, per this
+# guide's stated preference for simplicity here") -- a real project
+# targeting a genuinely different printer is a future config surface, not
+# something this phase's own bed-fit check needs to solve on its first
+# pass.
+PRINT_BED_MM = {"x": 220, "y": 220, "z": 250}
+
+

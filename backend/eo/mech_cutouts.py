@@ -52,6 +52,7 @@ from eo.mech_material import resolve_material
 from eo.mech_sections import subsections_for_section
 from eo.mech_subsections import members_for_subsection
 from eo.mech_swept_volume import is_exclusion
+from eo.mech_thermal import lookup_thermal
 
 # Patch E.3 (Phase E, "Material awareness"): which BOM part_id prefix
 # identifies the shared structural part whose wall this module's own
@@ -607,6 +608,93 @@ def generate_port_cutout(
 
 
 # ---------------------------------------------------------------------------
+# Patch F.3 (Phase F, Mech View standalone implementation guide) --
+# automatic vent cutout for `thermal_class == "hot"` parts, INDEPENDENT of
+# CUTOUT_TABLE's own keyword-matched descriptors above -- Part 1's own gap
+# #4 ("nothing generates automatic ventilation"). A part like a linear
+# voltage regulator or a stepper driver IC is curated "hot" in eo/
+# mech_thermal.py's own THERMAL_TABLE (Patch F.1) but matches no
+# CUTOUT_TABLE keyword at all today (it isn't a display/buzzer/mic/button/
+# led/port), so apply_cutout_generation() below silently produced zero
+# cutouts for it before this patch -- literal Patch F.3 wording: "producing
+# a vent cutout even for a part category that wouldn't otherwise get one."
+#
+# Deliberately its own `cutout_type` ("thermal_vent", not "vent") even
+# though the underlying shape is identical (circular, fixed hole size/
+# count/mesh-clearance) to a CUTOUT_TABLE "vent" descriptor (buzzer/mic) --
+# a thermal vent's job (bulk airflow for a heat-dissipating part) is a
+# different sizing problem from a buzzer/mic's small acoustic port (bigger
+# holes, more of them, no dust mesh -- screening a thermal vent would
+# defeat its own purpose), so it gets its own literal sizing here rather
+# than reusing "buzzer"/"mic"'s own CUTOUT_TABLE numbers. Kept local to
+# this module (not added to eo/enclosure_spec.py's own CUTOUT_TABLE)
+# because it is never reached via _match_cutout_descriptor()'s own
+# keyword scan -- apply_cutout_generation() below calls
+# generate_thermal_vent_cutout() directly, off `lookup_thermal()`, never
+# off a CUTOUT_TABLE match.
+_THERMAL_VENT_DESCRIPTOR = {
+    "cutout_type": "thermal_vent",
+    "shape": "circular",
+    "hole_diameter_mm": 3.0,
+    "hole_count": 6,
+    "mesh_clearance_mm": 0.0,
+}
+
+
+def generate_thermal_vent_cutout(
+    part: dict, face: str, housing_inner: dict = None, material: str = DEFAULT_MATERIAL
+) -> dict:
+    """Patch F.3's own generator -- a fixed-size circular vent cutout for
+    `part`, opened through `face`, driven by `_THERMAL_VENT_DESCRIPTOR`
+    above rather than a CUTOUT_TABLE keyword match. Unlike generate_cutout()
+    above, this never calls `_match_cutout_descriptor()` and never raises
+    on a part that matches no CUTOUT_TABLE keyword -- that's the entire
+    point of this being a SEPARATE, independent code path: a caller
+    (apply_cutout_generation() below) reaches this off `lookup_thermal(part)
+    == "hot"` alone, regardless of what (if anything) `part`'s own
+    generic_name matches in CUTOUT_TABLE.
+
+    `housing_inner` (optional, default `None`): same Patch 5.5
+    wall-thickness-check attachment generate_cutout()/generate_port_cutout()
+    already provide -- when supplied, the returned dict additionally
+    carries a `"wall_thickness_check"` key, never raised as an exception.
+
+    `material` (Patch E.4, optional, default `DEFAULT_MATERIAL`): forwarded
+    into check_min_wall_thickness() exactly like generate_cutout()/
+    generate_port_cutout() already do, so a thermal vent's own wall-
+    thickness floor is read from the same housing material as every other
+    cutout on this part rather than silently defaulting.
+
+    Returned dict shape mirrors generate_cutout()'s own circular-shape
+    output: `{"part_id", "face", "cutout_type": "thermal_vent",
+    "shape": "circular", "keyword": "thermal_hot", "diameter_mm",
+    "hole_count", "mesh_clearance_mm"}` -- "keyword" is the fixed literal
+    "thermal_hot" (not a CUTOUT_TABLE key, since none was matched) so a
+    downstream manufacturability/report pass can still trace this cutout
+    back to why it exists, same "keyword" traceability purpose
+    generate_cutout()'s own docstring already documents for its own
+    CUTOUT_TABLE-derived keyword.
+    """
+    result = {
+        "part_id": _part_id(part),
+        "face": face,
+        "cutout_type": _THERMAL_VENT_DESCRIPTOR["cutout_type"],
+        "shape": _THERMAL_VENT_DESCRIPTOR["shape"],
+        "keyword": "thermal_hot",
+        "diameter_mm": _THERMAL_VENT_DESCRIPTOR["hole_diameter_mm"],
+        "hole_count": _THERMAL_VENT_DESCRIPTOR["hole_count"],
+        "mesh_clearance_mm": _THERMAL_VENT_DESCRIPTOR["mesh_clearance_mm"],
+    }
+
+    if housing_inner is not None:
+        result["wall_thickness_check"] = check_min_wall_thickness(
+            part, face, result, housing_inner, material=material
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Patch 5.6 -- pipeline-integration half of Phase 5.
 # ---------------------------------------------------------------------------
 #
@@ -738,6 +826,27 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
     own "reject/flag... rather than silently emitting bad geometry"
     posture.
 
+    Patch F.3 (Mech View standalone implementation guide, Phase F):
+    for EVERY cutout-eligible member (independent of, and in addition
+    to, any CUTOUT_TABLE keyword match above), also checks
+    `eo/mech_thermal.py`'s own `lookup_thermal(member["generic_name"])`
+    -- a member curated `"hot"` there gets its own extra
+    `generate_thermal_vent_cutout()` cutout appended, even when it
+    matched no CUTOUT_TABLE keyword at all (or already got a different
+    cutout from one). This is why a single member can now contribute
+    up to TWO entries to the returned list, not just zero-or-one.
+    Gated on the same `CUTOUT_ELIGIBLE_CATEGORIES` pre-filter
+    `_match_cutout_descriptor()` itself already applies, so a
+    3D_PRINT/MISC structural part is never thermal-vented regardless
+    of its own `generic_name`. Deliberately calls ONLY
+    `lookup_thermal()` (Patch F.1's free, deterministic table lookup),
+    NEVER `estimate_thermal_and_vibration()` (Patch F.2's LLM
+    fallback) -- same "keep the pure geometry function pure, wire an
+    actual LLM call in as a later, separately-reviewable decision"
+    posture eo/mech_balance.py's own `compute_cog()`/
+    `compute_support_polygon()` already document for themselves toward
+    eo/mech_mass.py's own `estimate_mass()`.
+
     Stashes the resulting list on the new `mech["cutouts"]` key (mirrors
     `mech["supports"]`'s own flat-list-of-primitives shape from Patch
     2.4, just one list instead of a `{"standoffs","bosses"}` split,
@@ -816,18 +925,28 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
         if is_exclusion(member):
             continue
         match = _match_cutout_descriptor(member)
-        if match is None:
-            continue
-        _keyword, descriptor = match
+        if match is not None:
+            _keyword, descriptor = match
+            face = nearest_exterior_face(member, housing_inner)
+            if descriptor["cutout_type"] == "port":
+                cutout = generate_port_cutout(member, face, housing_inner=housing_inner, material=material)
+            else:
+                cutout = generate_cutout(
+                    member, face, descriptor["cutout_type"], housing_inner=housing_inner, material=material
+                )
+            cutouts.append(cutout)
 
-        face = nearest_exterior_face(member, housing_inner)
-        if descriptor["cutout_type"] == "port":
-            cutout = generate_port_cutout(member, face, housing_inner=housing_inner, material=material)
-        else:
-            cutout = generate_cutout(
-                member, face, descriptor["cutout_type"], housing_inner=housing_inner, material=material
-            )
-        cutouts.append(cutout)
+        # Patch F.3: independent of the CUTOUT_TABLE match above -- a
+        # member never eligible for the category pre-filter is never
+        # thermal-vented either (same pre-filter _match_cutout_descriptor()
+        # itself already applies), everything else is checked regardless
+        # of whether it also matched (or missed) a CUTOUT_TABLE keyword.
+        if member.get("category") in CUTOUT_ELIGIBLE_CATEGORIES:
+            if lookup_thermal(member.get("generic_name")) == "hot":
+                face = nearest_exterior_face(member, housing_inner)
+                cutouts.append(
+                    generate_thermal_vent_cutout(member, face, housing_inner=housing_inner, material=material)
+                )
 
     mech["cutouts"] = cutouts
     return cutouts
