@@ -148,6 +148,21 @@ class _FakeResponse:
         self.choices = [_FakeChoice(content)]
 
 
+class _FakeRawResponse:
+    """Stand-in for the SDKs' with_raw_response wrapper: llm_client.py's
+    _call_step() goes through .with_raw_response.create(...).parse()
+    instead of .create(...) directly so it can also read response
+    headers (see _call_step()'s own docstring) -- this exposes both a
+    `.headers` mapping and a `.parse()` returning the already-built
+    _FakeResponse, same shape the real groq/openai SDKs use."""
+    def __init__(self, parsed, headers=None):
+        self._parsed = parsed
+        self.headers = headers or {}
+
+    def parse(self):
+        return self._parsed
+
+
 def _make_fake_rate_limit_error():
     """Builds a real, correctly-constructed groq.RateLimitError — the SDK's
     __init__ dereferences response.request, so a bare `response=None`
@@ -168,6 +183,11 @@ class _FakeFailingClient:
             def create(**kwargs):
                 raise _make_fake_rate_limit_error()
 
+            class with_raw_response:
+                @staticmethod
+                def create(**kwargs):
+                    raise _make_fake_rate_limit_error()
+
 
 class _FakeWorkingClient:
     """Simulates the fallback provider succeeding with a valid classification."""
@@ -182,6 +202,11 @@ class _FakeWorkingClient:
             @staticmethod
             def create(**kwargs):
                 return _FakeResponse(_FakeWorkingClient.GOOD_JSON)
+
+            class with_raw_response:
+                @staticmethod
+                def create(**kwargs):
+                    return _FakeRawResponse(_FakeResponse(_FakeWorkingClient.GOOD_JSON))
 
 
 def test_fallback_chain_engages_when_both_groq_accounts_fail(monkeypatch):

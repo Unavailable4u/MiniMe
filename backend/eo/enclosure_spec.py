@@ -265,6 +265,95 @@ CUTOUT_TABLE = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Patch D.1 (Phase D, "Access mechanisms"): the access-type enum + per-type
+# geometry constants every Phase D generator (eo/mech_access.py's
+# generate_hinge()/generate_snap_latch()/generate_slide(), Patch D.2/D.3/D.4)
+# reads its sizing numbers from -- same "config here, logic in the module
+# that consumes it" split Patch 1.1/2.1/5.1 above already established for
+# ENCLOSURE_SPEC/SUPPORT_CATEGORIES/CUTOUT_TABLE respectively.
+#
+# Per this guide's own stated assumption (access mechanisms are scoped
+# PER-SECTION, not device-wide -- see the implementation guide's "Assumptions"
+# section): a single device can mix a "fastened" main body with one
+# "hinged"/"snap_latch"/"slide" sub-region (e.g. a slide-out battery hatch on
+# an otherwise screwed-shut housing). "fastened" is, and remains, the default
+# for any section that doesn't explicitly declare otherwise -- today's only
+# behavior is completely unchanged unless a section opts into one of the
+# other three.
+ACCESS_TYPES = {"fastened", "hinged", "snap_latch", "slide"}
+DEFAULT_ACCESS_TYPE = "fastened"
+
+# Per-type geometry, one sub-dict per non-default ACCESS_TYPES member --
+# "fastened" has no entry here because it's a no-op relative to today's
+# existing screw-boss/standoff geometry (eo/mech_supports.py, Phase 2),
+# not a new primitive this phase generates.
+ACCESS_GEOMETRY = {
+    # Knuckle/pin pair (Patch D.2's generate_hinge()). Alternating knuckles
+    # on the housing/lid halves of the section boundary, joined by one
+    # continuous pin -- the standard FDM-printable "print-in-place-clearance"
+    # hinge, not a living hinge (this codebase's rigid pla_rigid default
+    # material, Phase E, can't flex enough for a living hinge to survive
+    # repeated cycles).
+    "hinged": {
+        # Outer diameter of each knuckle barrel. Sized well above
+        # min_feature_mm so the knuckle wall around the pin bore stays
+        # printable at typical FDM layer widths.
+        "knuckle_dia_mm": 6.0,
+        # Axial length of each individual knuckle segment.
+        "knuckle_length_mm": 8.0,
+        # Number of knuckle segments across the hinge span -- odd count so
+        # the two halves alternate evenly (housing gets the two outer
+        # knuckles, lid gets the middle one, or vice versa).
+        "knuckle_count": 3,
+        # Pin diameter -- sized to leave real wall material inside the
+        # knuckle bore (knuckle_dia_mm minus 2x this, minus min_feature_mm
+        # of margin, still clears min_feature_mm on each side).
+        "pin_dia_mm": 2.5,
+        # Radial clearance between the pin and its bore so the assembled
+        # hinge actually rotates instead of binding as a single fused part.
+        "pin_clearance_mm": 0.3,
+    },
+
+    # Cantilever hook + catch pair (Patch D.3's generate_snap_latch()).
+    "snap_latch": {
+        # Free length of the cantilever beam, base to hook tip.
+        "cantilever_length_mm": 12.0,
+        # Beam width (in-plane, perpendicular to the flex direction).
+        "cantilever_width_mm": 4.0,
+        # Beam thickness (the flexing dimension) -- thin enough to deflect
+        # by hand on FDM-printed pla_rigid, thick enough not to snap on
+        # the first cycle; same "printable and durable" balance
+        # wall_thickness_mm strikes for the shell itself.
+        "cantilever_thickness_mm": 1.5,
+        # How far the hook overhangs past the catch's retaining edge --
+        # the engagement depth that actually holds the latch closed.
+        "catch_depth_mm": 1.2,
+        # Lead-in overhang on the catch's engagement face, so the hook can
+        # cam over it on insertion without needing to be pried open first.
+        "catch_overhang_mm": 0.8,
+    },
+
+    # Channel + stop pair (Patch D.4's generate_slide()) -- e.g. a
+    # slide-out battery hatch running in a printed rail.
+    "slide": {
+        # Radial clearance between the sliding part and its channel walls
+        # -- same dimensional-tolerance-stack-up role clearance_mm plays
+        # for a static part against the housing wall above, but slide
+        # fit needs it to move smoothly, not once, so it's tracked as its
+        # own number rather than reusing clearance_mm's static-fit value.
+        "channel_clearance_mm": 0.4,
+        # How deep the channel is cut into the housing wall.
+        "channel_depth_mm": 2.5,
+        # Length of the end-stop that keeps the slide from over-traveling
+        # and coming free of its channel.
+        "stop_length_mm": 3.0,
+        # How far the stop projects into the channel -- must stay below
+        # channel_depth_mm or it blocks the slide from ever seating.
+        "stop_height_mm": 1.5,
+    },
+}
+
 # Coarse pre-filter: only these five categories are ever wired/mounted
 # electrical parts in the first place (3D_PRINT/MISC -- housing, lid,
 # mounts, fasteners -- are purely mechanical and never a cutout
@@ -281,4 +370,75 @@ CUTOUT_TABLE = {
 # part's generic_name -- a 3D_PRINT/MISC part is never cutout-eligible
 # regardless of what its generic_name happens to contain.
 CUTOUT_ELIGIBLE_CATEGORIES = {"mcu", "sensor", "actuator", "power", "module"}
+
+# ---------------------------------------------------------------------------
+# Patch E.1 (Phase E, "Material awareness"): the material-property override
+# table every later Phase E module reads from -- Patch E.2's own
+# eo/mech_material.py resolve_material() (which part/archetype combination
+# resolves to which material name), and Patch E.3's targeted edits to eo/
+# mech_enclosure.py / eo/mech_cutouts.py (which ENCLOSURE_SPEC-shaped values
+# a resolved material actually overrides). Same "config here, logic in the
+# module/patch that consumes it" split Patch 1.1/2.1/5.1/D.1 above already
+# established for ENCLOSURE_SPEC/SUPPORT_CATEGORIES/CUTOUT_TABLE/
+# ACCESS_GEOMETRY respectively -- deliberately zero resolution logic in this
+# table itself, same "pure data, matching/resolving logic lives in the patch
+# that consumes it" posture Patch 5.1's own CUTOUT_TABLE docstring already
+# spells out for itself.
+#
+# "pla_rigid" is, and remains, this codebase's implicit material today --
+# every structural part up to this phase has been treated as one rigid,
+# generic 3D-printable plastic (Part 1, item 6's own "not modeled yet" gap
+# this phase closes), sized off ENCLOSURE_SPEC's own wall_thickness_mm/
+# min_feature_mm directly. Rather than re-declaring those same two numbers
+# a second time under a "pla_rigid" key (which would create exactly the
+# "numbers drift out of sync between modules" failure mode ENCLOSURE_SPEC's
+# own module docstring says this whole file exists to prevent), pla_rigid's
+# own entry below is an EMPTY override dict: Patch E.3's material-aware
+# lookup falls through to ENCLOSURE_SPEC's own baseline value for any key a
+# material doesn't explicitly override, so pla_rigid parts stay numerically
+# identical to today's un-overridden ENCLOSURE_SPEC reads, by construction,
+# not by two tables happening to agree.
+DEFAULT_MATERIAL = "pla_rigid"
+
+# Flex behavior is a material property this phase newly introduces --
+# ENCLOSURE_SPEC has no corresponding baseline key of its own for it to
+# "fall through" to the way wall_thickness_mm/min_feature_mm can, so it
+# gets its own explicit default here instead, read by any material entry
+# (like pla_rigid's empty dict below) that doesn't override it.
+DEFAULT_FLEX_BEHAVIOR = "rigid"
+
+# Keyed on material name. Each value is a PARTIAL override dict -- only the
+# ENCLOSURE_SPEC keys (plus the new "flex_behavior" key, which has no
+# ENCLOSURE_SPEC counterpart) a given material actually changes, per this
+# patch's own "overriding relevant ENCLOSURE_SPEC values (min wall
+# thickness, flex behavior) per material" wording -- not a full restated
+# copy of every ENCLOSURE_SPEC key for every material.
+MATERIAL_PROPERTIES = {
+    # The rigid FDM default every other phase already assumes (see this
+    # table's own docstring above) -- no overrides.
+    "pla_rigid": {},
+
+    # Strap/band material (Patch E.2 resolves this specifically for
+    # wearable strap-category parts -- see that patch's own docstring).
+    # Genuinely different print/behavior profile from pla_rigid, not a
+    # thinner version of the same rigid part:
+    "tpu_flexible": {
+        # A flexible strap needs to actually bend repeatedly in normal
+        # use, which a wall sized for pla_rigid's own rigid-shell
+        # thickness (2.0mm, ENCLOSURE_SPEC["wall_thickness_mm"]) would
+        # resist rather than flex -- thinned down to a cross-section that
+        # bends comfortably by hand while still printing as one solid
+        # wall (not so thin it falls below FDM's own reliable minimum
+        # extrusion width for a flexible filament).
+        "wall_thickness_mm": 1.2,
+        # min_feature_mm is unchanged from ENCLOSURE_SPEC's own rigid-
+        # material floor (1.2mm) -- that number is a print-process
+        # limit (nozzle/under-extrusion), not a material-stiffness one,
+        # so TPU doesn't get its own separate value here; only keys this
+        # material genuinely changes appear in its override dict, per
+        # this table's own "partial override" convention above.
+        "flex_behavior": "flexible",
+    },
+}
+
 

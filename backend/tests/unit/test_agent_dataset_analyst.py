@@ -54,7 +54,7 @@ def fake_run_one_module(monkeypatch):
 @pytest.fixture
 def fake_dynamic_chain(monkeypatch):
     fake = type("M", (), {"build_fallback_chain": staticmethod(lambda role: [])})()
-    sys.modules["eo.dynamic_chain"] = fake
+    monkeypatch.setitem(sys.modules, "eo.dynamic_chain", fake)
     return fake
 
 
@@ -247,7 +247,7 @@ class TestRunSuccessPath:
     ):
         custom_chain = [{"provider": "groq", "model": "custom-model", "key_env": "K"}]
         fake_mod = type("M", (), {"build_fallback_chain": staticmethod(lambda role: custom_chain)})()
-        sys.modules["eo.dynamic_chain"] = fake_mod
+        monkeypatch.setitem(sys.modules, "eo.dynamic_chain", fake_mod)
         path = _write_dataset(tmp_path)
         mock_llm.set_response("print('x')")
 

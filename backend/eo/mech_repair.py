@@ -871,6 +871,266 @@ def run_level_3_4_repair(spec: dict, parts: list, session_id: str = None, path: 
     return result
 
 
+# ---------------------------------------------------------------------------
+# Patch C.5 (Phase C, Mech View standalone implementation guide) --
+# repair suggestion on a Patch C.4 balance-check failure.
+#
+# eo/mech_validator.py's check_balance() (C.4) is a PURE scan over
+# eo/mech_balance.py's compute_cog()/compute_support_polygon() (C.3) --
+# it never sits inside the Level 0->1..3->4 generate->validate->repair
+# tree the rest of this module drives (it's not one of validate_layout()'s
+# LEVEL_* paths, and run_repair_loop() above has no node/level vocabulary
+# that maps onto "the whole device's CoG is off"). So this patch does NOT
+# call run_repair_loop() -- there is no `regenerate_node_fn`-per-node shape
+# to give it, and no `validate_layout()` call for it to drive. What it DOES
+# reuse from this module's own established posture (per Patch C.5's own
+# wording, "following the repair-until-cap posture (one retry, not an
+# unbounded loop) already used elsewhere in mech_repair.py" -- see this
+# module's own top docstring's "Retry cap... after the cap, it ships with
+# the violation flagged in the UI rather than blocking" line): exactly ONE
+# corrective attempt, then flag-don't-loop if that attempt didn't fix it.
+#
+# The fix itself -- "suggest repositioning the heaviest contributing part
+# (typically the battery) toward the polygon's centroid" (literal C.5
+# wording) -- is a deterministic rigid nudge, same "translate, never
+# resize, never re-propose from an LLM" posture _clamp_section_into_container()
+# above already holds for Level 3->4's own repair.
+# ---------------------------------------------------------------------------
+
+def _joined_balance_members(mech: dict, parts: list) -> list:
+    """Every placed member across every section, each paired with its
+    own looked-up mass -- the same two-hop section->subsection->member
+    join eo/mech_balance.py's own `_joined_mass_members()` already
+    performs for compute_cog()/compute_support_polygon(), kept as a
+    SEPARATE local copy here rather than importing that module's own
+    (underscore-prefixed, module-private) helper -- same "each module
+    owns its own join" precedent that module's own top docstring
+    already states for itself relative to eo/mech_supports.py,
+    eo/mech_cutouts.py, and eo/mech_swept_volume.py.
+
+    Returns a list of `(member_dict, mass_g)` pairs. `member_dict` is
+    the LIVE placement dict from `mech["placements"]` (via
+    eo/mech_subsections.py's `members_for_subsection()`, which resolves
+    by reference, not a copy -- see that function's own docstring) --
+    deliberately NOT shallow-copied the way eo/mech_balance.py's own
+    join is, because this function's one caller (`_heaviest_member()`
+    below) needs to actually mutate the winning member's `x`/`y` in
+    place, the same "member dicts are the real placement dicts" access
+    pattern `_clamp_section_into_container()` above already relies on.
+    `mass_g` is a curated eo/mech_mass.py `lookup_mass()` hit, or
+    eo/mech_balance.py's own `_DEFAULT_UNKNOWN_MASS_G` placeholder on a
+    miss -- same "still contributes SOME mass rather than vanishing"
+    reasoning that module's own `compute_cog()` already applies, so the
+    "heaviest contributor" this function feeds into never silently
+    skips an unlisted part.
+
+    Returns `[]` for a `mech` with no sections yet, never raises.
+    """
+    from eo.mech_balance import _DEFAULT_UNKNOWN_MASS_G
+    from eo.mech_mass import lookup_mass
+    from eo.mech_sections import subsections_for_section
+    from eo.mech_subsections import members_for_subsection
+
+    if not isinstance(mech, dict) or not mech.get("sections"):
+        return []
+
+    parts_by_id = {
+        p.get("id"): p for p in (parts or []) if isinstance(p, dict) and p.get("id")
+    }
+
+    joined = []
+    for section in mech.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for subsection in subsections_for_section(mech, section):
+            for member in members_for_subsection(mech, subsection):
+                if not isinstance(member, dict):
+                    continue
+                part = parts_by_id.get(member.get("part_id"))
+                generic_name = part.get("generic_name") if isinstance(part, dict) else None
+                mass_entry = lookup_mass(generic_name)
+                mass_g = mass_entry["mass_g"] if mass_entry else _DEFAULT_UNKNOWN_MASS_G
+                joined.append((member, mass_g))
+    return joined
+
+
+def _heaviest_member(mech: dict, parts: list):
+    """The single heaviest placed member found by `_joined_balance_members()`
+    above -- literal C.5 wording "the heaviest contributing part
+    (typically the battery)": a curated eo/mech_mass.py MASS_TABLE
+    battery entry (45-60g) dominates every other common part type's
+    own curated mass (see that module's own MASS_TABLE), so this
+    generic "pick the max" rule naturally resolves to the battery on
+    any layout that has one, without this function special-casing
+    `generic_name` at all.
+
+    Returns `(member_dict, mass_g)` for the max-mass entry -- ties
+    (shouldn't come up given real-world mass values, but possible on a
+    synthetic/test layout) resolve to the first-encountered one, the
+    same section->subsection->member iteration order
+    `_joined_balance_members()` above already fixes, a deterministic
+    but otherwise arbitrary tie-break. Returns `(None, 0.0)` if there
+    are no placed members to choose from at all.
+    """
+    joined = _joined_balance_members(mech, parts)
+    if not joined:
+        return None, 0.0
+    return max(joined, key=lambda pair: pair[1])
+
+
+def _polygon_centroid(support_polygon: list) -> dict:
+    """The plain, UNWEIGHTED centroid of `support_polygon`'s own hull
+    points (eo/mech_balance.py's own `compute_support_polygon()`
+    output) -- the reposition TARGET this patch nudges the heaviest
+    part toward. Deliberately not the mass-weighted device CoG
+    (eo/mech_balance.py's own `compute_cog()` -- that's the value
+    that's already off-center, the violation itself, not a target to
+    aim at) and not any single hull vertex -- the polygon's own rough
+    middle is a reasonable "pull the heavy part back toward the
+    device's own footprint" target regardless of the polygon's exact
+    shape.
+
+    Returns `{"x": 0.0, "y": 0.0}` for an empty `support_polygon`,
+    never raises.
+    """
+    if not support_polygon:
+        return {"x": 0.0, "y": 0.0}
+    xs = [float(p.get("x") or 0) for p in support_polygon if isinstance(p, dict)]
+    ys = [float(p.get("y") or 0) for p in support_polygon if isinstance(p, dict)]
+    if not xs:
+        return {"x": 0.0, "y": 0.0}
+    return {"x": round(sum(xs) / len(xs), 3), "y": round(sum(ys) / len(ys), 3)}
+
+
+def _reposition_toward(member: dict, target: dict) -> None:
+    """Mutates `member`'s own `x`/`y` (never `z` -- a balance repair
+    only ever shifts weight in the ground plane, same "translate on
+    exactly the axes the violation is actually about" posture
+    `_clamp_section_into_container()` above already holds for its own
+    x/y/z containment nudge) so its own footprint CENTER -- not its
+    own min-corner -- lands exactly on `target` (`_polygon_centroid()`'s
+    own `{"x", "y"}` output above). Uses `eo.mech_balance`'s own
+    `_footprint_center()` for the "min-corner + half extent" convention
+    every placement in this tree already shares (see that function's
+    own docstring), so this stays in sync with however that convention
+    is defined, rather than re-deriving it here.
+    """
+    from eo.mech_balance import _footprint_center
+
+    center_x, center_y, _center_z = _footprint_center(member)
+    dx = float(target.get("x") or 0) - center_x
+    dy = float(target.get("y") or 0) - center_y
+    member["x"] = float(member.get("x") or 0) + dx
+    member["y"] = float(member.get("y") or 0) + dy
+
+
+def repair_balance(mech: dict, parts: list, session_id: str = None, path: str = None,
+                    domain: str = None) -> dict:
+    """Patch C.5 -- the repair half of Patch C.4's
+    eo/mech_validator.py `check_balance()`. Meant to run synchronously
+    right after that check, on a `mech` whose archetype/mobility_type
+    has already made `check_balance()` a real (non-skipped) check --
+    same "already been through the check once" precondition every
+    other repair entry point in this module already states for itself.
+
+    What this does, in order:
+      1. Calls `check_balance(mech, parts)`. If it's skipped (mobility
+         type not wheeled/legged) or already passing, this function is
+         a no-op -- returns immediately, `attempted=False`, nothing
+         mutated. Matches Patch C.4's own gate exactly; this patch adds
+         no new gating logic of its own.
+      2. On a real violation, finds the single heaviest placed member
+         via `_heaviest_member()` above and nudges its own footprint
+         center to the support polygon's own centroid via
+         `_polygon_centroid()`/`_reposition_toward()` above -- ONE
+         attempt, mutating `mech["placements"]` in place (through the
+         live member reference `_joined_balance_members()` resolves,
+         same live-reference access `_clamp_section_into_container()`
+         above already relies on for its own Level 3->4 nudge). A
+         violation reported as `"insufficient_ground_contact_points"`
+         (no real support base at all -- see `check_balance()`'s own
+         docstring) or a `mech` with no placed members to choose from
+         has nothing a reposition could fix, so this step is skipped
+         and the ORIGINAL violation is flagged immediately,
+         `attempted=False`.
+      3. Re-runs `check_balance(mech, parts)` exactly once more. Per
+         the Master Guide's own retry-cap philosophy this module's top
+         docstring already states ("after the cap, it ships with the
+         violation flagged in the UI rather than blocking") -- literal
+         Patch C.5 wording, "one retry, not an unbounded loop": if the
+         single reposition attempt fixed it, `repaired=True`; if not,
+         the layout is left at its post-attempt position (not rolled
+         back -- same "the attempt already happened, flag what's still
+         wrong" posture `run_repair_loop()`'s own retry-then-flag path
+         above already holds) and the SECOND call's own violations are
+         what gets flagged, since those reflect the actual current
+         (post-attempt) state.
+
+    Returns `{"ok": bool, "skipped": bool, "attempted": bool,
+    "repaired": bool, "violations": [...], "cog": dict or None,
+    "support_polygon": list}` -- same violation/cog/support_polygon
+    shape `check_balance()` itself returns, plus the two fields this
+    patch's own repair posture adds (`attempted`, `repaired`).
+
+    Pure with respect to `parts` (never mutated); mutates `mech` only
+    via the single reposition in step 2, and only when a repair is
+    actually attempted.
+    """
+    agent_name = "mech_repair"
+    emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
+               payload={"label": "Mech Repair — Balance (Phase C)"})
+    started = time.monotonic()
+
+    from eo.mech_validator import check_balance
+
+    result = check_balance(mech, parts)
+    if result.get("skipped") or result.get("ok"):
+        duration_ms = int((time.monotonic() - started) * 1000)
+        summary = "skipped (mobility type not checked)" if result.get("skipped") else "balanced, no repair needed"
+        emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
+                   payload={"summary": summary, "duration_ms": duration_ms})
+        return {
+            "ok": result.get("ok"), "skipped": result.get("skipped"),
+            "attempted": False, "repaired": False,
+            "violations": result.get("violations") or [],
+            "cog": result.get("cog"), "support_polygon": result.get("support_polygon") or [],
+        }
+
+    member, _mass_g = _heaviest_member(mech, parts)
+    support_polygon = result.get("support_polygon") or []
+
+    if member is None or len(support_polygon) < 3:
+        # Nothing a reposition could fix -- no heaviest member to move,
+        # or no real support polygon to aim it at (see this function's
+        # own docstring, step 2). Flag the ORIGINAL violation, unattempted.
+        duration_ms = int((time.monotonic() - started) * 1000)
+        emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
+                   payload={"summary": "unbalanced, no reposition target available",
+                            "duration_ms": duration_ms})
+        return {
+            "ok": False, "skipped": False, "attempted": False, "repaired": False,
+            "violations": result.get("violations") or [],
+            "cog": result.get("cog"), "support_polygon": support_polygon,
+        }
+
+    target = _polygon_centroid(support_polygon)
+    _reposition_toward(member, target)
+
+    retry_result = check_balance(mech, parts)
+    repaired = bool(retry_result.get("ok"))
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    summary = "repaired on first reposition attempt" if repaired else "still unbalanced after one reposition attempt, flagged"
+    emit_event("agent_done", session_id=session_id, agent=agent_name, path=path,
+               payload={"summary": summary, "duration_ms": duration_ms})
+
+    return {
+        "ok": repaired, "skipped": False, "attempted": True, "repaired": repaired,
+        "violations": retry_result.get("violations") or [],
+        "cog": retry_result.get("cog"), "support_polygon": retry_result.get("support_polygon") or [],
+    }
+
+
 if __name__ == "__main__":
     _demo_mech = {
         "placements": [

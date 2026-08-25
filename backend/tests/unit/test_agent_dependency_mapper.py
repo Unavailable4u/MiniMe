@@ -53,7 +53,7 @@ def _fake_emit_event(monkeypatch):
 @pytest.fixture
 def fake_dynamic_chain(monkeypatch):
     fake = type("M", (), {"build_fallback_chain": staticmethod(lambda role: [])})()
-    sys.modules["eo.dynamic_chain"] = fake
+    monkeypatch.setitem(sys.modules, "eo.dynamic_chain", fake)
     return fake
 
 
@@ -170,7 +170,7 @@ class TestChainSelection:
     def test_dynamic_chain_used_when_non_empty(self, fake_bus, mock_llm, monkeypatch):
         custom_chain = [{"provider": "cloudflare", "model": "custom", "account_id_env": "A", "token_env": "T"}]
         fake_mod = type("M", (), {"build_fallback_chain": staticmethod(lambda role: custom_chain)})()
-        sys.modules["eo.dynamic_chain"] = fake_mod
+        monkeypatch.setitem(sys.modules, "eo.dynamic_chain", fake_mod)
         write(KEYS["submitted_code"], SUBMITTED_CODE)
         mock_llm.set_json_response(VALID_MAP)
 
