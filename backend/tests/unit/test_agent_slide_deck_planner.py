@@ -41,6 +41,24 @@ def _fake_generic_worker(text):
     return module.run
 
 
+@pytest.fixture(autouse=True)
+def _clear_fake_generic_worker():
+    """This file substitutes a bare stand-in object for agents.generic_worker
+    in sys.modules and never restored it, which poisons the deferred `from
+    agents.generic_worker import PROVIDER_DEFAULT_MODEL` in
+    eo/quota_sentinel.py for every test that runs afterward in the same
+    session -- same landmine and same fix test_agent_idea_planner.py already
+    applies for eo.dynamic_chain. Restoring (not popping) avoids
+    retriggering the agents.generic_worker <-> eo.registry circular-import
+    cycle patch 0001 broke."""
+    real_module = sys.modules.get("agents.generic_worker")
+    yield
+    if real_module is not None:
+        sys.modules["agents.generic_worker"] = real_module
+    else:
+        sys.modules.pop("agents.generic_worker", None)
+
+
 # ---------------------------------------------------------------------------
 # 1. _context_for(): excerpts vs summary fallback, truncation, empties
 # ---------------------------------------------------------------------------

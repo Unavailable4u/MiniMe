@@ -23,6 +23,8 @@ Two-pass posture (module docstring §8b):
      otherwise only topics whose `covers` intersects scope_node_ids.
 """
 
+import sys
+
 import pytest
 
 from agents import correction_locator
@@ -35,6 +37,24 @@ def _topic(name="Topic A", summary="summary A", content_hint="hint", covers=None
 @pytest.fixture(autouse=True)
 def _fake_ensure_role(monkeypatch):
     monkeypatch.setattr(correction_locator, "_ensure_role_registered", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _clear_fake_generic_worker():
+    """This file substitutes a bare stand-in object for agents.generic_worker
+    in sys.modules (see _install_fake_run_role below) and never restored it,
+    which poisons the deferred `from agents.generic_worker import
+    PROVIDER_DEFAULT_MODEL` in eo/quota_sentinel.py for every test that runs
+    afterward in the same session -- same landmine and same fix
+    test_agent_idea_planner.py already applies for eo.dynamic_chain.
+    Restoring (not popping) avoids retriggering the agents.generic_worker
+    <-> eo.registry circular-import cycle patch 0001 broke."""
+    real_module = sys.modules.get("agents.generic_worker")
+    yield
+    if real_module is not None:
+        sys.modules["agents.generic_worker"] = real_module
+    else:
+        sys.modules.pop("agents.generic_worker", None)
 
 
 def _install_fake_run_role(*responses):
