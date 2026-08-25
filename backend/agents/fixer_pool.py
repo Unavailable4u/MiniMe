@@ -49,7 +49,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.generic_worker import NEXT_TAG_INSTRUCTION, parse_next_tag
+# NEXT_TAG_INSTRUCTION/parse_next_tag deliberately NOT imported at module
+# level here (deferred into _run_one_worker() below instead). eo.registry
+# imports this module (fixer_pool) at load time to register it in
+# REGISTRY, and agents.generic_worker imports eo.registry at ITS OWN top
+# level -- a top-level import here would close the loop:
+#   agents.generic_worker -> eo.registry -> agents.fixer_pool -> agents.generic_worker
+# and fail with "cannot import name 'NEXT_TAG_INSTRUCTION' from partially
+# initialized module" the moment generic_worker is imported first. Every
+# other agents/*.py module that needs a name from generic_worker already
+# defers the import the same way -- see e.g. agents/reviewer.py,
+# agents/mind_mapper.py, agents/source_manager.py.
 from eo.errors import MissingDependencyError  # NEW — bug fix
 from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
@@ -194,6 +204,8 @@ def _run_one_worker(worker_index: int, key_env: str, modules: dict, review_notes
     modules in its bucket (round-robin partition) -- the label lists all
     module names this worker owns, not just one.
     """
+    from agents.generic_worker import NEXT_TAG_INSTRUCTION, parse_next_tag  # deferred -- see top-of-file note
+
     agent_name = f"fixer_{worker_index}"
     if not modules:
         emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,

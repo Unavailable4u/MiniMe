@@ -38,10 +38,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.generic_worker import NEXT_TAG_INSTRUCTION, parse_next_tag
+# NEXT_TAG_INSTRUCTION/parse_next_tag deliberately NOT imported at module
+# level here (deferred into _run_one_worker() below instead). eo.registry
+# imports this module (reviewer) at load time to register it in REGISTRY,
+# and agents.generic_worker imports eo.registry at ITS OWN top level --
+# a top-level import here would close the loop:
+#   agents.generic_worker -> eo.registry -> agents.reviewer -> agents.generic_worker
+# and fail with "cannot import name 'NEXT_TAG_INSTRUCTION' from partially
+# initialized module" the moment generic_worker is imported first. Every
+# other agents/*.py module that needs a name from generic_worker already
+# defers the import the same way -- see e.g. agents/fixer_pool.py,
+# agents/mind_mapper.py, agents/source_manager.py.
 from agents.review_aggregator import aggregate_reviews
 from eo.quota_sentinel import get_quota_snapshot
-from eo.registry import AGENT_CAPABILITIES
+# AGENT_CAPABILITIES deliberately NOT imported here at the top of the
+# file -- see the matching import at the BOTTOM of this file for why.
 from memory.bus import KEYS, read, write
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
@@ -125,6 +136,8 @@ def _run_one_worker(worker_index: int, key_env: str, user_prompt: str,
     potentially different verdicts. That's the reviewer-pool pattern
     (independent opinions -> aggregated), not a bug.
     """
+    from agents.generic_worker import NEXT_TAG_INSTRUCTION, parse_next_tag  # deferred -- see top-of-file note
+
     agent_name = f"reviewer_{worker_index}"
     emit_event("agent_start", session_id=session_id, agent=agent_name, path=path,
                payload={"label": f"Reviewer {worker_index}"})
@@ -255,6 +268,21 @@ def run_reviewer(session_id: str = None, path: str = None, expanded: bool = Fals
     write(KEYS["review_notes"], review_notes)
     return review_notes
 
+
+# Deliberately imported here, at the bottom of the file, not at the top:
+# eo.registry.py's own bottom-of-file import block registers this module
+# in REGISTRY via `reviewer.run_reviewer`, which requires run_reviewer()
+# to already be defined. If this module (agents.reviewer) is the first
+# one actually imported in a given process -- rather than eo.registry --
+# a top-level import here would mean Python is still sitting on this line
+# when eo.registry reaches that reference, and run_reviewer wouldn't
+# exist yet: AttributeError: partially initialized module
+# 'agents.reviewer' has no attribute 'run_reviewer'. Placing the import
+# down here, after every name this module defines, guarantees eo.registry
+# always sees a fully-formed module, regardless of which of the two a
+# given process happens to import first. Same reasoning as the matching
+# bottom-of-file import in agents/generic_worker.py.
+from eo.registry import AGENT_CAPABILITIES  # noqa: E402
 
 if __name__ == "__main__":
     notes = run_reviewer()
