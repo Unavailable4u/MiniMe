@@ -195,7 +195,14 @@ def test_full_mode_archetype_output_identical_to_pre_phase_a_behavior():
         ],
     }
     mech_full_archetype = json.loads(json.dumps(mech_no_archetype))
-    mech_full_archetype["archetype"] = {"enclosure_mode": "full", "mobility_type": "handheld"}
+    # "static" deliberately -- not "handheld"/"wearable": those two now
+    # (Phase H, Patch H.2) intentionally DO diverge full-mode geometry
+    # via their own ERGONOMIC_PRESETS entry, so they're no longer a
+    # valid example of this test's own "recording an archetype alone
+    # doesn't change full-mode geometry" invariant. "static" has no
+    # ERGONOMIC_PRESETS entry, so the invariant this test checks still
+    # holds for it.
+    mech_full_archetype["archetype"] = {"enclosure_mode": "full", "mobility_type": "static"}
 
     housing_no_archetype = me.apply_enclosure_generation(mech_no_archetype, [])
     housing_full_archetype = me.apply_enclosure_generation(mech_full_archetype, [])
@@ -213,4 +220,9 @@ def test_wearable_archetype_end_to_end_from_prd_to_full_mode_gate():
     device_footprint = {"x": 0, "y": 0, "z": 0, "w": 40, "h": 20, "d": 10}
     mech = _mech_with_archetype(archetype, device_footprint, baseplate_id="housing_1")
     housing = me.apply_enclosure_generation(mech, [])
-    assert set(housing.keys()) == {"outer", "inner", "lid"}
+    # Phase H, Patch H.2: a "wearable" archetype now also gets an
+    # "ergonomics" key (strap-mount points + wrist-curvature radius)
+    # alongside the pre-Phase-H {"outer", "inner", "lid"} shape.
+    assert set(housing.keys()) == {"outer", "inner", "lid", "ergonomics"}
+    assert len(housing["ergonomics"]["strap_mount_points"]) == 2
+    assert housing["ergonomics"]["wrist_curvature_radius_mm"] == 32.0

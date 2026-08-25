@@ -64,6 +64,7 @@ footprint and calls this.
 """
 
 from eo.enclosure_spec import DEFAULT_MATERIAL, ENCLOSURE_SPEC, MATERIAL_PROPERTIES
+from eo.mech_ergonomics import ERGONOMIC_PRESETS
 from eo.mech_material import resolve_material
 from eo.mech_sections import subsections_for_section
 from eo.mech_subsections import members_for_subsection
@@ -296,6 +297,121 @@ def _resolve_structural_material(mech: dict, parts: list, archetype: dict, id_pr
     return DEFAULT_MATERIAL
 
 
+# ---------------------------------------------------------------------------
+# Patch H.2: applies Patch H.1's own ERGONOMIC_PRESETS entry (eo/
+# mech_ergonomics.py) for a `full`-mode housing's own mobility_type, on
+# top of the otherwise-unchanged compute_housing_footprint() result --
+# per this patch's own "apply its constraints (minimum dimensions,
+# fillet radius, strap-mount points) on top of the otherwise-unchanged
+# housing derivation logic" wording. Only "handheld"/"wearable" ever
+# have an entry (see ERGONOMIC_PRESETS' own docstring) -- every other
+# mobility_type, and a `mech` with no archetype recorded yet, is a
+# no-op, byte-for-byte unchanged from before this patch.
+# ---------------------------------------------------------------------------
+
+def _apply_ergonomic_preset(result: dict, mobility_type: str) -> None:
+    """Mutates `result` (compute_housing_footprint()'s own
+    `{"outer", "inner", "lid"}` dict) in place to apply the
+    ERGONOMIC_PRESETS entry for `mobility_type`, when one exists,
+    stashing the outcome on a new `result["ergonomics"]` key. A caller
+    should use `result.get("ergonomics")` (`None`/absent both mean "no
+    preset applied here") rather than assuming the key is always
+    present -- see the no-op branch below for why it's deliberately
+    left OFF `result` entirely rather than set to `None`.
+
+    "handheld": grows `outer["w"]`/`outer["d"]` up to the preset's own
+    `min_grip_w_mm`/`min_grip_d_mm` floor -- NEVER shrinks a housing
+    that already meets or exceeds it (a floor, not a fixed size) --
+    expanding symmetrically about each axis's own existing center
+    (same "pad both sides evenly" idiom this module's own `_expand()`
+    already establishes) so the packed device stays centered inside
+    the now-larger shell rather than pinned to one edge of it. `lid`
+    is kept consistent with the grown `outer` (matching `w`/`x`, and
+    `z` re-derived from the grown `outer["z"] + outer["d"]`) -- the
+    same "lid tracks outer" relationship compute_housing_footprint()
+    itself establishes between the two. `inner` (the packed device's
+    own clearance cavity) is deliberately left untouched: growing
+    `outer` only adds extra shell/void material around an already-
+    valid packed device, so `inner` -- already a strict subset of the
+    smaller, pre-growth `outer` -- stays a valid subset of the larger
+    one too, no re-derivation needed. Stashes
+    `{"fillet_radius_mm": ...}` (the preset's own mandatory fillet,
+    unconditional per that key's own docstring in eo/
+    mech_ergonomics.py -- not gated on whether growth actually
+    happened) onto `result["ergonomics"]`.
+
+    "wearable": computes two strap-mount points (`{"x", "y", "z"}`
+    each) at the preset's own `strap_mount_inset_mm` inward from each
+    of `outer`'s own two w-edges, centered on `outer`'s own h-span and
+    sitting on its own top face (`outer["z"] + outer["d"]`, the same
+    face `lid` itself sits on) -- never resizes `outer`/`lid` at all,
+    since a strap's own curvature is a property of the strap PART
+    (Phase E's own `resolve_material()` already resolves a wearable's
+    strap to `"tpu_flexible"`), not the rigid housing shell. Stashes
+    `{"strap_mount_points": [...], "wrist_curvature_radius_mm": ...}`
+    onto `result["ergonomics"]`.
+
+    Any other `mobility_type` (including `None`/missing, "static",
+    "wheeled", "legged", "flying" -- none of which have an
+    ERGONOMIC_PRESETS entry): no-op, `result["ergonomics"]` is
+    stashed `None`, `outer`/`inner`/`lid` are left byte-for-byte
+    unchanged -- same regression-safety posture Patch A.4's own
+    "full mode must not drift" requirement already holds every other
+    phase in this guide to.
+
+    Mutates `result` in place; returns nothing, same "mutate the SAME
+    dict a caller already holds" convention `_apply_dims()` below
+    already follows for a single placement.
+    """
+    preset = ERGONOMIC_PRESETS.get(mobility_type)
+    if preset is None:
+        # No entry for this mobility_type (including missing/"static"/
+        # "wheeled"/"legged"/"flying") -- deliberately does NOT add an
+        # `"ergonomics": None` key here: `result`'s own key shape
+        # ({"outer", "inner", "lid"}) is a contract several existing
+        # callers/tests already fix on (see
+        # test_mech_enclosure.py::test_stashes_full_breakdown_on_housing_not_enclosure),
+        # so a no-op preset leaves `result` truly byte-for-byte
+        # unchanged rather than merely functionally unchanged.
+        return
+
+    outer = result["outer"]
+    lid = result.get("lid")
+
+    if "min_grip_w_mm" in preset or "min_grip_d_mm" in preset:
+        min_w = preset.get("min_grip_w_mm")
+        if min_w is not None and outer["w"] < min_w:
+            grow = min_w - outer["w"]
+            outer["x"] = round(outer["x"] - grow / 2.0, 3)
+            outer["w"] = round(min_w, 3)
+            if isinstance(lid, dict):
+                lid["x"] = outer["x"]
+                lid["w"] = outer["w"]
+
+        min_d = preset.get("min_grip_d_mm")
+        if min_d is not None and outer["d"] < min_d:
+            grow = min_d - outer["d"]
+            outer["z"] = round(outer["z"] - grow / 2.0, 3)
+            outer["d"] = round(min_d, 3)
+            if isinstance(lid, dict):
+                lid["z"] = round(outer["z"] + outer["d"], 3)
+
+        result["ergonomics"] = {"fillet_radius_mm": preset["fillet_radius_mm"]}
+        return
+
+    # "wearable" -- the only remaining preset shape.
+    inset = preset["strap_mount_inset_mm"]
+    mid_y = round(outer["y"] + outer["h"] / 2.0, 3)
+    top_z = round(outer["z"] + outer["d"], 3)
+    result["ergonomics"] = {
+        "strap_mount_points": [
+            {"x": round(outer["x"] + inset, 3), "y": mid_y, "z": top_z},
+            {"x": round(outer["x"] + outer["w"] - inset, 3), "y": mid_y, "z": top_z},
+        ],
+        "wrist_curvature_radius_mm": preset["wrist_curvature_radius_mm"],
+    }
+
+
 def _apply_dims(placement: dict, dims: dict) -> None:
     """Mutates `placement`'s own x/y/z/w/h/d in place to match `dims`
     (one of compute_housing_footprint()'s own "outer"/"lid" results) --
@@ -399,6 +515,23 @@ def apply_enclosure_generation(mech: dict, parts: list) -> dict:
         than left in place, so a `none`-mode run genuinely produces no
         enclosure output, not just an unrefreshed leftover from before
         the archetype was known.
+
+    Patch H.2 (Phase H, "Ergonomics"): the `full`-mode branch applies
+    Patch H.1's own ERGONOMIC_PRESETS entry (eo/mech_ergonomics.py) for
+    `archetype["mobility_type"]` via `_apply_ergonomic_preset()` above,
+    immediately after `compute_housing_footprint()` runs and before the
+    result is stashed anywhere -- so `mech["housing"]`, the refreshed
+    flat `mech["enclosure"]`, and the housing_1/lid_1 placement entries
+    below all see the SAME already-ergonomics-adjusted `outer`/`lid`,
+    never a stale pre-adjustment size in one place and an adjusted one
+    in another. Only "handheld"/"wearable" ever have a preset entry (in
+    practice the only two `mobility_type`s that ever reach `full` mode
+    with a real grip/strap to model -- see eo/device_archetype.py's own
+    `_GROUPS`), so every other archetype's housing output -- and every
+    `full`-mode housing built before this patch's own test suite existed
+    -- is byte-for-byte unchanged; not wired into the `partial`-mode
+    baseplate branch below at all, since no ERGONOMIC_PRESETS entry's
+    own mobility_type (`handheld`/`wearable`) ever resolves to `partial`.
     """
     archetype = (mech or {}).get("archetype") or {}
     enclosure_mode = archetype.get("enclosure_mode", "full")
@@ -443,6 +576,7 @@ def apply_enclosure_generation(mech: dict, parts: list) -> dict:
     # `full` (or no archetype recorded yet) -- unchanged from before A.5.
     material = _resolve_structural_material(mech, parts, archetype, _HOUSING_ID_PREFIX)
     result = compute_housing_footprint(device["footprint"], material=material)
+    _apply_ergonomic_preset(result, archetype.get("mobility_type"))
 
     if isinstance(mech, dict):
         mech["housing"] = result
