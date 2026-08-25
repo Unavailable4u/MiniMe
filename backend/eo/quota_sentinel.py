@@ -25,7 +25,7 @@ from memory.bus import read as bus_read
 from memory.bus import read_many as bus_read_many
 from relay.emitter import emit_event
 from utils.llm_client import QUOTA_CONFIG
-from utils.rate_ledger import headroom_snapshot
+from utils.rate_ledger import headroom_snapshot, is_unmetered_provider
 
 TAVILY_MONTHLY_QUOTA = 1000  # Tavily's free tier: 1,000 searches/MONTH, not
 # daily like every other provider in QUOTA_CONFIG. Deliberately NOT added
@@ -170,6 +170,24 @@ def get_quota_snapshot() -> dict:
             snapshot[agent_key] = {
                 "used": used_requests, "quota": neuron_quota, "pct": None,
                 "unit_mismatch": True,  # frontend: label as "requests (cap is neurons)"
+                "unmetered": False,
+                "cooldown_until": cooldown_until, "cooling_down": cooling_down,
+            }
+            continue
+
+        # Patch I.2: providers whose QUOTA_CONFIG entry is the explicit
+        # "unmetered_credit_pool" sentinel (currently just huggingface)
+        # get their own branch, same reasoning as cloudflare's above --
+        # `QUOTA_CONFIG.get(provider, {}).get(model, {})` would raise on
+        # a bare string, and even guarded against that, `quota: None`
+        # here would render identically to a provider nobody's sourced
+        # real numbers for yet. `unmetered: True` lets the frontend tell
+        # the two apart instead of both showing as an unlabeled dash.
+        if is_unmetered_provider(provider):
+            used_requests = record.get("requests", 0)
+            snapshot[agent_key] = {
+                "used": used_requests, "quota": None, "pct": None,
+                "unit_mismatch": False, "unmetered": True,
                 "cooldown_until": cooldown_until, "cooling_down": cooling_down,
             }
             continue
@@ -180,6 +198,7 @@ def get_quota_snapshot() -> dict:
         pct = (used / quota) if quota else None
         snapshot[agent_key] = {
             "used": used, "quota": quota, "pct": pct, "unit_mismatch": False,
+            "unmetered": False,
             "cooldown_until": cooldown_until, "cooling_down": cooling_down,
         }
 

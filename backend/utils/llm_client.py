@@ -201,17 +201,61 @@ QUOTA_CONFIG = {
         # get_quota_snapshot() has a dedicated neurons-aware branch for
         # this provider rather than reusing the requests-based math.
         "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {"neurons_rpd": 10000},
-        # NOTE: reviewer.py's cloudflare step actually calls
-        # "@cf/meta/llama-3.1-8b-instruct" -- a different model with no
-        # entry here yet. Flagging, not fixing as part of this patch.
+        # Patch I.2: reviewer.py's cloudflare step actually calls
+        # "@cf/meta/llama-3.1-8b-instruct" (see reviewer.py's own
+        # CLOUDFLARE_MODEL comment), a different model that had no entry
+        # here -- previously flagged, not fixed. Same 10k/day figure as
+        # the entry above: Workers AI's neuron ceiling is account-wide,
+        # not per-model, and dash.cloudflare.com > AI > Workers AI >
+        # Usage confirms every account on the free tier gets the same
+        # "Neurons used today: 0/10k" ceiling regardless of which model
+        # it calls -- this isn't a second, independently-sourced number,
+        # it's the same free-tier ceiling applied to reviewer.py's
+        # account (CLOUDFLARE_ACCOUNT_ID_2). If reviewer.py's account is
+        # ever moved to a paid Workers AI plan with a different ceiling,
+        # update this entry specifically -- it no longer has to move in
+        # lockstep with the fp8-fast entry above once that happens.
+        #
+        # IMPORTANT CAVEAT (found while wiring this in, not part of the
+        # original ask, flagging rather than silently fixing): this entry
+        # closes the QUOTA_CONFIG *coverage* gap -- get_quota_snapshot()
+        # will now report real usage/quota for this model instead of an
+        # empty {} -- but it does NOT give this step pre-flight gating
+        # via can_proceed()/reserve(). Neither function's gating-mode
+        # dispatch (rate_ledger._gating_mode_for()) recognizes
+        # "neurons_rpd" as a signal; it only branches on "tpm" (tokens
+        # mode) or "rpm"/"rpd" (requests mode). "neurons_rpd" is read
+        # solely by quota_sentinel.get_quota_snapshot()'s dedicated
+        # `if provider == "cloudflare"` branch, for dashboard reporting.
+        # That means _tpm_limit_for() still returns None for both
+        # cloudflare entries in this table, and reserve()/can_proceed()
+        # still fail open for every cloudflare call regardless of this
+        # entry -- true of the pre-existing fp8-fast entry too, not a
+        # regression introduced here. Actually blocking cloudflare calls
+        # pre-flight would need a real "neurons" gating mode added to
+        # rate_ledger.py (estimating neurons per call, a third window
+        # type alongside tokens/requests) -- out of scope for this patch;
+        # tracked as a follow-up, not silently claimed as done here.
+        "@cf/meta/llama-3.1-8b-instruct": {"neurons_rpd": 10000},
     },
     # "github" -- retiring/retired, see the reality guide §4. Left out of
     # this rewrite deliberately rather than given a fresh per-model
     # number now.
-    # "huggingface" (chat, via the router) -- still not a request-count
-    # product. It's a monthly CREDIT pool ($0.10/month free tier), so a
-    # "rpd" style number here would be a unit fabrication no matter what
-    # went in it. See the reality guide §5.
+    # Patch I.2: "huggingface" (chat, via the router) is still not a
+    # request-count product -- it's a monthly CREDIT pool ($0.10/month
+    # free tier), so an "rpd"/"rpm"/"tpm" style number here would be a
+    # unit fabrication no matter what went in it (see the reality guide
+    # §5). Previously this was simply absent from QUOTA_CONFIG, which is
+    # indistinguishable at a glance from "nobody's gotten around to
+    # sourcing this provider's real limits yet." Made explicit instead:
+    # the string sentinel below (as opposed to every other provider's
+    # dict-of-models value) means "deliberately ungated, verified no
+    # metered ceiling exists" -- rate_ledger._config_for() and
+    # eo.quota_sentinel.get_quota_snapshot() both special-case this
+    # sentinel so a future audit of this table can tell "intentionally
+    # unmetered" apart from "missing data" at every call site that reads
+    # QUOTA_CONFIG, not just here in a comment.
+    "huggingface": "unmetered_credit_pool",
     "openrouter": {
         # OR-1b (reliability_overhaul_plan.md). No "tpm"/"tpd" here,
         # deliberately -- OR-1's live header check (test_openrouter.py)

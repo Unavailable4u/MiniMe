@@ -125,14 +125,43 @@ def _seconds_until_next_utc_day(now: float = None) -> float:
     return max(0.0, (tomorrow - current).total_seconds())
 
 
+_UNMETERED_SENTINEL = "unmetered_credit_pool"  # keep in sync with the
+# string literal QUOTA_CONFIG["huggingface"] is set to in llm_client.py --
+# not imported directly (same lazy-import reasoning as the QUOTA_CONFIG
+# import itself, just below), but this module and llm_client.py need to
+# agree on the exact string.
+
+
+def is_unmetered_provider(provider: str) -> bool:
+    """Patch I.2: True when QUOTA_CONFIG[provider] is the explicit
+    "intentionally ungated" sentinel (currently just "huggingface")
+    rather than the normal {model: {...}} dict every other provider
+    uses. Exposed as a real function -- not just inlined into
+    _config_for() below -- so eo/quota_sentinel.py's get_quota_snapshot()
+    can ask the same question and report "unmetered" instead of treating
+    an unmetered provider like one nobody's sourced numbers for yet."""
+    from utils.llm_client import QUOTA_CONFIG
+    return QUOTA_CONFIG.get(provider) == _UNMETERED_SENTINEL
+
+
 def _config_for(provider: str, model: str) -> dict:
     """Single lookup point for QUOTA_CONFIG[provider][model], imported
     lazily for the same circular-import reason _tpm_limit_for() already
     documented (Phase 3 wires this module into utils/llm_client.py, which
     is where QUOTA_CONFIG itself lives). Returns {} rather than raising
-    when the provider/model has no entry at all."""
+    when the provider/model has no entry at all -- including when the
+    provider entry is the unmetered sentinel (a bare string, not a dict),
+    which would otherwise raise AttributeError on the .get(model, {})
+    below. Runtime result is identical to the pre-Patch-I.2 "absent key"
+    case (still {} -> every limit lookup still returns None -> gating
+    still fails open) -- the sentinel changes what a future reader of
+    QUOTA_CONFIG can tell about *why* it's ungated, not what happens at
+    call time."""
     from utils.llm_client import QUOTA_CONFIG
-    return QUOTA_CONFIG.get(provider, {}).get(model, {})
+    provider_config = QUOTA_CONFIG.get(provider, {})
+    if provider_config == _UNMETERED_SENTINEL:
+        return {}
+    return provider_config.get(model, {})
 
 
 def _gating_mode_for(provider: str, model: str) -> str:

@@ -57,6 +57,7 @@ from memory.bus import delete as bus_delete
 from memory.bus import (  # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; write is CO3's new pause_requested flag; read is CO5 Finding B's pending_synthesis lookup; bus_delete is CO5 Step 7 follow-up's cleanup of that same key; read_stage_output_text is Bug 7 (0b)'s new re-fetch route's full-text lookup
     read_many as bus_read_many,
 )
+from utils.error_sanitizer import user_facing_message  # NEW — Patch I.1
 
 router = APIRouter()
 
@@ -149,13 +150,13 @@ def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXE
             scope=req.scope,   # NEW — task 13d/13e
         )
     except Exception as exc:
-        traceback.print_exc()
+        traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return TaskResponse(
             decision={},
             tier=-1,
             status="error",
             result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
+            message=user_facing_message(exc),
         )
 
 
@@ -213,10 +214,10 @@ def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_a
             owner_id=owner_id,   # FIXED
         )
     except Exception as exc:
-        traceback.print_exc()
+        traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return TaskResponse(
             decision={}, tier=-1, status="error", result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
+            message=user_facing_message(exc),
         )
 
 
@@ -240,10 +241,10 @@ def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_a
             owner_id=owner_id,
         )
     except Exception as exc:
-        traceback.print_exc()
+        traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return TaskResponse(
             decision=req.decision or {}, tier=-1, status="error", result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
+            message=user_facing_message(exc),
         )
 
 
@@ -465,12 +466,12 @@ def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
         # unknown action string
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        traceback.print_exc()
+        traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return ResumeResponse(
             session_id=req.session_id,
             status="error",
             result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
+            message=user_facing_message(exc),
         )
 
     if isinstance(result, dict) and result.get("status") == "paused":
@@ -719,10 +720,10 @@ def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
-        traceback.print_exc()
+        traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return TaskResponse(
             decision={}, tier=-1, status="error", result=None,
-            message=f"{exc.__class__.__name__}: {exc}",
+            message=user_facing_message(exc),
         )
 
 
