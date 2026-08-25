@@ -291,7 +291,7 @@ def test_refresh_calls_the_providers_token_endpoint_and_persists_new_token(monke
     row = _row(expires_at=datetime.now(UTC) - timedelta(hours=1))
 
     fake_cursor = FakeCursor(fetchone_result=row)
-    calls_log = _install_fake_cursor(monkeypatch, fake_cursor)
+    _install_fake_cursor(monkeypatch, fake_cursor)
 
     mock_response = MagicMock()
     mock_response.status_code = 200

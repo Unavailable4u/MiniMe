@@ -353,7 +353,7 @@ def test_run_with_looping_redo_roles_empty_falls_back_to_execution_order(mock_gr
     """decision.get("redo_roles") or execution_order -- a CONTINUE with
     no colon (redo list empty) must fall back to redoing the FULL
     original execution_order, not an empty run."""
-    exec_mock = _mock_execute_graph(monkeypatch, [
+    _mock_execute_graph(monkeypatch, [
         {"writer": {"text": "draft 1"}},
         {"writer": {"text": "draft 2"}},
     ])
@@ -362,7 +362,6 @@ def test_run_with_looping_redo_roles_empty_falls_back_to_execution_order(mock_gr
 
     run_with_looping(hires=[], execution_order=["writer"], task_text="x",
                       session_id="s12", mode="expert")
-    second_call_kwargs = mock_graph_build.call_args_list[1]
     # build_execution_graph_from_hires(hires, current_order) -- current_order
     # positional/keyword depends on call site; assert against call args directly.
     assert mock_graph_build.call_count == 2

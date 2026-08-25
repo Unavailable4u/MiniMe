@@ -621,7 +621,7 @@ class TestProcessUpload:
         assert len(spies["promote_calls"]) == 0
 
     def test_auto_partial_promote_exception_is_swallowed(self, monkeypatch):
-        spies = self._stub_pipeline(monkeypatch, topic_ids=["t1"])
+        self._stub_pipeline(monkeypatch, topic_ids=["t1"])
 
         def raising_promote(*a, **k):
             raise Exception("promote failed")
@@ -646,8 +646,8 @@ class TestProcessUpload:
 
     def test_returns_expected_shape_with_defaulted_title(self, monkeypatch):
         artifact = {"sections": []}  # no "title" key at all
-        spies = self._stub_pipeline(monkeypatch, topic_ids=["t1"], artifact=artifact,
-                                     node_ids=["node-a"])
+        self._stub_pipeline(monkeypatch, topic_ids=["t1"], artifact=artifact,
+                             node_ids=["node-a"])
         result = source_manager.process_upload("pdf", "/tmp/file.pdf", "ws-1")
         assert result == {
             "node_ids": ["node-a"], "title": "Untitled",

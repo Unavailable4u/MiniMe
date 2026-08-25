@@ -43,6 +43,30 @@ def _fake_ensure_role(monkeypatch):
     monkeypatch.setattr(source_planner_lean, "_ensure_role_registered", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _clear_fake_generic_worker():
+    """This file substitutes a bare stand-in object for agents.generic_worker
+    in sys.modules (see _fake_generic_worker / _capturing_generic_worker
+    below) and, in two tests, pops it outright to assert plan()/plan_depth()
+    made no LLM call. Neither ever restored the real module, which poisons
+    the deferred `from agents.generic_worker import PROVIDER_DEFAULT_MODEL`
+    in eo/quota_sentinel.py for every test that runs afterward in the same
+    session -- same landmine and same fix test_agent_idea_planner.py already
+    applies for eo.dynamic_chain. This fixture snapshots the real module
+    before the test runs and restores it at teardown regardless of what the
+    test body does to sys.modules in between, so the mid-test
+    sys.modules.pop() calls below (used only to assert no reimport happened)
+    stay safe to keep. Restoring (not popping) at teardown avoids
+    retriggering the agents.generic_worker <-> eo.registry circular-import
+    cycle patch 0001 broke."""
+    real_module = sys.modules.get("agents.generic_worker")
+    yield
+    if real_module is not None:
+        sys.modules["agents.generic_worker"] = real_module
+    else:
+        sys.modules.pop("agents.generic_worker", None)
+
+
 def _fake_generic_worker(text):
     """Injects a fake agents.generic_worker module with a `run` that
     returns {"text": text}, and returns that mock for call inspection."""
