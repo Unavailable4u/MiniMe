@@ -41,10 +41,26 @@ that same shape -- eo/mech_enclosure.py's own compute_housing_footprint()
 already share it.
 """
 
-from eo.enclosure_spec import CUTOUT_ELIGIBLE_CATEGORIES, CUTOUT_TABLE, ENCLOSURE_SPEC
+from eo.enclosure_spec import (
+    CUTOUT_ELIGIBLE_CATEGORIES,
+    CUTOUT_TABLE,
+    DEFAULT_MATERIAL,
+    ENCLOSURE_SPEC,
+    MATERIAL_PROPERTIES,
+)
+from eo.mech_material import resolve_material
 from eo.mech_sections import subsections_for_section
 from eo.mech_subsections import members_for_subsection
 from eo.mech_swept_volume import is_exclusion
+
+# Patch E.3 (Phase E, "Material awareness"): which BOM part_id prefix
+# identifies the shared structural part whose wall this module's own
+# cutouts are drilled through -- same "duplicated here rather than
+# imported since eo/mech_enclosure.py is a peer, not a dependency, of
+# this module" convention every other cross-module id-prefix constant
+# in this tree already follows (see eo/mech_enclosure.py's own
+# _HOUSING_ID_PREFIX docstring comment for the identical reasoning).
+_HOUSING_ID_PREFIX = "housing"
 
 # ---------------------------------------------------------------------------
 # Patch 5.2 -- nearest_exterior_face()
@@ -242,7 +258,9 @@ def _part_id(part: dict):
 # the guard can be tested against both shape families uniformly").
 # ---------------------------------------------------------------------------
 
-def check_min_wall_thickness(part: dict, face: str, cutout: dict, housing_inner: dict) -> dict:
+def check_min_wall_thickness(
+    part: dict, face: str, cutout: dict, housing_inner: dict, material: str = DEFAULT_MATERIAL
+) -> dict:
     """Checks whether `cutout` (a dict already returned by
     generate_cutout() or generate_port_cutout(), for `part` opened
     through `face`) leaves a wall segment on that face thinner than
@@ -296,9 +314,25 @@ def check_min_wall_thickness(part: dict, face: str, cutout: dict, housing_inner:
     "tolerant of a partial dict" posture every pure function in this
     module (and this whole tree) already holds itself to.
 
+    Patch E.3 (Phase E, "Material awareness"): `material` (optional,
+    defaults to `DEFAULT_MATERIAL` -- "pla_rigid") selects which
+    material's own `MATERIAL_PROPERTIES` override this guard's own
+    `min_feature_mm` floor is read from -- the material of the housing
+    wall the cutout is actually being drilled through, not the cutout
+    `part` itself. Same "material's own override, falling through to
+    ENCLOSURE_SPEC's own baseline" lookup eo/mech_enclosure.py's own
+    `compute_housing_footprint()` already applies to `wall_thickness_mm`
+    (Patch E.3), applied here to `min_feature_mm` instead. Today's two
+    defined materials (Patch E.1) both leave `min_feature_mm`
+    unoverridden -- it's a print-process floor, not a material-
+    stiffness one -- so a default/omitted call is numerically
+    byte-for-byte unchanged from before this patch; the lookup exists
+    so a future material that DOES override it is honored automatically.
+
     Pure function: never mutates `part`, `cutout`, or `housing_inner`.
     """
-    min_feature = ENCLOSURE_SPEC["min_feature_mm"]
+    overrides = MATERIAL_PROPERTIES.get(material) or {}
+    min_feature = overrides.get("min_feature_mm", ENCLOSURE_SPEC["min_feature_mm"])
     normal = _FACE_NORMAL_DIM.get(face)
     in_plane_dims = [dim for dim in ("w", "h", "d") if dim != normal]
     cutout_shape = (cutout or {}).get("shape")
@@ -341,7 +375,9 @@ def check_min_wall_thickness(part: dict, face: str, cutout: dict, housing_inner:
 # envelope, not just a primitive hole)."
 # ---------------------------------------------------------------------------
 
-def generate_cutout(part: dict, face: str, cutout_type: str, housing_inner: dict = None) -> dict:
+def generate_cutout(
+    part: dict, face: str, cutout_type: str, housing_inner: dict = None, material: str = DEFAULT_MATERIAL
+) -> dict:
     """Returns one cutout primitive dict for `part`, opened through
     `face` (one of nearest_exterior_face()'s own six return values),
     shaped per `cutout_type` -- one of "window" (display), "vent"
@@ -361,6 +397,13 @@ def generate_cutout(part: dict, face: str, cutout_type: str, housing_inner: dict
     keeps returning exactly the same dict shape it always has --
     strictly additive, never a breaking change to this function's own
     established contract.
+
+    `material` (Patch E.3, optional, defaults to `DEFAULT_MATERIAL`):
+    forwarded as-is to `check_min_wall_thickness()` when `housing_inner`
+    is supplied -- see that function's own docstring for what it
+    selects (the housing wall's own material, not this cutout's `part`).
+    Has no effect when `housing_inner` is omitted, since no
+    wall-thickness check runs at all in that case.
 
     Re-derives `part`'s own CUTOUT_TABLE descriptor via
     _match_cutout_descriptor() (rather than trusting `cutout_type`
@@ -464,7 +507,7 @@ def generate_cutout(part: dict, face: str, cutout_type: str, housing_inner: dict
     # docstring below for why this is additive/optional.
     if housing_inner is not None:
         result["wall_thickness_check"] = check_min_wall_thickness(
-            part, face, result, housing_inner
+            part, face, result, housing_inner, material=material
         )
 
     return result
@@ -480,7 +523,9 @@ def generate_cutout(part: dict, face: str, cutout_type: str, housing_inner: dict
 # ordinary static hole.
 # ---------------------------------------------------------------------------
 
-def generate_port_cutout(part: dict, face: str, housing_inner: dict = None) -> dict:
+def generate_port_cutout(
+    part: dict, face: str, housing_inner: dict = None, material: str = DEFAULT_MATERIAL
+) -> dict:
     """Returns one port-cutout primitive for `part`, opened through
     `face` -- literal Master Guide wording ("port-shaped cutout at
     part's footprint"). Only matches CUTOUT_TABLE keywords whose own
@@ -497,6 +542,11 @@ def generate_port_cutout(part: dict, face: str, housing_inner: dict = None) -> d
     supplied, the returned dict gains a "wall_thickness_check" key;
     omitted (the default), this function's return shape is unchanged
     from Patch 5.4's own original contract.
+
+    `material` (Patch E.3, optional, defaults to `DEFAULT_MATERIAL`):
+    identical forward-to-check_min_wall_thickness()-when-housing_inner-
+    is-supplied contract generate_cutout()'s own `material` parameter
+    already documents above.
 
     Envelope size is `part`'s own in-plane footprint on `face` (see
     _in_plane_extents()) expanded on every side by the matched
@@ -550,7 +600,7 @@ def generate_port_cutout(part: dict, face: str, housing_inner: dict = None) -> d
     # why this is additive/opt-in and never raises.
     if housing_inner is not None:
         result["wall_thickness_check"] = check_min_wall_thickness(
-            part, face, result, housing_inner
+            part, face, result, housing_inner, material=material
         )
 
     return result
@@ -607,6 +657,54 @@ def _joined_cutout_members(mech: dict, parts: list) -> list:
                     merged["generic_name"] = part.get("generic_name")
                 joined.append(merged)
     return joined
+
+
+# ---------------------------------------------------------------------------
+# Patch E.3 (Phase E, "Material awareness"): resolves the material of the
+# housing wall every cutout in this module is drilled through -- same
+# "join the placement against `parts` by id, then resolve_material()"
+# pattern eo/mech_enclosure.py's own _resolve_structural_material()
+# (Patch E.3) already establishes for that module's own housing/baseplate
+# sizing, mirrored here since this module never imports that one (see
+# this module's own top docstring: "never reads `mech` or `parts`
+# directly" for the pure functions above -- this helper is part of this
+# module's OWN Patch 5.6 pipeline-integration half, same boundary).
+# ---------------------------------------------------------------------------
+
+def _resolve_housing_material(mech: dict, parts: list, archetype: dict) -> str:
+    """Finds the `_HOUSING_ID_PREFIX`-matched placement in `mech`'s own
+    Enclosure section, joins it against `parts` by id, and resolves its
+    material via Patch E.2's `resolve_material()`. Falls through to
+    `DEFAULT_MATERIAL` when the housing hasn't been placed yet or isn't
+    present in `parts` -- same fail-safe posture every other archetype-
+    reading helper in this tree already holds itself to. Only ever
+    called from `full`-mode `apply_cutout_generation()` (the only mode
+    that reaches this point -- `partial`/`none` both short-circuit
+    before any cutout is generated), so there is always exactly one
+    housing wall's material to resolve here, never a baseplate's.
+    """
+    parts_by_id = {
+        p.get("id"): p for p in (parts or []) if isinstance(p, dict) and p.get("id")
+    }
+
+    section = next(
+        (s for s in (mech.get("sections") or [])
+         if isinstance(s, dict) and s.get("section_id") == "Enclosure"),
+        None,
+    )
+    if section is None:
+        return DEFAULT_MATERIAL
+
+    for subsection in subsections_for_section(mech, section):
+        for member in members_for_subsection(mech, subsection):
+            if not isinstance(member, dict):
+                continue
+            part_id = member.get("part_id") or ""
+            if part_id.startswith(_HOUSING_ID_PREFIX):
+                part = parts_by_id.get(part_id)
+                return resolve_material(part, archetype) if isinstance(part, dict) else DEFAULT_MATERIAL
+
+    return DEFAULT_MATERIAL
 
 
 def apply_cutout_generation(mech: dict, parts: list) -> list:
@@ -669,6 +767,17 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
     keeps that outcome a stated contract of this function rather than
     an accident of what the `partial`-mode housing shape happens to
     omit.
+
+    Patch E.3 (Phase E, "Material awareness"): resolves the housing
+    wall's own material once via `_resolve_housing_material()` and
+    forwards it to every `generate_cutout()`/`generate_port_cutout()`
+    call this function makes, so `check_min_wall_thickness()`'s own
+    `min_feature_mm` floor (attached under each cutout's own
+    "wall_thickness_check" key) is read from that material's own
+    `MATERIAL_PROPERTIES` override where one exists. A housing's own
+    `generic_name` is never strap/band-flavored in practice, so this
+    resolves to `DEFAULT_MATERIAL` -- numerically unchanged from before
+    this patch -- for every project today.
     """
     archetype = (mech or {}).get("archetype") or {}
     if archetype.get("enclosure_mode", "full") != "full":
@@ -686,6 +795,8 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
     if not isinstance(housing_inner, dict):
         mech["cutouts"] = []
         return []
+
+    material = _resolve_housing_material(mech, parts, archetype)
 
     cutouts = []
     for member in _joined_cutout_members(mech, parts):
@@ -711,9 +822,11 @@ def apply_cutout_generation(mech: dict, parts: list) -> list:
 
         face = nearest_exterior_face(member, housing_inner)
         if descriptor["cutout_type"] == "port":
-            cutout = generate_port_cutout(member, face, housing_inner=housing_inner)
+            cutout = generate_port_cutout(member, face, housing_inner=housing_inner, material=material)
         else:
-            cutout = generate_cutout(member, face, descriptor["cutout_type"], housing_inner=housing_inner)
+            cutout = generate_cutout(
+                member, face, descriptor["cutout_type"], housing_inner=housing_inner, material=material
+            )
         cutouts.append(cutout)
 
     mech["cutouts"] = cutouts

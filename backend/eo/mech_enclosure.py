@@ -63,7 +63,8 @@ apply_enclosure_generation() is what actually reads `mech["device"]`'s
 footprint and calls this.
 """
 
-from eo.enclosure_spec import ENCLOSURE_SPEC
+from eo.enclosure_spec import DEFAULT_MATERIAL, ENCLOSURE_SPEC, MATERIAL_PROPERTIES
+from eo.mech_material import resolve_material
 from eo.mech_sections import subsections_for_section
 from eo.mech_subsections import members_for_subsection
 
@@ -86,7 +87,7 @@ def _expand(footprint: dict, pad: float) -> dict:
     }
 
 
-def compute_housing_footprint(device_footprint: dict) -> dict:
+def compute_housing_footprint(device_footprint: dict, material: str = DEFAULT_MATERIAL) -> dict:
     """Returns {"outer": {...}, "inner": {...}, "lid": {...}}, each an
     {"x","y","z","w","h","d"} dict -- see module docstring for the
     sizing rule and the reasoning behind each of the three.
@@ -97,14 +98,31 @@ def compute_housing_footprint(device_footprint: dict) -> dict:
     raises on a still-incomplete footprint -- it just returns a
     correspondingly degenerate (but still well-shaped) result.
 
+    Patch E.3 (Phase E, "Material awareness"): `material` (optional,
+    defaults to `DEFAULT_MATERIAL` -- "pla_rigid") selects which
+    Patch E.1 `MATERIAL_PROPERTIES` entry's own overrides this shell is
+    sized from. `wall_thickness_mm` is read via that material's own
+    partial-override dict FIRST, falling through to
+    `ENCLOSURE_SPEC["wall_thickness_mm"]` for any key the material
+    doesn't override -- literal "Patch E.3's material-aware lookup
+    falls through to ENCLOSURE_SPEC's own baseline value" wording
+    `eo/enclosure_spec.py`'s own `MATERIAL_PROPERTIES` docstring already
+    documents for this exact call site. `pla_rigid`'s own entry is an
+    empty override dict, so the default call (no `material` argument,
+    same as every pre-E.3 caller) is numerically byte-for-byte
+    unchanged from before this patch -- only a caller that explicitly
+    passes a non-default material (e.g. `"tpu_flexible"`) ever sees a
+    different wall thickness out of this function.
+
     Pure function: never mutates `device_footprint`, never touches
     `mech`, never does I/O. Two calls with the same input always
     return the same output -- the "idempotent by construction" property
     Patch 1.5's own idempotency test checks for at the pipeline level
     depends on this holding true here first.
     """
+    overrides = MATERIAL_PROPERTIES.get(material) or {}
     clearance = ENCLOSURE_SPEC["clearance_mm"]
-    wall = ENCLOSURE_SPEC["wall_thickness_mm"]
+    wall = overrides.get("wall_thickness_mm", ENCLOSURE_SPEC["wall_thickness_mm"])
 
     inner = _expand(device_footprint, clearance)
     outer = _expand(device_footprint, wall + clearance)
@@ -126,7 +144,7 @@ def compute_housing_footprint(device_footprint: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def compute_baseplate_footprint(device_footprint: dict) -> dict:
+def compute_baseplate_footprint(device_footprint: dict, material: str = DEFAULT_MATERIAL) -> dict:
     """Returns {"outer": {...}}, an {"x","y","z","w","h","d"} dict --
     the `partial`-mode analog of compute_housing_footprint()'s own
     "outer" box, sized for a single flat structural plate rather than a
@@ -154,12 +172,20 @@ def compute_baseplate_footprint(device_footprint: dict) -> dict:
     tolerant-of-a-partial-dict posture compute_housing_footprint()
     already takes toward its own input.
 
+    Patch E.3: `material` (optional, defaults to `DEFAULT_MATERIAL`)
+    is resolved the same "material's own override, falling through to
+    ENCLOSURE_SPEC's own baseline" way compute_housing_footprint()'s
+    own `material` parameter already is -- see that function's own
+    docstring for the full reasoning; a default/omitted call is
+    numerically unchanged from before this patch.
+
     Pure function: no I/O, no LLM call, no mutation of
     `device_footprint` -- same purity guarantee every other function in
     this module already holds itself to.
     """
+    overrides = MATERIAL_PROPERTIES.get(material) or {}
     clearance = ENCLOSURE_SPEC["clearance_mm"]
-    wall = ENCLOSURE_SPEC["wall_thickness_mm"]
+    wall = overrides.get("wall_thickness_mm", ENCLOSURE_SPEC["wall_thickness_mm"])
 
     x = float(device_footprint.get("x") or 0)
     y = float(device_footprint.get("y") or 0)
@@ -213,6 +239,61 @@ _BASEPLATE_ID_PREFIX = "baseplate"
 # rather than imported since eo/mech_device.py is a peer, not a
 # dependency, of this module (this module still never imports it).
 _CONTAINER_SECTION_ID = "Enclosure"
+
+
+# ---------------------------------------------------------------------------
+# Patch E.3: resolves which MATERIAL_PROPERTIES key the pipeline's single
+# shared structural part (housing/lid in `full` mode, baseplate in
+# `partial` mode) should be sized with, via Patch E.2's own
+# resolve_material() -- so this module never hand-rolls a second,
+# divergent material-lookup rule of its own.
+# ---------------------------------------------------------------------------
+
+def _resolve_structural_material(mech: dict, parts: list, archetype: dict, id_prefix: str) -> str:
+    """Finds the structural placement in `mech`'s own Enclosure section
+    whose `part_id` starts with `id_prefix` (`_HOUSING_ID_PREFIX` or
+    `_BASEPLATE_ID_PREFIX`, same prefix-not-literal match convention
+    `_apply_dims()`'s own callers already use below), joins it against
+    `parts` by id to get the real `category`/`generic_name`/`aliases`
+    fields a placement entry alone never carries, and resolves its
+    material via `resolve_material()`.
+
+    Falls through to `DEFAULT_MATERIAL` when the structural part hasn't
+    been placed yet, isn't present in `parts`, or `mech`/`parts` is
+    missing/malformed -- same "never let a bad/missing upstream field
+    produce anything other than today's unchanged default behavior"
+    posture every other archetype-reading function in this tree already
+    holds itself to. In practice, a housing/baseplate's own
+    `generic_name` is never strap/band-flavored, so this resolves to
+    `DEFAULT_MATERIAL` for every real project today -- the wiring exists
+    so a future material rule (or an unusual, explicitly-authored
+    structural part) is honored without a second code path.
+    """
+    if not isinstance(mech, dict):
+        return DEFAULT_MATERIAL
+
+    parts_by_id = {
+        p.get("id"): p for p in (parts or []) if isinstance(p, dict) and p.get("id")
+    }
+
+    section = next(
+        (s for s in (mech.get("sections") or [])
+         if isinstance(s, dict) and s.get("section_id") == _CONTAINER_SECTION_ID),
+        None,
+    )
+    if section is None:
+        return DEFAULT_MATERIAL
+
+    for subsection in subsections_for_section(mech, section):
+        for member in members_for_subsection(mech, subsection):
+            if not isinstance(member, dict):
+                continue
+            part_id = member.get("part_id") or ""
+            if part_id.startswith(id_prefix):
+                part = parts_by_id.get(part_id)
+                return resolve_material(part, archetype) if isinstance(part, dict) else DEFAULT_MATERIAL
+
+    return DEFAULT_MATERIAL
 
 
 def _apply_dims(placement: dict, dims: dict) -> None:
@@ -299,6 +380,18 @@ def apply_enclosure_generation(mech: dict, parts: list) -> dict:
         neither a cavity nor a matching lid), and overwrites a
         baseplate_1-prefixed placement (Patch A.4's own worked
         parts-prompt example) instead of housing_1/lid_1.
+
+    Patch E.3 (Phase E, "Material awareness"): both the `full` and
+    `partial` branches now resolve the shared structural part's own
+    material via `_resolve_structural_material()` and pass it through
+    to `compute_housing_footprint()`/`compute_baseplate_footprint()`,
+    so a housing/baseplate whose own BOM entry resolves to a
+    non-default material (Patch E.2's `resolve_material()`) is sized
+    with that material's own `MATERIAL_PROPERTIES` overrides rather
+    than the flat `ENCLOSURE_SPEC` defaults. A housing/baseplate's own
+    `generic_name` is never strap/band-flavored in practice, so this
+    resolves to `DEFAULT_MATERIAL` for every project today -- this is
+    additive wiring, not a change in today's numeric output.
       - `none`: no shared structural part at all (Part 1, gap #1) --
         skips entirely. `mech["housing"]` is stashed None (same
         "device missing" no-op shape above) and any stale
@@ -323,7 +416,8 @@ def apply_enclosure_generation(mech: dict, parts: list) -> dict:
         return None
 
     if enclosure_mode == "partial":
-        result = compute_baseplate_footprint(device["footprint"])
+        material = _resolve_structural_material(mech, parts, archetype, _BASEPLATE_ID_PREFIX)
+        result = compute_baseplate_footprint(device["footprint"], material=material)
 
         if isinstance(mech, dict):
             mech["housing"] = result
@@ -347,7 +441,8 @@ def apply_enclosure_generation(mech: dict, parts: list) -> dict:
         return result
 
     # `full` (or no archetype recorded yet) -- unchanged from before A.5.
-    result = compute_housing_footprint(device["footprint"])
+    material = _resolve_structural_material(mech, parts, archetype, _HOUSING_ID_PREFIX)
+    result = compute_housing_footprint(device["footprint"], material=material)
 
     if isinstance(mech, dict):
         mech["housing"] = result
