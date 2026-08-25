@@ -39,12 +39,6 @@ import os
 import sys
 import uuid
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))))  # .../backend, so `eo`/`agents`/`utils`/`memory` import cleanly
-
-logger = logging.getLogger("promptfoo.role_provider")
-logging.basicConfig(level=logging.INFO, format="[role_provider] %(levelname)s: %(message)s")
-
 # Patch 9, resolving the TODO(patch 2b) below: confirmed against
 # upstash_redis==1.7.0's own installed source (http.py) rather than
 # guessed. The two failure modes the TODO wanted separated really do
@@ -60,8 +54,17 @@ logging.basicConfig(level=logging.INFO, format="[role_provider] %(levelname)s: %
 #     a distinct, importable class.
 # So catching UpstashError separately from the transport-level
 # exception classes is a real, confirmed distinction, not a guess at
-# an unstable exception shape.
+# an unstable exception shape. Safe to import here at the top (unlike
+# the eo/agents/utils imports further down this file): it's a
+# third-party package, not a local module that needs the
+# sys.path.append below to resolve first.
 from upstash_redis.errors import UpstashError
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))))  # .../backend, so `eo`/`agents`/`utils`/`memory` import cleanly
+
+logger = logging.getLogger("promptfoo.role_provider")
+logging.basicConfig(level=logging.INFO, format="[role_provider] %(levelname)s: %(message)s")
 
 
 def _reject_real_action_role(role_name: str) -> str | None:
