@@ -1000,13 +1000,25 @@ def _populate_curated_dimensions(parts: list) -> list:
         match = lookup_curated_dimensions(part.get("generic_name"), part.get("aliases"))
         if not match:
             continue
+        ambiguous = bool(match.get("dimension_ambiguous"))   # NEW — read this first
         if match.get("dimensions_mm"):
             part["dimensions_mm"] = match["dimensions_mm"]
         part["dimension_ref_id"] = match.get("dimension_ref_id")
         part["shape"] = match.get("shape")
         part["mount_type"] = match.get("mount_type")
         part["mount_spec"] = match.get("mount_spec")
-        part["dimension_confidence"] = match.get("dimension_confidence")
+        # CHANGED — Patch 11: an ambiguous match (this row was on either
+        # side of an alias collision -- see component_dimension_table.py's
+        # _load_table()) is NOT the same certainty as an unambiguous
+        # curated hit. Downgrading confidence here, rather than trusting
+        # the curated table's own dimension_confidence value, means this
+        # part is treated the same way a curated miss would be by anything
+        # downstream that branches on confidence (e.g. a report footnote,
+        # or G1b below still running because "verified"/"curated" wasn't
+        # already satisfied).
+        part["dimension_confidence"] = (
+            "ambiguous" if ambiguous else match.get("dimension_confidence")
+        )
         part["source"] = match.get("source")
         # G1a alias-collision surfacing: True when this match's row id
         # was ever on either side of a curated-table alias collision
@@ -1017,7 +1029,15 @@ def _populate_curated_dimensions(parts: list) -> list:
         # alias index in favor of this one. Always set (True or False)
         # so downstream code/UI can distinguish "known unambiguous"
         # from "field absent."
-        part["dimension_ambiguous"] = bool(match.get("dimension_ambiguous"))
+        part["dimension_ambiguous"] = ambiguous
+        # NEW — Patch 11: an ambiguous match should not by itself count as
+        # "already resolved" for G1b's skip-if-already-resolved check (see
+        # _populate_dimensions()'s own docstring) -- clearing dimensions_mm
+        # here for the ambiguous case only means G1b's real DigiKey/Mouser
+        # lookup still runs and can confirm or correct it, instead of the
+        # curated table's uncertain guess being the last word.
+        if ambiguous:
+            part["dimensions_mm"] = None
 
     return parts
 
