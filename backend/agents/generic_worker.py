@@ -68,6 +68,7 @@ from eo.skill_library import (  # Part 6 §E2, task 14
 from memory.bus import KEYS
 from memory.bus import read as bus_read
 from memory.bus import write as bus_write
+from utils.llm_client import DROPPABLE_CONTEXT_MARKER  # NEW — Patch 1b
 from utils.llm_client import generate_text
 
 # NOTE: `from eo.panel import _best_match` is deliberately NOT imported at
@@ -533,10 +534,6 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     input_keys = input_keys or []
 
     context_parts = [f"TASK: {task_text}"]
-    if include_conversation_context:   # Part 2 §2.6 — opt-out gate
-        conv_context = conversation_memory.get_full_context(session_id)   # Part 23
-        if conv_context:
-            context_parts.insert(0, f"--- Recent conversation ---\n{conv_context}")   # Part 23
 
     for k in input_keys:
         prior = bus_read(f"stage_output:{session_id}:{k}", default=None)
@@ -563,7 +560,23 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
             zero_results_notice = _zero_results_notice(k, prior)
             if zero_results_notice:
                 context_parts.append(zero_results_notice)
-    context = "\n\n".join(context_parts)
+    context = "\n\n".join(context_parts)   # CHANGED — conv_context no longer in this join
+
+    if include_conversation_context:   # CHANGED — moved from top of function to here
+        conv_context = conversation_memory.get_full_context(session_id)   # Part 23
+        if conv_context:
+            # NEW — Patch 1b: conversation history goes AFTER the droppable
+            # marker, at the very end, so a 413 shrink drops it FIRST (via
+            # _shrink_prompt_for_retry()'s "drop everything after the last
+            # marker occurrence" rule) before ever falling back to blind-
+            # slicing task/input_keys content. Conversation context is
+            # reconstructable next turn from eo/conversation_memory.py's own
+            # store; a role's actual input_keys content is not recoverable
+            # once truncated mid-sentence.
+            context = (
+                f"{context}{DROPPABLE_CONTEXT_MARKER}"
+                f"--- Recent conversation ---\n{conv_context}"
+            )
 
     if chain_override is not None:
         # Bug fix (2026-08-12): a caller-reserved, already multi-step
