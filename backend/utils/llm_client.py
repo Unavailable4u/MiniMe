@@ -2358,6 +2358,35 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         return ("next-step", user_content, accumulated_text, same_step_shrinks,
                 same_step_rate_limit_waits, same_step_rate_limit_elapsed)
     if _bucket == ErrorBucket.RATE_LIMIT_WINDOW:
+        # Patch G1: a TPM-window 413 whose own body says "Limit X,
+        # Requested Y" with Y > X can NEVER succeed by waiting -- the
+        # single request already exceeds the entire per-minute budget,
+        # not just the currently-used slice of it. Detect that specific,
+        # unwaitable shape first and shrink immediately, reusing the same
+        # machinery/markers/cap (_MAX_REQUEST_TOO_LARGE_RETRIES) the
+        # CONTEXT_LENGTH_EXCEEDED branch below already uses. Falls
+        # through to the normal reroute-or-wait path for every other
+        # RATE_LIMIT_WINDOW case (Requested <= Limit -- a genuine "come
+        # back later" quota problem, where shrinking would be pointless).
+        _oversize_match = _REQUEST_TOO_LARGE_LIMIT_PATTERN.search(str(exc))
+        if _oversize_match and int(_oversize_match.group("requested")) > int(_oversize_match.group("limit")):
+            if same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES:
+                shrunk = _shrink_prompt_for_retry(user_content, exc)
+                same_step_shrinks += 1
+                print(f"  [{agent_name}] {label} rate-limit 413 has "
+                      f"Requested ({_oversize_match.group('requested')}) > "
+                      f"Limit ({_oversize_match.group('limit')}) -- unwaitable "
+                      f"by definition, shrinking prompt from "
+                      f"{len(user_content)} to {len(shrunk)} chars and "
+                      f"retrying {label} in place (attempt "
+                      f"{same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
+                return ("retry-in-place", shrunk, "", same_step_shrinks,
+                        same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+            print(f"  [{agent_name}] {label} still over its TPM window "
+                  f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks "
+                  f"-- falling back to next in chain...")
+            return ("next-step", user_content, accumulated_text, same_step_shrinks,
+                    same_step_rate_limit_waits, same_step_rate_limit_elapsed)
         # Phase 3d: an org-scoped, time-windowed quota problem is never a
         # size problem -- never shrink the prompt here (see llm_errors.py's
         # recovery table). Route back through 3b's reroute-vs-bounded-wait
@@ -2403,7 +2432,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         # comment for why: 5 retries * a 20s cap each is up to 100s, long
         # enough to blow through external harness timeouts with zero
         # diagnostic info instead of this clean, immediate RuntimeError).
-        if same_step_rate_limit_elapsed >= _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS:
+        _remaining_budget = _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS - same_step_rate_limit_elapsed
+        if _remaining_budget <= 0:
             print(f"  [{agent_name}] {label} still rate-limited "
                   f"({exc.__class__.__name__}) after "
                   f"{same_step_rate_limit_elapsed:.1f}s spent waiting "
@@ -2415,6 +2445,10 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                 f"rate-limit wait budget with no reroute headroom available "
                 f"(last error: {exc.__class__.__name__}: {exc})"
             ) from exc
+        # Patch G2: cap this wait to whatever's left of the budget instead
+        # of always sleeping the full ledger-suggested duration -- keeps
+        # total elapsed sleep from ever exceeding the stated budget.
+        _wait_seconds = min(_wait_seconds, _remaining_budget)
         same_step_rate_limit_waits += 1
         # 3e: no headroom anywhere in the remaining chain -- this is the
         # one RATE_LIMIT_WINDOW case that DOES cool this key down, using
