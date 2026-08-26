@@ -56,7 +56,10 @@ to reintroduce the exact single-point-of-failure that dynamic_chain.py
 exists to close.
 """
 import json
+import logging
 import re
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Keyword tables
@@ -271,9 +274,22 @@ def resolve_ambiguous_archetype(prd: dict) -> dict:
     try:
         result = json.loads(cleaned)
     except json.JSONDecodeError:
+        # L.2: this is the resolver falling back to the safe default
+        # silently -- log it so an unparseable-response pattern shows up
+        # somewhere instead of only ever being visible as "every PRD
+        # that hits this path ends up full/static" behavior downstream.
+        _logger.warning(
+            "resolve_ambiguous_archetype: unparseable JSON from model, "
+            "falling back to full/static default. raw=%r", raw,
+        )
         return {"enclosure_mode": "full", "mobility_type": "static"}
 
     if not isinstance(result, dict):
+        _logger.warning(
+            "resolve_ambiguous_archetype: model response parsed to non-dict "
+            "%s, falling back to full/static default. raw=%r",
+            type(result).__name__, raw,
+        )
         return {"enclosure_mode": "full", "mobility_type": "static"}
 
     enclosure_mode = result.get("enclosure_mode")
@@ -285,4 +301,9 @@ def resolve_ambiguous_archetype(prd: dict) -> dict:
     # constraints) -- same safe default as an unparseable one, rather
     # than propagating a value none of A.4/E/F/H's later branch checks
     # would recognize.
+    _logger.warning(
+        "resolve_ambiguous_archetype: out-of-vocabulary enclosure_mode=%r "
+        "mobility_type=%r, falling back to full/static default.",
+        enclosure_mode, mobility_type,
+    )
     return {"enclosure_mode": "full", "mobility_type": "static"}
