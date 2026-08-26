@@ -76,6 +76,7 @@ import requests
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.component_dimension_table import lookup_curated_dimensions
 from eo.hw_reference import write_hw_reference
+from eo.injection_guard import filter_snippets  # NEW — Patch 12
 from eo.knowledge_graph import write_node
 from eo.research_cache import get_cached_research, set_cached_research
 from memory.bus import KEYS, get_current_app_slug, read, write
@@ -273,6 +274,7 @@ def run(task_text: str = None, session_id: str = None, tier: int = None,
         raw = web_search(query, domains=domains, max_results=MAX_RESULTS, agent_name="web_researcher")
         raw_results = [{"url": r["url"], "snippet": r.get("snippet", ""),
                          "title": r.get("title") or _title_from_url(r["url"])} for r in raw]
+        raw_results = filter_snippets(raw_results)  # NEW — Patch 12
 
     if scope == "hw_reference":
         # Routed to eo/hw_reference.write_hw_reference() (hw_ref:

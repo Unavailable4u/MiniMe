@@ -121,6 +121,7 @@ from agents.structure_architect import (
 )  # reuse, don't reimplement
 from eo import workspace_facts
 from eo.errors import MissingDependencyError
+from eo.injection_guard import score_snippet  # NEW — Patch 12
 from memory.bus import read as bus_read
 from memory.bus import read_stage_output_text
 from relay.emitter import EventType, emit_event
@@ -1332,6 +1333,18 @@ def resolve_inferred_pin(part: dict, pin_hint: str, edge_kind: str, chain: list,
         return None
 
     part_label = part.get("name") or part.get("id") or "this part"
+
+    # NEW — Patch 12: this is the one place in the component_spec_lookup
+    # path where raw external text (a full parsed datasheet PDF) reaches
+    # an LLM call rather than just regex/dimension parsing -- see the
+    # patch guide's 12.4 note. Flag-only (fail-open), same posture as
+    # filter_snippets() elsewhere: a false positive here must never drop
+    # a real pinout, it's logged and left in place for now.
+    guard_result = score_snippet(content, source_label=datasheet_url)
+    if guard_result["flagged"]:
+        print(f"  [hardware_speccer] resolve_inferred_pin: injection_guard "
+              f"flagged datasheet content for {part_label}: "
+              f"{guard_result['reason']}")
     user_prompt = (
         f"Datasheet excerpt for {part_label}:\n{content[:6000]}\n\n"
         f'Which single physical pin/GPIO on {part_label} serves the '

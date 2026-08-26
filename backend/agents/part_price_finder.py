@@ -24,6 +24,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import UTC
 
+from eo.injection_guard import filter_snippets  # NEW — Patch 12
 from eo.price_cache import get_cached_price, set_cached_price
 from utils.llm_client import generate_text
 from utils.web_search import search as web_search
@@ -157,6 +158,7 @@ def find_price(part_name: str, force_refresh: bool = False, chain_override: list
     with ThreadPoolExecutor(max_workers=len(BD_VENDOR_DOMAINS)) as pool:
         for results in pool.map(_search_domain, BD_VENDOR_DOMAINS):
             snippets.extend(results)
+    snippets = filter_snippets(snippets)  # NEW — Patch 12
 
     if not snippets:
         # NEW (T2b, step 17): all six BD vendor domains came back empty
@@ -240,6 +242,7 @@ def _find_international_fallback(part_name: str, chain_override: list, agent_nam
     with ThreadPoolExecutor(max_workers=len(INTL_VENDOR_DOMAINS)) as pool:
         for results in pool.map(_search_domain, INTL_VENDOR_DOMAINS):
             snippets.extend(results)
+    snippets = filter_snippets(snippets)  # NEW — Patch 12
 
     if not snippets:
         result = {"part_name": part_name, "listings": [], "checked_at": _now_iso()}

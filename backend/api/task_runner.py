@@ -67,6 +67,7 @@ from eo.modes import apply_mode
 from eo.note_candidates import (
     get_topic_related_notes,  # NEW — Step 6.11.f (6.11.e's helper)
 )
+from eo.output_guard import check_content_safety  # NEW — Patch 13
 from eo.output_guard import validate_final_answer  # NEW — D3 Part 3
 from eo.panel import staff_task
 from eo.panel_content import (
@@ -525,13 +526,24 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
             # leaking, or structurally-broken answer to chat_store /
             # chat_workspace.
             is_valid, reason = validate_final_answer(organized["answer"])
-            if is_valid:
+            # NEW — Patch 13: content check, independent of the
+            # structural check just above -- both run at this same
+            # choke point since they can fail independently (a
+            # well-formed answer can still be unsafe content, and vice
+            # versa).
+            is_content_safe, content_reason = check_content_safety(
+                organized["answer"], label="final_answer",
+            )
+            if is_valid and is_content_safe:
                 answer = organized["answer"]
                 dedup_notes = organized["dedup_notes"]
             else:
+                combined_reason = "; ".join(
+                    r for r in (reason, content_reason) if r
+                )
                 print(f"  [task_runner] output_organizer answer failed "
                       f"output_guard validation, falling back to "
-                      f"final_role's own answer (fail-open): {reason}")
+                      f"final_role's own answer (fail-open): {combined_reason}")
         except Exception as exc:
             print(f"  [task_runner] output_organizer synthesis failed, "
                   f"falling back to final_role's own answer (fail-open): {exc}")
@@ -860,6 +872,26 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     every caller that doesn't set it (every existing caller, plus any
     non-research task) — identical behavior to today.
     """
+    # NEW — Patch 13: content-safety guard at intake, before this
+    # task_text is persisted to conversation_memory or dispatched to any
+    # role. Deliberately checked before the session_id/append_turn lines
+    # just below -- a flagged task never gets a turn recorded and never
+    # reaches _run_task_inner()'s hire/dispatch machinery at all.
+    is_safe, reason = check_content_safety(task_text, label="task_text")
+    if not is_safe:
+        session_id = session_id or str(uuid.uuid4())
+        print(f"  [task_runner] run_task: task_text failed content-safety "
+              f"guard, returning early (fail-closed): {reason}")
+        return {
+            "decision": {}, "tier": -1, "session_id": session_id,
+            "status": "error", "result": None,
+            # Deliberately vague to the end user (don't echo the
+            # classifier's reasoning back to whoever's testing the
+            # boundary) -- the full reason is already in the server log
+            # line above if you want to look it up.
+            "message": "This request couldn't be processed.",
+        }
+
     session_id = session_id or str(uuid.uuid4())
     conversation_memory.append_turn(session_id, "user", task_text)
     response = _run_task_inner(
