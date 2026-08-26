@@ -89,6 +89,96 @@ def test_never_mutates_inputs():
 
 
 # ---------------------------------------------------------------------------
+# estimate_print_cost_bdt() (Patch K.2, pricing-audit) -- the
+# deterministic, LLM-free print-cost estimate agents/hardware_speccer.py's
+# _populate_prices() and api/routes/workspace_data.py's
+# refresh_part_prices() both call for 3D_PRINT-category parts instead of
+# routing them through part_price_finder.py's market search.
+# ---------------------------------------------------------------------------
+
+_HOUSING_WITH_DIMS = {
+    "id": "housing_1", "category": "3D_PRINT", "generic_name": "Enclosure Housing",
+    "dimensions_mm": {"w": 100, "h": 60, "d": 30},
+}
+_HOUSING_NO_DIMS = {
+    "id": "housing_2", "category": "3D_PRINT", "generic_name": "Sensor Holder",
+}
+_HOUSING_PARTIAL_DIMS = {
+    # Cylindrical shape -- "d" legitimately null per
+    # agents/component_dimension_table.py's own "not applicable to this
+    # shape" convention.
+    "id": "housing_3", "category": "3D_PRINT", "generic_name": "Cylindrical Mount",
+    "dimensions_mm": {"w": 28, "h": 19},
+}
+
+
+def test_full_bounding_box_produces_volume_based_estimate():
+    cost = mm.estimate_print_cost_bdt(_HOUSING_WITH_DIMS)
+    # 100 * 60 * 30 = 180,000 mm^3 * 0.3 fill / 1000 = 54 cm^3
+    # 54 cm^3 * 1.24 g/cm^3 = 66.96 g * 3.5 BDT/g = 234.36 BDT
+    assert cost == round(100 * 60 * 30 * mm._FDM_FILL_FACTOR / 1000 * mm._PLA_DENSITY_G_PER_CM3
+                          * mm.PRINT_COST_BDT_PER_GRAM, 2)
+    assert cost > 0
+
+
+def test_missing_dimensions_falls_back_to_flat_estimate():
+    assert mm.estimate_print_cost_bdt(_HOUSING_NO_DIMS) == mm._FLAT_ESTIMATE_BDT
+
+
+def test_partial_dimensions_falls_back_to_flat_estimate_not_bogus_math():
+    # Only 2 of 3 axes present -- must NOT multiply just w*h and call
+    # that a volume (dimensionally meaningless for a bounding box).
+    assert mm.estimate_print_cost_bdt(_HOUSING_PARTIAL_DIMS) == mm._FLAT_ESTIMATE_BDT
+
+
+def test_non_dict_part_falls_back_to_flat_estimate():
+    assert mm.estimate_print_cost_bdt(None) == mm._FLAT_ESTIMATE_BDT
+    assert mm.estimate_print_cost_bdt("not-a-dict") == mm._FLAT_ESTIMATE_BDT
+
+
+def test_zero_or_negative_axis_falls_back_to_flat_estimate():
+    bad_dims = {"id": "x", "category": "3D_PRINT", "dimensions_mm": {"w": 0, "h": 10, "d": 10}}
+    assert mm.estimate_print_cost_bdt(bad_dims) == mm._FLAT_ESTIMATE_BDT
+
+
+def test_unknown_material_falls_back_to_default_material_cost():
+    default_cost = mm.estimate_print_cost_bdt(_HOUSING_WITH_DIMS, material=DEFAULT_MATERIAL)
+    unknown_cost = mm.estimate_print_cost_bdt(_HOUSING_WITH_DIMS, material="not_a_real_material")
+    assert unknown_cost == default_cost
+
+
+def test_material_override_cost_per_gram_takes_priority_over_flat_rate(monkeypatch):
+    # No MATERIAL_PROPERTIES entry defines cost_per_gram_bdt today -- prove
+    # the LOOKUP itself is override-aware (not just that today's table
+    # happens to lack one) via monkeypatch, same pattern
+    # test_check_min_wall_thickness_reads_min_feature_via_material_override
+    # above already uses for min_feature_mm.
+    patched_properties = dict(MATERIAL_PROPERTIES)
+    patched_properties["tpu_flexible"] = dict(MATERIAL_PROPERTIES["tpu_flexible"])
+    patched_properties["tpu_flexible"]["cost_per_gram_bdt"] = 999.0
+    monkeypatch.setattr(mm, "MATERIAL_PROPERTIES", patched_properties)
+
+    overridden = mm.estimate_print_cost_bdt(_HOUSING_WITH_DIMS, material="tpu_flexible")
+    rigid = mm.estimate_print_cost_bdt(_HOUSING_WITH_DIMS, material=DEFAULT_MATERIAL)
+    assert overridden > rigid  # 999 BDT/g completely dwarfs the 3.5 BDT/g flat rate
+    assert overridden == round(100 * 60 * 30 * mm._FDM_FILL_FACTOR / 1000 * mm._PLA_DENSITY_G_PER_CM3 * 999.0, 2)
+
+
+def test_never_makes_network_or_llm_call(monkeypatch):
+    # Deliberately break generate_text so the test fails loudly if
+    # estimate_print_cost_bdt() ever grows an LLM dependency -- this must
+    # stay a pure, instant computation (see its own docstring).
+    import utils.llm_client as llm_client_mod
+
+    def _boom(*a, **k):
+        raise AssertionError("estimate_print_cost_bdt() must never call generate_text()")
+
+    monkeypatch.setattr(llm_client_mod, "generate_text", _boom, raising=False)
+    mm.estimate_print_cost_bdt(_HOUSING_WITH_DIMS)
+    mm.estimate_print_cost_bdt(_HOUSING_NO_DIMS)
+
+
+# ---------------------------------------------------------------------------
 # MATERIAL_PROPERTIES table itself (Patch E.1) -- sanity checks the rest
 # of this file's wiring assertions lean on.
 # ---------------------------------------------------------------------------

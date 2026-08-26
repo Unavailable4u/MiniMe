@@ -44,7 +44,7 @@ from agents.calendar_agent import IntegrationNotConnectedError
 from agents.correction_locator import locate_correction
 from agents.exporter import SUPPORTED_FORMATS as EXPORTABLE_FORMATS
 from agents.exporter import export_artifact
-from agents.part_price_finder import find_price
+from agents.part_price_finder import _now_iso, find_price
 from api.deps import require_auth
 from eo import (
     chat_workspace,
@@ -54,6 +54,8 @@ from eo import (
     study_progress,
     workspace_facts,
 )
+from eo.mech_material import estimate_print_cost_bdt, resolve_material
+from eo.price_outliers import flag_price_outliers
 from graph.adapters import chat_to_artifact
 
 router = APIRouter()
@@ -377,8 +379,37 @@ def refresh_part_prices(ws_id: str, req: RefreshPricesRequest,
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown workspace_id")
 
+    # Patch K.2 (pricing-audit): mirror-image fix to
+    # agents/hardware_speccer.py's _populate_prices() -- this endpoint is
+    # the OTHER real dispatch site for find_price() (see that function's
+    # own docstring on "initial pricing and a later refresh never
+    # disagree about which vendor a part shows"). Without this, a
+    # 3D_PRINT part correctly priced via estimated_print_cost on initial
+    # generation would get silently overwritten with a real (near-always
+    # empty, or worse, spuriously matched) market search the moment
+    # someone clicks "Refresh prices" -- reintroducing the exact bug this
+    # patch fixes, just on the refresh path instead of the generation
+    # path. archetype is read back off the same mech.archetype stash
+    # hardware_speccer.py's own generate_hardware_spec() already writes
+    # (see get_device_spec() above), so a wearable's strap/band parts
+    # still resolve to "tpu_flexible" on refresh, not just on first
+    # generation.
+    archetype = (workspace_facts.get_facts(ws_id).get("custom") or {}).get("mech", {}).get("archetype")
+
     updated = []
     for part in req.parts:
+        if part.get("category") == "3D_PRINT":
+            material = resolve_material(part, archetype)
+            updated.append({
+                **part,
+                "estimated_price_bdt": estimate_print_cost_bdt(part, material=material),
+                "price_source": "estimated_print_cost",
+                "vendor_name": None,
+                "vendor_url": None,
+                "price_checked_at": _now_iso(),
+            })
+            continue
+
         result = find_price(part["name"], force_refresh=req.force_refresh)
         listing = result["listings"][0] if result["listings"] else None
         updated.append({
@@ -387,7 +418,16 @@ def refresh_part_prices(ws_id: str, req: RefreshPricesRequest,
             "vendor_name": listing.get("vendor") if listing else None,
             "vendor_url": listing.get("url") if listing else None,
             "price_checked_at": result["checked_at"],
+            "price_source": "market_listing" if listing else part.get("price_source"),
         })
+
+    # Patch K.3 (pricing-audit): same "flag, don't drop" pass
+    # agents/hardware_speccer.py's generate_hardware_spec() already runs
+    # after its own _populate_prices() call -- run here too so a refresh
+    # re-evaluates flags against the freshly refreshed price set instead
+    # of leaving stale flags (or a stale absence of flags) from
+    # whatever prices existed before this refresh.
+    updated = flag_price_outliers(updated)
 
     # Merge into the existing custom bucket rather than overwriting it —
     # `custom` already holds unrelated data (e.g. the UptimeRobot API key

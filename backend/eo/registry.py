@@ -1767,6 +1767,23 @@ ROLE_ALIASES = {
         "electronics_designer", "electronics_engineer", "electronics_speccer",
         "component_selector", "parts_speccer", "bom_writer",
         "bill_of_materials_writer", "device_speccer",
+        # Patch L.1: a routing_decision log surfaced a classifier
+        # suggesting "cad_designer" for a 3D-mechanical-model request,
+        # which only cleared resolve_role() via the fuzzy fallback
+        # (cutoff=0.82) rather than an exact alias match. The log's own
+        # suggested fix ("Consider adding 'cad_designer' to
+        # ROLE_ALIASES['schema_diagrammer']") was checked and rejected:
+        # schema_diagrammer is an ER/database-diagram role (see its own
+        # alias list just below -- "database_designer", "erd_designer",
+        # etc.), not a mechanical/CAD one. There is no separate
+        # mech_modeler role in REAL_ACTION_ROLES either.
+        # hardware_speccer is the actual real-action module that
+        # produces mech/CAD-adjacent output in this codebase -- it
+        # writes workspace_facts.custom["mech"] (enclosure, placements,
+        # material) via run_hardware_speccer(), the same "mech" sub-view
+        # Blueprint's MechView.jsx renders. "cad_designer" belongs here,
+        # not on schema_diagrammer.
+        "cad_designer",
     ],
     "architecture_diagrammer": [
         "architecture_designer", "system_architect", "system_diagrammer",

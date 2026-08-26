@@ -143,6 +143,133 @@ def resolve_material(part: dict, archetype: dict) -> str:
     return DEFAULT_MATERIAL
 
 
+# ---------------------------------------------------------------------------
+# Patch K.2 (MiniMe reliability guide, Phase K -- Pricing Pipeline): a
+# 3D_PRINT-category BOM part (enclosure housing/lid, brackets, sensor
+# holders -- anything printed, not purchased) has no real-world retail
+# listing for agents/part_price_finder.py's find_price() to ever
+# legitimately return. Routing it through that market search anyway
+# wastes an LLM extraction call per part AND can surface a stray,
+# unrelated retail hit as if it were a real vendor price for something
+# nobody sells. estimate_print_cost_bdt() below is the deterministic,
+# LLM-free replacement agents/hardware_speccer.py's _populate_prices()
+# and api/routes/workspace_data.py's refresh_part_prices() both call
+# instead, for exactly this category -- same "pure function first"
+# build order this package's other estimation helpers
+# (resolve_material() above, eo/mech_mass.py's estimate_mass()) already
+# follow.
+# ---------------------------------------------------------------------------
+
+# Phase E's own MATERIAL_PROPERTIES (eo/enclosure_spec.py) has no
+# cost-per-gram key yet -- per this patch's own guide wording ("reusing
+# Phase E's own MATERIAL_PROPERTIES cost-per-gram if present, else a
+# documented flat estimate"), this is that documented flat estimate: a
+# rough, approximate PLA filament retail cost in Bangladesh (roughly
+# 1200-1500 BDT/kg for a hobbyist-grade spool) plus a modest per-gram
+# allowance for printer wear/electricity, rounded to one easy-to-audit
+# number. _cost_per_gram_bdt() below already checks a material's own
+# MATERIAL_PROPERTIES override first, so a future patch that adds a real
+# "cost_per_gram_bdt" key to a specific material entry (e.g. tpu_flexible
+# costs more per gram than pla_rigid in real life) takes priority over
+# this global fallback without needing any change here.
+PRINT_COST_BDT_PER_GRAM = 3.5
+
+# FDM prints are never solid -- typical hobbyist slicer settings (15-20%
+# infill, a handful of perimeter shells) put actual extruded material at
+# roughly a third of a part's bounding-box volume for the small,
+# thin-walled mechanical parts this BOM category covers (enclosures,
+# brackets, mounts). A coarse, documented approximation, not a real
+# slice -- good enough to rank a print's cost sanely against a purchased
+# part's real price, not good enough to quote a customer.
+_FDM_FILL_FACTOR = 0.3
+
+# PLA density, g/cm^3 -- the same "every structural part is implicitly
+# one rigid, generic 3D-printable plastic" baseline this whole Phase E
+# package already assumes (see this module's own docstring above, and
+# eo/enclosure_spec.py's DEFAULT_MATERIAL = "pla_rigid").
+_PLA_DENSITY_G_PER_CM3 = 1.24
+
+# Used whenever a part has no full {"w","h","d"} bounding box to compute
+# a volume from -- no curated-table dimension match yet, an
+# LLM-estimated sizing that only resolved some axes, or a Cylindrical
+# part whose "d" is legitimately null per
+# agents/component_dimension_table.py's own "null means not applicable
+# to this shape" convention. A small, clearly-labeled placeholder rather
+# than refusing to price the line item, or reaching for a network/LLM
+# call just to get a number -- same "never leave a BOM line silently
+# unresolved" posture eo/mech_mass.py's own estimate_mass() fallback
+# already takes for mass, kept LLM-free here so this stays cheap and
+# instant across a whole parts list.
+_FLAT_ESTIMATE_BDT = 45.0
+
+
+def _cost_per_gram_bdt(material: str) -> float:
+    """A material's own MATERIAL_PROPERTIES override dict wins if it
+    ever defines a "cost_per_gram_bdt" key (none do yet -- see this
+    section's own module-level comment) -- falls back to the documented
+    flat PRINT_COST_BDT_PER_GRAM otherwise. Mirrors MATERIAL_PROPERTIES'
+    own "partial override" convention (Patch E.1's docstring) rather
+    than requiring every material entry to define a cost the moment this
+    function starts existing.
+    """
+    overrides = MATERIAL_PROPERTIES.get(material) or {}
+    cost = overrides.get("cost_per_gram_bdt")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        return cost
+    return PRINT_COST_BDT_PER_GRAM
+
+
+def estimate_print_cost_bdt(part: dict, material: str = None) -> float:
+    """K.2 entry point. Deterministic, LLM-free per-unit estimate (BDT)
+    of what a single 3D_PRINT-category BOM part costs to print --
+    multiplying by `qty` is the caller's job, same as every other price
+    source in this pipeline (part_price_finder.py's own listings are
+    per-unit too).
+
+    `material`: a MATERIAL_PROPERTIES key (typically resolve_material()'s
+    own return value) when the caller has archetype context to resolve
+    one -- agents/hardware_speccer.py's _populate_prices() does. None
+    (the default) when it doesn't -- api/routes/workspace_data.py's
+    refresh_part_prices() has no archetype threaded through it -- in
+    which case this falls back to DEFAULT_MATERIAL, same fallback
+    resolve_material() itself uses for a missing/malformed archetype.
+    Any value that isn't a real MATERIAL_PROPERTIES key (typo, stale
+    caller) falls back the same way rather than raising a KeyError.
+
+    Uses `part["dimensions_mm"]` (the same `{"w","h","d"}` shape
+    agents/component_dimension_table.py's _row_to_match() and
+    agents/hardware_speccer.py's G1c sizing already produce) as a
+    bounding-box volume proxy -- but ONLY when all three axes are
+    present as positive numbers. A part with just one or two axes (e.g.
+    a Cylindrical part's "d", legitimately null per that module's own
+    convention) has no well-defined bounding-box volume to multiply
+    partial axes into, so it takes the flat-estimate path below instead
+    of producing a dimensionally meaningless number.
+
+    Falls back to `_FLAT_ESTIMATE_BDT` whenever `part`/`dimensions_mm`
+    is missing, malformed, or incomplete in the way described above --
+    never raises, never makes a network or LLM call, same fail-safe
+    posture every other estimation function in this package
+    (resolve_material() above, eo/mech_mass.py's estimate_mass())
+    already holds itself to.
+    """
+    resolved_material = material if material in MATERIAL_PROPERTIES else DEFAULT_MATERIAL
+    cost_per_gram = _cost_per_gram_bdt(resolved_material)
+
+    dims = part.get("dimensions_mm") if isinstance(part, dict) else None
+    if not isinstance(dims, dict):
+        return _FLAT_ESTIMATE_BDT
+
+    axes = [dims.get(k) for k in ("w", "h", "d")]
+    if not all(isinstance(a, (int, float)) and not isinstance(a, bool) and a > 0 for a in axes):
+        return _FLAT_ESTIMATE_BDT
+
+    volume_mm3 = axes[0] * axes[1] * axes[2]
+    volume_cm3 = (volume_mm3 * _FDM_FILL_FACTOR) / 1000.0
+    mass_g = volume_cm3 * _PLA_DENSITY_G_PER_CM3
+    return round(mass_g * cost_per_gram, 2)
+
+
 if __name__ == "__main__":
     _wearable_archetype = {"enclosure_mode": "full", "mobility_type": "wearable"}
     _static_archetype = {"enclosure_mode": "full", "mobility_type": "static"}
