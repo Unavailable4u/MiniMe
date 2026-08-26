@@ -95,6 +95,46 @@ def test_every_curated_alias_resolves_to_its_canonical_real_action_role():
             )
 
 
+def test_cad_designer_resolves_exactly_to_hardware_speccer():
+    # Patch L.1: before this alias existed, "cad_designer" only ever
+    # cleared resolve_role() via the fuzzy fallback (a log line +
+    # cutoff=0.82 guess), not an exact match. This asserts the specific,
+    # confirmed-correct target the guide's own log suggestion (verbatim:
+    # schema_diagrammer) was checked against and rejected -- schema_diagrammer
+    # is an ER/database-diagram role, semantically wrong for a
+    # 3D-mechanical-model request; hardware_speccer is the module that
+    # actually produces mech/CAD-adjacent output (workspace_facts.custom["mech"]).
+    assert "cad_designer" in ROLE_ALIASES["hardware_speccer"]
+    assert resolve_role("cad_designer") == REAL_ACTION_ROLES["hardware_speccer"]
+    assert resolve_role("cad_designer") != REAL_ACTION_ROLES["schema_diagrammer"]
+
+
+def test_cad_designer_no_longer_needs_the_fuzzy_fallback():
+    # Confirms the specific regression this patch closes: "cad_designer"
+    # now resolves via the exact ROLE_ALIASES lookup (resolve_role()'s
+    # step 2), so the fuzzy helper (step 3) is never even reached for
+    # it -- no `cutoff=0.82` log line, no fuzzy-match uncertainty.
+    # Verified directly against resolve_role()'s own resolution order:
+    # the normalized label must already be an exact key in the alias
+    # lookup table step 2 checks, which is what makes step 3
+    # unreachable for this input.
+    from eo.registry import _ALIAS_LOOKUP, _normalize_role_label
+    assert _normalize_role_label("cad_designer") in _ALIAS_LOOKUP
+    assert _ALIAS_LOOKUP[_normalize_role_label("cad_designer")] == "hardware_speccer"
+
+
+def test_cad_designer_resolution_prints_no_fuzzy_match_log_line(capsys):
+    # _fuzzy_resolve_specialized_role() prints its own log line
+    # ("fuzzy-matched '...' -> '...' ... Consider adding ...") only when
+    # IT is actually invoked and finds a match. Since resolve_role()
+    # short-circuits at the exact-alias step for "cad_designer" now,
+    # that print must never fire for this input -- the literal "no
+    # fuzzy-match log line" half of this patch's own "Done when".
+    resolve_role("cad_designer")
+    captured = capsys.readouterr()
+    assert "fuzzy-matched" not in captured.out
+
+
 # ---------------------------------------------------------------------------
 # Conservative fuzzy-match fallback (resolution order step 3)
 # ---------------------------------------------------------------------------

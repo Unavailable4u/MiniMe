@@ -1,0 +1,619 @@
+diff --git a/backend/agents/hardware_speccer.py b/backend/agents/hardware_speccer.py
+index c1e5905..85d3dc8 100644
+--- a/backend/agents/hardware_speccer.py
++++ b/backend/agents/hardware_speccer.py
+@@ -2379,6 +2379,15 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
+ 
+     spec["parts"] = parts
+     spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id, archetype=archetype)
++    # Patch K.3 (pricing-audit): runs AFTER every part has its price (or
++    # confirmed lack of one) so the median/duplicate-sibling comparison
++    # sees the complete, final BOM -- never partially-priced. Flags,
++    # never drops -- see eo/price_outliers.py's own module docstring.
++    # Deferred import -- same circular-import reasoning
++    # _populate_prices()'s own deferred eo.* imports above already give
++    # for this identical module.
++    from eo.price_outliers import flag_price_outliers
++    spec["parts"] = flag_price_outliers(spec["parts"])
+ 
+     # Fill any mech.placements gaps the model left for electrical parts
+     # (see _ensure_electrical_placements' own docstring) -- must run
+diff --git a/backend/api/routes/workspace_data.py b/backend/api/routes/workspace_data.py
+index 84b27bf..a9af585 100644
+--- a/backend/api/routes/workspace_data.py
++++ b/backend/api/routes/workspace_data.py
+@@ -55,6 +55,7 @@ from eo import (
+     workspace_facts,
+ )
+ from eo.mech_material import estimate_print_cost_bdt, resolve_material
++from eo.price_outliers import flag_price_outliers
+ from graph.adapters import chat_to_artifact
+ 
+ router = APIRouter()
+@@ -420,6 +421,14 @@ def refresh_part_prices(ws_id: str, req: RefreshPricesRequest,
+             "price_source": "market_listing" if listing else part.get("price_source"),
+         })
+ 
++    # Patch K.3 (pricing-audit): same "flag, don't drop" pass
++    # agents/hardware_speccer.py's generate_hardware_spec() already runs
++    # after its own _populate_prices() call -- run here too so a refresh
++    # re-evaluates flags against the freshly refreshed price set instead
++    # of leaving stale flags (or a stale absence of flags) from
++    # whatever prices existed before this refresh.
++    updated = flag_price_outliers(updated)
++
+     # Merge into the existing custom bucket rather than overwriting it —
+     # `custom` already holds unrelated data (e.g. the UptimeRobot API key
+     # from deploy_agent.py's set_uptimerobot_api_key()). Read-modify-write
+diff --git a/backend/eo/price_outliers.py b/backend/eo/price_outliers.py
+new file mode 100644
+index 0000000..13ee8e2
+--- /dev/null
++++ b/backend/eo/price_outliers.py
+@@ -0,0 +1,208 @@
++"""
++eo/price_outliers.py — Patch K.3 (MiniMe reliability guide, Phase K --
++Pricing Pipeline): "After all part prices are collected, flag (not
++silently drop) any line item whose price is more than ~5x the median of
++same-category items, or whose price is missing while its duplicate-part
++sibling ... has a price." This is the pricing-summary assembly step the
++guide's own K.3 wording refers to -- nothing wired prices into any kind
++of summary/aggregate before this patch (agents/hardware_speccer.py's own
++_populate_prices() and api/routes/workspace_data.py's
++refresh_part_prices() both just attach a price to each part and stop;
++the Parts tab total itself is computed client-side, PartsTable.jsx's own
++plain `.reduce()`).
++
++Same "pure function first, plain dict/list in and out, no LLM, no
++network" build order every other eo/ estimation module in this package
++already establishes (eo/mech_material.py's resolve_material()/
++estimate_print_cost_bdt(), eo/mech_mass.py's lookup_mass()) -- this
++module only ever looks at prices/names/categories already sitting on
++`parts`, never fetches or computes a new price itself.
++
++Two independent flag conditions, per the guide's own "Change" wording
++-- a part can only ever match the SECOND one (missing a price), never
++the first (having an outlier price), so there's no real overlap/
++precedence question between them in practice:
++
++1. Outlier: `estimated_price_bdt > 5 * category_median`, where
++   `category_median` is the median of every OTHER priced item in
++   the same `category` (see _category_medians() below for exactly
++   which items count). A category with fewer than two priced items
++   has no meaningful median to compare against and never flags
++   anything.
++
++2. Asymmetric duplicate: a part with no price whose "duplicate-part
++   sibling" (identical `category` + name once a standalone "left"/
++   "right" word is stripped -- see _sibling_key() below) DOES have a
++   price. Deliberately narrow: only whole-word "left"/"right" are
++   stripped, not "l"/"r" abbreviations or any other side-indicating
++   vocabulary -- same "narrow, documented keyword match, not a
++   guessed-at fuzzy rule" posture eo/mech_material.py's own
++   _is_strap_or_band() already holds itself to for a comparable
++   free-text matching job.
++
++Sets exactly two fields on every part it processes, per the guide's own
++"surface flagged items to the UI with a badge" instruction --
++`price_flagged` (bool) and `price_flag_reason` (str | None, a
++human-readable sentence for a UI tooltip/badge title, not a bare error
++code) -- overwriting whatever those two fields held before, so a part
++that WAS flagged on a stale, unrefreshed price set correctly clears the
++flag once a fresh price run resolves it. Every other field on each part
++is left untouched.
++
++Mutates `parts` in place AND returns it, same convention
++agents/hardware_speccer.py's own _populate_prices() already establishes
++for this exact pricing pipeline (a caller can use either the return
++value or the list it already held a reference to).
++"""
++import re
++import statistics
++
++# Per this module's own docstring: ~5x is the guide's literal threshold
++# ("more than ~5x the median"). Kept as a named constant, not a magic
++# number inline, so a future patch adjusting the sensitivity has exactly
++# one place to change it.
++OUTLIER_RATIO_THRESHOLD = 5.0
++
++# Whole-word only (via \b) so a part legitimately named "Leftover
++# Bracket Stock" or "Right-Angle Header" doesn't get its real
++# distinguishing word stripped out and collide with an unrelated part --
++# same "cheap keyword check, not a guessed-at fuzzy rule" scope this
++# docstring's own module-level comment above already flags.
++_SIDE_WORD_RE = re.compile(r"\b(left|right)\b", re.IGNORECASE)
++
++
++def _priced_value(part):
++    """A part's own price as a positive float, or None for anything
++    that isn't a genuine priced value yet (missing key, null, zero,
++    negative, or a non-numeric value that slipped past upstream
++    validation -- same "never trust a field's type, always re-check"
++    posture PartsTable.jsx's own T2b bug-fix comment already documents
++    for this identical field on the frontend side).
++    """
++    price = part.get("estimated_price_bdt") if isinstance(part, dict) else None
++    if isinstance(price, bool) or not isinstance(price, (int, float)):
++        return None
++    return price if price > 0 else None
++
++
++def _sibling_key(part):
++    """(category, normalized_name) grouping key for asymmetric-duplicate
++    detection -- two parts share a key when they're the same category
++    and their own `name` is identical once a standalone "left"/"right"
++    word is removed (case/whitespace-insensitive), e.g. "Left Motor
++    Mounting Bracket" and "Right Motor Mounting Bracket" both normalize
++    to "motor mounting bracket".
++
++    Falls back to `generic_name` when `name` is missing/blank, same
++    "canonical generic_name/aliases" fallback order eo/mech_material.py's
++    own _is_strap_or_band() already uses for a comparable free-text
++    match -- a part with neither field returns a key built from its own
++    `id` instead, so it never spuriously collides with another
++    similarly-nameless part.
++    """
++    category = part.get("category") if isinstance(part, dict) else None
++    name = None
++    if isinstance(part, dict):
++        raw_name = part.get("name")
++        name = raw_name if isinstance(raw_name, str) and raw_name.strip() else None
++        if name is None:
++            raw_generic = part.get("generic_name")
++            name = raw_generic if isinstance(raw_generic, str) and raw_generic.strip() else None
++
++    if name is None:
++        # No usable free-text name at all -- key off `id` so this part
++        # only ever "groups" with itself, never falsely matches another
++        # equally-nameless part.
++        return (category, f"__no_name__:{part.get('id') if isinstance(part, dict) else id(part)}")
++
++    normalized = _SIDE_WORD_RE.sub("", name)
++    normalized = " ".join(normalized.split()).lower()
++    return (category, normalized)
++
++
++def _category_medians(parts):
++    """{category: median_price} for every category that has at least
++    two priced items -- a category with 0 or 1 priced items has no
++    meaningful median to flag anything against, so it's simply absent
++    from the returned dict (callers treat a missing category the same
++    as "never flag anything here").
++    """
++    by_category = {}
++    for part in parts:
++        if not isinstance(part, dict):
++            continue
++        price = _priced_value(part)
++        if price is None:
++            continue
++        by_category.setdefault(part.get("category"), []).append(price)
++
++    return {
++        category: statistics.median(prices)
++        for category, prices in by_category.items()
++        if len(prices) >= 2
++    }
++
++
++def flag_price_outliers(parts: list) -> list:
++    """K.3 entry point. See this module's own docstring above for the
++    two flag conditions. Never raises: a malformed `parts` (not a list,
++    or containing non-dict entries) is treated the same as "no anomalies
++    to find" for the offending entries, same fail-safe posture every
++    other pure function in this pricing pipeline already holds itself
++    to (eo/mech_material.py's resolve_material()/
++    estimate_print_cost_bdt()).
++    """
++    if not isinstance(parts, list):
++        return parts
++
++    medians = _category_medians(parts)
++
++    # Group by sibling key ONLY (not also requiring >= 2 members up
++    # front) so a lone part with no sibling at all correctly never
++    # flags -- same "absence is the safe default" reasoning
++    # _category_medians() above already applies for a too-small
++    # category.
++    sibling_groups = {}
++    for part in parts:
++        if not isinstance(part, dict):
++            continue
++        sibling_groups.setdefault(_sibling_key(part), []).append(part)
++
++    for part in parts:
++        if not isinstance(part, dict):
++            continue
++
++        price = _priced_value(part)
++        flagged = False
++        reason = None
++
++        if price is not None:
++            median = medians.get(part.get("category"))
++            if median is not None and median > 0 and price > OUTLIER_RATIO_THRESHOLD * median:
++                ratio = price / median
++                flagged = True
++                reason = (
++                    f"Price is {ratio:.1f}\u00d7 the {part.get('category')} category "
++                    f"median (\u09f3{median:,.0f}) \u2014 verify before trusting this figure."
++                )
++        else:
++            # Only relevant when THIS part has no price of its own --
++            # an already-priced part is never flagged as an "asymmetric
++            # duplicate" just because a sibling also happens to be priced.
++            siblings = sibling_groups.get(_sibling_key(part), [])
++            priced_sibling = next(
++                (sib for sib in siblings if sib is not part and _priced_value(sib) is not None),
++                None,
++            )
++            if priced_sibling is not None:
++                flagged = True
++                sib_price = _priced_value(priced_sibling)
++                reason = (
++                    f"No price found, but \u2018{priced_sibling.get('name')}\u2019 "
++                    f"(same part, other side) has \u09f3{sib_price:,.0f}."
++                )
++
++        part["price_flagged"] = flagged
++        part["price_flag_reason"] = reason
++
++    return parts
+diff --git a/backend/tests/unit/test_price_outlier_flagging.py b/backend/tests/unit/test_price_outlier_flagging.py
+new file mode 100644
+index 0000000..2fa73e7
+--- /dev/null
++++ b/backend/tests/unit/test_price_outlier_flagging.py
+@@ -0,0 +1,215 @@
++"""
++tests/unit/test_price_outlier_flagging.py — Patch K.3/K.4 (pricing-audit):
++covers eo/price_outliers.py's flag_price_outliers() -- the pricing-
++summary flagging step wired into agents/hardware_speccer.py's
++generate_hardware_spec() and api/routes/workspace_data.py's
++refresh_part_prices(), both right after their own _populate_prices()-
++equivalent pricing pass.
++
++Per the guide's own "Done when": a dataset with one outlier price
++(>=5x category median) and one asymmetric duplicate-part pair (one
++priced, one not) both come back flagged; a dataset with no such
++anomalies produces no flags.
++"""
++from eo.price_outliers import flag_price_outliers
++
++
++def _part(id, name, category, price, **extra):
++    return {"id": id, "name": name, "category": category,
++            "estimated_price_bdt": price, "qty": 1, **extra}
++
++
++# ---------------------------------------------------------------------------
++# Outlier detection
++# ---------------------------------------------------------------------------
++
++def test_outlier_price_is_flagged():
++    parts = [
++        _part("r1", "10k Resistor", "module", 20),
++        _part("r2", "10uF Capacitor", "module", 22),
++        _part("r3", "Suspiciously Expensive Module", "module", 25000),  # >5x median (21)
++    ]
++    result = flag_price_outliers(parts)
++    by_id = {p["id"]: p for p in result}
++
++    assert by_id["r3"]["price_flagged"] is True
++    assert "median" in by_id["r3"]["price_flag_reason"]
++    assert by_id["r1"]["price_flagged"] is False
++    assert by_id["r2"]["price_flagged"] is False
++
++
++def test_price_exactly_at_threshold_is_not_flagged():
++    # median of [10, 10] = 10; 5x = 50 exactly -- guide says "more than
++    # ~5x", so exactly 5x must NOT flag (strictly greater-than).
++    parts = [
++        _part("a", "A", "module", 10),
++        _part("b", "B", "module", 10),
++        _part("c", "C", "module", 50),
++    ]
++    result = flag_price_outliers(parts)
++    assert next(p for p in result if p["id"] == "c")["price_flagged"] is False
++
++
++def test_price_just_over_threshold_is_flagged():
++    parts = [
++        _part("a", "A", "module", 10),
++        _part("b", "B", "module", 10),
++        _part("c", "C", "module", 50.01),
++    ]
++    result = flag_price_outliers(parts)
++    assert next(p for p in result if p["id"] == "c")["price_flagged"] is True
++
++
++def test_no_anomalies_produces_no_flags():
++    parts = [
++        _part("m1", "ESP32 DevKit", "mcu", 1200),
++        _part("s1", "BME280", "sensor", 450),
++        _part("s2", "DHT22", "sensor", 380),
++        _part("h1", "Enclosure Housing", "3D_PRINT", 90, price_source="estimated_print_cost"),
++        _part("l1", "Enclosure Lid", "3D_PRINT", 60, price_source="estimated_print_cost"),
++    ]
++    result = flag_price_outliers(parts)
++    assert all(p["price_flagged"] is False for p in result)
++    assert all(p["price_flag_reason"] is None for p in result)
++
++
++def test_category_with_fewer_than_two_priced_items_never_flags():
++    # Single priced item in "power" -- no median to compare against.
++    parts = [_part("p1", "Battery Pack", "power", 5000)]
++    result = flag_price_outliers(parts)
++    assert result[0]["price_flagged"] is False
++
++
++def test_different_categories_use_separate_medians():
++    # 5000 would be a wild outlier among "module" prices, but this is
++    # its own "power" category with its own (much higher) median -- must
++    # not be flagged just because it's expensive in absolute terms.
++    parts = [
++        _part("mod1", "Relay Module", "module", 40),
++        _part("mod2", "RTC Module", "module", 45),
++        _part("pw1", "Lithium Battery", "power", 4800),
++        _part("pw2", "Battery Charger", "power", 5200),
++    ]
++    result = flag_price_outliers(parts)
++    assert all(p["price_flagged"] is False for p in result)
++
++
++# ---------------------------------------------------------------------------
++# Asymmetric duplicate-sibling detection
++# ---------------------------------------------------------------------------
++
++def test_asymmetric_duplicate_pair_flags_the_unpriced_one():
++    parts = [
++        _part("bracket_l", "Left Motor Mounting Bracket", "3D_PRINT", 0, price_source="estimated_print_cost"),
++        _part("bracket_r", "Right Motor Mounting Bracket", "3D_PRINT", 120, price_source="estimated_print_cost"),
++    ]
++    # Simulate "no price found" as the real pipeline would represent it
++    # (None, not 0) -- _part()'s helper takes a raw price value.
++    parts[0]["estimated_price_bdt"] = None
++
++    result = flag_price_outliers(parts)
++    by_id = {p["id"]: p for p in result}
++
++    assert by_id["bracket_l"]["price_flagged"] is True
++    assert "Right Motor Mounting Bracket" in by_id["bracket_l"]["price_flag_reason"]
++    # The priced sibling itself is NOT flagged just because its
++    # counterpart lacks a price.
++    assert by_id["bracket_r"]["price_flagged"] is False
++
++
++def test_symmetric_pair_both_priced_is_not_flagged():
++    parts = [
++        _part("bracket_l", "Left Motor Mounting Bracket", "3D_PRINT", 110, price_source="estimated_print_cost"),
++        _part("bracket_r", "Right Motor Mounting Bracket", "3D_PRINT", 120, price_source="estimated_print_cost"),
++    ]
++    result = flag_price_outliers(parts)
++    assert all(p["price_flagged"] is False for p in result)
++
++
++def test_symmetric_pair_both_unpriced_is_not_flagged():
++    parts = [
++        _part("bracket_l", "Left Motor Mounting Bracket", "3D_PRINT", None),
++        _part("bracket_r", "Right Motor Mounting Bracket", "3D_PRINT", None),
++    ]
++    result = flag_price_outliers(parts)
++    assert all(p["price_flagged"] is False for p in result)
++
++
++def test_different_categories_never_match_as_siblings():
++    # Same normalized name, different category -- must not be treated as
++    # duplicate-part siblings of each other.
++    parts = [
++        _part("x1", "Left Sensor Mount", "3D_PRINT", 80, price_source="estimated_print_cost"),
++        _part("x2", "Right Sensor Mount", "MISC", None),
++    ]
++    result = flag_price_outliers(parts)
++    assert all(p["price_flagged"] is False for p in result)
++
++
++def test_leftover_is_not_mistaken_for_a_side_word():
++    # Whole-word match only -- "Leftover" must not be treated as
++    # containing "left".
++    parts = [
++        _part("a", "Leftover Bracket Stock", "MISC", 30),
++        _part("b", "Right Bracket Stock", "MISC", None),
++    ]
++    result = flag_price_outliers(parts)
++    # Different normalized names ("leftover bracket stock" vs "bracket
++    # stock") -- not treated as siblings, so the unpriced one stays
++    # unflagged.
++    assert all(p["price_flagged"] is False for p in result)
++
++
++def test_falls_back_to_generic_name_when_name_missing():
++    parts = [
++        {"id": "a", "category": "3D_PRINT", "generic_name": "Left Wheel Mount",
++         "estimated_price_bdt": 60, "qty": 1, "price_source": "estimated_print_cost"},
++        {"id": "b", "category": "3D_PRINT", "generic_name": "Right Wheel Mount",
++         "estimated_price_bdt": None, "qty": 1},
++    ]
++    result = flag_price_outliers(parts)
++    by_id = {p["id"]: p for p in result}
++    assert by_id["b"]["price_flagged"] is True
++
++
++# ---------------------------------------------------------------------------
++# Stale-flag clearing + fail-safe input handling
++# ---------------------------------------------------------------------------
++
++def test_stale_flag_is_cleared_on_reevaluation():
++    # A part that was flagged in a PREVIOUS run (stale field already on
++    # it) but no longer qualifies must have both fields overwritten, not
++    # left stuck true from before -- per the module's own docstring.
++    parts = [
++        _part("a", "A", "module", 10, price_flagged=True, price_flag_reason="stale"),
++        _part("b", "B", "module", 12),
++    ]
++    result = flag_price_outliers(parts)
++    assert result[0]["price_flagged"] is False
++    assert result[0]["price_flag_reason"] is None
++
++
++def test_non_list_input_returned_unchanged():
++    assert flag_price_outliers(None) is None
++    assert flag_price_outliers("not-a-list") == "not-a-list"
++
++
++def test_non_dict_entries_are_skipped_without_raising():
++    parts = [_part("a", "A", "module", 10), "garbage-entry", None]
++    result = flag_price_outliers(parts)
++    assert result[0]["price_flagged"] is False  # unaffected
++    assert result[1] == "garbage-entry"
++    assert result[2] is None
++
++
++def test_zero_and_negative_prices_treated_as_unpriced():
++    parts = [
++        _part("a", "Left Widget", "MISC", 0),
++        _part("b", "Right Widget", "MISC", -5),
++        _part("c", "Center Widget", "MISC", 40),
++    ]
++    result = flag_price_outliers(parts)
++    # None of these should crash or produce a nonsensical median/ratio;
++    # 0/negative both count as "no price" so no duplicate-sibling match
++    # exists between a and b (neither is "priced").
++    assert all(isinstance(p["price_flagged"], bool) for p in result)
+diff --git a/frontend/app/components/PartsTable.jsx b/frontend/app/components/PartsTable.jsx
+index 5c482d5..2a60efe 100644
+--- a/frontend/app/components/PartsTable.jsx
++++ b/frontend/app/components/PartsTable.jsx
+@@ -1,5 +1,5 @@
+ "use client";
+-import { RefreshCw, BadgeCheck } from "lucide-react";
++import { RefreshCw, BadgeCheck, AlertTriangle } from "lucide-react";
+ 
+ // device_spec.parts[].category -> badge color. Same palette as
+ // WiringGraph.jsx's TYPE_COLORS (wiring nodes use the identical category
+@@ -52,6 +52,24 @@ const SOURCE_LABELS = {
+  * `dimensions_mm` isn't rendered by this table today -- MechView.jsx is
+  * where physical sizing actually matters.
+  *
++ * Patch K.2: a part may also carry `price_source` ("market_listing" |
++ * "estimated_print_cost") -- an "estimated_print_cost" part
++ * (agents/eo/mech_material.py's deterministic 3D-print cost estimate)
++ * has no real vendor, so `vendor_url`/`vendor_name` are always null for
++ * it; this table shows a plain (non-link) "Est. print cost" label for
++ * that case instead of the vendor-link treatment below, rather than
++ * rendering a dead link to nowhere with a blank vendor line under it.
++ *
++ * Patch K.3: a part may also carry `price_flagged` (bool) +
++ * `price_flag_reason` (string) -- eo/price_outliers.py flags (never
++ * drops) a price that's a >5x outlier against its own category's
++ * median, or that's missing while a same-part "other side" sibling
++ * (e.g. "Left"/"Right" Motor Mounting Bracket) has one. A flagged
++ * part's price is EXCLUDED from `total` below (the guide's own "flag...
++ * rather than folding them into the total estimated cost at face
++ * value" wording) and shown with a "verify" badge instead of being
++ * silently trusted.
++ *
+  * `onRefreshPrices`: called with no args, expected to hit the
+  * /refresh-prices endpoint and hand back updated parts; caller (Blueprint
+  * View) owns the resulting setSpec.
+@@ -63,11 +81,19 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
+   // string that slipped past the backend) turned the whole total into
+   // NaN. Number.isFinite() treats anything non-numeric the same as
+   // "unpriced", same as null already is.
++  //
++  // Patch K.3: a flagged part's price is never folded into this total
++  // at face value -- same treatment an unpriced part already gets
++  // (contributes 0), not "trust it but mark it" -- the guide is
++  // explicit that a flagged figure shouldn't count toward the total a
++  // user reads as trustworthy.
+   const total = parts.reduce((sum, p) => {
++    if (p.price_flagged) return sum;
+     const price = Number(p.estimated_price_bdt);
+     return sum + (Number.isFinite(price) ? price : 0) * p.qty;
+   }, 0);
+   const uncheckedCount = parts.filter((p) => !p.estimated_price_bdt).length;
++  const flaggedCount = parts.filter((p) => p.price_flagged).length;
+ 
+   return (
+     <div className="space-y-3">
+@@ -75,6 +101,7 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
+         <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
+           {parts.length} part{parts.length === 1 ? "" : "s"}
+           {uncheckedCount > 0 && ` · ${uncheckedCount} unpriced`}
++          {flaggedCount > 0 && ` · ${flaggedCount} to verify`}
+         </span>
+         <button
+           onClick={onRefreshPrices}
+@@ -123,6 +150,21 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
+                     </span>
+                   )
+                 )}
++                {p.price_flagged && (
++                  // Patch K.3: "price may be inaccurate — verify" badge,
++                  // per the guide's own exact wording. Title carries the
++                  // specific reason (outlier ratio, or which sibling has
++                  // the price) rather than a generic tooltip, so hovering
++                  // tells the user WHY without needing a separate detail
++                  // view.
++                  <span
++                    title={p.price_flag_reason || "Price may be inaccurate — verify"}
++                    className="flex items-center gap-0.5 text-[9px] uppercase border rounded px-1 text-amber-300 border-amber-500/40 shrink-0"
++                  >
++                    <AlertTriangle size={9} />
++                    Verify
++                  </span>
++                )}
+               </div>
+               {p.description && (
+                 <p className="text-[10px] text-[var(--neutral-600)] truncate">{p.description}</p>
+@@ -131,19 +173,38 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
+             <span className="text-xs text-[var(--neutral-500)] shrink-0">×{p.qty}</span>
+             <div className="text-right shrink-0 w-28">
+               {p.estimated_price_bdt ? (
+-                <>
+-                  <a
+-                    href={p.vendor_url}
+-                    target="_blank"
+-                    rel="noreferrer"
+-                    className="text-xs text-[var(--cyber-cyan)] hover:underline"
+-                  >
+-                    ৳{Number(p.estimated_price_bdt).toLocaleString()}
+-                  </a>
+-                  <p className="text-[9px] text-[var(--neutral-600)] truncate">{p.vendor_name}</p>
+-                </>
++                p.price_source === "estimated_print_cost" ? (
++                  // Patch K.2 fix (surfaced while wiring K.3's badge into
++                  // this same cell): an estimated_print_cost part has no
++                  // real vendor_url/vendor_name -- the pre-K.2 vendor-link
++                  // treatment below rendered a dead `href={null}` link
++                  // with a blank vendor line under it for every 3D_PRINT
++                  // part. Plain, non-link text instead, same "not
++                  // hyperlinked" treatment the "not found" branch already
++                  // uses below for a genuinely unpriced part.
++                  <>
++                    <span className={`text-xs ${p.price_flagged ? "text-amber-300" : "text-[var(--neutral-200)]"}`}>
++                      ৳{Number(p.estimated_price_bdt).toLocaleString()}
++                    </span>
++                    <p className="text-[9px] text-[var(--neutral-600)] truncate">Est. print cost</p>
++                  </>
++                ) : (
++                  <>
++                    <a
++                      href={p.vendor_url}
++                      target="_blank"
++                      rel="noreferrer"
++                      className={`text-xs hover:underline ${p.price_flagged ? "text-amber-300" : "text-[var(--cyber-cyan)]"}`}
++                    >
++                      ৳{Number(p.estimated_price_bdt).toLocaleString()}
++                    </a>
++                    <p className="text-[9px] text-[var(--neutral-600)] truncate">{p.vendor_name}</p>
++                  </>
++                )
+               ) : (
+-                <span className="text-[10px] text-[var(--neutral-700)]">not found</span>
++                <span className="text-[10px] text-[var(--neutral-700)]">
++                  {p.price_flagged ? "verify — no price" : "not found"}
++                </span>
+               )}
+             </div>
+           </div>

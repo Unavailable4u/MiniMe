@@ -733,7 +733,7 @@ def _read_prd_context(session_id: str) -> str:
     raise MissingDependencyError("prd_writer")
 
 
-def _populate_prices(parts: list, session_id: str = None) -> list:
+def _populate_prices(parts: list, session_id: str = None, archetype: dict = None) -> list:
     """Looks up and merges pricing for every part via
     agents/part_price_finder.py's find_price(), so the spec returns with
     prices already populated on first generation instead of requiring a
@@ -767,23 +767,67 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     in-flight concurrency tracks live ledger headroom instead of
     starting all `len(key_envs)` threads at once and letting each one
     individually discover there wasn't room.
+
+    Patch K.2 (pricing-audit): a `category == "3D_PRINT"` part (housing,
+    lid, bracket, sensor holder -- anything printed, not purchased) is
+    split off BEFORE any of the above dispatch machinery even runs. It
+    has no real-world retail listing for find_price() to ever
+    legitimately return, so sending it through the market-search worker
+    pool anyway just burns an LLM extraction call and, worse, can
+    surface a stray unrelated retail hit as if it were a genuine vendor
+    price for a part nobody sells. These parts get
+    eo/mech_material.py's estimate_print_cost_bdt() instead -- a
+    deterministic, LLM-free estimate -- and are marked
+    `price_source: "estimated_print_cost"` rather than a vendor
+    citation. Every other category is unaffected: it still goes through
+    the exact worker-pool/find_price() path below, unchanged.
+
+    `archetype`: forwarded to eo/mech_material.py's resolve_material()
+    so a wearable's strap/band 3D_PRINT parts price against
+    "tpu_flexible" rather than the "pla_rigid" default, same material
+    resolution Phase E's own enclosure/cutout generation already uses
+    for these parts. None (the default) resolves to "pla_rigid" for
+    every 3D_PRINT part, matching resolve_material()'s own fallback for
+    a missing archetype.
     """
     import functools
     from concurrent.futures import as_completed
 
-    from agents.part_price_finder import find_price
+    from agents.part_price_finder import _now_iso, find_price
     from eo.concurrency_gate import GatedTask, run_gated
     from eo.dynamic_chain import build_fallback_chain_excluding, chain_step_for
+    from eo.mech_material import estimate_print_cost_bdt, resolve_material
     from eo.worker_pool import _select_workers
 
     if not parts:
+        return parts
+
+    printed_parts = [p for p in parts if p.get("category") == "3D_PRINT"]
+    market_parts = [p for p in parts if p.get("category") != "3D_PRINT"]
+
+    for part in printed_parts:
+        material = resolve_material(part, archetype)
+        part["estimated_price_bdt"] = estimate_print_cost_bdt(part, material=material)
+        part["price_source"] = "estimated_print_cost"
+        part["vendor_name"] = None
+        part["vendor_url"] = None
+        part["price_checked_at"] = _now_iso()
+
+    if not market_parts:
+        # printed_parts holds the SAME dict objects as `parts` (just
+        # filtered), already mutated in place above -- return `parts`
+        # itself so callers see prices in the original part order, not
+        # printed-parts-first.
         return parts
 
     ROLE_TAG = "part_price_finder"
     # Cap workers at the smaller of (parts to look up, accounts tagged for
     # this role) -- no point spinning up more threads than there is work
     # or more than there are distinct accounts to spread it across.
-    worker_count = min(len(parts), 8)
+    # K.2: sized off market_parts, not the original `parts` -- the
+    # printed_parts split above already priced/removed the parts that
+    # never needed a worker/account in the first place.
+    worker_count = min(len(market_parts), 8)
     try:
         key_envs = _select_workers(ROLE_TAG, worker_count, session_id=session_id, agent_name=ROLE_TAG)
     except RuntimeError:
@@ -825,6 +869,12 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
         part["vendor_name"] = listing.get("vendor")
         part["vendor_url"] = listing.get("url")
         part["price_checked_at"] = result.get("checked_at")
+        # K.2: explicit market-listing source, the counterpart to
+        # printed_parts' "estimated_print_cost" above -- lets any future
+        # consumer (Parts tab tooltip, K.3's outlier check) tell "we
+        # actually found a retail listing" apart from "we computed a
+        # print-cost estimate" without re-deriving it from category.
+        part["price_source"] = "market_listing"
         return part
 
     if not key_envs:
@@ -838,15 +888,18 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
         tasks = [
             GatedTask(functools.partial(_price_one, part, None, i + 1), step=None,
                       label=f"{ROLE_TAG}_{i + 1}")
-            for i, part in enumerate(parts)
+            for i, part in enumerate(market_parts)
         ]
         futures = run_gated(tasks, session_id=session_id)
         for future in as_completed(futures):
             future.result()
+        # Same in-place-mutation reasoning as the `not market_parts`
+        # branch above -- `parts` already reflects every update, in its
+        # original order.
         return parts
 
     tasks = []
-    for i, part in enumerate(parts):
+    for i, part in enumerate(market_parts):
         key_env = key_envs[i % len(key_envs)]
         worker_id = (i % len(key_envs)) + 1
         step = chain_step_for(key_env) if key_env else None
@@ -859,6 +912,7 @@ def _populate_prices(parts: list, session_id: str = None) -> list:
     for future in as_completed(futures):
         future.result()
 
+    # Same in-place-mutation reasoning as both branches above.
     return parts
 
 
@@ -2324,7 +2378,16 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
     spec["mech"]["archetype"] = archetype
 
     spec["parts"] = parts
-    spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id)
+    spec["parts"] = _populate_prices(spec.get("parts", []), session_id=session_id, archetype=archetype)
+    # Patch K.3 (pricing-audit): runs AFTER every part has its price (or
+    # confirmed lack of one) so the median/duplicate-sibling comparison
+    # sees the complete, final BOM -- never partially-priced. Flags,
+    # never drops -- see eo/price_outliers.py's own module docstring.
+    # Deferred import -- same circular-import reasoning
+    # _populate_prices()'s own deferred eo.* imports above already give
+    # for this identical module.
+    from eo.price_outliers import flag_price_outliers
+    spec["parts"] = flag_price_outliers(spec["parts"])
 
     # Fill any mech.placements gaps the model left for electrical parts
     # (see _ensure_electrical_placements' own docstring) -- must run

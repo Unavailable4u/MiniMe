@@ -78,8 +78,18 @@ export default function WiringGraph({ wiring }) {
       type: n.type,
     }));
 
+    // J.3 fix: an edge whose from/to references a node id that isn't in
+    // wiring.nodes (model hallucinated an id, or a node was dropped
+    // upstream without its edges being pruned) used to sail straight
+    // through -- self-loop was the only check. ForceGraphBase/
+    // react-force-graph then either throws trying to resolve the
+    // missing endpoint or silently drops the link with no indication
+    // anything was wrong. Build the id set once and require both ends
+    // to resolve, in addition to the existing self-loop filter.
+    const nodeIds = new Set(nodes.map((n) => n.id));
+
     const links = (wiring?.edges || [])
-      .filter((e) => e.from !== e.to)
+      .filter((e) => e.from !== e.to && nodeIds.has(e.from) && nodeIds.has(e.to))
       .map((e) => ({
         source: e.from,
         target: e.to,

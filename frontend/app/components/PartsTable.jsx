@@ -1,5 +1,5 @@
 "use client";
-import { RefreshCw, BadgeCheck } from "lucide-react";
+import { RefreshCw, BadgeCheck, AlertTriangle } from "lucide-react";
 
 // device_spec.parts[].category -> badge color. Same palette as
 // WiringGraph.jsx's TYPE_COLORS (wiring nodes use the identical category
@@ -52,6 +52,24 @@ const SOURCE_LABELS = {
  * `dimensions_mm` isn't rendered by this table today -- MechView.jsx is
  * where physical sizing actually matters.
  *
+ * Patch K.2: a part may also carry `price_source` ("market_listing" |
+ * "estimated_print_cost") -- an "estimated_print_cost" part
+ * (agents/eo/mech_material.py's deterministic 3D-print cost estimate)
+ * has no real vendor, so `vendor_url`/`vendor_name` are always null for
+ * it; this table shows a plain (non-link) "Est. print cost" label for
+ * that case instead of the vendor-link treatment below, rather than
+ * rendering a dead link to nowhere with a blank vendor line under it.
+ *
+ * Patch K.3: a part may also carry `price_flagged` (bool) +
+ * `price_flag_reason` (string) -- eo/price_outliers.py flags (never
+ * drops) a price that's a >5x outlier against its own category's
+ * median, or that's missing while a same-part "other side" sibling
+ * (e.g. "Left"/"Right" Motor Mounting Bracket) has one. A flagged
+ * part's price is EXCLUDED from `total` below (the guide's own "flag...
+ * rather than folding them into the total estimated cost at face
+ * value" wording) and shown with a "verify" badge instead of being
+ * silently trusted.
+ *
  * `onRefreshPrices`: called with no args, expected to hit the
  * /refresh-prices endpoint and hand back updated parts; caller (Blueprint
  * View) owns the resulting setSpec.
@@ -63,11 +81,19 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
   // string that slipped past the backend) turned the whole total into
   // NaN. Number.isFinite() treats anything non-numeric the same as
   // "unpriced", same as null already is.
+  //
+  // Patch K.3: a flagged part's price is never folded into this total
+  // at face value -- same treatment an unpriced part already gets
+  // (contributes 0), not "trust it but mark it" -- the guide is
+  // explicit that a flagged figure shouldn't count toward the total a
+  // user reads as trustworthy.
   const total = parts.reduce((sum, p) => {
+    if (p.price_flagged) return sum;
     const price = Number(p.estimated_price_bdt);
     return sum + (Number.isFinite(price) ? price : 0) * p.qty;
   }, 0);
   const uncheckedCount = parts.filter((p) => !p.estimated_price_bdt).length;
+  const flaggedCount = parts.filter((p) => p.price_flagged).length;
 
   return (
     <div className="space-y-3">
@@ -75,6 +101,7 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
         <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
           {parts.length} part{parts.length === 1 ? "" : "s"}
           {uncheckedCount > 0 && ` · ${uncheckedCount} unpriced`}
+          {flaggedCount > 0 && ` · ${flaggedCount} to verify`}
         </span>
         <button
           onClick={onRefreshPrices}
@@ -123,6 +150,21 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
                     </span>
                   )
                 )}
+                {p.price_flagged && (
+                  // Patch K.3: "price may be inaccurate — verify" badge,
+                  // per the guide's own exact wording. Title carries the
+                  // specific reason (outlier ratio, or which sibling has
+                  // the price) rather than a generic tooltip, so hovering
+                  // tells the user WHY without needing a separate detail
+                  // view.
+                  <span
+                    title={p.price_flag_reason || "Price may be inaccurate — verify"}
+                    className="flex items-center gap-0.5 text-[9px] uppercase border rounded px-1 text-amber-300 border-amber-500/40 shrink-0"
+                  >
+                    <AlertTriangle size={9} />
+                    Verify
+                  </span>
+                )}
               </div>
               {p.description && (
                 <p className="text-[10px] text-[var(--neutral-600)] truncate">{p.description}</p>
@@ -131,19 +173,38 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
             <span className="text-xs text-[var(--neutral-500)] shrink-0">×{p.qty}</span>
             <div className="text-right shrink-0 w-28">
               {p.estimated_price_bdt ? (
-                <>
-                  <a
-                    href={p.vendor_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-[var(--cyber-cyan)] hover:underline"
-                  >
-                    ৳{Number(p.estimated_price_bdt).toLocaleString()}
-                  </a>
-                  <p className="text-[9px] text-[var(--neutral-600)] truncate">{p.vendor_name}</p>
-                </>
+                p.price_source === "estimated_print_cost" ? (
+                  // Patch K.2 fix (surfaced while wiring K.3's badge into
+                  // this same cell): an estimated_print_cost part has no
+                  // real vendor_url/vendor_name -- the pre-K.2 vendor-link
+                  // treatment below rendered a dead `href={null}` link
+                  // with a blank vendor line under it for every 3D_PRINT
+                  // part. Plain, non-link text instead, same "not
+                  // hyperlinked" treatment the "not found" branch already
+                  // uses below for a genuinely unpriced part.
+                  <>
+                    <span className={`text-xs ${p.price_flagged ? "text-amber-300" : "text-[var(--neutral-200)]"}`}>
+                      ৳{Number(p.estimated_price_bdt).toLocaleString()}
+                    </span>
+                    <p className="text-[9px] text-[var(--neutral-600)] truncate">Est. print cost</p>
+                  </>
+                ) : (
+                  <>
+                    <a
+                      href={p.vendor_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={`text-xs hover:underline ${p.price_flagged ? "text-amber-300" : "text-[var(--cyber-cyan)]"}`}
+                    >
+                      ৳{Number(p.estimated_price_bdt).toLocaleString()}
+                    </a>
+                    <p className="text-[9px] text-[var(--neutral-600)] truncate">{p.vendor_name}</p>
+                  </>
+                )
               ) : (
-                <span className="text-[10px] text-[var(--neutral-700)]">not found</span>
+                <span className="text-[10px] text-[var(--neutral-700)]">
+                  {p.price_flagged ? "verify — no price" : "not found"}
+                </span>
               )}
             </div>
           </div>
