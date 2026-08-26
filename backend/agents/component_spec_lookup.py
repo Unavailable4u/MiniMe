@@ -35,6 +35,7 @@ DIGIKEY_CLIENT_ID/DIGIKEY_CLIENT_SECRET or MOUSER_API_KEY aren't set,
 the corresponding lookup returns None rather than raising.
 """
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -67,7 +68,16 @@ REQUEST_TIMEOUT = 15
 # F3 Part 5: a full datasheet PDF download is bigger and slower than
 # any single DigiKey/Mouser JSON round-trip above, so it gets its own,
 # longer timeout rather than sharing REQUEST_TIMEOUT.
-DATASHEET_REQUEST_TIMEOUT = 30
+# CHANGED — Patch 10: 30s was too tight for some hosts' multi-MB PDFs
+# (ST's datasheet host specifically, per the audit log). Bumped to 45s
+# for the first attempt; a second attempt (if the first times out
+# specifically -- not on other failure types) gets 90s, since a host
+# that's simply slow rather than dead is likely to succeed given more
+# time, and datasheet fetches are not on any user-facing latency
+# budget (this runs as part of hardware_speccer's async spec-gathering
+# pass, not inline with a chat response).
+DATASHEET_REQUEST_TIMEOUT = 45          # was 30
+DATASHEET_REQUEST_TIMEOUT_RETRY = 90    # NEW
 
 DIGIKEY_TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
 # Permanent fix (real-bug follow-up, 2026-08-13): the old
@@ -251,7 +261,7 @@ def _lookup_digikey(part_number: str) -> dict | None:
                 **DIGIKEY_LOCALE_HEADERS,
             },
             json={
-                "Keywords": part_number,
+                "Keywords": _to_natural_language_query(part_number),   # CHANGED — was: part_number
                 "Limit": 10,
                 "Offset": 0,
             },
@@ -443,6 +453,37 @@ def _normalize_part_number(s: str) -> str:
     return normalized.strip()
 
 
+# NEW — Patch 9: a generic_name/part_number assembled elsewhere in the
+# pipeline (e.g. hardware_speccer.py's LLM-filled part_number, or a
+# hand-typed part string) can come in hyphen- or underscore-joined
+# ("100rpm-3V-gear-motor") rather than as natural language. DigiKey's
+# Keyword Search matches noticeably worse against that shape than
+# against space-separated terms -- this is purely a query-formatting
+# step, run ONLY on the string handed to DigiKey's Keywords field, not
+# on the canonical part_number used for caching/dedup (that string stays
+# exactly as given, so eo/spec_cache.py's cache keys are unaffected).
+_SKU_JOIN_CHARS = re.compile(r"[-_]+")
+# Splits a run like "3V" or "100rpm" at the letter/digit boundary so
+# "100rpm-3V-gear-motor" becomes "100 rpm 3 V gear motor" instead of
+# leaving "100rpm"/"3V" glued together after the hyphen split alone.
+_ALPHA_DIGIT_BOUNDARY = re.compile(r"(?<=[0-9])(?=[A-Za-z])|(?<=[A-Za-z])(?=[0-9])")
+
+
+def _to_natural_language_query(part_number: str) -> str:
+    """Best-effort SKU-string -> natural-language conversion for
+    DigiKey's Keyword Search. A genuine manufacturer part number (e.g.
+    'ESP32-WROOM-32U-N4') still round-trips through this basically
+    unchanged (DigiKey matches real part numbers fine either way) --
+    this only helps the specific case where the string was assembled
+    from spec fragments rather than being a real distributor SKU.
+    """
+    if not part_number:
+        return part_number
+    spaced = _SKU_JOIN_CHARS.sub(" ", part_number)
+    spaced = _ALPHA_DIGIT_BOUNDARY.sub(" ", spaced)
+    return " ".join(spaced.split())
+
+
 def get_real_spec(part_number: str) -> dict | None:
     """Returns {"dimensions_mm": {"w","h","d"}, "datasheet_url", "source",
     "confidence"} for the given exact part_number, or None if neither
@@ -527,25 +568,31 @@ class _NotAPdfError(Exception):
 DATASHEET_NOT_FOUND = object()
 
 
-def _fetch_and_parse_pdf(url: str) -> dict | None:
+def _fetch_and_parse_pdf(url: str, _timeout: int = None) -> dict | None:
     """Downloads `url` and runs it through agents/pdf_ingestor.py's
     ingest_pdf(). Raises _NotAPdfError (see above) if the response
     doesn't look like a PDF, checked before any of the download-heavy
-    work below. Returns None (never raises anything else) for any other
-    download/parse failure -- same "skip cleanly" posture the rest of
-    this module already has. Returns {"title", "content", "page_count"}
-    on success. Does NOT check or write eo/datasheet_cache.py -- that's
+    work below. Returns None (never raises anything else, EXCEPT
+    requests.exceptions.Timeout -- see below) for any other download/
+    parse failure -- same "skip cleanly" posture the rest of this
+    module already has. Returns {"title", "content", "page_count"} on
+    success. Does NOT check or write eo/datasheet_cache.py -- that's
     the caller's job, since the caller (get_datasheet_detail()) may call
     this twice against two different URLs for one logical lookup (L.3's
     retry) and each URL caches independently.
+
+    _timeout: NEW, internal -- lets the one-retry-on-timeout wrapper
+    below reuse this function with a longer budget on its second try,
+    without duplicating the download/parse logic.
     """
     import tempfile
 
     from agents.pdf_ingestor import ingest_pdf
 
+    timeout = _timeout or DATASHEET_REQUEST_TIMEOUT
     tmp_path = None
     try:
-        resp = requests.get(url, timeout=DATASHEET_REQUEST_TIMEOUT, stream=True)
+        resp = requests.get(url, timeout=timeout, stream=True)
         resp.raise_for_status()
         content_type = (resp.headers.get("Content-Type") or "").lower()
         if "pdf" not in content_type and not url.lower().endswith(".pdf"):
@@ -560,6 +607,13 @@ def _fetch_and_parse_pdf(url: str) -> dict | None:
             tmp_path = tmp.name
 
         artifact = ingest_pdf(tmp_path)
+    except requests.exceptions.Timeout:
+        # NEW — Patch 10: distinguish a timeout from every other
+        # failure so the caller below can decide to retry with a
+        # longer budget specifically for this case, not for e.g. a 404
+        # or a malformed PDF (retrying those wastes time on a failure
+        # that won't resolve itself).
+        raise
     except _NotAPdfError:
         raise
     except Exception as e:
@@ -578,6 +632,31 @@ def _fetch_and_parse_pdf(url: str) -> dict | None:
         "content": (artifact.get("sections") or [{}])[0].get("content", ""),
         "page_count": (artifact.get("metadata") or {}).get("page_count"),
     }
+
+
+def _fetch_and_parse_pdf_with_retry(url: str) -> dict | None:
+    """NEW — Patch 10: one retry, timeout-only, with a longer budget.
+    Every other failure mode (bad content-type, malformed PDF, 4xx/5xx)
+    still fails once and returns None, same as before -- only a
+    genuine slow-host timeout gets a second, more patient attempt.
+    _NotAPdfError still propagates either way, so L.3's existing
+    "reformulated query retry on confirmed-not-a-PDF" behavior is
+    unaffected by this wrapper.
+    """
+    try:
+        return _fetch_and_parse_pdf(url)
+    except requests.exceptions.Timeout:
+        print(f"  [component_spec_lookup] datasheet fetch for '{url}' "
+              f"timed out at {DATASHEET_REQUEST_TIMEOUT}s -- retrying "
+              f"once with a {DATASHEET_REQUEST_TIMEOUT_RETRY}s budget...")
+        try:
+            return _fetch_and_parse_pdf(url, _timeout=DATASHEET_REQUEST_TIMEOUT_RETRY)
+        except _NotAPdfError:
+            raise
+        except Exception as e:
+            print(f"  [component_spec_lookup] datasheet retry also failed "
+                  f"for '{url}': {e}")
+            return None
 
 
 def _search_for_pdf_datasheet(part_number: str, failed_url: str) -> str | None:
@@ -676,7 +755,7 @@ def get_datasheet_detail(datasheet_url: str, part_number: str | None = None) -> 
         }
 
     try:
-        result = _fetch_and_parse_pdf(datasheet_url)
+        result = _fetch_and_parse_pdf_with_retry(datasheet_url)
     except _NotAPdfError:
         print(f"  [component_spec_lookup] datasheet_url doesn't look "
               f"like a PDF: {datasheet_url}")
@@ -693,7 +772,7 @@ def get_datasheet_detail(datasheet_url: str, part_number: str | None = None) -> 
             }
 
         try:
-            retry_result = _fetch_and_parse_pdf(retry_url)
+            retry_result = _fetch_and_parse_pdf_with_retry(retry_url)
         except _NotAPdfError:
             print(f"  [component_spec_lookup] retry datasheet_url also "
                   f"doesn't look like a PDF: {retry_url}")

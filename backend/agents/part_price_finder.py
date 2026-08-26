@@ -18,6 +18,7 @@ same rather than relying on a "default" that doesn't exist.
 """
 import logging
 import os
+import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -99,6 +100,22 @@ def _sanitize_listings(listings: list) -> list:
     return listings
 
 
+# NEW — Patch 8: OpenRouter's openrouter/free route intermittently
+# lands on a safety/moderation classifier instead of the requested
+# model and returns a bare verdict string ("User Safety: safe" /
+# "User Safety: unsafe") instead of JSON. This is NOT a "no listings
+# found" outcome -- treat it as a transient routing miss and retry on
+# the NEXT chain step (a different account/model), rather than
+# accepting it as a real answer and silently caching an empty result.
+_OPENROUTER_SAFETY_VERDICT_PATTERN = re.compile(
+    r"^\s*user safety\s*:\s*(safe|unsafe)\s*$", re.IGNORECASE,
+)
+
+
+def _is_openrouter_safety_verdict(raw: str) -> bool:
+    return bool(raw) and bool(_OPENROUTER_SAFETY_VERDICT_PATTERN.match(raw))
+
+
 def find_price(part_name: str, force_refresh: bool = False, chain_override: list = None,
                 agent_name: str = "part_price_finder") -> dict:
     """Returns {"part_name", "listings": [...], "checked_at", "cached": bool}.
@@ -165,6 +182,27 @@ def find_price(part_name: str, force_refresh: bool = False, chain_override: list
         allow_continuation=False,
     )
     parsed = _safe_json(raw)
+    if _is_openrouter_safety_verdict(raw):
+        log.warning(
+            "find_price: openrouter/free returned a safety-classifier "
+            "verdict instead of real output — part=%r branch=bd raw=%r, "
+            "retrying with the safety-classifier route excluded",
+            part_name, raw,
+        )
+        # Rebuild the chain excluding whatever step just produced this --
+        # same "one retry, don't loop forever" posture as generate_text()'s
+        # own RATE_LIMIT_WINDOW handling. chain_override lets a caller pin
+        # an explicit chain; here we just drop the openrouter/free step
+        # specifically, since that's the one route known to do this.
+        retry_chain = [s for s in (chain_override or FALLBACK_CHAIN)
+                       if s.get("model") != "openrouter/free"]
+        if retry_chain:
+            raw = generate_text(
+                system_prompt=EXTRACTION_PROMPT,
+                user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
+                chain=retry_chain, agent_name=agent_name, allow_continuation=False,
+            )
+            parsed = _safe_json(raw)
     if parsed is None:
         log.warning(
             "find_price: unparseable JSON from LLM extraction — part=%r branch=bd "
@@ -219,6 +257,22 @@ def _find_international_fallback(part_name: str, chain_override: list, agent_nam
         allow_continuation=False,
     )
     parsed = _safe_json(raw)
+    if _is_openrouter_safety_verdict(raw):
+        log.warning(
+            "find_price: openrouter/free returned a safety-classifier "
+            "verdict instead of real output — part=%r branch=intl raw=%r, "
+            "retrying with the safety-classifier route excluded",
+            part_name, raw,
+        )
+        retry_chain = [s for s in (chain_override or FALLBACK_CHAIN)
+                       if s.get("model") != "openrouter/free"]
+        if retry_chain:
+            raw = generate_text(
+                system_prompt=EXTRACTION_PROMPT,
+                user_content=f"Part: {part_name}\n\nSnippets:\n{snippet_text}",
+                chain=retry_chain, agent_name=agent_name, allow_continuation=False,
+            )
+            parsed = _safe_json(raw)
     if parsed is None:
         log.warning(
             "find_price: unparseable JSON from LLM extraction — part=%r branch=intl "
