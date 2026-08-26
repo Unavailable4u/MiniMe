@@ -35,6 +35,11 @@ import requests
 
 from utils.llm_client import log_usage
 
+from datetime import UTC, datetime
+
+from memory.bus import read as bus_read
+from memory.bus import write as bus_write
+
 TAVILY_URL = "https://api.tavily.com/search"
 EXA_URL = "https://api.exa.ai/search"
 REQUEST_TIMEOUT = 12
@@ -59,34 +64,71 @@ def search(query: str, domains: list[str] | None = None, max_results: int = 3,
     return _search_exa(query, domains, max_results, agent_name)
 
 
+# Patch T1: Tavily's plan quota (HTTP 432, "This request exceeds your
+# plan's set usage limit") is monthly, not a short window -- retrying
+# the SAME key later today never helps. Rotate through every
+# TAVILY_API_KEY* env var configured (same naming convention this
+# codebase already uses for GROQ_API_KEY_6.._14 / GEMINI_API_KEY_2.._18),
+# and remember which keys are capped for a while so we don't waste a
+# request re-discovering the same dead-for-the-month key every call.
+_TAVILY_COOLDOWN_SECONDS = 6 * 3600  # cheap to re-check a few times/day if a key resets
+
+
+def _tavily_key_env_names() -> list[str]:
+    names = ["TAVILY_API_KEY"]
+    i = 2
+    while os.environ.get(f"TAVILY_API_KEY_{i}"):
+        names.append(f"TAVILY_API_KEY_{i}")
+        i += 1
+    return names
+
+
+def _tavily_key_cooling_down(key_env: str) -> bool:
+    until = bus_read(f"cooldown_until:tavily:{key_env}", default=0)
+    return bool(until) and datetime.now(UTC).timestamp() < until
+
+
+def _set_tavily_cooldown(key_env: str) -> None:
+    try:
+        bus_write(f"cooldown_until:tavily:{key_env}",
+                  datetime.now(UTC).timestamp() + _TAVILY_COOLDOWN_SECONDS)
+    except Exception as write_exc:
+        print(f"  [web_search] tavily cooldown write failed (non-fatal): {write_exc}")
+
+
 def _search_tavily(query: str, domains: list[str] | None, max_results: int,
                     agent_name: str) -> list[dict]:
-    key = os.environ.get("TAVILY_API_KEY")
-    if not key:
-        return []
-    try:
-        payload = {
-            "api_key": key,
-            "query": query,
-            "max_results": max_results,
-            "include_raw_content": False,
-        }
-        if domains:
-            # Tavily's own include_domains param -- NOT baked into the
-            # query string as `site:`. Tavily's /search API has no
-            # query-operator parsing at all, so a `site:` prefix in
-            # `query` is just literal search terms and gets silently
-            # ignored (confirmed against the live API during
-            # part_price_finder.py's original build).
-            payload["include_domains"] = domains
-        resp = requests.post(TAVILY_URL, json=payload, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        log_usage("tavily", "TAVILY_API_KEY", tokens=None, agent_name=agent_name)
-        return [{"url": r["url"], "snippet": r.get("content", ""), "title": r.get("title", "")}
-                for r in resp.json().get("results", [])]
-    except Exception as exc:
-        print(f"  [web_search] Tavily failed: {exc}")
-        return []
+    for key_env in _tavily_key_env_names():
+        if _tavily_key_cooling_down(key_env):
+            continue
+        key = os.environ.get(key_env)
+        if not key:
+            continue
+        try:
+            payload = {
+                "api_key": key,
+                "query": query,
+                "max_results": max_results,
+                "include_raw_content": False,
+            }
+            if domains:
+                payload["include_domains"] = domains
+            resp = requests.post(TAVILY_URL, json=payload, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 432:
+                print(f"  [web_search] Tavily key {key_env} hit its plan "
+                      f"usage limit (432) -- cooling it down for "
+                      f"{_TAVILY_COOLDOWN_SECONDS // 3600}h and trying the "
+                      f"next configured Tavily key, if any.")
+                _set_tavily_cooldown(key_env)
+                continue
+            resp.raise_for_status()
+            log_usage("tavily", key_env, tokens=None, agent_name=agent_name)
+            return [{"url": r["url"], "snippet": r.get("content", ""), "title": r.get("title", "")}
+                    for r in resp.json().get("results", [])]
+        except Exception as exc:
+            print(f"  [web_search] Tavily ({key_env}) failed: {exc}")
+            continue
+    return []
 
 
 def _search_exa(query: str, domains: list[str] | None, max_results: int,
