@@ -58,6 +58,7 @@ from memory.bus import (  # NEW — B6 cleanup: Part 7 §7.2 memory-bus read; wr
     read_many as bus_read_many,
 )
 from utils.error_sanitizer import user_facing_message  # NEW — Patch I.1
+from utils.llm_client import ShutdownRequested  # NEW — Patch 6.3
 
 router = APIRouter()
 
@@ -149,6 +150,11 @@ def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXE
             topic_id=req.topic_id,   # NEW — Step 6.11.f: now actually consulted, not just logged
             scope=req.scope,   # NEW — task 13d/13e
         )
+    except ShutdownRequested:   # NEW — Patch 6.3
+        return TaskResponse(
+            decision={}, tier=-1, status="cancelled", result=None,
+            message="Server is shutting down; task was cancelled mid-run.",
+        )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return TaskResponse(
@@ -213,6 +219,11 @@ def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_a
             project_unique_name=req.project_unique_name,
             owner_id=owner_id,   # FIXED
         )
+    except ShutdownRequested:   # NEW — Patch 6.3
+        return TaskResponse(
+            decision={}, tier=-1, status="cancelled", result=None,
+            message="Server is shutting down; task was cancelled mid-run.",
+        )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
         return TaskResponse(
@@ -239,6 +250,11 @@ def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_a
             project_unique_name=req.project_unique_name,
             approval_roles=set(req.approval_roles) if req.approval_roles else None,
             owner_id=owner_id,
+        )
+    except ShutdownRequested:   # NEW — Patch 6.3
+        return TaskResponse(
+            decision=req.decision or {}, tier=-1, status="cancelled", result=None,
+            message="Server is shutting down; task was cancelled mid-run.",
         )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`

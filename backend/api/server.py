@@ -11,6 +11,7 @@ CORS is open to the Next.js dev server origin (localhost:3000) only —
 tighten this before deploying anywhere real.
 """
 import os
+import signal
 import sys
 
 try:
@@ -51,6 +52,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # so api/routes/* modules can import it without a circular import back
 # into this file. See api/deps.py's module docstring for why.
 from api.deps import _verify_supabase_jwt
+from utils.llm_client import request_shutdown  # NEW — Patch 6.2
 from api.routes.chats import router as chats_router
 from api.routes.code import router as code_router
 from api.routes.deploy import router as deploy_router
@@ -135,6 +137,19 @@ if SENTRY_DSN:
 # moved to api/routes/deploy.py. Nothing left in this file needs any of
 # them — this file is now app setup + the websocket endpoint only.
 
+def _handle_sigint(signum, frame):
+    # NEW — Patch 6.2: signal in-flight rate-limit retry waits (see
+    # utils/llm_client.py's _interruptible_sleep()) to stop instead of
+    # letting uvicorn's graceful shutdown wait out every retry sleep in
+    # the worker thread it can't otherwise interrupt.
+    print("[shutdown] SIGINT received -- signaling in-flight LLM retries to stop")
+    request_shutdown()
+    # Let uvicorn's own default handler still run afterward so it
+    # proceeds with its normal graceful-shutdown sequence once the
+    # in-flight request (now unblocked) returns.
+    signal.default_int_handler(signum, frame)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # NEW — Data Layer architecture §9b: eo/notify.py's notify() runs
@@ -145,6 +160,10 @@ async def _lifespan(app: FastAPI):
     # WebSocket connections below actually live on. Capturing it here,
     # once, at startup, is that hand-off point.
     ws_registry.set_event_loop(asyncio.get_running_loop())
+    # NEW — Patch 6.2: register once the app actually starts serving
+    # (module import alone can happen under --reload's parent process
+    # too; this is the one place we know we're the live server).
+    signal.signal(signal.SIGINT, _handle_sigint)
     yield
 
 

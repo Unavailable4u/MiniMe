@@ -66,6 +66,7 @@ from relay.emitter import emit_event
 # docstring for exactly which raise sites this is and isn't.
 from utils.error_sanitizer import user_facing_message
 from utils.llm_client import ChainExhaustedError
+from utils.llm_client import PauseRequestedMidRetry  # NEW — Patch 7
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
 # failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
@@ -1195,6 +1196,45 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     continue   # re-enter the loop at the same idx, now pointing at
                                # the newly inserted prerequisite step instead of
                                # the one that raised (which got shifted to idx+1).
+            except PauseRequestedMidRetry:
+                # NEW — Patch 7 (fixes audit #2): pause was hit during a
+                # rate-limit sleep inside this role's retry loop, not at
+                # the role-boundary checkpoint below (the `if not
+                # role_failed:` block further down this function). Same
+                # snapshot shape, same bus key, same write()+return
+                # contract that checkpoint already uses, just triggered
+                # mid-role instead of after. `idx` stays pointed at the
+                # CURRENT role (not idx+1) so resume_graph() re-runs this
+                # role from scratch rather than skipping it -- there's no
+                # partial-role state to resume from, only whole-role retry.
+                from memory.bus import delete as bus_delete
+                from memory.bus import get_current_app_slug, write
+                bus_delete(f"pause_requested:{session_id}")
+                emit_event(
+                    "awaiting_approval", session_id=session_id, agent=current_name, path=path,
+                    payload={"role": role, "reason": "manual_pause"},
+                )
+                snapshot = {
+                    "agent_names": agent_names,
+                    "role_names": role_names,
+                    "idx": idx,
+                    "results": results,
+                    "key_overrides": key_overrides,
+                    "auto_inserted": auto_inserted,
+                    "stage_revisits": stage_revisits,
+                    "path": path,
+                    "task_text": task_text,
+                    "project_unique_name": project_unique_name,
+                    "mode": mode,
+                    "approval_roles": list(approval_roles),
+                    "no_conversation_context_roles": list(no_conversation_context_roles),
+                    "domain": domain,
+                    "scope": scope,
+                    "workspace_id": workspace_id,
+                    "app_slug": get_current_app_slug(),
+                }
+                write(f"paused_execution:{session_id}", snapshot)
+                return {"status": "paused", "paused_at_role": role}
             except ChainExhaustedError as exc:
                 # Phase 6b (fixes Bug 5): every provider in THIS role's
                 # fallback chain was genuinely tried and failed — degrade

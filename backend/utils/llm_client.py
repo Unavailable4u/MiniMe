@@ -1879,6 +1879,72 @@ _LEDGER_WAIT_CAP_SECONDS = 20.0
 # alone hasn't been exhausted yet.
 _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS = 45.0
 
+# NEW — Patch 6: cooperative-cancellation flag for graceful shutdown.
+# Uvicorn's SIGINT handler can't interrupt a worker thread, so instead
+# of trying to kill the thread, every blocking sleep in this module
+# checks this flag first and raises a clean, catchable exception if
+# it's set -- same "flag on the bus, checked at the next safe point"
+# shape CO3's pause_requested already uses, just written to an
+# in-process global instead of the bus (no need for cross-process
+# visibility here -- this process is the one shutting itself down).
+import threading
+
+_SHUTDOWN_REQUESTED = threading.Event()
+
+
+def request_shutdown() -> None:
+    """Called once, from the app's SIGINT/SIGTERM handler. Every
+    upcoming and in-progress time.sleep() call in this module (rate-
+    limit waits) will raise ShutdownRequested at its next checkpoint
+    instead of completing the sleep."""
+    _SHUTDOWN_REQUESTED.set()
+
+
+class ShutdownRequested(Exception):
+    """Raised from inside a retry/sleep loop when request_shutdown()
+    has been called. api/task_runner.py catches this at the top level
+    and returns a clean 'cancelled' TaskResponse instead of letting it
+    propagate as an unhandled error."""
+    pass
+
+
+class PauseRequestedMidRetry(Exception):
+    """NEW — Patch 7 (fixes audit #2). Raised from _interruptible_sleep()
+    when a session's pause_requested:{session_id} bus flag gets set
+    mid-wait, rather than at the next role boundary. Previously the
+    pause flag was only read AFTER a role finished (eo/executor.py's
+    _run_loop) — this is the read that makes it visible DURING the
+    20s-per-retry windows that make up most of a stuck role's
+    wall-clock time. _run_chain_step() catches this and treats it like
+    a role-boundary pause: snapshot execution state at the CURRENT
+    (in-progress) step and stop, rather than letting the step finish
+    first."""
+    pass
+
+
+def _interruptible_sleep(seconds: float, session_id: str = None) -> None:
+    """Drop-in replacement for time.sleep() in the rate-limit retry
+    path: sleeps in short slices so a shutdown request lands within
+    ~0.5s instead of waiting out the full duration.
+
+    NEW — Patch 7: also pause-aware, not just shutdown-aware, since
+    both are "stop what you're doing at the next safe checkpoint"
+    signals. When session_id is given, each slice also checks
+    pause_requested:{session_id} on the bus and raises
+    PauseRequestedMidRetry if it's been set. session_id defaults to
+    None so callers with no session context (if any) keep the old
+    shutdown-only behavior."""
+    from memory.bus import read as bus_read   # deferred -- avoid import cycle
+    remaining = seconds
+    while remaining > 0:
+        if _SHUTDOWN_REQUESTED.is_set():
+            raise ShutdownRequested("shutdown requested during rate-limit wait")
+        if session_id and bus_read(f"pause_requested:{session_id}", default=False):
+            raise PauseRequestedMidRetry("pause requested during rate-limit wait")
+        slice_s = min(0.5, remaining)
+        time.sleep(slice_s)
+        remaining -= slice_s
+
 
 def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: int):
     """Phase 3b -- cheap, read-only look-ahead used once the CURRENT
@@ -1944,7 +2010,8 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
 _EXHAUSTIVE_WAIT_CAP_SECONDS = 45.0
 
 
-def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set) -> bool:
+def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set,
+                            session_id: str = None) -> bool:
     """Phase 9a -- the "never fail until everything is truly exhausted"
     verdict, called once generate_text()/stream_completion()'s main
     loop has fallen off the end of `chain` with nothing returned (every
@@ -2008,7 +2075,7 @@ def _chain_exhaustion_wait(chain: list, estimated_tokens: int, step_buckets: set
           f"(capped at {_EXHAUSTIVE_WAIT_CAP_SECONDS:.0f}s) before "
           f"re-checking the whole chain once more, instead of failing "
           f"outright.")
-    time.sleep(wait_seconds)
+    _interruptible_sleep(wait_seconds, session_id=session_id)   # CHANGED — Patch 7: now pause-aware too
     return True
 
 
@@ -2461,7 +2528,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
               f"{_wait_seconds:.1f}s before retrying {label} in place "
               f"(attempt {same_step_rate_limit_waits}/{_MAX_RATE_LIMIT_RETRIES})...")
         _record_ledger_event(session_id, "wait")
-        time.sleep(_wait_seconds)
+        _interruptible_sleep(_wait_seconds, session_id=session_id)   # CHANGED — Patch 7: now pause-aware too
         same_step_rate_limit_elapsed += _wait_seconds
         return ("retry-in-place", user_content, accumulated_text, same_step_shrinks,
                 same_step_rate_limit_waits, same_step_rate_limit_elapsed)
@@ -2631,14 +2698,22 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             rate_ledger.release_reservation(_reservation_id, dispatched=False)
             last_exc = exc
             _record_ledger_event(session_id, "provider_failure")
-            (_action, user_content, accumulated_text, same_step_shrinks,
-             same_step_rate_limit_waits, same_step_rate_limit_elapsed) = \
-                _handle_transient_error(
-                    exc, provider, key, model, chain, index, is_last, label,
-                    agent_name, system_prompt, prompt_for_step, user_content,
-                    accumulated_text, same_step_shrinks, session_id=session_id,
-                    same_step_rate_limit_waits=same_step_rate_limit_waits,
-                    same_step_rate_limit_elapsed=same_step_rate_limit_elapsed)
+            try:
+                (_action, user_content, accumulated_text, same_step_shrinks,
+                 same_step_rate_limit_waits, same_step_rate_limit_elapsed) = \
+                    _handle_transient_error(
+                        exc, provider, key, model, chain, index, is_last, label,
+                        agent_name, system_prompt, prompt_for_step, user_content,
+                        accumulated_text, same_step_shrinks, session_id=session_id,
+                        same_step_rate_limit_waits=same_step_rate_limit_waits,
+                        same_step_rate_limit_elapsed=same_step_rate_limit_elapsed)
+            except PauseRequestedMidRetry:
+                # NEW — Patch 7: bubble this up as a distinct signal so
+                # eo/executor.py can snapshot mid-role instead of only at
+                # a role boundary. Re-raising rather than swallowing here,
+                # since generate_text()/_run_chain_step() itself has no
+                # snapshot/resume state to save -- only _run_loop does.
+                raise
             if _action == "raise":
                 raise
             if _action == "retry-in-place":
@@ -2932,7 +3007,7 @@ def generate_text(system_prompt: str, user_content: str, chain: list, agent_name
     # which case it returns False immediately and behavior is unchanged
     # from before this phase.
     _estimated_tokens = _estimate_tokens_for_call(system_prompt, user_content)
-    if _chain_exhaustion_wait(chain, _estimated_tokens, step_buckets):
+    if _chain_exhaustion_wait(chain, _estimated_tokens, step_buckets, session_id=session_id):   # CHANGED — Patch 7
         _action, full_text, accumulated_text, continuations_used, last_exc, step_buckets = \
             _walk_chain_once(system_prompt, user_content, chain, agent_name,
                               session_id, tier, path, domain, allow_continuation)
