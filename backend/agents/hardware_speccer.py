@@ -1217,10 +1217,18 @@ def _populate_datasheet_details(parts: list, session_id: str = None) -> dict:
     means no entry for that part id in the returned dict -- never
     raises, never fails the parts/wiring spec around it. Returns {}
     if no part in `parts` has a datasheet_url at all.
+
+    L.3: get_datasheet_detail() is called with this part's part_number
+    too, so a non-PDF datasheet_url gets its one reformulated-query
+    retry. When it comes back DATASHEET_NOT_FOUND (confirmed no PDF,
+    retry included), this clears the part's own datasheet_url field in
+    place -- otherwise a stale HTML product-page URL would keep sitting
+    in a field every downstream reader (Blueprint's parts view, a
+    future mech-primitive step) expects to be a real datasheet link.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from agents.component_spec_lookup import get_datasheet_detail
+    from agents.component_spec_lookup import DATASHEET_NOT_FOUND, get_datasheet_detail
 
     candidates = [p for p in parts if p.get("datasheet_url")]
     if not candidates:
@@ -1229,17 +1237,24 @@ def _populate_datasheet_details(parts: list, session_id: str = None) -> dict:
     def _detail_one(part: dict):
         part_id = part.get("id")
         try:
-            detail = get_datasheet_detail(part["datasheet_url"])
+            detail = get_datasheet_detail(part["datasheet_url"], part.get("part_number"))
         except Exception:
-            return part_id, None
-        return part_id, detail
+            return part_id, None, None
+        if detail is DATASHEET_NOT_FOUND:
+            return part_id, None, "not_found"
+        return part_id, detail, None
 
     details = {}
     worker_count = min(len(candidates), 8)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(_detail_one, part) for part in candidates]
-        for future in as_completed(futures):
-            part_id, detail = future.result()
+        future_to_part = {
+            executor.submit(_detail_one, part): part for part in candidates
+        }
+        for future in as_completed(future_to_part):
+            part_id, detail, status = future.result()
+            if status == "not_found":
+                future_to_part[future]["datasheet_url"] = None
+                continue
             if part_id and detail:
                 details[part_id] = detail
 

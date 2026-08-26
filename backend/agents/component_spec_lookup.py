@@ -502,7 +502,118 @@ def get_real_spec(part_number: str) -> dict | None:
     return result
 
 
-def get_datasheet_detail(datasheet_url: str) -> dict | None:
+class _NotAPdfError(Exception):
+    """Internal signal from _fetch_and_parse_pdf() below: the response at
+    a given URL doesn't look like a PDF (Content-Type and file extension
+    both checked). Never raised past get_datasheet_detail() -- it's the
+    thing that tells that function specifically "this URL wasn't a PDF"
+    as opposed to "the download/parse failed for some other reason", so
+    it knows when a L.3 reformulated-query retry is the right move.
+    """
+
+
+# L.3: sentinel returned by get_datasheet_detail() when a resolved
+# datasheet_url was confirmed NOT to be a PDF and the one reformulated-
+# query retry also failed to turn up a usable PDF. Distinct from a plain
+# None (which still just means "nothing to report" for every other
+# failure mode -- no datasheet_url given, a download timeout, a parse
+# error) so a caller that specifically wants to null out a bad
+# datasheet_url on the part (see hardware_speccer.py's
+# _populate_datasheet_details()) can tell "confirmed no PDF exists here"
+# apart from "the lookup just didn't happen to work this time" without
+# this function's return value losing its existing dict/None shape for
+# every other caller (e.g. resolve_inferred_pin(), which only ever
+# checks truthiness and doesn't care about the distinction).
+DATASHEET_NOT_FOUND = object()
+
+
+def _fetch_and_parse_pdf(url: str) -> dict | None:
+    """Downloads `url` and runs it through agents/pdf_ingestor.py's
+    ingest_pdf(). Raises _NotAPdfError (see above) if the response
+    doesn't look like a PDF, checked before any of the download-heavy
+    work below. Returns None (never raises anything else) for any other
+    download/parse failure -- same "skip cleanly" posture the rest of
+    this module already has. Returns {"title", "content", "page_count"}
+    on success. Does NOT check or write eo/datasheet_cache.py -- that's
+    the caller's job, since the caller (get_datasheet_detail()) may call
+    this twice against two different URLs for one logical lookup (L.3's
+    retry) and each URL caches independently.
+    """
+    import tempfile
+
+    from agents.pdf_ingestor import ingest_pdf
+
+    tmp_path = None
+    try:
+        resp = requests.get(url, timeout=DATASHEET_REQUEST_TIMEOUT, stream=True)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "pdf" not in content_type and not url.lower().endswith(".pdf"):
+            # Not actually a PDF (e.g. an HTML product page some vendors
+            # return under a "datasheet" link) -- ingest_pdf() would just
+            # raise on this, so skip the download/parse attempt entirely.
+            raise _NotAPdfError(url)
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            for chunk in resp.iter_content(chunk_size=65536):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+
+        artifact = ingest_pdf(tmp_path)
+    except _NotAPdfError:
+        raise
+    except Exception as e:
+        print(f"  [component_spec_lookup] datasheet deep-dive failed for "
+              f"'{url}': {e}")
+        return None
+    finally:
+        # Always clean up the downloaded temp file, success or failure --
+        # this module has no standing reason to keep a copy of the raw
+        # PDF around once ingest_pdf() has extracted its text.
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    return {
+        "title": artifact.get("title"),
+        "content": (artifact.get("sections") or [{}])[0].get("content", ""),
+        "page_count": (artifact.get("metadata") or {}).get("page_count"),
+    }
+
+
+def _search_for_pdf_datasheet(part_number: str, failed_url: str) -> str | None:
+    """L.3: the one reformulated-query retry -- searches for
+    "<part_number> datasheet filetype:pdf" via utils/web_search.py's
+    shared search() (Tavily, falling back to Exa) and returns the first
+    result URL that isn't the same URL that already failed, or None if
+    the search comes up empty/unavailable (missing API keys, request
+    failure -- same "never raises" posture search() already documents).
+
+    This only returns a CANDIDATE URL -- it does not verify it's a PDF.
+    get_datasheet_detail() below does that verification the exact same
+    way it already does for the primary URL (via
+    _fetch_and_parse_pdf()'s Content-Type/extension check), so a bad
+    search result is handled by the same code path as a bad vendor
+    result, not a second, separately-trusted check.
+    """
+    if not part_number:
+        return None
+
+    from utils.web_search import search
+
+    try:
+        results = search(f"{part_number} datasheet filetype:pdf", max_results=3,
+                          agent_name="component_spec_lookup_datasheet_retry")
+    except Exception:
+        return None
+
+    for r in results:
+        url = r.get("url")
+        if url and url != failed_url:
+            return url
+    return None
+
+
+def get_datasheet_detail(datasheet_url: str, part_number: str | None = None) -> dict | None:
     """F3 Part 5 (optional stretch): downloads the PDF at datasheet_url
     and runs it through agents/pdf_ingestor.py's existing ingest_pdf()
     pipeline -- the same deterministic, no-LLM-call PDF parser already
@@ -526,16 +637,32 @@ def get_datasheet_detail(datasheet_url: str) -> dict | None:
     common ESP32/DS18B20/etc. datasheet gets pulled once, not once per
     project generation) doesn't re-download/re-parse for free.
 
+    `part_number` (L.3, optional): when the resolved datasheet_url turns
+    out NOT to be a PDF (e.g. an HTML product page some vendors put
+    behind a "datasheet" link), and a part_number is given, this makes
+    exactly ONE retry against a reformulated search query
+    (_search_for_pdf_datasheet() above) before giving up on this part's
+    datasheet entirely -- never a second retry off the retry, matching
+    every other "one bounded retry, not a loop" convention in this
+    codebase (e.g. hardware_speccer.py's resolve_inferred_pin()).
+
     Returns {"title", "content", "page_count"} on success -- "content"
     is ingest_pdf()'s single joined section (see that module's
     docstring for why a PDF always comes back as exactly one section),
     the full extracted text a later step could search/parse further.
-    Returns None (never raises) for: no datasheet_url, a download that
-    fails or times out, a response that doesn't look like a PDF
-    (Content-Type and file extension both checked, since some vendors
-    put an HTML product page behind a "datasheet" link), or a parse
-    failure inside ingest_pdf() itself -- same "skip cleanly" pattern
-    as the rest of this module.
+
+    Returns None (never raises) for: no datasheet_url given, or a
+    download/parse failure unrelated to the URL not being a PDF (a
+    timeout, a parse error inside ingest_pdf(), etc).
+
+    Returns DATASHEET_NOT_FOUND (see module-level constant above) when
+    datasheet_url was confirmed not to be a PDF AND either no
+    part_number was given to retry with, or the retry itself also
+    failed to turn up a usable PDF -- callers that track a datasheet
+    field on a part record (hardware_speccer.py's
+    _populate_datasheet_details()) should treat this the same as "clear
+    the field, there's nothing here" rather than silently leaving the
+    original non-PDF URL in place.
     """
     if not datasheet_url:
         return None
@@ -548,45 +675,39 @@ def get_datasheet_detail(datasheet_url: str) -> dict | None:
             "page_count": cached.get("page_count"),
         }
 
-    import tempfile
-
-    from agents.pdf_ingestor import ingest_pdf
-
-    tmp_path = None
     try:
-        resp = requests.get(datasheet_url, timeout=DATASHEET_REQUEST_TIMEOUT, stream=True)
-        resp.raise_for_status()
-        content_type = (resp.headers.get("Content-Type") or "").lower()
-        if "pdf" not in content_type and not datasheet_url.lower().endswith(".pdf"):
-            # Not actually a PDF (e.g. an HTML product page some vendors
-            # return under a "datasheet" link) -- ingest_pdf() would just
-            # raise on this, so skip the download/parse attempt entirely.
-            print(f"  [component_spec_lookup] datasheet_url doesn't look "
-                  f"like a PDF (Content-Type={content_type!r}): {datasheet_url}")
-            return None
+        result = _fetch_and_parse_pdf(datasheet_url)
+    except _NotAPdfError:
+        print(f"  [component_spec_lookup] datasheet_url doesn't look "
+              f"like a PDF: {datasheet_url}")
+        retry_url = _search_for_pdf_datasheet(part_number, datasheet_url)
+        if not retry_url:
+            return DATASHEET_NOT_FOUND
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            for chunk in resp.iter_content(chunk_size=65536):
-                tmp.write(chunk)
-            tmp_path = tmp.name
+        retry_cached = get_cached_datasheet(retry_url)
+        if retry_cached is not None:
+            return {
+                "title": retry_cached.get("title"),
+                "content": retry_cached.get("content"),
+                "page_count": retry_cached.get("page_count"),
+            }
 
-        artifact = ingest_pdf(tmp_path)
-    except Exception as e:
-        print(f"  [component_spec_lookup] datasheet deep-dive failed for "
-              f"'{datasheet_url}': {e}")
+        try:
+            retry_result = _fetch_and_parse_pdf(retry_url)
+        except _NotAPdfError:
+            print(f"  [component_spec_lookup] retry datasheet_url also "
+                  f"doesn't look like a PDF: {retry_url}")
+            return DATASHEET_NOT_FOUND
+
+        if retry_result is None:
+            return DATASHEET_NOT_FOUND
+
+        set_cached_datasheet(retry_url, retry_result)
+        return retry_result
+
+    if result is None:
         return None
-    finally:
-        # Always clean up the downloaded temp file, success or failure --
-        # this module has no standing reason to keep a copy of the raw
-        # PDF around once ingest_pdf() has extracted its text.
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
-    result = {
-        "title": artifact.get("title"),
-        "content": (artifact.get("sections") or [{}])[0].get("content", ""),
-        "page_count": (artifact.get("metadata") or {}).get("page_count"),
-    }
     set_cached_datasheet(datasheet_url, result)
     return result
 
