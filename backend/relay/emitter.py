@@ -224,6 +224,24 @@ class EventType(str, Enum):
     # consumed only by Part 7's terminal panel.
     LOCAL_TOOL_STREAM_CHUNK = "local_tool_stream_chunk"
 
+    # Patch A3: agent-triggered external MCP tool-call log, fired on the
+    # WORKSPACE channel -- same reasoning as the LOCAL_TOOL_* block just
+    # above (an MCP tool call isn't tied to one chat turn the way an
+    # agent_start/agent_done pair is), and deliberately the SAME
+    # emit_workspace_event() mechanism, not a parallel one, so an
+    # agent-triggered "GitHub MCP" call lands in the exact same
+    # decisionEvents timeline a daemon write_file call already does
+    # (see eo/mcp_agent_tools.py's call_agent_mcp_tool(), and its own
+    # docstring on why this is Patch A3's explicit key requirement).
+    #   - MCP_TOOL_CALLED: fired right before eo.mcp_client.call_mcp_tool()
+    #     -- every MCP tool is callable with no propose/confirm gate yet
+    #     (that's Patch A4), so unlike LOCAL_TOOL_PROPOSED/_CONFIRMED this
+    #     is a single "about to call" event, not a two-step pair.
+    #   - MCP_TOOL_RESULT: fired after call_mcp_tool() returns or raises,
+    #     same {ok, error?} shape as LOCAL_TOOL_RESULT.
+    MCP_TOOL_CALLED = "mcp_tool_called"
+    MCP_TOOL_RESULT = "mcp_tool_result"
+
 
 # Backward-compat view: existing code/tests that do
 # `"foo" in emitter.VALID_EVENT_TYPES` or iterate/sort it as plain

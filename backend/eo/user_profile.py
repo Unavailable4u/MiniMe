@@ -423,6 +423,53 @@ def override_profile_fact(owner_id: str, field: str, new_value, key: str | None 
     return profile
 
 
+def delete_profile_fact(owner_id: str, field: str, key: str | None = None,
+                         reason: str | None = None) -> dict:
+    """Patch B6 — the delete counterpart to Patch B4's
+    override_profile_fact(). Where override_profile_fact() says "this
+    guess is wrong, here's the right value," this says "this doesn't
+    belong in my profile at all" — e.g. an entry that was accurate
+    once but no longer applies, rather than one that was ever wrong.
+
+    Same field/key contract as override_profile_fact(): `field` is
+    one of SIGNAL_CATEGORIES, in which case `key` is required and the
+    whole entry is removed from that category's bucket, or
+    "output_prefs", in which case `key` is ignored and the single
+    current-value record is reset back to its unset shape.
+
+    A delete of something never set is a no-op (nothing to remove,
+    nothing to log) rather than an error — same "don't punish a
+    caller for asking to clear an already-clear field" posture
+    get_profile()'s empty-shape guarantee takes elsewhere in this
+    module. Otherwise, reuses append_correction() exactly the way
+    override_profile_fact() does, with new_value=None marking a
+    removal (as opposed to an overwrite) in the audit trail.
+    """
+    if not owner_id or not field:
+        raise ValueError("owner_id and field are required")
+    if field != "output_prefs" and field not in SIGNAL_CATEGORIES:
+        raise ValueError(f"unknown profile field: {field!r}")
+    if field != "output_prefs" and not key:
+        raise ValueError("key is required when deleting a domains/likes/dislikes/error_patterns fact")
+
+    profile = get_profile(owner_id)
+
+    if field == "output_prefs":
+        old_value = profile["output_prefs"].get("default_format")
+        if old_value is None:
+            return profile
+        profile["output_prefs"] = _empty_profile()["output_prefs"]
+        write(_key(owner_id), profile)
+        return append_correction(owner_id, field, None, old_value=old_value, new_value=None, reason=reason)
+
+    bucket = profile[field]
+    if key not in bucket:
+        return profile
+    old_value = bucket.pop(key).get("value")
+    write(_key(owner_id), profile)
+    return append_correction(owner_id, field, key, old_value=old_value, new_value=None, reason=reason)
+
+
 # --- Patch B3: format_profile_for_prompt() -----------------------------
 # Structurally identical in spirit to workspace_facts.py's own
 # format_facts_for_prompt() (same "no history yet -> ''" convention, so
