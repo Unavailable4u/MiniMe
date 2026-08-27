@@ -42,18 +42,38 @@ logger = logging.getLogger(__name__)
 
 # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
 # models Groq's decommission notice suggested in its place.
+#
+# Root-cause audit fix, Fix 4 (2026-08-27): every step below got an
+# explicit "max_tokens": 1024 (always preferred over any model-based
+# default -- see llm_client._max_tokens_for()'s docstring), instead of
+# falling through to that function's flat DEFAULT_MAX_TOKENS/
+# REASONING_MODEL_MAX_TOKENS (which reserved as much as double
+# qwen/qwen3.6-27b's entire tpm budget before a single prompt token was
+# counted). SGA's own module docstring and SYSTEM_PROMPT above are
+# explicit that this tier exists ONLY for what it can answer "confidently
+# and quickly" -- anything needing real research, multi-step planning, or
+# cross-file code work is instructed to ESCALATE rather than attempt a
+# partial answer -- so unlike Inspector's fixed-shape classification JSON,
+# this budget has to cover a genuine (if deliberately scoped-small)
+# free-text "answer" field, not just a short verdict. 1024 is sized for
+# that: comfortably more than the ESCALATE sentinel or a short direct
+# answer ever needs, while still well under every chain model's real tpm
+# ceiling. A task whose honest answer needs more room than this is, by
+# SGA's own design, exactly the kind of task that should ESCALATE to
+# eo/inspector.py's routing instead of being force-fit into a truncated
+# SGA response.
 SGA_CHAINS = {
     "sga_1": [
-        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1"},
-        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1"},
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1", "max_tokens": 1024},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1", "max_tokens": 1024},
     ],
     "sga_2": [
-        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_2"},
-        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_2"},
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_2", "max_tokens": 1024},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_2", "max_tokens": 1024},
     ],
     "sga_3": [
-        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_3"},
-        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_3"},
+        {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_3", "max_tokens": 1024},
+        {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_3", "max_tokens": 1024},
     ],
 }
 

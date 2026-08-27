@@ -89,9 +89,21 @@ _DETERMINISTIC_SIGNALS = (
 
 # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
 # models Groq's decommission notice suggested in its place.
+#
+# Root-cause audit fix, Fix 4 (2026-08-27): _VERIFY_SYSTEM_PROMPT below
+# asks for exactly one word (YES or NO) and nothing else. Neither step
+# carried its own max_tokens before this, so both fell through to
+# llm_client._max_tokens_for()'s flat model-family default (8192 for
+# openai/gpt-oss-120b, 16384 -- more than DOUBLE its whole tpm budget --
+# for qwen/qwen3.6-27b, since it matches _REASONING_MODEL_HINTS) for a
+# call that only ever needs a couple of tokens. An explicit override
+# (always preferred over any model-based default -- see
+# _max_tokens_for()'s docstring) is what makes this call actually cheap;
+# 16 leaves headroom for "YES"/"NO" plus a stray leading token some
+# models emit before settling on the word.
 _VERIFY_CHAIN = [
-    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1"},
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1", "max_tokens": 16},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1", "max_tokens": 16},
 ]
 
 _VERIFY_SYSTEM_PROMPT = """You check whether a previously-given answer is still accurate. \

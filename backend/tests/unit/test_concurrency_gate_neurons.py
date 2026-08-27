@@ -66,7 +66,13 @@ def _fake_cloudflare_quota_config(monkeypatch):
 
 def _max_tokens_for_cloudflare_step() -> int:
     from utils.llm_client import _max_tokens_for
-    return _max_tokens_for(MODEL, CLOUDFLARE_STEP)
+    # Root-cause audit fix follow-up (2026-08-27): _max_tokens_for() grew
+    # a leading `provider` param (see concurrency_gate.py's
+    # _outer_reservation_size() comment, updated the same day, for why)
+    # -- this test helper mirrors the real call site's arguments so it
+    # keeps testing the actual production call shape rather than a stale
+    # 2-arg one.
+    return _max_tokens_for(PROVIDER, MODEL, CLOUDFLARE_STEP)
 
 
 # ---------------------------------------------------------------------

@@ -409,8 +409,22 @@ def validate_artifact_entry(entry) -> tuple[bool, str]:
 # LLM classification call, so it goes through generate_text() directly
 # instead of pretending to be a synchronous Validator.
 SAFEGUARD_MODEL = "openai/gpt-oss-safeguard-20b"
+# Root-cause audit fix, Fix 4 (2026-08-27): _SAFEGUARD_SYSTEM_PROMPT below
+# asks for exactly one word (SAFE or UNSAFE) and nothing else -- before
+# this, this step had no step["max_tokens"] at all, so it fell through to
+# llm_client._max_tokens_for()'s flat DEFAULT_MAX_TOKENS (8192), reserving
+# roughly a thousand times the completion budget this call ever actually
+# uses. That's no longer a correctness bug on its own now that Root Cause
+# A's fix caps the flat default at this model's real ~8000 tpm ceiling,
+# but it's still spending nearly the model's entire per-minute budget on
+# a call whose real output is a few characters -- an explicit override
+# (which _max_tokens_for() always prefers over any model-family default,
+# see its own docstring) is what actually makes this call cheap instead
+# of merely non-crashing. 16 leaves headroom for "SAFE"/"UNSAFE" plus a
+# stray leading token or two some models emit before settling on the
+# word, without reserving anything close to a full budget for it.
 SAFEGUARD_CHAIN = [
-    {"provider": "groq", "model": SAFEGUARD_MODEL, "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": SAFEGUARD_MODEL, "key_env": "GROQ_API_KEY", "max_tokens": 512},
 ]
 
 _SAFEGUARD_SYSTEM_PROMPT = (
