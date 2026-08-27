@@ -65,6 +65,7 @@ from eo.skill_library import (  # Part 6 §E2, task 14
     ensure_skill_for_task,
     get_relevant_skill,
 )
+from eo.user_profile import default_format_hint  # NEW — Patch B5
 from memory.bus import KEYS
 from memory.bus import read as bus_read
 from memory.bus import write as bus_write
@@ -486,7 +487,7 @@ def parse_next_tag(raw_text: str) -> tuple:
 
 def run(role: str, task_text: str, input_keys: list = None, session_id: str = None,
         key_override=None, include_conversation_context: bool = True,
-        domain: str = None, chain_override: list = None) -> dict:
+        domain: str = None, chain_override: list = None, owner_id: str = None) -> dict:
     """
     role: the exact role name the Panel/registry assigned (e.g.
         "brainstormer", "fact_checker") — also used as this call's own
@@ -529,6 +530,20 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
         Defaults to None — no other effect on this function's behavior.
         eo/executor.py's dispatch (both the single-role and the
         concurrent-group branch) already passes this through.
+
+    owner_id (Patch B5 — Output-Format Routing): if given, forwarded to
+        eo/user_profile.py's default_format_hint(), which degrades to ""
+        (today's exact system_prompt, unchanged) whenever there's no
+        owner_id, no stored output_prefs, or the stored preference isn't
+        confident yet. Appended after MARKDOWN_INSTRUCTION/
+        NEXT_TAG_INSTRUCTION below, same "general defaults only" caveat
+        MARKDOWN_INSTRUCTION's own text already carries — a role's own
+        brief (an exact required structure, JSON, checkbox options, ...)
+        still wins over this hint exactly the same way it already wins
+        over MARKDOWN_INSTRUCTION's table/bullet suggestions. Never
+        surfaced to the user; only ever nudges which of the frontend's
+        already-existing renderers (ArtifactRenderer/MermaidDiagram/
+        Markdown) the model's own output ends up picked up by.
     """
     brief = get_role_prompt(role)
     input_keys = input_keys or []
@@ -637,7 +652,10 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
         if skill_doc else ""
     )
 
-    system_prompt = (brief or "") + skill_addition + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION
+    system_prompt = (
+        (brief or "") + skill_addition + MARKDOWN_INSTRUCTION + NEXT_TAG_INSTRUCTION
+        + default_format_hint(owner_id)   # NEW — Patch B5
+    )
     try:
         raw = generate_text(
             system_prompt=system_prompt,

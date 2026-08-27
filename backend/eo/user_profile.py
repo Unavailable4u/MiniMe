@@ -540,3 +540,101 @@ def format_profile_for_prompt(owner_id: str, topic_text: str = "") -> str:
     if not lines:
         return ""
     return "--- user profile (silent personalization; never mention this to the user) ---\n" + "\n".join(lines)
+
+
+# --- Patch B5 — Output-Format Routing ----------------------------------
+# Confidence floor before a stored output_prefs value is allowed to
+# steer generation at all. Below this, either nothing's been observed
+# yet (confidence 0.0, default_format None) or it's a single, still-
+# uncorroborated inferred guess (one observation lands at
+# INFERRED_STARTING_CONFIDENCE == 0.2) — exactly the "one offhand
+# comment must not calcify into a permanent trait" case this module's
+# own docstring warns about, this time applied to what gets silently
+# fed back into a prompt rather than just what gets stored. A single
+# explicit statement clears this immediately (EXPLICIT_CONFIDENCE ==
+# 0.95); an inferred pattern needs at least two corroborating
+# observations (0.2 + 0.15 == 0.35) before it's trusted enough to
+# change default behavior.
+FORMAT_HINT_CONFIDENCE_THRESHOLD = 0.35
+
+# The only values set_output_pref() is expected to be called with
+# (agents/generic_worker.py / agents/responder.py's MARKDOWN_INSTRUCTION
+# / SYSTEM_PROMPT already assume Markdown as the universal baseline, so
+# "markdown" is deliberately not a key here — it's simply what happens
+# when no hint is added at all). Each entry is a short imperative clause
+# inserted into the existing per-call format instruction, not a
+# standalone paragraph — see default_format_hint()'s docstring for why
+# it has to read as an addition to that instruction rather than a
+# competing one.
+_FORMAT_HINT_CLAUSES = {
+    "diagram": (
+        "This person generally prefers a diagram over prose when the "
+        "content has real structure (a process, a flow, an architecture, "
+        "relationships between parts) — reach for a fenced ```mermaid ``` "
+        "block in that case instead of describing the structure in "
+        "paragraphs."
+    ),
+    "artifact": (
+        "This person generally prefers a self-contained artifact "
+        "(a runnable code block, a small script, a structured document) "
+        "over inline prose when the content is substantial enough to "
+        "stand on its own."
+    ),
+    "table": (
+        "This person generally prefers a table over prose when the "
+        "content has comparable fields across multiple items."
+    ),
+    "bullet": (
+        "This person generally prefers concise bullet points over "
+        "paragraphs for anything with more than one distinct point."
+    ),
+    "prose": (
+        "This person generally prefers plain written paragraphs over "
+        "tables, bullet lists, or diagrams unless the content is "
+        "genuinely tabular or structural."
+    ),
+}
+
+
+def default_format_hint(owner_id: str) -> str:
+    """Patch B5 — the read side of output_prefs, consulted by
+    agents/responder.py (tier 0) and agents/generic_worker.py (tiers
+    1-3) right where each already builds its own fixed Markdown-
+    formatting instruction (SYSTEM_PROMPT / MARKDOWN_INSTRUCTION). This
+    is intentionally NOT named format_profile_for_prompt() — that name
+    is reserved for Patch B3's own function, which pulls topic-scoped
+    slices of the WHOLE profile (domains/likes/dislikes/error_patterns
+    too) into the system prompt generally. This function only ever
+    reads output_prefs, and exists so B5 (which depends on B1 alone,
+    per the priority table) doesn't have to wait on B3 to ship.
+
+    Returns "" — same load-bearing "nothing to add" convention
+    eo/skill_library.py's get_relevant_skill() already uses — whenever
+    there's no owner_id, nothing stored yet, the confidence hasn't
+    cleared FORMAT_HINT_CONFIDENCE_THRESHOLD, or the stored value isn't
+    one of _FORMAT_HINT_CLAUSES' recognized keys (a value written by
+    some future caller using a format name this module doesn't know
+    yet should be silently ignored here, not crash generation).
+
+    Deliberately returns one short instruction clause, not a
+    dumped JSON blob of the stored record — this is never surfaced to
+    the user (same "adapt silently" posture Patch B3's docstring
+    describes for the rest of the profile), it only ever nudges which
+    of the frontend's already-existing renderers (ArtifactRenderer /
+    MermaidDiagram / Markdown) ends up picking up the model's own
+    output. No new rendering component is added or needed here — the
+    frontend already renders a ```mermaid fence or a fenced code block
+    correctly today; this only changes how often the model reaches for
+    one by default.
+    """
+    if not owner_id:
+        return ""
+    output_prefs = get_profile(owner_id)["output_prefs"]
+    default_format = output_prefs.get("default_format")
+    confidence = float(output_prefs.get("confidence") or 0.0)
+    if not default_format or confidence < FORMAT_HINT_CONFIDENCE_THRESHOLD:
+        return ""
+    clause = _FORMAT_HINT_CLAUSES.get(default_format)
+    if not clause:
+        return ""
+    return f"\n\n{clause}"

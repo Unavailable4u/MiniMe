@@ -277,9 +277,10 @@ def _grounded_task_text(workspace_id: str, task_text: str, session_id: str = Non
     return grounded_text, node_ids
 
 
-def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
+def _run_tier0(task_text: str, decision: dict, session_id: str, owner_id: str = None) -> dict:
     graph = build_execution_graph(tier=0)
-    results = execute_graph(graph, task_text=task_text, session_id=session_id, path="instant")
+    results = execute_graph(graph, task_text=task_text, session_id=session_id, path="instant",
+                             owner_id=owner_id)   # NEW — Patch B5
     answer = results["responder"]
     routing_memory.log_outcome(task_text, decision, outcome="tier-0 responder answered directly")
     return {
@@ -292,9 +293,15 @@ def _run_tier0(task_text: str, decision: dict, session_id: str) -> dict:
     }
 
 
-def _run_tier1(task_text: str, decision: dict, run_tests: bool, session_id: str) -> dict:
+def _run_tier1(task_text: str, decision: dict, run_tests: bool, session_id: str, owner_id: str = None) -> dict:
     graph = build_execution_graph(tier=1, run_tests=run_tests)
-    results = execute_graph(graph, task_text=task_text, session_id=session_id, path="direct")
+    # owner_id (Patch B5): forwarded for signature consistency with
+    # _run_tier0/_run_tier3_hires, but a no-op here in practice — tier 1's
+    # lean pipeline (prompt_writer_lean/code_writer_lean/reviewer_fixer_lean)
+    # never dispatches through generic_worker.run()/responder.run(), the
+    # only two readers of eo/user_profile.py's default_format_hint().
+    results = execute_graph(graph, task_text=task_text, session_id=session_id, path="direct",
+                             owner_id=owner_id)
     fixed = results["reviewer_fixer_lean"]
 
     test_results = None
@@ -326,7 +333,8 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
                       project_unique_name: str = None, mode: str = "auto",
                       approval_roles: set = None,
                       no_conversation_context_roles: set = None,
-                      app_slug: str = None, scope: str = None, workspace_id: str = None) -> dict:
+                      app_slug: str = None, scope: str = None, workspace_id: str = None,
+                      owner_id: str = None) -> dict:
     """
     Routes through eo/loop_controller.py's run_with_looping() rather than
     calling execute_graph() directly, so the adaptive-looping machinery
@@ -373,6 +381,14 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     already understands (Part 2 §2.6). This is the only production call
     site that changes for this work; every other caller of
     run_with_looping() is untouched.
+
+    owner_id (Patch B5 — Output-Format Routing): the same session_id/
+    owner_id pair this function's own docstring already mentions
+    _write_plan_panels()/_write_code_files() using — forwarded straight
+    through to run_with_looping() -> execute_graph() so generic_worker
+    steps in this tier-3 roster can look up a stored output-format
+    preference. None (default) is a no-op, matching every other optional
+    param here.
     """
     from memory.bus import set_app_slug, slugify
     # Scopes every bus key this run touches (module_specs, current_plan,
@@ -407,6 +423,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         no_conversation_context_roles=no_conversation_context_roles,
         scope=scope,
         workspace_id=workspace_id,
+        owner_id=owner_id,
     )
 
     # run_with_looping() returns a paused sentinel instead of
@@ -938,7 +955,8 @@ def preview_task(task_text: str, tier_override: int = None, directed_task_type_o
 
     if tier in (0, 1) or not hires:
         response = _dispatch_resolved(task_text, decision, tier, hires, app_slug, run_tests,
-                                       session_id, mode, project_unique_name, approval_roles=None)
+                                       session_id, mode, project_unique_name, approval_roles=None,
+                                       owner_id=owner_id)
         conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
         return response
 
@@ -1005,7 +1023,7 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                                        project_unique_name=project_unique_name,
                                        approval_roles=approval_roles,
                                        no_conversation_context_roles=no_conversation_context_roles,
-                                       workspace_id=workspace_id)
+                                       workspace_id=workspace_id, owner_id=owner_id)
 
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response), owner_id=owner_id)   
     return response
@@ -1122,6 +1140,7 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
         no_conversation_context_roles=no_conversation_context_roles,
         scope=scope,   # NEW — task 13e
         workspace_id=workspace_id,
+        owner_id=owner_id,
     )
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
     return response
@@ -1515,7 +1534,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
                         run_tests: bool, session_id: str, mode: str, project_unique_name: str,
                         approval_roles: set, no_conversation_context_roles: set = None,
-                        scope: str = None, workspace_id: str = None) -> dict:
+                        scope: str = None, workspace_id: str = None, owner_id: str = None) -> dict:
     """The tier-branch dispatch that runs once classification + hiring
     are resolved — shared by _run_task_inner() (auto, one-shot path),
     confirm_task() (Part 2 §2.5's post-review path, where `hires` may
@@ -1539,11 +1558,17 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
     (see _resolve_decision_and_hires()'s own "workspace_id" return key)
     but it was never forwarded past this point before, so hardware_speccer
     could never actually run even once hired -- it hard-requires
-    workspace_id and would raise ValueError without it."""
+    workspace_id and would raise ValueError without it.
+
+    owner_id (Patch B5 — Output-Format Routing): unlike the params above,
+    NOT tier-3-only — forwarded to every tier branch below (0, 1, and 3)
+    so eo/user_profile.py's default_format_hint() has an account to look
+    a stored output preference up against, regardless of which tier
+    actually ends up answering. None (default) is a no-op everywhere."""
     if tier == 0:
-        return _run_tier0(task_text, decision, session_id)
+        return _run_tier0(task_text, decision, session_id, owner_id=owner_id)
     elif tier == 1:
-        return _run_tier1(task_text, decision, run_tests, session_id)
+        return _run_tier1(task_text, decision, run_tests, session_id, owner_id=owner_id)
     elif tier == 2:
         return _run_tier2(task_text, decision, app_slug, session_id, hires=hires,
                            project_unique_name=project_unique_name, mode=mode)
@@ -1558,7 +1583,8 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
                                      project_unique_name=project_unique_name, mode=mode,
                                      approval_roles=approval_roles,
                                      no_conversation_context_roles=no_conversation_context_roles,
-                                     app_slug=app_slug, scope=scope, workspace_id=workspace_id)
+                                     app_slug=app_slug, scope=scope, workspace_id=workspace_id,
+                                     owner_id=owner_id)
         return {
             "decision": decision, "tier": 3, "session_id": session_id,
             "status": "not_wired_yet", "result": None,
@@ -1601,7 +1627,7 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
     response = _dispatch_resolved(resolved.get("task_text", task_text), resolved["decision"], resolved["tier"],
                                    resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
                                    approval_roles, no_conversation_context_roles=no_conversation_context_roles,
-                                   scope=scope, workspace_id=resolved.get("workspace_id"))
+                                   scope=scope, workspace_id=resolved.get("workspace_id"), owner_id=owner_id)
     _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response,
                                  owner_id=owner_id)   # NEW — Part 2, owner_id threaded through for Patch B2
     _maybe_attach_prerequisite_suggestions(resolved, response, session_id)   # NEW — Data Layer §9d

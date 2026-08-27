@@ -65,6 +65,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import conversation_memory  # NEW — Part 23 fix
+from eo.user_profile import default_format_hint  # NEW — Patch B5
 from utils.llm_client import generate_text
 
 # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
@@ -88,7 +89,7 @@ structure longer answers, and use bold/italic sparingly for emphasis."""
 
 
 def run(task_text: str = None, key_override=None, session_id: str = None, path: str = None,
-        domain: str = None) -> str:
+        domain: str = None, owner_id: str = None) -> str:
     """
     Answers `task_text` directly. Unlike the other agents in this
     codebase, this one takes its input as an argument rather than reading
@@ -131,6 +132,17 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     tagging isn't the only thing forwarded, and so a future caller that
     does have a domain doesn't need this signature touched again. Safe
     to leave None, same as every other optional param here.
+
+    owner_id (Patch B5 — Output-Format Routing): if given, this is the
+    authenticated caller's account id, forwarded straight to
+    eo/user_profile.py's default_format_hint(). That function already
+    degrades to "" (this SYSTEM_PROMPT's own Markdown-formatting
+    paragraph, unchanged) whenever there's no owner_id, no stored
+    preference, or the stored preference isn't confident yet -- so
+    leaving this None is today's exact behavior for every existing
+    caller. Only ever adjusts the general-defaults formatting sentence
+    below; never surfaced to the user, never changes anything else
+    about the answer.
     """
     if not task_text:
         raise ValueError(
@@ -182,8 +194,15 @@ def run(task_text: str = None, key_override=None, session_id: str = None, path: 
     if conv_context:
         user_content = f"Recent conversation:\n{conv_context}\n\nTask: {task_text}"   # NEW — Part 23 fix
 
+    # NEW — Patch B5 (Output-Format Routing). Appended to SYSTEM_PROMPT's
+    # own Markdown-formatting paragraph rather than replacing it —
+    # default_format_hint() already degrades to "" for every caller that
+    # doesn't pass owner_id, so system_prompt is byte-for-byte SYSTEM_PROMPT
+    # (today's exact behavior) whenever this is a no-op.
+    system_prompt = SYSTEM_PROMPT + default_format_hint(owner_id)
+
     answer = generate_text(
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,   # CHANGED — Patch B5, was SYSTEM_PROMPT
         user_content=user_content,   # CHANGED — Part 23 fix, was task_text
         chain=chain,
         agent_name="Responder",
