@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memory.bus import KEYS, redis
 
 KEYS_TO_CLEAR = [
-    "original_idea", "current_plan", "module_specs", "submitted_code",
+    "original_idea", "current_plan", "plan_changelog", "module_specs", "submitted_code",
     "test_code", "review_notes", "fixed_code", "test_results",
     "commit_message", "changelog_entry", "latest_report", "cycle_count",
     "loop_decision", "feature_status", "file_map", "app_slug",

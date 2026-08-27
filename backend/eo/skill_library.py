@@ -185,6 +185,18 @@ def list_skills() -> dict:
     return _load_skills()
 
 
+def get_skill(skill_id: str) -> dict | None:
+    """Single-skill counterpart to list_skills() -- returns the full
+    {title, doc, source, updated_at, times_matched} record for one
+    skill_id, or None if it doesn't exist. Same "richer read path for a
+    UI/CLI detail view, not the hot retrieval path" role
+    eo/registry.py's own get_role_metadata() plays next to
+    get_role_prompt() -- get_relevant_skill() above stays the
+    string-only contract generic_worker.py depends on; this is only
+    for a human (or CLI) inspecting one skill by id."""
+    return _load_skills().get(skill_id)
+
+
 def write_skill(title: str, doc_text: str, source: str = "hand_written") -> str:
     """Persists a skill doc: raw record into registry:skill_library
     (Redis, listable/editable later) AND embedded into Vector (so

@@ -45,7 +45,7 @@ from eo.registry import (
     set_role_pinned,
     update_role_prompt,
 )
-from eo.skill_library import list_skills  # NEW — Part 6 §E2, task 14, patch 4
+from eo.skill_library import get_skill, list_skills  # NEW — Part 6 §E2, task 14, patch 4 (+ Patch A5 single-skill read)
 from eo.structure import (
     delete_workflow_template,
     list_workflow_templates,
@@ -635,6 +635,34 @@ def get_skills(owner_id: str = Depends(require_auth)):
     )
 
 
+# Patch A5 (CLI + Skills + MCP implementation guide) — the one read
+# endpoint GET /api/skills above was missing: a single-skill detail
+# view. This is purely additive on top of eo/skill_library.py's
+# existing get_skill(); no write/edit endpoint here by design (see
+# the guide's Patch A5 "explicitly not in scope" note) — write_skill()
+# stays reachable only from the hand-written seed and the
+# self-improvement loop, same as before this patch.
+@router.get("/api/skills/{skill_id}")
+def get_skill_detail(skill_id: str, owner_id: str = Depends(require_auth)):
+    """Full {skill_id, title, doc, source, updated_at, times_matched}
+    record for one skill, or a 404 if skill_id doesn't exist. Thin
+    wrapper over eo/skill_library.py's get_skill() — same "single bulk
+    read already exists, this is just the one-record view" relationship
+    GET /api/skills/{skill_id} has to GET /api/skills that
+    /api/roles/{role_name}-shaped routes elsewhere in this file already
+    follow for the Role Library.
+
+    owner_id: accepted for parity with require_auth on every other
+    route in this file, unused here for the same reason GET /api/skills
+    above doesn't use it — the skill library is a single global store,
+    not scoped per user.
+    """
+    entry = get_skill(skill_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"No skill found with id {skill_id!r}")
+    return {"skill_id": skill_id, **entry}
+
+
 class SaveWorkflowTemplateRequest(BaseModel):
     name: str
     roles: list   # role-name strings, or nested lists of them for a
@@ -846,7 +874,8 @@ def get_tasks(session_id: str):
     """
     set_app_slug(session_id)
     data = bus_read_many(
-        [KEYS["current_plan"], KEYS["feature_status"], KEYS["module_specs"],
+        [KEYS["current_plan"], KEYS["plan_changelog"], KEYS["feature_status"],
+         KEYS["module_specs"],
          KEYS["submitted_code"],
          f"stage_output:{session_id}:integration_flagger",
          deploy_config_writer_agent.DEPLOY_CONFIG_PLAN_KEY,
@@ -859,6 +888,12 @@ def get_tasks(session_id: str):
     submitted_code = data[KEYS["submitted_code"]] or {}
     return {
         "current_plan": data[KEYS["current_plan"]] or {},
+        # Patch B11 -- compact {what, why, at} history of prior
+        # current_plan revisions, newest last. Not full snapshots (see
+        # memory/bus.py's write_plan()), so this is cheap to include on
+        # every poll of this endpoint the same way the rest of the board
+        # already is.
+        "plan_changelog": data[KEYS["plan_changelog"]] or [],
         "feature_status": data[KEYS["feature_status"]] or {},
         "module_specs": module_specs,
         "integrations": _parse_fenced_json(data[f"stage_output:{session_id}:integration_flagger"]),

@@ -684,6 +684,22 @@ ROLE_PROMPTS_SEED = {
         "actually say, and prefer silence over proposing a marginal or "
         "trivial note."
     ),
+    # Patch B9 — Tier B rolling summary. See eo/rolling_summary.py for
+    # how this role's output is used (folded into a running summary of
+    # turns that are about to fall out of Tier A's storage window).
+    "rolling_summarizer": (
+        "You maintain a rolling summary of an ongoing conversation. You "
+        "are given an EXISTING SUMMARY (which may be empty) and one or "
+        "more NEW TURN(S) that are about to be dropped from full-detail "
+        "storage. Merge the new turn(s) into the existing summary so the "
+        "result still captures every fact, decision, and piece of "
+        "context worth remembering, written in your own words — do not "
+        "just append the new turns' raw text onto the old summary. "
+        "Prefer dropping small talk, repetition, and anything superseded "
+        "by a later turn over dropping a decision or a stated fact. "
+        "Output only the updated summary text itself — no preamble, no "
+        "headers, no commentary about what you changed or why."
+    ),
     # Notebooks Chat-First refinement (2026-08-01 gap fix): the
     # source-grounded, single-topic note generator agents/note_taker.py's
     # own "suggested_notes" target was mistakenly assumed to already be
