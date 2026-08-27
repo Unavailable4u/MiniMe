@@ -79,6 +79,19 @@ CATEGORY_TO_SECTION = {
     "context": "context",
 }
 
+# Bug fix (2026-08-27, prompt-bloat audit): format_facts_for_prompt() used
+# to render a section entry's "text" field verbatim, with no cap — the
+# only field in this whole render path that wasn't already bounded (every
+# chat-turn/linked-chat context builder elsewhere in the codebase caps at
+# 120-400 chars). A caller that forgets to truncate before writing (as
+# api/task_runner.py's _record_routing_fact() used to) silently balloons
+# every future classify()/Inspector prompt for that workspace. This is a
+# render-time backstop, not a replacement for truncating at write time —
+# see task_runner.py's _ROUTING_FACT_TEXT_MAX for the actual fix at the
+# source of the writes.
+_RENDERED_ENTRY_TEXT_MAX = 300
+
+
 def _empty_facts() -> dict:
     """Builds a brand-new dict with its own independent nested
     containers every call. get_facts()'s two early-return branches
@@ -539,6 +552,8 @@ def format_facts_for_prompt(workspace_id: str) -> str:
             summary = entry.get("summary") or entry.get("title") or key
             rendered_sections.append(f"- {key}: {summary}")
             text = (entry.get("text") or "").strip()
+            if len(text) > _RENDERED_ENTRY_TEXT_MAX:
+                text = text[:_RENDERED_ENTRY_TEXT_MAX - 1].rstrip() + "…"
             if text and text != summary:
                 rendered_sections.append(f"  {text}")
     if rendered_sections:
