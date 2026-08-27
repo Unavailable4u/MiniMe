@@ -234,13 +234,37 @@ class EventType(str, Enum):
     # (see eo/mcp_agent_tools.py's call_agent_mcp_tool(), and its own
     # docstring on why this is Patch A3's explicit key requirement).
     #   - MCP_TOOL_CALLED: fired right before eo.mcp_client.call_mcp_tool()
-    #     -- every MCP tool is callable with no propose/confirm gate yet
-    #     (that's Patch A4), so unlike LOCAL_TOOL_PROPOSED/_CONFIRMED this
-    #     is a single "about to call" event, not a two-step pair.
+    #     -- for a read_only-classified MCP tool this is the whole story
+    #     (no propose/confirm step, same as LOCAL_TOOL_EXECUTED); for a
+    #     mutating-classified tool it fires once more, from INSIDE the
+    #     confirm step below, right before the now-approved call actually
+    #     reaches the MCP server.
     #   - MCP_TOOL_RESULT: fired after call_mcp_tool() returns or raises,
     #     same {ok, error?} shape as LOCAL_TOOL_RESULT.
     MCP_TOOL_CALLED = "mcp_tool_called"
     MCP_TOOL_RESULT = "mcp_tool_result"
+
+    # Patch A4: propose/confirm/deny lifecycle for MUTATING-classified
+    # MCP tools (eo.mcp_registry.classify_tool() == "mutating") --
+    # the exact same three-event shape as LOCAL_TOOL_PROPOSED/
+    # _CONFIRMED/_DENIED above, extended to a second action source
+    # rather than inventing a parallel gating mechanism (see
+    # eo/local_workspace_tools.py's propose_mcp_action(), and Patch
+    # A4's own "extend it, don't duplicate it" scope note). A
+    # read_only-classified MCP tool never emits any of these three --
+    # it only ever gets MCP_TOOL_CALLED/_RESULT above, same as before
+    # this patch.
+    #   - MCP_TOOL_PROPOSED: propose_mcp_action() -- nothing has
+    #     touched the MCP server yet.
+    #   - MCP_TOOL_CONFIRMED: confirm_action(), right before the
+    #     now-approved call is handed to call_agent_mcp_tool() (which
+    #     then fires its own MCP_TOOL_CALLED/_RESULT pair around the
+    #     actual eo.mcp_client.call_mcp_tool() round trip).
+    #   - MCP_TOOL_DENIED: deny_action() -- the MCP server is never
+    #     contacted for this proposal.
+    MCP_TOOL_PROPOSED = "mcp_tool_proposed"
+    MCP_TOOL_CONFIRMED = "mcp_tool_confirmed"
+    MCP_TOOL_DENIED = "mcp_tool_denied"
 
 
 # Backward-compat view: existing code/tests that do

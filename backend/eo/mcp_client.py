@@ -320,7 +320,13 @@ async def connect_server(
                 stderr=asyncio.subprocess.DEVNULL,
                 env=process_env,
             )
-        except OSError as exc:
+        except (OSError, NotImplementedError) as exc:
+            # NotImplementedError: Windows' default SelectorEventLoop doesn't
+            # implement subprocess transports at all (only ProactorEventLoop
+            # does) -- api/server.py now sets that policy on Windows, but a
+            # misconfigured/incompatible server should still degrade to "this
+            # one server didn't connect" rather than crash the whole app, the
+            # same guarantee this function already gave for OSError.
             raise MCPClientError(f"failed to launch stdio MCP server {server_name!r}: {exc}") from exc
 
         conn_transport = _StdioTransport(process=process)

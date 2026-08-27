@@ -10,9 +10,19 @@ Run locally:
 CORS is open to the Next.js dev server origin (localhost:3000) only —
 tighten this before deploying anywhere real.
 """
+import asyncio
 import os
 import signal
 import sys
+
+# Windows-only: asyncio.create_subprocess_exec() (used by eo/mcp_client.py to
+# launch stdio-transport MCP servers) only works under the ProactorEventLoop.
+# uvicorn --reload runs this module in a fresh worker subprocess, so the
+# policy has to be set here, at true import time, rather than in whatever
+# script launches uvicorn -- setting it anywhere else runs in the wrong
+# process and silently doesn't take effect. No-op on every other OS.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 try:
     from dotenv import load_dotenv

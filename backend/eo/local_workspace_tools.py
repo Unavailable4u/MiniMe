@@ -44,6 +44,28 @@ Two other things live here, both from Part 3:
     left for whichever later part actually builds that human-in-the-
     loop UI path, not assumed here.
 
+Patch A4 — Safety Gate Extension for Mutating MCP Tools -- extends
+this SAME pending-action store and confirm/deny discipline to cover
+MCP-sourced actions too, rather than writing a second, MCP-specific
+confirm mechanism (see the implementation guide's own wording for this
+patch). Concretely:
+  - PendingAction now carries a `source` ("daemon" | "mcp"), so
+    confirm_action()/deny_action() branch on where an action came from
+    without needing two separate stores, two separate TTL sweeps, or
+    two separate action_id namespaces.
+  - propose_mcp_action() is the MCP-sourced analogue of propose_action()
+    above: it validates that a given eo.mcp_agent_tools agent-tool name
+    is well-formed AND classified "mutating" by eo.mcp_registry.
+    classify_tool() (read-only MCP tools don't go through this gate at
+    all -- they run freely via eo.mcp_agent_tools.call_agent_mcp_tool(),
+    same as list_dir/read_file above never touch propose/confirm).
+  - confirm_action()'s mcp branch hands the approved call to
+    eo.mcp_agent_tools.call_agent_mcp_tool() rather than re-deriving
+    the server_name/tool_name split or the MCP_TOOL_CALLED/_RESULT
+    event-logging that module already does -- that module's own
+    docstring asks exactly this of Patch A4 ("wrap THIS function...
+    not duplicate the event-logging or name-parsing done here").
+
 Place this file at: eo/local_workspace_tools.py
 """
 from __future__ import annotations
@@ -51,16 +73,20 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
+import eo.mcp_agent_tools as mcp_agent_tools  # NEW — Patch A4
+import eo.mcp_registry as mcp_registry  # NEW — Patch A4
 from eo.local_workspace import (
     ToolCallError,
     call_daemon,
 )
+from eo.mcp_client import MCPClientError  # NEW — Patch A4
 from relay.emitter import EventType, emit_workspace_event  # NEW — Part 5
 
 __all__ = [
     "PENDING_ACTION_TTL_SECONDS",
+    "MCPClientError",
     "PendingActionError",
     "ToolCallError",
     "confirm_action",
@@ -69,6 +95,7 @@ __all__ = [
     "list_workspace_dir",
     "local_workspace_tools",
     "propose_action",
+    "propose_mcp_action",
     "read_workspace_file",
 ]
 
@@ -119,6 +146,45 @@ def _tool_event_payload(tool: str, params: dict[str, Any]) -> dict[str, Any]:
         content = params.get("content")
         payload["content_bytes"] = len(content.encode("utf-8")) if isinstance(content, str) else None
     return payload
+
+
+def _mcp_event_payload(agent_tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Same truncate-for-display purpose as _tool_event_payload() above,
+    but shaped for an MCP-sourced action -- {server, tool, arguments}
+    instead of {tool, path/command} -- matching the payload
+    eo.mcp_agent_tools.call_agent_mcp_tool() already puts on
+    MCP_TOOL_CALLED/_RESULT, so a chip built from a Patch A4 propose/
+    confirm/deny event and one built from that module's own events
+    look like the same kind of thing in the timeline."""
+    try:
+        server_name, tool_name = mcp_agent_tools._parse_agent_tool_name(agent_tool_name)
+    except ValueError:
+        # Shouldn't happen -- propose_mcp_action() already validated
+        # this name before ever storing a PendingAction with it -- but
+        # an event-payload helper is exactly the wrong place to raise,
+        # per _emit_tool_event()'s own "never load-bearing" reasoning.
+        server_name, tool_name = None, agent_tool_name
+    return {
+        "server": server_name,
+        "tool": tool_name,
+        "arguments": {k: _preview(v) for k, v in (arguments or {}).items()},
+    }
+
+
+def _emit_mcp_action_event(
+    event_type: EventType,
+    workspace_id: str,
+    action: "PendingAction",
+    ok: bool | None = None,
+    error: str | None = None,
+) -> None:
+    payload = _mcp_event_payload(action.tool, action.params.get("arguments", {}))
+    payload["action_id"] = action.action_id
+    if ok is not None:
+        payload["ok"] = ok
+    if error is not None:
+        payload["error"] = _preview(error)
+    emit_workspace_event(event_type, workspace_id=workspace_id, agent="mcp_agent_tools", payload=payload)
 
 
 def _emit_tool_event(
@@ -213,6 +279,16 @@ class PendingAction:
     workspace_id: str
     tool: str
     params: dict[str, Any]
+    # Patch A4 — "daemon" (write_file/delete/execute_command, via
+    # propose_action() below) or "mcp" (a mutating-classified MCP tool,
+    # via propose_mcp_action() below). Defaults to "daemon" so every
+    # call site that predates this patch keeps constructing
+    # PendingAction the same way it always has. For a "mcp" action,
+    # `tool` holds the full f"mcp__{server}__{tool}" agent-tool name
+    # (not a bare tool name -- see propose_mcp_action()) and `params`
+    # holds {"arguments": {...}} rather than the daemon tools' flat
+    # path/content/command shape.
+    source: Literal["daemon", "mcp"] = "daemon"
     created_at: float = field(default_factory=time.time)
 
 
@@ -261,9 +337,59 @@ def propose_action(workspace_id: str, tool: str, params: dict[str, Any]) -> Pend
         workspace_id=workspace_id,
         tool=tool,
         params=dict(params or {}),
+        source="daemon",
     )
     _pending_actions[action.action_id] = action
     _emit_tool_event(EventType.LOCAL_TOOL_PROPOSED, workspace_id, tool, action.params, action_id=action.action_id)
+    return action
+
+
+def propose_mcp_action(
+    workspace_id: str, agent_tool_name: str, arguments: dict[str, Any] | None = None
+) -> PendingAction:
+    """Patch A4's MCP-sourced analogue of propose_action() above,
+    added to the SAME _pending_actions store (see module docstring) --
+    one propose->confirm->execute discipline, not a second,
+    MCP-specific mechanism.
+
+    `agent_tool_name` is the f"mcp__{server}__{tool}" name
+    eo.mcp_agent_tools.mcp_tools_for_agent() hands an agent -- this
+    reuses that module's own name parsing rather than re-deriving it.
+
+    Raises ValueError if:
+      - agent_tool_name isn't a well-formed "mcp__{server}__{tool}"
+        name (same failure eo.mcp_agent_tools._parse_agent_tool_name()
+        itself raises for a malformed name), or
+      - eo.mcp_registry.classify_tool() classifies this tool
+        "read_only", not "mutating" -- a read-only MCP tool has no
+        business going through propose/confirm (mirrors
+        propose_action()'s own rejection of list_dir/read_file above);
+        callers should call eo.mcp_agent_tools.call_agent_mcp_tool()
+        directly for those instead, same as they already do for
+        list_workspace_dir()/read_workspace_file().
+    """
+    _prune_expired()
+
+    server_name, tool_name = mcp_agent_tools._parse_agent_tool_name(agent_tool_name)
+
+    trust = mcp_registry.classify_tool(server_name, tool_name)
+    if trust != "mutating":
+        raise ValueError(
+            f"{agent_tool_name!r} is classified {trust!r} by mcp_servers.json, "
+            f"not 'mutating' -- it runs freely via "
+            f"eo.mcp_agent_tools.call_agent_mcp_tool(), it doesn't go "
+            f"through propose/confirm"
+        )
+
+    action = PendingAction(
+        action_id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        tool=agent_tool_name,
+        params={"arguments": dict(arguments or {})},
+        source="mcp",
+    )
+    _pending_actions[action.action_id] = action
+    _emit_mcp_action_event(EventType.MCP_TOOL_PROPOSED, workspace_id, action)
     return action
 
 
@@ -281,15 +407,36 @@ def get_pending_action(workspace_id: str, action_id: str) -> PendingAction:
 
 async def confirm_action(workspace_id: str, action_id: str) -> dict[str, Any]:
     """The only path by which a write_file/delete/execute_command
-    tool_call ever actually reaches call_daemon(). Pops the pending
-    action (so it can't be confirmed twice) *before* calling the
-    daemon -- if the daemon call itself then fails (ToolCallError), the
-    action is still gone; the caller re-proposes rather than this
-    silently allowing a second confirm attempt to retry the exact same
-    stale proposal.
+    tool_call ever actually reaches call_daemon() (action.source ==
+    "daemon"), or a mutating-classified MCP tool call ever actually
+    reaches eo.mcp_agent_tools.call_agent_mcp_tool() (action.source ==
+    "mcp", Patch A4). Pops the pending action (so it can't be confirmed
+    twice) *before* executing it either way -- if execution itself then
+    fails (ToolCallError for a daemon action, MCPClientError for an MCP
+    one), the action is still gone; the caller re-proposes rather than
+    this silently allowing a second confirm attempt to retry the exact
+    same stale proposal.
     """
     action = get_pending_action(workspace_id, action_id)
     _pending_actions.pop(action_id, None)
+
+    if action.source == "mcp":
+        # Patch A4's mcp branch: emit the CONFIRMED lifecycle event,
+        # then hand off to eo.mcp_agent_tools.call_agent_mcp_tool() --
+        # that function already does the server_name/tool_name split
+        # and its own MCP_TOOL_CALLED/_RESULT event pair around the
+        # real eo.mcp_client.call_mcp_tool() round trip, so this branch
+        # deliberately does NOT re-derive either (see module docstring
+        # and that module's own "Patch A4 is expected to wrap THIS
+        # function" note). No separate MCP_TOOL_RESULT emission is
+        # needed here on the failure path either -- call_agent_mcp_tool()
+        # already emits one before re-raising.
+        _emit_mcp_action_event(EventType.MCP_TOOL_CONFIRMED, workspace_id, action)
+        arguments = action.params.get("arguments", {})
+        return await mcp_agent_tools.call_agent_mcp_tool(
+            action.tool, arguments, workspace_id=workspace_id
+        )
+
     _emit_tool_event(
         EventType.LOCAL_TOOL_CONFIRMED, workspace_id, action.tool, action.params, action_id=action_id
     )
@@ -315,14 +462,17 @@ async def confirm_action(workspace_id: str, action_id: str) -> dict[str, Any]:
 
 
 def deny_action(workspace_id: str, action_id: str) -> None:
-    """Discards a pending action without ever contacting the daemon.
-    Raises PendingActionError under the same conditions as
+    """Discards a pending action without ever contacting the daemon or
+    MCP server. Raises PendingActionError under the same conditions as
     get_pending_action() -- denying an already-gone action is still an
     error, not a silent no-op, so a caller can tell "you denied
     something real" apart from "that action_id was never valid"."""
     action = get_pending_action(workspace_id, action_id)
     _pending_actions.pop(action_id, None)
-    _emit_tool_event(EventType.LOCAL_TOOL_DENIED, workspace_id, action.tool, action.params, action_id=action_id)
+    if action.source == "mcp":
+        _emit_mcp_action_event(EventType.MCP_TOOL_DENIED, workspace_id, action)
+    else:
+        _emit_tool_event(EventType.LOCAL_TOOL_DENIED, workspace_id, action.tool, action.params, action_id=action_id)
 
 
 def local_workspace_tools() -> list[dict[str, Any]]:

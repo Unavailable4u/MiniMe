@@ -44,6 +44,7 @@ from eo.local_workspace_tools import (
     propose_action,
     read_workspace_file,
 )
+from eo.mcp_client import MCPClientError  # NEW — Patch A4
 
 router = APIRouter()
 
@@ -154,16 +155,22 @@ async def local_confirm_action(
 ):
     """Runs the proposed action for real. 404 if action_id is unknown/
     expired/wrong-workspace (nothing to confirm); 409 if the action was
-    valid but the daemon call itself failed (no daemon connected, the
-    daemon rejected the path, the command errored, etc.) -- same 409
+    valid but execution itself failed (no daemon connected, the daemon
+    rejected the path, the command errored, etc.) -- same 409
     convention local_list_dir/local_read_file above already use for
-    "well-formed request, daemon-side failure.\""""
+    "well-formed request, daemon-side failure." confirm_action() is
+    the SAME function api/routes/mcp.py's own confirm route calls
+    (Patch A4); this route is meant for action_ids proposed via
+    /local/propose, but also catches MCPClientError just in case an
+    MCP-sourced action_id ends up here instead -- a caller hitting the
+    "wrong" one of these two routes should still get a clean 409, not
+    an unhandled 500."""
     _require_workspace(ws_id, owner_id)
     try:
         return await confirm_action(ws_id, req.action_id)
     except PendingActionError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    except local_workspace.ToolCallError as exc:
+    except (local_workspace.ToolCallError, MCPClientError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
