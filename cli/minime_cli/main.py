@@ -13,6 +13,7 @@ from __future__ import annotations
 import click
 
 from . import __version__
+from .commands.attach_cmds import attach
 from .commands.auth_cmds import configure, login, logout, whoami
 from .commands.chat_cmds import ask, chat, list_chats_cmd
 
@@ -30,6 +31,7 @@ cli.add_command(whoami)
 cli.add_command(ask)
 cli.add_command(chat)
 cli.add_command(list_chats_cmd)
+cli.add_command(attach)
 
 
 def main():

@@ -700,6 +700,30 @@ ROLE_PROMPTS_SEED = {
         "Output only the updated summary text itself — no preamble, no "
         "headers, no commentary about what you changed or why."
     ),
+    # Patch B10 — anti-drift re-grounding for the Tier B rolling summary.
+    # See eo/rolling_summary.py's module docstring (mitigation 1) for why
+    # this exists as a separate role from "rolling_summarizer" above
+    # rather than a variant prompt on the same role: this one is asked to
+    # rewrite from the RAW turns as ground truth, not to edit the prior
+    # summary, and keeping the two prompts fully separate makes that
+    # difference explicit rather than a runtime flag buried in task_text.
+    "rolling_summary_reground": (
+        "You maintain a rolling summary of an ongoing conversation. "
+        "Unlike a normal update, this is a periodic RE-GROUNDING pass: "
+        "you are given an EXISTING SUMMARY that has been through several "
+        "rounds of incremental edits and may have drifted from what "
+        "actually happened, plus a set of RAW TURNS — the actual "
+        "transcript excerpts behind the most recent stretch of the "
+        "conversation. Rewrite the summary from scratch, treating the "
+        "raw turns as ground truth: correct anything the existing "
+        "summary got wrong, dropped, or overstated relative to the raw "
+        "turns, while still preserving genuinely older material from the "
+        "existing summary that the raw turns don't cover or contradict. "
+        "Prefer dropping small talk, repetition, and anything superseded "
+        "by a later turn over dropping a decision or a stated fact. "
+        "Output only the rewritten summary text itself — no preamble, no "
+        "headers, no commentary about what you changed or why."
+    ),
     # Notebooks Chat-First refinement (2026-08-01 gap fix): the
     # source-grounded, single-topic note generator agents/note_taker.py's
     # own "suggested_notes" target was mistakenly assumed to already be

@@ -69,6 +69,7 @@ def test_extract_fact_returns_the_parsed_dict_when_worth_remembering(monkeypatch
         "category": "decision",
         "title": "Use TS",
         "summary": "Always use TypeScript.",
+        "profile_signals": [],
     }
 
 
@@ -163,4 +164,155 @@ def test_extract_fact_never_raises_even_on_completely_unexpected_output(monkeypa
     neither valid JSON nor a fenced block, exercising the fail-open
     except branch end to end."""
     monkeypatch.setattr(fact_summarizer, "generate_text", lambda **k: "")
+    assert fact_summarizer.extract_fact("task", "answer") is None
+
+
+# ---------------------------------------------------------------------
+# _validate_profile_signals — Patch B2
+# ---------------------------------------------------------------------
+
+def test_validate_profile_signals_returns_empty_list_for_non_list_input():
+    assert fact_summarizer._validate_profile_signals(None) == []
+    assert fact_summarizer._validate_profile_signals("not a list") == []
+    assert fact_summarizer._validate_profile_signals({"type": "like"}) == []
+
+
+def test_validate_profile_signals_keeps_a_well_formed_entry():
+    raw = [{"type": "like", "key": "diagrams", "value": "prefers visual explanations", "explicit": True}]
+    result = fact_summarizer._validate_profile_signals(raw)
+    assert result == [{
+        "type": "like", "key": "diagrams",
+        "value": "prefers visual explanations", "explicit": True,
+    }]
+
+
+def test_validate_profile_signals_defaults_explicit_to_false_when_absent():
+    raw = [{"type": "dislike", "key": "verbose output", "value": "said it was too long"}]
+    result = fact_summarizer._validate_profile_signals(raw)
+    assert result[0]["explicit"] is False
+
+
+def test_validate_profile_signals_drops_entries_with_an_unrecognized_type():
+    raw = [{"type": "not_a_real_type", "key": "x", "value": "y"}]
+    assert fact_summarizer._validate_profile_signals(raw) == []
+
+
+def test_validate_profile_signals_drops_entries_missing_value():
+    raw = [{"type": "like", "key": "diagrams", "value": ""}]
+    assert fact_summarizer._validate_profile_signals(raw) == []
+
+
+def test_validate_profile_signals_drops_non_format_preference_entries_missing_key():
+    raw = [{"type": "expertise_signal", "key": "", "value": "intermediate"}]
+    assert fact_summarizer._validate_profile_signals(raw) == []
+
+
+def test_validate_profile_signals_drops_non_dict_items_and_keeps_valid_ones():
+    raw = ["not a dict", {"type": "like", "key": "dark mode", "value": "said they love it", "explicit": True}]
+    result = fact_summarizer._validate_profile_signals(raw)
+    assert len(result) == 1
+    assert result[0]["key"] == "dark mode"
+
+
+def test_validate_profile_signals_format_preference_does_not_require_a_key():
+    raw = [{"type": "format_preference", "value": "diagram", "explicit": True}]
+    result = fact_summarizer._validate_profile_signals(raw)
+    assert result == [{
+        "type": "format_preference", "key": "default_format",
+        "value": "diagram", "explicit": True,
+    }]
+
+
+@pytest.mark.parametrize("signal_type", list(fact_summarizer.PROFILE_SIGNAL_TYPES))
+def test_validate_profile_signals_accepts_every_known_type(signal_type):
+    raw = [{"type": signal_type, "key": "some-key", "value": "some-value", "explicit": False}]
+    result = fact_summarizer._validate_profile_signals(raw)
+    assert len(result) == 1
+    assert result[0]["type"] == signal_type
+
+
+# ---------------------------------------------------------------------
+# extract_fact — profile_signals integration, Patch B2
+# ---------------------------------------------------------------------
+
+def test_extract_fact_includes_empty_profile_signals_by_default(monkeypatch):
+    monkeypatch.setattr(
+        fact_summarizer, "generate_text",
+        lambda **k: '{"worth_remembering": true, "category": "idea", "title": "t", "summary": "s"}',
+    )
+    result = fact_summarizer.extract_fact("task", "answer")
+    assert result["profile_signals"] == []
+
+
+def test_extract_fact_carries_profile_signals_through_alongside_a_workspace_fact(monkeypatch):
+    monkeypatch.setattr(
+        fact_summarizer, "generate_text",
+        lambda **k: (
+            '{"worth_remembering": true, "category": "decision", "title": "Use TS", '
+            '"summary": "Always use TypeScript.", '
+            '"profile_signals": [{"type": "expertise_signal", "key": "React", '
+            '"value": "intermediate", "explicit": false}]}'
+        ),
+    )
+    result = fact_summarizer.extract_fact("task", "answer")
+    assert result["worth_remembering"] is True
+    assert result["profile_signals"] == [{
+        "type": "expertise_signal", "key": "React",
+        "value": "intermediate", "explicit": False,
+    }]
+
+
+def test_extract_fact_returns_a_signal_only_result_when_not_worth_remembering(monkeypatch):
+    """The whole point of decoupling the two halves: an aside about the
+    user's own preference on an otherwise trivial, not-worth-
+    remembering task must still reach the caller."""
+    monkeypatch.setattr(
+        fact_summarizer, "generate_text",
+        lambda **k: (
+            '{"worth_remembering": false, "category": "", "title": "", "summary": "", '
+            '"profile_signals": [{"type": "like", "key": "dark mode", '
+            '"value": "mentioned liking it", "explicit": true}]}'
+        ),
+    )
+    result = fact_summarizer.extract_fact("task", "answer")
+    assert result is not None
+    assert result["worth_remembering"] is False
+    assert result["category"] == ""
+    assert result["profile_signals"] == [{
+        "type": "like", "key": "dark mode",
+        "value": "mentioned liking it", "explicit": True,
+    }]
+
+
+def test_extract_fact_returns_none_when_neither_half_has_anything(monkeypatch):
+    monkeypatch.setattr(
+        fact_summarizer, "generate_text",
+        lambda **k: '{"worth_remembering": false, "category": "", "title": "", "summary": "", "profile_signals": []}',
+    )
+    assert fact_summarizer.extract_fact("task", "answer") is None
+
+
+def test_extract_fact_still_surfaces_profile_signals_when_category_is_invalid(monkeypatch):
+    """An invalid workspace-fact half must not swallow a valid profile
+    signal riding alongside it in the same response."""
+    monkeypatch.setattr(
+        fact_summarizer, "generate_text",
+        lambda **k: (
+            '{"worth_remembering": true, "category": "nonsense", "title": "t", "summary": "s", '
+            '"profile_signals": [{"type": "dislike", "key": "verbose answers", '
+            '"value": "said it was too much", "explicit": true}]}'
+        ),
+    )
+    result = fact_summarizer.extract_fact("task", "answer")
+    assert result is not None
+    assert result["worth_remembering"] is False
+    assert result["category"] == ""
+    assert len(result["profile_signals"]) == 1
+
+
+def test_extract_fact_never_raises_on_a_malformed_profile_signals_field(monkeypatch):
+    monkeypatch.setattr(
+        fact_summarizer, "generate_text",
+        lambda **k: '{"worth_remembering": false, "category": "", "title": "", "summary": "", "profile_signals": "oops"}',
+    )
     assert fact_summarizer.extract_fact("task", "answer") is None

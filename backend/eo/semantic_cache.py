@@ -30,6 +30,22 @@ Two independent fixes bundled together:
      half of this). classify_cache_class() is a cheap keyword heuristic,
      not a model call — the whole point of SGA's fast path is to stay
      fast, so classification can't itself cost a network round trip.
+  4. Patch B8 — system_version fingerprint tag: context_fingerprint
+     (above) only tracks *conversation* content, so it has nothing to
+     say about a cached answer going stale because the code around it
+     changed — a prompt rewrite, an agent behavior change, or a model
+     swap. Without a separate signal, a popular query just keeps
+     matching on similarity + TTL and gets served forever, even after
+     the prompt that originally produced it has been improved. Every
+     write_cache() call now stamps the entry with the current
+     SYSTEM_VERSION; check_cache() and get_cached_reference() both
+     reject any entry whose stored system_version doesn't match the
+     running one, no verify-call attempted — a version bump is a
+     deliberate "treat everything before this as stale" signal, not
+     something worth spending an LLM call to double-check. Bump
+     SYSTEM_VERSION (env var SGA_SYSTEM_VERSION, or the default below)
+     whenever a prompt/agent/model change is meaningful enough that old
+     answers shouldn't be trusted or replayed anymore.
 """
 import hashlib
 import os
@@ -44,6 +60,14 @@ from utils.llm_client import embed_text, generate_text
 SIMILARITY_THRESHOLD = 0.93
 INVALIDATION_THRESHOLD = 0.90
 CACHE_TTL_SECONDS = 60 * 60 * 48
+
+# Patch B8 — bump this (or set SGA_SYSTEM_VERSION in the environment)
+# whenever a prompt, agent, or model change is meaningful enough that
+# cache entries written under the old behavior shouldn't be replayed
+# or reused as reference material anymore. Any string works; it's an
+# opaque tag, not a parsed version number. See module docstring
+# point 4 for the full reasoning.
+SYSTEM_VERSION = os.environ.get("SGA_SYSTEM_VERSION", "1")
 
 # Patch B7 — see module docstring point 3.
 CACHE_CLASS_DETERMINISTIC = "deterministic"
@@ -182,6 +206,15 @@ def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,
     if time.time() - meta.get("_cached_at", 0) > CACHE_TTL_SECONDS:
         return None
 
+    # Patch B8 — an entry written under a since-superseded prompt/agent/
+    # model is stale regardless of similarity or TTL. No verify-call
+    # fallback here: a version bump is a deliberate "don't trust this"
+    # signal, not something to spend an LLM call second-guessing.
+    # Entries written before this patch have no system_version field at
+    # all and are treated as stale too, same as an explicit mismatch.
+    if meta.get("system_version") != SYSTEM_VERSION:
+        return None
+
     if meta.get("cache_class", CACHE_CLASS_DETERMINISTIC) != CACHE_CLASS_DETERMINISTIC:
         return None  # generative entry — never replayed verbatim (Patch B7)
 
@@ -223,6 +256,7 @@ def write_cache(task_text: str, answer: str, app_slug: str = None, workspace_id:
         "_cached_at": time.time(),
         "context_fingerprint": _fingerprint(context_text),
         "cache_class": cache_class,
+        "system_version": SYSTEM_VERSION,  # Patch B8
     }
     metadata.update(_scope_metadata(scope_type, scope_id))
     index.upsert(vectors=[{
@@ -263,6 +297,12 @@ def get_cached_reference(task_text: str, app_slug: str = None, workspace_id: str
 
     meta = top.metadata or {}
     if time.time() - meta.get("_cached_at", 0) > CACHE_TTL_SECONDS:
+        return None
+
+    # Patch B8 — same reasoning as check_cache(): reference material
+    # written under a superseded prompt/agent/model isn't safe to feed
+    # into a fresh generation as "here's roughly what we said before".
+    if meta.get("system_version") != SYSTEM_VERSION:
         return None
 
     return meta.get("answer") or None
