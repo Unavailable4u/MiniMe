@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Patch A2 -- MCP Server Registry & Config. Loaded by eo/mcp_registry.py",
+    "at backend startup (see api/server.py's _lifespan). Every ${VAR_NAME}",
+    "token below is expanded from a real environment variable at connect",
+    "time -- see backend/.env.example's 'MCP Servers' section for what each",
+    "one is and where to get it. Never put a real secret directly in this",
+    "file; it's checked into version control.",
+    "",
+    "Deliberately Tier 1 only (see the implementation guide's own scope",
+    "note on Patch A2): filesystem-equivalent capability is skipped here",
+    "on purpose -- the daemon already covers that (docs/decisions/0001).",
+    "Do not add a filesystem MCP server to this list. Tier 3/4 servers",
+    "(shell/terminal, process manager, package manager, application",
+    "launcher) are likewise out of scope until the safety architecture in",
+    "Patch A4 has been live and proven for this lower-risk Tier 1 set.",
+    "",
+    "'default_tool_trust' / 'tool_trust_overrides' are consumed by Patch",
+    "A4's safety gate, not by this patch -- but the classification is a",
+    "property of the server config (how much do we trust THIS server's",
+    "tools), so it's recorded here now rather than invented later at call",
+    "time. 'mutating' is the safe default for any tool not explicitly",
+    "listed as read_only -- see eo/mcp_registry.py's classify_tool()."
+  ],
+  "servers": [
+    {
+      "name": "github",
+      "enabled": true,
+      "transport": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_MCP_TOKEN}"
+      },
+      "default_tool_trust": "mutating",
+      "tool_trust_overrides": {
+        "search_issues": "read_only",
+        "search_pull_requests": "read_only",
+        "search_code": "read_only",
+        "search_repositories": "read_only",
+        "get_issue": "read_only",
+        "get_pull_request": "read_only",
+        "get_file_contents": "read_only",
+        "list_issues": "read_only",
+        "list_pull_requests": "read_only",
+        "list_commits": "read_only"
+      }
+    },
+    {
+      "name": "context7",
+      "enabled": true,
+      "transport": "stdio",
+      "command": ["npx", "-y", "@upstash/context7-mcp"],
+      "env": {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      },
+      "default_tool_trust": "read_only"
+    },
+    {
+      "name": "web_search",
+      "enabled": true,
+      "transport": "stdio",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "default_tool_trust": "read_only"
+    }
+  ]
+}

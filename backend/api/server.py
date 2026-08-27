@@ -52,6 +52,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # so api/routes/* modules can import it without a circular import back
 # into this file. See api/deps.py's module docstring for why.
 from api.deps import _verify_supabase_jwt
+from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
+from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
 from utils.llm_client import request_shutdown  # NEW — Patch 6.2
 from api.routes.chats import router as chats_router
 from api.routes.code import router as code_router
@@ -164,7 +166,21 @@ async def _lifespan(app: FastAPI):
     # (module import alone can happen under --reload's parent process
     # too; this is the one place we know we're the live server).
     signal.signal(signal.SIGINT, _handle_sigint)
+    # NEW — Patch A2: connect every `enabled` server in
+    # backend/config/mcp_servers.json exactly once, at real server
+    # startup (not on every --reload parent-process import, same
+    # reasoning as the signal.signal() call just above). A server that
+    # fails to connect (missing token, `npx` not on PATH, etc.) is
+    # logged and skipped by connect_configured_servers() itself -- this
+    # never blocks the rest of the app from starting.
+    await mcp_registry.connect_configured_servers()
     yield
+    # NEW — Patch A2: mirror image of the connect above -- clean
+    # shutdown of every live MCP connection (closes stdio subprocesses,
+    # closes HTTP clients) on the same graceful-shutdown path uvicorn
+    # already drives this generator through. eo.mcp_client.shutdown_all()
+    # existed since Patch A1 but had no caller until now.
+    await mcp_client.shutdown_all()
 
 
 app = FastAPI(title="MiniMe v6 — EO layer API", lifespan=_lifespan)

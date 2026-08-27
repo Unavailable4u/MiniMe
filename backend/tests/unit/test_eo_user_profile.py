@@ -204,6 +204,58 @@ def test_set_output_pref_explicit_sets_high_confidence_immediately():
 
 
 # ---------------------------------------------------------------------
+# apply_profile_signal — Patch B2 write-side routing
+# ---------------------------------------------------------------------
+
+def test_apply_profile_signal_routes_expertise_signal_to_domains():
+    signal = {"type": "expertise_signal", "key": "React", "value": "intermediate", "explicit": False}
+    profile = user_profile.apply_profile_signal("user-1", signal)
+    assert profile["domains"]["React"]["value"] == "intermediate"
+    assert profile["domains"]["React"]["confidence"] == user_profile.INFERRED_STARTING_CONFIDENCE
+
+
+def test_apply_profile_signal_routes_error_pattern_to_error_patterns():
+    signal = {"type": "error_pattern", "key": "off-by-one", "value": "loop bound mistake", "explicit": False}
+    profile = user_profile.apply_profile_signal("user-1", signal)
+    assert "off-by-one" in profile["error_patterns"]
+
+
+def test_apply_profile_signal_routes_like_and_dislike():
+    like_profile = user_profile.apply_profile_signal(
+        "user-1", {"type": "like", "key": "diagrams", "value": "likes visuals", "explicit": True},
+    )
+    assert like_profile["likes"]["diagrams"]["explicit"] is True
+
+    dislike_profile = user_profile.apply_profile_signal(
+        "user-1", {"type": "dislike", "key": "verbose answers", "value": "said too long", "explicit": True},
+    )
+    assert dislike_profile["dislikes"]["verbose answers"]["explicit"] is True
+
+
+def test_apply_profile_signal_routes_format_preference_to_output_prefs_not_a_bucket():
+    signal = {"type": "format_preference", "key": "default_format", "value": "diagram", "explicit": True}
+    profile = user_profile.apply_profile_signal("user-1", signal)
+    assert profile["output_prefs"]["default_format"] == "diagram"
+    assert profile["output_prefs"]["confidence"] == user_profile.EXPLICIT_CONFIDENCE
+    assert "format_preference" not in profile["domains"]
+
+
+def test_apply_profile_signal_returns_none_for_an_unrecognized_type():
+    signal = {"type": "not_a_real_type", "key": "x", "value": "y"}
+    assert user_profile.apply_profile_signal("user-1", signal) is None
+
+
+def test_apply_profile_signal_returns_none_for_a_non_dict_signal():
+    assert user_profile.apply_profile_signal("user-1", "not a dict") is None
+
+
+def test_apply_profile_signal_passes_source_through_to_the_stored_entry():
+    signal = {"type": "like", "key": "dark mode", "value": "likes it", "explicit": False}
+    profile = user_profile.apply_profile_signal("user-1", signal, source="chat_summarizer:sess-1")
+    assert profile["likes"]["dark mode"]["source"] == "chat_summarizer:sess-1"
+
+
+# ---------------------------------------------------------------------
 # append_correction / list_corrections
 # ---------------------------------------------------------------------
 
@@ -236,3 +288,101 @@ def test_corrections_log_is_append_only_across_multiple_calls():
     user_profile.append_correction("user-1", "likes", "diagrams", True, False)
     user_profile.append_correction("user-1", "output_prefs", None, "markdown", "diagram")
     assert len(user_profile.list_corrections("user-1")) == 2
+
+
+# ---------------------------------------------------------------------
+# override_profile_fact — Patch B4
+# ---------------------------------------------------------------------
+
+def test_override_profile_fact_requires_owner_id_and_field():
+    with pytest.raises(ValueError):
+        user_profile.override_profile_fact(None, "likes", True, key="diagrams")
+    with pytest.raises(ValueError):
+        user_profile.override_profile_fact("user-1", "", True, key="diagrams")
+
+
+def test_override_profile_fact_rejects_an_unknown_field():
+    with pytest.raises(ValueError):
+        user_profile.override_profile_fact("user-1", "not_a_real_field", True, key="x")
+
+
+def test_override_profile_fact_requires_a_key_for_bucketed_fields():
+    with pytest.raises(ValueError):
+        user_profile.override_profile_fact("user-1", "likes", True, key=None)
+
+
+def test_override_profile_fact_sets_explicit_confidence_immediately():
+    """The core promise: one clear correction jumps straight to high
+    confidence, no gradual climb, regardless of what came before."""
+    profile = user_profile.override_profile_fact(
+        "user-1", "dislikes", "loves it now", key="Python", reason="user corrected me",
+    )
+    entry = profile["dislikes"]["Python"]
+    assert entry["confidence"] == user_profile.EXPLICIT_CONFIDENCE
+    assert entry["explicit"] is True
+    assert entry["value"] == "loves it now"
+
+
+def test_override_profile_fact_overrides_a_prior_weak_inferred_guess():
+    """The direct fix for 'one wrong guess became permanent forever':
+    a single inferred observation must not survive an explicit
+    correction, and the correction must be logged."""
+    user_profile.record_signal("user-1", "dislikes", "Python", value=True, explicit=False)
+    profile = user_profile.override_profile_fact(
+        "user-1", "dislikes", False, key="Python", reason="actually I like it",
+    )
+    entry = profile["dislikes"]["Python"]
+    assert entry["confidence"] == user_profile.EXPLICIT_CONFIDENCE
+    assert entry["value"] is False
+
+    corrections = user_profile.list_corrections("user-1")
+    assert len(corrections) == 1
+    assert corrections[0]["field"] == "dislikes"
+    assert corrections[0]["key"] == "Python"
+    assert corrections[0]["old_value"] is True
+    assert corrections[0]["new_value"] is False
+    assert corrections[0]["reason"] == "actually I like it"
+
+
+def test_override_profile_fact_against_a_never_set_field_applies_but_does_not_log_a_correction():
+    """No prior guess existed, so there's nothing to contradict —
+    setting it explicitly for the first time is not itself a
+    'correction'."""
+    profile = user_profile.override_profile_fact(
+        "user-1", "likes", True, key="dark mode", reason="user said so",
+    )
+    assert profile["likes"]["dark mode"]["confidence"] == user_profile.EXPLICIT_CONFIDENCE
+    assert user_profile.list_corrections("user-1") == []
+
+
+def test_override_profile_fact_matching_the_prior_value_does_not_log_a_correction():
+    """Re-stating the same value explicitly isn't a correction either
+    — nothing was actually contradicted."""
+    user_profile.record_signal("user-1", "likes", "diagrams", value=True, explicit=True)
+    user_profile.override_profile_fact("user-1", "likes", True, key="diagrams")
+    assert user_profile.list_corrections("user-1") == []
+
+
+def test_override_profile_fact_works_on_output_prefs_without_a_key():
+    user_profile.set_output_pref("user-1", "diagram", explicit=False)
+    profile = user_profile.override_profile_fact(
+        "user-1", "output_prefs", "markdown", reason="user asked for markdown instead",
+    )
+    assert profile["output_prefs"]["default_format"] == "markdown"
+    assert profile["output_prefs"]["confidence"] == user_profile.EXPLICIT_CONFIDENCE
+
+    corrections = user_profile.list_corrections("user-1")
+    assert len(corrections) == 1
+    assert corrections[0]["field"] == "output_prefs"
+    assert corrections[0]["key"] is None
+    assert corrections[0]["old_value"] == "diagram"
+    assert corrections[0]["new_value"] == "markdown"
+
+
+def test_override_profile_fact_a_later_inferred_signal_does_not_erode_the_correction():
+    user_profile.record_signal("user-1", "dislikes", "Python", value=True, explicit=False)
+    user_profile.override_profile_fact("user-1", "dislikes", False, key="Python")
+    profile = user_profile.record_signal("user-1", "dislikes", "Python", explicit=False)
+    entry = profile["dislikes"]["Python"]
+    assert entry["confidence"] == user_profile.EXPLICIT_CONFIDENCE
+    assert entry["value"] is False

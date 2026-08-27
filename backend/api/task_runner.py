@@ -52,9 +52,10 @@ from eo import (
     chat_workspace,
     code_loader,
     conversation_memory,
-    fact_summarizer,  # NEW — Part 3
+    fact_summarizer,  # NEW — Part 3, extended by Patch B2
     loop_v4,
     routing_memory,
+    user_profile,  # NEW — Patch B2, profile_signals write-side
     workspace_facts,
 )
 from eo.executor import execute_graph
@@ -1184,7 +1185,8 @@ def _should_extract_content_fact(tier) -> bool:
     return tier in (2, 3)
 
 
-def _maybe_extract_content_fact(workspace_id: str, tier, task_text: str, session_id: str, response: dict) -> None:
+def _maybe_extract_content_fact(workspace_id: str, tier, task_text: str, session_id: str,
+                                 response: dict, owner_id: str = None) -> None:
     """Part 3 — the actual content summarizer, gated by
     _should_extract_content_fact() above (tier 2/3 only). Two
     independent fail-open layers, matching
@@ -1194,18 +1196,28 @@ def _maybe_extract_content_fact(workspace_id: str, tier, task_text: str, session
 
       1. eo/fact_summarizer.extract_fact() never raises — a model/
          parse error there returns None, same as a genuine
-         worth_remembering: false judgment.
-      2. The record_section_entry() write below is still wrapped here,
-         since a storage-layer failure is a different failure mode
-         than a summarizer failure and callers of this function must
-         never see either one — the task's actual answer has already
-         been returned to the user by the time this runs.
+         worth_remembering: false judgment (and, since Patch B2, "and
+         no profile signal either" — see that function's docstring).
+      2. Both write paths below (workspace fact, profile signals) are
+         still wrapped here, since a storage-layer failure is a
+         different failure mode than a summarizer failure and callers
+         of this function must never see either one — the task's
+         actual answer has already been returned to the user by the
+         time this runs.
+
+    owner_id: NEW — Patch B2. Only needed for the profile-signal half
+    (eo/user_profile.py is keyed by owner_id, not workspace_id); the
+    workspace-fact half below is unaffected and still runs without it.
+    Missing owner_id (e.g. a system-triggered run with no authenticated
+    caller) just means profile signals are skipped for this call,
+    same "degrade, don't fail" posture record_section_entry() already
+    has for a missing workspace_id at the top of this function.
 
     Scoped to _run_task_inner()'s auto-dispatch path only for now —
     confirm_task() and run_task_from_template() are separate dispatch
     entrypoints that also reach tier 2/3 and would need this same call
     added if/when content extraction should cover them too. Not done
-    here to keep this step to exactly what Part 2/3 need."""
+    here to keep this step to exactly what Part 2/3 (and now B2) need."""
     if not workspace_id or not _should_extract_content_fact(tier):
         return
 
@@ -1217,25 +1229,52 @@ def _maybe_extract_content_fact(workspace_id: str, tier, task_text: str, session
     if not fact:
         return
 
-    section = workspace_facts.CATEGORY_TO_SECTION.get(fact["category"])
-    if not section:
-        return  # unreachable in practice — extract_fact() already validates category
+    if fact["worth_remembering"]:
+        section = workspace_facts.CATEGORY_TO_SECTION.get(fact["category"])
+        if not section:
+            pass  # unreachable in practice — extract_fact() already validates category
+        else:
+            try:
+                workspace_facts.record_section_entry(
+                    workspace_id,
+                    section,
+                    {
+                        "title": fact["title"],
+                        "summary": fact["summary"],
+                        "data": {"category": fact["category"], "tier": tier},
+                    },
+                    source="chat_summarizer",   # distinct from D1's source="chat_task_runner"
+                    source_ref=session_id,
+                    event="upsert",
+                )
+            except Exception as exc:
+                print(f"  [task_runner] content-fact write failed, skipped (fail-open): {exc}")
 
-    try:
-        workspace_facts.record_section_entry(
-            workspace_id,
-            section,
-            {
-                "title": fact["title"],
-                "summary": fact["summary"],
-                "data": {"category": fact["category"], "tier": tier},
-            },
-            source="chat_summarizer",   # distinct from D1's source="chat_task_runner"
-            source_ref=session_id,
-            event="upsert",
-        )
-    except Exception as exc:
-        print(f"  [task_runner] content-fact write failed, skipped (fail-open): {exc}")
+    _maybe_apply_profile_signals(owner_id, fact.get("profile_signals"), session_id)
+
+
+def _maybe_apply_profile_signals(owner_id: str, profile_signals, session_id: str) -> None:
+    """Patch B2 — writes each of extract_fact()'s already-validated
+    `profile_signals` entries into eo/user_profile.py via
+    apply_profile_signal(), routed by owner_id rather than
+    workspace_id (a person's profile follows them across every
+    workspace they touch, per that module's own docstring).
+
+    Each signal is written independently, in its own try/except, so
+    one malformed or storage-failing entry can't drop the rest of an
+    otherwise-good batch — same reasoning record_section_entry()'s
+    per-write isolation already has one level up in
+    _maybe_extract_content_fact(), just applied per-signal instead of
+    per-call since this is the one place multiple writes can happen
+    off a single extraction result."""
+    if not owner_id or not profile_signals:
+        return
+
+    for signal in profile_signals:
+        try:
+            user_profile.apply_profile_signal(owner_id, signal, source="chat_summarizer:" + str(session_id))
+        except Exception as exc:
+            print(f"  [task_runner] profile-signal write failed, skipped (fail-open): {exc}")
 
 
 _SGA_FACT_TITLE_MAX = 80
@@ -1563,7 +1602,8 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                                    resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
                                    approval_roles, no_conversation_context_roles=no_conversation_context_roles,
                                    scope=scope, workspace_id=resolved.get("workspace_id"))
-    _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response)   # NEW — Part 2
+    _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response,
+                                 owner_id=owner_id)   # NEW — Part 2, owner_id threaded through for Patch B2
     _maybe_attach_prerequisite_suggestions(resolved, response, session_id)   # NEW — Data Layer §9d
     return response
 

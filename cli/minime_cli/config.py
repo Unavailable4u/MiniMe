@@ -32,6 +32,21 @@ reads from `.env` (backend/eo/db.py, daemon/config.py, etc.):
 Precedence per value: real env var > `~/.minime/config.json` > built-in
 default (API URL only — the two Supabase values have no safe default
 and are required before `minime login` can do anything).
+
+  MINIME_DAEMON_DIR         -- NEW, Patch A7. Path to a local MiniMe
+                               checkout containing `daemon/`, so
+                               `minime attach` can import the real
+                               `daemon.config` / `daemon.path_guard`
+                               modules and write a real `daemon/.env`,
+                               instead of a second copy of that logic
+                               living here. Same precedence as the rest
+                               (env var > config file), but — like the
+                               Supabase values — has no safe default:
+                               the CLI package and a MiniMe checkout
+                               are not guaranteed to be adjacent (see
+                               docs/decisions/0003). Only `minime
+                               attach` needs this; every other command
+                               works with it unset.
 """
 from __future__ import annotations
 
@@ -58,6 +73,7 @@ class Config:
     api_url: str
     supabase_url: str | None
     supabase_anon_key: str | None
+    daemon_dir: str | None = None
 
     def require_supabase(self) -> tuple[str, str]:
         """Fail loudly, with the actual fix, rather than a bare
@@ -98,11 +114,12 @@ def load_config() -> Config:
         api_url=os.environ.get("MINIME_API_URL") or file_cfg.get("api_url") or _DEFAULT_API_URL,
         supabase_url=os.environ.get("MINIME_SUPABASE_URL") or file_cfg.get("supabase_url"),
         supabase_anon_key=os.environ.get("MINIME_SUPABASE_ANON_KEY") or file_cfg.get("supabase_anon_key"),
+        daemon_dir=os.environ.get("MINIME_DAEMON_DIR") or file_cfg.get("daemon_dir"),
     )
 
 
 def save_config(*, api_url: str | None = None, supabase_url: str | None = None,
-                 supabase_anon_key: str | None = None) -> Config:
+                 supabase_anon_key: str | None = None, daemon_dir: str | None = None) -> Config:
     """Merges into the existing file rather than overwriting it, so
     `minime configure` can be re-run to fix one value without
     clobbering the others."""
@@ -114,6 +131,8 @@ def save_config(*, api_url: str | None = None, supabase_url: str | None = None,
         current["supabase_url"] = supabase_url
     if supabase_anon_key:
         current["supabase_anon_key"] = supabase_anon_key
+    if daemon_dir:
+        current["daemon_dir"] = daemon_dir
     CONFIG_FILE.write_text(json.dumps(current, indent=2) + "\n")
     # 0600: this file holds a project's anon key (public-ish, but still
     # no reason to leave it group/world-readable) and sits right next

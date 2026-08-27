@@ -1,5 +1,6 @@
 """
-eo/fact_summarizer.py — Part 3 of the Data-bubble content work.
+eo/fact_summarizer.py — Part 3 of the Data-bubble content work, extended
+by Patch B2 to also emit per-account profile signals.
 
 Called once per task from api/task_runner.py's _maybe_extract_content_fact(),
 already gated to tier 2/3 responses only (see that function's docstring for
@@ -8,6 +9,26 @@ filtering ("is this worth keeping") and summarization in a single model
 call rather than two — the relevance question is folded into the same
 structured output as the summary itself, so a "not memorable" result costs
 exactly the same one call as a "memorable" one, not a separate filter step.
+
+Patch B2 folds a second, independent question into that same call and
+that same structured output, rather than paying for a second LLM call:
+"does anything here say something about the *person*, not just the
+project" — expertise level, a stated like/dislike, a recurring mistake
+pattern, or an output-format preference. That's `profile_signals` below,
+a (possibly empty) list living alongside the original
+worth_remembering/category/title/summary fields. The two questions are
+independent — a task can carry a profile signal with nothing
+workspace-worthy in it (an aside about the user's own preference on an
+otherwise one-off/trivial task), or a workspace fact with no profile
+signal, or both, or neither. See extract_fact()'s docstring for exactly
+how the two halves of the response combine into what gets returned.
+
+profile_signals entries are routed by api/task_runner.py to
+eo/user_profile.py's apply_profile_signal() (Patch B1), keyed by
+owner_id — NOT written here. This module stays a pure extraction step
+with no storage side effects of its own, same posture it already has for
+the workspace-fact half (workspace_facts.record_section_entry() is also
+only ever called from task_runner.py, never from here).
 
 Not registered in eo/router.py or eo/panel.py's staffable-role tables like
 a normal agent — this isn't something the Inspector/Panel ever hires; it's
@@ -19,6 +40,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.user_profile import PROFILE_SIGNAL_TYPES
 from eo.workspace_facts import CATEGORY_TO_SECTION
 from utils.llm_client import generate_text
 
@@ -58,14 +80,20 @@ CHAIN = [
 # _parse() below strips a ```json fence the same way other structured-
 # output callers in this codebase already do, rather than assuming a
 # bare JSON body.
-SYSTEM_PROMPT = """You extract durable, workspace-level facts from a completed task and its \
-answer, for a project's long-term memory. You will be given the task and its answer, and must \
-decide whether anything in it is worth remembering for future tasks in the same project.
+SYSTEM_PROMPT = """You extract durable, workspace-level facts AND per-person profile signals \
+from a completed task and its answer, for long-term memory. You will be given the task and its \
+answer, and must decide (1) whether anything in it is worth remembering for future tasks in the \
+same project, and (2) whether anything in it reveals something about the PERSON themselves \
+(their skill level, a like/dislike, a recurring mistake, a format preference) rather than the \
+project. These are two independent judgments — either, both, or neither can apply to the same \
+task.
 
 Respond with ONLY a JSON object and nothing else — no preamble, no markdown fences — matching \
 exactly this shape:
 
-{"worth_remembering": true or false, "category": "decision" | "preference" | "idea" | "context", "title": "...", "summary": "..."}
+{"worth_remembering": true or false, "category": "decision" | "preference" | "idea" | "context", "title": "...", "summary": "...", "profile_signals": [...]}
+
+--- Part 1: worth_remembering / category / title / summary (workspace-level) ---
 
 worth_remembering is true only for durable, reusable information — a stated preference \
 ("always use TypeScript"), a real decision made ("target this for students"), a concrete idea \
@@ -84,7 +112,35 @@ separate entries.
 summary is one or two plain sentences stating the fact itself — not the mechanics of how the \
 task was resolved.
 
-If worth_remembering is false, set category/title/summary to empty strings."""
+If worth_remembering is false, set category/title/summary to empty strings.
+
+--- Part 2: profile_signals (person-level, independent of Part 1) ---
+
+profile_signals is a list, usually empty, of objects shaped:
+
+{"type": "expertise_signal" | "format_preference" | "error_pattern" | "like" | "dislike", "key": "...", "value": "...", "explicit": true or false}
+
+Only include an entry when the task or answer actually shows one of these:
+- "expertise_signal": the person's skill level at a topic became evident (e.g. key="React", \
+value="intermediate" — inferred from how they asked, or explicit if they stated it outright).
+- "format_preference": they showed or stated a preference for how answers should be delivered \
+(key="default_format", value one of "text" | "markdown" | "artifact" | "diagram" | "code").
+- "error_pattern": they made the same kind of mistake again (key names the pattern, e.g. \
+"off-by-one in loop bounds", value is a short description).
+- "like" / "dislike": a clear positive or negative reaction to a topic, tool, or approach \
+(key is the topic, value is a short description of the reaction).
+
+explicit is true only when the person stated the thing about themselves directly in their own \
+words ("I'm still learning React", "I prefer diagrams", "I always mess this up"). explicit is \
+false when you are inferring it from behavior or context rather than a direct statement. When \
+in doubt, prefer leaving profile_signals empty over guessing — a false signal is worse than a \
+missed one, since low-confidence inferred signals still need repeated corroboration before they \
+matter, but a wrong explicit signal overwrites the record immediately.
+
+Every entry needs a non-empty type from the list above, a non-empty value, and (except for \
+format_preference, where key is fixed to "default_format") a non-empty key. If nothing in the \
+task reveals anything about the person, return an empty list — do not manufacture a signal just \
+to fill the field."""
 
 
 def _parse(raw: str) -> dict:
@@ -97,13 +153,72 @@ def _parse(raw: str) -> dict:
     return json.loads(cleaned)
 
 
+def _validate_profile_signals(raw) -> list:
+    """Patch B2. Defensive validation of the `profile_signals` half of
+    the model's response, same fail-open posture as the rest of this
+    module — a malformed or partially-malformed list degrades to
+    dropping the bad entries, never to raising. Mirrors the shape
+    `apply_profile_signal()` (eo/user_profile.py) expects, so
+    task_runner.py can hand each validated entry straight through
+    without re-checking it.
+
+    Never raises: any unexpected shape (not a list, a non-dict item,
+    missing/blank fields) is silently skipped rather than surfaced,
+    consistent with extract_fact()'s "callers treat this whole
+    function as fail-open" contract."""
+    if not isinstance(raw, list):
+        return []
+
+    validated = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        signal_type = item.get("type")
+        if signal_type not in PROFILE_SIGNAL_TYPES:
+            continue
+        value = item.get("value")
+        if not value:
+            continue
+        is_format_preference = signal_type == "format_preference"
+        key = "default_format" if is_format_preference else item.get("key")
+        if not key:
+            continue
+        validated.append({
+            "type": signal_type,
+            "key": key,
+            "value": value,
+            "explicit": bool(item.get("explicit")),
+        })
+    return validated
+
+
 def extract_fact(task_text: str, answer_text: str, session_id: str = None) -> dict:
-    """Returns the parsed {"worth_remembering", "category", "title",
-    "summary"} dict when the model judged the task worth remembering, or
-    None in every other case — escalate/error, malformed JSON, an
-    unrecognized category, a missing title/summary, or
-    worth_remembering: false. Callers should treat None as "skip the
-    write, don't block the task response" (fail-open, same discipline
+    """Returns {"worth_remembering", "category", "title", "summary",
+    "profile_signals"} — Patch B2 adds `profile_signals` (a possibly-
+    empty list; see _validate_profile_signals()) alongside the
+    original four fields.
+
+    Returns None only when there is genuinely nothing to do with this
+    task: the LLM call/parse itself failed, worth_remembering came
+    back false AND profile_signals is empty, or the workspace-fact
+    half was well-formed-but-invalid (unrecognized category, or a
+    missing title/summary) AND profile_signals is empty. In every
+    other case a dict is returned, even if only one of the two halves
+    has anything in it — a profile signal on an otherwise
+    not-worth-remembering task (an aside about the user's own
+    preference on a one-off question) still needs to reach the
+    caller, so it can't be treated as a full miss just because Part 1
+    of the response was empty.
+
+    When returned, the workspace-fact half of the dict is internally
+    consistent: worth_remembering is only ever true when category/
+    title/summary are all present and category is a recognized value;
+    any workspace-fact validation failure resets worth_remembering to
+    False and category/title/summary to "" rather than propagating a
+    half-valid fact to record_section_entry()'s caller.
+
+    Callers should treat None as "skip both writes, don't block the
+    task response" (fail-open, same discipline
     eo/workspace_facts.py's _invalidate_facts_cache() already uses) —
     this function never raises.
 
@@ -127,11 +242,29 @@ def extract_fact(task_text: str, answer_text: str, session_id: str = None) -> di
         print(f"  [fact_summarizer] extraction call/parse failed, skipped (fail-open): {exc}")
         return None
 
-    if not isinstance(parsed, dict) or not parsed.get("worth_remembering"):
+    if not isinstance(parsed, dict):
         return None
-    if parsed.get("category") not in CATEGORY_TO_SECTION:
-        print(f"  [fact_summarizer] unrecognized category {parsed.get('category')!r}, skipped")
+
+    profile_signals = _validate_profile_signals(parsed.get("profile_signals"))
+
+    worth_remembering = bool(parsed.get("worth_remembering"))
+    category, title, summary = "", "", ""
+    if worth_remembering:
+        if parsed.get("category") not in CATEGORY_TO_SECTION:
+            print(f"  [fact_summarizer] unrecognized category {parsed.get('category')!r}, skipped")
+            worth_remembering = False
+        elif not parsed.get("title") or not parsed.get("summary"):
+            worth_remembering = False
+        else:
+            category, title, summary = parsed["category"], parsed["title"], parsed["summary"]
+
+    if not worth_remembering and not profile_signals:
         return None
-    if not parsed.get("title") or not parsed.get("summary"):
-        return None
-    return parsed
+
+    return {
+        "worth_remembering": worth_remembering,
+        "category": category,
+        "title": title,
+        "summary": summary,
+        "profile_signals": profile_signals,
+    }

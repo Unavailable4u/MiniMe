@@ -11,21 +11,26 @@ from ..config import ConfigError, load_config, save_config
 @click.option("--api-url", default=None, help="Backend base URL (e.g. http://localhost:8000).")
 @click.option("--supabase-url", default=None, help="Supabase project URL.")
 @click.option("--supabase-anon-key", default=None, help="Supabase project anon (public) key -- never the service role key.")
-def configure(api_url, supabase_url, supabase_anon_key):
+@click.option("--daemon-dir", default=None,
+              help="Path to a local MiniMe checkout containing daemon/ -- only needed for `minime attach` (Patch A7).")
+def configure(api_url, supabase_url, supabase_anon_key, daemon_dir):
     """Save connection settings to ~/.minime/config.json.
 
     Every value is also settable via env var (MINIME_API_URL,
-    MINIME_SUPABASE_URL, MINIME_SUPABASE_ANON_KEY) instead, which takes
-    precedence over anything saved here -- this command exists purely
-    so you don't have to export them in every shell session.
+    MINIME_SUPABASE_URL, MINIME_SUPABASE_ANON_KEY, MINIME_DAEMON_DIR)
+    instead, which takes precedence over anything saved here -- this
+    command exists purely so you don't have to export them in every
+    shell session.
     """
-    if not any([api_url, supabase_url, supabase_anon_key]):
-        click.echo("Nothing to save -- pass at least one of --api-url / --supabase-url / --supabase-anon-key.")
+    if not any([api_url, supabase_url, supabase_anon_key, daemon_dir]):
+        click.echo("Nothing to save -- pass at least one of --api-url / --supabase-url / --supabase-anon-key / --daemon-dir.")
         return
-    cfg = save_config(api_url=api_url, supabase_url=supabase_url, supabase_anon_key=supabase_anon_key)
+    cfg = save_config(api_url=api_url, supabase_url=supabase_url, supabase_anon_key=supabase_anon_key,
+                       daemon_dir=daemon_dir)
     click.echo(f"Saved. api_url={cfg.api_url}"
                + (f" supabase_url={cfg.supabase_url}" if cfg.supabase_url else "")
-               + (" supabase_anon_key=<set>" if cfg.supabase_anon_key else ""))
+               + (" supabase_anon_key=<set>" if cfg.supabase_anon_key else "")
+               + (f" daemon_dir={cfg.daemon_dir}" if cfg.daemon_dir else ""))
 
 
 @click.command()

@@ -116,9 +116,10 @@ def test_append_turn_folds_dropped_turns_instead_of_discarding(monkeypatch):
     vanishing — the actual behavior change this patch makes."""
     captured = {}
 
-    def fake_fold_async(session_id, turns):
+    def fake_fold_async(session_id, turns, owner_id=None):
         captured["session_id"] = session_id
         captured["turns"] = turns
+        captured["owner_id"] = owner_id
 
     monkeypatch.setattr(conversation_memory.rolling_summary, "fold_turns_async", fake_fold_async)
 

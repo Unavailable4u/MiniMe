@@ -92,6 +92,18 @@ class ApiClient:
         )
         self._raise_for_status(resp)
 
+    # --- workspaces ------------------------------------------------------
+    # NEW -- Patch A7. Not part of A6's original cut (chats/tasks only);
+    # added so `minime attach` can offer a real pick-list instead of
+    # asking a person to copy a workspace_id out of the web app's URL
+    # bar. Same GET /api/workspaces the frontend's workspace switcher
+    # already reads -- no new backend route.
+
+    def list_workspaces(self) -> list:
+        resp = requests.get(self._url("/api/workspaces"), headers=self._headers(), timeout=_TIMEOUT_CHAT)
+        self._raise_for_status(resp)
+        return resp.json()
+
     # --- tasks ---------------------------------------------------------
 
     def send_task(self, task_text: str, *, session_id: str | None, mode: str = "auto",
