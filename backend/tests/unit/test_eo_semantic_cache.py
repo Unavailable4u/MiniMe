@@ -160,7 +160,8 @@ def test_check_cache_replays_blindly_when_context_fingerprint_is_unchanged(monke
     fp = semantic_cache._fingerprint("same context")
     fake_index.query_result = [FakeMatch(score=0.99,
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
-                                                    "context_fingerprint": fp})]
+                                                    "context_fingerprint": fp,
+                                                    "system_version": semantic_cache.SYSTEM_VERSION})]
     verify_called = []
     monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: verify_called.append(1) or "YES")
 
@@ -173,7 +174,8 @@ def test_check_cache_replays_blindly_when_context_fingerprint_is_unchanged(monke
 def test_check_cache_escalates_to_verification_when_fingerprint_differs(monkeypatch, fake_index):
     fake_index.query_result = [FakeMatch(score=0.99,
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
-                                                    "context_fingerprint": semantic_cache._fingerprint("old context")})]
+                                                    "context_fingerprint": semantic_cache._fingerprint("old context"),
+                                                    "system_version": semantic_cache.SYSTEM_VERSION})]
     monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: "YES")
 
     result = semantic_cache.check_cache("some question", context_text="new context")
@@ -210,7 +212,8 @@ def test_check_cache_missing_stored_fingerprint_also_escalates_to_verification(m
     match -- it should still go through verification rather than being
     replayed blindly."""
     fake_index.query_result = [FakeMatch(score=0.99,
-                                          metadata={"answer": "cached answer", "_cached_at": time.time()})]
+                                          metadata={"answer": "cached answer", "_cached_at": time.time(),
+                                                    "system_version": semantic_cache.SYSTEM_VERSION})]
     monkeypatch.setattr(semantic_cache, "generate_text", lambda **k: "YES")
 
     assert semantic_cache.check_cache("some question", context_text="anything") == "cached answer"
@@ -246,7 +249,8 @@ def test_check_cache_emits_cache_hit_event_on_a_fingerprint_match(monkeypatch, f
     fp = semantic_cache._fingerprint("same context")
     fake_index.query_result = [FakeMatch(score=0.97,
                                           metadata={"answer": "cached answer", "_cached_at": time.time(),
-                                                    "context_fingerprint": fp})]
+                                                    "context_fingerprint": fp,
+                                                    "system_version": semantic_cache.SYSTEM_VERSION})]
     events = []
     monkeypatch.setattr(semantic_cache, "emit_event",
                          lambda name, session_id=None, agent=None, payload=None: events.append((name, payload)))

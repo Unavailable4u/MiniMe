@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -312,9 +313,27 @@ async def connect_server(
         if not command:
             raise MCPClientError(f"stdio transport for {server_name!r} requires a non-empty `command`")
         process_env = {**os.environ, **(env or {})}
+        # Resolve the executable through PATH/PATHEXT ourselves rather than
+        # handing the bare name straight to create_subprocess_exec(). On
+        # Windows, npm-installed CLIs like `npx` are `.cmd` shims; Windows'
+        # CreateProcess (which create_subprocess_exec calls directly, no
+        # shell involved) can't launch a shim by its extension-less name the
+        # way cmd.exe does, so `command=["npx", ...]` fails with an OSError
+        # for every stdio server configured that way (context7, web_search,
+        # etc.) regardless of whether its own API key/env var is set --
+        # this has nothing to do with per-server config. shutil.which()
+        # applies PATHEXT (.COM/.EXE/.BAT/.CMD) on Windows and is a no-op
+        # correctness-wise on POSIX, so this is safe cross-platform. Falls
+        # back to the original bare command if resolution fails, so the
+        # underlying OSError still surfaces normally (e.g. genuinely missing
+        # `npx`) instead of being masked here.
+        resolved_command = list(command)
+        resolved_executable = shutil.which(resolved_command[0], path=process_env.get("PATH"))
+        if resolved_executable:
+            resolved_command[0] = resolved_executable
         try:
             process = await asyncio.create_subprocess_exec(
-                *command,
+                *resolved_command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
