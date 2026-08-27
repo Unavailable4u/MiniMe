@@ -177,7 +177,16 @@ def _outer_reservation_size(step: dict) -> "tuple[int, int | None]":
     try:
         from utils.llm_client import _max_tokens_for
         _provider, _key, model = _candidate_identity(step)
-        ceiling = _max_tokens_for(model, step)
+        # Root-cause audit fix follow-up (2026-08-27): _max_tokens_for()'s
+        # signature grew a leading `provider` param as part of the
+        # 2026-08-27 root-cause audit (it now caps a step's resolved
+        # ceiling against QUOTA_CONFIG[provider][model]'s real tpm figure
+        # when one is known -- see that function's own docstring). This
+        # call site already unpacks `_provider` from _candidate_identity()
+        # a line above for its own unrelated purposes, so passing it
+        # through here is free -- without it, every neurons-mode step
+        # hitting this function would TypeError on the now-3-arg call.
+        ceiling = _max_tokens_for(_provider, model, step)
     except Exception:
         return 1, None
     if not ceiling:

@@ -221,18 +221,35 @@ CHAIN = [
     # 2026-07-30 -- see agents/test_writer.py's matching fix for the same
     # swap). This chain runs on EVERY incoming task, so this was the
     # highest-traffic of the 3 call sites using the retired model.
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1"},
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2"},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1", "max_tokens": 700},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2", "max_tokens": 700},
     # Gemini/Mistral/HF rollout, Patch 6 (§4b/§6): dedicated fallback-only
     # accounts, not shared with any other agent's chain -- see module
     # docstring for why this doesn't reopen the isolation gap the original
     # Gemini exclusion was protecting against.
-    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_10"},
-    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_11"},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_10", "max_tokens": 700},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_11", "max_tokens": 700},
     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
     # its last-resort step is removed here, not replaced. This role keeps
     # the Groq x2 -> Gemini x2 redundancy above (still every task, tier 0).
 ]
+# Root-cause audit fix, Fix 4 (2026-08-27): every step above got
+# "max_tokens": 700 explicitly (always preferred over any model-based
+# default -- see llm_client._max_tokens_for()'s docstring), instead of
+# falling through to that function's flat DEFAULT_MAX_TOKENS/
+# REASONING_MODEL_MAX_TOKENS. This chain's own SYSTEM_PROMPT below asks
+# for a single, tightly-bounded JSON object -- a handful of short fixed
+# fields (path/directed_task_type/confidence/domain), a "reasoning"
+# capped at "one short sentence", and suggested_agents/execution_order/
+# parallel_groups lists of short role-label strings that are themselves
+# bounded by how many distinct roles one task realistically implies. 700
+# is generous headroom above what a real response of that shape needs
+# (checked against representative multi-role examples), while still
+# being a small fraction of even this chain's tightest model's tpm
+# budget -- unlike the flat 8192/16384 defaults, which for
+# qwen/qwen3.6-27b (tpm=8000) reserved more than double the model's
+# entire per-minute budget for a JSON object that never approaches it.
+
 SYSTEM_PROMPT = """You are the Inspector for a multi-agent build system. \
 You classify one incoming task into a routing path — you do NOT do the \
 task yourself.

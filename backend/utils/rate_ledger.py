@@ -508,17 +508,19 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int,
     already compute an estimate for every call, it's just unused here
     when it doesn't apply.
 
-    Patch I.2 follow-up: `max_output_tokens` is only meaningful in
-    "neurons" mode (the step's configured max_tokens ceiling, used as
-    the output-side figure for _estimate_neurons() -- see its own
-    docstring for why the ceiling rather than a guess). Every other
-    mode ignores it, same "accepted but unused when it doesn't apply"
-    convention `estimated_tokens` already has for "requests" mode above.
-    Defaults to None so pre-existing callers that haven't been updated
-    (there is currently exactly one -- the look-ahead in
-    llm_client.py's _remaining_chain_headroom(), which now resolves and
-    passes a real one) still fail open via _estimate_neurons()'s own
-    None-safe fallback rather than raising.
+    Patch I.2 follow-up: `max_output_tokens` is meaningful in "neurons"
+    mode (the step's configured max_tokens ceiling, used as the
+    output-side figure for _estimate_neurons() -- see its own docstring
+    for why the ceiling rather than a guess) and, as of the 2026-08-27
+    root-cause audit fix, also in "tokens" mode (folded into the
+    prospective-usage check alongside `estimated_tokens` -- see that
+    branch's own comment for why the completion ceiling has to be part
+    of the pre-flight check, not just the post-hoc bookkeeping).
+    "requests" mode still ignores it, same "accepted but unused when it
+    doesn't apply" convention `estimated_tokens` already has there.
+    Defaults to None so a caller that genuinely can't resolve a
+    max_tokens ceiling ahead of time still fails open (treated as a 0
+    completion-side contribution) rather than raising.
     """
     try:
         now = _now()
@@ -585,10 +587,30 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int,
             # (didn't return False above) -- nothing left to check.
             return True, 0.0
 
-        # mode == "tokens" -- unchanged from pre-OR-1d behavior.
+        # mode == "tokens".
+        #
+        # Root-cause audit fix (2026-08-27): this branch used to gate on
+        # `estimated_tokens` (prompt/input size) alone, completely blind to
+        # `max_output_tokens` even though the caller already resolves and
+        # passes it (see this function's own docstring) -- llm_client.py's
+        # _max_tokens_for() can reserve a completion budget that alone
+        # exceeds a model's entire tpm ceiling (e.g. a 16384-token reasoning
+        # default against an 8000 tpm model), and this gate would still say
+        # "proceed" because it never looked at that number, only to have
+        # Groq 413 it seconds later. `_prospective_tokens` folds the
+        # resolved completion ceiling into the CHECK so the gate can
+        # actually see a call coming that's mathematically guaranteed to
+        # exceed the window -- it does NOT change what gets booked/tracked
+        # in the window itself (that stays `estimated_tokens`, i.e. the
+        # input-side estimate), so the sliding window's own accounting
+        # convention here is unchanged; a dispatched call's real total
+        # usage is trued up after the fact the normal way (record_usage()/
+        # release_reservation() with the real usage object).
+        _prospective_tokens = estimated_tokens + (max_output_tokens or 0)
+
         if headroom is not None and headroom.get("remaining_tokens") is not None:
             remaining = headroom["remaining_tokens"]
-            if estimated_tokens <= remaining:
+            if _prospective_tokens <= remaining:
                 return True, 0.0
             reset_at = headroom.get("reset_at")
             wait = max(0.0, reset_at - now) if reset_at is not None else 5.0
@@ -604,7 +626,7 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int,
         window_record = bus_read(_window_key(provider, key_id, model), default=None) or {"slices": {}}
         slices = _prune_window(window_record.get("slices", {}), now)
         current_usage = sum(slices.values())
-        if current_usage + estimated_tokens <= tpm_limit:
+        if current_usage + _prospective_tokens <= tpm_limit:
             return True, 0.0
 
         # Not enough headroom right now -- wait until the oldest slice in
@@ -757,7 +779,8 @@ def _decrement_daily_count(day_key: str, now: float) -> None:
         print(f"  [rate_ledger] _decrement_daily_count write failed (non-fatal): {write_exc}")
 
 
-def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units: int, now: float):
+def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units: int, now: float,
+                          max_output_tokens: "int | None" = None):
     """Tokens-mode body of reserve(). Same decision precedence as
     can_proceed()'s "tokens" branch (provider-reported headroom first,
     self-tracked window fallback) -- but where can_proceed() only reads,
@@ -775,11 +798,27 @@ def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units
     A None value for any field means "nothing was written there, don't
     touch it on release" -- e.g. headroom_field is None whenever the
     decision fell through to the self-tracked window instead.
+
+    Root-cause audit fix (2026-08-27): `max_output_tokens`, when given, is
+    folded into the accept/reject CHECKS below (`_prospective_tokens`) the
+    same way can_proceed()'s tokens branch now does -- see that branch's
+    own comment for why (this was the pre-flight gate's actual blind spot:
+    llm_client.py resolves a real completion-budget ceiling per step, but
+    this function never saw it, so it happily booked a call guaranteed to
+    exceed the provider's tpm ceiling and let the 413 be the first signal
+    anything was wrong). What actually gets BOOKED into the window/headroom
+    below is unchanged -- still `estimated_units` (the input-side
+    estimate) -- so release_reservation()'s existing true-up-from-real-
+    usage math (`delta = actual_units - estimated_units`, using this same
+    `estimated_units` as its baseline) stays correct without needing its
+    own change.
     """
+    _prospective_tokens = estimated_units + (max_output_tokens or 0)
+
     headroom = bus_read(_headroom_key(provider, key_id, model), default=None)
     if headroom is not None and headroom.get("remaining_tokens") is not None:
         remaining = headroom["remaining_tokens"]
-        if estimated_units <= remaining:
+        if _prospective_tokens <= remaining:
             headroom["remaining_tokens"] = remaining - estimated_units
             bus_write(_headroom_key(provider, key_id, model), headroom,
                       ex=_headroom_write_ttl(headroom, now))
@@ -817,7 +856,7 @@ def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units
     window_record = bus_read(_window_key(provider, key_id, model), default=None) or {"slices": {}}
     slices = _prune_window(window_record.get("slices", {}), now)
     current_usage = sum(slices.values())
-    if current_usage + estimated_units <= tpm_limit:
+    if current_usage + _prospective_tokens <= tpm_limit:
         slice_key = _bump_window(provider, key_id, model, estimated_units, now)
         return True, 0.0, {
             "headroom_field": None, "headroom_decrement": None,
@@ -967,7 +1006,14 @@ def reserve(provider: str, key_id: str, model: str, estimated_units: int,
     identical convention to can_proceed()'s `estimated_tokens` param; see
     _gating_mode_for()'s docstring. In "neurons" mode it's the INPUT-side
     token estimate; `max_output_tokens` (Patch I.2 follow-up, same
-    convention as can_proceed()'s own param) supplies the output side.
+    convention as can_proceed()'s own param) supplies the output side. As
+    of the 2026-08-27 root-cause audit fix, "tokens" mode also uses
+    `max_output_tokens` -- folded into _reserve_tokens_mode()'s
+    prospective-usage check so a call whose resolved completion ceiling
+    alone would exceed the remaining window gets caught here instead of
+    surfacing as a 413 from the provider. See _reserve_tokens_mode()'s own
+    docstring for what does/doesn't change as a result (the check changes;
+    what gets booked into the window does not).
 
     Fails open (True, 0.0, None) on any error, matching can_proceed()'s
     own fail-open contract. A reservation_id of None is always safe to
@@ -984,7 +1030,8 @@ def reserve(provider: str, key_id: str, model: str, estimated_units: int,
             ok, wait, booking = _reserve_neurons_mode(provider, key_id, model, estimated_units,
                                                         max_output_tokens, now)
         else:
-            ok, wait, booking = _reserve_tokens_mode(provider, key_id, model, estimated_units, now)
+            ok, wait, booking = _reserve_tokens_mode(provider, key_id, model, estimated_units, now,
+                                                       max_output_tokens=max_output_tokens)
 
         if not ok:
             return False, wait, None

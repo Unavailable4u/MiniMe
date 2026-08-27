@@ -166,6 +166,14 @@ QUOTA_CONFIG = {
         "llama-3.1-8b-instant":    {"rpm": 30, "rpd": 14400, "tpm": 6000,  "tpd": 500000},
         "qwen/qwen3.6-27b":        {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
         "openai/gpt-oss-120b":     {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
+        # Root-cause audit fix (2026-08-27): this model was completely
+        # absent from QUOTA_CONFIG, so _gating_mode_for()/_tpm_limit_for()
+        # had nothing to gate on and every call through output_guard.py's
+        # content-safety check failed open at the ledger, only to then
+        # 413 at Groq's actual (identical) tpm ceiling. Same figures as
+        # the account's Free Plan Limits page, 2026-07-30 confirmation
+        # that covered the other groq entries above.
+        "openai/gpt-oss-safeguard-20b": {"rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000},
         # "qwen/qwen3-32b" deliberately absent -- not in the current live
         # model list at all (see the reality guide §3). Don't add a number
         # for a model that may already be 404ing.
@@ -709,6 +717,72 @@ def _shrink_prompt_for_retry(user_content: str, exc) -> str:
     if target_len < len(user_content):
         return user_content[:target_len]
     return user_content[: max(1, int(len(user_content) * 0.6))]
+
+
+# Root-cause audit fix, Fix 5 (2026-08-27): floor under which
+# _shrink_max_tokens_for_retry() below refuses to shrink further. Keeps a
+# retried call requesting a non-trivial completion budget even after
+# several shrinks, rather than asymptoting toward a max_tokens so small
+# the model can't produce a complete answer at all (which would just
+# swap a loud 413 for a silently truncated/empty response -- no better
+# than the failure mode this fix exists to close).
+_MIN_SHRUNK_MAX_TOKENS = 256
+
+
+def _shrink_max_tokens_for_retry(max_tokens: "int | None", exc) -> "int | None":
+    """Root-cause audit fix, Fix 5 (2026-08-27): companion to
+    _shrink_prompt_for_retry() above, called alongside it from the same
+    two _handle_transient_error() branches (CONTEXT_LENGTH_EXCEEDED, and
+    the unwaitable-by-definition RATE_LIMIT_WINDOW case).
+
+    Root Cause A's fix caps llm_client._max_tokens_for()'s flat defaults
+    at a model's real tpm figure WHEN that model has a verified entry in
+    rate_ledger's QUOTA_CONFIG -- but for a model added later without one
+    (the exact gap Root Cause A's own comment calls out, and the same gap
+    Fix 3 closes for openai/gpt-oss-safeguard-20b specifically), that
+    function still falls back to the flat, unclamped
+    DEFAULT_MAX_TOKENS/REASONING_MODEL_MAX_TOKENS constants -- which can
+    alone exceed the model's real per-minute ceiling, the exact failure
+    mode that motivated tonight's audit in the first place. Before this
+    fix, a 413 caused that way was unrecoverable via retry-in-place:
+    _shrink_prompt_for_retry() only ever shrinks user_content, and a
+    reserved-completion-budget overage doesn't get smaller no matter how
+    short the prompt is (a two-character "hi" 413s identically to a
+    2000-word prompt when max_tokens alone is the problem) -- so every
+    in-place retry sent the IDENTICAL oversized max_tokens and failed the
+    same way, burning the full _MAX_REQUEST_TOO_LARGE_RETRIES budget on
+    retries that were never going to succeed before falling through to
+    "next step" (or giving up, on the last step).
+
+    Mirrors _target_length_for_shrink()'s own strategy for consistency
+    (same regex, same 85%-of-limit safety margin, same flat-cut fallback)
+    rather than inventing a second shrink heuristic: parses the
+    provider's own "Limit X, Requested Y" figures out of the error
+    message when present and scales max_tokens down by the same
+    keep_ratio _target_length_for_shrink() would derive from them, since
+    a "Requested" figure on a TPM-window 413 reflects prompt tokens PLUS
+    the reserved completion budget together -- shrinking max_tokens by
+    that same ratio is directly responsive to the actual number the
+    provider rejected, not a guess. Falls back to a flat 40% cut (mirrors
+    _target_length_for_shrink()'s own fallback) when the message doesn't
+    carry those figures. Never shrinks below _MIN_SHRUNK_MAX_TOKENS, and
+    never returns a larger value than it was given (a malformed/tiny
+    "Limit"/"Requested" pair should not accidentally INCREASE the
+    budget). Returns max_tokens unchanged (including None) when
+    max_tokens is falsy -- nothing to shrink for a step that never had an
+    explicit ceiling to begin with."""
+    if not max_tokens:
+        return max_tokens
+    match = _REQUEST_TOO_LARGE_LIMIT_PATTERN.search(str(exc))
+    if match:
+        limit = int(match.group("limit"))
+        requested = int(match.group("requested"))
+        if requested > 0 and limit > 0:
+            keep_ratio = max(0.1, min(1.0, (limit / requested) * 0.85))
+            shrunk = int(max_tokens * keep_ratio)
+            return max(_MIN_SHRUNK_MAX_TOKENS, min(max_tokens, shrunk))
+    shrunk = int(max_tokens * 0.6)
+    return max(_MIN_SHRUNK_MAX_TOKENS, min(max_tokens, shrunk))
 
 
 def _set_cooldown(provider: str, key_id: str, exc) -> None:
@@ -1728,21 +1802,64 @@ DEFAULT_MAX_TOKENS = 8192
 REASONING_MODEL_MAX_TOKENS = 16384
 _REASONING_MODEL_HINTS = ("qwen3.6", "qwen/qwen3.6", "-thinking", "r1", "deepseek-r1")
 
+# Quota-reality fix, Root Cause A follow-up (2026-08-27 audit): these two
+# flat constants above were picked independently of QUOTA_CONFIG and were
+# never checked against it -- qwen/qwen3.6-27b (tpm=8000) got the 16384
+# REASONING ceiling reserved for it, more than double its entire per-minute
+# budget, before a single prompt token was added; openai/gpt-oss-120b and
+# llama-3.1-8b-instant (tpm=8000/6000) got the flat 8192 default, which is
+# already over or nearly over budget alone. Any chain step calling one of
+# these without its own explicit step["max_tokens"] override was
+# guaranteed to 413 on any input, independent of prompt size.
+#
+# _MAX_TOKENS_SAFETY_MARGIN is reserved headroom for the prompt itself
+# (system + user content) plus provider overhead, since this function is
+# called before the prompt is estimated/known at the call site -- without
+# reserving *some* room here, capping max_tokens at exactly tpm would still
+# guarantee a 413 the moment any nonzero prompt is added. 1500 tokens is a
+# conservative floor for this repo's agents (short-to-medium prompts); a
+# chain step with a genuinely larger prompt should set its own
+# step["max_tokens"] rather than rely on this fallback.
+_MAX_TOKENS_SAFETY_MARGIN = 1500
 
-def _max_tokens_for(model: str, step: dict) -> int:
+
+def _max_tokens_for(provider: str, model: str, step: dict) -> int:
     """Resolves the max_tokens budget for one chain step. An explicit
     step["max_tokens"] (set by the caller's chain definition) always
-    wins; otherwise a model name matching _REASONING_MODEL_HINTS gets
-    REASONING_MODEL_MAX_TOKENS, everything else gets
-    DEFAULT_MAX_TOKENS. See the Root Cause A comment above
-    _MAX_CONTINUATIONS for why this exists."""
+    wins.
+
+    Otherwise, resolves a model-family default (REASONING_MODEL_MAX_TOKENS
+    for a model matching _REASONING_MODEL_HINTS, DEFAULT_MAX_TOKENS
+    otherwise) and then caps it at QUOTA_CONFIG[provider][model]'s real
+    verified "tpm" figure minus _MAX_TOKENS_SAFETY_MARGIN, when that figure
+    is known -- see the Root Cause A follow-up comment above
+    _MAX_TOKENS_SAFETY_MARGIN for why the flat defaults alone were
+    guaranteed to exceed several models' entire per-minute budget. Falls
+    back to the flat model-family default, uncapped, only when this
+    provider/model has no verified tpm figure in QUOTA_CONFIG at all --
+    same "no verified number -> don't fabricate one" posture
+    rate_ledger._tpm_limit_for() already documents.
+
+    See the Root Cause A comment above _MAX_CONTINUATIONS for why this
+    function exists in the first place."""
     explicit = step.get("max_tokens") if step else None
     if explicit:
         return explicit
     model_lower = (model or "").lower()
-    if any(hint in model_lower for hint in _REASONING_MODEL_HINTS):
-        return REASONING_MODEL_MAX_TOKENS
-    return DEFAULT_MAX_TOKENS
+    default = (REASONING_MODEL_MAX_TOKENS
+               if any(hint in model_lower for hint in _REASONING_MODEL_HINTS)
+               else DEFAULT_MAX_TOKENS)
+    tpm_limit = rate_ledger._tpm_limit_for(provider, model)
+    if tpm_limit is None:
+        return default
+    capped = tpm_limit - _MAX_TOKENS_SAFETY_MARGIN
+    if capped <= 0:
+        # tpm itself is smaller than the safety margin (shouldn't happen
+        # with today's QUOTA_CONFIG figures, but don't emit a <=0
+        # max_tokens if it ever does) -- fall back to whatever's smaller
+        # of the flat default and the raw tpm figure.
+        capped = min(default, tpm_limit)
+    return max(1, min(default, capped))
 
 
 def _estimate_tokens_for_call(system_prompt: str, user_content: str) -> int:
@@ -1962,19 +2079,25 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
     the remaining steps resets soonest.
 
     Patch I.2 follow-up: each step's own max_tokens ceiling is now
-    resolved via _max_tokens_for(model, step) and threaded into
+    resolved via _max_tokens_for(provider, model, step) and threaded into
     can_proceed()'s max_output_tokens param. Before this, every step got
     max_output_tokens=None regardless of gating mode -- harmless for
-    "tokens"/"requests" steps (they ignore the param entirely), but for
-    a "neurons" step (cloudflare) it meant _estimate_neurons() always
-    fell back to its None-safe default rather than the step's real
-    output ceiling, so the look-ahead either under- or over-stated a
-    cloudflare step's actual headroom depending on that fallback's
-    shape. Each step's own max_tokens is looked up per-step (not once
-    for the whole chain) since different steps can carry different
-    explicit max_tokens overrides -- see _max_tokens_for()'s own
-    docstring for why an explicit step["max_tokens"] always wins over
-    the model-based default."""
+    "requests" steps (they ignore the param entirely), but for a
+    "neurons" step (cloudflare) it meant _estimate_neurons() always fell
+    back to its None-safe default rather than the step's real output
+    ceiling, so the look-ahead either under- or over-stated a cloudflare
+    step's actual headroom depending on that fallback's shape. As of the
+    2026-08-27 root-cause audit fix, "tokens"-mode steps are no longer
+    harmless to leave at None either: can_proceed()'s tokens branch now
+    folds max_output_tokens into its prospective-usage check too (see
+    rate_ledger.can_proceed()'s own docstring), so an accurate value here
+    is what lets this look-ahead correctly rule out a step whose resolved
+    completion ceiling alone would blow the remaining window. Each step's
+    own max_tokens is looked up per-step (not once for the whole chain)
+    since different steps can carry different explicit max_tokens
+    overrides -- see _max_tokens_for()'s own docstring for why an
+    explicit step["max_tokens"] always wins over the model-based
+    default."""
     results = []
     for j in range(from_index + 1, len(chain)):
         step = chain[j]
@@ -1991,7 +2114,7 @@ def _remaining_chain_headroom(chain: list, from_index: int, estimated_tokens: in
             key_id = step["key_env"]
         if _is_cooling_down(provider, key_id):
             continue
-        step_max_tokens = _max_tokens_for(model, step)
+        step_max_tokens = _max_tokens_for(provider, model, step)
         ok, wait = rate_ledger.can_proceed(provider, key_id, model, estimated_tokens,
                                             max_output_tokens=step_max_tokens)
         results.append((j, provider, key_id, model, ok, wait))
@@ -2343,7 +2466,8 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                              prompt_for_step: str, user_content: str, accumulated_text: str,
                              same_step_shrinks: int, session_id: str = None,
                              same_step_rate_limit_waits: int = 0,
-                             same_step_rate_limit_elapsed: float = 0.0) -> "tuple[str, str, str, int, int, float]":
+                             same_step_rate_limit_elapsed: float = 0.0,
+                             max_tokens: "int | None" = None) -> "tuple[str, str, str, int, int, float, int | None]":
     """3f-4 -- shared classify_error() exception dispatch, extracted
     from the duplicated `except _TRANSIENT_ERRORS as exc:` bodies in
     generate_text() (cloudflare/SDK-shaped branches), including the 3e
@@ -2381,8 +2505,19 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
     uncapped version of this loop can spin forever on a single-step
     chain.
 
+    `max_tokens` (Root-cause audit fix, Fix 5, 2026-08-27): the step's
+    CURRENT max_tokens ceiling for this retry loop -- the caller's
+    original _max_tokens_for() resolution on the first call, or whatever
+    this function itself already shrank it to on a previous retry-in-
+    place of the SAME step. Only the CONTEXT_LENGTH_EXCEEDED and
+    unwaitable-RATE_LIMIT_WINDOW branches below touch it (via
+    _shrink_max_tokens_for_retry(), alongside their existing
+    _shrink_prompt_for_retry() call) -- see that function's own
+    docstring for why a prompt-only shrink is not always sufficient.
+    Every other branch returns it unchanged.
+
     Returns (action, user_content, accumulated_text, same_step_shrinks,
-    same_step_rate_limit_waits, same_step_rate_limit_elapsed):
+    same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens):
       action == "raise"          -- caller should bare `raise` (re-raise
                                      the exception currently being
                                      handled) -- MALFORMED_REQUEST, or
@@ -2409,21 +2544,32 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         # prompt is the correct recovery.
         if same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES:
             shrunk = _shrink_prompt_for_retry(user_content, exc)
+            # Fix 5: shrink the reserved completion budget the same pass,
+            # not just the prompt -- see _shrink_max_tokens_for_retry()'s
+            # own docstring for why a prompt-only shrink can retry the
+            # IDENTICAL oversized max_tokens forever on a model whose
+            # resolved ceiling alone exceeds its real tpm (e.g. one added
+            # without a QUOTA_CONFIG entry, same gap Fix 3 closes for one
+            # specific model but that will recur for the next one added
+            # without a verified figure).
+            shrunk_max_tokens = _shrink_max_tokens_for_retry(max_tokens, exc)
             same_step_shrinks += 1
             print(f"  [{agent_name}] {label} rejected the request as too "
                   f"large ({exc.__class__.__name__}, CONTEXT_LENGTH_EXCEEDED) "
                   f"-- shrinking prompt from {len(user_content)} to "
-                  f"{len(shrunk)} chars and retrying {label} in place "
+                  f"{len(shrunk)} chars (max_tokens {max_tokens} -> "
+                  f"{shrunk_max_tokens}) and retrying {label} in place "
                   f"(attempt {same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
             # stale partial output no longer matches the shrunk prompt
             return ("retry-in-place", shrunk, "", same_step_shrinks,
-                    same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                    same_step_rate_limit_waits, same_step_rate_limit_elapsed,
+                    shrunk_max_tokens)
         if not is_last:
             print(f"  [{agent_name}] {label} still over context length "
                   f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks, "
                   f"falling back to next in chain...")
         return ("next-step", user_content, accumulated_text, same_step_shrinks,
-                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
     if _bucket == ErrorBucket.RATE_LIMIT_WINDOW:
         # Patch G1: a TPM-window 413 whose own body says "Limit X,
         # Requested Y" with Y > X can NEVER succeed by waiting -- the
@@ -2439,21 +2585,31 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         if _oversize_match and int(_oversize_match.group("requested")) > int(_oversize_match.group("limit")):
             if same_step_shrinks < _MAX_REQUEST_TOO_LARGE_RETRIES:
                 shrunk = _shrink_prompt_for_retry(user_content, exc)
+                # Fix 5: same rationale as the CONTEXT_LENGTH_EXCEEDED
+                # branch above -- this is precisely the "Requested >
+                # Limit, unwaitable" shape a max_tokens-driven overage
+                # produces (a tiny prompt plus an oversized reserved
+                # completion budget together exceed the tpm ceiling), so
+                # this is the branch most likely to be hit by exactly the
+                # gap Fix 5 exists to close.
+                shrunk_max_tokens = _shrink_max_tokens_for_retry(max_tokens, exc)
                 same_step_shrinks += 1
                 print(f"  [{agent_name}] {label} rate-limit 413 has "
                       f"Requested ({_oversize_match.group('requested')}) > "
                       f"Limit ({_oversize_match.group('limit')}) -- unwaitable "
                       f"by definition, shrinking prompt from "
-                      f"{len(user_content)} to {len(shrunk)} chars and "
+                      f"{len(user_content)} to {len(shrunk)} chars "
+                      f"(max_tokens {max_tokens} -> {shrunk_max_tokens}) and "
                       f"retrying {label} in place (attempt "
                       f"{same_step_shrinks}/{_MAX_REQUEST_TOO_LARGE_RETRIES})...")
                 return ("retry-in-place", shrunk, "", same_step_shrinks,
-                        same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                        same_step_rate_limit_waits, same_step_rate_limit_elapsed,
+                        shrunk_max_tokens)
             print(f"  [{agent_name}] {label} still over its TPM window "
                   f"after {_MAX_REQUEST_TOO_LARGE_RETRIES} in-place shrinks "
                   f"-- falling back to next in chain...")
             return ("next-step", user_content, accumulated_text, same_step_shrinks,
-                    same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                    same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
         # Phase 3d: an org-scoped, time-windowed quota problem is never a
         # size problem -- never shrink the prompt here (see llm_errors.py's
         # recovery table). Route back through 3b's reroute-vs-bounded-wait
@@ -2472,7 +2628,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"of waiting.")
             _record_ledger_event(session_id, "reroute")
             return ("next-step", user_content, accumulated_text, same_step_shrinks,
-                    same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                    same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
         # Bug fix (2026-08-25): bounded retry cap, same shape as
         # CONTEXT_LENGTH_EXCEEDED's same_step_shrinks cap above. Without
         # this, a chain step with no reroute headroom anywhere ahead of
@@ -2531,7 +2687,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         _interruptible_sleep(_wait_seconds, session_id=session_id)   # CHANGED — Patch 7: now pause-aware too
         same_step_rate_limit_elapsed += _wait_seconds
         return ("retry-in-place", user_content, accumulated_text, same_step_shrinks,
-                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
     if _bucket == ErrorBucket.MALFORMED_REQUEST:
         # Our own payload is wrong. Never retry unchanged -- retrying
         # (same step, next step, or after a wait) would just fail
@@ -2542,7 +2698,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
               f"in the request itself, not a transient failure. "
               f"Not retrying; raising.")
         return ("raise", user_content, accumulated_text, same_step_shrinks,
-                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
     if _bucket == ErrorBucket.PERMANENT_AUTH:
         # Bad/revoked key -- no amount of retrying helps. 3e: this is now
         # the ONLY place in this branch that calls _set_cooldown() -- it
@@ -2558,7 +2714,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
                   f"from rotation for this chain and falling back to "
                   f"next in chain...")
         return ("next-step", user_content, accumulated_text, same_step_shrinks,
-                same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+                same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
     # ErrorBucket.TRANSIENT_NETWORK -- timeout/5xx/connection reset. 3e:
     # no longer cooled down here -- a single network blip doesn't mean
     # this account/key is bad, so standard backoff is just "move to the
@@ -2568,7 +2724,7 @@ def _handle_transient_error(exc, provider: str, key, model: str, chain: list, in
         print(f"  [{agent_name}] {label} failed ({exc.__class__.__name__}, "
               f"TRANSIENT_NETWORK), falling back to next in chain...")
     return ("next-step", user_content, accumulated_text, same_step_shrinks,
-            same_step_rate_limit_waits, same_step_rate_limit_elapsed)
+            same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens)
 
 
 def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model: str, key,
@@ -2587,23 +2743,41 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
     continuation handling (_handle_finish_reason(), 3f-3) -> transient
     error dispatch (_handle_transient_error(), 3f-4).
 
-    `call_fn` is a one-argument closure the caller builds right before
-    calling this function, taking `prompt_for_step` and returning the
-    same 4-tuple _call_step()/_call_cloudflare_step() already return --
-    (text, usage, finish_reason, headroom_headers), the 4-tuple contract
-    from 3c's message. Everything else that differs between the two
-    call sites (creds vs. client, json_mode, the model's max_tokens) is
-    already baked into the closure by the caller, so this function
-    itself doesn't need to know which branch it's running for.
+    `call_fn` is a two-argument closure the caller builds right before
+    calling this function, taking `(prompt_for_step, max_tokens)` and
+    returning the same 4-tuple _call_step()/_call_cloudflare_step()
+    already return -- (text, usage, finish_reason, headroom_headers),
+    the 4-tuple contract from 3c's message. Everything else that differs
+    between the two call sites (creds vs. client, json_mode) is already
+    baked into the closure by the caller, so this function itself
+    doesn't need to know which branch it's running for.
+
+    Root-cause audit fix, Fix 5 (2026-08-27): `call_fn` took only
+    `prompt_for_step` before this -- the caller baked its ORIGINAL
+    max_tokens into the closure once, at chain-step-dispatch time, so
+    every retry-in-place iteration of the while loop below sent the
+    identical value no matter how many times
+    _handle_transient_error()'s CONTEXT_LENGTH_EXCEEDED/RATE_LIMIT_WINDOW
+    branches shrank it (see that function's own Fix 5 docstring for why
+    that made an oversized-completion-budget 413 unrecoverable via
+    retry). `call_fn` now takes the loop's current `max_tokens` as its
+    second argument on every call, so a caller's closure can honor
+    whatever this loop most recently shrank it to instead of the value
+    it was built with -- see the cloudflare/SDK-shaped `_call_fn`
+    definitions in _walk_chain_once() for the updated shape.
 
     `key` is whichever identifier this call site uses to key the
     ledger/cooldown (key_id for cloudflare, key_env for the SDK-shaped
     branch) -- unchanged from how 3f-1/3f-2/3f-4 already take it.
 
     `max_tokens` (Patch I.2 follow-up): the step's configured max_tokens
-    ceiling, threaded straight through to _ledger_gate() on every
-    iteration of the retry loop below -- see that function's own
-    docstring for why (only meaningful for a "neurons" gating-mode step).
+    ceiling, threaded straight through to _ledger_gate() AND `call_fn` on
+    every iteration of the retry loop below -- see _ledger_gate()'s own
+    docstring for why it matters there (only meaningful for a "neurons"
+    gating-mode step). As of the Fix 5 change above, this parameter is
+    now just the STARTING value for the loop's own local `max_tokens`,
+    which _handle_transient_error() can shrink and hand back on a
+    retry-in-place -- see that function's Fix 5 docstring.
 
     `same_step_shrinks` (Fix D2) is NOT a parameter here: unlike
     accumulated_text/continuations_used, it never needs to survive past
@@ -2656,7 +2830,11 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
                                           agent_name, session_id, tier, path, domain)
             try:
-                text, usage, finish_reason, headroom_headers = call_fn(prompt_for_step)
+                # Fix 5: pass the loop's current max_tokens (possibly
+                # already shrunk by a previous retry-in-place iteration
+                # below) rather than relying on whatever call_fn's
+                # closure was originally built with.
+                text, usage, finish_reason, headroom_headers = call_fn(prompt_for_step, max_tokens)
             except BaseException:
                 _end_traced_generation(_traced, agent_name, label, None, None, None,
                                         exc_info=sys.exc_info())
@@ -2700,13 +2878,14 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _record_ledger_event(session_id, "provider_failure")
             try:
                 (_action, user_content, accumulated_text, same_step_shrinks,
-                 same_step_rate_limit_waits, same_step_rate_limit_elapsed) = \
+                 same_step_rate_limit_waits, same_step_rate_limit_elapsed, max_tokens) = \
                     _handle_transient_error(
                         exc, provider, key, model, chain, index, is_last, label,
                         agent_name, system_prompt, prompt_for_step, user_content,
                         accumulated_text, same_step_shrinks, session_id=session_id,
                         same_step_rate_limit_waits=same_step_rate_limit_waits,
-                        same_step_rate_limit_elapsed=same_step_rate_limit_elapsed)
+                        same_step_rate_limit_elapsed=same_step_rate_limit_elapsed,
+                        max_tokens=max_tokens)
             except PauseRequestedMidRetry:
                 # NEW — Patch 7: bubble this up as a distinct signal so
                 # eo/executor.py can snapshot mid-role instead of only at
@@ -2808,11 +2987,20 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
                       f"(see cooldown_until:{provider}:{key_id}).")
                 continue
             json_mode = step.get("json_mode", False)
-            _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
+            _max_tok = _max_tokens_for(provider, model, step)  # Root Cause A fix
 
-            def _call_fn(prompt_for_step, _creds=creds, _model=model, _jm=json_mode, _mt=_max_tok):
+            # Fix 5 (2026-08-27): _call_fn now takes max_tokens as its
+            # second positional argument -- _run_chain_step()'s retry
+            # loop passes its own current value (which may have been
+            # shrunk by _handle_transient_error() on a prior retry-in-
+            # place) on every call, instead of this closure always using
+            # the _mt it was originally built with. _mt is kept as the
+            # default so a caller that doesn't have an override handy
+            # still gets the original resolved ceiling.
+            def _call_fn(prompt_for_step, _max_tokens=None, _creds=creds, _model=model, _jm=json_mode, _mt=_max_tok):
                 return _call_cloudflare_step(_creds, _model, system_prompt, prompt_for_step,
-                                              json_mode=_jm, max_tokens=_mt)
+                                              json_mode=_jm,
+                                              max_tokens=_max_tokens if _max_tokens is not None else _mt)
 
             # 3f-5 -- the whole retry loop (pre-flight gate -> traced call
             # -> dispatch -> bookkeeping -> finish_reason handling ->
@@ -2856,12 +3044,22 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
             print(f"  [{agent_name}] {provider}:{model} skipped — {key_env} not set.")
             continue
 
-        _max_tok = _max_tokens_for(model, step)  # Root Cause A fix
+        _max_tok = _max_tokens_for(provider, model, step)  # Root Cause A fix
 
-        def _call_fn(prompt_for_step, _client=client, _model=model, _mt=_max_tok, _provider=provider):
+        # Fix 5 (2026-08-27): same _max_tokens override shape as the
+        # cloudflare branch's _call_fn above -- see that closure's own
+        # comment for why. The _EmptyReasoningBudgetError retry below
+        # still multiplies off of whatever ceiling was ACTUALLY used for
+        # the failed call (active_mt), not the closure's original _mt --
+        # if a prior shrink already lowered the effective budget, "4x
+        # the ceiling that just produced an empty response" should scale
+        # from that shrunk value, not silently discard the shrink and
+        # jump back to 4x the pre-shrink number.
+        def _call_fn(prompt_for_step, _max_tokens=None, _client=client, _model=model, _mt=_max_tok, _provider=provider):
+            active_mt = _max_tokens if _max_tokens is not None else _mt
             try:
                 return _call_step(_client, _model, system_prompt, prompt_for_step,
-                                   max_tokens=_mt, provider=_provider)
+                                   max_tokens=active_mt, provider=_provider)
             except _EmptyReasoningBudgetError as _empty_exc:
                 # OR-1c: whole budget went to hidden reasoning, nothing left
                 # for visible output, even with reasoning={"exclude": True}
@@ -2873,9 +3071,9 @@ def _walk_chain_once(system_prompt: str, user_content: str, chain: list, agent_n
                 # counts off of _empty_exc.usage and sizing off that instead.
                 print(f"  [{agent_name}] {label} returned empty text "
                       f"(reasoning burned the budget) — retrying once with "
-                      f"max_tokens={_mt * 4} instead of {_mt}.")
+                      f"max_tokens={active_mt * 4} instead of {active_mt}.")
                 return _call_step(_client, _model, system_prompt, prompt_for_step,
-                                   max_tokens=_mt * 4, provider=_provider)
+                                   max_tokens=active_mt * 4, provider=_provider)
 
         # 3f-5 -- same shared _run_chain_step() as the cloudflare branch
         # above; this branch differs only in `key_env` vs. `key_id` and
@@ -3235,7 +3433,7 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: 
             # Root Cause A fix: same _max_tokens_for() budget resolution
             # generate_text() now uses -- this streaming path had the
             # identical "max_tokens never set" gap.
-            _stream_max_tokens = _max_tokens_for(model, step)
+            _stream_max_tokens = _max_tokens_for(provider, model, step)
             # OR-1c-stream: see docstring point 6 -- suppress reasoning-
             # token spend for openrouter steps the same way _call_step()
             # does for the non-streaming path. `create_kwargs` built once
