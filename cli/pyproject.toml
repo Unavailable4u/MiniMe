@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minime-cli"
+version = "0.1.0"
+description = "Terminal client for MiniMe -- Patch A6 of the CLI+Skills+MCP implementation guide."
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned to match backend/requirements.txt's own pins -- this
+    # package is a separate installable (its own venv, potentially on
+    # a different machine than the backend entirely), but there is no
+    # reason to drift from versions already vetted for this project.
+    "requests==2.34.2",
+    "click==8.2.0",
+]
+
+[project.scripts]
+minime = "minime_cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["minime_cli*"]

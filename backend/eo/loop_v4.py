@@ -74,7 +74,14 @@ from eo.router import (
     build_execution_graph,
     build_execution_graph_from_hires,
 )
-from eo.semantic_cache import check_cache, write_cache
+from eo.semantic_cache import (
+    CACHE_CLASS_DETERMINISTIC,
+    CACHE_CLASS_GENERATIVE,
+    check_cache,
+    classify_cache_class,
+    get_cached_reference,
+    write_cache,
+)
 from eo.sga import attempt as sga_attempt
 from eo.structure import (  # CHANGED — Part 26 §4c, was defined locally
     PATH_TO_TIER,
@@ -447,14 +454,33 @@ def main():
     # kept symmetric with api/task_runner.py's run_task().
     if opts["tier"] is None and opts["mode"] != "beast":
         conv_context = conversation_memory.get_full_context(session_id)  # NEW
-        cached = check_cache(task_text, app_slug=opts["app"], context_text=conv_context, session_id=session_id)
-        if cached:
-            print(f"\n[Cache]\n{cached}\n")
-            return
 
-        sga_result = sga_attempt(task_text)
+        # NEW — Patch B7: deterministic asks keep the exact replay behavior
+        # this block had before; generative asks never get a literal replay
+        # back — only prior material to build the fresh answer on.
+        cache_class = classify_cache_class(task_text)
+        reference_answer = None
+        if cache_class == CACHE_CLASS_DETERMINISTIC:
+            cached = check_cache(task_text, app_slug=opts["app"], context_text=conv_context, session_id=session_id)
+            if cached:
+                print(f"\n[Cache]\n{cached}\n")
+                return
+        elif cache_class == CACHE_CLASS_GENERATIVE:
+            reference_answer = get_cached_reference(task_text, app_slug=opts["app"])
+
+        sga_input = task_text
+        if reference_answer:
+            sga_input = (
+                f"{task_text}\n\n"
+                f"(Reference — your previous answer to a similar ask. Build on it, "
+                f"refine it, or diverge from it as this new ask calls for; don't just "
+                f"repeat it verbatim.)\n{reference_answer}"
+            )
+
+        sga_result = sga_attempt(sga_input)   # Patch B7: may include reference context
         if sga_result["resolved"]:
-            write_cache(task_text, sga_result["answer"], app_slug=opts["app"], context_text=conv_context)  # FIXED
+            write_cache(task_text, sga_result["answer"], app_slug=opts["app"], context_text=conv_context,
+                        cache_class=cache_class)  # FIXED; CHANGED — Patch B7, tags the entry
             print(f"\n[SGA]\n{sga_result['answer']}\n")
             return
 

@@ -14,6 +14,22 @@ Two independent fixes bundled together:
      scoped to one must never leak into, or be purged by, the other.
      Callers now pass an explicit (scope_type, scope_id) pair instead
      of a bare app_slug.
+  3. Patch B7 — deterministic/generative split: not every cacheable
+     call site wants the same thing from a "hit". A datasheet lookup
+     or a spec calculation has exactly one correct answer, so replaying
+     it verbatim is correct, not stale — that's CACHE_CLASS_DETERMINISTIC,
+     and it keeps using check_cache()/write_cache() exactly as before.
+     Advice, brainstorming, plans, and explanations are different: the
+     "correct" answer isn't unique, and replaying the same paragraph
+     verbatim on a repeat ask reads as frozen/unhelpful even when
+     nothing is factually wrong with it. That's CACHE_CLASS_GENERATIVE —
+     call sites never get the literal old answer back for replay; they
+     call get_cached_reference() instead, which hands back the prior
+     answer as *reference material* to feed into a fresh generation
+     (see task_runner.py / loop_v4.py call sites for the prompt-side
+     half of this). classify_cache_class() is a cheap keyword heuristic,
+     not a model call — the whole point of SGA's fast path is to stay
+     fast, so classification can't itself cost a network round trip.
 """
 import hashlib
 import os
@@ -28,6 +44,24 @@ from utils.llm_client import embed_text, generate_text
 SIMILARITY_THRESHOLD = 0.93
 INVALIDATION_THRESHOLD = 0.90
 CACHE_TTL_SECONDS = 60 * 60 * 48
+
+# Patch B7 — see module docstring point 3.
+CACHE_CLASS_DETERMINISTIC = "deterministic"
+CACHE_CLASS_GENERATIVE = "generative"
+
+# Keyword heuristic for classify_cache_class(). Deliberately conservative:
+# anything not clearly a lookup/calculation/correctness-check defaults to
+# GENERATIVE (see classify_cache_class()'s docstring for why the default
+# leans that way).
+_DETERMINISTIC_SIGNALS = (
+    "calculate", "compute", "convert", "look up", "lookup", "datasheet",
+    "spec sheet", "specification", "checksum", "hash of", "what is the value of",
+    "what's the value of", "how many", "how much is", "resistor value",
+    "voltage", "wattage", "tolerance rating", "is this code correct",
+    "check this code", "does this compile", "syntax error", "unit test",
+    "what is the boiling point", "what is the melting point", "molecular weight",
+    "exchange rate", "square root of", "sum of", "average of",
+)
 
 # llama-3.3-70b-versatile decommissioned by Groq; migrated to the two
 # models Groq's decommission notice suggested in its place.
@@ -60,6 +94,24 @@ def _scope_metadata(scope_type: str, scope_id: str) -> dict:
     if scope_type and scope_id:
         return {scope_type: scope_id}
     return {"project": "global"}
+
+
+def classify_cache_class(task_text: str) -> str:
+    """Patch B7 — cheap, deterministic (pun intended) keyword split used
+    at each cacheable call site to decide which cache behavior applies.
+    Not a model call: SGA's whole premise is a fast pre-Inspector path,
+    so classification has to be ~free.
+
+    Errs toward CACHE_CLASS_GENERATIVE when unsure — worst case for a
+    false "generative" is a lookup gets regenerated instead of replayed
+    (slower, but still correct); worst case for a false "deterministic"
+    is an opinion/plan/explanation gets woodenly replayed verbatim on a
+    repeat ask, which is exactly the staleness this patch exists to fix.
+    """
+    lowered = (task_text or "").lower()
+    if any(signal in lowered for signal in _DETERMINISTIC_SIGNALS):
+        return CACHE_CLASS_DETERMINISTIC
+    return CACHE_CLASS_GENERATIVE
 
 
 def _fingerprint(context_text: str) -> str:
@@ -98,6 +150,15 @@ def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,
     every existing caller that doesn't pass this (eo/loop_v4.py's CLI
     path never has a real session_id at all) keeps behaving exactly as
     before.
+
+    Patch B7: this function is the DETERMINISTIC path only — call sites
+    route here after classify_cache_class() (or their own judgment)
+    says CACHE_CLASS_DETERMINISTIC. It only ever matches entries stored
+    with cache_class == deterministic (or written before this patch,
+    which default to deterministic — see write_cache()), so a
+    generative entry can never accidentally get replayed verbatim
+    through this path. GENERATIVE call sites use get_cached_reference()
+    instead, further down.
     """
     scope_type = "app" if app_slug else ("workspace" if workspace_id else None)
     scope_id = app_slug or workspace_id
@@ -121,6 +182,9 @@ def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,
     if time.time() - meta.get("_cached_at", 0) > CACHE_TTL_SECONDS:
         return None
 
+    if meta.get("cache_class", CACHE_CLASS_DETERMINISTIC) != CACHE_CLASS_DETERMINISTIC:
+        return None  # generative entry — never replayed verbatim (Patch B7)
+
     answer = meta.get("answer")
     if not answer:
         return None
@@ -140,7 +204,12 @@ def check_cache(task_text: str, app_slug: str = None, workspace_id: str = None,
 
 
 def write_cache(task_text: str, answer: str, app_slug: str = None, workspace_id: str = None,
-                 context_text: str = "") -> None:
+                 context_text: str = "", cache_class: str = CACHE_CLASS_DETERMINISTIC) -> None:
+    """cache_class: NEW — Patch B7. Tags the entry so a later check_cache()
+    (deterministic replay) or get_cached_reference() (generative
+    reference-only reuse) knows how it's allowed to be reused. Defaults
+    to CACHE_CLASS_DETERMINISTIC so any caller not yet migrated keeps
+    today's replay behavior unchanged."""
     scope_type = "app" if app_slug else ("workspace" if workspace_id else None)
     scope_id = app_slug or workspace_id
 
@@ -153,6 +222,7 @@ def write_cache(task_text: str, answer: str, app_slug: str = None, workspace_id:
         "answer": answer,
         "_cached_at": time.time(),
         "context_fingerprint": _fingerprint(context_text),
+        "cache_class": cache_class,
     }
     metadata.update(_scope_metadata(scope_type, scope_id))
     index.upsert(vectors=[{
@@ -160,6 +230,42 @@ def write_cache(task_text: str, answer: str, app_slug: str = None, workspace_id:
         "vector": vector,
         "metadata": metadata,
     }])
+
+
+def get_cached_reference(task_text: str, app_slug: str = None, workspace_id: str = None) -> str | None:
+    """Patch B7 — GENERATIVE call sites only. Finds a semantically similar
+    prior answer to hand back as *reference context* for a fresh
+    generation. This is deliberately NOT check_cache(): there's no
+    fingerprint/context-verify short-circuit and no cache_hit event,
+    because reusing an old answer as an input to a new one isn't a
+    "hit" in the replay sense — it's raw material. Matches entries of
+    either cache_class (a deterministic answer is still fine background
+    material for a generative follow-up); the asymmetry that matters is
+    the other direction, enforced in check_cache().
+    """
+    scope_type = "app" if app_slug else ("workspace" if workspace_id else None)
+    scope_id = app_slug or workspace_id
+
+    try:
+        vector = embed_text(task_text)
+    except Exception:
+        return None
+
+    index = vector_index()
+    results = index.query(vector=vector, top_k=1, include_metadata=True,
+                          filter=_scope_filter(scope_type, scope_id))
+    if not results:
+        return None
+
+    top = results[0]
+    if top.score < SIMILARITY_THRESHOLD:
+        return None
+
+    meta = top.metadata or {}
+    if time.time() - meta.get("_cached_at", 0) > CACHE_TTL_SECONDS:
+        return None
+
+    return meta.get("answer") or None
 
 
 def invalidate_cache(text: str, app_slug: str = None, workspace_id: str = None) -> int:

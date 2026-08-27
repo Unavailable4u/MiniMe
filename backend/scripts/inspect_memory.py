@@ -17,6 +17,7 @@ KEYS_TO_CHECK = [
     "original_idea",
     "app_slug",
     "current_plan",
+    "plan_changelog",  # Patch B11 -- compact {what, why, at} revision history
     "file_map",
     "fixed_code",
     "file_plan",  # not in KEYS dict, but used directly by structure_architect/file_manager

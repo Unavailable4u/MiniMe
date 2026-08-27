@@ -85,7 +85,14 @@ from eo.router import (
     build_execution_graph_from_hires,
     sanitize_parallel_groups,
 )
-from eo.semantic_cache import check_cache, write_cache
+from eo.semantic_cache import (
+    CACHE_CLASS_DETERMINISTIC,
+    CACHE_CLASS_GENERATIVE,
+    check_cache,
+    classify_cache_class,
+    get_cached_reference,
+    write_cache,
+)
 from eo.sga import attempt as sga_attempt
 from eo.source_index import (
     get_topic_covered_sources,  # NEW — Step 6.11.f (6.11.d's helper)
@@ -1380,23 +1387,45 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     grounded_task_text, grounded_node_ids = _grounded_task_text(
         workspace_id, task_text, session_id=session_id, topic_id=topic_id)   # topic_id NEW — Step 6.11.f
 
+    # NEW — Patch B7: classify before touching the cache at all. Deterministic
+    # asks keep the exact check_cache()/write_cache() replay behavior that
+    # existed before this patch. Generative asks never get a literal replay —
+    # get_cached_reference() below only supplies prior material to build on.
+    cache_class = classify_cache_class(task_text)
+    reference_answer = None
     if tier_override is None and mode != "beast":
-        cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id,
-                             context_text=conv_context, session_id=session_id)
-        if cached:
-            _record_routing_fact(workspace_id, "cache", task_text, session_id)   # NEW — D1
-            return {"resolved": False, "response": {
-                "decision": {},
-                "tier": "cache",
-                "session_id": session_id,
-                "status": "ok",
-                "result": {"answer": cached},
-                "message": None,
-            }}
+        if cache_class == CACHE_CLASS_DETERMINISTIC:
+            cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id,
+                                 context_text=conv_context, session_id=session_id)
+            if cached:
+                _record_routing_fact(workspace_id, "cache", task_text, session_id)   # NEW — D1
+                return {"resolved": False, "response": {
+                    "decision": {},
+                    "tier": "cache",
+                    "session_id": session_id,
+                    "status": "ok",
+                    "result": {"answer": cached},
+                    "message": None,
+                }}
+        elif cache_class == CACHE_CLASS_GENERATIVE:
+            reference_answer = get_cached_reference(task_text, app_slug=app_slug, workspace_id=workspace_id)
 
-    sga_result = sga_attempt(grounded_task_text, session_id=session_id)   # CHANGED — bug #4 fix, was task_text
+    # NEW — Patch B7: fold the prior answer in as reference context rather
+    # than replaying it. grounded_task_text (not task_text) so the model
+    # still sees the grounded prompt from the bug #4 fix above.
+    sga_input = grounded_task_text
+    if reference_answer:
+        sga_input = (
+            f"{grounded_task_text}\n\n"
+            f"(Reference — your previous answer to a similar ask. Build on it, "
+            f"refine it, or diverge from it as this new ask calls for; don't just "
+            f"repeat it verbatim.)\n{reference_answer}"
+        )
+
+    sga_result = sga_attempt(sga_input, session_id=session_id)   # CHANGED — bug #4 fix, was task_text; Patch B7, may include reference
     if sga_result["resolved"]:
-        write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id, context_text=conv_context)
+        write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id,
+                    context_text=conv_context, cache_class=cache_class)   # CHANGED — Patch B7, tags the entry
         _record_routing_fact(workspace_id, "sga", task_text, session_id)   # NEW — D1
         _maybe_record_sga_fact(workspace_id, task_text, session_id, sga_result)   # NEW — Part 5 follow-up
         return {"resolved": False, "response": {

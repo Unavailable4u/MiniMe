@@ -5,7 +5,7 @@ import sys
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import KEYS, read_many, write
+from memory.bus import KEYS, read_many, write_plan
 from utils.llm_client import DROPPABLE_CONTEXT_MARKER, generate_text
 
 load_dotenv()
@@ -113,8 +113,17 @@ def run(session_id: str = None, domain: str = None):
         raw_text = raw_text.removeprefix("json")
         raw_text = raw_text.strip()
     plan = json.loads(raw_text)
-    write(KEYS["current_plan"], plan)
-    return plan
+    # Patch B11 -- write_plan() appends a compact {what, why, at}
+    # changelog entry (diffed against whatever plan was there before)
+    # to KEYS["plan_changelog"] before overwriting KEYS["current_plan"],
+    # instead of the old plain write() that discarded the previous plan
+    # with no history. `why` mirrors this module's own cycle framing:
+    # "cycle 1" when there's no prior report yet, otherwise "re-plan
+    # after prior cycle report" -- prior_report's own content is already
+    # visible via KEYS["latest_report"] for anyone who wants more detail
+    # than this one-line reason.
+    why = "cycle 1 plan" if not prior_report else "re-plan after prior cycle report"
+    return write_plan(plan, why=why)
 if __name__ == "__main__":
     plan = run()
     print(json.dumps(plan, indent=2))

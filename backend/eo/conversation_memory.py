@@ -25,6 +25,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import (
     chat_store,  # NEW — cross-chat memory sharing (see §4)
     chat_workspace,  # NEW — Part 0 §0.3, session_id -> workspace_id
+    rolling_summary,  # NEW — Patch B9, Tier B: folds trimmed turns instead of dropping them
     workspace_facts,  # NEW — Part 0 §0.3, tier-3 memory
 )
 from memory.bus import read, write
@@ -75,6 +76,12 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None) -> 
     turns = read(_key(session_id), default=[])
     turns.append({"role": role, "text": text})
     if len(turns) > MAX_STORED_TURNS:
+        dropped = turns[:len(turns) - MAX_STORED_TURNS]
+        # NEW — Patch B9 (Tier B): these turns are about to fall out of
+        # Tier A's storage window for good. Fold them into the rolling
+        # summary instead of just discarding them — fire-and-forget, so
+        # the summarizer LLM call never adds latency to this turn.
+        rolling_summary.fold_turns_async(session_id, dropped)
         turns = turns[-MAX_STORED_TURNS:]
     write(_key(session_id), turns)
     if role == "assistant":
@@ -103,6 +110,15 @@ def get_full_context(session_id: str, owner_id: str = None, max_turns: int = FUL
     linked = chat_store.get_linked_context_text(session_id, owner_id, max_turns_per_chat=6,
                                                  char_limit=400) if owner_id else ""
     body = linked + "\n\n--- current conversation ---\n\n" + own if (linked and own) else (linked or own)
+
+    # NEW — Patch B9 (Tier B): older material that's already fallen out
+    # of `own` above (see append_turn()'s trim) isn't just gone — surface
+    # it here, ahead of the full-detail recent turns, so a generation
+    # agent still has a (narrower) sense of what happened earlier in a
+    # long-running session.
+    summary = rolling_summary.get_summary(session_id)
+    if summary:
+        body = f"--- earlier in this conversation (summarized) ---\n\n{summary}\n\n{body}" if body else summary
 
     facts = _workspace_facts_text(session_id, owner_id)   # FIXED — now passes owner_id
     if facts and body:

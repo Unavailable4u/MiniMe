@@ -2,6 +2,7 @@ import contextvars
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from upstash_redis import Redis
@@ -328,4 +329,121 @@ KEYS = {
     # module per run from a dict of several; see agents/
     # performance_reviewer.py's own docstring for the selection rule).
     "performance_review": "performance_review",
+    # Patch B11 -- Plan/Guide Changelog Versioning. Sits alongside
+    # "current_plan" rather than inside it: current_plan stays the
+    # single full-snapshot key every existing reader (structure_architect,
+    # report_writer, memory_search, prompt_writer, get_tasks()) already
+    # reads unchanged. This key holds ONLY the compact {what, why, at}
+    # history -- see write_plan() below.
+    "plan_changelog": "plan_changelog",
 }
+
+# Patch B11 -- Plan/Guide Changelog Versioning.
+#
+# Before this patch, agents/idea_planner.py (the only writer of
+# KEYS["current_plan"]) called plain write(KEYS["current_plan"], plan)
+# every cycle: a full overwrite, no history, no way to see WHAT changed
+# between cycle N's plan and cycle N+1's beyond diffing raw JSON blobs
+# by hand.
+#
+# write_plan() replaces that one call site with a git-style
+# supersede-with-diff: the full current plan is still kept as-is (every
+# existing reader of KEYS["current_plan"] is unaffected), but a compact
+# changelog entry -- {"what": ..., "why": ..., "at": ...} -- is appended
+# to KEYS["plan_changelog"] first, describing the delta from the
+# previous plan rather than duplicating the previous plan's full text.
+_PLAN_CHANGELOG_MAX_ENTRIES = 50  # bounded history, not unbounded growth
+
+
+def _utcnow_iso() -> str:
+    """Small local helper so write_plan() doesn't reach for a project-wide
+    time utility that doesn't exist yet -- ISO 8601, UTC, second
+    precision is all a changelog timestamp needs."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _summarize_plan_diff(old_plan: dict | None, new_plan: dict) -> str:
+    """Builds a short, human-readable "what changed" string for a
+    plan_changelog entry by comparing the fields idea_planner.py's own
+    SYSTEM_PROMPT guarantees every plan has (target_feature, cycle_goal,
+    features, priorities) against the previous plan. Deliberately field-
+    level, not a generic dict-diff library dependency -- these are the
+    only fields a fresh session (or the Working Panel UI) actually cares
+    about when skimming plan history.
+
+    Returns "Initial plan" for the very first plan (old_plan is None/{}),
+    and "No detected change" if every tracked field is identical (e.g. a
+    re-run that produced the same JSON) rather than an empty string, so a
+    changelog entry is never silently uninformative.
+    """
+    if not old_plan:
+        return "Initial plan"
+
+    changes = []
+    for field in ("target_feature", "cycle_goal"):
+        old_val = old_plan.get(field)
+        new_val = new_plan.get(field)
+        if old_val != new_val:
+            changes.append(f"{field}: {old_val!r} -> {new_val!r}")
+
+    old_features = old_plan.get("features") or []
+    new_features = new_plan.get("features") or []
+    if old_features != new_features:
+        added = [f for f in new_features if f not in old_features]
+        removed = [f for f in old_features if f not in new_features]
+        if added:
+            changes.append(f"features added: {added}")
+        if removed:
+            changes.append(f"features removed: {removed}")
+        if not added and not removed:
+            # Same set, different order -- priorities reshuffled.
+            changes.append("features reordered")
+
+    old_priorities = old_plan.get("priorities") or []
+    new_priorities = new_plan.get("priorities") or []
+    if old_priorities != new_priorities and "features reordered" not in changes:
+        changes.append("priorities changed")
+
+    return "; ".join(changes) if changes else "No detected change"
+
+
+def write_plan(plan: dict, why: str = None) -> dict:
+    """Writes a new current_plan the same way write(KEYS["current_plan"],
+    plan) always has (full overwrite -- every existing reader keeps
+    working unchanged), but first appends a compact changelog entry to
+    KEYS["plan_changelog"] describing the delta from whatever plan was
+    there before, instead of the old behavior of just discarding it with
+    no history at all.
+
+    `why` is optional context from the caller about WHY this plan was
+    produced (e.g. "cycle 3 re-plan" or a one-line summary of the prior
+    cycle's report) -- idea_planner.py is the intended caller. When
+    omitted, falls back to a generic "plan generated" so a changelog
+    entry always has a non-empty why.
+
+    The changelog itself stays a small, bounded list (newest last, capped
+    at _PLAN_CHANGELOG_MAX_ENTRIES) of {what, why, at} dicts -- NOT full
+    plan snapshots per revision, which is the whole point of this patch:
+    git-style supersede-with-diff rather than duplicate-with-full-text.
+    Older entries roll off the front once the cap is hit, same bounded-
+    growth reasoning conversation_memory.py's MAX_STORED_TURNS already
+    uses for turn history.
+
+    Returns `plan` unchanged, so existing call sites like
+    agents/idea_planner.py's `write(KEYS["current_plan"], plan); return
+    plan` can become `return write_plan(plan)` with no other change to
+    their own return value.
+    """
+    old_plan = read(KEYS["current_plan"], default=None)
+    changelog = read(KEYS["plan_changelog"], default=[]) or []
+    entry = {
+        "what": _summarize_plan_diff(old_plan, plan),
+        "why": why or "plan generated",
+        "at": _utcnow_iso(),
+    }
+    changelog.append(entry)
+    if len(changelog) > _PLAN_CHANGELOG_MAX_ENTRIES:
+        changelog = changelog[-_PLAN_CHANGELOG_MAX_ENTRIES:]
+    write(KEYS["plan_changelog"], changelog)
+    write(KEYS["current_plan"], plan)
+    return plan
