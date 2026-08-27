@@ -84,7 +84,7 @@ def _make_fakes(sleep_seconds: float = 0.0):
 
     def fake_worker(role, task_text=None, input_keys=None, session_id=None,
                      key_override=None, include_conversation_context=True,
-                     domain=None, chain_override=None):
+                     domain=None, chain_override=None, owner_id=None):
         start_times[role] = time.monotonic()
         call_log.append(role)
         if sleep_seconds:
@@ -396,7 +396,7 @@ def test_reactive_self_heal_still_works_for_edge_not_in_static_graph():
 
     def fake_worker7(role, task_text=None, input_keys=None, session_id=None,
                       key_override=None, include_conversation_context=True,
-                      domain=None, chain_override=None):
+                      domain=None, chain_override=None, owner_id=None):
         if role == "custom_role":
             attempts7["custom_role"] += 1
             if attempts7["custom_role"] == 1:

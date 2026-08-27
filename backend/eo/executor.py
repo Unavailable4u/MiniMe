@@ -191,7 +191,7 @@ def _merge_group_next_destinations(votes: list):
 def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results: dict,
                             task_text: str, session_id: str, path: str, key_overrides: dict,
                             next_step, no_conversation_context_roles: set = None,
-                            domain: str = None) -> tuple:
+                            domain: str = None, owner_id: str = None) -> tuple:
     """Migration Part 2 §2.6 — parallel execution control's real gap.
 
     The Panel-decided execution_order that generic_worker steps through
@@ -232,6 +232,12 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
     every role in the group gets the same per-project/per-section usage
     attribution a sequential role gets. Defaults to None -- unaffected
     unless a caller (execute_graph()/_run_loop()) actually has one.
+
+    owner_id (Patch B5 — Output-Format Routing): same "forwarded to
+    every member's generic_worker.run() call" treatment as domain
+    above, so a concurrent group's own free-form output gets the same
+    stored-preference nudge a sequential generic_worker step gets.
+    Defaults to None -- unaffected unless a caller actually has one.
 
     Known v1 limitation, flagged rather than silently unsupported: a
     group does not currently support approval_roles pausing or a
@@ -356,7 +362,7 @@ def _run_concurrent_group(group_roles: list, role_names: list, idx: int, results
                             key_override=key_overrides.get(member_role),
                             chain_override=chain_overrides.get(member_role),
                             include_conversation_context=member_role not in no_conversation_context_roles,
-                            domain=domain)
+                            domain=domain, owner_id=owner_id)
                 if _member_span is not None:
                     _member_span.update(output=_summarize(result, role=member_role))
                 return result
@@ -660,7 +666,7 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                    mode: str = None, key_overrides: dict = None,
                    project_unique_name: str = None, approval_roles: set = None,
                    no_conversation_context_roles: set = None, domain: str = None,
-                   scope: str = None, workspace_id: str = None) -> dict:
+                   scope: str = None, workspace_id: str = None, owner_id: str = None) -> dict:
     """Fresh-start entry point. `approval_roles` defaults to None (today's
     full-auto behavior) — every existing call site that doesn't pass it is
     unaffected.
@@ -692,6 +698,14 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
     web_researcher; defaults to None, which _run_loop()'s own
     web_researcher branch below then substitutes "general" for, matching
     agents/web_researcher.py's own run() default.
+
+    `owner_id` (Patch B5 — Output-Format Routing): same "not branched on
+    here, just forwarded" treatment as domain/scope above. Threaded down
+    to every generic_worker dispatch (single-role and concurrent-group)
+    and the tier-0 responder dispatch, so eo/user_profile.py's
+    default_format_hint() has an account to look a stored output
+    preference up against. Defaults to None -- unaffected for every
+    call site that doesn't pass one.
 
     Returns either the finished {role: output} results dict, or, if
     execution pauses at a role in approval_roles,
@@ -725,14 +739,14 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
             project_unique_name=project_unique_name, expanded=expanded,
             approval_roles=approval_roles, next_step=next_step,
             no_conversation_context_roles=no_conversation_context_roles,
-            domain=domain, scope=scope, workspace_id=workspace_id,
+            domain=domain, scope=scope, workspace_id=workspace_id, owner_id=owner_id,
         )
 
 
 def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisits,
               task_text, session_id, path, mode, key_overrides, project_unique_name,
               expanded, approval_roles, next_step, no_conversation_context_roles=None,
-              domain=None, scope=None, workspace_id=None) -> dict:
+              domain=None, scope=None, workspace_id=None, owner_id=None) -> dict:
     """The actual step-dispatch loop, factored out of execute_graph() so
     resume_graph() below can re-enter it from a persisted mid-run
     snapshot instead of duplicating every dispatch case, the
@@ -817,7 +831,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 role_names[idx], role_names, idx, results, task_text,
                 session_id, path, key_overrides, next_step,
                 no_conversation_context_roles=no_conversation_context_roles,
-                domain=domain,
+                domain=domain, owner_id=owner_id,
             )
             _apply_recheck_retry(key_overrides, role_names, next_idx, reason)
             if next_idx is not None and next_idx >= len(agent_names):
@@ -959,8 +973,13 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     # (prompt_writer_lean is also in TASK_TEXT_ENTRYPOINTS but
                     # never reaches this branch — it's caught by the dedicated
                     # `if` above, which already passes both session_id/path.)
+                    # In practice this is only ever "responder" — owner_id
+                    # (Patch B5) is forwarded here so responder.run() can look
+                    # up a stored output-format preference; prompt_writer_lean
+                    # never sees it, since it's dispatched from the branch
+                    # above instead.
                     result = fn(task_text, key_override=override, session_id=session_id, path=path,
-                                domain=domain)
+                                domain=domain, owner_id=owner_id)
                 elif current_name == "code_writer_lean" or current_name == "reviewer_fixer_lean":
                     result = fn(session_id=session_id, path=path, domain=domain)
                 elif current_name == "code_writers":
@@ -1127,11 +1146,15 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     # domain (Part 2 §2.6, cost-tracking gap): forwarded so
                     # utils/llm_client.py's log_usage() can tag this call's
                     # usage for the per-project/per-section breakdown.
+                    #
+                    # owner_id (Patch B5 — Output-Format Routing): forwarded
+                    # so eo/user_profile.py's default_format_hint() has an
+                    # account to look a stored output preference up against.
                     result = fn(role=role, task_text=task_text,
                                 input_keys=list(_flatten_role_names(role_names[:idx])), session_id=session_id,
                                 key_override=override,
                                 include_conversation_context=role not in no_conversation_context_roles,
-                                domain=domain)
+                                domain=domain, owner_id=owner_id)
                 elif current_name in UNSCOPED_TIER_AGENTS:
                     # tier=None if path itself is None/unrecognized — these
                     # agents already treat a None tier as "unscoped".
@@ -1231,6 +1254,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     "domain": domain,
                     "scope": scope,
                     "workspace_id": workspace_id,
+                    "owner_id": owner_id,   # NEW — Patch B5
                     "app_slug": get_current_app_slug(),
                 }
                 write(f"paused_execution:{session_id}", snapshot)
@@ -1355,6 +1379,13 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     # workspace_id it hard-requires, instead of raising
                     # ValueError on resume.
                     "workspace_id": workspace_id,
+                    # Patch B5 — same carry-through reasoning as
+                    # scope/domain/workspace_id above, so a resumed run's
+                    # generic_worker/responder steps still see the same
+                    # stored output-format preference the original dispatch
+                    # had, instead of silently losing the personalization
+                    # signal on resume.
+                    "owner_id": owner_id,
                     # Captured so resume_graph() can restore the exact bus
                     # namespace this run was writing under before touching
                     # anything else.
@@ -1460,6 +1491,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     domain = snapshot.get("domain")
     scope = snapshot.get("scope")
     workspace_id = snapshot.get("workspace_id")
+    owner_id = snapshot.get("owner_id")   # NEW — Patch B5
     expanded = (mode or "auto").lower() in ("expert", "beast")
 
     # Macro-loop state (eo/loop_controller.py's run_with_looping()) —
@@ -1475,6 +1507,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     macro_domain = snapshot.get("macro_domain")
     macro_scope = snapshot.get("macro_scope")
     macro_workspace_id = snapshot.get("macro_workspace_id")
+    macro_owner_id = snapshot.get("macro_owner_id")   # NEW — Patch B5
     macro_project_unique_name = snapshot.get("macro_project_unique_name")
 
     role = role_names[idx]
@@ -1552,6 +1585,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         new_snapshot["macro_domain"] = macro_domain
         new_snapshot["macro_scope"] = macro_scope
         new_snapshot["macro_workspace_id"] = macro_workspace_id
+        new_snapshot["macro_owner_id"] = macro_owner_id   # NEW — Patch B5
         new_snapshot["macro_project_unique_name"] = macro_project_unique_name
         write(f"paused_execution:{session_id}", new_snapshot)
 
@@ -1576,7 +1610,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
             project_unique_name=project_unique_name, expanded=expanded,
             approval_roles=approval_roles, next_step=next_step,
             no_conversation_context_roles=no_conversation_context_roles,
-            domain=domain, scope=scope, workspace_id=workspace_id,
+            domain=domain, scope=scope, workspace_id=workspace_id, owner_id=owner_id,
         )
 
     if isinstance(result, dict) and result.get("status") == "paused":
@@ -1627,6 +1661,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
             approval_roles=approval_roles,
             no_conversation_context_roles=no_conversation_context_roles,
             domain=macro_domain, scope=macro_scope, workspace_id=macro_workspace_id,
+            owner_id=macro_owner_id,
         )
 
         if isinstance(pass_results, dict) and pass_results.get("status") == "paused":
