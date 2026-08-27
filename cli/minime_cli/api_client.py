@@ -104,6 +104,40 @@ class ApiClient:
         self._raise_for_status(resp)
         return resp.json()
 
+    # --- skills / mcp ----------------------------------------------------
+    # NEW -- Patch A8. Thin wrappers over the same GET /api/skills,
+    # /api/skills/{id} routes A5 already added (api/routes/tasks.py) and
+    # the GET /api/mcp/servers, /api/mcp/servers/{name}/status routes A8
+    # itself adds (api/routes/mcp.py) as the missing HTTP surface over
+    # A2's mcp_registry read functions. No new protocol -- same
+    # requests-based GET pattern list_chats()/list_workspaces() already
+    # use above.
+
+    def list_skills(self) -> list:
+        resp = requests.get(self._url("/api/skills"), headers=self._headers(), timeout=_TIMEOUT_CHAT)
+        self._raise_for_status(resp)
+        return resp.json()
+
+    def get_skill(self, skill_id: str) -> dict:
+        resp = requests.get(
+            self._url(f"/api/skills/{skill_id}"), headers=self._headers(), timeout=_TIMEOUT_CHAT,
+        )
+        self._raise_for_status(resp)
+        return resp.json()
+
+    def list_mcp_servers(self) -> list:
+        resp = requests.get(self._url("/api/mcp/servers"), headers=self._headers(), timeout=_TIMEOUT_CHAT)
+        self._raise_for_status(resp)
+        return resp.json()
+
+    def mcp_server_status(self, server_name: str) -> dict:
+        resp = requests.get(
+            self._url(f"/api/mcp/servers/{server_name}/status"), headers=self._headers(),
+            timeout=_TIMEOUT_CHAT,
+        )
+        self._raise_for_status(resp)
+        return resp.json()
+
     # --- tasks ---------------------------------------------------------
 
     def send_task(self, task_text: str, *, session_id: str | None, mode: str = "auto",

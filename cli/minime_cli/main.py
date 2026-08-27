@@ -4,9 +4,9 @@ cli/pyproject.toml's [project.scripts]).
 
 Wires the command modules together. Kept deliberately thin: every
 command's actual logic lives in commands/*.py so this file stays a
-pure dispatch table, easy to extend in A7 (`minime attach`) and A8
-(`minime skills ...`, `minime mcp ...`) without touching this file's
-existing commands.
+pure dispatch table -- A7's `minime attach` and A8's `minime skills
+...` / `minime mcp ...` were both added here without touching any of
+this file's pre-existing commands.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from . import __version__
 from .commands.attach_cmds import attach
 from .commands.auth_cmds import configure, login, logout, whoami
 from .commands.chat_cmds import ask, chat, list_chats_cmd
+from .commands.mcp_cmds import mcp
+from .commands.skills_cmds import skills
 
 
 @click.group()
@@ -32,6 +34,8 @@ cli.add_command(ask)
 cli.add_command(chat)
 cli.add_command(list_chats_cmd)
 cli.add_command(attach)
+cli.add_command(skills)
+cli.add_command(mcp)
 
 
 def main():

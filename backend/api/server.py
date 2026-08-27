@@ -67,6 +67,7 @@ from api.routes.graph_and_notes import router as graph_and_notes_router
 # ws_id-ownership shape every other api/routes/*.py file uses, unlike
 # the websocket route's pairing-token auth.
 from api.routes.local_workspace import router as local_workspace_data_router
+from api.routes.mcp import router as mcp_router  # NEW — Patch A8: HTTP surface over A2's mcp_registry read functions
 from api.routes.notebooks import router as notebooks_router
 from api.routes.system import router as system_router
 
@@ -85,6 +86,7 @@ from api.routes.system import router as system_router
 # per workspace file path, see api/routes/code.py's own docstring for
 # why it's a separate file rather than folded into workspace_data.py.
 from api.routes.tasks import router as tasks_router
+from api.routes.user_profile import router as user_profile_router  # NEW — Patch B6
 from api.routes.workspace_data import router as workspace_data_router
 from api.routes.workspaces import router as workspaces_router
 from eo import ws_registry  # NEW — §9b: per-session WebSocket connection registry
@@ -223,6 +225,8 @@ app.include_router(deploy_router)
 app.include_router(code_router)
 app.include_router(local_workspace_router)  # F2 Part 2: /ws/daemon/{workspace_id}
 app.include_router(local_workspace_data_router)  # F2 Part 3: /api/workspaces/{ws_id}/local/*
+app.include_router(mcp_router)  # Patch A8: /api/mcp/servers, /api/mcp/servers/{name}/status
+app.include_router(user_profile_router)  # NEW — Patch B6: /api/profile/*
 
 
 # NEW — Data Layer architecture §9b: the real transport behind

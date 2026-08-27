@@ -68,6 +68,7 @@ from eo import (
     study_progress,
     workspace_facts,
 )
+from eo.mcp_agent_tools import mcp_tools_for_agent  # NEW — Patch A3
 from eo.structure import STRUCTURE_TEMPLATES
 from graph.adapters import markdown_text_to_artifact
 from memory.bus import read_many as bus_read_many
@@ -829,7 +830,7 @@ class ClassifyIntentRequest(BaseModel):
 
 
 @router.post("/api/workspaces/{ws_id}/notebooks/classify-intent")
-def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depends(require_auth)):
+async def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depends(require_auth)):
     """Phase 2 step 2.5.
 
     Runs one chat message through the real tool-calling classification
@@ -851,6 +852,17 @@ def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depe
     {"error": "..."} field in the 200 response, not a 500, since a
     log-only classification pass failing should never look like a real
     error to the frontend or block the fallback to sendTask().
+
+    NEW — Patch A3: the tools array this route classifies against now
+    also includes every currently-connected MCP server's tools
+    (eo.mcp_agent_tools.mcp_tools_for_agent()), normalized into the same
+    OpenAI shape as the internal tools above -- so a message like "find
+    open issues on our repo" can classify to a GitHub MCP tool exactly
+    the way "quiz me on this" classifies to generate_study_quiz. This
+    route is now `async def` (it wasn't before) purely because
+    mcp_tools_for_agent() needs to await eo.mcp_client.list_tools() per
+    connected server -- classify_tool_intent() itself is still a plain
+    sync call, unchanged.
     """
     try:
         chat_workspace.get_workspace(ws_id, owner_id)
@@ -861,7 +873,11 @@ def classify_intent(ws_id: str, req: ClassifyIntentRequest, owner_id: str = Depe
     # doesn't live in CAPABILITIES_MANIFEST -- it's appended from its own
     # hand-written builder (see utils/capability_tools.py's header
     # comment on why generation and non-generation tools stay separate).
-    tools = manifest_to_tools(CAPABILITIES_MANIFEST) + study_progress_tools()
+    tools = (
+        manifest_to_tools(CAPABILITIES_MANIFEST)
+        + study_progress_tools()
+        + await mcp_tools_for_agent()  # NEW — Patch A3
+    )
     return classify_tool_intent(req.message, tools)
 
 
