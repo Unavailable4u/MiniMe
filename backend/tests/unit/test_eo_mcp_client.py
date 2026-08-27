@@ -145,7 +145,14 @@ async def test_is_error_content_raises():
     isError=true (MCP's own convention for a tool-level failure, distinct
     from a transport-level JSON-RPC error) must still surface as
     MCPClientError, not a silently 'successful' result."""
-    async def fake_post(url, json=None, timeout=None):
+    async def fake_post(self, url, json=None, timeout=None):
+        # `self` here matters: httpx.AsyncClient.post is looked up as
+        # `self.client.post(...)`, and unittest.mock.patch.object binds a
+        # plain function via the normal descriptor protocol, so the real
+        # AsyncClient instance is passed as the first positional arg.
+        # Without this param it lands in `url` and shifts everything else,
+        # colliding with the explicit `json=payload` keyword at the call
+        # site (TypeError: got multiple values for argument 'json').
         if json["method"] == "initialize":
             return _rpc_response(json, {"serverInfo": {}})
         if json["method"] == "notifications/initialized":

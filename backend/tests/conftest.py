@@ -43,6 +43,7 @@ or, if a test wants raw control:
 import contextlib
 import json
 import sys
+from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
@@ -359,6 +360,137 @@ def mock_static_scan(monkeypatch):
     patcher._patch_all_now(monkeypatch)
     yield patcher
     patcher._patch_all_now(monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# 4. web_search (utils/web_search.py) — autouse, no fixture request needed
+#
+#    Found via a Windows test-run audit: tests/integration/test_gatekeeper.py
+#    and test_resume_graph.py drive agents/web_researcher.py through the real
+#    executor/gatekeeper code, which calls utils.web_search.search() with no
+#    mocking anywhere in this file. On a machine with a real TAVILY_API_KEY
+#    in backend/.env (loaded transitively the same way LANGFUSE_* is above --
+#    see test_eo_tracing.py's fix), that made REAL calls to Tavily on every
+#    test run. Once that key was already rate-limited, Tavily's retry/
+#    fallback path (per-result-URL classification calls, provider-chain
+#    fallback to Exa) made extra generate_text() calls the tests never
+#    accounted for, draining mock_llm's finite set_sequence() queues
+#    (StopIteration) and inflating call counts.
+#
+#    This is exactly the class of bug fake_bus (above) already exists to
+#    prevent for Redis: tests/unit and tests/integration must never depend
+#    on -- or burn quota against -- real external services, regardless of
+#    what happens to be sitting in a contributor's local .env. Same
+#    lazy-import hazard as generate_text (agents/web_researcher.py and
+#    agents/part_price_finder.py both do
+#    `from utils.web_search import search as web_search`, a bound name in
+#    their own module namespace), so this uses the same sweep-and-patch
+#    shape as _modules_with_bound_generate_text() above.
+#
+#    tests/manual/ is excluded the same way it already is for fake_bus --
+#    see tests/manual/conftest.py's override of this fixture.
+# ---------------------------------------------------------------------------
+
+def _modules_with_bound_web_search():
+    """Same lazy-import-proxy hazard noted on _modules_with_bound_generate_text()
+    above -- getattr(..., None) alone isn't safe against modules whose
+    __getattr__ raises something other than AttributeError.
+
+    Extra hazard specific to this name (found the hard way -- see the git
+    log for this line): "web_search" is both the bound-function-name
+    convention (`from utils.web_search import search as web_search`, used
+    by agents/web_researcher.py and agents/part_price_finder.py) AND,
+    completely coincidentally, the exact name of the utils.web_search
+    submodule itself. Python's import system auto-sets `web_search` as an
+    attribute on the parent `utils` PACKAGE module the first time
+    `utils.web_search` is imported anywhere (that's what makes
+    `import utils.web_search as x` work at all). Without the isinstance
+    check below, this sweep matches the `utils` package too, and patching
+    it replaces that submodule attribute with the mock -- which silently
+    breaks every `import utils.web_search as web_search` statement
+    everywhere else (including in test files that patch the module
+    directly), since that import resolves through the package attribute,
+    not sys.modules, once the submodule has been auto-attached. Skipping
+    module-type hits keeps this sweep matching only genuine bound
+    function references."""
+    hits = []
+    for name, mod in list(sys.modules.items()):
+        if mod is None:
+            continue
+        if name == "utils.web_search":
+            continue
+        try:
+            candidate = getattr(mod, "web_search", None)
+        except Exception:
+            continue
+        if candidate is None or isinstance(candidate, ModuleType):
+            continue
+        hits.append(mod)
+    return hits
+
+
+class WebSearchPatcher:
+    """Patches utils.web_search.search in-place across every module that
+    imported it (bound as `web_search` or otherwise), plus the module
+    itself so deferred/local `from utils.web_search import search` imports
+    (e.g. agents/component_spec_lookup.py, which imports inside the
+    function body on every call) pick up the patched version too.
+
+    Defaults to "no results" ([]) -- the same safe, non-fatal outcome
+    utils/web_search.py's own docstring says every current caller already
+    treats a real empty response as, so this never changes control flow
+    for a test that doesn't care about search results. Call
+    set_results()/set_sequence() when a test needs specific results."""
+
+    def __init__(self):
+        self._mock = MagicMock()
+        self._patched_modules = []
+        self._mock.side_effect = lambda *a, **k: []
+
+    def set_results(self, results):
+        self._mock.side_effect = lambda *a, **k: results
+
+    def set_sequence(self, results_list):
+        it = iter(results_list)
+        self._mock.side_effect = lambda *a, **k: next(it)
+
+    @property
+    def mock(self):
+        return self._mock
+
+    def _patch_all_now(self, monkeypatch):
+        for mod in _modules_with_bound_web_search():
+            monkeypatch.setattr(mod, "web_search", self._mock, raising=False)
+            self._patched_modules.append(mod)
+        try:
+            import utils.web_search as web_search_mod
+            monkeypatch.setattr(web_search_mod, "search", self._mock, raising=False)
+        except ImportError:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_web_search(monkeypatch):
+    """Autouse (unlike mock_llm/mock_static_scan): unlike an LLM call, a
+    test doesn't have to be *about* search for the code under test to
+    reach it incidentally (gatekeeper/executor/resume_graph all can, via
+    web_researcher), so opting in per-test isn't good enough here -- the
+    whole point is that nothing under tests/unit or tests/integration
+    should ever be able to make a real Tavily/Exa call, full stop. A test
+    that specifically wants to assert on search behavior can still pull
+    `_web_search_patcher` and call set_results()/set_sequence()."""
+    patcher = WebSearchPatcher()
+    patcher._patch_all_now(monkeypatch)
+    yield patcher
+    patcher._patch_all_now(monkeypatch)
+
+
+@pytest.fixture
+def _web_search_patcher(_no_real_web_search):
+    """Named alias for tests that want to configure search results --
+    same object _no_real_web_search already installed, just a clearer name
+    to request when a test cares about it specifically."""
+    return _no_real_web_search
 
 
 @contextlib.contextmanager

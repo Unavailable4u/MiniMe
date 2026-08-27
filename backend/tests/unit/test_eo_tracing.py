@@ -90,6 +90,15 @@ def test_get_tracer_delegates_to_langfuse_get_client(monkeypatch):
 # ---------------------------------------------------------------------
 
 def _reload_tracing_with_env(monkeypatch, public_key, secret_key):
+    # tracing.py calls load_dotenv() at module import time, and
+    # importlib.reload() re-executes that -- python-dotenv won't override a
+    # key already set in os.environ, but WILL set one that's currently
+    # absent. So on a machine with a real backend/.env (unlike this repo's
+    # CI sandbox, which has none), the delenv() calls below get silently
+    # undone by the reload's own load_dotenv() call before TRACING_ENABLED
+    # is computed. No-op the reload's dotenv call so a real .env on disk
+    # can never leak back in here.
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
     if public_key is None:
         monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     else:

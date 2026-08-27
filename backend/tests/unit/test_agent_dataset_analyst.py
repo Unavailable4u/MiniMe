@@ -60,7 +60,14 @@ def fake_dynamic_chain(monkeypatch):
 
 def _write_dataset(tmp_path, name="sales.csv", content="region,total\nEast,100\n"):
     p = tmp_path / name
-    p.write_text(content)
+    # write_text() opens in text mode with universal-newline translation ON,
+    # which silently rewrites \n -> \r\n on disk on Windows. The production
+    # code reads this file in binary mode and base64-encodes the raw bytes,
+    # so on Windows it would encode \r\n-terminated bytes while `content`
+    # above is an \n-only Python string -- write the exact bytes of
+    # `content`, no OS-dependent translation, so the fixture and the
+    # encoded-bytes assertion agree on every OS.
+    p.write_bytes(content.encode("utf-8"))
     return str(p)
 
 
