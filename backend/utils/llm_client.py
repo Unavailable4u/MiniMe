@@ -1996,6 +1996,19 @@ _LEDGER_WAIT_CAP_SECONDS = 20.0
 # alone hasn't been exhausted yet.
 _MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS = 45.0
 
+# Bug fix (2026-08-27, ledger-gate hang): _ledger_gate()'s own "no headroom
+# anywhere in the chain" wait branch never got the 2026-08-25 CI-hang fix
+# above -- that fix only capped the RATE_LIMIT_WINDOW retry loop further
+# down in this same function (a real provider 429 coming back), which is
+# a different code path from this PRE-flight estimate-based gate. Without
+# its own cap, a step whose estimated prompt size just never shrinks
+# (e.g. a bloated workspace-facts block that nothing trims between
+# retries) sleeps and retries here forever, with no ceiling at all. Same
+# two-part shape as _MAX_RATE_LIMIT_RETRIES/_MAX_RATE_LIMIT_WAIT_BUDGET_SECONDS
+# above, just scoped to this sibling loop.
+_MAX_LEDGER_WAIT_RETRIES = 5
+_MAX_LEDGER_WAIT_BUDGET_SECONDS = 45.0
+
 # NEW — Patch 6: cooperative-cancellation flag for graceful shutdown.
 # Uvicorn's SIGINT handler can't interrupt a worker thread, so instead
 # of trying to kill the thread, every blocking sleep in this module
@@ -2015,6 +2028,20 @@ def request_shutdown() -> None:
     limit waits) will raise ShutdownRequested at its next checkpoint
     instead of completing the sleep."""
     _SHUTDOWN_REQUESTED.set()
+
+
+def shutdown_requested() -> bool:
+    """Bug fix (2026-08-27, Ctrl+C audit): previously _SHUTDOWN_REQUESTED
+    was only ever consulted inside this module's own _interruptible_sleep()
+    -- nothing outside llm_client.py could tell a shutdown had been
+    requested at all, so eo/executor.py's role-dispatch loop (and every
+    other long-running non-LLM step: web_search, injection_guard, etc.)
+    kept running to completion in its worker thread even after SIGINT had
+    already torn down the ASGI response the frontend was waiting on. This
+    is the read-only accessor executor.py now polls at its own
+    role-boundary checkpoint, the same way it already polls the
+    pause_requested:{session_id} bus flag."""
+    return _SHUTDOWN_REQUESTED.is_set()
 
 
 class ShutdownRequested(Exception):
@@ -2233,14 +2260,29 @@ def _decide_ledger_action(chain: list, index: int, current_wait: float,
 
 def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
                   system_prompt: str, prompt_for_step: str, label: str,
-                  agent_name: str, max_tokens: "int | None" = None) -> "tuple[str, str | None]":
+                  agent_name: str, max_tokens: "int | None" = None,
+                  session_id: str = None,
+                  same_step_ledger_waits: int = 0,
+                  same_step_ledger_wait_elapsed: float = 0.0
+                  ) -> "tuple[str, str | None, int, float]":
     """3f-1 -- shared pre-flight ledger gate, extracted verbatim from the
     duplicated cloudflare/SDK-shaped blocks in generate_text(). Reads
     ledger state AND books the provisional reservation in the same call
     (estimate -> rate_ledger.reserve() -> _decide_ledger_action()),
-    sleeping in the "wait" case as a side effect, but never touches any
-    of generate_text()'s own loop-scoped state -- so unlike 3f-3/3f-4
-    this can return a plain sentinel with no state to hand back.
+    sleeping in the "wait" case as a side effect.
+
+    Bug fix (2026-08-27, ledger-gate hang): this function is no longer
+    fully stateless with respect to generate_text()'s loop -- the caller
+    now threads same_step_ledger_waits/same_step_ledger_wait_elapsed in
+    and gets updated values back out (mirroring how the RATE_LIMIT_WINDOW
+    handler further down already threads same_step_rate_limit_waits/
+    same_step_rate_limit_elapsed), so this loop can enforce its own
+    _MAX_LEDGER_WAIT_RETRIES / _MAX_LEDGER_WAIT_BUDGET_SECONDS ceiling
+    instead of retrying forever. session_id is threaded through purely so
+    the actual sleep can go through _interruptible_sleep() and become
+    shutdown/pause-aware -- previously this branch used a bare time.sleep()
+    that neither Ctrl+C's request_shutdown() nor the UI's Pause button
+    (pause_requested:{session_id}) could ever interrupt.
 
     Phase 4: swaps the old read-only rate_ledger.can_proceed() for
     rate_ledger.reserve() -- same decision logic, but reserve() also
@@ -2256,19 +2298,26 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
     (key_id for cloudflare, key_env for the SDK-shaped branch) -- this
     function is agnostic to which one it's given.
 
-    Returns (action, reservation_id):
-      ("proceed", reservation_id) -- headroom confirmed and booked;
+    Returns (action, reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed):
+      ("proceed", reservation_id, ...) -- headroom confirmed and booked;
                          caller should make the call, then pass
                          reservation_id straight through to
                          _record_ledger_bookkeeping() afterwards so the
                          provisional booking gets corrected rather than
                          left as a permanent overcount.
-      ("reroute", None) -- caller should `break` out of this step's
+      ("reroute", None, ...) -- caller should `break` out of this step's
                          retry loop and fall through to the next chain
                          step. Nothing was booked for this step.
-      ("waited-retry", None) -- caller already slept the decided
+      ("waited-retry", None, ...) -- caller already slept the decided
                          duration and should `continue` to retry THIS
-                         step now. Nothing was booked yet either.
+                         step now. Nothing was booked yet either. The
+                         two counters are updated and must be passed
+                         back in on the next call for this same step.
+
+    Raises RuntimeError if same_step_ledger_waits/elapsed would exceed
+    _MAX_LEDGER_WAIT_RETRIES / _MAX_LEDGER_WAIT_BUDGET_SECONDS -- same
+    "give up cleanly instead of looping forever" contract the
+    RATE_LIMIT_WINDOW handler already has.
 
     `max_tokens` (Patch I.2 follow-up): the step's configured max_tokens
     ceiling (both call sites below already resolve this via
@@ -2283,7 +2332,7 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
     _ledger_ok, _ledger_wait, _reservation_id = rate_ledger.reserve(
         provider, key, model, _estimated_tokens, max_output_tokens=max_tokens)
     if _ledger_ok:
-        return "proceed", _reservation_id
+        return "proceed", _reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed
     _action, _wait_seconds = _decide_ledger_action(
         chain, index, _ledger_wait, _estimated_tokens)
     if _action == "reroute":
@@ -2291,15 +2340,50 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
               f"~{_estimated_tokens} estimated tokens -- a later chain "
               f"step already has headroom, rerouting immediately "
               f"instead of waiting.")
-        return "reroute", None
+        return "reroute", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
+    # Bug fix (2026-08-27, ledger-gate hang): same two-part cap the
+    # RATE_LIMIT_WINDOW handler already has -- see _MAX_LEDGER_WAIT_RETRIES'
+    # own comment for why this branch never had one before now.
+    if same_step_ledger_waits >= _MAX_LEDGER_WAIT_RETRIES:
+        print(f"  [{agent_name}] {label} still has no headroom for "
+              f"~{_estimated_tokens} estimated tokens after "
+              f"{_MAX_LEDGER_WAIT_RETRIES} in-place waits, and nothing "
+              f"else in the chain has headroom -- giving up on this "
+              f"call instead of retrying forever.")
+        raise RuntimeError(
+            f"{label} exhausted {_MAX_LEDGER_WAIT_RETRIES} pre-flight "
+            f"ledger-wait retries with no reroute headroom available "
+            f"(~{_estimated_tokens} estimated tokens each attempt)"
+        )
+    _remaining_budget = _MAX_LEDGER_WAIT_BUDGET_SECONDS - same_step_ledger_wait_elapsed
+    if _remaining_budget <= 0:
+        print(f"  [{agent_name}] {label} still has no headroom for "
+              f"~{_estimated_tokens} estimated tokens after "
+              f"{same_step_ledger_wait_elapsed:.1f}s spent waiting "
+              f"(budget {_MAX_LEDGER_WAIT_BUDGET_SECONDS:.0f}s), and "
+              f"nothing else in the chain has headroom -- giving up on "
+              f"this call instead of continuing to wait.")
+        raise RuntimeError(
+            f"{label} exceeded the {_MAX_LEDGER_WAIT_BUDGET_SECONDS:.0f}s "
+            f"pre-flight ledger-wait budget with no reroute headroom "
+            f"available (~{_estimated_tokens} estimated tokens)"
+        )
+    _wait_seconds = min(_wait_seconds, _remaining_budget)
+    same_step_ledger_waits += 1
     print(f"  [{agent_name}] {label} has no headroom for "
           f"~{_estimated_tokens} estimated tokens, and neither does "
           f"anything else remaining in the chain -- sleeping "
           f"{_wait_seconds:.1f}s (suggested {_ledger_wait:.1f}s, capped "
           f"at {_LEDGER_WAIT_CAP_SECONDS:.0f}s) before retrying {label} "
-          f"in place.")
-    time.sleep(_wait_seconds)
-    return "waited-retry", None
+          f"in place (attempt {same_step_ledger_waits}/{_MAX_LEDGER_WAIT_RETRIES})...")
+    # Bug fix (2026-08-27): was a bare time.sleep(), which neither
+    # Ctrl+C's request_shutdown() nor the UI's per-session Pause button
+    # could ever interrupt -- this is the actual reason Pause/Ctrl+C did
+    # nothing while a step sat here retrying. _interruptible_sleep()
+    # checks both every 0.5s, same as the RATE_LIMIT_WINDOW branch below.
+    _interruptible_sleep(_wait_seconds, session_id=session_id)
+    same_step_ledger_wait_elapsed += _wait_seconds
+    return "waited-retry", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
 
 
 def _record_ledger_bookkeeping(provider: str, key, model: str, usage, headroom_headers,
@@ -2810,14 +2894,19 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
     same_step_shrinks = 0  # Fix D2: scoped to retries-in-place on THIS step only
     same_step_rate_limit_waits = 0  # Bug fix (2026-08-25): same scoping, for RATE_LIMIT_WINDOW
     same_step_rate_limit_elapsed = 0.0  # Bug fix (2026-08-25 part 2): total sleep time, same scoping
+    same_step_ledger_waits = 0  # Bug fix (2026-08-27): same scoping, for the pre-flight ledger gate
+    same_step_ledger_wait_elapsed = 0.0  # Bug fix (2026-08-27): total sleep time, same scoping
     while True:  # Fix D2: retry loop scoped to THIS step only
         prompt_for_step = (
             _continuation_prompt(user_content, accumulated_text)
             if accumulated_text else user_content
         )
-        _gate, _reservation_id = _ledger_gate(chain, index, provider, key, model,
-                                               system_prompt, prompt_for_step, label, agent_name,
-                                               max_tokens=max_tokens)
+        _gate, _reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed = _ledger_gate(
+            chain, index, provider, key, model,
+            system_prompt, prompt_for_step, label, agent_name,
+            max_tokens=max_tokens, session_id=session_id,
+            same_step_ledger_waits=same_step_ledger_waits,
+            same_step_ledger_wait_elapsed=same_step_ledger_wait_elapsed)
         if _gate == "reroute":
             _record_ledger_event(session_id, "reroute")
             break  # skip this step, fall through to the next chain step

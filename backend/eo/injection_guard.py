@@ -22,8 +22,23 @@ import os
 from utils.llm_client import generate_text
 
 PROMPT_GUARD_MODEL = "meta-llama/llama-prompt-guard-2-86m"
+# Bug fix (2026-08-27, injection-guard audit): this step had no explicit
+# max_tokens, so every call fell through to llm_client._max_tokens_for()'s
+# flat DEFAULT_MAX_TOKENS (8192) -- but llama-prompt-guard-2-86m is an
+# 86M-param single-label classifier whose actual Groq-enforced ceiling is
+# 512 ("max_tokens must be less than or equal to 512" per the API's own
+# 400 response). Every single call was therefore malformed from the
+# start and failed before it ever reached the model, meaning this guard
+# has never actually screened anything -- score_snippet()'s fail-open
+# except-clause below silently treats every failure as "not flagged," so
+# scraped web content has been passing through completely unchecked. The
+# model only ever needs to emit one label word ("BENIGN"/"INJECTION"/
+# "JAILBREAK"), so a small explicit value both fixes the 400 and keeps
+# this cheap classification call cheap.
+PROMPT_GUARD_MAX_TOKENS = 8
 PROMPT_GUARD_CHAIN = [
-    {"provider": "groq", "model": PROMPT_GUARD_MODEL, "key_env": "GROQ_API_KEY"},
+    {"provider": "groq", "model": PROMPT_GUARD_MODEL, "key_env": "GROQ_API_KEY",
+     "max_tokens": PROMPT_GUARD_MAX_TOKENS},
 ]
 
 # Fail-open by design: a classifier outage (Groq down, key missing,

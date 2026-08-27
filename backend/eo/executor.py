@@ -67,6 +67,7 @@ from relay.emitter import emit_event
 from utils.error_sanitizer import user_facing_message
 from utils.llm_client import ChainExhaustedError
 from utils.llm_client import PauseRequestedMidRetry  # NEW — Patch 7
+from utils.llm_client import ShutdownRequested, shutdown_requested  # NEW — Bug fix 2026-08-27 (Ctrl+C audit)
 
 # D1 audit fix -- these print()s were the only signal a Langfuse span
 # failed to open/close; grep-able marker (TRACE_EXPORT_FAILED) added so
@@ -794,6 +795,26 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
     no_conversation_context_roles = no_conversation_context_roles or set()
 
     while idx is not None and idx < len(agent_names):
+        # Bug fix (2026-08-27, Ctrl+C audit): SIGINT's request_shutdown()
+        # previously only ever reached _interruptible_sleep() inside
+        # llm_client.py's own rate-limit retry path -- nothing checked it
+        # anywhere in this loop, so a task already past its Inspector call
+        # (running an ordinary role, a web_search, an injection_guard
+        # check, etc.) just kept running to completion in its worker
+        # thread even after SIGINT had already torn down the ASGI
+        # response the frontend was waiting on. Checked here, at the top
+        # of every role-dispatch iteration -- the same natural checkpoint
+        # the pause_requested bus flag already uses further down, just
+        # BEFORE a new role starts rather than after one finishes, so a
+        # shutdown mid-run doesn't have to wait for the current role to
+        # complete before this loop notices. Raising (rather than
+        # returning a "paused" sentinel) reuses the exact ShutdownRequested
+        # contract _interruptible_sleep() already has -- api/routes/tasks.py
+        # already catches this at the top level and returns a clean
+        # "cancelled" TaskResponse either way.
+        if shutdown_requested():
+            raise ShutdownRequested(
+                f"shutdown requested before dispatching role {role_names[idx]!r}")
         # Migration Part 2 §2.6: a group (role_names[idx] is a list, not
         # a str) is handled entirely separately from the single-role
         # dispatch below — see _run_concurrent_group()'s own docstring
@@ -1321,6 +1342,15 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # changes at all to handle either trigger.
             from memory.bus import delete as bus_delete
             from memory.bus import read as bus_read
+            # Bug fix (2026-08-27, Ctrl+C audit): same reasoning as the
+            # top-of-loop check above -- a role that was already running
+            # when SIGINT arrived finishes normally (can't interrupt a
+            # worker thread mid-role), but this is the next safe point
+            # after it, and it's cheap to check again right where the
+            # pause flag is already being read.
+            if shutdown_requested():
+                raise ShutdownRequested(
+                    f"shutdown requested after completing role {role!r}")
             pause_requested = bus_read(f"pause_requested:{session_id}", default=False) if session_id else False
             if role in approval_roles or pause_requested:
                 from memory.bus import get_current_app_slug, write

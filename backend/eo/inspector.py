@@ -221,34 +221,44 @@ CHAIN = [
     # 2026-07-30 -- see agents/test_writer.py's matching fix for the same
     # swap). This chain runs on EVERY incoming task, so this was the
     # highest-traffic of the 3 call sites using the retired model.
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1", "max_tokens": 700},
-    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2", "max_tokens": 700},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_1", "max_tokens": 3000},
+    {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "EO_INSPECTOR_GROQ_KEY_2", "max_tokens": 3000},
     # Gemini/Mistral/HF rollout, Patch 6 (§4b/§6): dedicated fallback-only
     # accounts, not shared with any other agent's chain -- see module
     # docstring for why this doesn't reopen the isolation gap the original
     # Gemini exclusion was protecting against.
-    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_10", "max_tokens": 700},
-    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_11", "max_tokens": 700},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_10", "max_tokens": 3000},
+    {"provider": "gemini", "model": "gemini-3.6-flash", "key_env": "GEMINI_API_KEY_11", "max_tokens": 3000},
     # Quota-reality fix, §4 (2026-07-30): GitHub Models retired in full --
     # its last-resort step is removed here, not replaced. This role keeps
     # the Groq x2 -> Gemini x2 redundancy above (still every task, tier 0).
 ]
-# Root-cause audit fix, Fix 4 (2026-08-27): every step above got
-# "max_tokens": 700 explicitly (always preferred over any model-based
-# default -- see llm_client._max_tokens_for()'s docstring), instead of
-# falling through to that function's flat DEFAULT_MAX_TOKENS/
+# Root-cause audit fix, Fix 4 (2026-08-27): every step above got an
+# explicit max_tokens (always preferred over any model-based default --
+# see llm_client._max_tokens_for()'s docstring) instead of falling
+# through to that function's flat DEFAULT_MAX_TOKENS/
 # REASONING_MODEL_MAX_TOKENS. This chain's own SYSTEM_PROMPT below asks
 # for a single, tightly-bounded JSON object -- a handful of short fixed
 # fields (path/directed_task_type/confidence/domain), a "reasoning"
 # capped at "one short sentence", and suggested_agents/execution_order/
-# parallel_groups lists of short role-label strings that are themselves
-# bounded by how many distinct roles one task realistically implies. 700
-# is generous headroom above what a real response of that shape needs
-# (checked against representative multi-role examples), while still
-# being a small fraction of even this chain's tightest model's tpm
-# budget -- unlike the flat 8192/16384 defaults, which for
-# qwen/qwen3.6-27b (tpm=8000) reserved more than double the model's
-# entire per-minute budget for a JSON object that never approaches it.
+# parallel_groups lists of short role-label strings.
+#
+# Bug fix (2026-08-27, truncation audit): Fix 4 above set this to a flat
+# 700, sized for the JSON answer alone -- but qwen/qwen3.6-27b and
+# gemini-3.6-flash are both reasoning models that spend tokens on a
+# hidden <think>...</think> trace BEFORE emitting the actual JSON (see
+# this module's own allow_continuation=False comment further down,
+# which already flags reasoning models getting stuck mid-<think> --
+# Fix 4 didn't account for that same hazard when it set max_tokens).
+# 700 was enough for the trace alone to eat the whole budget and hit
+# finish_reason=length before a single character of real JSON came out,
+# so EVERY step in this chain -- Groq primary and Gemini fallback alike
+# -- was truncating on every call, falling back to a conservative tier-3
+# draft and an unnecessary panel escalation on every single task. 3000
+# leaves room for a representative reasoning trace plus the actual
+# answer while still sitting well under qwen/qwen3.6-27b's 8000 tpm
+# budget (this chain's tightest constraint) -- nowhere near the flat
+# 8192/16384 defaults Fix 4 was originally trying to avoid.
 
 SYSTEM_PROMPT = """You are the Inspector for a multi-agent build system. \
 You classify one incoming task into a routing path — you do NOT do the \

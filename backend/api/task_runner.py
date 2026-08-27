@@ -1146,6 +1146,22 @@ def run_task_from_template(template_id: str, task_text: str, session_id: str = N
     return response
 
 
+# Bug fix (2026-08-27, prompt-bloat audit): _record_routing_fact() used to
+# store the FULL, untruncated task_text on every single task, forever —
+# unlike every other fact-writing path in this file (_SGA_FACT_TITLE_MAX /
+# _SGA_FACT_SUMMARY_MAX below, fact_summarizer's own bounded summary),
+# this one had no cap at all. format_facts_for_prompt() then re-injects
+# every stored "text" verbatim into EVERY classify()/Inspector call for
+# the workspace (via conversation_memory.get_light_context() ->
+# _workspace_facts_text()), so a workspace that's been used for a while
+# silently accumulates a multi-hundred-KB "decisions" section that gets
+# resent on every future task regardless of how short that task is.
+# Capped the same way _SGA_FACT_SUMMARY_MAX caps its sibling write path;
+# this is routing/tier metadata for a human glancing at the facts panel,
+# not a transcript, so a short excerpt is all it ever needed.
+_ROUTING_FACT_TEXT_MAX = 300
+
+
 def _record_routing_fact(workspace_id: str, tier, task_text: str, session_id: str, decision: dict = None) -> None:
     """D1 — shared by every early-return branch of
     _resolve_decision_and_hires() (cache hit, SGA-resolved) as well as
@@ -1169,6 +1185,13 @@ def _record_routing_fact(workspace_id: str, tier, task_text: str, session_id: st
         str(decision.get("action") or "decision").lower(),
         str(decision.get("directed_task_type") or decision.get("path") or "general").lower(),
     ])
+    # Bug fix (2026-08-27): truncate before storing, not just at render
+    # time — see _ROUTING_FACT_TEXT_MAX's comment above. Truncating here
+    # (rather than only in format_facts_for_prompt()) also keeps the
+    # workspace_facts bus key itself from growing without bound.
+    excerpt = (task_text or "").strip()
+    if len(excerpt) > _ROUTING_FACT_TEXT_MAX:
+        excerpt = excerpt[:_ROUTING_FACT_TEXT_MAX - 1].rstrip() + "…"
     workspace_facts.record_section_entry(
         workspace_id,
         "decisions",
@@ -1177,7 +1200,7 @@ def _record_routing_fact(workspace_id: str, tier, task_text: str, session_id: st
             "title": decision.get("directed_task_type") or decision.get("path") or decision.get("action")
                       or f"Routing decision (tier {tier})",
             "summary": decision.get("reasoning") or decision.get("action") or f"Resolved at tier {tier}",
-            "text": task_text,
+            "text": excerpt,
             "data": decision or {"tier": tier},
         },
         source="chat_task_runner",
