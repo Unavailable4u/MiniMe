@@ -291,6 +291,16 @@ class TestBuildTopicWorkflow:
             raise RuntimeError("workspace unreadable")
 
         monkeypatch.setattr(workflow_suggester, "plan", _raising_plan)
+        # generic_worker.run must be faked out too (same as every other
+        # test in this class), or this falls through to a REAL model call
+        # -- which can succeed against the live provider chain and return
+        # an actual synthesized workflow instead of exercising the
+        # hardcoded fallback this test is meant to pin, making the
+        # asserted step count flaky/non-deterministic.
+        monkeypatch.setattr(
+            "agents.generic_worker.run",
+            lambda **k: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+        )
         result = workflow_suggester.build_topic_workflow("ws-1", "Some Topic")
         assert result["topic_id"] is None
         assert result["topic_key"] == "some_topic"
