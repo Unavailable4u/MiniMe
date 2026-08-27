@@ -2341,6 +2341,29 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
               f"step already has headroom, rerouting immediately "
               f"instead of waiting.")
         return "reroute", None, same_step_ledger_waits, same_step_ledger_wait_elapsed
+    # Bug fix (2026-08-27, unwinnable-step fast-fail): nothing else in the
+    # chain has headroom either (we're past the "reroute" branch above),
+    # so we're about to enter the retry-in-place loop below -- but if this
+    # step's own estimated input plus its resolved max_tokens ceiling
+    # already exceeds the model's entire tpm budget, no amount of waiting
+    # for someone else's usage to age out of the sliding window can ever
+    # produce headroom; every one of the retries below would just re-hit
+    # the same structural wall. Fail immediately with a diagnostic that
+    # says so, instead of spending the full _MAX_LEDGER_WAIT_RETRIES /
+    # _MAX_LEDGER_WAIT_BUDGET_SECONDS budget finding that out the slow way.
+    if rate_ledger.exceeds_tpm_ceiling(provider, model, _estimated_tokens, max_tokens):
+        print(f"  [{agent_name}] {label} needs ~{_estimated_tokens} "
+              f"estimated input tokens + {max_tokens or 0} max output "
+              f"tokens, which alone exceeds this model's tpm ceiling -- "
+              f"this call can never fit regardless of concurrent usage, "
+              f"failing fast instead of retrying.")
+        raise RuntimeError(
+            f"{label} cannot fit under its tpm ceiling: ~{_estimated_tokens} "
+            f"estimated input tokens + {max_tokens or 0} max output tokens "
+            f"exceeds the model's per-minute token budget on its own. "
+            f"Reduce this step's prompt size, lower its max_tokens, or "
+            f"give it a higher-tpm fallback earlier in the chain."
+        )
     # Bug fix (2026-08-27, ledger-gate hang): same two-part cap the
     # RATE_LIMIT_WINDOW handler already has -- see _MAX_LEDGER_WAIT_RETRIES'
     # own comment for why this branch never had one before now.
