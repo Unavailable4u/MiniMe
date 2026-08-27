@@ -119,6 +119,40 @@ def _headroom_key(provider: str, key_id: str, model: str) -> str:
     return f"rate_ledger:{provider}:{key_id}:{model}:headroom"
 
 
+def _fresh_headroom(headroom: "dict | None", now: float) -> "dict | None":
+    """Bug fix (2026-08-27, stale-headroom busy-loop): every call site
+    below used to trust a provider-reported headroom record as-is,
+    with no check for whether its own `reset_at` had already passed.
+    A record surviving past its reset (e.g. a delayed bus read, a
+    record written just before the process briefly lost its clock, or
+    simply outliving its window because nothing has called this
+    provider/model since) was still being treated as authoritative --
+    its (possibly zero/negative) `remaining_*` figure kept being used
+    for the accept/reject decision, and the corresponding wait
+    (`max(0.0, reset_at - now)`) collapses to exactly 0.0 once
+    `reset_at <= now`. That produced a tight, effectively instant
+    retry loop (see llm_client.py's `_ledger_gate`: "sleeping 0.0s"
+    logged 5 times in a row) that burns the entire
+    _MAX_LEDGER_WAIT_RETRIES budget without ever re-checking real
+    headroom -- including the case where the window has, in reality,
+    long since reset and fresh headroom is available.
+
+    Returns `headroom` unchanged when it's missing a `reset_at` (can't
+    judge staleness, so trust it same as before) or `reset_at` is
+    still in the future. Returns None -- "treat as if no provider
+    headroom record exists at all" -- once `reset_at <= now`, which
+    sends every call site below down its existing self-tracked-window
+    fallback path (already fresh, since that path re-reads the window
+    every time) instead of a stale reading.
+    """
+    if headroom is None:
+        return None
+    reset_at = headroom.get("reset_at")
+    if reset_at is not None and reset_at <= now:
+        return None
+    return headroom
+
+
 def _window_key(provider: str, key_id: str, model: str) -> str:
     return f"rate_ledger:{provider}:{key_id}:{model}:window"
 
@@ -221,6 +255,35 @@ def _tpm_limit_for(provider: str, model: str):
     the sliding window, fail open" rather than fabricating a number.
     """
     return _config_for(provider, model).get("tpm")
+
+
+def exceeds_tpm_ceiling(provider: str, model: str, estimated_tokens: int,
+                         max_output_tokens: "int | None") -> bool:
+    """Bug fix (2026-08-27, unwinnable-step fast-fail): tells a caller
+    whether this call can *never* fit under this model's tpm ceiling,
+    independent of any concurrent usage -- i.e. `estimated_tokens +
+    max_output_tokens` alone already exceeds the whole per-minute
+    budget, so no amount of waiting for other traffic to age out of
+    the sliding window will ever make headroom appear.
+
+    This is a distinct failure mode from ordinary "busy right now"
+    contention: _ledger_gate()'s retry-in-place loop exists for the
+    latter (wait for someone else's usage to age out) and was never
+    meant to spend its 5 retries / 45s budget re-checking a request
+    that was mathematically doomed from the first attempt. Callers
+    should treat True here as "raise immediately, don't retry" rather
+    than routing through the normal wait/reroute decision.
+
+    Returns False (not exceeded / can't tell) when this provider/model
+    has no verified tpm figure in QUOTA_CONFIG -- same "no verified
+    number -> don't fabricate one, fail open" posture the rest of this
+    module already follows.
+    """
+    tpm_limit = _tpm_limit_for(provider, model)
+    if tpm_limit is None:
+        return False
+    prospective = estimated_tokens + (max_output_tokens or 0)
+    return prospective > tpm_limit
 
 
 def _rpm_limit_for(provider: str, model: str):
@@ -525,7 +588,10 @@ def can_proceed(provider: str, key_id: str, model: str, estimated_tokens: int,
     try:
         now = _now()
         mode = _gating_mode_for(provider, model)
-        headroom = bus_read(_headroom_key(provider, key_id, model), default=None)
+        # Bug fix (2026-08-27, stale-headroom busy-loop): filter out an
+        # expired provider-reported record here so neither branch below
+        # trusts it -- see _fresh_headroom()'s own docstring.
+        headroom = _fresh_headroom(bus_read(_headroom_key(provider, key_id, model), default=None), now)
 
         if mode == "neurons":
             # Patch I.2 follow-up: no provider-reported headroom signal
@@ -815,7 +881,10 @@ def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units
     """
     _prospective_tokens = estimated_units + (max_output_tokens or 0)
 
-    headroom = bus_read(_headroom_key(provider, key_id, model), default=None)
+    # Bug fix (2026-08-27, stale-headroom busy-loop): see
+    # _fresh_headroom()'s docstring -- an expired record falls through
+    # to the self-tracked window below instead of being trusted as-is.
+    headroom = _fresh_headroom(bus_read(_headroom_key(provider, key_id, model), default=None), now)
     if headroom is not None and headroom.get("remaining_tokens") is not None:
         remaining = headroom["remaining_tokens"]
         if _prospective_tokens <= remaining:
@@ -883,7 +952,10 @@ def _reserve_requests_mode(provider: str, key_id: str, model: str, now: float):
     regardless of size -- there's no `estimated_units` magnitude to book
     here the way tokens mode has."""
     headroom_key = _headroom_key(provider, key_id, model)
-    headroom = bus_read(headroom_key, default=None)
+    # Bug fix (2026-08-27, stale-headroom busy-loop): see
+    # _fresh_headroom()'s docstring -- an expired record falls through
+    # to the rpm/rpd window checks below instead of being trusted as-is.
+    headroom = _fresh_headroom(bus_read(headroom_key, default=None), now)
     if headroom is not None and headroom.get("remaining_requests") is not None:
         remaining = headroom["remaining_requests"]
         if remaining >= 1:
