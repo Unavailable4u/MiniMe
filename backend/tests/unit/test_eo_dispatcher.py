@@ -209,50 +209,123 @@ def test_hallucinated_role_rejected_when_not_in_known_roles(mock_emit):
 
 
 def test_hallucinated_role_rejection_payload(mock_emit, monkeypatch):
-    # Patch B5a: payload now also carries a `known_capability` flag —
-    # force the capability lookup to a known False here so this stays a
-    # plain payload-shape test, not a capability-layer test.
-    monkeypatch.setattr(dispatcher, "list_capabilities", lambda: [])
+    # Patch B5b: payload now carries `known_capability` +
+    # `fallback_source`, sourced from the two-step fallback check —
+    # force both steps to come back empty so this stays a plain
+    # payload-shape test, not a fallback-ordering test.
+    monkeypatch.setattr(dispatcher, "capabilities_for_role", lambda role: [])
+    monkeypatch.setattr(dispatcher, "search_text",
+                         lambda pattern, root: {"matches": []})
     role_plan = ["a", "b"]
     next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
               known_roles={"a", "b"})
     reject_call = next(c for c in mock_emit.call_args_list
                         if c.args[0] == "hallucinated_role_rejected")
     assert reject_call.kwargs["payload"] == {"attempted_role": "ghost",
-                                              "known_capability": False}
+                                              "known_capability": False,
+                                              "fallback_source": "introspection"}
 
 
 # ---------------------------------------------------------------------------
-# _is_known_capability / hallucinated-role capability lookup — Patch B5a
+# _capability_fallback_check / hallucinated-role fallback ordering — Patch B5b
+#
+# §3.3's fallback order: capabilities_for_role() (the current role's own
+# scoped capability view) is tried first; eo/introspection.py's
+# search_text() (via eo/capabilities.py) is only reached when that scoped
+# view comes back empty. These tests pin the ORDER, not just the result —
+# each asserts the call count on the step that should have been skipped.
 # ---------------------------------------------------------------------------
 
-def test_hallucinated_role_payload_flags_a_known_capability(mock_emit, monkeypatch):
-    # eo/capabilities.py::list_capabilities() is the real call site this
-    # patch wires dispatcher.py to -- confirm the lookup result actually
-    # reaches the emitted payload, not just that the payload has the key.
-    monkeypatch.setattr(dispatcher, "list_capabilities",
-                         lambda: [{"entry_id": "ghost", "title": "Ghost", "tags": []}])
+def test_capability_layer_answer_skips_introspection(mock_emit, monkeypatch):
+    # "capability layer has an answer" -> zero introspection calls.
+    scoped_mock = MagicMock(return_value=[{"entry_id": "ghost", "title": "Ghost"}])
+    search_mock = MagicMock(return_value={"matches": [{"path": "eo/x.py"}]})
+    monkeypatch.setattr(dispatcher, "capabilities_for_role", scoped_mock)
+    monkeypatch.setattr(dispatcher, "search_text", search_mock)
+
+    role_plan = ["a", "b"]
+    next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
+              known_roles={"a", "b"})
+
+    scoped_mock.assert_called_once_with("a")
+    search_mock.assert_not_called()
+    reject_call = next(c for c in mock_emit.call_args_list
+                        if c.args[0] == "hallucinated_role_rejected")
+    assert reject_call.kwargs["payload"]["known_capability"] is True
+    assert reject_call.kwargs["payload"]["fallback_source"] == "capability_layer"
+
+
+def test_capability_layer_empty_falls_back_to_introspection_once(mock_emit, monkeypatch):
+    # "capability layer has no answer" -> exactly one introspection call.
+    scoped_mock = MagicMock(return_value=[])
+    search_mock = MagicMock(return_value={"matches": [{"path": "eo/x.py"}]})
+    monkeypatch.setattr(dispatcher, "capabilities_for_role", scoped_mock)
+    monkeypatch.setattr(dispatcher, "search_text", search_mock)
+
+    role_plan = ["a", "b"]
+    next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
+              known_roles={"a", "b"})
+
+    scoped_mock.assert_called_once_with("a")
+    search_mock.assert_called_once()
+    reject_call = next(c for c in mock_emit.call_args_list
+                        if c.args[0] == "hallucinated_role_rejected")
+    assert reject_call.kwargs["payload"]["known_capability"] is True
+    assert reject_call.kwargs["payload"]["fallback_source"] == "introspection"
+
+
+def test_introspection_fallback_no_match_is_unknown(mock_emit, monkeypatch):
+    monkeypatch.setattr(dispatcher, "capabilities_for_role", lambda role: [])
+    monkeypatch.setattr(dispatcher, "search_text",
+                         lambda pattern, root: {"matches": []})
     role_plan = ["a", "b"]
     next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
               known_roles={"a", "b"})
     reject_call = next(c for c in mock_emit.call_args_list
                         if c.args[0] == "hallucinated_role_rejected")
-    assert reject_call.kwargs["payload"]["known_capability"] is True
+    assert reject_call.kwargs["payload"] == {"attempted_role": "ghost",
+                                              "known_capability": False,
+                                              "fallback_source": "introspection"}
 
 
-def test_capability_lookup_failure_does_not_break_rejection(mock_emit, monkeypatch):
-    # Defensive contract: a broken/unavailable capability store must
-    # never turn an ordinary hallucinated-role rejection into a crash.
-    def _boom():
+def test_no_current_role_skips_scoped_lookup_goes_straight_to_introspection(mock_emit, monkeypatch):
+    # idx=-1 has no meaning here, but an empty role_plan slot (defensive
+    # edge: idx out of range) means current_role is None -- scoped lookup
+    # must not even be attempted with a None role, straight to introspection.
+    scoped_mock = MagicMock(return_value=[])
+    search_mock = MagicMock(return_value={"matches": []})
+    monkeypatch.setattr(dispatcher, "capabilities_for_role", scoped_mock)
+    monkeypatch.setattr(dispatcher, "search_text", search_mock)
+
+    role_plan = []
+    next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
+              known_roles=set())
+
+    scoped_mock.assert_not_called()
+    search_mock.assert_called_once()
+
+
+def test_capability_fallback_failures_do_not_break_rejection(mock_emit, monkeypatch):
+    # Defensive contract: a broken/unavailable capability store OR a
+    # broken introspection search must never turn an ordinary
+    # hallucinated-role rejection into a crash.
+    def _boom_scoped(role):
         raise RuntimeError("capability store unavailable")
-    monkeypatch.setattr(dispatcher, "list_capabilities", _boom)
+
+    def _boom_search(pattern, root):
+        raise RuntimeError("filesystem unavailable")
+
+    monkeypatch.setattr(dispatcher, "capabilities_for_role", _boom_scoped)
+    monkeypatch.setattr(dispatcher, "search_text", _boom_search)
     role_plan = ["a", "b"]
     idx, reason = next_step({"next_destination": "ghost"}, role_plan, idx=0,
                              session_id="s5", known_roles={"a", "b"})
     assert (idx, reason) == (1, "plan")
     reject_call = next(c for c in mock_emit.call_args_list
                         if c.args[0] == "hallucinated_role_rejected")
-    assert reject_call.kwargs["payload"]["known_capability"] is False
+    assert reject_call.kwargs["payload"] == {"attempted_role": "ghost",
+                                              "known_capability": False,
+                                              "fallback_source": "introspection"}
 
 
 def test_hallucinated_role_rejected_at_end_of_plan_returns_none():

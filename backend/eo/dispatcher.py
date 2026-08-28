@@ -37,12 +37,31 @@ so that's where this patch wires in a real (if today mostly empty)
 eo/capabilities.py call: _is_known_capability() below. This is
 observability only, added to hallucinated_role_rejected's payload -- it
 never changes target_idx/reason, so routing behavior is unchanged.
+
+Patch B5b (CLI-as-Internal-Interface plan, §3.3 "the fallback path" --
+join point between B4 and B5a, needs both merged first): the same
+hallucinated-role branch is also this system's one real instance of
+"an agent facing an unfamiliar request" (§3.2/§3.3's own framing), so
+it's where the plan's fallback ORDER gets wired in for real, not just
+observed. _is_known_capability() above answered "is this name known at
+all" with a single, unscoped eo/capabilities.py::list_capabilities()
+call. This patch replaces that with _capability_fallback_check() below,
+which tries the CURRENT role's own scoped view first
+(eo/capabilities.py::capabilities_for_role(), Patch B3 -- "what am I,
+specifically, allowed to know about") and only reaches for a live
+eo/introspection.py::search_text() read (Patch B4, via
+eo/capabilities.py's re-export) if that scoped view comes back empty.
+Still observability-only in the same sense B5a's version was -- the
+result only enriches hallucinated_role_rejected's payload, it never
+changes target_idx/reason -- but the LOOKUP itself now does real,
+two-step work instead of a single unscoped list_capabilities() call.
 """
 import os
+import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eo.capabilities import list_capabilities
+from eo.capabilities import capabilities_for_role, search_text
 from memory.bus import read, write
 from relay.emitter import emit_event
 
@@ -52,27 +71,58 @@ from relay.emitter import emit_event
 # session. Unchanged in Part 12 — still 3, still per (session_id, role).
 MAX_STAGE_REVISITS = 3
 
+# Patch B5b: search_text()'s root for the introspection fallback below.
+# Scoped to the backend's own agent/routing code (where a real role or
+# capability name would actually show up in source) rather than the
+# whole repo -- keeps the fallback read narrow and fast, consistent
+# with introspection.py's own framing of these functions as a targeted
+# last resort, not a general-purpose grep.
+_FALLBACK_SEARCH_ROOT = "eo"
 
-def _is_known_capability(name: str) -> bool:
-    """Patch B5a: does `name` match any entry_id/title in
-    eo/capabilities.py::list_capabilities()? Used only to enrich
-    hallucinated_role_rejected's payload -- it tells a later reader
-    (dashboard, or a future patch's fallback logic) whether the model
-    asked for something that's a real, registered system capability
-    (just not a role staffed for this session) versus something
-    invented outright. Today's CAPABILITY_SEED (Patch B1) is entry-id
-    granularity ("agent_roster", "mcp_capabilities", ...), not
-    per-role, so this will usually return False even for a legitimate
-    ask -- that's an honest reflection of how much the capability layer
-    covers right now, not a bug in this lookup. Defensive: a capability
-    lookup must never break routing, so any failure here is swallowed.
+
+def _capability_fallback_check(name: str, current_role: str | None) -> dict:
+    """Patch B5b: the fallback-order lookup for a hallucinated
+    `next_destination`. Two steps, tried in the order the architecture
+    plan specifies (§3.3):
+
+      1. capabilities_for_role(current_role) (Patch B3) -- the scoped,
+         curated answer for "what is the role that just ran allowed to
+         know about." If `name` matches an entry_id/title in that
+         scoped list, we're done: known_capability=True,
+         fallback_source="capability_layer", and search_text() below is
+         never called.
+      2. Only if step 1 comes back empty (no current_role, an unscoped
+         role, or a scope with no match) do we fall back to
+         search_text() (Patch B4) -- a live, read-only search of the
+         backend's own source for `name`, the "broader read" §3.3 calls
+         the fallback of last resort. A hit there still counts as
+         known_capability=True (the name is real, just not something
+         the capability layer has been told about yet, e.g. a role
+         that exists in code but was never seeded into
+         eo/capability_entries.py) -- fallback_source="introspection".
+
+    Defensive throughout: neither the capability-layer lookup nor the
+    introspection search may ever raise into the routing path -- a
+    broken store or a filesystem hiccup here degrades to "unknown,"
+    the same posture eo/introspection.py's own functions take toward a
+    denied/missing path, never a crash in next_step().
     """
     try:
-        entries = list_capabilities()
+        scoped = capabilities_for_role(current_role) if current_role else []
     except Exception:
-        return False
-    return any(entry.get("entry_id") == name or entry.get("title") == name
-               for entry in entries)
+        scoped = []
+
+    if any(entry.get("entry_id") == name or entry.get("title") == name
+           for entry in scoped):
+        return {"known_capability": True, "fallback_source": "capability_layer"}
+
+    try:
+        result = search_text(pattern=re.escape(name), root=_FALLBACK_SEARCH_ROOT)
+        found = bool(result.get("matches"))
+    except Exception:
+        found = False
+
+    return {"known_capability": found, "fallback_source": "introspection"}
 
 
 def _visit_count(session_id: str, name: str) -> int:
@@ -130,9 +180,10 @@ def next_step(agent_result: dict, role_plan: list, idx: int, session_id: str = N
         # staff_task() -> _get_or_write_role_prompt() -> add_role_prompt(),
         # and running it would produce a brief-less, dead-end step.
         if known_roles is not None and named not in known_roles:
+            current_role = role_plan[idx] if 0 <= idx < len(role_plan) else None
+            fallback = _capability_fallback_check(named, current_role)
             emit_event("hallucinated_role_rejected", session_id=session_id, agent="dispatcher",
-                       payload={"attempted_role": named,
-                                "known_capability": _is_known_capability(named)})
+                       payload={"attempted_role": named, **fallback})
             nxt = idx + 1
             target_idx = nxt if nxt < len(role_plan) else None
             _log_route(session_id, role_plan[nxt] if target_idx is not None else None, "plan")
