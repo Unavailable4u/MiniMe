@@ -36,7 +36,6 @@ Later patches extend this module rather than replacing it:
     they're discoverable through the same shared surface as everything
     else — the plan's own framing for why introspection lives next to
     capability lookups rather than off on its own.
-
 Scope note: this module intentionally does not touch cli/ — the CLI
 package (cli/minime_cli/) is a standalone HTTP client
 (see cli/minime_cli/api_client.py's own docstring) with no in-process
@@ -51,8 +50,12 @@ from __future__ import annotations
 from typing import Any
 
 from eo.capability_entries import list_capability_entries as _list_capability_entries
+from eo.introspection import list_directory as _list_directory
+from eo.introspection import read_file as _read_file
+from eo.introspection import search_text as _search_text
 from eo.mcp_registry import list_mcp_servers as _list_mcp_servers
 from eo.mcp_registry import mcp_server_status as _mcp_server_status
+from eo.registry import get_role_metadata as _get_role_metadata
 from eo.skill_library import get_skill as _get_skill
 from eo.skill_library import list_skills as _list_skills
 
@@ -101,3 +104,74 @@ def list_capabilities(tags: list[str] | None = None) -> list[dict[str, Any]]:
     through this general-purpose function.
     """
     return _list_capability_entries(entry_type="capability", tags=tags)
+
+
+def get_role_scope(role_name: str, user_id: str | None = None) -> list[str]:
+    """Patch B3 — a role's capability_tags, straight from
+    eo/registry.py's per-role metadata store (the same store
+    list_role_metadata()/get_role_metadata() already read/write; B3
+    just adds this one field to it). Returns [] both for a role that
+    exists but has no tags set, and for a role_name that's never been
+    briefed at all — the caller (capabilities_for_role() below, or an
+    eo agent calling this directly) never needs to distinguish "no
+    scope configured" from "unknown role"; either way the answer to
+    "what's this role allowed to see" is the same empty scope.
+
+    This is deliberately the ONE place "how much should this agent
+    introspect" gets answered, per the architecture plan's own framing
+    for §3.2's role-scoping bullet — not scattered raw directory paths
+    or ad-hoc checks in eo/registry.py or anywhere else that happens
+    to have a role_name in scope.
+    """
+    metadata = _get_role_metadata(role_name, user_id=user_id)
+    if not metadata:
+        return []
+    return list(metadata.get("capability_tags") or [])
+
+
+def capabilities_for_role(role_name: str, user_id: str | None = None) -> list[dict[str, Any]]:
+    """Patch B3 — composes get_role_scope() with list_capabilities():
+    exactly the capability entries visible to this role, given its own
+    capability_tags. A role with an empty scope (no tags set, or an
+    unknown role_name) sees nothing through this function — this is
+    intentionally NOT "no tags means see everything"; a role has to be
+    explicitly scoped to something before it gets anything back here.
+
+    This is the function eo agents call for "what am I, specifically,
+    allowed to know about" — list_capabilities() itself stays the
+    unscoped, "what can this system do at all" answer for callers that
+    aren't asking on behalf of a particular role (e.g. an admin-facing
+    route).
+    """
+    tags = get_role_scope(role_name, user_id=user_id)
+    if not tags:
+        return []
+    return list_capabilities(tags=tags)
+
+
+def list_directory(path: str) -> dict:
+    """Patch B4 — pass-through to eo/introspection.py's list_directory().
+    Registered here, alongside every other capability/lookup function
+    on this module's shared surface, per this module's own docstring:
+    introspection is "the fallback path when the capability layer
+    doesn't precisely cover what an agent needs to know" (§3.3), so it
+    belongs next to the capability lookups above, not off on its own.
+    An agent should call list_capabilities()/capabilities_for_role()
+    first and only reach for this when that comes back empty or
+    insufficient — Patch B5b wires that ordering into the actual agent
+    call path; this function itself has no opinion about call order."""
+    return _list_directory(path)
+
+
+def read_file(path: str) -> dict:
+    """Patch B4 — pass-through to eo/introspection.py's read_file().
+    See list_directory() above for the fallback-path framing this
+    shares."""
+    return _read_file(path)
+
+
+def search_text(pattern: str, root: str) -> dict:
+    """Patch B4 — pass-through to eo/introspection.py's search_text().
+    See list_directory() above for the fallback-path framing this
+    shares."""
+    return _search_text(pattern, root)

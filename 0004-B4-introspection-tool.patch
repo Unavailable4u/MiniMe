@@ -1,0 +1,548 @@
+From a3b3c0f5fad6ee8b9968a99220b1bffed98587e9 Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Fri, 28 Aug 2026 08:36:02 +0000
+Subject: [PATCH] B4: read-only introspection tool (eo/introspection.py)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- New backend/eo/introspection.py: list_directory(path), read_file(path),
+  search_text(pattern, root) -- plain Python (os.listdir/os.walk,
+  open(), re.search), no subprocess/shell. Every function calls
+  eo/redaction_guard.py::is_readable() (Patch B2) before returning any
+  content, directory entry, or search hit. A denied top-level path/root
+  comes back as {"readable": False, ...} with no further detail --
+  never an exception, never a distinguishable "exists but denied" vs.
+  "doesn't exist" message, since either would let a rejection leak
+  information about what's being hidden.
+  - list_directory(): non-recursive; each entry carries its OWN
+    readable flag (a listable directory doesn't make every file inside
+    it readable) -- entry *names* are still shown even when denied,
+    since existence isn't the thing being protected, content is.
+  - read_file(): full text up to MAX_READ_BYTES (200_000, truncates
+    rather than errors); binary/non-UTF-8 content comes back as
+    error="not_text" rather than raw bytes or a decode exception.
+  - search_text(): os.walk()'s `root` gates the whole call; each file
+    encountered during the walk is independently checked too, and a
+    denied file is silently skipped (not reported as an error or a
+    count), since a growing "skipped: n" number would itself leak how
+    much redacted content exists under a root. Capped at
+    MAX_SEARCH_MATCHES (200, truncated=True when hit), each line
+    previewed to 200 chars.
+- backend/eo/capabilities.py: list_directory()/read_file()/search_text()
+  registered as pass-throughs alongside the B0/B1/B3 functions, per
+  this module's own docstring ("discoverable through the same shared
+  surface... the fallback path when the capability layer doesn't
+  precisely cover what an agent needs to know"). No call-order
+  enforcement here -- that's Patch B5b, once B5a's agent wiring exists
+  to enforce it against.
+- Test: backend/tests/unit/test_eo_introspection.py -- reuses
+  test_eo_redaction_guard.py's own _path_in() helper and its exact
+  secret-pattern fixture cases (same boundary, not re-derived), plus
+  real-repo-tree reads/lists/searches, per-entry/per-file redaction
+  inside an otherwise-allowed root, not-a-file/not-a-directory/
+  invalid-pattern operational errors, and the two caps
+  (MAX_READ_BYTES truncation, MAX_SEARCH_MATCHES truncation).
+- Full backend unit suite re-run after this patch: 3474 passed, 7
+  skipped, 2 xfailed, 0 failed (+25 over the B3 baseline, all new).
+
+Ref: MiniMe-CLI-Internal-Architecture-Plan.md §3.3
+Ref: MiniMe-Patch-Series-B-Plan.md, Patch B4
+Depends on: Patch B2 (eo/redaction_guard.py::is_readable() must exist -- this patch is its primary caller)
+---
+ backend/eo/capabilities.py                  |  31 +++
+ backend/eo/introspection.py                 | 187 +++++++++++++++
+ backend/tests/unit/test_eo_introspection.py | 241 ++++++++++++++++++++
+ 3 files changed, 459 insertions(+)
+ create mode 100644 backend/eo/introspection.py
+ create mode 100644 backend/tests/unit/test_eo_introspection.py
+
+diff --git a/backend/eo/capabilities.py b/backend/eo/capabilities.py
+index c283be5..468e386 100644
+--- a/backend/eo/capabilities.py
++++ b/backend/eo/capabilities.py
+@@ -50,6 +50,9 @@ from __future__ import annotations
+ from typing import Any
+ 
+ from eo.capability_entries import list_capability_entries as _list_capability_entries
++from eo.introspection import list_directory as _list_directory
++from eo.introspection import read_file as _read_file
++from eo.introspection import search_text as _search_text
+ from eo.mcp_registry import list_mcp_servers as _list_mcp_servers
+ from eo.mcp_registry import mcp_server_status as _mcp_server_status
+ from eo.registry import get_role_metadata as _get_role_metadata
+@@ -144,3 +147,31 @@ def capabilities_for_role(role_name: str, user_id: str | None = None) -> list[di
+     if not tags:
+         return []
+     return list_capabilities(tags=tags)
++
++
++def list_directory(path: str) -> dict:
++    """Patch B4 — pass-through to eo/introspection.py's list_directory().
++    Registered here, alongside every other capability/lookup function
++    on this module's shared surface, per this module's own docstring:
++    introspection is "the fallback path when the capability layer
++    doesn't precisely cover what an agent needs to know" (§3.3), so it
++    belongs next to the capability lookups above, not off on its own.
++    An agent should call list_capabilities()/capabilities_for_role()
++    first and only reach for this when that comes back empty or
++    insufficient — Patch B5b wires that ordering into the actual agent
++    call path; this function itself has no opinion about call order."""
++    return _list_directory(path)
++
++
++def read_file(path: str) -> dict:
++    """Patch B4 — pass-through to eo/introspection.py's read_file().
++    See list_directory() above for the fallback-path framing this
++    shares."""
++    return _read_file(path)
++
++
++def search_text(pattern: str, root: str) -> dict:
++    """Patch B4 — pass-through to eo/introspection.py's search_text().
++    See list_directory() above for the fallback-path framing this
++    shares."""
++    return _search_text(pattern, root)
+diff --git a/backend/eo/introspection.py b/backend/eo/introspection.py
+new file mode 100644
+index 0000000..008365c
+--- /dev/null
++++ b/backend/eo/introspection.py
+@@ -0,0 +1,187 @@
++"""
++eo/introspection.py — Patch B4 (CLI-as-Internal-Interface plan, §3.3
++"the fallback path").
++
++Three plain, read-only functions over the backend's own codebase:
++list_directory(path), read_file(path), search_text(pattern, root).
++Plain Python only — os.walk/os.listdir/os.scandir for traversal,
++open() for reads, re.search for matching. No subprocess, no shell, no
++way for a pattern or path argument to cause anything to execute.
++
++This is explicitly the FALLBACK path (§3.3): an agent facing an
++unfamiliar request should check eo/capabilities.py's list_capabilities()
++/ capabilities_for_role() (Patch B1/B3) first — the targeted,
++already-curated answer — and only reach for one of these three
++functions when that comes back empty or insufficient. Patch B5b wires
++that fallback ordering into the actual agent call path; this patch
++only builds the three functions themselves and registers them on
++eo/capabilities.py's shared surface, per that module's own docstring
++("so they're discoverable through the same shared surface as
++everything else").
++
++Every function calls eo/redaction_guard.py's is_readable() (Patch B2)
++before returning any content, directory entry, or search hit — that
++module's docstring explains why this is a hard-coded check with zero
++dependency on the (model-writable) capability-entries data, and this
++module is that check's primary caller. A denied path never raises; it
++comes back as {"readable": False, ...} with no further detail, so a
++rejection can't be used to infer *why* something is hidden (a
++distinguishable "exists but denied" vs. "doesn't exist" error message
++would itself leak information a redaction is meant to withhold).
++
++Return shape, consistently across all three functions:
++    {"readable": bool, ...the function's own keys..., "error": str|None}
++
++`readable=False` means redaction_guard denied the top-level path/root
++argument itself — nothing below it was touched at all.
++`error` is set for an ordinary operational problem (not found, not a
++directory/file, unreadable encoding, bad regex) on a path that DID
++clear the readability gate — these are safe to describe plainly, since
++they carry no information about what a redaction is protecting.
++"""
++from __future__ import annotations
++
++import os
++import re
++
++from eo.redaction_guard import is_readable
++
++# Read-size and match-count caps -- generous enough for real
++# introspection use (a role brief, a module file, a handful of search
++# hits), small enough that a single tool call can't balloon a context
++# window or a Pusher event payload the way local_workspace_tools.py's
++# own _EVENT_FIELD_PREVIEW_CHARS notes an unbounded file/command
++# payload would. Truncates rather than errors, same "still return
++# something useful" posture as that module's own truncate-for-display
++# helper.
++MAX_READ_BYTES = 200_000
++MAX_SEARCH_MATCHES = 200
++_SEARCH_LINE_PREVIEW_CHARS = 200
++
++
++def list_directory(path: str) -> dict:
++    """Non-recursive listing of one directory. Each entry additionally
++    carries its OWN readable flag (via is_readable() on that entry's
++    full path) — a directory being listable doesn't automatically mean
++    every file inside it is readable (a secret-named file can sit
++    right next to ordinary ones in an otherwise-allowed directory); the
++    caller finds that out per-entry here rather than only on a later
++    failed read_file() call.
++
++    Entry *names* are shown even for entries that aren't themselves
++    readable — knowing a file named `.env` exists in a directory is not
++    the same exposure as reading its contents, and hiding the entry
++    entirely would make a directory listing an inconsistent, silently
++    incomplete view for no real security benefit.
++    """
++    if not is_readable(path):
++        return {"readable": False, "path": path, "entries": None, "error": None}
++
++    resolved = os.path.abspath(os.path.realpath(path))
++    if not os.path.isdir(resolved):
++        return {"readable": True, "path": path, "entries": None,
++                "error": "not_a_directory"}
++
++    try:
++        names = sorted(os.listdir(resolved))
++    except OSError:
++        return {"readable": True, "path": path, "entries": None,
++                "error": "list_failed"}
++
++    entries = []
++    for name in names:
++        full = os.path.join(resolved, name)
++        entries.append({
++            "name": name,
++            "type": "dir" if os.path.isdir(full) else "file",
++            "readable": is_readable(full),
++        })
++    return {"readable": True, "path": path, "entries": entries, "error": None}
++
++
++def read_file(path: str) -> dict:
++    """Reads one file's full text content, up to MAX_READ_BYTES.
++    Binary/non-UTF-8 content comes back as error="not_text" rather
++    than raw bytes or a decode exception — this function's whole
++    contract is "text an agent can read," not a general file-transfer
++    tool."""
++    if not is_readable(path):
++        return {"readable": False, "path": path, "content": None,
++                "truncated": False, "error": None}
++
++    resolved = os.path.abspath(os.path.realpath(path))
++    if not os.path.isfile(resolved):
++        return {"readable": True, "path": path, "content": None,
++                "truncated": False, "error": "not_a_file"}
++
++    try:
++        with open(resolved, "rb") as f:
++            raw = f.read(MAX_READ_BYTES + 1)
++    except OSError:
++        return {"readable": True, "path": path, "content": None,
++                "truncated": False, "error": "read_failed"}
++
++    truncated = len(raw) > MAX_READ_BYTES
++    raw = raw[:MAX_READ_BYTES]
++    try:
++        content = raw.decode("utf-8")
++    except UnicodeDecodeError:
++        return {"readable": True, "path": path, "content": None,
++                "truncated": False, "error": "not_text"}
++
++    return {"readable": True, "path": path, "content": content,
++            "truncated": truncated, "error": None}
++
++
++def search_text(pattern: str, root: str) -> dict:
++    """Regex search across every file under `root`, walked with
++    os.walk(). `root` itself gates the whole call via is_readable() —
++    a denied root returns immediately with nothing walked. Below that,
++    each individual FILE encountered during the walk is independently
++    checked with is_readable() too (root being allowed doesn't make
++    every file under it readable, same reasoning as list_directory()'s
++    per-entry check) — a denied file is silently skipped, not reported
++    as an error, since a growing "skipped: n files" count would itself
++    leak how much redacted content exists under a given root.
++
++    Caps out at MAX_SEARCH_MATCHES hits (truncated=True when it does)
++    and previews each matched line to _SEARCH_LINE_PREVIEW_CHARS,
++    rather than returning unbounded full-line content for a broad
++    pattern over a large tree."""
++    if not is_readable(root):
++        return {"readable": False, "root": root, "matches": None,
++                "truncated": False, "error": None}
++
++    try:
++        compiled = re.compile(pattern)
++    except re.error:
++        return {"readable": True, "root": root, "matches": None,
++                "truncated": False, "error": "invalid_pattern"}
++
++    resolved_root = os.path.abspath(os.path.realpath(root))
++    matches: list[dict] = []
++    truncated = False
++
++    for dirpath, _dirnames, filenames in os.walk(resolved_root):
++        for filename in filenames:
++            full = os.path.join(dirpath, filename)
++            if not is_readable(full):
++                continue
++            try:
++                with open(full, "r", encoding="utf-8", errors="ignore") as f:
++                    for lineno, line in enumerate(f, start=1):
++                        if compiled.search(line):
++                            preview = line.strip()[:_SEARCH_LINE_PREVIEW_CHARS]
++                            matches.append({"path": full, "line": lineno, "text": preview})
++                            if len(matches) >= MAX_SEARCH_MATCHES:
++                                truncated = True
++                                break
++            except OSError:
++                continue
++            if truncated:
++                break
++        if truncated:
++            break
++
++    return {"readable": True, "root": root, "matches": matches,
++            "truncated": truncated, "error": None}
+diff --git a/backend/tests/unit/test_eo_introspection.py b/backend/tests/unit/test_eo_introspection.py
+new file mode 100644
+index 0000000..e5ba7c8
+--- /dev/null
++++ b/backend/tests/unit/test_eo_introspection.py
+@@ -0,0 +1,241 @@
++"""
++tests/unit/test_eo_introspection.py — Patch B4.
++
++Reuses the exact `_path_in()` helper and ALLOWED_ROOTS-relative fixture
++paths test_eo_redaction_guard.py (Patch B2) already established, per
++the plan's own instruction: keeps the two test files honest about
++testing the same boundary, rather than each drifting toward its own
++idea of what's "allowed."
++
++Two kinds of coverage:
++  1. Against the REAL repo tree (backend/eo/*.py) — confirms each
++     function actually reads/lists/searches real, currently-allowed
++     files, not just a synthetic fixture.
++  2. Against a temporary directory monkeypatched into
++     redaction_guard.ALLOWED_ROOTS — isolates the "secret-named file
++     denied even inside an allowed root" and size/count-cap cases from
++     the real repo tree, so these tests don't depend on (or risk
++     mutating) anything actually checked in.
++"""
++import os
++
++import pytest
++
++from eo import introspection, redaction_guard
++from tests.unit.test_eo_redaction_guard import _path_in
++
++# ---------------------------------------------------------------------------
++# list_directory()
++# ---------------------------------------------------------------------------
++
++def test_list_directory_denied_path_returns_readable_false_and_no_entries():
++    result = introspection.list_directory("/etc")
++    assert result == {"readable": False, "path": "/etc", "entries": None, "error": None}
++
++
++def test_list_directory_lists_a_real_allowed_directory():
++    eo_dir = _path_in("eo")
++    result = introspection.list_directory(eo_dir)
++
++    assert result["readable"] is True
++    assert result["error"] is None
++    names = {e["name"] for e in result["entries"]}
++    assert "redaction_guard.py" in names
++    assert "introspection.py" in names
++
++    entry = next(e for e in result["entries"] if e["name"] == "redaction_guard.py")
++    assert entry["type"] == "file"
++    assert entry["readable"] is True
++
++
++def test_list_directory_on_a_file_path_returns_not_a_directory_error():
++    file_path = _path_in("eo", "redaction_guard.py")
++    result = introspection.list_directory(file_path)
++    assert result["readable"] is True
++    assert result["entries"] is None
++    assert result["error"] == "not_a_directory"
++
++
++def test_list_directory_marks_secret_named_entries_unreadable_but_still_lists_name(
++    tmp_path, monkeypatch,
++):
++    # Clean-named subdirectory, not tmp_path directly -- see the same
++    # note in test_search_text_skips_secret_named_files_without_reporting_them
++    # below about pytest's tmp_path picking up "secret" from this test's
++    # own name.
++    root_dir = tmp_path / "list_root"
++    root_dir.mkdir()
++    monkeypatch.setattr(redaction_guard, "ALLOWED_ROOTS",
++                         redaction_guard.ALLOWED_ROOTS + [str(root_dir)])
++    (root_dir / "normal.txt").write_text("hello")
++    (root_dir / ".env").write_text("SECRET=1")
++
++    result = introspection.list_directory(str(root_dir))
++
++    by_name = {e["name"]: e for e in result["entries"]}
++    assert by_name["normal.txt"]["readable"] is True
++    assert by_name[".env"]["readable"] is False
++    # The name is still surfaced -- existence isn't the thing being
++    # protected, content is.
++    assert ".env" in by_name
++
++
++# ---------------------------------------------------------------------------
++# read_file()
++# ---------------------------------------------------------------------------
++
++def test_read_file_denied_path_returns_readable_false_and_no_content():
++    result = introspection.read_file("/etc/passwd")
++    assert result["readable"] is False
++    assert result["content"] is None
++
++
++def test_read_file_reads_a_real_allowed_file():
++    file_path = _path_in("eo", "redaction_guard.py")
++    result = introspection.read_file(file_path)
++    assert result["readable"] is True
++    assert result["error"] is None
++    assert "def is_readable" in result["content"]
++    assert result["truncated"] is False
++
++
++def test_read_file_on_a_directory_path_returns_not_a_file_error():
++    eo_dir = _path_in("eo")
++    result = introspection.read_file(eo_dir)
++    assert result["readable"] is True
++    assert result["content"] is None
++    assert result["error"] == "not_a_file"
++
++
++@pytest.mark.parametrize("filename", [".env", "credentials.json", "id_rsa"])
++def test_read_file_denied_for_secret_named_file_in_an_allowed_root(
++    tmp_path, monkeypatch, filename,
++):
++    # Clean-named subdirectory as the allowed root -- otherwise
++    # pytest's own tmp_path (derived from this test's name, which
++    # contains "secret") would deny the ROOT itself, making the
++    # assertion pass for the wrong reason.
++    root_dir = tmp_path / "read_root"
++    root_dir.mkdir()
++    monkeypatch.setattr(redaction_guard, "ALLOWED_ROOTS",
++                         redaction_guard.ALLOWED_ROOTS + [str(root_dir)])
++    target = root_dir / filename
++    target.write_text("super secret content")
++
++    result = introspection.read_file(str(target))
++
++    assert result["readable"] is False
++    assert result["content"] is None
++
++
++def test_read_file_truncates_over_max_read_bytes(tmp_path, monkeypatch):
++    monkeypatch.setattr(redaction_guard, "ALLOWED_ROOTS",
++                         redaction_guard.ALLOWED_ROOTS + [str(tmp_path)])
++    monkeypatch.setattr(introspection, "MAX_READ_BYTES", 10)
++    big_file = tmp_path / "big.txt"
++    big_file.write_text("x" * 100)
++
++    result = introspection.read_file(str(big_file))
++
++    assert result["readable"] is True
++    assert result["truncated"] is True
++    assert len(result["content"]) == 10
++
++
++def test_read_file_binary_content_returns_not_text_error(tmp_path, monkeypatch):
++    monkeypatch.setattr(redaction_guard, "ALLOWED_ROOTS",
++                         redaction_guard.ALLOWED_ROOTS + [str(tmp_path)])
++    binary_file = tmp_path / "image.bin"
++    binary_file.write_bytes(bytes([0xFF, 0xFE, 0x00, 0x80, 0x81]))
++
++    result = introspection.read_file(str(binary_file))
++
++    assert result["readable"] is True
++    assert result["content"] is None
++    assert result["error"] == "not_text"
++
++
++# ---------------------------------------------------------------------------
++# search_text()
++# ---------------------------------------------------------------------------
++
++def test_search_text_denied_root_returns_readable_false_and_no_matches():
++    result = introspection.search_text("anything", "/etc")
++    assert result["readable"] is False
++    assert result["matches"] is None
++
++
++def test_search_text_finds_matches_in_a_real_allowed_root():
++    eo_dir = _path_in("eo")
++    result = introspection.search_text(r"class RedactionGuard|def is_readable", eo_dir)
++
++    assert result["readable"] is True
++    assert result["error"] is None
++    hit_paths = {m["path"] for m in result["matches"]}
++    assert any(p.endswith("redaction_guard.py") for p in hit_paths)
++
++
++def test_search_text_invalid_pattern_returns_error():
++    eo_dir = _path_in("eo")
++    result = introspection.search_text("(unclosed[", eo_dir)
++    assert result["readable"] is True
++    assert result["matches"] is None
++    assert result["error"] == "invalid_pattern"
++
++
++def test_search_text_skips_secret_named_files_without_reporting_them(
++    tmp_path, monkeypatch,
++):
++    # Use a clean-named subdirectory rather than tmp_path directly --
++    # pytest's own tmp_path is derived from the test function's name,
++    # which for this test happens to contain "secret" and would
++    # otherwise trip SECRET_NAME_PATTERNS on the root itself.
++    root_dir = tmp_path / "search_root"
++    root_dir.mkdir()
++    monkeypatch.setattr(redaction_guard, "ALLOWED_ROOTS",
++                         redaction_guard.ALLOWED_ROOTS + [str(root_dir)])
++    (root_dir / "normal.py").write_text("needle = 1\n")
++    (root_dir / "credentials.json").write_text('{"needle": true}\n')
++
++    result = introspection.search_text("needle", str(root_dir))
++
++    assert result["readable"] is True
++    hit_paths = {m["path"] for m in result["matches"]}
++    assert any(p.endswith("normal.py") for p in hit_paths)
++    assert not any(p.endswith("credentials.json") for p in hit_paths)
++    # No count/skip-tracking field anywhere in the result -- the whole
++    # point is that a redacted file's existence doesn't leak through
++    # even as a number.
++    assert set(result.keys()) == {"readable", "root", "matches", "truncated", "error"}
++
++
++def test_search_text_caps_at_max_matches_and_marks_truncated(tmp_path, monkeypatch):
++    monkeypatch.setattr(redaction_guard, "ALLOWED_ROOTS",
++                         redaction_guard.ALLOWED_ROOTS + [str(tmp_path)])
++    monkeypatch.setattr(introspection, "MAX_SEARCH_MATCHES", 3)
++    (tmp_path / "many_hits.txt").write_text("needle\n" * 10)
++
++    result = introspection.search_text("needle", str(tmp_path))
++
++    assert result["readable"] is True
++    assert len(result["matches"]) == 3
++    assert result["truncated"] is True
++
++
++# ---------------------------------------------------------------------------
++# Same boundary as Patch B2 -- reuse test_eo_redaction_guard's own denial
++# cases directly, rather than re-deriving them.
++# ---------------------------------------------------------------------------
++
++@pytest.mark.parametrize("filename", [
++    ".env", ".env.local", "prod_secrets.py", "SECRET_config.py",
++    "credentials.json", "api_key.py", "id_rsa", "server.pem",
++])
++def test_introspection_functions_honor_the_same_secret_patterns_as_redaction_guard(
++    filename,
++):
++    path = _path_in("eo", filename)
++    assert redaction_guard.is_readable(path) is False  # sanity: same fixture as B2
++
++    assert introspection.read_file(path)["readable"] is False
++    assert introspection.list_directory(path)["readable"] is False
+-- 
+2.43.0
+

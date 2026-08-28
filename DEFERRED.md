@@ -31,4 +31,15 @@ comment (`file:line`) that flagged it.
   redaction layer (Patch B1/B2) still matches reality. Worth deciding
   once that layer exists and has real content, not before.
 
+- **Redaction coverage beyond `redaction_guard.py`'s seeded
+  ALLOWED_ROOTS/SECRET_NAME_PATTERNS is a code change, not a config
+  change.** (`backend/eo/redaction_guard.py`) The redaction *entries*
+  in `eo/capability_entries.py` are human-editable without a deploy;
+  what `redaction_guard.is_readable()` actually enforces is not, by
+  design — that's the property Patch B2 depends on. Worth revisiting
+  only alongside the drift-check mechanism already deferred above,
+  once there's a real process for someone to notice "the enforcement
+  list and the documentation list have drifted apart" rather than
+  relying on a person happening to re-read both.
+
 <!-- New entries go below this line, oldest first. -->

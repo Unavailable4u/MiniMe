@@ -1,0 +1,384 @@
+From fc079af33c0b3a52fdaf7e7751b3cfb175d42018 Mon Sep 17 00:00:00 2001
+From: Dev <dev@example.com>
+Date: Fri, 28 Aug 2026 08:34:47 +0000
+Subject: [PATCH] B3: role-scoping via capability-entry tags (eo/registry.py,
+ eo/capabilities.py)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- backend/eo/registry.py: per-role metadata (the same store
+  list_role_metadata()/get_role_metadata() already read/write) gets an
+  additive `capability_tags: list[str]` field, defaulting to [].
+  Wired into every place an entry gets constructed or migrated:
+  _wrap_legacy_entry() (bare-string legacy entries), _load_prompts()'s
+  migration pass (already-dict entries from before this patch),
+  add_role_prompt() (preserved across a brief rewrite, same as
+  pinned/times_hired), record_role_hire(), and set_role_pinned()
+  (bare-entry fallback in both). New backend/eo/registry.py::
+  set_role_capability_tags(role_name, tags, user_id=None) -> dict sets
+  it explicitly -- replaces wholesale, same "explicit set, not an
+  implicit accumulate" contract update_role_prompt() already uses for
+  briefs, and creates a bare entry for a not-yet-hired role, same
+  discipline as record_role_hire()/set_role_pinned().
+- backend/eo/capabilities.py: new get_role_scope(role_name, user_id=None)
+  -> list[str], a thin read of the field above (empty list for both
+  "role has no tags" and "role doesn't exist" -- callers never need to
+  tell those apart). New capabilities_for_role(role_name, user_id=None)
+  -> list[dict], composing get_role_scope() with B1's list_capabilities()
+  -- an untagged role sees nothing through this function (deliberately
+  NOT "no tags means see everything").
+- Test: backend/tests/unit/test_eo_role_scope.py -- capability_tags
+  defaults/migrates/persists correctly across every registry.py write
+  path above, get_role_scope()'s empty-list cases, and
+  capabilities_for_role()'s tag-filtering (incl. union across multiple
+  tags, empty for untagged/unknown roles, and confirming redaction
+  entries never leak through even if tagged the same as a capability
+  entry).
+- Full backend unit suite re-run after this patch: 3449 passed, 7
+  skipped, 2 xfailed, 0 failed (+16 over the B2 baseline, all new;
+  nothing else changed).
+
+Ref: MiniMe-CLI-Internal-Architecture-Plan.md §3.2 (role-scoping bullet), §7 (decided)
+Ref: MiniMe-Patch-Series-B-Plan.md, Patch B3
+Depends on: Patch B1 (list_capabilities()/entry_type mechanism must exist). Independent of Patch B2 (different files).
+---
+ backend/eo/capabilities.py               |  45 ++++++-
+ backend/eo/registry.py                   |  58 ++++++++-
+ backend/tests/unit/test_eo_role_scope.py | 151 +++++++++++++++++++++++
+ 3 files changed, 249 insertions(+), 5 deletions(-)
+ create mode 100644 backend/tests/unit/test_eo_role_scope.py
+
+diff --git a/backend/eo/capabilities.py b/backend/eo/capabilities.py
+index 39554fc..c283be5 100644
+--- a/backend/eo/capabilities.py
++++ b/backend/eo/capabilities.py
+@@ -36,7 +36,6 @@ Later patches extend this module rather than replacing it:
+     they're discoverable through the same shared surface as everything
+     else — the plan's own framing for why introspection lives next to
+     capability lookups rather than off on its own.
+-
+ Scope note: this module intentionally does not touch cli/ — the CLI
+ package (cli/minime_cli/) is a standalone HTTP client
+ (see cli/minime_cli/api_client.py's own docstring) with no in-process
+@@ -53,6 +52,7 @@ from typing import Any
+ from eo.capability_entries import list_capability_entries as _list_capability_entries
+ from eo.mcp_registry import list_mcp_servers as _list_mcp_servers
+ from eo.mcp_registry import mcp_server_status as _mcp_server_status
++from eo.registry import get_role_metadata as _get_role_metadata
+ from eo.skill_library import get_skill as _get_skill
+ from eo.skill_library import list_skills as _list_skills
+ 
+@@ -101,3 +101,46 @@ def list_capabilities(tags: list[str] | None = None) -> list[dict[str, Any]]:
+     through this general-purpose function.
+     """
+     return _list_capability_entries(entry_type="capability", tags=tags)
++
++
++def get_role_scope(role_name: str, user_id: str | None = None) -> list[str]:
++    """Patch B3 — a role's capability_tags, straight from
++    eo/registry.py's per-role metadata store (the same store
++    list_role_metadata()/get_role_metadata() already read/write; B3
++    just adds this one field to it). Returns [] both for a role that
++    exists but has no tags set, and for a role_name that's never been
++    briefed at all — the caller (capabilities_for_role() below, or an
++    eo agent calling this directly) never needs to distinguish "no
++    scope configured" from "unknown role"; either way the answer to
++    "what's this role allowed to see" is the same empty scope.
++
++    This is deliberately the ONE place "how much should this agent
++    introspect" gets answered, per the architecture plan's own framing
++    for §3.2's role-scoping bullet — not scattered raw directory paths
++    or ad-hoc checks in eo/registry.py or anywhere else that happens
++    to have a role_name in scope.
++    """
++    metadata = _get_role_metadata(role_name, user_id=user_id)
++    if not metadata:
++        return []
++    return list(metadata.get("capability_tags") or [])
++
++
++def capabilities_for_role(role_name: str, user_id: str | None = None) -> list[dict[str, Any]]:
++    """Patch B3 — composes get_role_scope() with list_capabilities():
++    exactly the capability entries visible to this role, given its own
++    capability_tags. A role with an empty scope (no tags set, or an
++    unknown role_name) sees nothing through this function — this is
++    intentionally NOT "no tags means see everything"; a role has to be
++    explicitly scoped to something before it gets anything back here.
++
++    This is the function eo agents call for "what am I, specifically,
++    allowed to know about" — list_capabilities() itself stays the
++    unscoped, "what can this system do at all" answer for callers that
++    aren't asking on behalf of a particular role (e.g. an admin-facing
++    route).
++    """
++    tags = get_role_scope(role_name, user_id=user_id)
++    if not tags:
++        return []
++    return list_capabilities(tags=tags)
+diff --git a/backend/eo/registry.py b/backend/eo/registry.py
+index 23f6df0..0b72ee2 100644
+--- a/backend/eo/registry.py
++++ b/backend/eo/registry.py
+@@ -1499,10 +1499,16 @@ def _wrap_legacy_entry(role_name: str, brief: str) -> dict:
+     anything else is tagged "panel_brief_writer" — the only other way a
+     bare string could have ended up in the pre-migration store — so the
+     UI correctly flags it as an unreviewed cold-start brief instead of
+-    silently implying a human wrote it."""
++    silently implying a human wrote it.
++
++    Patch B3 adds `capability_tags: []` to this shape — additive, same
++    "migrate in place, no separate script" discipline this function
++    already follows for the times_hired/pinned fields. A legacy entry
++    has no tags to recover any more than it has a real source, so it
++    starts empty, same as every freshly-hired role does."""
+     source = "seed" if ROLE_PROMPTS_SEED.get(role_name) == brief else "panel_brief_writer"
+     return {"brief": brief, "source": source, "updated_at": None, "times_hired": 0,
+-            "pinned": False, "pinned_at": None}
++            "pinned": False, "pinned_at": None, "capability_tags": []}
+ 
+ 
+ def _load_prompts(user_id: str | None = None) -> dict:
+@@ -1549,6 +1555,16 @@ def _load_prompts(user_id: str | None = None) -> dict:
+         if not isinstance(value, dict):
+             prompts[role_name] = _wrap_legacy_entry(role_name, value)
+             changed = True
++        elif "capability_tags" not in value:
++            # Patch B3: additive field on an already-migrated (Part
++            # 2 §2.2) entry that predates this patch. Same in-place,
++            # no-separate-script migration discipline as the
++            # bare-string case above — an entry with no tags yet
++            # starts at [], not None, so every caller of
++            # capability_tags can treat it as "empty list" rather
++            # than needing its own None-check.
++            value["capability_tags"] = []
++            changed = True
+     if changed:
+         write(key, prompts)
+     _cache_prompts(key, prompts)
+@@ -1607,6 +1623,10 @@ def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_write
+         # unpinned every time a role's brief changes.
+         "pinned": existing.get("pinned", False),
+         "pinned_at": existing.get("pinned_at"),
++        # Patch B3: capability_tags is role-scoping metadata, not part
++        # of the brief itself — preserved across a brief rewrite for
++        # the same reason pinned/pinned_at are.
++        "capability_tags": existing.get("capability_tags", []),
+     }
+     write(key, prompts)
+ 
+@@ -1638,7 +1658,7 @@ def record_role_hire(role_name: str, user_id: str | None = None) -> None:
+     entry = prompts.get(role_name) or {
+         "brief": None, "source": "panel_brief_writer",
+         "updated_at": None, "times_hired": 0,
+-        "pinned": False, "pinned_at": None,
++        "pinned": False, "pinned_at": None, "capability_tags": [],
+     }
+     entry["times_hired"] = entry.get("times_hired", 0) + 1
+     prompts[role_name] = entry
+@@ -1660,7 +1680,7 @@ def set_role_pinned(role_name: str, pinned: bool, user_id: str | None = None) ->
+     entry = prompts.get(role_name) or {
+         "brief": None, "source": "panel_brief_writer",
+         "updated_at": None, "times_hired": 0,
+-        "pinned": False, "pinned_at": None,
++        "pinned": False, "pinned_at": None, "capability_tags": [],
+     }
+     entry["pinned"] = bool(pinned)
+     entry["pinned_at"] = _utcnow_iso() if pinned else None
+@@ -1669,6 +1689,36 @@ def set_role_pinned(role_name: str, pinned: bool, user_id: str | None = None) ->
+     return entry
+ 
+ 
++def set_role_capability_tags(role_name: str, tags: list[str],
++                              user_id: str | None = None) -> dict:
++    """Patch B3 — sets a role's capability_tags, the field
++    eo/capabilities.py::get_role_scope()/capabilities_for_role() read
++    to decide how much of the capability layer (Patch B1) that role
++    can see. Same "create a bare entry rather than raise if the role
++    hasn't been briefed yet" discipline as record_role_hire() and
++    set_role_pinned() above — a role can in principle be scoped before
++    it's ever been hired. Returns the updated entry, same "hand the
++    fresh object back so the API layer doesn't need a second read"
++    convention set_role_pinned() already uses.
++
++    Replaces the tag list wholesale rather than merging — same
++    "explicit set, not an implicit accumulate" contract PUT-style
++    endpoints in this codebase already use elsewhere (e.g.
++    update_role_prompt() replacing a brief outright rather than
++    appending to it)."""
++    key = _role_prompts_key(user_id)
++    prompts = _load_prompts(user_id)
++    entry = prompts.get(role_name) or {
++        "brief": None, "source": "panel_brief_writer",
++        "updated_at": None, "times_hired": 0,
++        "pinned": False, "pinned_at": None, "capability_tags": [],
++    }
++    entry["capability_tags"] = list(tags)
++    prompts[role_name] = entry
++    write(key, prompts)
++    return entry
++
++
+ def list_known_roles(user_id: str | None = None) -> list:
+     """Every role the system has ever written a brief for — unchanged
+     return contract (sorted list of role-name strings) even though the
+diff --git a/backend/tests/unit/test_eo_role_scope.py b/backend/tests/unit/test_eo_role_scope.py
+new file mode 100644
+index 0000000..eadfcc0
+--- /dev/null
++++ b/backend/tests/unit/test_eo_role_scope.py
+@@ -0,0 +1,151 @@
++"""
++tests/unit/test_eo_role_scope.py — Patch B3.
++
++Covers the two new eo/capabilities.py functions Patch B3 adds
++(get_role_scope(), capabilities_for_role()) and the additive
++capability_tags field they read from eo/registry.py's per-role
++metadata store. Uses the autouse `fake_bus` / `_reset_role_prompts_cache`
++fixtures from tests/conftest.py, same as test_eo_registry_role_library.py.
++"""
++from eo import capabilities
++from eo.registry import (
++    add_role_prompt,
++    get_role_metadata,
++    record_role_hire,
++    set_role_capability_tags,
++    set_role_pinned,
++)
++
++# ---------------------------------------------------------------------------
++# eo/registry.py — capability_tags is additive, defaults to []
++# ---------------------------------------------------------------------------
++
++def test_seeded_role_has_empty_capability_tags_by_default():
++    entry = get_role_metadata("implementer")
++    assert entry["capability_tags"] == []
++
++
++def test_set_role_capability_tags_on_a_seeded_role():
++    entry = set_role_capability_tags("researcher", ["frontend_capabilities"])
++    assert entry["capability_tags"] == ["frontend_capabilities"]
++    assert get_role_metadata("researcher")["capability_tags"] == ["frontend_capabilities"]
++
++
++def test_set_role_capability_tags_on_a_role_never_briefed_creates_a_bare_entry():
++    entry = set_role_capability_tags("brand_new_role", ["agent_roster"])
++    assert entry["capability_tags"] == ["agent_roster"]
++    assert entry["brief"] is None
++    assert get_role_metadata("brand_new_role")["capability_tags"] == ["agent_roster"]
++
++
++def test_set_role_capability_tags_replaces_wholesale_not_merges():
++    set_role_capability_tags("writer", ["a", "b"])
++    entry = set_role_capability_tags("writer", ["c"])
++    assert entry["capability_tags"] == ["c"]
++
++
++def test_capability_tags_survive_a_brief_rewrite():
++    set_role_capability_tags("writer", ["frontend_capabilities"])
++    add_role_prompt("writer", "A rewritten brief.", source="user_edited")
++    assert get_role_metadata("writer")["capability_tags"] == ["frontend_capabilities"]
++
++
++def test_capability_tags_survive_record_role_hire():
++    set_role_capability_tags("writer", ["agent_roster"])
++    record_role_hire("writer")
++    entry = get_role_metadata("writer")
++    assert entry["capability_tags"] == ["agent_roster"]
++    assert entry["times_hired"] == 1
++
++
++def test_capability_tags_survive_set_role_pinned():
++    set_role_capability_tags("writer", ["mcp_capabilities"])
++    set_role_pinned("writer", True)
++    entry = get_role_metadata("writer")
++    assert entry["capability_tags"] == ["mcp_capabilities"]
++    assert entry["pinned"] is True
++
++
++def test_legacy_dict_entry_missing_capability_tags_is_migrated_in_place(monkeypatch):
++    # Simulate an entry written before Patch B3 -- a fully-migrated
++    # Part 2 §2.2 dict shape, but with no capability_tags key at all.
++    import eo.registry as registry_module
++
++    key = registry_module._role_prompts_key()
++    pre_b3_entry = {
++        "brief": "An old brief.", "source": "user_edited",
++        "updated_at": None, "times_hired": 3,
++        "pinned": False, "pinned_at": None,
++    }
++    registry_module.write(key, {"legacy_role": pre_b3_entry})
++    monkeypatch.setattr(registry_module, "_role_prompts_cache_ctx",
++                         registry_module.contextvars.ContextVar("t", default=None))
++
++    entry = get_role_metadata("legacy_role")
++    assert entry["capability_tags"] == []
++    assert entry["times_hired"] == 3  # untouched by the migration
++
++
++# ---------------------------------------------------------------------------
++# eo/capabilities.py::get_role_scope()
++# ---------------------------------------------------------------------------
++
++def test_get_role_scope_returns_configured_tags():
++    set_role_capability_tags("researcher", ["frontend_capabilities", "agent_roster"])
++    assert set(capabilities.get_role_scope("researcher")) == {
++        "frontend_capabilities", "agent_roster",
++    }
++
++
++def test_get_role_scope_returns_empty_for_role_with_no_tags_set():
++    assert capabilities.get_role_scope("implementer") == []
++
++
++def test_get_role_scope_returns_empty_for_unknown_role():
++    assert capabilities.get_role_scope("does_not_exist") == []
++
++
++# ---------------------------------------------------------------------------
++# eo/capabilities.py::capabilities_for_role()
++# ---------------------------------------------------------------------------
++
++def test_capabilities_for_role_returns_only_matching_tagged_entries():
++    set_role_capability_tags("researcher", ["frontend_capabilities"])
++
++    results = capabilities.capabilities_for_role("researcher")
++
++    assert [e["entry_id"] for e in results] == ["frontend_renderable_tabs"]
++
++
++def test_capabilities_for_role_union_across_multiple_tags():
++    set_role_capability_tags("researcher", ["agent_roster", "mcp_capabilities"])
++
++    results = capabilities.capabilities_for_role("researcher")
++
++    assert {e["entry_id"] for e in results} == {"agent_roster", "mcp_capabilities"}
++
++
++def test_capabilities_for_role_returns_empty_for_untagged_role():
++    # No tags configured -- must NOT fall back to "see everything."
++    assert capabilities.capabilities_for_role("implementer") == []
++
++
++def test_capabilities_for_role_returns_empty_for_unknown_role():
++    assert capabilities.capabilities_for_role("does_not_exist") == []
++
++
++def test_capabilities_for_role_never_surfaces_redaction_entries():
++    from eo import capability_entries
++
++    capability_entries.write_capability_entry(
++        title="Never read backend/.env",
++        doc_text="Do not open the backend .env file.",
++        tags=["frontend_capabilities"],
++        entry_type="redaction",
++    )
++    set_role_capability_tags("researcher", ["frontend_capabilities"])
++
++    results = capabilities.capabilities_for_role("researcher")
++
++    assert all(e["entry_id"] != "never_read_backend_env" for e in results)
++    assert [e["entry_id"] for e in results] == ["frontend_renderable_tabs"]
+-- 
+2.43.0
+
