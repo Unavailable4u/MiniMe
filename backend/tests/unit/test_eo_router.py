@@ -15,8 +15,10 @@ import pytest
 from eo.registry import resolve
 from eo.router import (
     DIRECTED_TASK_MAP,
+    EXPLAIN_CODE_ROUTE,
     TIERS,
     build_execution_graph,
+    capability_registration_gaps,
     validate_registry_coverage,
 )
 
@@ -117,3 +119,58 @@ def test_validate_registry_coverage_raises_on_a_real_gap(monkeypatch):
     monkeypatch.setattr(router_module, "TIERS", patched_tiers)
     with pytest.raises(AssertionError, match="totally_unregistered_agent_xyz"):
         validate_registry_coverage()
+
+
+# ---------------------------------------------------------------------------
+# capability_registration_gaps — Patch B5a
+# ---------------------------------------------------------------------------
+
+def test_capability_registration_gaps_calls_eo_capabilities(monkeypatch):
+    # This is the real call site Patch B5a wires router.py to -- confirm
+    # it goes through eo/capabilities.py::list_capabilities() rather
+    # than eo.registry.REGISTRY or any direct skill_library/mcp_registry
+    # import.
+    import eo.router as router_module
+    seen = []
+
+    def fake_list_capabilities():
+        seen.append(True)
+        return [{"entry_id": "responder", "tags": []}]
+
+    monkeypatch.setattr(router_module, "list_capabilities", fake_list_capabilities)
+    capability_registration_gaps()
+    assert seen == [True]
+
+
+def test_capability_registration_gaps_reports_uncovered_names(monkeypatch):
+    import eo.router as router_module
+    # No capability entries at all -> every referenced agent name is a gap.
+    monkeypatch.setattr(router_module, "list_capabilities", lambda: [])
+    gaps = capability_registration_gaps()
+    all_names = set(TIERS[0]["agents"]) | set(TIERS[1]["agents"])
+    all_names.update(EXPLAIN_CODE_ROUTE)
+    all_names.add("sandbox_tester_lean")
+    for names in DIRECTED_TASK_MAP.values():
+        all_names.update(names)
+    assert set(gaps) == all_names
+
+
+def test_capability_registration_gaps_excludes_covered_names(monkeypatch):
+    import eo.router as router_module
+    monkeypatch.setattr(router_module, "list_capabilities",
+                         lambda: [{"entry_id": "responder", "tags": ["frontend_capabilities"]}])
+    gaps = capability_registration_gaps()
+    assert "responder" not in gaps
+
+
+def test_capability_registration_gaps_does_not_raise_on_lookup_failure(monkeypatch):
+    # Unlike validate_registry_coverage(), this is a soft check -- a
+    # broken capability store must degrade to "everything's a gap," not
+    # crash the caller.
+    import eo.router as router_module
+
+    def _boom():
+        raise RuntimeError("capability store unavailable")
+    monkeypatch.setattr(router_module, "list_capabilities", _boom)
+    gaps = capability_registration_gaps()
+    assert "responder" in gaps

@@ -24,11 +24,25 @@ know which function to call.
 
 Also renamed per the field this now reads: agents emit "next_destination"
 (a role name), not the old "next" (a resolved module/destination name).
+
+Patch B5a (CLI-as-Internal-Interface plan, Part 2 -- "wire eo agents to
+eo/capabilities.py"): grep confirms this module never imported
+eo/skill_library.py or eo/mcp_registry.py directly, before or after this
+patch -- next_step() is pure role-plan indexing, it never had a real
+call site to redirect. The one place this module DOES already reason
+about "did the agent ask for something we don't recognize" is the
+hallucinated-role rejection branch below, which is the closest thing
+this file has to \u00a73.2's \"an agent facing an unfamiliar request\" --
+so that's where this patch wires in a real (if today mostly empty)
+eo/capabilities.py call: _is_known_capability() below. This is
+observability only, added to hallucinated_role_rejected's payload -- it
+never changes target_idx/reason, so routing behavior is unchanged.
 """
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eo.capabilities import list_capabilities
 from memory.bus import read, write
 from relay.emitter import emit_event
 
@@ -37,6 +51,28 @@ from relay.emitter import emit_event
 # reviewer -> sandbox_tester -> ... forever). Cap revisits per role, per
 # session. Unchanged in Part 12 — still 3, still per (session_id, role).
 MAX_STAGE_REVISITS = 3
+
+
+def _is_known_capability(name: str) -> bool:
+    """Patch B5a: does `name` match any entry_id/title in
+    eo/capabilities.py::list_capabilities()? Used only to enrich
+    hallucinated_role_rejected's payload -- it tells a later reader
+    (dashboard, or a future patch's fallback logic) whether the model
+    asked for something that's a real, registered system capability
+    (just not a role staffed for this session) versus something
+    invented outright. Today's CAPABILITY_SEED (Patch B1) is entry-id
+    granularity ("agent_roster", "mcp_capabilities", ...), not
+    per-role, so this will usually return False even for a legitimate
+    ask -- that's an honest reflection of how much the capability layer
+    covers right now, not a bug in this lookup. Defensive: a capability
+    lookup must never break routing, so any failure here is swallowed.
+    """
+    try:
+        entries = list_capabilities()
+    except Exception:
+        return False
+    return any(entry.get("entry_id") == name or entry.get("title") == name
+               for entry in entries)
 
 
 def _visit_count(session_id: str, name: str) -> int:
@@ -95,7 +131,8 @@ def next_step(agent_result: dict, role_plan: list, idx: int, session_id: str = N
         # and running it would produce a brief-less, dead-end step.
         if known_roles is not None and named not in known_roles:
             emit_event("hallucinated_role_rejected", session_id=session_id, agent="dispatcher",
-                       payload={"attempted_role": named})
+                       payload={"attempted_role": named,
+                                "known_capability": _is_known_capability(named)})
             nxt = idx + 1
             target_idx = nxt if nxt < len(role_plan) else None
             _log_route(session_id, role_plan[nxt] if target_idx is not None else None, "plan")

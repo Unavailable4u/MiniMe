@@ -290,6 +290,42 @@ class TestRunLoopHappyPath:
         event_types = [e[0] for e in _quiet_emit]
         assert event_types == ["agent_start", "agent_done"]
 
+    def test_agent_start_payload_carries_capability_tags(self, monkeypatch, _quiet_emit):
+        # Patch B5a: eo/capabilities.py::list_capabilities() is the real
+        # call site this patch wires executor.py to -- confirm its
+        # result actually reaches agent_start's payload.
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+        monkeypatch.setattr(executor, "list_capabilities", lambda: [
+            {"entry_id": "agent_roster", "tags": ["agent_roster"]},
+            {"entry_id": "mcp_capabilities", "tags": ["mcp_capabilities"]},
+        ])
+
+        executor._run_loop(**_base_run_loop_kwargs())
+
+        start_event = next(e for e in _quiet_emit if e[0] == "agent_start")
+        assert start_event[1]["payload"]["capability_tags"] == [
+            "agent_roster", "mcp_capabilities",
+        ]
+
+    def test_agent_start_capability_lookup_failure_does_not_break_dispatch(self, monkeypatch, _quiet_emit):
+        # Defensive contract: a broken/unavailable capability store must
+        # never turn an ordinary step into a crash.
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+
+        def _boom():
+            raise RuntimeError("capability store unavailable")
+        monkeypatch.setattr(executor, "list_capabilities", _boom)
+
+        result = executor._run_loop(**_base_run_loop_kwargs())
+
+        start_event = next(e for e in _quiet_emit if e[0] == "agent_start")
+        assert start_event[1]["payload"]["capability_tags"] == []
+        assert result  # step still completed normally
+
 
 class TestRunLoopEscalation:
     def test_next_step_escalating_to_a_new_role_grows_agent_names_in_lockstep(self, monkeypatch):

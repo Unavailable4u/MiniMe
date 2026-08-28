@@ -208,13 +208,51 @@ def test_hallucinated_role_rejected_when_not_in_known_roles(mock_emit):
     assert "hallucinated_role_rejected" in events
 
 
-def test_hallucinated_role_rejection_payload(mock_emit):
+def test_hallucinated_role_rejection_payload(mock_emit, monkeypatch):
+    # Patch B5a: payload now also carries a `known_capability` flag —
+    # force the capability lookup to a known False here so this stays a
+    # plain payload-shape test, not a capability-layer test.
+    monkeypatch.setattr(dispatcher, "list_capabilities", lambda: [])
     role_plan = ["a", "b"]
     next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
               known_roles={"a", "b"})
     reject_call = next(c for c in mock_emit.call_args_list
                         if c.args[0] == "hallucinated_role_rejected")
-    assert reject_call.kwargs["payload"] == {"attempted_role": "ghost"}
+    assert reject_call.kwargs["payload"] == {"attempted_role": "ghost",
+                                              "known_capability": False}
+
+
+# ---------------------------------------------------------------------------
+# _is_known_capability / hallucinated-role capability lookup — Patch B5a
+# ---------------------------------------------------------------------------
+
+def test_hallucinated_role_payload_flags_a_known_capability(mock_emit, monkeypatch):
+    # eo/capabilities.py::list_capabilities() is the real call site this
+    # patch wires dispatcher.py to -- confirm the lookup result actually
+    # reaches the emitted payload, not just that the payload has the key.
+    monkeypatch.setattr(dispatcher, "list_capabilities",
+                         lambda: [{"entry_id": "ghost", "title": "Ghost", "tags": []}])
+    role_plan = ["a", "b"]
+    next_step({"next_destination": "ghost"}, role_plan, idx=0, session_id="s5",
+              known_roles={"a", "b"})
+    reject_call = next(c for c in mock_emit.call_args_list
+                        if c.args[0] == "hallucinated_role_rejected")
+    assert reject_call.kwargs["payload"]["known_capability"] is True
+
+
+def test_capability_lookup_failure_does_not_break_rejection(mock_emit, monkeypatch):
+    # Defensive contract: a broken/unavailable capability store must
+    # never turn an ordinary hallucinated-role rejection into a crash.
+    def _boom():
+        raise RuntimeError("capability store unavailable")
+    monkeypatch.setattr(dispatcher, "list_capabilities", _boom)
+    role_plan = ["a", "b"]
+    idx, reason = next_step({"next_destination": "ghost"}, role_plan, idx=0,
+                             session_id="s5", known_roles={"a", "b"})
+    assert (idx, reason) == (1, "plan")
+    reject_call = next(c for c in mock_emit.call_args_list
+                        if c.args[0] == "hallucinated_role_rejected")
+    assert reject_call.kwargs["payload"]["known_capability"] is False
 
 
 def test_hallucinated_role_rejected_at_end_of_plan_returns_none():

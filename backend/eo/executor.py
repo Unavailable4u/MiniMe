@@ -52,6 +52,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 
 from eo.agent_dependencies import AGENT_DEPENDENCIES
+from eo.capabilities import list_capabilities  # NEW — Patch B5a
 from eo.errors import MissingDependencyError
 from eo.registry import list_known_roles, resolve, resolve_role
 from eo.structure import PATH_TO_TIER
@@ -112,6 +113,31 @@ UNSCOPED_TIER_AGENTS = {
 # no-code planning path needs task_text (to plan a folder/file scaffold
 # when there's no fixed_code/submitted_code to organize yet), which the
 # four agents above don't need. It gets its own dispatch case instead.
+
+
+def _available_capability_tags() -> list:
+    """Patch B5a (CLI-as-Internal-Interface plan, Part 2 -- "wire eo
+    agents to eo/capabilities.py"): this module never imported
+    eo/skill_library.py or eo/mcp_registry.py directly either (grep
+    confirms the same as eo/dispatcher.py and eo/router.py) -- every
+    step's dispatch branch below reads task_text/memory-bus keys, never
+    skill or MCP data directly. The one real, low-risk hook this file
+    already has for "what did this step have to work with" is the
+    agent_start event's payload (see the given_roles comment just above
+    its emission) -- this adds the capability layer's own tag universe
+    to that same payload, sourced through eo/capabilities.py exactly as
+    the plan asks, without changing any dispatch branch's own call
+    shape (generic_worker.run() and every other agent function below
+    are untouched by this patch).
+
+    Observability only: a lookup failure here must never break
+    dispatch, so any exception is swallowed and an empty list reported
+    instead.
+    """
+    try:
+        return sorted({tag for entry in list_capabilities() for tag in (entry.get("tags") or [])})
+    except Exception:
+        return []
 
 
 def _apply_recheck_retry(key_overrides: dict, role_names: list, next_idx, reason: str) -> None:
@@ -971,7 +997,8 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
         # (see _run_concurrent_group's own flat_input_keys just above).
         given_roles = list(_flatten_role_names(role_names[:idx]))
         emit_event("agent_start", session_id=session_id, agent=current_name, path=path,
-                    payload={"label": role, "given_roles": given_roles})
+                    payload={"label": role, "given_roles": given_roles,
+                             "capability_tags": _available_capability_tags()})
         started = time.monotonic()
         # D1 patch 3b -- one child span per step, named after `role`, so
         # this step's own generation(s) (already wrapped by utils/llm_client.py's
