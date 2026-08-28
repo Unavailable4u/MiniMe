@@ -108,3 +108,14 @@ comment (`file:line`) that flagged it.
   Fixing it properly means resume_graph()'s duplicated tail should stop
   being a separate copy of that logic, which is a bigger structural
   change than this patch's scope (add the scratchpad mechanism).
+
+## Reviewed during Patch B9
+
+- **`resume_graph()`'s scratchpad gap (flagged during Patch B7, above)
+  is still open.** Confirmed still present during B9's integration pass
+  (`backend/eo/executor.py`'s `resume_graph()` still has two finished-
+  return points — the plain-resume case and the macro-loop-continuation
+  tail — neither calling `clear_scratchpad()`). Not fixed here: B9 is an
+  integration pass over B0-B8's own scope, not a rewrite of
+  `resume_graph()`'s duplicated tail. Worth its own patch once that
+  structural change is prioritized.
