@@ -9,6 +9,7 @@ this directed_task_type), which agent names run, in what order?" It does
 not call anything itself — see eo/registry.py for name->callable
 resolution, and a later-stage executor for actually running the graph.
 """
+from eo.capabilities import list_capabilities  # NEW — Patch B5a
 from eo.registry import REGISTRY, resolve_role
 
 # ---------------------------------------------------------------------------
@@ -444,3 +445,42 @@ def validate_registry_coverage() -> None:
             f"These agent names are referenced by router.py but missing "
             f"from eo.registry.REGISTRY: {missing}"
         )
+
+
+def capability_registration_gaps() -> list:
+    """Patch B5a (CLI-as-Internal-Interface plan, Part 2 -- "wire eo
+    agents to eo/capabilities.py"): this module never imported
+    eo/skill_library.py or eo/mcp_registry.py directly (grep confirms
+    the same as eo/dispatcher.py and eo/executor.py) -- build_execution_
+    graph() is pure static-list construction, it has no runtime
+    decision that skill/MCP data would ever inform. The closest thing
+    this file has to a real capability-layer touchpoint is
+    validate_registry_coverage() just above: the same universe of
+    agent-name strings it already walks, cross-checked here against
+    eo/capabilities.py::list_capabilities() instead of eo.registry.REGISTRY.
+
+    Deliberately NOT raising, unlike validate_registry_coverage(): that
+    function checks a hard invariant (every referenced name must
+    resolve, or the graph is genuinely broken). Capability-layer
+    coverage is a much softer property -- eo/capability_entries.py's own
+    CAPABILITY_SEED docstring describes itself as "a starting set, not
+    the definitive one" -- so treating a gap here as fatal would make
+    this module's tests depend on how complete Patch B1's hand-written
+    seed happens to be today, not on anything router.py itself got
+    wrong. Returns the list of gaps instead, for a caller (dashboard, or
+    a future patch) that wants to log/report it.
+    """
+    all_names = set(TIERS[0]["agents"]) | set(TIERS[1]["agents"])
+    all_names.update(EXPLAIN_CODE_ROUTE)
+    all_names.add("sandbox_tester_lean")
+    for names in DIRECTED_TASK_MAP.values():
+        all_names.update(names)
+    try:
+        entries = list_capabilities()
+    except Exception:
+        return sorted(all_names)
+    known = set()
+    for entry in entries:
+        known.add(entry.get("entry_id"))
+        known.update(entry.get("tags") or [])
+    return sorted(name for name in all_names if name not in known)

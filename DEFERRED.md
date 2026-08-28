@@ -43,3 +43,29 @@ comment (`file:line`) that flagged it.
   relying on a person happening to re-read both.
 
 <!-- New entries go below this line, oldest first. -->
+
+## Deferred during Patch B5a
+
+- **Per-role capability entries.** `_is_known_capability()`
+  (`eo/dispatcher.py`) and `capability_registration_gaps()`
+  (`eo/router.py`) both check a hallucinated/referenced role name
+  against `eo/capabilities.py::list_capabilities()`, but Patch B1's
+  `CAPABILITY_SEED` is entry-id granularity (`agent_roster`,
+  `mcp_capabilities`, ...), not per-role — so in practice these checks
+  report "not a known capability" for essentially every real role name
+  today. Worth revisiting once B3's role-scoping (`capability_tags` per
+  role) gives the capability layer that finer granularity to check
+  against.
+- **`generic_worker.run()` itself receiving capability context.**
+  B5a only threads `eo/capabilities.py` into the three orchestration
+  modules' own observability/validation surface (`agent_start`'s
+  payload, the hallucinated-role event, router's coverage check) — it
+  does not change what any dispatched agent function (including
+  `agents/generic_worker.py`) is actually given to reason with. That
+  module's own direct `eo.skill_library` import (`get_relevant_skill`/
+  `ensure_skill_for_task`) is untouched; those functions aren't wrapped
+  by `eo/capabilities.py` at all yet. A real "agent checks the
+  capability layer before falling back to a broader read" (architecture
+  plan §3.2) needs generic_worker.py's own call shape to change — out
+  of scope for a patch that's supposed to be behavior-safe for the
+  three named orchestration files only.

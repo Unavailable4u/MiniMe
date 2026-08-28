@@ -1,6 +1,6 @@
-From 07f31f54bfdfc3e3fc79f381a30db4969c5ad820 Mon Sep 17 00:00:00 2001
+From 0227311d83586b3d9290c96e44fc394a37cccf68 Mon Sep 17 00:00:00 2001
 From: Patch Author <patch-author@example.com>
-Date: Fri, 28 Aug 2026 09:09:39 +0000
+Date: Fri, 28 Aug 2026 09:14:27 +0000
 Subject: [PATCH] B5a: wire eo/dispatcher.py, eo/executor.py, eo/router.py to
  eo/capabilities.py
 MIME-Version: 1.0
@@ -35,8 +35,7 @@ dispatch or routing.
 Acceptance: grep confirms no eo.skill_library/eo.mcp_registry imports
 in dispatcher.py/executor.py/router.py (still zero, as before this
 patch); all three now import eo.capabilities.list_capabilities and use
-it. Full backend unit suite: 3419 passed, 0 failed (7 skipped, 2 xfailed,
-pre-existing).
+it.
 
 Tests: extended test_eo_dispatcher.py, test_eo_executor.py, and
 test_eo_router.py with cases that mock eo.capabilities.list_capabilities
@@ -44,11 +43,10 @@ and assert the call is actually made and its result reaches the
 relevant payload/return value, plus a defensive test per file for
 lookup-failure behavior.
 
-DEFERRED.md: added two entries — per-role capability granularity
-(blocks _is_known_capability/capability_registration_gaps from matching
-much today) and generic_worker.run() itself not yet receiving
-capability context (out of scope for a patch limited to the three
-orchestration files).
+DEFERRED.md: added a 'Deferred during Patch B5a' section (on top of
+the already-merged B2 redaction-coverage entry) — per-role capability
+granularity, and generic_worker.run() not yet receiving capability
+context.
 ---
  DEFERRED.md                              | 26 +++++++++++
  backend/eo/capabilities.py               |  6 ++-
@@ -61,11 +59,11 @@ orchestration files).
  8 files changed, 271 insertions(+), 6 deletions(-)
 
 diff --git a/DEFERRED.md b/DEFERRED.md
-index cc0f52f..ec605cf 100644
+index 7bb1bfb..869f748 100644
 --- a/DEFERRED.md
 +++ b/DEFERRED.md
-@@ -32,3 +32,29 @@ comment (`file:line`) that flagged it.
-   once that layer exists and has real content, not before.
+@@ -43,3 +43,29 @@ comment (`file:line`) that flagged it.
+   relying on a person happening to re-read both.
  
  <!-- New entries go below this line, oldest first. -->
 +

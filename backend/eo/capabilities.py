@@ -23,7 +23,11 @@ callers are meant to use it:
      eo/mcp_registry.py directly, so the route stays a thin wrapper
      one layer further out.
   2. eo/dispatcher.py, eo/executor.py, eo/router.py — wired to this
-     module by Patch B5a. Not touched by this patch.
+     module by Patch B5a (each now imports list_capabilities() for its
+     own observability/validation touchpoint — see each module's own
+     B5a docstring note for why none of the three had a direct
+     skill_library/mcp_registry import to redirect in the first place).
+     Not touched by this patch [B0].
 
 Later patches extend this module rather than replacing it:
   - B1 (this patch) adds list_capabilities() — tagged capability-layer
