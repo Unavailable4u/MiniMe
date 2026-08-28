@@ -264,3 +264,78 @@ def test_inspector_without_session_id_emits_nothing(monkeypatch):
 
     inspector.classify("what's 2+2")  # no session_id
     assert fake_client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 3. CLI path (eo/loop_v4.py) — Patch B8
+# ---------------------------------------------------------------------------
+#
+# Before this patch, eo/loop_v4.py's main() hard-coded session_id = None
+# for the entire CLI run, so every emit_event() call downstream of it
+# (including _get_decision()'s own "routing_decision" emission) hit
+# relay/emitter.py's "no session_id -> no-op" guard and never reached
+# Pusher at all -- see test_no_session_id_is_a_silent_noop above for
+# that guard's own unit coverage. main() now mints a real session_id
+# once and threads it through, so a CLI run's events actually reach the
+# relay -- this is the "does a real session_id now reach emit_event()
+# from that call site" case the B8 patch plan asks for.
+
+_TIER0_DRAFT_FOR_RELAY_TEST = {
+    "path": "instant", "directed_task_type": None, "confidence": 0.95,
+    "suggested_agents": ["responder"], "reasoning": "trivial factual question",
+}
+
+
+def test_cli_tier0_run_reaches_pusher_with_a_real_session_id(monkeypatch):
+    _configure_fake_env(monkeypatch)
+    fake_client = _FakePusher()
+    monkeypatch.setattr(emitter, "_pusher_client", fake_client)
+    monkeypatch.setattr(emitter, "_pusher_unavailable", False)
+
+    from eo import loop_v4
+    monkeypatch.setattr(loop_v4, "classify",
+                         lambda task_text, context=None, session_id=None: dict(_TIER0_DRAFT_FOR_RELAY_TEST))
+    # check_cache/write_cache talk to Upstash Vector directly, not
+    # memory.bus -- same reasoning as tests/integration/test_loop_v4_tier0.py's
+    # own comment on this exact stub.
+    monkeypatch.setattr(loop_v4, "check_cache", lambda *a, **k: None)
+    monkeypatch.setattr(loop_v4, "write_cache", lambda *a, **k: None)
+    monkeypatch.setattr(loop_v4.routing_memory, "retrieve_similar_outcomes", lambda *a, **k: "")
+    monkeypatch.setattr(loop_v4.routing_memory, "log_outcome", lambda *a, **k: None)
+    monkeypatch.setattr(loop_v4, "write", lambda *a, **k: None)
+    monkeypatch.setattr(loop_v4.conversation_memory, "get_light_context", lambda *a, **k: None)
+    monkeypatch.setattr(
+        loop_v4, "staff_task",
+        lambda decision, task_text=None, session_id=None: [{"role": "responder", "agent_key": None, "brief": ""}],
+    )
+    monkeypatch.setattr(
+        loop_v4, "execute_graph",
+        lambda graph, task_text=None, cycle_num=None, session_id=None: {"responder": "Paris."},
+    )
+
+    import sys
+    old_argv = sys.argv
+    try:
+        sys.argv = ["loop_v4.py", "What's", "the", "capital", "of", "France?"]
+        loop_v4.main()
+    finally:
+        sys.argv = old_argv
+
+    # _get_decision()'s own emit_event("routing_decision", session_id=...)
+    # call is real (not mocked above) -- it must have actually reached
+    # Pusher, on a real per-session channel, not been silently dropped.
+    # The SGA relay step (eo/sga.py's attempt(), also not mocked above)
+    # fires its own agent_start/agent_done pair first, on the exact same
+    # channel -- proof that session_id is now the SAME real value all
+    # the way from main() through both call sites, not two different
+    # accidental values.
+    assert len(fake_client.calls) == 3
+    event_names = [call[1] for call in fake_client.calls]
+    assert event_names == ["agent_start", "agent_done", "routing_decision"]
+    channels = {call[0] for call in fake_client.calls}
+    assert len(channels) == 1  # every event landed on the SAME session channel
+    channel = channels.pop()
+    assert channel.startswith("session-")
+    assert channel != "session-None"
+    for _, _, data in fake_client.calls:
+        assert data["session_id"] is not None and data["session_id"] != "None"

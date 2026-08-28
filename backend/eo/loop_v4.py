@@ -56,6 +56,7 @@ Usage:
 import json
 import os
 import sys
+import uuid   # NEW — Patch B8: main() mints a real session_id for the CLI run
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import (
@@ -214,17 +215,17 @@ def _safe_graph_preview(decision: dict) -> list:
         return []
 
 
-def _run_tier0(task_text: str, decision: dict) -> None:
+def _run_tier0(task_text: str, decision: dict, session_id: str = None) -> None:
     graph = build_execution_graph(tier=0)
-    results = execute_graph(graph, task_text=task_text)
+    results = execute_graph(graph, task_text=task_text, session_id=session_id)
     answer = results["responder"]
     print(f"\n[Responder]\n{answer}\n")
     routing_memory.log_outcome(task_text, decision, outcome="tier-0 responder answered directly")
 
 
-def _run_tier1(task_text: str, decision: dict, run_tests: bool) -> None:
+def _run_tier1(task_text: str, decision: dict, run_tests: bool, session_id: str = None) -> None:
     graph = build_execution_graph(tier=1, run_tests=run_tests)
-    results = execute_graph(graph, task_text=task_text)
+    results = execute_graph(graph, task_text=task_text, session_id=session_id)
     fixed = results["reviewer_fixer_lean"]
     print(f"\n[Tier 1] module '{fixed.get('name')}':\n{fixed.get('code')}\n")
     if fixed.get("issues_found"):
@@ -239,7 +240,7 @@ def _run_tier1(task_text: str, decision: dict, run_tests: bool) -> None:
 
 
 def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None,
-               project_unique_name: str = None, mode: str = "auto") -> None:
+               project_unique_name: str = None, mode: str = "auto", session_id: str = None) -> None:
     directed_task_type = decision.get("directed_task_type")
     if not directed_task_type:
         print("[EO] Tier 2 requires a directed_task_type, but none was set "
@@ -268,7 +269,7 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None
             + json.dumps(submitted_code, indent=2)
         )
         graph = list(EXPLAIN_CODE_ROUTE)
-        results = execute_graph(graph, task_text=combined)
+        results = execute_graph(graph, task_text=combined, session_id=session_id)
         print(f"\n[Responder — explain_code]\n{results['responder']}\n")
     else:
         # Migration Part 5 §3 — if the Panel actually staffed this task
@@ -293,11 +294,12 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None
                 hires, execution_order=decision.get("execution_order"))
             results = execute_graph(agent_names, task_text=task_text, key_overrides=key_overrides,
                                      project_unique_name=project_unique_name, mode=mode,
-                                     role_names=role_names)
+                                     role_names=role_names, session_id=session_id)
             last_agent = role_names[-1] if role_names else agent_names[-1]
         else:
             graph = build_execution_graph(tier=2, directed_task_type=directed_task_type)
-            results = execute_graph(graph, project_unique_name=project_unique_name, mode=mode)
+            results = execute_graph(graph, project_unique_name=project_unique_name, mode=mode,
+                                     session_id=session_id)
             last_agent = graph[-1]
         print(f"\n[Tier 2 — {directed_task_type}] final output from '{last_agent}':")
         print(json.dumps(results[last_agent], indent=2, default=str))
@@ -305,7 +307,8 @@ def _run_tier2(task_text: str, decision: dict, app_slug: str, hires: list = None
 
 
 def _run_tier3_hires(task_text: str, decision: dict, hires: list,
-                      project_unique_name: str = None, mode: str = "auto") -> None:
+                      project_unique_name: str = None, mode: str = "auto",
+                      session_id: str = None) -> None:
     """CLI mirror of api/task_runner.py's _run_tier3_hires() — see that
     file's docstring for the full reasoning (Migration Part 10
     testability wiring, Part 5 §3's existing tier-2 pattern applied to
@@ -315,23 +318,29 @@ def _run_tier3_hires(task_text: str, decision: dict, hires: list,
     run_with_looping() instead of calling execute_graph() directly, so
     the adaptive-looping machinery from Parts 11-12 (macro-loop
     gatekeeper, hard safety caps) actually fires for a hires-driven
-    tier-3 task, rather than sitting fully built and unused. No
-    session_id available on this CLI path (same pre-existing gap as
-    _get_decision()'s own call above).
+    tier-3 task, rather than sitting fully built and unused.
+
+    Patch B8 (architecture plan §3.6 / build order step 7): this CLI
+    path used to hard-code session_id=None here (and main() below used
+    to never mint a session_id for the CLI run at all) -- "CLI-originated
+    work currently passes session_id=None and is silently skipped [at
+    relay/emitter.py] -- a gap, not a design intent." main() now mints a
+    real session_id once, the same way api/task_runner.py's run_task()/
+    preview_task() already do (`session_id or str(uuid.uuid4())`), and
+    this function receives and forwards it instead of hard-coding None.
 
     Migration Part B (session isolation fix): generates a throwaway
     per-invocation slug and scopes this run's bus keys to it (see
     api/task_runner.py's _run_tier3_hires() for the full reasoning) —
     without this, two separate CLI runs back to back would share the
     same module_specs/current_plan/submitted_code/etc. exactly like the
-    HTTP path did before this fix."""
-    import uuid
-
+    HTTP path did before this fix.
+    """
     from memory.bus import set_app_slug, slugify
     set_app_slug(f"{slugify(task_text)}_{uuid.uuid4().hex[:8]}")
 
     looped = run_with_looping(
-        hires, decision.get("execution_order"), task_text, session_id=None,
+        hires, decision.get("execution_order"), task_text, session_id=session_id,
         mode=mode, domain=decision.get("domain"), project_unique_name=project_unique_name,
         path="adaptive",   # NEW — Part 15 §2c, optional path label
     )
@@ -435,15 +444,28 @@ def main():
               "Start a new task, or ask for it to be rebuilt for the adaptive pipeline specifically.")
         return
 
-    # Part 23: the CLI path has never threaded a real session_id through
-    # at all -- append_turn()'s "no-op if session_id is falsy" guard
-    # means this simply does nothing on the CLI path today. Not a
-    # regression (the CLI never had conversation memory before either),
-    # just a known limitation -- see conversation_memory.py's own
-    # module docstring, and a candidate for a later part if CLI
-    # conversation continuity ever matters.
-    session_id = None
-    conversation_memory.append_turn(session_id, "user", task_text)   # NEW — Part 23 (no-op today)
+    # Patch B8 (architecture plan §3.6 / build order step 7): this CLI
+    # path used to hard-code session_id = None for the entire run --
+    # every downstream emit_event() call (classify()'s agent_start/
+    # routing_decision/agent_done, staff_task()'s brief-writer events,
+    # every execute_graph()/run_with_looping() role step) silently
+    # no-op'd at relay/emitter.py's own "no session_id -> no-op" guard.
+    # Per the architecture plan: "CLI-originated work currently passes
+    # session_id=None and is silently skipped -- a gap, not a design
+    # intent." Mint one real session_id for this invocation, the same
+    # way api/task_runner.py's run_task()/preview_task() already do for
+    # the HTTP path (`session_id or str(uuid.uuid4())`), and thread it
+    # through every call below that accepts one -- so a CLI run now
+    # shows up live on relay/emitter.py's event stream exactly like an
+    # HTTP-originated one does, instead of being silently invisible.
+    #
+    # conversation_memory.append_turn()'s own "no-op if session_id is
+    # falsy" guard (Part 23) meant CLI conversation memory was never
+    # actually written before this patch either -- that's a real,
+    # separate behavior change from this one line, not just an event-
+    # visibility fix, flagged here since it's easy to miss.
+    session_id = str(uuid.uuid4())
+    conversation_memory.append_turn(session_id, "user", task_text)
 
     # NEW — Part 2: Starter General Agents attempt first, unless a manual
     # --tier override was given (an explicit override skips SGA/cache
@@ -477,7 +499,7 @@ def main():
                 f"repeat it verbatim.)\n{reference_answer}"
             )
 
-        sga_result = sga_attempt(sga_input)   # Patch B7: may include reference context
+        sga_result = sga_attempt(sga_input, session_id=session_id)   # Patch B7: may include reference context; Patch B8: threads session_id
         if sga_result["resolved"]:
             write_cache(task_text, sga_result["answer"], app_slug=opts["app"], context_text=conv_context,
                         cache_class=cache_class)  # FIXED; CHANGED — Patch B7, tags the entry
@@ -493,12 +515,10 @@ def main():
 
     # CHANGE — Part 7 §2.1: staff_task() now needs the original task text
     # to write a good brief if a suggested role is genuinely new.
-    # Note: session_id is passed through as None here — this CLI path has
-    # no real session_id variable (same pre-existing gap _get_decision()'s
-    # own call above now shares explicitly). Brief-writer events will
-    # simply go out unassociated with any session here, exactly like
-    # routing_decision events already do.
-    hires = staff_task(decision, task_text=task_text)
+    # Patch B8: session_id is now threaded through here too, so a
+    # genuinely-new role's brief-writer events land on this run's own
+    # live channel instead of going out unassociated with any session.
+    hires = staff_task(decision, task_text=task_text, session_id=session_id)
     assessed_max = decision.get("agent_count_max", len(decision.get("suggested_agents", [])) or 1)
     mode_result = apply_mode(opts["mode"], hires, assessed_max)
 
@@ -515,18 +535,18 @@ def main():
 
     hires = mode_result["hires"]
     if tier == 0:
-        _run_tier0(task_text, decision)
+        _run_tier0(task_text, decision, session_id=session_id)
     elif tier == 1:
-        _run_tier1(task_text, decision, run_tests=opts["test"])
+        _run_tier1(task_text, decision, run_tests=opts["test"], session_id=session_id)
     elif tier == 2:
         _run_tier2(task_text, decision, app_slug=opts["app"], hires=hires,
-                   project_unique_name=opts["project"], mode=opts["mode"])
+                   project_unique_name=opts["project"], mode=opts["mode"], session_id=session_id)
     elif tier == 3:
         # Migration Part 14 §1/§3: _ensure_staffable() guarantees hires is
         # never empty for a tier-3 task now, so the old "else: loop.py"
         # fallback is gone — there's no case left for it to catch.
         _run_tier3_hires(task_text, decision, hires=hires,
-                          project_unique_name=opts["project"], mode=opts["mode"])
+                          project_unique_name=opts["project"], mode=opts["mode"], session_id=session_id)
     else:
         print(f"[EO] Unknown tier {tier!r} — aborting.")
 

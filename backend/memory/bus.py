@@ -119,15 +119,25 @@ def _namespaced(key: str) -> str:
             # -- that's literally the value this key is about to supply) would
             # look in the wrong namespace, or the default/global one, and
             # silently miss.
-            or key.startswith("pending_synthesis:")):   # NEW — CO5 Finding A:
-        # same exemption, same reasoning as paused_execution: above. This
-        # key is written mid-_run_tier3_hires() (still inside the
-        # POST /api/task request, before set_app_slug() context is torn
-        # down) and read back later from GET /api/task/{session_id}/stream
-        # -- a fresh request that hasn't called set_app_slug() either. If
-        # this were namespaced, the stream endpoint's read() would land in
-        # the wrong (or default/global) namespace and silently miss, same
-        # failure mode paused_execution: was exempted to avoid.
+            or key.startswith("pending_synthesis:")   # NEW — CO5 Finding A:
+            # same exemption, same reasoning as paused_execution: above. This
+            # key is written mid-_run_tier3_hires() (still inside the
+            # POST /api/task request, before set_app_slug() context is torn
+            # down) and read back later from GET /api/task/{session_id}/stream
+            # -- a fresh request that hasn't called set_app_slug() either. If
+            # this were namespaced, the stream endpoint's read() would land in
+            # the wrong (or default/global) namespace and silently miss, same
+            # failure mode paused_execution: was exempted to avoid.
+            or key.startswith("scratchpad:")):   # NEW — Patch B7 (§3.5):
+        # same exemption, same reasoning as paused_execution:/conversation:
+        # above -- a task's ephemeral working notes are a property of the
+        # SESSION, not whatever app_slug happens to be active in whichever
+        # call context (an agent mid-dispatch, a routes/tasks.py request,
+        # a resume) is touching the scratchpad at that moment. Without this
+        # exemption, a write_note() from one app_slug context and a
+        # list_notes()/resolve_note() from another would silently land on
+        # two different Redis keys, the exact failure mode this exemption
+        # list already exists to close off.
         return key
     slug = _current_app_slug()
     return f"{slug}:{key}" if slug else key

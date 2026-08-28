@@ -16,6 +16,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from eo.executor import execute_graph
 from eo.router import build_execution_graph_from_hires
+from eo.scratchpad import clear_scratchpad
 from memory.bus import read, write
 from relay.emitter import emit_event
 
@@ -254,4 +255,13 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
         loop_num += 1
         current_order = decision.get("redo_roles") or execution_order
 
+    # This is the one place run_with_looping() marks a task fully
+    # finished (as opposed to paused mid-pass, handled and returned
+    # separately above) — Patch B7 (§3.5) hooks the scratchpad's
+    # backstop wipe here so no working note outlives its task, even one
+    # an agent never explicitly resolved via scratchpad.resolve_note().
+    # See eo/scratchpad.py's own module docstring for the one gap this
+    # doesn't cover (a paused-then-resumed run finishing through
+    # eo/executor.py's resume_graph() instead of back through here).
+    clear_scratchpad(session_id)
     return {"results": results, "final_role": final_role}

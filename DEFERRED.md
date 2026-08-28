@@ -95,3 +95,16 @@ comment (`file:line`) that flagged it.
   open-ended adaptive runs the budget is meant to catch. Worth
   revisiting if a long-running tier-2 chat-tab task turns out to need
   the same backstop.
+
+## Deferred during Patch B7
+
+- **`eo/executor.py`'s `resume_graph()` doesn't clear the scratchpad on
+  completion.** (`backend/eo/scratchpad.py`, `backend/eo/executor.py`)
+  `resume_graph()` duplicates `run_with_looping()`'s own finished-return
+  tail inline for the resumed-macro-loop case, rather than calling back
+  into `eo/loop_controller.py` — so this patch's `clear_scratchpad()`
+  hook, wired only into `run_with_looping()`'s real completion point,
+  never fires for a run that pauses and is later resumed to completion.
+  Fixing it properly means resume_graph()'s duplicated tail should stop
+  being a separate copy of that logic, which is a bigger structural
+  change than this patch's scope (add the scratchpad mechanism).
