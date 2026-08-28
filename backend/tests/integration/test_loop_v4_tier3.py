@@ -57,7 +57,7 @@ def _stub_common(monkeypatch):
     monkeypatch.setattr(loop_v4.conversation_memory, "get_light_context", lambda *a, **k: None)
     monkeypatch.setattr(
         loop_v4, "staff_task",
-        lambda decision, task_text=None: [{"role": "writer", "agent_key": "FAKE_KEY", "brief": "write it"}],
+        lambda decision, task_text=None, session_id=None: [{"role": "writer", "agent_key": "FAKE_KEY", "brief": "write it"}],
     )
 
 
@@ -71,6 +71,7 @@ def test_tier3_decision_reaches_run_with_looping_and_prints_final_answer(monkeyp
         captured["execution_order"] = execution_order
         captured["task_text"] = task_text
         captured["path"] = path
+        captured["session_id"] = session_id
         return {"results": {"writer": {"text": "a finished multi-cycle app"}}, "final_role": "writer"}
 
     monkeypatch.setattr(loop_v4, "run_with_looping", fake_run_with_looping)
@@ -86,6 +87,9 @@ def test_tier3_decision_reaches_run_with_looping_and_prints_final_answer(monkeyp
     assert captured["hires"] == [{"role": "writer", "agent_key": "FAKE_KEY", "brief": "write it"}]
     assert captured["execution_order"] == ["writer"]
     assert captured["path"] == "adaptive"
+    # Patch B8: run_with_looping() must now receive a real (non-None)
+    # session_id from the CLI path, not the old hard-coded None.
+    assert captured["session_id"] is not None
     out = capsys.readouterr().out
     assert "a finished multi-cycle app" in out
 

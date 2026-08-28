@@ -36,7 +36,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import agents.generic_worker as generic_worker_module
-from eo import loop_controller
+from eo import loop_controller, scratchpad
 from eo.loop_controller import (
     FORCED_CHECKPOINT_EVERY,
     MAX_MACRO_LOOPS,
@@ -212,6 +212,32 @@ def test_run_with_looping_empty_pass_results_leaves_final_role_none(mock_graph_b
     result = run_with_looping(hires=[], execution_order=[], task_text="x",
                                session_id="s3", mode="simple")
     assert result == {"results": {}, "final_role": None}
+
+
+# ---------------------------------------------------------------------------
+# run_with_looping -- scratchpad wipe on completion (Patch B7)
+# ---------------------------------------------------------------------------
+
+def test_run_with_looping_clears_scratchpad_on_finished_completion(mock_graph_build, monkeypatch):
+    """B7's acceptance criterion: no scratchpad key survives past its
+    task's completion, even if the agent never called resolve_note()
+    for notes it wrote mid-run."""
+    scratchpad.write_note("s-finish", "never resolved")
+    _mock_execute_graph(monkeypatch, [{"writer": {"text": "output"}}])
+    run_with_looping(hires=[], execution_order=["writer"], task_text="x",
+                      session_id="s-finish", mode="simple")
+    assert scratchpad.list_notes("s-finish") == []
+
+
+def test_run_with_looping_does_not_clear_scratchpad_on_pause(mock_graph_build, monkeypatch):
+    """A pause is not a completion -- clear_scratchpad() must only fire
+    at the real finished-return point, not when execute_graph() reports
+    status: paused mid-pass."""
+    scratchpad.write_note("s-pause", "still needed on resume")
+    _mock_execute_graph(monkeypatch, [{"status": "paused", "paused_at_role": "reviewer"}])
+    run_with_looping(hires=[], execution_order=["reviewer"], task_text="x",
+                      session_id="s-pause", mode="expert")
+    assert [n["text"] for n in scratchpad.list_notes("s-pause")] == ["still needed on resume"]
 
 
 # ---------------------------------------------------------------------------

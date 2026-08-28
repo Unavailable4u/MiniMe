@@ -48,14 +48,20 @@ def test_tier0_task_routes_to_responder_only(monkeypatch):
     # staff_task() would otherwise try to write a real brief for
     # "responder" (no key_env set in this test env) since it isn't
     # pre-registered -- not what this test is about, so stub it out.
+    # Patch B8: staff_task() is now called with session_id=<real uuid>
+    # (main() no longer hard-codes None), so the stub must accept it.
+    captured_staff_task_session_id = {}
     monkeypatch.setattr(
         loop_v4, "staff_task",
-        lambda decision, task_text=None: [{"role": "responder", "agent_key": None, "brief": ""}],
+        lambda decision, task_text=None, session_id=None: (
+            captured_staff_task_session_id.__setitem__("value", session_id)
+            or [{"role": "responder", "agent_key": None, "brief": ""}]
+        ),
     )
 
     calls = []
 
-    def fake_execute_graph(graph, task_text=None, cycle_num=None):
+    def fake_execute_graph(graph, task_text=None, cycle_num=None, session_id=None):
         calls.append(graph)
         return {"responder": "Paris is the capital of France."}
 
@@ -72,6 +78,9 @@ def test_tier0_task_routes_to_responder_only(monkeypatch):
     assert calls == [["responder"]], f"expected only the responder graph to run, got {calls}"
     assert logged["outcome"] == "tier-0 responder answered directly"
     assert logged["decision"]["tier"] == 0
+    # Patch B8: the CLI path must mint and thread a real (non-None)
+    # session_id now, instead of hard-coding None end to end.
+    assert captured_staff_task_session_id["value"] is not None
 
 
 def test_tier0_never_calls_execute_graph_with_tier3_agents(monkeypatch):
@@ -84,12 +93,12 @@ def test_tier0_never_calls_execute_graph_with_tier3_agents(monkeypatch):
     monkeypatch.setattr(loop_v4.conversation_memory, "get_light_context", lambda *a, **k: None)
     monkeypatch.setattr(
         loop_v4, "staff_task",
-        lambda decision, task_text=None: [{"role": "responder", "agent_key": None, "brief": ""}],
+        lambda decision, task_text=None, session_id=None: [{"role": "responder", "agent_key": None, "brief": ""}],
     )
 
     seen_agents = set()
 
-    def fake_execute_graph(graph, task_text=None, cycle_num=None):
+    def fake_execute_graph(graph, task_text=None, cycle_num=None, session_id=None):
         seen_agents.update(graph)
         return {"responder": "answer"}
 

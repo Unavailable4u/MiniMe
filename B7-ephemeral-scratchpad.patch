@@ -1,0 +1,348 @@
+diff --git a/DEFERRED.md b/DEFERRED.md
+index 2dc174d..024a59a 100644
+--- a/DEFERRED.md
++++ b/DEFERRED.md
+@@ -95,3 +95,16 @@ comment (`file:line`) that flagged it.
+   open-ended adaptive runs the budget is meant to catch. Worth
+   revisiting if a long-running tier-2 chat-tab task turns out to need
+   the same backstop.
++
++## Deferred during Patch B7
++
++- **`eo/executor.py`'s `resume_graph()` doesn't clear the scratchpad on
++  completion.** (`backend/eo/scratchpad.py`, `backend/eo/executor.py`)
++  `resume_graph()` duplicates `run_with_looping()`'s own finished-return
++  tail inline for the resumed-macro-loop case, rather than calling back
++  into `eo/loop_controller.py` — so this patch's `clear_scratchpad()`
++  hook, wired only into `run_with_looping()`'s real completion point,
++  never fires for a run that pauses and is later resumed to completion.
++  Fixing it properly means resume_graph()'s duplicated tail should stop
++  being a separate copy of that logic, which is a bigger structural
++  change than this patch's scope (add the scratchpad mechanism).
+diff --git a/backend/eo/loop_controller.py b/backend/eo/loop_controller.py
+index fb635db..a7fc440 100644
+--- a/backend/eo/loop_controller.py
++++ b/backend/eo/loop_controller.py
+@@ -16,6 +16,7 @@ import sys
+ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+ from eo.executor import execute_graph
+ from eo.router import build_execution_graph_from_hires
++from eo.scratchpad import clear_scratchpad
+ from memory.bus import read, write
+ from relay.emitter import emit_event
+ 
+@@ -254,4 +255,13 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
+         loop_num += 1
+         current_order = decision.get("redo_roles") or execution_order
+ 
++    # This is the one place run_with_looping() marks a task fully
++    # finished (as opposed to paused mid-pass, handled and returned
++    # separately above) — Patch B7 (§3.5) hooks the scratchpad's
++    # backstop wipe here so no working note outlives its task, even one
++    # an agent never explicitly resolved via scratchpad.resolve_note().
++    # See eo/scratchpad.py's own module docstring for the one gap this
++    # doesn't cover (a paused-then-resumed run finishing through
++    # eo/executor.py's resume_graph() instead of back through here).
++    clear_scratchpad(session_id)
+     return {"results": results, "final_role": final_role}
+\ No newline at end of file
+diff --git a/backend/eo/scratchpad.py b/backend/eo/scratchpad.py
+new file mode 100644
+index 0000000..686d1dd
+--- /dev/null
++++ b/backend/eo/scratchpad.py
+@@ -0,0 +1,118 @@
++"""
++eo/scratchpad.py — Patch B7 (CLI-as-Internal-Interface plan, §3.5):
++per-task, ephemeral free-form working notes for an agent mid-run.
++
++Explicitly NOT merged with eo/audit_log.py: the audit log is an
++append-only, permanent record of config-affecting changes (redaction
++entries today — see redaction_guard.py's B2 write path); this module is
++the opposite on every axis that matters — mutable, agent-deletable, and
++guaranteed to be wiped by the end of the task that created it. A future
++session should not "helpfully" consolidate these into one store.
++
++Storage: one memory.bus list per session_id, namespaced the same way
++paused_execution:{session_id} already is (see eo/loop_controller.py's
++run_with_looping() for that established pattern) — key
++"scratchpad:{session_id}". memory/bus.py's _namespaced() has been
++extended (this same patch) to exempt "scratchpad:" from app_slug
++prefixing for the identical reason paused_execution:/conversation:/
++workspace_facts: are already exempt there: a task's own working notes
++are a property of the SESSION, not whatever app_slug happens to be
++active in whichever call context (agent dispatch, a routes/tasks.py
++request, a resume) is touching the scratchpad at that moment. Without
++that exemption, a write from one app_slug context and a read from
++another would silently land on two different Redis keys — see
++_namespaced()'s own docstring for the exact failure shape this class of
++bug takes.
++
++Cleanup has two layers, per the plan:
++  1. Primary: the agent that wrote a note deletes it itself once it's
++     no longer needed (resolve_note()).
++  2. Safety net: a max-note-count cap here, in case an agent (or a run
++     that errors out mid-way) never calls resolve_note() for some notes.
++  3. Backstop: clear_scratchpad() wipes the whole key. Wired into
++     eo/loop_controller.py's run_with_looping() at the point it returns
++     its finished (non-paused) result — see that function for the call
++     site. NOT wired into eo/executor.py's resume_graph(), which
++     duplicates run_with_looping()'s own finished-return tail inline
++     for the resumed-macro-loop case rather than calling back into
++     loop_controller.py; a scratchpad from a run that pauses and later
++     resumes to completion is not cleared by this patch. Flagged in
++     DEFERRED.md rather than fixed here — resume_graph()'s duplicated
++     tail is a pre-existing structural gap, not something this patch's
++     scope (add the scratchpad mechanism) should be reaching into
++     executor.py to restructure.
++"""
++import uuid
++from datetime import datetime, timezone
++
++from memory.bus import delete, read, write
++
++# Safety-net cap — a named constant so it's easy to tune later, same
++# reasoning as eo/tool_budget.py's DEFAULT_TOOL_CALL_BUDGET. Notes
++# beyond this count are dropped oldest-first on write(), independent of
++# whether any of them have been resolved yet.
++MAX_SCRATCHPAD_NOTES = 20
++
++
++def _key(session_id: str) -> str:
++    return f"scratchpad:{session_id}"
++
++
++def _utcnow_iso() -> str:
++    return datetime.now(timezone.utc).isoformat(timespec="seconds")
++
++
++def write_note(session_id: str, text: str) -> str:
++    """Appends a free-form note to this session's scratchpad and returns
++    its note_id, for a later resolve_note() call by whichever agent
++    wrote it (or anyone else working the same session_id — there's no
++    per-writer ownership tracked here, same trust model as the rest of
++    an in-process task run).
++
++    Applies the safety-net cap on every write: once MAX_SCRATCHPAD_NOTES
++    is exceeded, the oldest note(s) are dropped first, regardless of
++    resolved status — this is the fallback for notes nobody ever
++    resolves, not a substitute for resolve_note().
++    """
++    notes = read(_key(session_id), default=[]) or []
++    note_id = uuid.uuid4().hex[:8]
++    notes.append({"id": note_id, "text": text, "created_at": _utcnow_iso()})
++    if len(notes) > MAX_SCRATCHPAD_NOTES:
++        notes = notes[-MAX_SCRATCHPAD_NOTES:]
++    write(_key(session_id), notes)
++    return note_id
++
++
++def resolve_note(session_id: str, note_id: str) -> bool:
++    """Deletes a single note by id — the primary cleanup path (§3.5):
++    an agent resolves its own note once it's no longer needed, rather
++    than waiting for the safety-net cap or the end-of-task wipe. Returns
++    True if a note with that id existed and was removed, False
++    otherwise (unknown id, already resolved, or unknown session)."""
++    notes = read(_key(session_id), default=[]) or []
++    remaining = [n for n in notes if n.get("id") != note_id]
++    if len(remaining) == len(notes):
++        return False
++    write(_key(session_id), remaining)
++    return True
++
++
++def list_notes(session_id: str) -> list:
++    """Returns this session's current notes, oldest first, as-stored.
++    Read-only — does not mutate or trim anything (mirrors
++    eo/tool_budget.py's over_threshold()/read split: reads never have
++    write side effects)."""
++    return read(_key(session_id), default=[]) or []
++
++
++def clear_scratchpad(session_id: str) -> None:
++    """Wipes this session's scratchpad entirely. Called on task
++    completion (see eo/loop_controller.py's run_with_looping()) — the
++    backstop that guarantees no scratchpad key survives past its task,
++    even for notes an agent never explicitly resolved. Uses delete()
++    rather than write(session_id, []), which would leave an empty-but-
++    present namespaced key sitting in Redis forever instead of actually
++    removing it — same distinction memory/bus.py's own delete()
++    docstring draws, and the same call eo/chat_store.py's delete_chat()
++    makes for the same reason."""
++    delete(_key(session_id))
+diff --git a/backend/memory/bus.py b/backend/memory/bus.py
+index a7e6b5d..c5ab282 100644
+--- a/backend/memory/bus.py
++++ b/backend/memory/bus.py
+@@ -119,15 +119,25 @@ def _namespaced(key: str) -> str:
+             # -- that's literally the value this key is about to supply) would
+             # look in the wrong namespace, or the default/global one, and
+             # silently miss.
+-            or key.startswith("pending_synthesis:")):   # NEW — CO5 Finding A:
+-        # same exemption, same reasoning as paused_execution: above. This
+-        # key is written mid-_run_tier3_hires() (still inside the
+-        # POST /api/task request, before set_app_slug() context is torn
+-        # down) and read back later from GET /api/task/{session_id}/stream
+-        # -- a fresh request that hasn't called set_app_slug() either. If
+-        # this were namespaced, the stream endpoint's read() would land in
+-        # the wrong (or default/global) namespace and silently miss, same
+-        # failure mode paused_execution: was exempted to avoid.
++            or key.startswith("pending_synthesis:")   # NEW — CO5 Finding A:
++            # same exemption, same reasoning as paused_execution: above. This
++            # key is written mid-_run_tier3_hires() (still inside the
++            # POST /api/task request, before set_app_slug() context is torn
++            # down) and read back later from GET /api/task/{session_id}/stream
++            # -- a fresh request that hasn't called set_app_slug() either. If
++            # this were namespaced, the stream endpoint's read() would land in
++            # the wrong (or default/global) namespace and silently miss, same
++            # failure mode paused_execution: was exempted to avoid.
++            or key.startswith("scratchpad:")):   # NEW — Patch B7 (§3.5):
++        # same exemption, same reasoning as paused_execution:/conversation:
++        # above -- a task's ephemeral working notes are a property of the
++        # SESSION, not whatever app_slug happens to be active in whichever
++        # call context (an agent mid-dispatch, a routes/tasks.py request,
++        # a resume) is touching the scratchpad at that moment. Without this
++        # exemption, a write_note() from one app_slug context and a
++        # list_notes()/resolve_note() from another would silently land on
++        # two different Redis keys, the exact failure mode this exemption
++        # list already exists to close off.
+         return key
+     slug = _current_app_slug()
+     return f"{slug}:{key}" if slug else key
+diff --git a/backend/tests/unit/test_eo_loop_controller.py b/backend/tests/unit/test_eo_loop_controller.py
+index 9558ef0..e4d185b 100644
+--- a/backend/tests/unit/test_eo_loop_controller.py
++++ b/backend/tests/unit/test_eo_loop_controller.py
+@@ -36,7 +36,7 @@ from unittest.mock import MagicMock
+ import pytest
+ 
+ import agents.generic_worker as generic_worker_module
+-from eo import loop_controller
++from eo import loop_controller, scratchpad
+ from eo.loop_controller import (
+     FORCED_CHECKPOINT_EVERY,
+     MAX_MACRO_LOOPS,
+@@ -214,6 +214,32 @@ def test_run_with_looping_empty_pass_results_leaves_final_role_none(mock_graph_b
+     assert result == {"results": {}, "final_role": None}
+ 
+ 
++# ---------------------------------------------------------------------------
++# run_with_looping -- scratchpad wipe on completion (Patch B7)
++# ---------------------------------------------------------------------------
++
++def test_run_with_looping_clears_scratchpad_on_finished_completion(mock_graph_build, monkeypatch):
++    """B7's acceptance criterion: no scratchpad key survives past its
++    task's completion, even if the agent never called resolve_note()
++    for notes it wrote mid-run."""
++    scratchpad.write_note("s-finish", "never resolved")
++    _mock_execute_graph(monkeypatch, [{"writer": {"text": "output"}}])
++    run_with_looping(hires=[], execution_order=["writer"], task_text="x",
++                      session_id="s-finish", mode="simple")
++    assert scratchpad.list_notes("s-finish") == []
++
++
++def test_run_with_looping_does_not_clear_scratchpad_on_pause(mock_graph_build, monkeypatch):
++    """A pause is not a completion -- clear_scratchpad() must only fire
++    at the real finished-return point, not when execute_graph() reports
++    status: paused mid-pass."""
++    scratchpad.write_note("s-pause", "still needed on resume")
++    _mock_execute_graph(monkeypatch, [{"status": "paused", "paused_at_role": "reviewer"}])
++    run_with_looping(hires=[], execution_order=["reviewer"], task_text="x",
++                      session_id="s-pause", mode="expert")
++    assert [n["text"] for n in scratchpad.list_notes("s-pause")] == ["still needed on resume"]
++
++
+ # ---------------------------------------------------------------------------
+ # run_with_looping -- paused mid-pass
+ # ---------------------------------------------------------------------------
+diff --git a/backend/tests/unit/test_eo_scratchpad.py b/backend/tests/unit/test_eo_scratchpad.py
+new file mode 100644
+index 0000000..012d867
+--- /dev/null
++++ b/backend/tests/unit/test_eo_scratchpad.py
+@@ -0,0 +1,85 @@
++"""
++tests/unit/test_eo_scratchpad.py — Patch B7.
++
++eo/scratchpad.py is a small memory.bus-backed store, same shape family
++as eo/tool_budget.py (B6) — no mocking needed beyond the autouse
++fake_bus fixture already used across this suite. Covers: write/resolve/
++list, the safety-net cap, and the two ways a scratchpad ends up empty
++(explicit resolve_note() calls vs. the end-of-task clear_scratchpad()
++backstop) — the latter is the specific property B7's acceptance
++criterion cares about: no scratchpad key survives task completion, even
++if nothing was ever explicitly resolved.
++"""
++from eo import scratchpad
++
++
++def test_write_note_returns_an_id():
++    note_id = scratchpad.write_note("session-a", "remember to check X")
++    assert isinstance(note_id, str) and note_id
++
++
++def test_write_note_appends_to_list_notes():
++    scratchpad.write_note("session-a", "first note")
++    scratchpad.write_note("session-a", "second note")
++    notes = scratchpad.list_notes("session-a")
++    assert [n["text"] for n in notes] == ["first note", "second note"]
++
++
++def test_notes_are_scoped_per_session():
++    scratchpad.write_note("session-a", "a's note")
++    scratchpad.write_note("session-b", "b's note")
++    assert [n["text"] for n in scratchpad.list_notes("session-a")] == ["a's note"]
++    assert [n["text"] for n in scratchpad.list_notes("session-b")] == ["b's note"]
++
++
++def test_list_notes_empty_for_unknown_session():
++    assert scratchpad.list_notes("never-written") == []
++
++
++def test_resolve_note_removes_only_that_note():
++    id1 = scratchpad.write_note("session-a", "keep")
++    id2 = scratchpad.write_note("session-a", "resolve me")
++    resolved = scratchpad.resolve_note("session-a", id2)
++    assert resolved is True
++    remaining = scratchpad.list_notes("session-a")
++    assert len(remaining) == 1
++    assert remaining[0]["id"] == id1
++
++
++def test_resolve_note_returns_false_for_unknown_id():
++    scratchpad.write_note("session-a", "note")
++    assert scratchpad.resolve_note("session-a", "not-a-real-id") is False
++
++
++def test_resolve_note_returns_false_for_unknown_session():
++    assert scratchpad.resolve_note("never-written", "whatever") is False
++
++
++def test_safety_net_cap_drops_oldest_notes():
++    ids = [scratchpad.write_note("session-a", f"note {i}")
++           for i in range(scratchpad.MAX_SCRATCHPAD_NOTES + 5)]
++    notes = scratchpad.list_notes("session-a")
++    assert len(notes) == scratchpad.MAX_SCRATCHPAD_NOTES
++    # oldest 5 got dropped; the newest MAX_SCRATCHPAD_NOTES survive, in order
++    assert [n["id"] for n in notes] == ids[5:]
++
++
++def test_clear_scratchpad_empties_notes_that_were_never_resolved():
++    scratchpad.write_note("session-a", "note 1")
++    scratchpad.write_note("session-a", "note 2")
++    scratchpad.clear_scratchpad("session-a")
++    assert scratchpad.list_notes("session-a") == []
++
++
++def test_clear_scratchpad_only_affects_its_own_session():
++    scratchpad.write_note("session-a", "a's note")
++    scratchpad.write_note("session-b", "b's note")
++    scratchpad.clear_scratchpad("session-a")
++    assert scratchpad.list_notes("session-a") == []
++    assert [n["text"] for n in scratchpad.list_notes("session-b")] == ["b's note"]
++
++
++def test_clear_scratchpad_is_safe_on_an_empty_session():
++    # No prior write_note() call at all — clear_scratchpad() must not raise.
++    scratchpad.clear_scratchpad("never-written")
++    assert scratchpad.list_notes("never-written") == []
