@@ -1499,10 +1499,16 @@ def _wrap_legacy_entry(role_name: str, brief: str) -> dict:
     anything else is tagged "panel_brief_writer" — the only other way a
     bare string could have ended up in the pre-migration store — so the
     UI correctly flags it as an unreviewed cold-start brief instead of
-    silently implying a human wrote it."""
+    silently implying a human wrote it.
+
+    Patch B3 adds `capability_tags: []` to this shape — additive, same
+    "migrate in place, no separate script" discipline this function
+    already follows for the times_hired/pinned fields. A legacy entry
+    has no tags to recover any more than it has a real source, so it
+    starts empty, same as every freshly-hired role does."""
     source = "seed" if ROLE_PROMPTS_SEED.get(role_name) == brief else "panel_brief_writer"
     return {"brief": brief, "source": source, "updated_at": None, "times_hired": 0,
-            "pinned": False, "pinned_at": None}
+            "pinned": False, "pinned_at": None, "capability_tags": []}
 
 
 def _load_prompts(user_id: str | None = None) -> dict:
@@ -1548,6 +1554,16 @@ def _load_prompts(user_id: str | None = None) -> dict:
     for role_name, value in list(prompts.items()):
         if not isinstance(value, dict):
             prompts[role_name] = _wrap_legacy_entry(role_name, value)
+            changed = True
+        elif "capability_tags" not in value:
+            # Patch B3: additive field on an already-migrated (Part
+            # 2 §2.2) entry that predates this patch. Same in-place,
+            # no-separate-script migration discipline as the
+            # bare-string case above — an entry with no tags yet
+            # starts at [], not None, so every caller of
+            # capability_tags can treat it as "empty list" rather
+            # than needing its own None-check.
+            value["capability_tags"] = []
             changed = True
     if changed:
         write(key, prompts)
@@ -1607,6 +1623,10 @@ def add_role_prompt(role_name: str, brief: str, source: str = "panel_brief_write
         # unpinned every time a role's brief changes.
         "pinned": existing.get("pinned", False),
         "pinned_at": existing.get("pinned_at"),
+        # Patch B3: capability_tags is role-scoping metadata, not part
+        # of the brief itself — preserved across a brief rewrite for
+        # the same reason pinned/pinned_at are.
+        "capability_tags": existing.get("capability_tags", []),
     }
     write(key, prompts)
 
@@ -1638,7 +1658,7 @@ def record_role_hire(role_name: str, user_id: str | None = None) -> None:
     entry = prompts.get(role_name) or {
         "brief": None, "source": "panel_brief_writer",
         "updated_at": None, "times_hired": 0,
-        "pinned": False, "pinned_at": None,
+        "pinned": False, "pinned_at": None, "capability_tags": [],
     }
     entry["times_hired"] = entry.get("times_hired", 0) + 1
     prompts[role_name] = entry
@@ -1660,10 +1680,40 @@ def set_role_pinned(role_name: str, pinned: bool, user_id: str | None = None) ->
     entry = prompts.get(role_name) or {
         "brief": None, "source": "panel_brief_writer",
         "updated_at": None, "times_hired": 0,
-        "pinned": False, "pinned_at": None,
+        "pinned": False, "pinned_at": None, "capability_tags": [],
     }
     entry["pinned"] = bool(pinned)
     entry["pinned_at"] = _utcnow_iso() if pinned else None
+    prompts[role_name] = entry
+    write(key, prompts)
+    return entry
+
+
+def set_role_capability_tags(role_name: str, tags: list[str],
+                              user_id: str | None = None) -> dict:
+    """Patch B3 — sets a role's capability_tags, the field
+    eo/capabilities.py::get_role_scope()/capabilities_for_role() read
+    to decide how much of the capability layer (Patch B1) that role
+    can see. Same "create a bare entry rather than raise if the role
+    hasn't been briefed yet" discipline as record_role_hire() and
+    set_role_pinned() above — a role can in principle be scoped before
+    it's ever been hired. Returns the updated entry, same "hand the
+    fresh object back so the API layer doesn't need a second read"
+    convention set_role_pinned() already uses.
+
+    Replaces the tag list wholesale rather than merging — same
+    "explicit set, not an implicit accumulate" contract PUT-style
+    endpoints in this codebase already use elsewhere (e.g.
+    update_role_prompt() replacing a brief outright rather than
+    appending to it)."""
+    key = _role_prompts_key(user_id)
+    prompts = _load_prompts(user_id)
+    entry = prompts.get(role_name) or {
+        "brief": None, "source": "panel_brief_writer",
+        "updated_at": None, "times_hired": 0,
+        "pinned": False, "pinned_at": None, "capability_tags": [],
+    }
+    entry["capability_tags"] = list(tags)
     prompts[role_name] = entry
     write(key, prompts)
     return entry

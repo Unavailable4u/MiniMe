@@ -1,5 +1,5 @@
 """
-tests/unit/test_eo_capability_entries.py — Patch B1.
+tests/unit/test_eo_capability_entries.py — Patch B1, extended by B2.
 
 eo/capability_entries.py is a second, separate store from
 eo/skill_library.py's (see that module's own docstring for why) — no
@@ -7,7 +7,17 @@ Vector/embedding involved, so unlike test_eo_skill_library.py this
 file needs no embed_text/vector_index patching. `read`/`write` route
 through fake_bus (conftest, autouse) transparently, same as every
 other registry:-prefixed store's tests in this suite.
+
+Patch B2 additions at the bottom of this file cover the one new
+behavior it adds to write_capability_entry(): entry_type="redaction"
+writes are audit-logged, ordinary "capability" writes are not.
+write_audit() itself is mocked here (not exercised against a real DB)
+— this file is only pinning "was it called, with what," the same way
+test_eo_capabilities.py mocks its own delegate targets rather than
+running the real underlying functions.
 """
+from unittest.mock import MagicMock
+
 from eo import capability_entries
 
 
@@ -98,3 +108,71 @@ def test_write_capability_entry_supports_other_entry_types():
         for e in capability_entries.list_capability_entries(entry_type="redaction")
     }
     assert entry_id in redaction_ids
+
+
+# ---------------------------------------------------------------------------
+# Patch B2 — redaction writes are audit-logged; ordinary writes are not.
+# ---------------------------------------------------------------------------
+
+def test_redaction_write_logs_to_audit_log(monkeypatch):
+    fake_audit = MagicMock()
+    monkeypatch.setattr(capability_entries, "write_audit", fake_audit)
+
+    entry_id = capability_entries.write_capability_entry(
+        title="Never read backend/.env",
+        doc_text="Do not open or summarize the backend .env file.",
+        tags=["secrets"],
+        entry_type="redaction",
+        user_id="user_42",
+    )
+
+    fake_audit.assert_called_once_with(
+        "user_42",
+        "capability_entry.redaction_write",
+        "capability_entry",
+        entry_id,
+        {"title": "Never read backend/.env", "tags": ["secrets"], "created": True},
+    )
+
+
+def test_redaction_write_without_user_id_falls_back_to_system_actor(monkeypatch):
+    fake_audit = MagicMock()
+    monkeypatch.setattr(capability_entries, "write_audit", fake_audit)
+
+    capability_entries.write_capability_entry(
+        title="Never read id_rsa",
+        doc_text="Do not open private key files.",
+        tags=["secrets"],
+        entry_type="redaction",
+    )
+
+    called_user_id = fake_audit.call_args.args[0]
+    assert called_user_id == capability_entries._SYSTEM_ACTOR
+
+
+def test_redaction_write_second_time_marks_created_false(monkeypatch):
+    fake_audit = MagicMock()
+    monkeypatch.setattr(capability_entries, "write_audit", fake_audit)
+
+    capability_entries.write_capability_entry(
+        title="Repeated redaction", doc_text="v1", tags=["a"], entry_type="redaction",
+    )
+    capability_entries.write_capability_entry(
+        title="Repeated redaction", doc_text="v2", tags=["a"], entry_type="redaction",
+    )
+
+    second_call_detail = fake_audit.call_args.args[4]
+    assert second_call_detail["created"] is False
+
+
+def test_ordinary_capability_write_does_not_log_to_audit_log(monkeypatch):
+    fake_audit = MagicMock()
+    monkeypatch.setattr(capability_entries, "write_audit", fake_audit)
+
+    capability_entries.write_capability_entry(
+        title="A brand new capability",
+        doc_text="Describes something new the system can do.",
+        tags=["frontend_capabilities"],
+    )
+
+    fake_audit.assert_not_called()
