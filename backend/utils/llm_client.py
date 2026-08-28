@@ -384,6 +384,23 @@ class _CloudflareTransientError(Exception):
 _TRANSIENT_ERRORS = _TRANSIENT_SDK_ERRORS + (_CloudflareTransientError,)
 
 
+class _StepUnwinnableError(RuntimeError):
+    """Bug fix (2026-08-28): raised by _ledger_gate()'s unwinnable-step
+    fast-fail (2026-08-27 patch) when a step's own estimated input plus
+    its resolved max_tokens ceiling already exceeds the model's entire
+    tpm budget on its own. That fast-fail correctly avoids burning the
+    full _MAX_LEDGER_WAIT_RETRIES/_MAX_LEDGER_WAIT_BUDGET_SECONDS budget
+    on a structurally impossible wait -- but until now it was a bare
+    RuntimeError raised from inside _run_chain_step()'s per-step retry
+    loop with no surrounding try/except, so it propagated straight past
+    every later chain step instead of triggering the same "reroute to
+    next step" behavior every other _ledger_gate() outcome gets. Giving
+    it its own subclass lets _run_chain_step() catch this specific case
+    (and only this case) and reroute like the "reroute" gate action
+    already does, while still letting it escape unhandled everywhere
+    else RuntimeError was never being caught anyway."""
+
+
 class ChainExhaustedError(RuntimeError):
     """Phase 6a: raised by generate_text() (both the sync and streaming
     paths) ONLY when every provider in the fallback chain has genuinely
@@ -1139,12 +1156,30 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     every openrouter call, same as a provider that just didn't include
     them -- record_headroom() already treats that as a normal no-op, no
     special-casing needed here for that part."""
+    # Bug fix (2026-08-28, injection-guard audit): the system message was
+    # always included, even when system_prompt is "" (empty string is
+    # still truthy-shaped here -- it was unconditionally appended as
+    # {"role": "system", "content": ""}). That's fine for ordinary chat
+    # models, but single-label classification models served behind this
+    # same /chat/completions shape (e.g. Groq's llama-prompt-guard-2-86m,
+    # see eo/injection_guard.py) reject any request that isn't exactly
+    # one user message with a 400 ("messages must contains a single user
+    # message for text classification models"). Every injection_guard
+    # call was therefore malformed before it ever reached the model --
+    # confirmed live, 100% failure rate -- and injection_guard.py's own
+    # fail-open except-clause silently treated every one of those 400s
+    # as "not flagged," so scraped web content was passing through
+    # completely unscreened. Omitting the system message entirely when
+    # it's empty/falsy fixes the 400 for classifier-shaped callers while
+    # being a no-op for every existing chat-model caller, which always
+    # passes a real system_prompt.
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_content})
     kwargs = dict(
         model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        messages=messages,
     )
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
@@ -2357,7 +2392,7 @@ def _ledger_gate(chain: list, index: int, provider: str, key, model: str,
               f"tokens, which alone exceeds this model's tpm ceiling -- "
               f"this call can never fit regardless of concurrent usage, "
               f"failing fast instead of retrying.")
-        raise RuntimeError(
+        raise _StepUnwinnableError(
             f"{label} cannot fit under its tpm ceiling: ~{_estimated_tokens} "
             f"estimated input tokens + {max_tokens or 0} max output tokens "
             f"exceeds the model's per-minute token budget on its own. "
@@ -2924,12 +2959,29 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _continuation_prompt(user_content, accumulated_text)
             if accumulated_text else user_content
         )
-        _gate, _reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed = _ledger_gate(
-            chain, index, provider, key, model,
-            system_prompt, prompt_for_step, label, agent_name,
-            max_tokens=max_tokens, session_id=session_id,
-            same_step_ledger_waits=same_step_ledger_waits,
-            same_step_ledger_wait_elapsed=same_step_ledger_wait_elapsed)
+        try:
+            _gate, _reservation_id, same_step_ledger_waits, same_step_ledger_wait_elapsed = _ledger_gate(
+                chain, index, provider, key, model,
+                system_prompt, prompt_for_step, label, agent_name,
+                max_tokens=max_tokens, session_id=session_id,
+                same_step_ledger_waits=same_step_ledger_waits,
+                same_step_ledger_wait_elapsed=same_step_ledger_wait_elapsed)
+        except _StepUnwinnableError as _unwinnable_exc:
+            # Bug fix (2026-08-28): this step can never fit under its own
+            # tpm ceiling no matter how long we wait, but that's only
+            # fatal for the WHOLE call if there's no later chain step to
+            # fall through to. Mirror the "reroute" gate action instead
+            # of letting this escape past every remaining fallback --
+            # same as _handle_transient_error() already does for other
+            # unrecoverable-on-this-step-but-not-on-the-chain failures.
+            if is_last:
+                raise
+            print(f"  [{agent_name}] {label} cannot fit under its tpm "
+                  f"ceiling no matter how long we wait -- rerouting to "
+                  f"the next chain step instead of failing the request.")
+            last_exc = _unwinnable_exc
+            _record_ledger_event(session_id, "reroute")
+            break  # skip this step, fall through to the next chain step
         if _gate == "reroute":
             _record_ledger_event(session_id, "reroute")
             break  # skip this step, fall through to the next chain step

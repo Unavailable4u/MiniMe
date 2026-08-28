@@ -124,6 +124,7 @@ from eo.errors import MissingDependencyError
 from eo.injection_guard import score_snippet  # NEW — Patch 12
 from memory.bus import read as bus_read
 from memory.bus import read_stage_output_text
+from memory.bus import write as bus_write
 from relay.emitter import EventType, emit_event
 from utils.llm_client import (
     DROPPABLE_CONTEXT_MARKER,
@@ -2897,7 +2898,30 @@ def run_hardware_speccer(session_id: str = None, tier: int = None,
 
     emit_event(EventType.DEVICE_SPEC, session_id, agent="hardware_speccer",
                payload={"part_count": len(spec.get("parts", []))})
-    return {"text": json.dumps(spec), "spec": spec}
+
+    _full_text = json.dumps(spec)
+    # Bug fix (2026-08-28, full-result-404 audit): this role's real
+    # storage is workspace_facts.custom (see module docstring above) --
+    # that part is deliberate and stays unchanged. But
+    # api/routes/tasks.py's GET .../step/{role}/full route (the
+    # truncation-recovery endpoint relay/emitter.py's `truncated: True`
+    # flag tells the frontend to call whenever a large agent_done payload
+    # got shrunk to fit Pusher's ~10KB cap) only ever reads
+    # stage_output:{session_id}:{role} via read_stage_output_text() --
+    # the same convention every other agent in this codebase writes to
+    # on completion (generic_worker.py, schema_diagrammer.py,
+    # architecture_diagrammer.py, etc. -- see their own
+    # bus_write(f"stage_output:{{session_id}}:{{role}}", ...) call
+    # sites). hardware_speccer never wrote that key, so any session
+    # whose device spec was large enough to get Pusher-truncated hit a
+    # guaranteed 404 on the recovery route with no way to fetch the full
+    # spec. Mirroring the same write here (in addition to, not instead
+    # of, the workspace_facts write above) fixes the 404 for every
+    # existing/other consumer of workspace_facts.custom unaffected.
+    if session_id:
+        bus_write(f"stage_output:{session_id}:hardware_speccer", _full_text)
+
+    return {"text": _full_text, "spec": spec}
 
 
 if __name__ == "__main__":
