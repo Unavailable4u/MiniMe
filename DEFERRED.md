@@ -69,3 +69,29 @@ comment (`file:line`) that flagged it.
   plan §3.2) needs generic_worker.py's own call shape to change — out
   of scope for a patch that's supposed to be behavior-safe for the
   three named orchestration files only.
+
+## Deferred during Patch B6
+
+- **No explicit "tab" concept anywhere else in the backend.** `tab` is
+  a brand-new, bare `str | None` threaded from `TaskRequest`/
+  `ConfirmTaskRequest` all the way to `eo/executor.py`'s `_run_loop()`
+  (see `eo/executor.py::execute_graph()`'s own docstring) purely so
+  this patch's budget check can gate itself to `tab == "chat"`. No
+  other backend code validates, enumerates, or otherwise cares what
+  values are legal — the frontend is trusted to send the right string.
+  A real enum/constant (`CHAT`, `PROJECTS`, `NOTEBOOKS`, ...) shared
+  between frontend and backend, and validation at the `TaskRequest`
+  boundary, would close that gap; out of scope for a patch that's just
+  supposed to add the budget mechanism.
+- **`DEFAULT_TOOL_CALL_BUDGET`'s value (40) is a guess, not data.**
+  `eo/tool_budget.py`'s own docstring already flags this — the plan
+  (§3.4) explicitly calls it a starting default meant to be tuned once
+  real chat-tab usage numbers exist. No telemetry pass to actually
+  gather those numbers is in scope here.
+- **`_run_tier2()`'s direct `execute_graph()` call never receives
+  `tab`.** Only the tier-3 hires-driven path (`_run_tier3_hires()` ->
+  `run_with_looping()`) is threaded through — tier 2's fixed/hires
+  graphs are typically short, code-editing dispatches, not the
+  open-ended adaptive runs the budget is meant to catch. Worth
+  revisiting if a long-running tier-2 chat-tab task turns out to need
+  the same backstop.

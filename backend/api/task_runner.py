@@ -334,7 +334,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
                       approval_roles: set = None,
                       no_conversation_context_roles: set = None,
                       app_slug: str = None, scope: str = None, workspace_id: str = None,
-                      owner_id: str = None) -> dict:
+                      owner_id: str = None, tab: str = None) -> dict:
     """
     Routes through eo/loop_controller.py's run_with_looping() rather than
     calling execute_graph() directly, so the adaptive-looping machinery
@@ -389,6 +389,12 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
     steps in this tier-3 roster can look up a stored output-format
     preference. None (default) is a no-op, matching every other optional
     param here.
+
+    tab (Patch B6 — tool-call budget): same "not branched on here, just
+    forwarded" treatment as owner_id above — forwarded straight through
+    to run_with_looping() -> execute_graph() -> eo/executor.py's
+    _run_loop(), the one place that actually reads it (to gate the
+    tool-call-budget pause to the chat tab). None (default) is a no-op.
     """
     from memory.bus import set_app_slug, slugify
     # Scopes every bus key this run touches (module_specs, current_plan,
@@ -424,6 +430,7 @@ def _run_tier3_hires(task_text: str, decision: dict, session_id: str, hires: lis
         scope=scope,
         workspace_id=workspace_id,
         owner_id=owner_id,
+        tab=tab,
     )
 
     # run_with_looping() returns a paused sentinel instead of
@@ -867,7 +874,8 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
              mode: str = "auto", project_unique_name: str = None,
              approval_roles: set = None,
              no_conversation_context_roles: set = None, owner_id: str = None,
-             attachment: dict = None, topic_id: str = None, scope: str = None) -> dict:
+             attachment: dict = None, topic_id: str = None, scope: str = None,
+             tab: str = None) -> dict:
     """
     ...docstring unchanged, plus:
 
@@ -896,6 +904,16 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     only web_researcher's dispatch branch actually reads it. None for
     every caller that doesn't set it (every existing caller, plus any
     non-research task) — identical behavior to today.
+
+    tab: NEW — Patch B6 (§3.4). Which frontend tab this request
+    originated from ("chat", "projects", "notebooks", ...) — the
+    person's own open UI tab, not a routing/classification concept.
+    Forwarded unchanged through _run_task_inner() -> _dispatch_resolved()
+    -> _run_tier3_hires() -> run_with_looping() -> execute_graph(), where
+    only eo/executor.py's _run_loop() reads it, to gate the tool-call
+    budget pause to the chat tab specifically. None for every caller
+    that doesn't set it (every existing caller before this patch) —
+    identical behavior to today: no budget enforcement at all.
     """
     # NEW — Patch 13: content-safety guard at intake, before this
     # task_text is persisted to conversation_memory or dispatched to any
@@ -929,6 +947,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         attachment=attachment,   # NEW — Data Layer §4a
         topic_id=topic_id,   # NEW — Step 6.11.f
         scope=scope,   # NEW — task 13d/13e
+        tab=tab,   # NEW — Patch B6
     )
     _write_plan_panels(response, session_id, owner_id)   # NEW — chat-to-panel writes, patch 2
     _write_code_files(response, session_id, owner_id)   # NEW — Code sub-tab write-back, patch 9
@@ -972,7 +991,8 @@ def preview_task(task_text: str, tier_override: int = None, directed_task_type_o
 def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                   app_slug: str = None, mode: str = "auto", project_unique_name: str = None,
                   approval_roles: set = None,
-                  no_conversation_context_roles: set = None, owner_id: str = None) -> dict:   
+                  no_conversation_context_roles: set = None, owner_id: str = None,
+                  tab: str = None) -> dict:   
     """Part 2 §2.5 — the "confirm" half: takes the (possibly user-edited)
     hires list straight from a preview_task() response and dispatches it
     directly, WITHOUT calling staff_task() a second time (a second call
@@ -990,6 +1010,12 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
     stripped before the hires list is handed to the actual dispatch —
     downstream code (build_execution_graph_from_hires(), etc.) only
     knows about role/agent_key/brief, unchanged.
+
+    tab: NEW — Patch B6, same "forwarded to _dispatch_resolved(), only
+    eo/executor.py's _run_loop() reads it" treatment as run_task()'s own
+    tab param — preview -> edit -> confirm is still a chat-tab flow when
+    that's where it started, so this needs the same pass-through
+    run_task() already has, not a second design.
     """
     for hire in hires:
         if hire.get("update_library"):
@@ -1023,7 +1049,7 @@ def confirm_task(task_text: str, decision: dict, hires: list, session_id: str,
                                        project_unique_name=project_unique_name,
                                        approval_roles=approval_roles,
                                        no_conversation_context_roles=no_conversation_context_roles,
-                                       workspace_id=workspace_id, owner_id=owner_id)
+                                       workspace_id=workspace_id, owner_id=owner_id, tab=tab)
 
     conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response), owner_id=owner_id)   
     return response
@@ -1557,7 +1583,8 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
 def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_slug: str,
                         run_tests: bool, session_id: str, mode: str, project_unique_name: str,
                         approval_roles: set, no_conversation_context_roles: set = None,
-                        scope: str = None, workspace_id: str = None, owner_id: str = None) -> dict:
+                        scope: str = None, workspace_id: str = None, owner_id: str = None,
+                        tab: str = None) -> dict:
     """The tier-branch dispatch that runs once classification + hiring
     are resolved — shared by _run_task_inner() (auto, one-shot path),
     confirm_task() (Part 2 §2.5's post-review path, where `hires` may
@@ -1587,7 +1614,13 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
     NOT tier-3-only — forwarded to every tier branch below (0, 1, and 3)
     so eo/user_profile.py's default_format_hint() has an account to look
     a stored output preference up against, regardless of which tier
-    actually ends up answering. None (default) is a no-op everywhere."""
+    actually ends up answering. None (default) is a no-op everywhere.
+
+    tab (Patch B6 — tool-call budget): same "tier-3 hires-driven branch
+    only" scoping as scope/no_conversation_context_roles above — tiers
+    0/1/2 never reach eo/executor.py's _run_loop() through
+    run_with_looping(), the only place this is read. None (default) is
+    a no-op."""
     if tier == 0:
         return _run_tier0(task_text, decision, session_id, owner_id=owner_id)
     elif tier == 1:
@@ -1607,7 +1640,7 @@ def _dispatch_resolved(task_text: str, decision: dict, tier, hires: list, app_sl
                                      approval_roles=approval_roles,
                                      no_conversation_context_roles=no_conversation_context_roles,
                                      app_slug=app_slug, scope=scope, workspace_id=workspace_id,
-                                     owner_id=owner_id)
+                                     owner_id=owner_id, tab=tab)
         return {
             "decision": decision, "tier": 3, "session_id": session_id,
             "status": "not_wired_yet", "result": None,
@@ -1627,7 +1660,8 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                      mode: str = "auto", project_unique_name: str = None,
                      approval_roles: set = None,
                      no_conversation_context_roles: set = None, owner_id: str = None,
-                     attachment: dict = None, topic_id: str = None, scope: str = None) -> dict:
+                     attachment: dict = None, topic_id: str = None, scope: str = None,
+                     tab: str = None) -> dict:
     """The actual routing/execution body — split out of run_task() so
     that wrapper can do turn-recording on either side without every
     early-return point needing to do it individually. session_id is
@@ -1638,7 +1672,10 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
     topic_id: NEW — Step 6.11.f, passed through unchanged.
     scope: task 13d/13e — Sources sub-tab's scope selector value, passed
     through unchanged to _dispatch_resolved() -> _run_tier3_hires(). Only
-    web_researcher reads it; a no-op for every other role/tier."""
+    web_researcher reads it; a no-op for every other role/tier.
+    tab: Patch B6 — passed through unchanged to _dispatch_resolved() ->
+    _run_tier3_hires(). Only eo/executor.py's _run_loop() reads it, to
+    gate the tool-call budget pause to the chat tab."""
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
                                             app_slug, session_id, mode, owner_id=owner_id,
                                             attachment=attachment, topic_id=topic_id)   # FIXED / 6.11.f
@@ -1650,7 +1687,8 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
     response = _dispatch_resolved(resolved.get("task_text", task_text), resolved["decision"], resolved["tier"],
                                    resolved["hires"], app_slug, run_tests, session_id, mode, project_unique_name,
                                    approval_roles, no_conversation_context_roles=no_conversation_context_roles,
-                                   scope=scope, workspace_id=resolved.get("workspace_id"), owner_id=owner_id)
+                                   scope=scope, workspace_id=resolved.get("workspace_id"), owner_id=owner_id,
+                                   tab=tab)
     _maybe_extract_content_fact(resolved.get("workspace_id"), resolved["tier"], task_text, session_id, response,
                                  owner_id=owner_id)   # NEW — Part 2, owner_id threaded through for Patch B2
     _maybe_attach_prerequisite_suggestions(resolved, response, session_id)   # NEW — Data Layer §9d
