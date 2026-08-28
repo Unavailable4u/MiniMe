@@ -5,13 +5,16 @@ api/routes/mcp.py -- Patch A8 (CLI + Skills + MCP implementation guide)
 Patch A2 built eo/mcp_registry.py's list_mcp_servers() and (async)
 mcp_server_status() specifically "for later patches (A8, the CLI
 introspection commands) to call" (see that module's own docstrings),
-but never wired an HTTP route to either -- the CLI is a separate
-process that only ever speaks HTTP to the backend (same as the
-frontend; see cli/minime_cli/api_client.py's own module docstring), so
-a direct Python import isn't an option for `minime mcp list` /
-`minime mcp status <name>`. The two GET routes below are that missing
-HTTP surface: purely additive, no new business logic -- both are thin
-pass-throughs to functions A2 already wrote and already unit-tests.
+but never wired an HTTP route to either -- the original motivating
+caller was `minime mcp list` / `minime mcp status <name>` in the
+human-facing CLI, which only ever spoke HTTP to the backend. That CLI
+was removed in Patch C0 (MiniMe-Patch-Series-C-Plan.md, Track 1); the
+two GET routes below are left in place regardless -- they're a
+generic, already-tested HTTP surface over A2's functions, not
+CLI-specific machinery, and removing a working route isn't part of
+C0's scope (deleting the cli/ package and its dead references).
+Purely additive, no new business logic -- both are thin pass-throughs
+to functions A2 already wrote and already unit-tests.
 
 New file rather than folding into api/routes/system.py: system.py's own
 docstring scopes itself to health/quota/usage-history, and api/routes/

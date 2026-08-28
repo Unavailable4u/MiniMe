@@ -109,6 +109,16 @@ comment (`file:line`) that flagged it.
   being a separate copy of that logic, which is a bigger structural
   change than this patch's scope (add the scratchpad mechanism).
 
+## Removed during Patch C0
+
+- **The human-facing CLI (`cli/minime_cli/`).** Built before this
+  direction was clear; nothing in Series C is a human-typed command,
+  and Track 2's `run_data_command()` is in-process only, never HTTP.
+  Deleted rather than deferred — see `MiniMe-Patch-Series-C-Plan.md`,
+  Track 1, and `docs/decisions/0002-cli-auth-strategy.md` /
+  `0003-cli-attach-daemon-dir.md` (marked superseded, not deleted, as
+  the record of why A6/A7 were built the way they were).
+
 ## Reviewed during Patch B9
 
 - **`resume_graph()`'s scratchpad gap (flagged during Patch B7, above)

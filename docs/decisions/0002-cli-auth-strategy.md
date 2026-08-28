@@ -1,6 +1,11 @@
 # 0002 — CLI Auth Strategy
 
-**Status:** decided, implemented in `cli/minime_cli/auth.py` (Patch A6).
+**Status:** superseded — the human-facing CLI (`cli/minime_cli/`) was
+removed in Patch C0; see `MiniMe-Patch-Series-C-Plan.md`, Track 1.
+Left here as the historical record of why A6 was built the way it was.
+
+**Status (as originally decided):** decided, implemented in
+`cli/minime_cli/auth.py` (Patch A6).
 
 ## The question
 
