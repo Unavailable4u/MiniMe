@@ -398,3 +398,22 @@ def test_run_with_looping_domain_forwarded_to_execute_graph_every_pass(mock_grap
                       mode="expert", domain="coding")
     for c in exec_mock.call_args_list:
         assert c.kwargs["domain"] == "coding"
+
+
+def test_run_with_looping_tab_forwarded_to_execute_graph_every_pass(mock_graph_build, monkeypatch):
+    """Patch B6 (§3.4) -- `tab` gets the identical "not branched on here,
+    just forwarded" treatment domain/scope/owner_id already have, on
+    every macro-loop pass, so eo/executor.py's _run_loop() can gate the
+    tool-call budget to the chat tab on a redo pass too, not just the
+    first one."""
+    exec_mock = _mock_execute_graph(monkeypatch, [
+        {"writer": {"text": "d1"}},
+        {"writer": {"text": "d2"}},
+    ])
+    gk_mock = MagicMock(side_effect=[{"text": "CONTINUE: writer"}, {"text": "STOP"}])
+    monkeypatch.setattr(generic_worker_module, "run", gk_mock)
+
+    run_with_looping(hires=[], execution_order=["writer"], task_text="x", session_id="s15",
+                      mode="expert", tab="chat")
+    for c in exec_mock.call_args_list:
+        assert c.kwargs["tab"] == "chat"

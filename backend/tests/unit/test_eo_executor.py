@@ -503,8 +503,6 @@ class TestRunLoopPause:
         assert result == {"status": "paused", "paused_at_role": "role_a"}
         assert next_step_calls == []  # dispatcher never consulted once paused
         assert any(e[0] == "awaiting_approval" for e in _quiet_emit)
-
-    def test_pause_snapshot_is_persisted_on_the_bus(self, monkeypatch, fake_bus):
         from memory.bus import read as bus_read
 
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
@@ -547,6 +545,114 @@ class TestRunLoopPause:
         result = executor._run_loop(**_base_run_loop_kwargs(
             agent_names=["generic_worker"], role_names=["role_a"],
             approval_roles={"some_other_role"},
+        ))
+
+        assert result == {"role_a": {"text": "ok"}}
+
+
+class TestRunLoopToolBudget:
+    """Patch B6 (§3.4) -- the tool-call budget's pause path must reuse
+    approval_roles' exact checkpoint: same trigger point, same snapshot
+    shape, same {"status": "paused", "paused_at_role": ...} return value.
+    A budget-exceeded pause is only distinguishable from an
+    approval_roles pause by the "reason" on the awaiting_approval event
+    (existing frontend resume code needs zero changes either way)."""
+
+    def test_budget_exceeded_on_chat_tab_pauses_with_identical_shape_to_approval(
+        self, monkeypatch, fake_bus, _quiet_emit,
+    ):
+        from eo.tool_budget import DEFAULT_TOOL_CALL_BUDGET
+        from memory.bus import write as bus_write
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+
+        # Pre-seed this session one increment() below the threshold --
+        # the single role step _run_loop() dispatches below will push it
+        # over on its own increment() call, exactly like a real run's
+        # Nth tool call would.
+        bus_write("tool_call_budget:sess-budget", DEFAULT_TOOL_CALL_BUDGET - 1)
+
+        result = executor._run_loop(**_base_run_loop_kwargs(
+            agent_names=["generic_worker"], role_names=["role_a"],
+            approval_roles=set(), session_id="sess-budget", tab="chat",
+        ))
+
+        # Byte-for-byte the same shape an approval_roles pause returns.
+        assert result == {"status": "paused", "paused_at_role": "role_a"}
+        approval_events = [e for e in _quiet_emit if e[0] == "awaiting_approval"]
+        assert len(approval_events) == 1
+        assert approval_events[0][1]["payload"]["reason"] == "budget_exceeded"
+
+    def test_budget_exceeded_pause_snapshot_matches_approval_pause_shape(self, monkeypatch, fake_bus):
+        """Same acceptance property as the docstring above, but pinned
+        against the actual persisted snapshot (what resume_graph() reads
+        back), not just _run_loop()'s return value."""
+        from eo.tool_budget import DEFAULT_TOOL_CALL_BUDGET
+        from memory.bus import read as bus_read
+        from memory.bus import write as bus_write
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+
+        bus_write("tool_call_budget:sess-budget-snap", DEFAULT_TOOL_CALL_BUDGET - 1)
+        bus_write("tool_call_budget:sess-approval-snap", 0)
+
+        executor._run_loop(**_base_run_loop_kwargs(
+            agent_names=["generic_worker"], role_names=["role_a"],
+            approval_roles=set(), session_id="sess-budget-snap", tab="chat",
+        ))
+        executor._run_loop(**_base_run_loop_kwargs(
+            agent_names=["generic_worker"], role_names=["role_a"],
+            approval_roles={"role_a"}, session_id="sess-approval-snap", tab="chat",
+        ))
+
+        budget_snapshot = bus_read("paused_execution:sess-budget-snap")
+        approval_snapshot = bus_read("paused_execution:sess-approval-snap")
+        # Same keys, same shape -- resume_graph() branches on none of
+        # this, only on "idx"/"role_names"/etc, which must line up.
+        assert set(budget_snapshot) == set(approval_snapshot)
+        assert budget_snapshot["idx"] == approval_snapshot["idx"] == 0
+        assert budget_snapshot["role_names"] == approval_snapshot["role_names"] == ["role_a"]
+
+    def test_over_budget_on_non_chat_tab_never_pauses(self, monkeypatch, fake_bus):
+        """§3.4's "chat tab only" scoping: a task from any other tab (or
+        no tab at all -- every pre-B6 caller) must never trigger a pause
+        here, no matter how far over the counter is."""
+        from eo.tool_budget import DEFAULT_TOOL_CALL_BUDGET
+        from memory.bus import write as bus_write
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+
+        bus_write("tool_call_budget:sess-not-chat", DEFAULT_TOOL_CALL_BUDGET * 5)
+
+        result_no_tab = executor._run_loop(**_base_run_loop_kwargs(
+            agent_names=["generic_worker"], role_names=["role_a"],
+            approval_roles=set(), session_id="sess-not-chat", tab=None,
+        ))
+        result_other_tab = executor._run_loop(**_base_run_loop_kwargs(
+            agent_names=["generic_worker"], role_names=["role_a"],
+            approval_roles=set(), session_id="sess-not-chat", tab="projects",
+        ))
+
+        assert result_no_tab == {"role_a": {"text": "ok"}}
+        assert result_other_tab == {"role_a": {"text": "ok"}}
+
+    def test_chat_tab_under_budget_does_not_pause(self, monkeypatch):
+        """A normal, well-under-budget chat-tab task is unaffected --
+        this patch must not change today's behavior for the common
+        case."""
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+
+        result = executor._run_loop(**_base_run_loop_kwargs(
+            agent_names=["generic_worker"], role_names=["role_a"],
+            approval_roles=set(), session_id="sess-fresh-chat", tab="chat",
         ))
 
         assert result == {"role_a": {"text": "ok"}}

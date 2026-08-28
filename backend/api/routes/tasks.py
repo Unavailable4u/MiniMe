@@ -109,6 +109,13 @@ class TaskRequest(BaseModel):
     # only web_researcher's dispatch branch reads it. None (the default
     # for every existing caller, and any non-research task) matches
     # today's behavior exactly.
+    tab: str | None = None   # NEW — Patch B6 (§3.4): which frontend tab
+    # this request originated from ("chat", "projects", "notebooks",
+    # ...). Forwarded unchanged to run_task() -> ... -> eo/executor.py's
+    # _run_loop(), the only place that reads it — to gate the tool-call
+    # budget pause to the chat tab specifically. None (the default for
+    # every existing caller, and any non-chat-tab request) matches
+    # today's behavior exactly: no budget enforcement at all.
 
 
 class TaskResponse(BaseModel):
@@ -149,6 +156,7 @@ def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXE
             attachment=req.attachment.dict() if req.attachment else None,   # NEW — Data Layer §4a
             topic_id=req.topic_id,   # NEW — Step 6.11.f: now actually consulted, not just logged
             scope=req.scope,   # NEW — task 13d/13e
+            tab=req.tab,   # NEW — Patch B6
         )
     except ShutdownRequested:   # NEW — Patch 6.3
         return TaskResponse(
@@ -202,6 +210,9 @@ class ConfirmTaskRequest(BaseModel):
     mode: str | None = "auto"
     project_unique_name: str | None = None
     approval_roles: list[str] | None = None   # same meaning as on /api/task
+    tab: str | None = None   # NEW — Patch B6: same meaning as on /api/task —
+    # preview -> edit -> confirm is still a chat-tab flow when that's
+    # where it started.
 
 
 @router.post("/api/task/preview", response_model=TaskResponse, dependencies=[Depends(require_auth)])
@@ -250,6 +261,7 @@ def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_a
             project_unique_name=req.project_unique_name,
             approval_roles=set(req.approval_roles) if req.approval_roles else None,
             owner_id=owner_id,
+            tab=req.tab,   # NEW — Patch B6
         )
     except ShutdownRequested:   # NEW — Patch 6.3
         return TaskResponse(

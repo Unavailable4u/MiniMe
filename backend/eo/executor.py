@@ -56,6 +56,8 @@ from eo.capabilities import list_capabilities  # NEW — Patch B5a
 from eo.errors import MissingDependencyError
 from eo.registry import list_known_roles, resolve, resolve_role
 from eo.structure import PATH_TO_TIER
+from eo.tool_budget import increment as budget_increment  # NEW — Patch B6
+from eo.tool_budget import over_threshold as budget_over_threshold  # NEW — Patch B6
 from eo.tracing import TRACING_ENABLED, get_tracer, truncate_for_trace
 from relay.emitter import emit_event
 
@@ -693,7 +695,8 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
                    mode: str = None, key_overrides: dict = None,
                    project_unique_name: str = None, approval_roles: set = None,
                    no_conversation_context_roles: set = None, domain: str = None,
-                   scope: str = None, workspace_id: str = None, owner_id: str = None) -> dict:
+                   scope: str = None, workspace_id: str = None, owner_id: str = None,
+                   tab: str = None) -> dict:
     """Fresh-start entry point. `approval_roles` defaults to None (today's
     full-auto behavior) — every existing call site that doesn't pass it is
     unaffected.
@@ -734,6 +737,15 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
     preference up against. Defaults to None -- unaffected for every
     call site that doesn't pass one.
 
+    `tab` (Patch B6 — tool-call budget): which frontend tab originated
+    this run ("chat", "projects", "notebooks", ...). The ONLY thing this
+    is used for is gating eo/tool_budget.py's over_threshold() check in
+    _run_loop() below to the chat tab specifically, per §3.4 -- every
+    other dispatch branch in this module ignores it completely. Defaults
+    to None, which never matches "chat", so any existing caller that
+    doesn't pass this is unaffected (today's exact full-auto behavior,
+    same posture as approval_roles/domain/scope above).
+
     Returns either the finished {role: output} results dict, or, if
     execution pauses at a role in approval_roles,
     {"status": "paused", "paused_at_role": role} — see _run_loop()'s
@@ -767,13 +779,14 @@ def execute_graph(agent_names: list, role_names: list = None, task_text: str = N
             approval_roles=approval_roles, next_step=next_step,
             no_conversation_context_roles=no_conversation_context_roles,
             domain=domain, scope=scope, workspace_id=workspace_id, owner_id=owner_id,
+            tab=tab,
         )
 
 
 def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisits,
               task_text, session_id, path, mode, key_overrides, project_unique_name,
               expanded, approval_roles, next_step, no_conversation_context_roles=None,
-              domain=None, scope=None, workspace_id=None, owner_id=None) -> dict:
+              domain=None, scope=None, workspace_id=None, owner_id=None, tab=None) -> dict:
     """The actual step-dispatch loop, factored out of execute_graph() so
     resume_graph() below can re-enter it from a persisted mid-run
     snapshot instead of duplicating every dispatch case, the
@@ -817,7 +830,16 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
     single-role branch's existing pause handling covers every member.
     This should never actually fire in practice (Steps 2/3 upstream
     already filter these out); it's a defensive backstop, not the
-    primary enforcement point."""
+    primary enforcement point.
+
+    Tool-call budget (Patch B6, §3.4): every completed single-role step
+    below increments eo/tool_budget.py's per-session counter (regardless
+    of `tab` — the counter itself is generic, per that module's own
+    docstring). Whether crossing the counter's threshold actually pauses
+    this run is gated to `tab == "chat"`, at the exact same checkpoint
+    (same place, same snapshot shape, same return value) approval_roles
+    already uses just below -- a budget-exceeded pause is
+    indistinguishable, on resume, from an approval_roles pause."""
     no_conversation_context_roles = no_conversation_context_roles or set()
 
     while idx is not None and idx < len(agent_names):
@@ -1303,6 +1325,7 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     "scope": scope,
                     "workspace_id": workspace_id,
                     "owner_id": owner_id,   # NEW — Patch B5
+                    "tab": tab,   # NEW — Patch B6
                     "app_slug": get_current_app_slug(),
                 }
                 write(f"paused_execution:{session_id}", snapshot)
@@ -1379,7 +1402,20 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 raise ShutdownRequested(
                     f"shutdown requested after completing role {role!r}")
             pause_requested = bus_read(f"pause_requested:{session_id}", default=False) if session_id else False
-            if role in approval_roles or pause_requested:
+
+            # Patch B6 (§3.4): increment the per-session tool-call
+            # counter for every completed step (session_id-agnostic —
+            # over_threshold() itself doesn't know about `tab`), then
+            # only let it trigger a pause when this run is the chat tab.
+            # A non-chat-tab task still increments the same counter (so
+            # its numbers are real if a future caller wants them), it
+            # just never reaches the point of pausing on it.
+            budget_exceeded = False
+            if session_id:
+                budget_increment(session_id)
+                budget_exceeded = tab == "chat" and budget_over_threshold(session_id)
+
+            if role in approval_roles or pause_requested or budget_exceeded:
                 from memory.bus import get_current_app_slug, write
                 if pause_requested:
                     # Consume the flag now, same lifecycle as the snapshot
@@ -1395,10 +1431,18 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                 # live for EITHER trigger, approval_roles or on-demand. This
                 # call is what completes it. `reason` lets the frontend show
                 # different copy for "this role needs sign-off" vs "someone
-                # hit pause" without needing a second event type.
+                # hit pause" vs a budget pause, without needing a third event
+                # type (Patch B6 adds "budget_exceeded" alongside the
+                # existing two values).
+                if role in approval_roles:
+                    reason = "approval"
+                elif pause_requested:
+                    reason = "manual_pause"
+                else:
+                    reason = "budget_exceeded"   # NEW — Patch B6
                 emit_event(
                     "awaiting_approval", session_id=session_id, agent=current_name, path=path,
-                    payload={"role": role, "reason": "approval" if role in approval_roles else "manual_pause"},
+                    payload={"role": role, "reason": reason},
                 )
                 snapshot = {
                     "agent_names": agent_names,
@@ -1443,6 +1487,12 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
                     # had, instead of silently losing the personalization
                     # signal on resume.
                     "owner_id": owner_id,
+                    # Patch B6 — carried through so a resumed run keeps
+                    # enforcing (or not enforcing) the tool-call budget the
+                    # same way the original dispatch did, instead of
+                    # silently reverting to the non-chat-tab default on
+                    # resume.
+                    "tab": tab,
                     # Captured so resume_graph() can restore the exact bus
                     # namespace this run was writing under before touching
                     # anything else.
@@ -1549,6 +1599,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     scope = snapshot.get("scope")
     workspace_id = snapshot.get("workspace_id")
     owner_id = snapshot.get("owner_id")   # NEW — Patch B5
+    tab = snapshot.get("tab")   # NEW — Patch B6
     expanded = (mode or "auto").lower() in ("expert", "beast")
 
     # Macro-loop state (eo/loop_controller.py's run_with_looping()) —
@@ -1668,6 +1719,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
             approval_roles=approval_roles, next_step=next_step,
             no_conversation_context_roles=no_conversation_context_roles,
             domain=domain, scope=scope, workspace_id=workspace_id, owner_id=owner_id,
+            tab=tab,
         )
 
     if isinstance(result, dict) and result.get("status") == "paused":
@@ -1719,6 +1771,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
             no_conversation_context_roles=no_conversation_context_roles,
             domain=macro_domain, scope=macro_scope, workspace_id=macro_workspace_id,
             owner_id=macro_owner_id,
+            tab=tab,
         )
 
         if isinstance(pass_results, dict) and pass_results.get("status") == "paused":

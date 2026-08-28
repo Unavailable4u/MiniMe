@@ -116,7 +116,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                       approval_roles: set = None,
                       no_conversation_context_roles: set = None,
                       scope: str = None, workspace_id: str = None,
-                      owner_id: str = None) -> dict:
+                      owner_id: str = None, tab: str = None) -> dict:
     """
     `domain` is not branched on anywhere in this module — every domain
     takes the same path through _run_gatekeeper(). Part 2 §2.6: it IS now
@@ -150,6 +150,16 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
     execute_graph() on every pass so generic_worker/responder steps can
     look up a stored output-format preference, and persisted into the
     pause snapshot below as macro_owner_id, same as domain/scope are.
+
+    `tab` (Patch B6 — tool-call budget): same "not branched on here,
+    just forwarded" treatment as owner_id/domain/scope above — forwarded
+    to execute_graph() on every pass so eo/executor.py's _run_loop() can
+    gate its tool-call-budget check to the chat tab specifically. Unlike
+    domain/scope/owner_id, this is NOT re-persisted as a macro_* pause
+    field below: execute_graph() -> _run_loop() already writes it
+    straight into the paused_execution snapshot as "tab" on every pause
+    (same as approval_roles), so there's nothing extra for this
+    function's own snapshot-enrichment block to carry.
 
     Return shape: {"results": {role: output, ...}, "final_role": str | None}
     on a normal completion — a caller can't rely on "last key in the dict"
@@ -192,7 +202,7 @@ def run_with_looping(hires, execution_order, task_text, session_id, mode,
                                        approval_roles=approval_roles,
                                        no_conversation_context_roles=no_conversation_context_roles,
                                        domain=domain, scope=scope, workspace_id=workspace_id,
-                                       owner_id=owner_id)
+                                       owner_id=owner_id, tab=tab)
 
         # execute_graph() returns {"status": "paused", "paused_at_role": role}
         # instead of a finished {role: output} dict when execution hits a
