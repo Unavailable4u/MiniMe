@@ -40,14 +40,16 @@ Later patches extend this module rather than replacing it:
     they're discoverable through the same shared surface as everything
     else — the plan's own framing for why introspection lives next to
     capability lookups rather than off on its own.
-Scope note: this module intentionally does not touch cli/ — the CLI
-package (cli/minime_cli/) is a standalone HTTP client
-(see cli/minime_cli/api_client.py's own docstring) with no in-process
-relationship to the backend, so "the CLI's command surface becomes the
-shared interface" (architecture plan §3.1) is implemented here, one
-layer below where the plan doc's own wording might suggest — the
-CLI's job stays "mirror this command surface as an HTTP client for
-humans," not participate in the in-process call graph itself.
+Scope note: the human-facing CLI (cli/minime_cli/) was removed in
+Patch C0 (see MiniMe-Patch-Series-C-Plan.md, Track 1) — it was a
+standalone HTTP client with no in-process relationship to this module,
+so its removal changes nothing here. "The CLI's command surface
+becomes the shared interface" (architecture plan §3.1) is realized
+in-process, through this module and its callers, not through any CLI
+package. Series C's Track 2 extends that same shared in-process-surface
+discipline to per-task artifact data (eo/data_store.py /
+eo/data_handler.py's run_data_command(), registered here once it
+lands) — see the plan doc for details.
 """
 from __future__ import annotations
 

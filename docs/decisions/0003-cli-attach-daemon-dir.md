@@ -1,6 +1,11 @@
 # 0003 — How `minime attach` locates the daemon it's pairing
 
-**Status:** accepted
+**Status:** superseded — the human-facing CLI (`cli/minime_cli/`),
+including `minime attach`, was removed in Patch C0; see
+`MiniMe-Patch-Series-C-Plan.md`, Track 1. Left here as the historical
+record of why A7 was built the way it was.
+
+**Status (as originally decided):** accepted
 **Context:** Implementation Guide, Patch A7 (`minime attach`).
 
 ## The question
