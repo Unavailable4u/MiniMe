@@ -45,7 +45,7 @@ from eo.registry import (
     set_role_pinned,
     update_role_prompt,
 )
-from eo.skill_library import get_skill, list_skills  # NEW — Part 6 §E2, task 14, patch 4 (+ Patch A5 single-skill read)
+from eo.capabilities import get_skill, list_skills  # NEW — Part 6 §E2, task 14, patch 4 (+ Patch A5 single-skill read); routed through eo/capabilities.py as of Patch B0
 from eo.structure import (
     delete_workflow_template,
     list_workflow_templates,
