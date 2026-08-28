@@ -56,8 +56,8 @@ from eo.local_workspace_tools import (
     deny_action,
     propose_mcp_action,
 )
+from eo.capabilities import list_mcp_servers, mcp_server_status  # routed through eo/capabilities.py as of Patch B0
 from eo.mcp_client import MCPClientError
-from eo.mcp_registry import list_mcp_servers, mcp_server_status
 
 router = APIRouter()
 
