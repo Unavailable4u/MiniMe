@@ -46,22 +46,31 @@ standalone HTTP client with no in-process relationship to this module,
 so its removal changes nothing here. "The CLI's command surface
 becomes the shared interface" (architecture plan §3.1) is realized
 in-process, through this module and its callers, not through any CLI
-package. Series C's Track 2 extends that same shared in-process-surface
-discipline to per-task artifact data (eo/data_store.py /
-eo/data_handler.py's run_data_command(), registered here once it
-lands) — see the plan doc for details.
+package.
+
+B-series added read-only introspection over the repo (list_directory/
+read_file/search_text, gated by redaction_guard). Series C's
+run_data_command() extends the same "one shared in-process surface,
+capped reads, fail-loud on ambiguity" discipline to per-task artifact
+data (eo/data_store.py) instead of the filesystem. It does not go
+through redaction_guard — task artifacts aren't secrets — but copies
+the same byte/match caps so a role can't accidentally re-ingest an
+entire artifact just by asking a slightly broad question.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from eo.capability_entries import list_capability_entries as _list_capability_entries
+from eo.data_handler import run_data_command as _run_data_command
 from eo.introspection import list_directory as _list_directory
 from eo.introspection import read_file as _read_file
 from eo.introspection import search_text as _search_text
 from eo.mcp_registry import list_mcp_servers as _list_mcp_servers
 from eo.mcp_registry import mcp_server_status as _mcp_server_status
 from eo.registry import get_role_metadata as _get_role_metadata
+from eo.skill_library import ensure_skill_for_task as _ensure_skill_for_task
+from eo.skill_library import get_relevant_skill as _get_relevant_skill
 from eo.skill_library import get_skill as _get_skill
 from eo.skill_library import list_skills as _list_skills
 
@@ -78,6 +87,26 @@ def get_skill(skill_id: str) -> dict | None:
     eo/skill_library.py's get_skill() — returns None if skill_id
     doesn't exist."""
     return _get_skill(skill_id)
+
+
+def get_relevant_skill(task_text: str) -> str:
+    """Patch C7 — pass-through to eo/skill_library.py's
+    get_relevant_skill(). Registered here so agents/generic_worker.py
+    can go through this module's shared surface for its own skill
+    lookup instead of importing eo/skill_library.py directly (B5a
+    already did the equivalent for dispatcher/executor/router's own
+    observability touchpoint; this closes the one remaining direct
+    import C7 flagged). Degrades to \"\" on any retrieval failure or
+    genuine no-match — see the wrapped function's own docstring."""
+    return _get_relevant_skill(task_text)
+
+
+def ensure_skill_for_task(task_text: str) -> str:
+    """Patch C7 — pass-through to eo/skill_library.py's
+    ensure_skill_for_task(). See get_relevant_skill() above for why
+    this is registered here rather than left as a direct
+    agents/generic_worker.py -> eo/skill_library.py import."""
+    return _ensure_skill_for_task(task_text)
 
 
 def list_mcp_servers() -> list[dict[str, Any]]:
@@ -181,3 +210,15 @@ def search_text(pattern: str, root: str) -> dict:
     See list_directory() above for the fallback-path framing this
     shares."""
     return _search_text(pattern, root)
+
+
+def run_data_command(session_id: str, command: str, author_role: str | None = None) -> str:
+    """Patch C2 — pass-through to eo/data_handler.py's
+    run_data_command(). Registered here next to B4's
+    list_directory/read_file/search_text per this module's own
+    docstring: same shared-in-process-surface principle, applied to
+    per-task artifact data (eo/data_store.py) instead of the
+    filesystem. Unlike the B4 trio, this does not go through
+    redaction_guard — see this module's docstring for why — but shares
+    their same capped-read discipline underneath."""
+    return _run_data_command(session_id, command, author_role=author_role)
