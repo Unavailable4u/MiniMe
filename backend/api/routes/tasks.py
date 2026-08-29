@@ -38,6 +38,7 @@ from eo import (
     chat_workspace,  # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
     timeline_node_blurbs,  # NEW — CO4 patch 5
 )
+from eo.data_store import VersionConflict  # NEW — C4: revise_section's optimistic-concurrency error
 from eo.executor import resume_graph
 from eo.registry import (
     get_role_metadata,
@@ -439,8 +440,18 @@ async def stream_answer(session_id: str, token: str = Query(None)):
 class ResumeRequest(BaseModel):
     # Part 2 §2.4
     session_id: str
-    action: str          # "approve" | "edit" | "reject_redo"
+    action: str          # "approve" | "edit" | "reject_redo" | "revise_section"
     text: str | None = None   # required when action == "edit"
+    # NEW — C4 (MiniMe-Patch-Series-C-Plan.md, Track 2): required when
+    # action == "revise_section". expected_version is optional, same
+    # optional-concurrency contract as eo/data_store.py's
+    # patch_section() itself — omit it for the common case where
+    # sections are scoped narrowly enough that two callers can't
+    # plausibly race on the same one.
+    section_id: str | None = None
+    old_snippet: str | None = None
+    new_snippet: str | None = None
+    expected_version: int | None = None
 
 
 class ResumeResponse(BaseModel):
@@ -472,9 +483,24 @@ def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
     decision = {"action": req.action}
     if req.action == "edit":
         decision["text"] = req.text or ""
+    elif req.action == "revise_section":
+        # NEW — C4: pass through as-is; resume_graph() itself does the
+        # required-field validation (raises ValueError, caught below as
+        # a 400) rather than duplicating that check at this layer.
+        decision["section_id"] = req.section_id
+        decision["old_snippet"] = req.old_snippet
+        decision["new_snippet"] = req.new_snippet
+        decision["expected_version"] = req.expected_version
 
     try:
         result = resume_graph(req.session_id, decision)
+    except VersionConflict as exc:
+        # NEW — C4: revise_section's expected_version didn't match the
+        # section's current stored version — a real conflict (someone
+        # else's write landed first), not a client input error. Same
+        # 409 treatment as reject_redo's MAX_STAGE_REVISITS conflict
+        # below.
+        raise HTTPException(status_code=409, detail=str(exc))
     except KeyError:
         # NEW — B4: the one user-facing error path new since Phase CO —
         # worth a breadcrumb even though it's handled cleanly as a 404,
@@ -503,6 +529,23 @@ def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
         )
 
     if isinstance(result, dict) and result.get("status") == "paused":
+        if req.action == "revise_section":
+            # NEW — C4: a revise_section "paused" result isn't a fresh
+            # pause from a re-entered _run_loop() pass — it's the same
+            # pause as before, plus the patched section. Surface the
+            # patch outcome (new version) instead of the generic
+            # "paused again" message, which would be misleading here:
+            # nothing re-ran, so nothing "paused again".
+            revised = result.get("revised_section") or {}
+            return ResumeResponse(
+                session_id=req.session_id,
+                status="paused",
+                result={"paused_at_role": result["paused_at_role"],
+                        "revised_section": revised},
+                message=(f"Section '{revised.get('section_id', req.section_id)}' "
+                         f"revised to version {revised.get('version')}. Run is "
+                         f"still paused at role '{result['paused_at_role']}'."),
+            )
         return ResumeResponse(
             session_id=req.session_id,
             status="paused",
