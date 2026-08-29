@@ -1544,11 +1544,30 @@ def resume_graph(session_id: str, decision: dict) -> dict:
       {"action": "reject_redo"}             — re-runs the same role from
           scratch, guarded by MAX_STAGE_REVISITS so a reject loop can't
           run forever.
+      {"action": "revise_section",
+       "section_id": "...", "old_snippet": "...", "new_snippet": "...",
+       "expected_version": 3}                — Patch C4
+          (MiniMe-Patch-Series-C-Plan.md, Track 2): snippet-patches one
+          section of this session's eo/data_store.py artifact document
+          via patch_section(). Unlike reject_redo, idx does NOT move
+          back — nothing re-runs, this only edits stored data in place.
+          "expected_version" is optional, same optional-concurrency
+          contract as patch_section() itself. This is the direct
+          replacement for reject_redo's whole-role re-run and edit's
+          whole-text swap in the case that matters most: a reviewer
+          flagging something small in one section rather than wanting
+          the whole role regenerated or fully retyped.
 
     Raises KeyError if there's no paused run for this session_id.
     Raises RuntimeError if reject_redo exceeds MAX_STAGE_REVISITS for
     this role. Both are meant to be caught at the API layer and turned
-    into 404 / 409 responses respectively.
+    into 404 / 409 responses respectively. revise_section instead
+    raises ValueError (missing section_id/old_snippet/new_snippet, or
+    patch_section()'s own "not found"/"not unique" failures) or
+    eo.data_store.VersionConflict (expected_version mismatch) — callers
+    should catch these and turn them into 400 / 409 responses
+    respectively, same "fail loud, don't guess" posture as
+    patch_section() itself.
 
     Macro-loop continuation: this calls _run_loop() directly, not
     eo/loop_controller.py's run_with_looping() — but if the snapshot
@@ -1569,6 +1588,7 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     macro_loop_num (the plain adaptive-pass case, still the common one)
     behaves exactly as before: _run_loop()'s result is returned as-is.
     """
+    from eo.data_store import patch_section
     from eo.dispatcher import next_step
     from memory.bus import delete, read, set_app_slug, write
 
@@ -1620,6 +1640,61 @@ def resume_graph(session_id: str, decision: dict) -> dict:
 
     role = role_names[idx]
     action = decision.get("action")
+
+    if action == "revise_section":
+        # Patch C4 (MiniMe-Patch-Series-C-Plan.md, Track 2). Deliberately
+        # handled BEFORE the edit/approve/reject_redo chain below and
+        # returned from immediately: every one of those three actions
+        # ends by deleting paused_execution:{session_id} and re-entering
+        # _run_loop() (or the macro-continuation tail) from idx onward —
+        # fine for reject_redo, whose whole point is to re-execute
+        # agent_names[idx] from scratch, but wrong here. idx does NOT
+        # move back and nothing re-runs: this only patches one snippet
+        # inside one section of this session's data_store.py artifact
+        # document, in place, while the run stays paused exactly as it
+        # was. Re-entering _run_loop() with idx unchanged would silently
+        # re-execute role_names[idx] — indistinguishable from
+        # reject_redo — which is exactly what this action must NOT do.
+        # The snapshot is therefore left untouched (not deleted) so a
+        # later, separate "approve" / "reject_redo" / another
+        # "revise_section" against the same pause still finds it.
+        section_id = decision.get("section_id")
+        old_snippet = decision.get("old_snippet")
+        new_snippet = decision.get("new_snippet")
+        expected_version = decision.get("expected_version")
+        if not section_id:
+            raise ValueError("revise_section requires 'section_id'")
+        if not old_snippet:
+            raise ValueError("revise_section requires 'old_snippet'")
+        if new_snippet is None:
+            raise ValueError("revise_section requires 'new_snippet'")
+        # Raises ValueError (section not found / old_snippet not found /
+        # not unique) or VersionConflict (expected_version mismatch)
+        # straight through to the caller — same fail-loud posture as
+        # patch_section() itself. Nothing to clean up on failure: the
+        # snapshot was never touched, so a rejected revise_section
+        # leaves the pause exactly as it was for a corrected retry.
+        updated = patch_section(session_id, section_id, old_snippet,
+                                 new_snippet, expected_version=expected_version)
+        # Reuses "execution_resumed" (relay/emitter.py's EventType) —
+        # the same event every other resume decision fires — rather
+        # than a new event type, since VALID_EVENT_TYPES would reject
+        # an unregistered literal outright (see relay/emitter.py's own
+        # "execution_resumed"/PATCH-A comments on that exact failure
+        # mode). Frontend/observability consumers already listen on
+        # this event; section_id/version in payload distinguish it.
+        emit_event("execution_resumed", session_id=session_id, path=path,
+                    payload={"label": role, "action": action,
+                             "section_id": section_id,
+                             "version": updated.get("version")})
+        # Same {"status": "paused", "paused_at_role": role} shape
+        # _run_loop() itself returns on a fresh pause (see lines 1332/
+        # 1502 above) — the run is still paused at the same role, this
+        # just didn't come from a re-entered _run_loop() pass. Callers
+        # (api/routes/tasks.py's post_resume()) already branch on this
+        # exact shape for the "run paused again" response.
+        return {"status": "paused", "paused_at_role": role,
+                "revised_section": updated}
 
     if action == "edit":
         new_text = decision.get("text", "")

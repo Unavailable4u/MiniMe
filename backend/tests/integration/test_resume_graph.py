@@ -179,3 +179,133 @@ def test_unknown_resume_action_raises_valueerror(mock_llm, fake_bus):
 
     with pytest.raises(ValueError):
         resume_graph(session_id, {"action": "not_a_real_action"})
+
+
+# ---------------------------------------------------------------------------
+# C4 (MiniMe-Patch-Series-C-Plan.md, Track 2) — the revise_section resume
+# action: a section-scoped sibling of edit/reject_redo that patches one
+# snippet inside one eo/data_store.py section without re-running anything
+# or consuming the pause.
+# ---------------------------------------------------------------------------
+
+def test_revise_section_patches_data_store_and_leaves_run_paused(mock_llm, fake_bus):
+    from eo.data_store import list_sections, write_section
+
+    session_id = "resume-session-revise"
+    agent_names, role_names = _build_plan(["writer", "editor"])
+    mock_llm.set_sequence(["a first draft", "a polished final version"])
+
+    paused = execute_graph(
+        agent_names, role_names=role_names, task_text="write something",
+        session_id=session_id, path="adaptive", approval_roles={"writer"},
+    )
+    assert paused == {"status": "paused", "paused_at_role": "writer"}
+
+    write_section(session_id, "intro", "the cat sat on the mat", author_role="writer")
+
+    result = resume_graph(session_id, {
+        "action": "revise_section",
+        "section_id": "intro",
+        "old_snippet": "cat",
+        "new_snippet": "dog",
+    })
+
+    # Still paused at the same role — nothing re-ran, idx didn't move.
+    assert result["status"] == "paused"
+    assert result["paused_at_role"] == "writer"
+    assert result["revised_section"]["section_id"] == "intro"
+    assert result["revised_section"]["version"] == 2
+
+    sections = {s["section_id"]: s for s in list_sections(session_id)}
+    assert sections["intro"]["version"] == 2
+
+    # The snapshot must survive (unlike every other action, which
+    # deletes it) so a later approve/reject_redo/revise_section against
+    # the same pause still finds it.
+    snapshot = bus_read(f"paused_execution:{session_id}", default=None)
+    assert snapshot is not None
+    assert snapshot["idx"] == 0
+
+    # The role itself was NOT re-run — only one generate_text call so
+    # far (the original "writer" pass); revise_section must not trigger
+    # a second one the way reject_redo would.
+    assert mock_llm.mock.call_count == 1
+
+    # A normal "approve" afterwards still works, proving the pause is
+    # genuinely intact and not just a superficially-similar dict.
+    final = resume_graph(session_id, {"action": "approve"})
+    assert final["writer"]["text"] == "a first draft"
+    assert final["editor"]["text"] == "a polished final version"
+    assert bus_read(f"paused_execution:{session_id}", default=None) is None
+
+
+def test_revise_section_missing_fields_raise_valueerror(mock_llm, fake_bus):
+    session_id = "resume-session-revise-missing-fields"
+    agent_names, role_names = _build_plan(["writer"])
+    mock_llm.set_response("draft")
+
+    execute_graph(
+        agent_names, role_names=role_names, task_text="write something",
+        session_id=session_id, path="adaptive", approval_roles={"writer"},
+    )
+
+    with pytest.raises(ValueError):
+        resume_graph(session_id, {"action": "revise_section"})
+    with pytest.raises(ValueError):
+        resume_graph(session_id, {"action": "revise_section", "section_id": "intro"})
+    with pytest.raises(ValueError):
+        resume_graph(session_id, {
+            "action": "revise_section", "section_id": "intro", "old_snippet": "x",
+        })
+
+    # None of the above should have consumed the pause -- validation
+    # failures happen before patch_section() or the snapshot delete.
+    assert bus_read(f"paused_execution:{session_id}", default=None) is not None
+
+
+def test_revise_section_missing_section_raises_valueerror(mock_llm, fake_bus):
+    session_id = "resume-session-revise-no-section"
+    agent_names, role_names = _build_plan(["writer"])
+    mock_llm.set_response("draft")
+
+    execute_graph(
+        agent_names, role_names=role_names, task_text="write something",
+        session_id=session_id, path="adaptive", approval_roles={"writer"},
+    )
+
+    with pytest.raises(ValueError):
+        resume_graph(session_id, {
+            "action": "revise_section", "section_id": "does-not-exist",
+            "old_snippet": "x", "new_snippet": "y",
+        })
+    assert bus_read(f"paused_execution:{session_id}", default=None) is not None
+
+
+def test_revise_section_version_conflict_raises_and_preserves_pause(mock_llm, fake_bus):
+    from eo.data_store import VersionConflict, write_section
+
+    session_id = "resume-session-revise-conflict"
+    agent_names, role_names = _build_plan(["writer"])
+    mock_llm.set_response("draft")
+
+    execute_graph(
+        agent_names, role_names=role_names, task_text="write something",
+        session_id=session_id, path="adaptive", approval_roles={"writer"},
+    )
+    write_section(session_id, "intro", "the cat sat on the mat", author_role="writer")
+
+    with pytest.raises(VersionConflict):
+        resume_graph(session_id, {
+            "action": "revise_section", "section_id": "intro",
+            "old_snippet": "cat", "new_snippet": "dog",
+            "expected_version": 99,
+        })
+
+    # A rejected revise_section (bad expected_version) must leave both
+    # the pause AND the section's stored text untouched for a corrected
+    # retry -- same fail-loud, no-partial-effect posture as
+    # patch_section() itself.
+    assert bus_read(f"paused_execution:{session_id}", default=None) is not None
+    doc = bus_read(f"artifact:{session_id}", default=None)
+    assert doc["intro"]["text"] == "the cat sat on the mat"
+    assert doc["intro"]["version"] == 1
