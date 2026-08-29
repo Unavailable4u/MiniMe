@@ -37,3 +37,4 @@ backend/evals/promptfoo/.promptfoo/
 # actual runtime-data directory it was written for.
 /data/
 
+backend/.env.bak-*
