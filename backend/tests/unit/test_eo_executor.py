@@ -1053,6 +1053,56 @@ class TestResumeGraph:
 
         assert any(e[0] == "execution_resumed" for e in _quiet_emit)
 
+    def test_approve_that_finishes_the_run_clears_the_scratchpad(self, monkeypatch, fake_bus):
+        # NEW — Patch C6 regression test: resume_graph()'s finished-run
+        # path duplicates run_with_looping()'s own finished tail
+        # (eo/loop_controller.py's clear_scratchpad() call) inline
+        # instead of calling back into that module, which is exactly
+        # why the hook never used to fire for a run that pauses and is
+        # later resumed to completion (flagged B7, confirmed open B9).
+        from eo.scratchpad import write_note, list_notes
+
+        write_note("sess-finish-scratchpad", "leftover note from before the pause")
+        assert list_notes("sess-finish-scratchpad")  # sanity: note is there
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+        import eo.dispatcher as dispatcher_module
+        monkeypatch.setattr(dispatcher_module, "next_step", lambda *a, **k: (None, "plan"))
+
+        _write_pause_snapshot("sess-finish-scratchpad", approval_roles=[])
+        result = executor.resume_graph("sess-finish-scratchpad", {"action": "approve"})
+
+        assert result == {"role_a": {"text": "first draft"}}
+        assert list_notes("sess-finish-scratchpad") == []
+
+    def test_approve_that_pauses_again_does_not_clear_the_scratchpad(self, monkeypatch, fake_bus):
+        # The other half of the C6 fix: a re-pause still has an active
+        # scratchpad the human-in-the-loop reviewer may need, so this
+        # path must NOT be touched (the fix sits after the "paused"
+        # early-return, not before it).
+        from eo.scratchpad import write_note, list_notes
+
+        write_note("sess-repause-scratchpad", "note the reviewer still needs")
+
+        monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
+        monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")
+        monkeypatch.setattr(executor, "list_known_roles", list)
+        import eo.dispatcher as dispatcher_module
+        monkeypatch.setattr(dispatcher_module, "next_step", _sequential_next_step)
+
+        _write_pause_snapshot(
+            "sess-repause-scratchpad",
+            agent_names=["generic_worker", "generic_worker"],
+            role_names=["role_a", "role_b"],
+            approval_roles=["role_a", "role_b"],
+        )
+        result = executor.resume_graph("sess-repause-scratchpad", {"action": "approve"})
+
+        assert result == {"status": "paused", "paused_at_role": "role_b"}
+        assert list_notes("sess-repause-scratchpad")  # untouched
+
     def test_approve_can_pause_again_on_a_later_role(self, monkeypatch, fake_bus):
         monkeypatch.setattr(executor, "resolve", lambda name: (lambda **kw: {"text": "ok"}))
         monkeypatch.setattr(executor, "resolve_role", lambda role: "generic_worker")

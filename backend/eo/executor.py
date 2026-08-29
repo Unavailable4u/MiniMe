@@ -55,6 +55,7 @@ from eo.agent_dependencies import AGENT_DEPENDENCIES
 from eo.capabilities import list_capabilities  # NEW — Patch B5a
 from eo.errors import MissingDependencyError
 from eo.registry import list_known_roles, resolve, resolve_role
+from eo.scratchpad import clear_scratchpad  # NEW — Patch C6
 from eo.structure import PATH_TO_TIER
 from eo.tool_budget import increment as budget_increment  # NEW — Patch B6
 from eo.tool_budget import over_threshold as budget_over_threshold  # NEW — Patch B6
@@ -1806,6 +1807,18 @@ def resume_graph(session_id: str, decision: dict) -> dict:
     # wasn't part of a macro-loop, this IS the finished shape callers
     # expect — return it unchanged, same as before this correction.
     if macro_loop_num is None:
+        # NEW — Patch C6 (MiniMe-Patch-Series-C-Plan.md, Track 3): a
+        # genuinely finished run needs its scratchpad cleared, same as
+        # run_with_looping()'s own finished tail
+        # (eo/loop_controller.py, line 266) already does. resume_graph()
+        # duplicates that tail inline instead of calling back into
+        # loop_controller.py, which is exactly why this hook never fired
+        # for a run that pauses and is later resumed to completion —
+        # flagged during B7, confirmed still open during B9, fixed here.
+        # Deliberately placed AFTER the "paused" early-return above (this
+        # run is NOT re-pausing, so it has no active scratchpad state
+        # left to preserve).
+        clear_scratchpad(session_id)
         return result
 
     # It WAS part of an expert/beast-mode macro-loop (Correction 1):
@@ -1860,6 +1873,13 @@ def resume_graph(session_id: str, decision: dict) -> dict:
         if pass_results:
             final_role = list(pass_results.keys())[-1]
 
+    # NEW — Patch C6: same fix as the non-macro finish above, for the
+    # macro-loop tail's own finished exit — the `while True` loop above
+    # only reaches here via `break` (STOP/PAUSE_FOR_HUMAN gate decision,
+    # or hitting MAX_MACRO_LOOPS), never via the paused-and-return path
+    # a few lines up, so every path that lands here is a genuine finish
+    # with no active scratchpad left to preserve.
+    clear_scratchpad(session_id)
     return {"results": combined_results, "final_role": final_role}
 
 
