@@ -47,10 +47,15 @@ export default function IntegrationsPanel() {
     // redirects the browser back to /settings/integrations?connected=... —
     // reload the list once more if that param is present, in case this
     // component mounted before the redirect's round-trip finished.
+    // BUGFIX: this used to only strip the query param without actually
+    // re-fetching, so the panel could keep showing the pre-OAuth state
+    // (still "Connect", no account_label) until the next unrelated
+    // re-render happened to call load() again.
     if (typeof window !== "undefined" && window.location.search.includes("connected=")) {
       const url = new URL(window.location.href);
       url.searchParams.delete("connected");
       window.history.replaceState({}, "", url.toString());
+      load();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

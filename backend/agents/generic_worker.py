@@ -71,9 +71,15 @@ On the READ side, an input_keys entry now resolves one of three ways:
      (list_sections()'s section_id/written_by/version/byte_len), not
      full text. The role's own brief is told, via
      DATA_HANDLER_INSTRUCTION below, that it's looking at a table of
-     contents and how to call run_data_command(session_id,
-     "read <section_id>") for whichever sections it actually needs in
-     full.
+     contents — NOT how to call run_data_command() itself. (BUGFIX:
+     this comment used to claim the instruction teaches the role how
+     to invoke run_data_command(session_id, "read <section_id>"), which
+     was never true of DATA_HANDLER_INSTRUCTION's actual text — see
+     that constant below. There is no tool-calling round trip in run()
+     to catch such a call anyway, per the "Honest caveat" a few
+     paragraphs down; the instruction correctly tells the role to name
+     the section it needs in prose instead, not to emit a command
+     nothing will execute.)
   3. a plain `role` name with no matching data_store section (a
      REAL_ACTION_ROLES entry from LEGACY_BUS_KEY_MAP that never calls
      this module's run() at all, e.g. academic_search/web_researcher/

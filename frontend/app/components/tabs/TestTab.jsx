@@ -806,6 +806,23 @@ function ReportsPanel({ wsId, sessionId, lastSessionId, fetchSimulationResults }
     return () => { cancelled = true; };
   }, [wsId, sessionId, fetchSimulationResults]);
 
+  // BUGFIX: the Refresh button used to call fetchSimulationResults()
+  // directly in its onClick, bypassing loading/error entirely — same
+  // fetch, but `loading` never flipped true (so the RefreshCw icon
+  // never actually spun on a manual refresh, unlike RedTeamPanel's own
+  // load(), which this now mirrors) and a stale error from a previous
+  // failed fetch was never cleared before retrying, so it could keep
+  // showing under freshly-loaded data after a successful refresh.
+  function refresh() {
+    if (!sessionId) return;
+    setLoading(true);
+    setError(null);
+    fetchSimulationResults(wsId, sessionId)
+      .then(setData)
+      .catch((e) => setError(e.message || "Failed to load results."))
+      .finally(() => setLoading(false));
+  }
+
   if (!sessionId) {
     return (
       <p className="text-xs text-[var(--neutral-600)]">
@@ -823,8 +840,9 @@ function ReportsPanel({ wsId, sessionId, lastSessionId, fetchSimulationResults }
             : "Showing results for the selected run."}
         </p>
         <button
-          onClick={() => fetchSimulationResults(wsId, sessionId).then(setData).catch((e) => setError(e.message))}
-          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1"
+          onClick={refresh}
+          disabled={loading}
+          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1 disabled:opacity-50"
         >
           <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
         </button>
@@ -953,7 +971,8 @@ function PersonasPanel({ fetchRoles, updateRolePrompt, setRolePinned }) {
         </p>
         <button
           onClick={load}
-          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1 shrink-0"
+          disabled={loading}
+          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1 shrink-0 disabled:opacity-50"
         >
           <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
         </button>
@@ -1097,7 +1116,8 @@ function RedTeamPanel({ wsId, sessionId, fetchSimulationResults }) {
         <p className="text-[11px] text-[var(--neutral-600)]">Showing red_team&apos;s pass for the selected run.</p>
         <button
           onClick={load}
-          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1"
+          disabled={loading}
+          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] flex items-center gap-1 disabled:opacity-50"
         >
           <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
         </button>

@@ -5,6 +5,28 @@ import { categorize, DEFAULT_CATEGORY } from "../agentRoleIcons";
 import RolePickerOverlay from "../RolePickerOverlay";
 import { Trash2, Plus, Play, X, Pencil } from "lucide-react";
 
+// BUGFIX: eo/structure.py's _flatten_roles/_validate_roles_shape allow a
+// top-level `roles` entry to be either a plain role-name string OR a
+// nested list of role names (a "run these together" parallel group,
+// saved when a template is created from a finished run — see
+// executor.py's group-execution branch). TemplateCard's own read-only
+// chip rendering already accounts for this (`Array.isArray(r)` below),
+// but RolePickerOverlay/TemplateBuilder never did — they only ever
+// understood a flat list of strings. Feeding a template with an
+// existing group straight into the Edit builder didn't crash on
+// render, but crashed the instant you tried to add another role
+// (addRole()'s `r.toLowerCase()` check, called against an array
+// element instead of a string). Mirrors the backend's own
+// _flatten_roles() so editing never sees a shape it can't handle.
+function flattenRoles(roles) {
+  const flat = [];
+  for (const entry of roles) {
+    if (Array.isArray(entry)) flat.push(...entry);
+    else flat.push(entry);
+  }
+  return flat;
+}
+
 // Part 2 §2.7 — Workflow Template builder. Covers both write paths
 // §2.3's design calls for against a single GET/POST/DELETE
 // /api/workflow-templates surface:
@@ -168,7 +190,7 @@ function WorkflowTemplatesTab({ onOpenChat, initialTemplateRoles, onConsumeIniti
   );
 }
 
-function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues, heading = "Build a template", submitLabel = "Save template", savingLabel = "Saving…" }) {
+function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues, heading = "Build a template", submitLabel = "Save template", savingLabel = "Saving…", groupsFlattenedWarning = false }) {
   const [name, setName] = useState(initialValues?.name || "");
   const [description, setDescription] = useState(initialValues?.description || "");
   const [roles, setRoles] = useState(() => initialValues?.roles || initialRoles || []);
@@ -207,6 +229,14 @@ function TemplateBuilder({ onSave, onCancel, apiUrl, initialRoles, initialValues
           <X size={14} />
         </button>
       </div>
+
+      {groupsFlattenedWarning && (
+        <p className="text-[11px] text-amber-500">
+          This template has roles marked to run in parallel — saving changes here will
+          flatten them into a fully sequential pipeline (parallel-group editing isn&apos;t
+          supported in this builder yet).
+        </p>
+      )}
 
       <label className="block text-xs text-[var(--neutral-500)]">
         Name
@@ -291,6 +321,7 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onSta
   function run() {
     if (!taskText.trim() || runState.running) return;
     runTemplate(template.template_id, taskText);
+    setTaskText("");
   }
 
   // Template editing (previously dead PUT endpoint) — reuses the same
@@ -298,6 +329,11 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onSta
   // and wired to onUpdate() instead of onSave(), inline in place of the
   // card's normal display.
   if (isEditing) {
+    // Flatten before handing roles to the builder (see flattenRoles'
+    // own comment above) — this does mean saving from here turns any
+    // existing parallel group into a fully sequential pipeline, so flag
+    // that plainly rather than silently dropping the grouping.
+    const hadGroups = (template.roles || []).some((r) => Array.isArray(r));
     return (
       <TemplateBuilder
         apiUrl={apiUrl}
@@ -307,10 +343,11 @@ function TemplateCard({ template, apiUrl, onDelete, onOpenChat, isEditing, onSta
         initialValues={{
           name: template.name,
           description: template.description || "",
-          roles: template.roles || [],
+          roles: flattenRoles(template.roles || []),
           approval_roles: template.approval_roles || [],
           domain_hint: template.domain_hint || "",
         }}
+        groupsFlattenedWarning={hadGroups}
         onSave={(payload) => onUpdate(template.template_id, payload)}
         onCancel={onCancelEdit}
       />

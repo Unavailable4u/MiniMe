@@ -108,7 +108,10 @@ function SettingsTab() {
               {pusherConnected ? "connected" : "not configured"}
             </dd>
           </div>
-          <div className="flex justify-between"><dt>Session ID</dt><dd className="truncate max-w-[60%]">{sessionId}</dd></div>
+          <div className="flex justify-between">
+            <dt>Session ID</dt>
+            <dd className="truncate max-w-[60%] cursor-default" title={sessionId || ""}>{sessionId}</dd>
+          </div>
         </dl>
       </section>
     </div>
