@@ -159,7 +159,7 @@ function QuotaPanel({ apiUrl }) {
                           style={{ background: colorFor(r.provider) }}
                         />
                       )}
-                      <span className="truncate text-cyber-text">{r.agentKey}</span>
+                      <span className="truncate text-cyber-text" title={r.agentKey}>{r.agentKey}</span>
                     </span>
                     <span className={`shrink-0 ${near ? "text-amber-500" : "text-cyber-dim"}`}>
                       {formatUsedQuota(r)}
@@ -600,14 +600,28 @@ function ProviderCard({ provider, keys, history }) {
 }
 
 function mergeProviderHistory(keys, history) {
-  // Combine every key of this provider's own per-key history into one
-  // provider-level series, summing whichever keys have a sample at each
-  // timestamp seen. Simpler than a true resample/forward-fill (fine for
-  // a live sparkline over one session; revisit if a provider with many
-  // concurrently-active keys makes this look choppy).
-  const rows = keys.flatMap((k) => (history[k.statKey] || []).map((p) => ({ ...p, statKey: k.statKey })));
-  rows.sort((a, b) => a.t - b.t);
-  return rows;
+  // BUGFIX: this used to just concatenate every key's raw points and
+  // sort by time — no summing at all, despite the comment above
+  // promising it. Each `history[statKey]` sample is that ONE key's
+  // own cumulative tokens_used_today (see UsageStatsContext.jsx's
+  // handleUsageEvent), so for a provider with more than one active
+  // key, plotting the raw concatenated points meant every other point
+  // on the sparkline reflected a single key's count instead of the
+  // provider's actual total — a real zigzag, not just "choppy".
+  // Fixed the same way UsageStatsContext.jsx's own combinedUsageHistory
+  // already handles the multi-key case: forward-fill each key's last
+  // known value and sum across all of the provider's keys at every
+  // sample, so the series is a true running provider total.
+  const rows = keys
+    .flatMap((k) => (history[k.statKey] || []).map((p) => ({ t: p.t, tokens: p.tokens, statKey: k.statKey })))
+    .sort((a, b) => a.t - b.t);
+
+  const lastByKey = {};
+  return rows.map((p) => {
+    lastByKey[p.statKey] = p.tokens;
+    const tokens = keys.reduce((sum, k) => sum + (lastByKey[k.statKey] ?? 0), 0);
+    return { t: p.t, tokens };
+  });
 }
 
 function CombinedChart({ data, providers }) {
