@@ -534,6 +534,31 @@ def _load_saved_podcast(ws_id: str) -> tuple[str, str | None]:
     return script_text, None
 
 
+def _load_saved_video_path(ws_id: str) -> str | None:
+    """Frontend paste-box patch (patch 4), step 1. Returns the
+    NOTES_EXPORTS_DIR-relative video filename saved under the
+    "video_overview" panel, or None if there's no saved row, the row's
+    content doesn't parse, or the file it names no longer exists on
+    disk. Same "don't promise a path that then 404s" posture
+    _load_saved_podcast() above already takes for "podcast"'s
+    audio_path -- this is that same check, just for video_overview's
+    video_path, and pulled out as its own helper (rather than inlined
+    into notebooks_video_overview_video() below) so the existence check
+    isn't duplicated between this and any future caller.
+    """
+    row = panel_content.get_content(ws_id, "video_overview")
+    if not row["content"]:
+        return None
+    try:
+        data = json.loads(row["content"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    video_filename = data.get("video_path")
+    if video_filename and os.path.exists(os.path.join(NOTES_EXPORTS_DIR, video_filename)):
+        return video_filename
+    return None
+
+
 def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     """Phase 5 step 5.6, rewritten by the Video Overview reuse patch,
     step 2. Raises LookupError/ValueError on failure, same contract as
@@ -1377,6 +1402,60 @@ def notebooks_video_overview(ws_id: str, req: NotebooksVideoOverviewRequest, own
         return _generate_video_overview(ws_id, req.scope, owner_id)
     except (LookupError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- serving the panel_content-backed podcast/video_overview media --------
+# Frontend paste-box patch (patch 4), step 1: the gap flagged in
+# notebooks_podcast()'s and _generate_video_overview()'s own comments --
+# "no GET route serves the mp3/mp4 back yet" -- closed here. Deliberately
+# two thin, workspace-scoped GET routes rather than a single
+# "/media/{filename}" route: each one resolves its own filename off the
+# matching panel_content row (via _load_saved_podcast()/
+# _load_saved_video_path() above) rather than trusting a client-supplied
+# filename, so there's no path-traversal surface and no way for one
+# workspace's owner to probe another workspace's export filenames by
+# guessing them. Same require_auth + get_workspace existence check every
+# other route in this file already uses; a 404 here means "generate one
+# first" (via chat, the dedicated POST route, or the Presentation/Podcast/
+# Video Overview paste boxes), not a server error.
+@router.get("/api/workspaces/{ws_id}/notebooks/podcast/audio")
+def notebooks_podcast_audio(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    _, audio_filename = _load_saved_podcast(ws_id)
+    if not audio_filename:
+        raise HTTPException(
+            status_code=404,
+            detail="No podcast audio saved for this workspace yet -- generate one first.",
+        )
+    return FileResponse(
+        os.path.join(NOTES_EXPORTS_DIR, audio_filename),
+        media_type="audio/mpeg",
+        filename=audio_filename,
+    )
+
+
+@router.get("/api/workspaces/{ws_id}/notebooks/video_overview/video")
+def notebooks_video_overview_video(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    video_filename = _load_saved_video_path(ws_id)
+    if not video_filename:
+        raise HTTPException(
+            status_code=404,
+            detail="No video overview saved for this workspace yet -- generate one first.",
+        )
+    return FileResponse(
+        os.path.join(NOTES_EXPORTS_DIR, video_filename),
+        media_type="video/mp4",
+        filename=video_filename,
+    )
 
 
 # --- per-topic workflow, triggered by a Mind Map node click (step 2) -------
