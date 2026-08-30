@@ -658,6 +658,38 @@ def test_delete_workspace_unlinks_every_remaining_chat(monkeypatch):
     chat_workspace.write_audit.assert_called_once()
 
 
+def test_delete_workspace_detaches_chats_workspace_id(monkeypatch):
+    """Bug fix regression test: deleting a workspace must null out
+    workspace_id on every chat still pointing at it -- not just clear
+    linked_chat_ids -- or those chats keep showing as grouped under a
+    project that no longer exists (chat tab lists chats independent of
+    any workspace join, unlike tabs that re-resolve the workspace and
+    safely 404). This must run as an `update ... where workspace_id = %s`
+    against the chats table BEFORE (or as part of the same transaction
+    as) the `delete from workspaces` -- not filtered down to just
+    ws["chat_ids"], since that array intentionally omits other members'
+    private chats, which still need detaching."""
+    monkeypatch.setattr(chat_workspace, "_require_owner_or_partner", lambda *a, **kw: "owner")
+    monkeypatch.setattr(chat_workspace, "get_workspace",
+                         lambda *a, **kw: _ws_row(chat_ids=["chat_1", "chat_2"]))
+    monkeypatch.setattr(chat_workspace.chat_store, "chat_exists", lambda *a, **kw: True)
+    monkeypatch.setattr(chat_workspace.chat_store, "set_linked_chats", MagicMock())
+    cursor = FakeCursor()
+    _install_fake_cursor(monkeypatch, cursor)
+
+    chat_workspace.delete_workspace("ws_1", "owner_1")
+
+    detach_queries = [(q, p) for q, p in cursor.executed if "workspace_id = null" in q]
+    assert len(detach_queries) == 1
+    query, params = detach_queries[0]
+    assert "update chats" in query
+    assert "where workspace_id = %s" in query
+    assert params[-1] == "ws_1"
+
+    delete_queries = [q for q, _ in cursor.executed if q.strip().startswith("delete from workspaces")]
+    assert len(delete_queries) == 1
+
+
 def test_workspace_for_chat_returns_none_when_chat_missing_or_unowned(monkeypatch):
     cursor = FakeCursor(fetchone_results=[None])
     _install_fake_cursor(monkeypatch, cursor)

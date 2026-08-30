@@ -697,10 +697,38 @@ def remove_chat(ws_id: str, user_id: str, chat_id: str, delete_chat: bool = Fals
 def delete_workspace(ws_id: str, user_id: str) -> None:
     """Owner OR partner can delete — both tiers are full-power. A
     moderator cannot, regardless of how long they've been trusted with
-    membership management."""
+    membership management.
+
+    Bug fix: this used to only `delete from workspaces` and clear each
+    chat_ids member's linked_chat_ids, but never cleared chats.workspace_id
+    itself -- unlike remove_chat()'s non-delete_chat branch, which does
+    `update chats set workspace_id = null ...` when detaching a single
+    chat. That meant every chat that had been in the workspace kept a
+    workspace_id pointing at a row that no longer existed. Screens that
+    resolve membership by re-fetching the workspace (get_workspace,
+    workspace_for_chat) degrade safely -- a lookup on a deleted id just
+    404s/returns None -- so those looked correct. But the chat tab lists
+    a user's chats independent of any workspace join (chat_store.list_chats
+    is a plain `where owner_id = %s`) and groups them client-side by
+    cross-referencing each workspace's chat_ids; a stale, non-null
+    workspace_id left chats.workspace_id and the (now nonexistent)
+    workspace's contents implicitly still associated on any code path
+    that keys off that column directly, so deleted projects' chats could
+    keep showing as grouped there even though every other tab looked
+    clean. Explicitly nulling workspace_id here -- for every chat that
+    points at ws_id, not just the ones ws["chat_ids"] surfaces (that
+    array intentionally omits other members' private chats, but those
+    still need detaching) -- makes chats fully standalone the moment the
+    workspace is gone, matching the product's own "member chats survive,
+    they just stop auto-sharing memory" framing for this action.
+    """
     _require_owner_or_partner(ws_id, user_id)
     ws = get_workspace(ws_id, user_id)
     with db.cursor(user_id=user_id) as cur:
+        cur.execute(
+            "update chats set workspace_id = null, updated_at = %s where workspace_id = %s",
+            (_now(), ws_id),
+        )
         cur.execute("delete from workspaces where id = %s", (ws_id,))
     write_audit(user_id, "workspace.delete", "workspace", ws_id, {"name": ws["name"]})
     for cid in ws["chat_ids"]:
