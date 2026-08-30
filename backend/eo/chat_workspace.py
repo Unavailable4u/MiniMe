@@ -721,16 +721,40 @@ def delete_workspace(ws_id: str, user_id: str) -> None:
     still need detaching) -- makes chats fully standalone the moment the
     workspace is gone, matching the product's own "member chats survive,
     they just stop auto-sharing memory" framing for this action.
+
+    Bug fix (Option A, audit-log follow-up): api/routes/workspaces.py's
+    get_workspace_audit() authorizes a caller via chat_workspace.member_role(),
+    which needs the workspaces row (and, for a joint workspace, the
+    workspace_members rows) to still exist -- both gone the instant this
+    function returns, so a workspace's own "who deleted this and when"
+    audit entry became permanently unreachable through that route,
+    directly contradicting eo/audit_log.py's own "independent of the
+    current state of the thing itself" promise. Snapshotting every
+    owner/partner-tier user_id into THIS delete event's detail (read back
+    via audit_log.find_deletion_snapshot()) gives that route something to
+    authorize against once the live membership is gone -- captured here,
+    before either table is touched, since ws["owner_id"] and the
+    workspace_members rows below are both gone by the time write_audit()
+    runs a few lines down.
     """
     _require_owner_or_partner(ws_id, user_id)
     ws = get_workspace(ws_id, user_id)
+    authorized_viewer_ids = set()
+    if ws.get("owner_id"):
+        authorized_viewer_ids.add(ws["owner_id"])
     with db.cursor(user_id=user_id) as cur:
+        cur.execute(
+            "select user_id from workspace_members where workspace_id = %s and role = 'partner'",
+            (ws_id,),
+        )
+        authorized_viewer_ids.update(r["user_id"] for r in cur.fetchall())
         cur.execute(
             "update chats set workspace_id = null, updated_at = %s where workspace_id = %s",
             (_now(), ws_id),
         )
         cur.execute("delete from workspaces where id = %s", (ws_id,))
-    write_audit(user_id, "workspace.delete", "workspace", ws_id, {"name": ws["name"]})
+    write_audit(user_id, "workspace.delete", "workspace", ws_id,
+                {"name": ws["name"], "authorized_viewer_ids": sorted(authorized_viewer_ids)})
     for cid in ws["chat_ids"]:
         if chat_store.chat_exists(cid, user_id):
             chat_store.set_linked_chats(cid, user_id, [])

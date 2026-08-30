@@ -26,15 +26,19 @@ from eo import audit_log
 
 
 class FakeCursor:
-    def __init__(self, fetchall_result=None):
+    def __init__(self, fetchall_result=None, fetchone_result=None):
         self.executed = []
         self._fetchall_result = fetchall_result or []
+        self._fetchone_result = fetchone_result
 
     def execute(self, query, params=None):
         self.executed.append((query, params))
 
     def fetchall(self):
         return self._fetchall_result
+
+    def fetchone(self):
+        return self._fetchone_result
 
 
 class FakeCursorContext:
@@ -200,3 +204,45 @@ def test_row_to_entry_handles_a_null_created_at_without_raising():
         "target_id": "tid", "detail": {}, "created_at": None,
     }
     assert audit_log._row_to_entry(row)["created_at"] is None
+
+
+# ---------------------------------------------------------------------
+# find_deletion_snapshot (Option A: authorize a former owner/partner
+# against a deleted workspace's own audit trail)
+# ---------------------------------------------------------------------
+
+def test_find_deletion_snapshot_uses_trusted_cursor(monkeypatch):
+    """Same posture as list_for_target(): this is an internal
+    authorization lookup a route makes on the caller's behalf, not a
+    caller-scoped read, so it must go in via trusted=True."""
+    calls_log = _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=None))
+
+    audit_log.find_deletion_snapshot("workspace", "ws_1")
+
+    assert calls_log == [{"trusted": True}]
+
+
+def test_find_deletion_snapshot_queries_the_delete_action_for_this_target(monkeypatch):
+    fake_cursor = FakeCursor(fetchone_result=None)
+    _install_fake_cursor(monkeypatch, fake_cursor)
+
+    audit_log.find_deletion_snapshot("workspace", "ws_1")
+
+    query, params = fake_cursor.executed[0]
+    assert "target_type = %s and target_id = %s and action = %s" in query
+    assert params == ("workspace", "ws_1", "workspace.delete")
+
+
+def test_find_deletion_snapshot_returns_the_detail_dict_when_found(monkeypatch):
+    row = {"detail": {"name": "My Project", "authorized_viewer_ids": ["owner_1", "partner_1"]}}
+    _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=row))
+
+    result = audit_log.find_deletion_snapshot("workspace", "ws_1")
+
+    assert result == {"name": "My Project", "authorized_viewer_ids": ["owner_1", "partner_1"]}
+
+
+def test_find_deletion_snapshot_returns_none_when_never_deleted(monkeypatch):
+    _install_fake_cursor(monkeypatch, FakeCursor(fetchone_result=None))
+
+    assert audit_log.find_deletion_snapshot("workspace", "ws_never_deleted") is None

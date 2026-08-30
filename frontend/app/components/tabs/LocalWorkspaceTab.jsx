@@ -6,7 +6,7 @@ import PendingActionBar from "../PendingActionBar";   // NEW — Part 7
 import TerminalPanel from "../TerminalPanel";           // NEW — Part 7
 import {
   Folder, FolderOpen, File, Loader2, RefreshCw, WifiOff, ChevronRight,
-  HardDrive, AlertTriangle, FileText, TerminalSquare,
+  HardDrive, AlertTriangle, FileText, TerminalSquare, Copy, Check,
 } from "lucide-react";
 
 /**
@@ -197,6 +197,22 @@ function FileTreeNode({ wsId, entry, path, depth, onSelectFile, selectedPath }) 
 // from Part 4), so this deliberately renders as plain, non-editable
 // text even though it's sitting right next to a real file on disk.
 function FilePreview({ file }) {
+  // Visual refinement: brief "Copied" confirmation on the copy-path
+  // button, reset whenever the selection itself changes so a stale
+  // checkmark from a previously-copied file can't linger onto the next.
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    setCopied(false);
+  }, [file?.path]);
+
+  const handleCopyPath = useCallback(() => {
+    if (!file || !navigator.clipboard) return;
+    navigator.clipboard.writeText(file.path).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  }, [file]);
+
   if (!file) {
     return (
       <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-600)]">
@@ -204,10 +220,29 @@ function FilePreview({ file }) {
       </div>
     );
   }
+
+  // Visual refinement: line/char count footer, same idea as most code
+  // editors' status bars -- gives a cheap sense of file size beyond the
+  // byte count already shown in the tree row, without adding another
+  // network round trip (the content's already sitting in state).
+  const showMeta = !file.loading && !file.error;
+  const lineCount = showMeta ? file.content.split("\n").length : null;
+
   return (
     <div className="h-full flex flex-col min-h-0">
-      <div className="shrink-0 px-3 py-2 border-b border-[var(--neutral-800)] text-xs text-[var(--neutral-300)] font-mono truncate" title={file.path}>
-        {file.path}
+      <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--neutral-800)]">
+        <span className="flex-1 min-w-0 text-xs text-[var(--neutral-300)] font-mono truncate" title={file.path}>
+          {file.path}
+        </span>
+        <button
+          type="button"
+          onClick={handleCopyPath}
+          title="Copy path"
+          className="shrink-0 flex items-center gap-1 text-[10px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+        >
+          {copied ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+          {copied ? "Copied" : "Copy path"}
+        </button>
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
         {file.loading && (
@@ -234,6 +269,11 @@ function FilePreview({ file }) {
           </>
         )}
       </div>
+      {showMeta && (
+        <div className="shrink-0 px-3 py-1 border-t border-[var(--neutral-800)] text-[10px] text-[var(--neutral-700)]">
+          {lineCount.toLocaleString()} {lineCount === 1 ? "line" : "lines"} · {file.content.length.toLocaleString()} chars
+        </div>
+      )}
     </div>
   );
 }
@@ -250,6 +290,10 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
   const [selectedFile, setSelectedFile] = useState(null);
   const [subView, setSubView] = useState("files"); // "files" | "terminal" — NEW, Part 7
 
+  // Monotonically increasing token guarding onSelectFile against
+  // out-of-order network responses -- see that callback's own comment.
+  const selectRequestRef = useRef(0);
+
   // Consumed once, same "promote/handoff sets it, destination tab reads
   // it once and clears it" contract AppShell.jsx's pendingWorkspaceSelection
   // documents for every other workspace-scoped tab.
@@ -262,7 +306,20 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
   }, [initialWorkspaceId]);
 
   useEffect(() => {
-    if (!selectedId && workspaces.length > 0) setSelectedId(workspaces[0].id);
+    // BUGFIX (same class as AuditLogTab.jsx's own workspace picker): this
+    // used to only fire `!selectedId` — a one-time default pick, never
+    // revisited. If the workspace behind `selectedId` is deleted (or the
+    // user loses access) while this tab isn't the active one, selectedId
+    // keeps pointing at an id no longer in `workspaces`: the <select>
+    // above renders a `value` with no matching <option>, and every
+    // status/list_dir/read_file call below keeps hitting a workspace_id
+    // that 404s, even though the user may have several other workspaces
+    // they could perfectly well browse. Re-check membership on every
+    // `workspaces` change, not just when selectedId is empty, and fall
+    // back the same way the initial-pick branch already does.
+    if (workspaces.length === 0) return;
+    const stillExists = selectedId && workspaces.some((ws) => ws.id === selectedId);
+    if (!stillExists) setSelectedId(workspaces[0].id);
   }, [workspaces, selectedId]);
 
   useEffect(() => {
@@ -294,6 +351,11 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
     setSelectedFile(null);
     setLive(false);
     setStatusChecked(false);
+    // Also invalidate any read_file request still in flight for the
+    // previous workspace, so a slow response landing after the switch
+    // can't repopulate the preview pane with another workspace's file
+    // (see selectRequestRef's own comment on onSelectFile).
+    selectRequestRef.current += 1;
   }, [selectedId]);
 
   useEffect(() => {
@@ -322,11 +384,25 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
   }, [selectedId, loadRoot]);
 
   const onSelectFile = useCallback(async (path) => {
+    // BUGFIX: out-of-order responses. Clicking file A then quickly
+    // clicking file B fires two overlapping read_file requests; network
+    // timing gives no guarantee A's promise resolves before B's, so the
+    // naive version could let A's now-stale response land last and
+    // silently overwrite B's freshly-selected content -- the tree still
+    // highlights B, but the preview pane shows A. Stamping each call with
+    // a token and checking it's still the latest before touching state
+    // (after every await, so both the success and error paths are
+    // covered) drops any response that's been superseded by a newer
+    // selection -- same technique the reset effect above uses to
+    // invalidate in-flight requests across a workspace switch.
+    const requestId = ++selectRequestRef.current;
     setSelectedFile({ path, content: "", loading: true, error: null, truncated: false });
     try {
       const data = await fetchReadFile(selectedId, path);
+      if (requestId !== selectRequestRef.current) return;
       setSelectedFile({ path, content: data.content, loading: false, error: null, truncated: Boolean(data.truncated) });
     } catch (e) {
+      if (requestId !== selectRequestRef.current) return;
       setSelectedFile({ path, content: "", loading: false, error: e.message, truncated: false });
     }
   }, [selectedId]);
