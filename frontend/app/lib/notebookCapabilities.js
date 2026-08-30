@@ -180,7 +180,17 @@ const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));
 // Fields the server manifest (api/server.py's CAPABILITIES_MANIFEST) owns.
 // Deliberately excludes `icon` and `keywords` — see the step 1.6 comment
 // in api/server.py for why those stay frontend-only.
-const SERVER_OWNED_FIELDS = ["label", "subTab", "description", "scopeAllowed", "endpoint", "enabled"];
+//
+// FIXED — Frontend paste-box patch (patch 4): `pastableTextFields` was
+// missing from this list even though the Chat wiring patch (step 4)
+// already added it to every relevant CAPABILITIES_MANIFEST entry on the
+// server (podcast/slide_deck/video_overview). Nothing caught this
+// because nothing on the frontend read `pastableTextFields` yet — this
+// step is the first frontend code that does (StudyView's rewired
+// paste boxes below), and it would have silently seen `undefined`
+// forever without this fix, sync succeeding but dropping the one field
+// that mattered.
+const SERVER_OWNED_FIELDS = ["label", "subTab", "description", "scopeAllowed", "endpoint", "enabled", "pastableTextFields"];
 
 let syncPromise = null;
 

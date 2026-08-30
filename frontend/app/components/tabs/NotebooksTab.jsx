@@ -1148,7 +1148,17 @@ function DiagramsView({
 // stage_output text" pattern the Mind Map view above already uses.
 
 function StudyView({ workspaceId }) {
-  const { synthesizePodcast, buildVideoOverview, fetchPanelContent, generateNotebooks } = useSession();
+  // CHANGED — Frontend paste-box patch (patch 4): synthesizePodcast/
+  // buildVideoOverview (the old, disconnected /api/notes/... routes)
+  // are dropped from this component's destructure. Podcast/Video
+  // overview below now dispatch through generateNotebooks() -- the
+  // same panel_content-backed path chat already uses -- and read the
+  // resulting media back via the two new fetch*Url() readers, so a
+  // script/slides pasted here, generated here, or generated from a
+  // chat message all land in the exact same "podcast"/"video_overview"/
+  // "slide_deck" panel rows instead of two parallel, never-reusing-
+  // each-other systems.
+  const { fetchPanelContent, generateNotebooks, fetchPodcastAudioUrl, fetchVideoOverviewUrl } = useSession();
   const [kind, setKind] = useState("flashcards");
   const [text, setText] = useState("");
   const [rendered, setRendered] = useState("");
@@ -1205,30 +1215,36 @@ function StudyView({ workspaceId }) {
     }
   }
 
-  // NEW — Part 4 §4.4: podcast synthesis state. Kept separate from
-  // `rendered` (the paste-and-Load flow above) since this kind doesn't
-  // render the pasted text directly — it round-trips through the
-  // synthesis endpoint first and renders an <audio> player from the
-  // result instead.
-  const [podcastTitle, setPodcastTitle] = useState("podcast");
+  // CHANGED — Frontend paste-box patch (patch 4): podcast synthesis
+  // state, rewired onto generateNotebooks()'s "podcast" target instead
+  // of the old synthesizePodcast() raw-file-response call. `text` above
+  // (already used by PERSISTED_KINDS' textarea machinery) doubles as
+  // the optional pasted-script box for this kind too -- when non-empty
+  // it's sent as scope.script_text (matching the "podcast" manifest
+  // entry's pastableTextFields, Chat wiring patch step 4); when empty,
+  // generateNotebooks() falls through to whatever's already saved or
+  // generates fresh from sources, same three-way resolution
+  // _generate_podcast()/_generate_video_overview() already give chat.
+  // `podcastFilename` is now purely cosmetic (the `download` attribute
+  // below) -- the backend writes a single fixed `podcast_{ws_id}.mp3`
+  // per workspace regardless of what's typed here, so there's no more
+  // "must match exactly" coupling to Video Overview's build to track.
+  const [podcastFilename, setPodcastFilename] = useState("podcast");
   const [podcastAudioUrl, setPodcastAudioUrl] = useState("");
   const [synthesizing, setSynthesizing] = useState(false);
   const [synthesizeError, setSynthesizeError] = useState("");
-  // Tracks which titles have been successfully synthesized in this
-  // session — the video-overview build below needs a podcast already on
-  // disk under a matching title (see build_video_overview_endpoint's
-  // 404 message), so the UI surfaces that dependency instead of letting
-  // the user hit the error blind.
-  const [synthesizedTitles, setSynthesizedTitles] = useState(() => new Set());
+  const [podcastUpdatedAt, setPodcastUpdatedAt] = useState(null);
 
   async function handleSynthesize() {
     setSynthesizing(true);
     setSynthesizeError("");
-    setPodcastAudioUrl("");
     try {
-      const url = await synthesizePodcast(text, podcastTitle);
-      setPodcastAudioUrl(url);
-      setSynthesizedTitles((prev) => new Set(prev).add(podcastTitle));
+      const scope = text.trim() ? { script_text: text.trim() } : null;
+      const { branches } = await generateNotebooks(workspaceId, ["podcast"], scope);
+      const branch = branches.find((b) => b.panel_key === "podcast");
+      if (branch?.status === "error") throw new Error(branch.error || "Couldn't generate the podcast.");
+      setPodcastUpdatedAt(branch?.result?.updated_at || null);
+      setPodcastAudioUrl(await fetchPodcastAudioUrl(workspaceId));
     } catch (err) {
       setSynthesizeError(String(err.message || err));
     } finally {
@@ -1236,23 +1252,75 @@ function StudyView({ workspaceId }) {
     }
   }
 
-  // NEW — Part 4 §4.4: Video Overview state. Reuses podcastTitle above
-  // (rather than a separate field) since the backend requires the two to
-  // match exactly — it locates the already-synthesized mp3 on disk by
-  // that title instead of re-synthesizing it.
+  // NEW — Frontend paste-box patch (patch 4): Presentation (slide_deck)
+  // state -- the standalone target _generate_slide_deck() gave a real
+  // panel of its own (Video Overview reuse patch, step 1), but until
+  // now there was no UI anywhere to reach it outside of chat, and no
+  // "Presentation" tab existed in this component at all. `presentationText`
+  // is this kind's own optional paste box (kept separate from Video
+  // Overview's `slideText` below -- they're two different submissions
+  // to two different generate calls, even though both use the
+  // `slide_text` scope key), sent as scope.slide_text when non-empty.
+  const [presentationText, setPresentationText] = useState("");
+  const [presentationResult, setPresentationResult] = useState("");
+  const [generatingPresentation, setGeneratingPresentation] = useState(false);
+  const [presentationError, setPresentationError] = useState("");
+  const [presentationUpdatedAt, setPresentationUpdatedAt] = useState(null);
+
+  async function handleGeneratePresentation() {
+    setGeneratingPresentation(true);
+    setPresentationError("");
+    try {
+      const scope = presentationText.trim() ? { slide_text: presentationText.trim() } : null;
+      const { branches } = await generateNotebooks(workspaceId, ["slide_deck"], scope);
+      const branch = branches.find((b) => b.panel_key === "slide_deck");
+      if (branch?.status === "error") throw new Error(branch.error || "Couldn't generate the presentation.");
+      setPresentationResult(branch?.result?.slide_text || "");
+      setPresentationUpdatedAt(branch?.result?.updated_at || null);
+    } catch (err) {
+      setPresentationError(String(err.message || err));
+    } finally {
+      setGeneratingPresentation(false);
+    }
+  }
+
+  // CHANGED — Frontend paste-box patch (patch 4): Video Overview state,
+  // rewired onto generateNotebooks()'s "video_overview" target. The old
+  // `podcastTitle`-must-match-exactly coupling to the Podcast tab is
+  // gone -- _generate_video_overview() resolves its own script/slide
+  // halves against whatever's already saved (or pasted here via
+  // scope.slide_text) with zero title-matching involved, so there's
+  // nothing left for this tab to warn about. `videoFilename` is
+  // cosmetic only, same as `podcastFilename` above. `videoOrigins`
+  // surfaces the branch result's slide_source/script_source/
+  // reused_audio fields -- exactly the "pasted vs existing vs derived
+  // vs generated" transparency this whole reuse patch was built to
+  // provide -- so pasting just a slide outline here visibly shows
+  // "narration: derived" instead of leaving the user to guess whether
+  // it silently regenerated everything from scratch.
   const [slideText, setSlideText] = useState("");
-  const [videoTitle, setVideoTitle] = useState("video_overview");
+  const [videoFilename, setVideoFilename] = useState("video_overview");
   const [videoUrl, setVideoUrl] = useState("");
   const [buildingVideo, setBuildingVideo] = useState(false);
   const [videoError, setVideoError] = useState("");
+  const [videoOrigins, setVideoOrigins] = useState(null);
+  const [videoUpdatedAt, setVideoUpdatedAt] = useState(null);
 
   async function handleBuildVideo() {
     setBuildingVideo(true);
     setVideoError("");
-    setVideoUrl("");
     try {
-      const url = await buildVideoOverview(slideText, podcastTitle, videoTitle);
-      setVideoUrl(url);
+      const scope = slideText.trim() ? { slide_text: slideText.trim() } : null;
+      const { branches } = await generateNotebooks(workspaceId, ["video_overview"], scope);
+      const branch = branches.find((b) => b.panel_key === "video_overview");
+      if (branch?.status === "error") throw new Error(branch.error || "Couldn't build the video overview.");
+      setVideoOrigins({
+        slide_source: branch?.result?.slide_source,
+        script_source: branch?.result?.script_source,
+        reused_audio: branch?.result?.reused_audio,
+      });
+      setVideoUpdatedAt(branch?.result?.updated_at || null);
+      setVideoUrl(await fetchVideoOverviewUrl(workspaceId));
     } catch (err) {
       setVideoError(String(err.message || err));
     } finally {
@@ -1260,28 +1328,97 @@ function StudyView({ workspaceId }) {
     }
   }
 
+  // NEW — Frontend paste-box patch (patch 4): best-effort "load what's
+  // already there" for the three media kinds, on tab switch -- the
+  // same courtesy PERSISTED_KINDS' own effect above already gives
+  // flashcards/quiz/study_guide, so switching to Podcast/Presentation/
+  // Video overview shows a chat-generated result immediately instead of
+  // looking empty until someone hits Generate again. Silently leaves
+  // fields blank on any failure (no saved panel yet, no media file on
+  // disk for it, network hiccup) -- a blank paste box is the correct
+  // resting state for "nothing generated yet," not an error to surface.
+  useEffect(() => {
+    if (!["podcast", "slide_deck", "video_overview"].includes(kind)) return;
+    let cancelled = false;
+    (async () => {
+      let saved;
+      try {
+        saved = await fetchPanelContent(workspaceId, kind);
+      } catch {
+        return;
+      }
+      if (cancelled || !saved?.content) return;
+      let data;
+      try {
+        data = JSON.parse(saved.content);
+      } catch {
+        return;
+      }
+      if (kind === "podcast") {
+        setPodcastUpdatedAt(saved.updated_at || null);
+        if (data.script_text) setText((prev) => prev || data.script_text);
+        if (data.audio_path) {
+          try {
+            const url = await fetchPodcastAudioUrl(workspaceId);
+            if (!cancelled) setPodcastAudioUrl(url);
+          } catch { /* saved row exists but no playable file — leave blank */ }
+        }
+      } else if (kind === "slide_deck") {
+        setPresentationUpdatedAt(saved.updated_at || null);
+        if (data.slide_text) setPresentationResult((prev) => prev || data.slide_text);
+      } else if (kind === "video_overview") {
+        setVideoUpdatedAt(saved.updated_at || null);
+        if (data.video_path) {
+          try {
+            const url = await fetchVideoOverviewUrl(workspaceId);
+            if (!cancelled) setVideoUrl(url);
+          } catch { /* saved row exists but no playable file — leave blank */ }
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, kind]);
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        {["flashcards", "quiz", "study_guide", "podcast", "video_overview"].map((k) => (
+        {/* CHANGED — Frontend paste-box patch (patch 4): "slide_deck"
+            added as its own "Presentation" tab (it had no tab at all
+            before this patch — slides only ever existed as a hidden
+            first stage inside a video build). */}
+        {["flashcards", "quiz", "study_guide", "podcast", "slide_deck", "video_overview"].map((k) => (
           <button
             key={k}
             onClick={() => { setKind(k); setRendered(""); setText(""); }}
             className={`text-xs rounded-lg px-3 py-1 ${kind === k ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"}`}
           >
-            {k === "flashcards" ? "Flashcards" : k === "quiz" ? "Quiz" : k === "study_guide" ? "Study guide" : k === "podcast" ? "Podcast" : "Video overview"}
+            {k === "flashcards" ? "Flashcards" : k === "quiz" ? "Quiz" : k === "study_guide" ? "Study guide" : k === "podcast" ? "Podcast" : k === "slide_deck" ? "Presentation" : "Video overview"}
           </button>
         ))}
       </div>
+      {/* CHANGED — Frontend paste-box patch (patch 4): all three paste
+          boxes below are now optional, matching generateNotebooks()'s
+          real three-way resolution -- leave it blank to reuse whatever
+          this workspace already has saved (or generate fresh from
+          sources if nothing's saved yet), or paste your own to use that
+          instead of generating one. */}
       {kind === "video_overview" && (
         <p className="text-xs text-[var(--neutral-500)]">
-          Paste the Markdown from a <code className="text-amber-300">slide_planner</code> chat run, then build a
-          narrated slideshow using audio from a podcast you&apos;ve already synthesized under the same title below.
+          Optionally paste a slide outline below. Leave it blank to reuse this notebook&apos;s saved Podcast/Presentation
+          automatically, or generate both fresh from sources if neither exists yet.
         </p>
       )}
       {kind === "podcast" && (
         <p className="text-xs text-[var(--neutral-500)]">
-          Paste the Markdown from a <code className="text-amber-300">podcast_scriptwriter</code> chat run.
+          Optionally paste your own two-host script below (e.g. <code className="text-amber-300">HOST A: ...</code>).
+          Leave it blank to generate one from this notebook&apos;s sources.
+        </p>
+      )}
+      {kind === "slide_deck" && (
+        <p className="text-xs text-[var(--neutral-500)]">
+          Optionally paste your own slide outline below to reformat it. Leave it blank to generate one from this
+          notebook&apos;s sources.
         </p>
       )}
       {kind === "video_overview" && (
@@ -1291,7 +1428,7 @@ function StudyView({ workspaceId }) {
           value={slideText}
           onChange={(e) => setSlideText(e.target.value)}
           rows={5}
-          placeholder={"# Title\n## Section heading\nSection body text..."}
+          placeholder={"# Title\n## Section heading\nSection body text... (optional — leave blank to reuse/generate)"}
           className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
         />
       )}
@@ -1302,7 +1439,18 @@ function StudyView({ workspaceId }) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={5}
-          placeholder={"HOST A: Welcome back to the show...\nHOST B: Today we're covering..."}
+          placeholder={"HOST A: Welcome back to the show...\nHOST B: Today we're covering... (optional — leave blank to generate)"}
+          className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
+        />
+      )}
+      {kind === "slide_deck" && (
+        <textarea
+          id="notebook-presentation-text"
+          name="notebookPresentationText"
+          value={presentationText}
+          onChange={(e) => setPresentationText(e.target.value)}
+          rows={5}
+          placeholder={"# Title\n## Section heading\nSection body text... (optional — leave blank to generate)"}
           className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs font-mono outline-none focus:border-[var(--cyber-cyan)]"
         />
       )}
@@ -1348,22 +1496,27 @@ function StudyView({ workspaceId }) {
       {kind === "podcast" ? (
         <div className="space-y-2">
           <input
-            id="notebook-podcast-title"
-            name="notebookPodcastTitle"
-            value={podcastTitle}
-            onChange={(e) => setPodcastTitle(e.target.value)}
-            aria-label="Podcast title"
-            placeholder="Title (used as the audio filename)"
+            id="notebook-podcast-filename"
+            name="notebookPodcastFilename"
+            value={podcastFilename}
+            onChange={(e) => setPodcastFilename(e.target.value)}
+            aria-label="Download file name"
+            placeholder="Download file name (cosmetic only)"
             className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           />
-          <button
-            onClick={handleSynthesize}
-            disabled={synthesizing || !text.trim()}
-            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
-          >
-            {synthesizing && <Loader2 size={12} className="animate-spin" />}
-            {synthesizing ? "Synthesizing…" : "Synthesize"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSynthesize}
+              disabled={synthesizing}
+              className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            >
+              {synthesizing && <Loader2 size={12} className="animate-spin" />}
+              {synthesizing ? "Generating…" : podcastAudioUrl ? "Regenerate" : "Generate"}
+            </button>
+            {podcastUpdatedAt && !synthesizing && (
+              <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(podcastUpdatedAt)}</span>
+            )}
+          </div>
           {synthesizeError && (
             <p className="text-xs text-red-400">{synthesizeError}</p>
           )}
@@ -1372,7 +1525,7 @@ function StudyView({ workspaceId }) {
               <audio controls src={podcastAudioUrl} className="w-full" />
               <a
                 href={podcastAudioUrl}
-                download={`${podcastTitle || "podcast"}.mp3`}
+                download={`${podcastFilename || "podcast"}.mp3`}
                 className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
               >
                 Download mp3
@@ -1380,40 +1533,66 @@ function StudyView({ workspaceId }) {
             </div>
           )}
         </div>
+      ) : kind === "slide_deck" ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleGeneratePresentation}
+              disabled={generatingPresentation}
+              className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            >
+              {generatingPresentation && <Loader2 size={12} className="animate-spin" />}
+              {generatingPresentation ? "Generating…" : presentationResult ? "Regenerate" : "Generate"}
+            </button>
+            {presentationUpdatedAt && !generatingPresentation && (
+              <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(presentationUpdatedAt)}</span>
+            )}
+          </div>
+          {presentationError && (
+            <p className="text-xs text-red-400">{presentationError}</p>
+          )}
+          {presentationResult && (
+            <div className="rounded-lg border border-[var(--neutral-800)] p-4">
+              <pre className="text-xs whitespace-pre-wrap font-mono text-[var(--neutral-200)]">{presentationResult}</pre>
+            </div>
+          )}
+        </div>
       ) : kind === "video_overview" ? (
         <div className="space-y-2">
           <input
-            id="notebook-video-source-podcast-title"
-            name="notebookVideoSourcePodcastTitle"
-            value={podcastTitle}
-            onChange={(e) => setPodcastTitle(e.target.value)}
-            aria-label="Source podcast title"
-            placeholder="Podcast title (must match an already-synthesized podcast)"
+            id="notebook-video-filename"
+            name="notebookVideoFilename"
+            value={videoFilename}
+            onChange={(e) => setVideoFilename(e.target.value)}
+            aria-label="Download file name"
+            placeholder="Download file name (cosmetic only)"
             className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           />
-          {!synthesizedTitles.has(podcastTitle) && (
-            <p className="text-[11px] text-amber-400">
-              No podcast synthesized under this title yet this session. Switch to the Podcast tab and synthesize
-              one with this exact title first, or the build below will fail.
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleBuildVideo}
+              disabled={buildingVideo}
+              className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            >
+              {buildingVideo && <Loader2 size={12} className="animate-spin" />}
+              {buildingVideo ? "Building…" : "Build video overview"}
+            </button>
+            {videoUpdatedAt && !buildingVideo && (
+              <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(videoUpdatedAt)}</span>
+            )}
+          </div>
+          {/* NEW — Frontend paste-box patch (patch 4): surfaces the
+              branch result's slide_source/script_source/reused_audio
+              fields (Video Overview reuse patch, step 2) so pasting
+              only one half here visibly shows what happened to the
+              other, instead of leaving the user to guess whether it
+              silently regenerated everything from scratch. */}
+          {videoOrigins && !videoError && (
+            <p className="text-[11px] text-[var(--neutral-500)]">
+              Slides: {videoOrigins.slide_source} · Narration: {videoOrigins.script_source}
+              {videoOrigins.reused_audio ? " (reused existing audio, no re-synthesis)" : ""}
             </p>
           )}
-          <input
-            id="notebook-video-title"
-            name="notebookVideoTitle"
-            value={videoTitle}
-            onChange={(e) => setVideoTitle(e.target.value)}
-            aria-label="Video title"
-            placeholder="Video title (used as the output filename)"
-            className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
-          />
-          <button
-            onClick={handleBuildVideo}
-            disabled={buildingVideo || !slideText.trim() || !podcastTitle.trim()}
-            className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
-          >
-            {buildingVideo && <Loader2 size={12} className="animate-spin" />}
-            {buildingVideo ? "Building…" : "Build video overview"}
-          </button>
           {videoError && (
             <p className="text-xs text-red-400">{videoError}</p>
           )}
@@ -1422,7 +1601,7 @@ function StudyView({ workspaceId }) {
               <video controls src={videoUrl} className="w-full rounded" />
               <a
                 href={videoUrl}
-                download={`${videoTitle || "video_overview"}.mp4`}
+                download={`${videoFilename || "video_overview"}.mp4`}
                 className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
               >
                 Download mp4

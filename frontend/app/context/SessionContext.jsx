@@ -1842,6 +1842,45 @@ const buildVideoOverview = useCallback(async (slideText, podcastTitle, title) =>
   return URL.createObjectURL(blob);
 }, []);
 
+// NEW — Frontend paste-box patch (patch 4), step 2: thin GET wrappers
+// over the two new backend routes (api/routes/notebooks.py's
+// notebooks_podcast_audio()/notebooks_video_overview_video()) that
+// serve back whatever's currently saved under the "podcast"/
+// "video_overview" panel_content rows -- the panel_content-backed
+// counterpart synthesizePodcast()/buildVideoOverview() above never had,
+// since those two call the older, disconnected /api/notes/... routes
+// that return the freshly-built file directly instead of reading it
+// back from a saved panel. Same blob → object URL pattern as those two
+// (the browser <audio>/<video> tags below need a URL, not raw bytes),
+// just a GET with no body instead of a POST that also triggers
+// generation -- StudyView's rewired handleSynthesize()/handleBuildVideo()
+// call generateNotebooks() first (so scope.script_text/scope.slide_text
+// actually reach _generate_podcast()/_generate_video_overview()), then
+// call one of these to fetch the resulting media once it's saved.
+const fetchPodcastAudioUrl = useCallback(async (wsId) => {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/podcast/audio`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Couldn't fetch podcast audio (${res.status})`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}, []);
+
+const fetchVideoOverviewUrl = useCallback(async (wsId) => {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/video_overview/video`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Couldn't fetch video overview (${res.status})`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}, []);
+
 const gradeQuiz = useCallback(async (quizText, answers) => {
   const res = await fetch(`${API_URL}/api/notes/study/quiz/grade`, {
     method: "POST",
@@ -2582,6 +2621,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   gradeQuiz, recordQuizAttempt, fetchMissedQuestions,
   synthesizePodcast,   // NEW — Part 4 §4.4: podcast synthesis
   buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
+  fetchPodcastAudioUrl, fetchVideoOverviewUrl,   // NEW — Frontend paste-box patch (patch 4): read back saved panel_content media
   fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
   }), [
     sessionId, API_URL, messages, loading,
@@ -2604,7 +2644,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     classifyIntent, markTopicDone, fetchWorkspaceProgress, setWorkspaceProgress, fetchDeviceSpec, refreshPartPrices,
     toggleInstructionStep, proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate, openScopedSubChat,
     gradeQuiz, recordQuizAttempt, fetchMissedQuestions, synthesizePodcast, buildVideoOverview, fetchWorkspaceAudit,
-    fetchMyAudit,
+    fetchMyAudit, fetchPodcastAudioUrl, fetchVideoOverviewUrl,
   ]);
   return (
     <SessionContext.Provider value={value}>
