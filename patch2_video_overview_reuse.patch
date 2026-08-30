@@ -1,0 +1,380 @@
+diff --git a/backend/agents/podcast_scriptwriter.py b/backend/agents/podcast_scriptwriter.py
+index d2f70de..a6e165a 100644
+--- a/backend/agents/podcast_scriptwriter.py
++++ b/backend/agents/podcast_scriptwriter.py
+@@ -68,37 +68,63 @@ def _context_for(topics: dict) -> str:
+     return "\n\n".join(parts)
+ 
+ 
+-def generate_podcast_script(workspace_id: str, source_node_ids: list[str] | None = None) -> str:
++def generate_podcast_script(workspace_id: str, source_node_ids: list[str] | None = None,
++                             raw_context: str | None = None) -> str:
+     """Returns the raw two-host Markdown ("HOST A:"/"HOST B:" lines) a
+     podcast_scriptwriter role produces over the given sources, or every
+     source in the workspace when `source_node_ids` is falsy — same
+     "blank scope = whole notebook" convention agents/study_generator.py
+     and agents/fact_detector.py already use.
+ 
++    raw_context: NEW — Video Overview reuse patch, step 2. When given (a
++    non-empty string), skips the workspace source read entirely and
++    writes the podcast script directly from this text instead — lets a
++    caller who already has slide content (but no script yet) hand that
++    text straight to podcast_scriptwriter as the material to narrate,
++    without it needing to already exist as an ingested,
++    chunked-and-embedded workspace source. This is what lets
++    api/routes/notebooks.py's _generate_video_overview() derive a
++    narration script FROM a user-pasted (or previously generated) slide
++    deck, so the two halves of a video overview tell the same story
++    instead of the narration drawing on unrelated whole-notebook
++    material while the slides show something specific the user handed
++    it. `source_node_ids` is ignored when raw_context is given — there's
++    no source scope left to apply once raw_context already IS the whole
++    scope.
++
+     Raises LookupError if the resolved scope has zero readable topic
+-    content, same contract agents/study_generator.py's
++    content — only reachable when raw_context is NOT given, since a
++    non-empty raw_context always yields non-empty context by
++    construction. Same contract agents/study_generator.py's
+     generate_study_content() already gives its own caller — so
+     api/server.py's route can turn it into a clear 400 instead of
+     silently asking the model to write a script from nothing.
+     """
+-    packet = plan(
+-        workspace_id,
+-        task_text=(
+-            "Write a two-host podcast script that draws on real detail "
+-            "from the source material — specific facts, figures, and "
+-            "explanations a one-line summary wouldn't capture."
+-        ),
+-        scope="project",
+-    )
+-    topics = packet["topics"]
+-    if source_node_ids:
+-        wanted = set(source_node_ids)
+-        topics = {tid: t for tid, t in topics.items()
+-                  if wanted & set(t.get("covers") or [])}
+-
+-    context = _context_for(topics)
+-    if not context:
+-        raise LookupError("no readable topic content in scope")
++    if raw_context and raw_context.strip():
++        # Same per-source truncation reasoning as MAX_CONTENT_CHARS_PER_SOURCE
++        # above, just a single 4x-wider cap since this is one blob of
++        # already-curated text (a whole slide deck or script), not
++        # several sources summed together.
++        context = raw_context.strip()[:MAX_CONTENT_CHARS_PER_SOURCE * 4]
++    else:
++        packet = plan(
++            workspace_id,
++            task_text=(
++                "Write a two-host podcast script that draws on real detail "
++                "from the source material — specific facts, figures, and "
++                "explanations a one-line summary wouldn't capture."
++            ),
++            scope="project",
++        )
++        topics = packet["topics"]
++        if source_node_ids:
++            wanted = set(source_node_ids)
++            topics = {tid: t for tid, t in topics.items()
++                      if wanted & set(t.get("covers") or [])}
++
++        context = _context_for(topics)
++        if not context:
++            raise LookupError("no readable topic content in scope")
+ 
+     from agents.generic_worker import run as run_role  # deferred, same
+                                                           # circular-import
+@@ -125,6 +151,7 @@ def generate_podcast_script(workspace_id: str, source_node_ids: list[str] | None
+     return (result.get("text") or "").strip()
+ 
+ 
++
+ if __name__ == "__main__":
+     import sys as _sys
+     if len(_sys.argv) < 2:
+diff --git a/backend/agents/slide_deck_planner.py b/backend/agents/slide_deck_planner.py
+index e68bf7d..b346a86 100644
+--- a/backend/agents/slide_deck_planner.py
++++ b/backend/agents/slide_deck_planner.py
+@@ -69,37 +69,55 @@ def _context_for(topics: dict) -> str:
+     return "\n\n".join(parts)
+ 
+ 
+-def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = None) -> str:
++def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = None,
++                         raw_context: str | None = None) -> str:
+     """Returns the raw '# Deck Title' / '## Slide Title' Markdown outline
+     a slide_planner role produces over the given sources, or every source
+     in the workspace when `source_node_ids` is falsy — same "blank scope
+     = whole notebook" convention agents/podcast_scriptwriter.py and
+     agents/study_generator.py already use.
+ 
++    raw_context: NEW — Video Overview reuse patch, step 2. Same as
++    agents/podcast_scriptwriter.py's own generate_podcast_script()
++    parameter of the same name: when given (a non-empty string), skips
++    the workspace source read entirely and plans the deck directly from
++    this text instead — lets api/routes/notebooks.py's
++    _generate_video_overview() outline slides FROM a user-pasted (or
++    previously generated) podcast script, so the two halves of a video
++    overview cover the same material instead of the slides drawing on
++    unrelated whole-notebook content while the narration says something
++    specific the user handed it. `source_node_ids` is ignored when
++    raw_context is given, same reasoning as that sibling function.
++
+     Raises LookupError if the resolved scope has zero readable topic
+-    content, same contract agents/podcast_scriptwriter.py's
+-    generate_podcast_script() already gives its own caller — so
++    content — only reachable when raw_context is NOT given, same as
++    generate_podcast_script()'s own contract. So
+     api/server.py's route can turn it into a clear 400 instead of
+     silently asking the model to plan a deck from nothing.
+     """
+-    packet = plan(
+-        workspace_id,
+-        task_text=(
+-            "Plan a slide deck outline that draws on real detail from "
+-            "the source material — specific facts, figures, and "
+-            "explanations a one-line summary wouldn't capture."
+-        ),
+-        scope="project",
+-    )
+-    topics = packet["topics"]
+-    if source_node_ids:
+-        wanted = set(source_node_ids)
+-        topics = {tid: t for tid, t in topics.items()
+-                  if wanted & set(t.get("covers") or [])}
+-
+-    context = _context_for(topics)
+-    if not context:
+-        raise LookupError("no readable topic content in scope")
++    if raw_context and raw_context.strip():
++        # Same 4x-wider single-blob cap as generate_podcast_script()'s
++        # own raw_context branch.
++        context = raw_context.strip()[:MAX_CONTENT_CHARS_PER_SOURCE * 4]
++    else:
++        packet = plan(
++            workspace_id,
++            task_text=(
++                "Plan a slide deck outline that draws on real detail from "
++                "the source material — specific facts, figures, and "
++                "explanations a one-line summary wouldn't capture."
++            ),
++            scope="project",
++        )
++        topics = packet["topics"]
++        if source_node_ids:
++            wanted = set(source_node_ids)
++            topics = {tid: t for tid, t in topics.items()
++                      if wanted & set(t.get("covers") or [])}
++
++        context = _context_for(topics)
++        if not context:
++            raise LookupError("no readable topic content in scope")
+ 
+     from agents.generic_worker import run as run_role  # deferred, same
+                                                           # circular-import
+@@ -124,6 +142,7 @@ def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = N
+     return (result.get("text") or "").strip()
+ 
+ 
++
+ if __name__ == "__main__":
+     import sys as _sys
+     if len(_sys.argv) < 2:
+diff --git a/backend/api/routes/notebooks.py b/backend/api/routes/notebooks.py
+index 6877f98..d960af4 100644
+--- a/backend/api/routes/notebooks.py
++++ b/backend/api/routes/notebooks.py
+@@ -486,21 +486,146 @@ def _generate_podcast(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+     }
+ 
+ 
+-def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+-    """Phase 5 step 5.6. Same extraction _generate_podcast() above
+-    describes, for notebooks_video_overview() (step 5.5's dedicated
+-    route) instead. Raises LookupError/ValueError on failure, same
+-    contract as every other target function here -- see
+-    _generate_podcast()'s own docstring for why.
++def _load_saved_text(ws_id: str, panel_key: str, field: str) -> str:
++    """Video Overview reuse patch, step 2. Best-effort read of one text
++    field out of a JSON-encoded panel_content row -- returns "" for a
++    panel with no row saved yet, or content that doesn't parse or
++    doesn't have the field, so every caller can treat "no usable saved
++    text" as one single falsy case instead of handling get_content()'s
++    empty-row shape and a possible json.JSONDecodeError separately at
++    each call site. Used for the "slide_deck" panel below; "podcast"
++    needs its own sibling (_load_saved_podcast) since it also has to
++    hand back a reusable audio_path, not just script_text.
+     """
+-    source_node_ids = (scope or {}).get("source_node_ids")
++    row = panel_content.get_content(ws_id, panel_key)
++    if not row["content"]:
++        return ""
++    try:
++        data = json.loads(row["content"])
++    except (json.JSONDecodeError, TypeError):
++        return ""
++    return (data.get(field) or "").strip()
++
++
++def _load_saved_podcast(ws_id: str) -> tuple[str, str | None]:
++    """Video Overview reuse patch, step 2. Returns (script_text,
++    audio_filename) from a saved "podcast" panel row, or ("", None) if
++    there's nothing usable saved. audio_filename comes back as None
++    (even when the saved row names one) unless that exact file still
++    exists on disk under NOTES_EXPORTS_DIR -- panel_content and disk
++    state could in principle drift (e.g. someone manually cleared
++    NOTES_EXPORTS_DIR), and promising a caller a reusable audio path
++    that then 404s inside build_video_overview() would be a worse
++    failure mode than just re-synthesizing it.
++    """
++    row = panel_content.get_content(ws_id, "podcast")
++    if not row["content"]:
++        return "", None
++    try:
++        data = json.loads(row["content"])
++    except (json.JSONDecodeError, TypeError):
++        return "", None
++    script_text = (data.get("script_text") or "").strip()
++    if not script_text:
++        return "", None
++    audio_filename = data.get("audio_path")
++    if audio_filename and os.path.exists(os.path.join(NOTES_EXPORTS_DIR, audio_filename)):
++        return script_text, audio_filename
++    return script_text, None
+ 
+-    slide_text = generate_slide_deck(ws_id, source_node_ids)
+-    script_text = generate_podcast_script(ws_id, source_node_ids)
+ 
+-    audio_filename = f"video_overview_narration_{ws_id}.mp3"
++def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
++    """Phase 5 step 5.6, rewritten by the Video Overview reuse patch,
++    step 2. Raises LookupError/ValueError on failure, same contract as
++    every other target function here -- see _generate_podcast()'s own
++    docstring for why.
++
++    Before this patch, this function unconditionally ran BOTH
++    slide_deck_planner and podcast_scriptwriter fresh over the whole
++    notebook every single time, ignoring anything already saved and
++    giving a caller no way to hand it a script or slide deck it already
++    has (a pasted script, a pasted slide outline, or a previous
++    standalone "slide_deck"/"podcast" Generate run). That's the actual
++    gap this rewrite closes:
++
++      scope["slide_text"] / scope["script_text"] -- NEW. Either or both
++      can be passed directly (e.g. a script or slide outline the user
++      just pasted into chat) to use as-is instead of generating it.
++
++      Otherwise, a previously saved "slide_deck" / "podcast" panel for
++      this workspace is reused as-is -- including the podcast's
++      already-synthesized audio file, when it still exists on disk, so
++      a video overview built right after a standalone Podcast/
++      Presentation generation costs zero additional LLM calls and no
++      re-synthesis.
++
++      Otherwise, if exactly one half is available (pasted or saved) and
++      the other isn't, the missing half is generated FROM the available
++      one (agents/podcast_scriptwriter.py / agents/slide_deck_planner.py's
++      new `raw_context` parameter) rather than independently from
++      unrelated whole-notebook source material -- so e.g. handing this
++      only a slide deck gets narration that actually matches those
++      slides, not a generic notebook-wide script.
++
++      Only when NEITHER half is available does this fall back to
++      today's original behavior: both generated independently, fresh,
++      from the workspace's own sources.
++
++    Whichever text ends up freshly generated or freshly pasted (i.e.
++    NOT reused unchanged from an existing panel) is backfilled into its
++    own standalone "slide_deck"/"podcast" panel too, so a video overview
++    build also leaves behind independently reusable Presentation/Podcast
++    content, not just the merged video.
++    """
++    scope = scope or {}
++    source_node_ids = scope.get("source_node_ids")
++
++    pasted_slide = (scope.get("slide_text") or "").strip()
++    pasted_script = (scope.get("script_text") or "").strip()
++    saved_slide = "" if pasted_slide else _load_saved_text(ws_id, "slide_deck", "slide_text")
++    saved_script, saved_audio_filename = ("", None) if pasted_script else _load_saved_podcast(ws_id)
++
++    have_slide = pasted_slide or saved_slide
++    have_script = pasted_script or saved_script
++
++    # Resolve slides: prefer what's already available; otherwise derive
++    # from the script if there is one (keeps both halves telling the
++    # same story); only fall all the way back to a fresh, whole-notebook
++    # slide_planner run when neither exists yet.
++    if have_slide:
++        slide_text = have_slide
++        slide_origin = "pasted" if pasted_slide else "existing"
++    elif have_script:
++        slide_text = generate_slide_deck(ws_id, source_node_ids, raw_context=have_script)
++        slide_origin = "derived"
++    else:
++        slide_text = generate_slide_deck(ws_id, source_node_ids)
++        slide_origin = "generated"
++
++    # Resolve narration: same priority, deriving from slide_text (always
++    # resolved to *something* by this point) whenever there wasn't
++    # already a script to reuse. reusable_audio_filename only ever comes
++    # back non-None for the "existing" origin -- every other origin is
++    # new or changed text with no matching audio yet.
++    if have_script:
++        script_text = have_script
++        script_origin = "pasted" if pasted_script else "existing"
++        reusable_audio_filename = saved_audio_filename if script_origin == "existing" else None
++    elif slide_origin in ("pasted", "existing"):
++        script_text = generate_podcast_script(ws_id, source_node_ids, raw_context=slide_text)
++        script_origin = "derived"
++        reusable_audio_filename = None
++    else:
++        script_text = generate_podcast_script(ws_id, source_node_ids)
++        script_origin = "generated"
++        reusable_audio_filename = None
++
++    if reusable_audio_filename:
++        audio_filename = reusable_audio_filename
++    else:
++        audio_filename = f"video_overview_narration_{ws_id}.mp3"
++        synthesize_podcast(script_text, os.path.join(NOTES_EXPORTS_DIR, audio_filename))
+     audio_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
+-    synthesize_podcast(script_text, audio_path)
+ 
+     slide_artifact = markdown_text_to_artifact(slide_text, title_fallback="video_overview")
+     video_filename = f"video_overview_{ws_id}.mp4"
+@@ -523,12 +648,32 @@ def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> d
+         source_node_ids=source_node_ids,
+     )
+ 
++    # NEW — Video Overview reuse patch, step 2: backfill the two
++    # standalone panels with whatever wasn't already sitting there
++    # unchanged, so this build leaves behind real, independently
++    # reusable Presentation/Podcast content too -- not just the video.
++    # Deliberately skipped for "existing" origin: that content is
++    # already saved verbatim, and rewriting it would just bump
++    # updated_at for no actual change.
++    if slide_origin != "existing":
++        panel_content.set_content(ws_id, "slide_deck", json.dumps({"slide_text": slide_text}),
++                                   owner_id, source_node_ids=source_node_ids)
++    if script_origin != "existing":
++        panel_content.set_content(
++            ws_id, "podcast",
++            json.dumps({"script_text": script_text, "audio_path": audio_filename}),
++            owner_id, source_node_ids=source_node_ids,
++        )
++
+     return {
+         "panel_key": "video_overview",
+         "status": "done",
+         "slide_text": slide_text,
+         "script_text": script_text,
+         "video_bytes": os.path.getsize(video_path),
++        "slide_source": slide_origin,    # "pasted" | "existing" | "derived" | "generated"
++        "script_source": script_origin,  # same four values
++        "reused_audio": reusable_audio_filename is not None,
+         "updated_at": saved["updated_at"],
+         "message": (
+             "Slide deck, narration, and video generated and saved (Phase 5 step 5.5), "

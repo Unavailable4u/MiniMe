@@ -122,6 +122,23 @@ VALID_PANEL_KEYS = {
                 # audio_path is NOTES_EXPORTS_DIR-relative (currently
                 # "presentation_rehearsal_<ws_id>.mp3"), same portability
                 # reasoning as podcast's own audio_path.
+    "slide_deck",  # NEW — Video Overview reuse patch, step 1: until now,
+                # agents/slide_deck_planner.py's slide_planner output only
+                # ever existed as a throwaway local variable inside
+                # api/routes/notebooks.py's _generate_video_overview() --
+                # nothing that ran it standalone (a "make me a
+                # presentation" ask with no video/narration wanted) could
+                # save its result anywhere, and video_overview generation
+                # had no saved slide deck to check for and reuse before
+                # regenerating one from scratch every single time. This
+                # key gives the slide outline the exact same standalone,
+                # persisted-and-reusable shape "podcast" already has for
+                # the narration half of this same pipeline. content is a
+                # JSON string -- {"slide_text"} -- deliberately just the
+                # one field (no on-disk artifact path here, unlike
+                # podcast's audio_path/video_overview's video_path --
+                # slide_text is Markdown text, nothing gets rendered to
+                # disk until an actual Video Overview build asks for it).
 }
 
 # NEW — bug audit §2 real fix (migration 0001). The subset of
@@ -169,6 +186,14 @@ GENERATED_PANEL_KEYS = {
                 # scope["source_node_ids"] the same "blank scope = whole
                 # notebook" way, so it's source-scoped exactly like its
                 # two siblings and belongs in this set too.
+    "slide_deck",  # NEW — Video Overview reuse patch, step 1. Same
+                # reasoning as "podcast" above -- _generate_slide_deck()
+                # reads scope["source_node_ids"] the same "blank scope =
+                # whole notebook" way every other Generate target here
+                # does, so it's source-scoped exactly like its siblings
+                # and belongs in this set too: a source delete should
+                # invalidate a saved slide deck that drew on it, same as
+                # it already does for a saved podcast script.
 }
 
 

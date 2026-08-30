@@ -69,37 +69,55 @@ def _context_for(topics: dict) -> str:
     return "\n\n".join(parts)
 
 
-def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = None) -> str:
+def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = None,
+                         raw_context: str | None = None) -> str:
     """Returns the raw '# Deck Title' / '## Slide Title' Markdown outline
     a slide_planner role produces over the given sources, or every source
     in the workspace when `source_node_ids` is falsy — same "blank scope
     = whole notebook" convention agents/podcast_scriptwriter.py and
     agents/study_generator.py already use.
 
+    raw_context: NEW — Video Overview reuse patch, step 2. Same as
+    agents/podcast_scriptwriter.py's own generate_podcast_script()
+    parameter of the same name: when given (a non-empty string), skips
+    the workspace source read entirely and plans the deck directly from
+    this text instead — lets api/routes/notebooks.py's
+    _generate_video_overview() outline slides FROM a user-pasted (or
+    previously generated) podcast script, so the two halves of a video
+    overview cover the same material instead of the slides drawing on
+    unrelated whole-notebook content while the narration says something
+    specific the user handed it. `source_node_ids` is ignored when
+    raw_context is given, same reasoning as that sibling function.
+
     Raises LookupError if the resolved scope has zero readable topic
-    content, same contract agents/podcast_scriptwriter.py's
-    generate_podcast_script() already gives its own caller — so
+    content — only reachable when raw_context is NOT given, same as
+    generate_podcast_script()'s own contract. So
     api/server.py's route can turn it into a clear 400 instead of
     silently asking the model to plan a deck from nothing.
     """
-    packet = plan(
-        workspace_id,
-        task_text=(
-            "Plan a slide deck outline that draws on real detail from "
-            "the source material — specific facts, figures, and "
-            "explanations a one-line summary wouldn't capture."
-        ),
-        scope="project",
-    )
-    topics = packet["topics"]
-    if source_node_ids:
-        wanted = set(source_node_ids)
-        topics = {tid: t for tid, t in topics.items()
-                  if wanted & set(t.get("covers") or [])}
+    if raw_context and raw_context.strip():
+        # Same 4x-wider single-blob cap as generate_podcast_script()'s
+        # own raw_context branch.
+        context = raw_context.strip()[:MAX_CONTENT_CHARS_PER_SOURCE * 4]
+    else:
+        packet = plan(
+            workspace_id,
+            task_text=(
+                "Plan a slide deck outline that draws on real detail from "
+                "the source material — specific facts, figures, and "
+                "explanations a one-line summary wouldn't capture."
+            ),
+            scope="project",
+        )
+        topics = packet["topics"]
+        if source_node_ids:
+            wanted = set(source_node_ids)
+            topics = {tid: t for tid, t in topics.items()
+                      if wanted & set(t.get("covers") or [])}
 
-    context = _context_for(topics)
-    if not context:
-        raise LookupError("no readable topic content in scope")
+        context = _context_for(topics)
+        if not context:
+            raise LookupError("no readable topic content in scope")
 
     from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
@@ -122,6 +140,7 @@ def generate_slide_deck(workspace_id: str, source_node_ids: list[str] | None = N
         domain="notes",
     )
     return (result.get("text") or "").strip()
+
 
 
 if __name__ == "__main__":

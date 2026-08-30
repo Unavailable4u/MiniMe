@@ -1,5 +1,6 @@
 import {
   Sparkles, Layers, BookMarked, GraduationCap, Network, Mic, Video, ListChecks, Drama, PenLine,
+  Presentation,
 } from "lucide-react";
 
 // Phase 1 step 1.7: same NEXT_PUBLIC_API_URL convention SessionContext.jsx
@@ -112,6 +113,23 @@ export const TARGETS = [
   // (e.g. first paint) sees the old, wrong disabled state for a beat
   // longer than it needs to.
   { key: "podcast", label: "Podcast", icon: Mic, subTab: "insights", keywords: ["podcast"], description: "Generate a two-host audio podcast episode discussing the selected scope.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/podcast", enabled: true },
+  // NEW — Video Overview reuse patch, step 1 (backend) / Chat wiring
+  // patch, step 4 (this entry): slide_deck_planner's output now has a
+  // standalone Generate target of its own server-side
+  // (_generate_slide_deck(), panel_key "slide_deck") -- this entry is
+  // what makes it reachable from the picker chip row AND from chat's
+  // tool-call dispatch. Without this, TARGETS_BY_KEY[key] in
+  // WorkspaceChatPanel.jsx's tryHandleClassifiedToolCall() would come
+  // back undefined for "slide_deck" even after the backend started
+  // returning it from GET /api/capabilities -- syncCapabilitiesFromServer()
+  // below only merges server fields onto an ALREADY-PRESENT local entry
+  // (`if (!local) continue`), it never adds a brand-new key on its own.
+  // scopeAllowed/endpoint/description here are just the initial local
+  // defaults per this file's step 1.7 comment above; the server sync
+  // overwrites them with CAPABILITIES_MANIFEST's real values (currently
+  // "sources", the shared .../notebooks/generate route, and a
+  // pasted-slide-text-aware description) the moment that fetch resolves.
+  { key: "slide_deck", label: "Presentation", icon: Presentation, subTab: "insights", keywords: ["presentation", "slide deck", "slides", "make me slides", "build a deck"], description: "Generate a slide deck outline summarizing the selected scope, with no narration or video attached.", scopeAllowed: "whole", endpoint: "POST /api/workspaces/{ws_id}/notebooks/generate", enabled: true },
   // CHANGED — Phase 5 step 5.8 finding: "Give me a video walkthrough of
   // this material." misfired to no-tool-call 3/3 -- "walkthrough"/
   // "explainer" added as keyword + description synonyms, same fix

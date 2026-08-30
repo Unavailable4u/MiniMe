@@ -806,14 +806,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // key string (see notebookCapabilities.js's own header comment), so
   // stripping the prefix and looking it up here is safe.
   //
-  // scope mapping: every capability actually enabled today is
-  // scopeAllowed "whole" (no required args), so `arguments` normally
-  // comes back empty. The source_ids -> source_node_ids translation
-  // below is forward-looking for if/when a "sources"-scope capability
-  // gets enabled — manifest_to_tools() names the arg "source_ids" for
-  // the model, but NOTEBOOKS_GENERATE_TARGETS' scope dict reads
-  // "source_node_ids" (see api/server.py's _generate_backlinks/
-  // _generate_workflows), so this is not just a passthrough.
+  // scope mapping: most capabilities are still scopeAllowed "whole" (no
+  // args at all), but as of the Chat wiring patch (step 4), podcast/
+  // slide_deck/video_overview are "sources" -- so `arguments` can come
+  // back with a real source_ids list for those three, translated to
+  // source_node_ids below since manifest_to_tools() names the arg
+  // "source_ids" for the model but NOTEBOOKS_GENERATE_TARGETS' scope
+  // dict reads "source_node_ids" (see api/server.py's
+  // _generate_backlinks/_generate_workflows). The same three
+  // capabilities can also come back with script_text/slide_text
+  // (utils/capability_tools.py's `pastableTextFields`) when the model
+  // found a pasted script/slide outline in the message -- see the block
+  // below the source_ids translation for how those get folded into the
+  // same scope object api/routes/notebooks.py's _generate_video_overview()/
+  // _generate_podcast()/_generate_slide_deck() already know how to read
+  // (Video Overview reuse patch, step 2).
   async function tryHandleClassifiedToolCall(text) {
     if (!workspaceId || !generateNotebooks || !classifyIntent) return false;
 
@@ -864,10 +871,33 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     // topic-typed activeContext with nothing live to consume it still
     // falls through to null rather than sending an argument no backend
     // route reads.
-    const scope = call.arguments?.source_ids?.length
+    const sourceScope = call.arguments?.source_ids?.length
       ? { source_node_ids: call.arguments.source_ids }
       : activeContext?.type === "source" && activeContext.id
       ? { source_node_ids: [activeContext.id] }
+      : null;
+
+    // NEW — Chat wiring patch (step 4): same source_ids -> source_node_ids
+    // translation immediately above, now for the two pasted-text args
+    // utils/capability_tools.py's _parameters_for_scope() adds under a
+    // capability's `pastableTextFields` (currently podcast's script_text,
+    // slide_deck's slide_text, video_overview's both) -- these two DO
+    // pass straight through unrenamed, since api/routes/notebooks.py's
+    // _generate_video_overview()/_generate_podcast()/_generate_slide_deck()
+    // all read scope["script_text"]/scope["slide_text"] under those exact
+    // same names (see the Video Overview reuse patch, step 2). No
+    // activeContext fallback for either -- unlike source_ids, there's no
+    // "ambient" pasted script/slides sitting in UI state to fall back to;
+    // the model either found one in the message or it didn't, and
+    // omitting both here is exactly what tells the backend to generate
+    // that half instead of reusing anything, same as omitting scope
+    // entirely already does for a "whole" capability.
+    const scope = (sourceScope || call.arguments?.script_text || call.arguments?.slide_text)
+      ? {
+          ...(sourceScope || {}),
+          ...(call.arguments?.script_text ? { script_text: call.arguments.script_text } : {}),
+          ...(call.arguments?.slide_text ? { slide_text: call.arguments.slide_text } : {}),
+        }
       : null;
     return runGenerateTarget(key, scope, text);
   }

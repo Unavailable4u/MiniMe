@@ -18,7 +18,7 @@ backend/evals/promptfoo/.promptfoo/
 
 # Editor
 .vscode/
-
+backend/data
 # Persistent chat data (user content, not source) — written at runtime
 # to <repo root>/data/{graph,study,timeline}/... by backend/eo/graph_edges.py,
 # backend/eo/study_progress.py, backend/eo/timeline_node_blurbs.py, etc.
