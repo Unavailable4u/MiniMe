@@ -45,15 +45,26 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
   const [editing, setEditing] = useState(false);
   const [brief, setBrief] = useState(entry.brief || "");
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
   const [pinning, setPinning] = useState(false);
+  const [pinError, setPinError] = useState(null);
   const category = categorize(entry.role) || DEFAULT_CATEGORY;
   const isDirty = brief !== (entry.brief || "");
 
   async function save() {
     setSaving(true);
+    setSaveError(null);
     try {
       await onSave(entry.role, brief);
       setEditing(false);
+    } catch (err) {
+      // BUGFIX: this used to have no catch at all — a failed save (bad
+      // network, expired auth) left the edit box open with the brief
+      // still marked dirty and zero indication anything went wrong,
+      // unlike every other data-mutation flow elsewhere in the app
+      // (e.g. ResearchTab's ExtractionPanel surfaces its own generate()
+      // failures the same way).
+      setSaveError(err.message || "Couldn't save this role's brief.");
     } finally {
       setSaving(false);
     }
@@ -61,8 +72,18 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
 
   async function togglePin() {
     setPinning(true);
+    setPinError(null);
     try {
       await onTogglePin(entry.role, !entry.pinned);
+    } catch (err) {
+      // BUGFIX: onTogglePin (RoleLibraryTab's own togglePin) used to
+      // swallow its error internally to perform the optimistic-update
+      // rollback, so this catch never fired — the pin icon just flipped
+      // back to its old state with no explanation, indistinguishable
+      // from the user having changed their mind. onTogglePin now
+      // rethrows after rolling back so this can actually tell the user
+      // something failed.
+      setPinError(err.message || "Couldn't update pin.");
     } finally {
       setPinning(false);
     }
@@ -114,6 +135,8 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
         </div>
       </div>
 
+      {pinError && <p className="text-[11px] text-red-400">{pinError}</p>}
+
       {editing ? (
         <>
           <textarea
@@ -137,7 +160,7 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
             )}
             <button
               type="button"
-              onClick={() => { setEditing(false); setBrief(entry.brief || ""); }}
+              onClick={() => { setEditing(false); setBrief(entry.brief || ""); setSaveError(null); }}
               className="flex items-center gap-1 text-[var(--neutral-500)] hover:text-[var(--neutral-300)] px-2 py-1"
             >
               <X size={11} />
@@ -153,6 +176,7 @@ function RoleCard({ entry, onSave, selectable, selected, onToggleSelect, onToggl
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
+          {saveError && <p className="text-[11px] text-red-400">{saveError}</p>}
         </>
       ) : (
         <div className="flex items-start justify-between gap-2">
@@ -230,14 +254,27 @@ function RoleLibraryTab({ onStartTemplate }) {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const updated = await res.json();
       setRoles((prev) => (prev || []).map((r) => (r.role === role ? { ...r, ...updated } : r)));
-    } catch {
+    } catch (err) {
       setRoles((prev) => (prev || []).map((r) => (r.role === role ? { ...r, pinned: !pinned } : r)));
+      // BUGFIX: this used to swallow the error entirely after rolling
+      // back the optimistic update, so RoleCard's own togglePin() catch
+      // never fired -- the pin icon just flipped back with no
+      // indication anything failed, indistinguishable from the user
+      // having changed their mind. Rethrowing after the rollback lets
+      // the card show an actual error instead.
+      throw err;
     }
   }
 
   const grouped = useMemo(() => {
     const filtered = (roles || []).filter((r) =>
-      !filter || r.role.toLowerCase().includes(filter.toLowerCase())
+      // Visual refinement: exclude pinned roles here — they already get
+      // their own "Pinned" section above (see pinnedEntries below), so
+      // without this a pinned role rendered twice: once up top, once
+      // again in its category group, as two fully independent RoleCard
+      // instances (different keys) that could drift out of sync with
+      // each other while either one was mid-edit.
+      !r.pinned && (!filter || r.role.toLowerCase().includes(filter.toLowerCase()))
     );
     const groups = {};
     for (const entry of filtered) {
@@ -253,9 +290,12 @@ function RoleLibraryTab({ onStartTemplate }) {
       .filter((r) => !filter || r.role.toLowerCase().includes(filter.toLowerCase()));
   }, [roles, filter]);
 
+  // grouped no longer includes pinned roles (see grouped's own comment
+  // above), so "select all visible" needs pinnedEntries folded back in —
+  // otherwise it would silently skip every pinned card still on screen.
   const visibleRoleNames = useMemo(
-    () => grouped.flatMap((g) => g.entries.map((e) => e.role)),
-    [grouped]
+    () => [...pinnedEntries.map((e) => e.role), ...grouped.flatMap((g) => g.entries.map((e) => e.role))],
+    [grouped, pinnedEntries]
   );
 
   function toggleSelectMode() {
@@ -336,7 +376,7 @@ function RoleLibraryTab({ onStartTemplate }) {
           </p>
         )}
         {!error && roles === null && <p className="text-xs text-[var(--neutral-500)]">Loading…</p>}
-        {!error && roles !== null && grouped.length === 0 && (
+        {!error && roles !== null && grouped.length === 0 && pinnedEntries.length === 0 && (
           <p className="text-xs text-[var(--neutral-500)]">No roles match that filter.</p>
         )}
 
