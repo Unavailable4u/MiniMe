@@ -68,37 +68,63 @@ def _context_for(topics: dict) -> str:
     return "\n\n".join(parts)
 
 
-def generate_podcast_script(workspace_id: str, source_node_ids: list[str] | None = None) -> str:
+def generate_podcast_script(workspace_id: str, source_node_ids: list[str] | None = None,
+                             raw_context: str | None = None) -> str:
     """Returns the raw two-host Markdown ("HOST A:"/"HOST B:" lines) a
     podcast_scriptwriter role produces over the given sources, or every
     source in the workspace when `source_node_ids` is falsy — same
     "blank scope = whole notebook" convention agents/study_generator.py
     and agents/fact_detector.py already use.
 
+    raw_context: NEW — Video Overview reuse patch, step 2. When given (a
+    non-empty string), skips the workspace source read entirely and
+    writes the podcast script directly from this text instead — lets a
+    caller who already has slide content (but no script yet) hand that
+    text straight to podcast_scriptwriter as the material to narrate,
+    without it needing to already exist as an ingested,
+    chunked-and-embedded workspace source. This is what lets
+    api/routes/notebooks.py's _generate_video_overview() derive a
+    narration script FROM a user-pasted (or previously generated) slide
+    deck, so the two halves of a video overview tell the same story
+    instead of the narration drawing on unrelated whole-notebook
+    material while the slides show something specific the user handed
+    it. `source_node_ids` is ignored when raw_context is given — there's
+    no source scope left to apply once raw_context already IS the whole
+    scope.
+
     Raises LookupError if the resolved scope has zero readable topic
-    content, same contract agents/study_generator.py's
+    content — only reachable when raw_context is NOT given, since a
+    non-empty raw_context always yields non-empty context by
+    construction. Same contract agents/study_generator.py's
     generate_study_content() already gives its own caller — so
     api/server.py's route can turn it into a clear 400 instead of
     silently asking the model to write a script from nothing.
     """
-    packet = plan(
-        workspace_id,
-        task_text=(
-            "Write a two-host podcast script that draws on real detail "
-            "from the source material — specific facts, figures, and "
-            "explanations a one-line summary wouldn't capture."
-        ),
-        scope="project",
-    )
-    topics = packet["topics"]
-    if source_node_ids:
-        wanted = set(source_node_ids)
-        topics = {tid: t for tid, t in topics.items()
-                  if wanted & set(t.get("covers") or [])}
+    if raw_context and raw_context.strip():
+        # Same per-source truncation reasoning as MAX_CONTENT_CHARS_PER_SOURCE
+        # above, just a single 4x-wider cap since this is one blob of
+        # already-curated text (a whole slide deck or script), not
+        # several sources summed together.
+        context = raw_context.strip()[:MAX_CONTENT_CHARS_PER_SOURCE * 4]
+    else:
+        packet = plan(
+            workspace_id,
+            task_text=(
+                "Write a two-host podcast script that draws on real detail "
+                "from the source material — specific facts, figures, and "
+                "explanations a one-line summary wouldn't capture."
+            ),
+            scope="project",
+        )
+        topics = packet["topics"]
+        if source_node_ids:
+            wanted = set(source_node_ids)
+            topics = {tid: t for tid, t in topics.items()
+                      if wanted & set(t.get("covers") or [])}
 
-    context = _context_for(topics)
-    if not context:
-        raise LookupError("no readable topic content in scope")
+        context = _context_for(topics)
+        if not context:
+            raise LookupError("no readable topic content in scope")
 
     from agents.generic_worker import run as run_role  # deferred, same
                                                           # circular-import
@@ -123,6 +149,7 @@ def generate_podcast_script(workspace_id: str, source_node_ids: list[str] | None
         domain="notes",
     )
     return (result.get("text") or "").strip()
+
 
 
 if __name__ == "__main__":

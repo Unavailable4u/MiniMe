@@ -393,6 +393,53 @@ def _generate_workflows(ws_id: str, scope: dict | None, owner_id: str) -> dict:
                                       source_node_ids=source_node_ids)
 
 
+def _generate_slide_deck(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Video Overview reuse patch, step 1. Same (ws_id, scope, owner_id)
+    -> result shape every other NOTEBOOKS_GENERATE_TARGETS entry here
+    already has -- gives agents/slide_deck_planner.py's slide_planner
+    role a standalone Generate target of its own, the same way
+    _generate_podcast() below already gives podcast_scriptwriter one,
+    instead of that role only ever running as a hidden first stage
+    inside _generate_video_overview().
+
+    Two things this unlocks: (1) "make me a presentation on X" now
+    resolves to real content on its own, with nothing narrated or
+    rendered to video; (2) a saved "slide_deck" panel row becomes
+    something _generate_video_overview() (see below) can check for and
+    reuse, instead of unconditionally regenerating a fresh slide outline
+    on every single video build.
+
+    Raises LookupError on failure (no readable topic content in scope),
+    same contract _generate_podcast()'s own generate_podcast_script()
+    call already gives -- notebooks_generate()'s surrounding try/except
+    turns that into a normal "error" branch the same way any other
+    target's raise already does.
+    """
+    source_node_ids = (scope or {}).get("source_node_ids")
+    slide_text = generate_slide_deck(ws_id, source_node_ids)
+
+    # NEW: persisted under its own "slide_deck" panel_key (added to
+    # eo/panel_content.py's VALID_PANEL_KEYS/GENERATED_PANEL_KEYS
+    # alongside "podcast") -- same encode-on-write JSON-string shape
+    # _generate_podcast() below uses for "podcast", just the one
+    # {"slide_text"} field since there's no on-disk artifact (mp3/mp4)
+    # for a plain text outline the way there is for podcast/video_overview.
+    saved = panel_content.set_content(
+        ws_id,
+        "slide_deck",
+        json.dumps({"slide_text": slide_text}),
+        owner_id,
+        source_node_ids=source_node_ids,
+    )
+
+    return {
+        "panel_key": "slide_deck",
+        "status": "done",
+        "slide_text": slide_text,
+        "updated_at": saved["updated_at"],
+    }
+
+
 def _generate_podcast(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     """Phase 5 step 5.6. Same (ws_id, scope, owner_id) -> result shape
     every other NOTEBOOKS_GENERATE_TARGETS entry above already has --
@@ -439,21 +486,146 @@ def _generate_podcast(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     }
 
 
-def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
-    """Phase 5 step 5.6. Same extraction _generate_podcast() above
-    describes, for notebooks_video_overview() (step 5.5's dedicated
-    route) instead. Raises LookupError/ValueError on failure, same
-    contract as every other target function here -- see
-    _generate_podcast()'s own docstring for why.
+def _load_saved_text(ws_id: str, panel_key: str, field: str) -> str:
+    """Video Overview reuse patch, step 2. Best-effort read of one text
+    field out of a JSON-encoded panel_content row -- returns "" for a
+    panel with no row saved yet, or content that doesn't parse or
+    doesn't have the field, so every caller can treat "no usable saved
+    text" as one single falsy case instead of handling get_content()'s
+    empty-row shape and a possible json.JSONDecodeError separately at
+    each call site. Used for the "slide_deck" panel below; "podcast"
+    needs its own sibling (_load_saved_podcast) since it also has to
+    hand back a reusable audio_path, not just script_text.
     """
-    source_node_ids = (scope or {}).get("source_node_ids")
+    row = panel_content.get_content(ws_id, panel_key)
+    if not row["content"]:
+        return ""
+    try:
+        data = json.loads(row["content"])
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return (data.get(field) or "").strip()
 
-    slide_text = generate_slide_deck(ws_id, source_node_ids)
-    script_text = generate_podcast_script(ws_id, source_node_ids)
 
-    audio_filename = f"video_overview_narration_{ws_id}.mp3"
+def _load_saved_podcast(ws_id: str) -> tuple[str, str | None]:
+    """Video Overview reuse patch, step 2. Returns (script_text,
+    audio_filename) from a saved "podcast" panel row, or ("", None) if
+    there's nothing usable saved. audio_filename comes back as None
+    (even when the saved row names one) unless that exact file still
+    exists on disk under NOTES_EXPORTS_DIR -- panel_content and disk
+    state could in principle drift (e.g. someone manually cleared
+    NOTES_EXPORTS_DIR), and promising a caller a reusable audio path
+    that then 404s inside build_video_overview() would be a worse
+    failure mode than just re-synthesizing it.
+    """
+    row = panel_content.get_content(ws_id, "podcast")
+    if not row["content"]:
+        return "", None
+    try:
+        data = json.loads(row["content"])
+    except (json.JSONDecodeError, TypeError):
+        return "", None
+    script_text = (data.get("script_text") or "").strip()
+    if not script_text:
+        return "", None
+    audio_filename = data.get("audio_path")
+    if audio_filename and os.path.exists(os.path.join(NOTES_EXPORTS_DIR, audio_filename)):
+        return script_text, audio_filename
+    return script_text, None
+
+
+def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
+    """Phase 5 step 5.6, rewritten by the Video Overview reuse patch,
+    step 2. Raises LookupError/ValueError on failure, same contract as
+    every other target function here -- see _generate_podcast()'s own
+    docstring for why.
+
+    Before this patch, this function unconditionally ran BOTH
+    slide_deck_planner and podcast_scriptwriter fresh over the whole
+    notebook every single time, ignoring anything already saved and
+    giving a caller no way to hand it a script or slide deck it already
+    has (a pasted script, a pasted slide outline, or a previous
+    standalone "slide_deck"/"podcast" Generate run). That's the actual
+    gap this rewrite closes:
+
+      scope["slide_text"] / scope["script_text"] -- NEW. Either or both
+      can be passed directly (e.g. a script or slide outline the user
+      just pasted into chat) to use as-is instead of generating it.
+
+      Otherwise, a previously saved "slide_deck" / "podcast" panel for
+      this workspace is reused as-is -- including the podcast's
+      already-synthesized audio file, when it still exists on disk, so
+      a video overview built right after a standalone Podcast/
+      Presentation generation costs zero additional LLM calls and no
+      re-synthesis.
+
+      Otherwise, if exactly one half is available (pasted or saved) and
+      the other isn't, the missing half is generated FROM the available
+      one (agents/podcast_scriptwriter.py / agents/slide_deck_planner.py's
+      new `raw_context` parameter) rather than independently from
+      unrelated whole-notebook source material -- so e.g. handing this
+      only a slide deck gets narration that actually matches those
+      slides, not a generic notebook-wide script.
+
+      Only when NEITHER half is available does this fall back to
+      today's original behavior: both generated independently, fresh,
+      from the workspace's own sources.
+
+    Whichever text ends up freshly generated or freshly pasted (i.e.
+    NOT reused unchanged from an existing panel) is backfilled into its
+    own standalone "slide_deck"/"podcast" panel too, so a video overview
+    build also leaves behind independently reusable Presentation/Podcast
+    content, not just the merged video.
+    """
+    scope = scope or {}
+    source_node_ids = scope.get("source_node_ids")
+
+    pasted_slide = (scope.get("slide_text") or "").strip()
+    pasted_script = (scope.get("script_text") or "").strip()
+    saved_slide = "" if pasted_slide else _load_saved_text(ws_id, "slide_deck", "slide_text")
+    saved_script, saved_audio_filename = ("", None) if pasted_script else _load_saved_podcast(ws_id)
+
+    have_slide = pasted_slide or saved_slide
+    have_script = pasted_script or saved_script
+
+    # Resolve slides: prefer what's already available; otherwise derive
+    # from the script if there is one (keeps both halves telling the
+    # same story); only fall all the way back to a fresh, whole-notebook
+    # slide_planner run when neither exists yet.
+    if have_slide:
+        slide_text = have_slide
+        slide_origin = "pasted" if pasted_slide else "existing"
+    elif have_script:
+        slide_text = generate_slide_deck(ws_id, source_node_ids, raw_context=have_script)
+        slide_origin = "derived"
+    else:
+        slide_text = generate_slide_deck(ws_id, source_node_ids)
+        slide_origin = "generated"
+
+    # Resolve narration: same priority, deriving from slide_text (always
+    # resolved to *something* by this point) whenever there wasn't
+    # already a script to reuse. reusable_audio_filename only ever comes
+    # back non-None for the "existing" origin -- every other origin is
+    # new or changed text with no matching audio yet.
+    if have_script:
+        script_text = have_script
+        script_origin = "pasted" if pasted_script else "existing"
+        reusable_audio_filename = saved_audio_filename if script_origin == "existing" else None
+    elif slide_origin in ("pasted", "existing"):
+        script_text = generate_podcast_script(ws_id, source_node_ids, raw_context=slide_text)
+        script_origin = "derived"
+        reusable_audio_filename = None
+    else:
+        script_text = generate_podcast_script(ws_id, source_node_ids)
+        script_origin = "generated"
+        reusable_audio_filename = None
+
+    if reusable_audio_filename:
+        audio_filename = reusable_audio_filename
+    else:
+        audio_filename = f"video_overview_narration_{ws_id}.mp3"
+        synthesize_podcast(script_text, os.path.join(NOTES_EXPORTS_DIR, audio_filename))
     audio_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)
-    synthesize_podcast(script_text, audio_path)
 
     slide_artifact = markdown_text_to_artifact(slide_text, title_fallback="video_overview")
     video_filename = f"video_overview_{ws_id}.mp4"
@@ -476,12 +648,32 @@ def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> d
         source_node_ids=source_node_ids,
     )
 
+    # NEW — Video Overview reuse patch, step 2: backfill the two
+    # standalone panels with whatever wasn't already sitting there
+    # unchanged, so this build leaves behind real, independently
+    # reusable Presentation/Podcast content too -- not just the video.
+    # Deliberately skipped for "existing" origin: that content is
+    # already saved verbatim, and rewriting it would just bump
+    # updated_at for no actual change.
+    if slide_origin != "existing":
+        panel_content.set_content(ws_id, "slide_deck", json.dumps({"slide_text": slide_text}),
+                                   owner_id, source_node_ids=source_node_ids)
+    if script_origin != "existing":
+        panel_content.set_content(
+            ws_id, "podcast",
+            json.dumps({"script_text": script_text, "audio_path": audio_filename}),
+            owner_id, source_node_ids=source_node_ids,
+        )
+
     return {
         "panel_key": "video_overview",
         "status": "done",
         "slide_text": slide_text,
         "script_text": script_text,
         "video_bytes": os.path.getsize(video_path),
+        "slide_source": slide_origin,    # "pasted" | "existing" | "derived" | "generated"
+        "script_source": script_origin,  # same four values
+        "reused_audio": reusable_audio_filename is not None,
         "updated_at": saved["updated_at"],
         "message": (
             "Slide deck, narration, and video generated and saved (Phase 5 step 5.5), "
@@ -583,6 +775,7 @@ NOTEBOOKS_GENERATE_TARGETS = {
     "study_guide": _make_study_generate("study_guide"),
     "mindmap": _generate_mindmap,
     "suggested_route": _generate_suggested_route,
+    "slide_deck": _generate_slide_deck,  # NEW — Video Overview reuse patch, step 1.
     "podcast": _generate_podcast,  # NEW — Phase 5 step 5.6.
     "video_overview": _generate_video_overview,  # NEW — Phase 5 step 5.6.
     "presentation_rehearsal": _generate_presentation_rehearsal,  # NEW — Phase 5 step 5.11.
@@ -741,8 +934,43 @@ CAPABILITIES_MANIFEST = [
         # False, so this is what makes "generate_podcast" appear in
         # Phase 2's tools array for the first time.
         "key": "podcast", "label": "Podcast", "subTab": "insights",
-        "description": "Generate a two-host audio podcast episode discussing the selected scope.",
-        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/podcast",
+        # CHANGED — Chat wiring patch (step 4): description now mentions
+        # both new capabilities this step actually unlocks --
+        # source/topic scoping (scopeAllowed flipped to "sources" right
+        # below) and reusing a script the user already pasted
+        # (pastableTextFields, read by utils/capability_tools.py's
+        # _parameters_for_scope()) -- so the classifier knows to fill in
+        # source_ids/script_text instead of always calling this with an
+        # empty scope. This is a real behavior change, not just a
+        # description tweak: before this step, podcast was hardcoded
+        # "whole" and had no path for a pasted script at all -- see
+        # _generate_podcast()/generate_podcast_script()'s own raw_context
+        # parameter (Video Overview reuse patch, step 2) for the half of
+        # this it already supported that chat just couldn't reach yet.
+        "description": "Generate a two-host audio podcast episode discussing the selected scope. Can be scoped to specific sources ('a podcast about the pricing chapter') instead of the whole notebook. If the user's message already includes or clearly refers to a script they wrote themselves, pass it as script_text to narrate that instead of writing a new one from the sources.",
+        "scopeAllowed": "sources", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/podcast",
+        "pastableTextFields": ["script_text"],
+        "enabled": True,
+    },
+    {
+        # NEW — Video Overview reuse patch, step 1: slide_planner now has
+        # a standalone target (_generate_slide_deck(), registered in
+        # NOTEBOOKS_GENERATE_TARGETS above) instead of only ever running
+        # as video_overview's hidden first stage, so it needs its own
+        # manifest entry the same way "podcast" got one in step 5.7 --
+        # this is what makes "generate_slide_deck" appear in the chat
+        # tool list at all. No dedicated route (unlike podcast/
+        # video_overview) -- same "shared dispatch route is enough"
+        # reasoning presentation_rehearsal's own entry below gives, since
+        # nothing here needs a second, TTS/build-adjacent stage the way
+        # podcast/video_overview's dedicated routes do.
+        "key": "slide_deck", "label": "Presentation", "subTab": "insights",
+        # CHANGED — Chat wiring patch (step 4): same scoping + pasted-text
+        # flip "podcast" above got, for the slide half -- see that
+        # entry's own comment.
+        "description": "Generate a slide deck outline (title + slide-by-slide bullet points) summarizing the selected scope, with no narration or video attached. Use this for requests like 'make me a presentation', 'build a slide deck', or 'outline slides for this' -- as opposed to the video_overview tool, which additionally narrates and renders these slides into a video. Can be scoped to specific sources instead of the whole notebook. If the user's message already includes or clearly refers to a slide outline they wrote themselves, pass it as slide_text to reformat/reuse that instead of writing a new one from the sources.",
+        "scopeAllowed": "sources", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/generate",
+        "pastableTextFields": ["slide_text"],
         "enabled": True,
     },
     {
@@ -755,8 +983,23 @@ CAPABILITIES_MANIFEST = [
         # closest tool but hedged because "walkthrough" wasn't in the
         # description. Added it (and "explainer") as explicit synonyms.
         "key": "video_overview", "label": "Video overview", "subTab": "insights",
-        "description": "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'.",
-        "scopeAllowed": "whole", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/video_overview",
+        # CHANGED — Chat wiring patch (step 4): same scoping flip as
+        # "podcast"/"slide_deck" above, plus BOTH pastableTextFields --
+        # this is the tool the Video Overview reuse patch (step 2) was
+        # actually written for: _generate_video_overview() already knows
+        # how to take either or both of script_text/slide_text and skip
+        # regenerating whichever half it's given (reusing a saved
+        # "podcast"/"slide_deck" panel, or -- new as of this step -- text
+        # the user just pasted this turn), deriving the other half from
+        # it when only one is given, and falling all the way back to
+        # generating both fresh only when neither is available. This
+        # description spells out all three shapes (nothing pasted,
+        # only a script, only slides) since a caller reading only "video
+        # overview" wouldn't otherwise know pasted content changes what
+        # gets generated.
+        "description": "Generate a narrated video overview summarizing the selected scope -- a short explainer/walkthrough video. Use this for requests like 'video overview', 'video summary', 'explainer video', or 'video walkthrough'. Can be scoped to specific sources instead of the whole notebook. If the user's message already includes or clearly refers to a podcast script and/or a slide outline they wrote themselves, pass those as script_text/slide_text -- either one alone still works (the missing half gets generated to match whichever one you gave), and passing both skips generation for this call entirely and just renders the video.",
+        "scopeAllowed": "sources", "endpoint": "POST /api/workspaces/{ws_id}/notebooks/video_overview",
+        "pastableTextFields": ["script_text", "slide_text"],
         "enabled": True,
     },
     {

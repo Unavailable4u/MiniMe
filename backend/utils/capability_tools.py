@@ -54,7 +54,9 @@ def _is_enabled(capability: dict[str, Any]) -> bool:
 def _parameters_for_scope(capability: dict[str, Any]) -> dict[str, Any]:
     """
     Build the JSON-schema `parameters` block for one capability, based on
-    its scopeAllowed value ("whole" | "sources" | "topic").
+    its scopeAllowed value ("whole" | "sources" | "topic") plus, NEW —
+    Chat wiring patch (step 4), any `pastableTextFields` the manifest
+    entry declares.
 
     - "topic": the action is meaningless without knowing which topic
       (e.g. running a workflow off a Mind Map node), so topic_id is
@@ -63,6 +65,24 @@ def _parameters_for_scope(capability: dict[str, Any]) -> dict[str, Any]:
       sources, but doesn't have to be -- omitting source_ids means "use
       everything currently attached to the workspace."
     - "whole": operates over the whole notebook; no extra arguments.
+
+    pastableTextFields: NEW — Chat wiring patch (step 4). An optional
+    list on a manifest entry (currently just "podcast" -> ["script_text"],
+    "slide_deck" -> ["slide_text"], "video_overview" ->
+    ["script_text", "slide_text"] -- see api/routes/notebooks.py's
+    CAPABILITIES_MANIFEST) naming which of api/routes/notebooks.py's
+    `scope["script_text"]`/`scope["slide_text"]` reuse keys (added by the
+    Video Overview reuse patch, step 2's _generate_video_overview()
+    rewrite, and read the same way by _generate_podcast()/
+    _generate_slide_deck() once their own callers pass them through) this
+    particular capability can accept. Each named field becomes its own
+    optional string parameter, independent of the scope branch above --
+    a capability can be both "sources"-scoped AND accept pasted text in
+    the same call (e.g. "make a video overview of the intro chapter using
+    the script I just pasted"). Deliberately never required: omitting
+    these is what tells the backend to generate that half instead of
+    reusing pasted text, exactly as much a normal, expected case as
+    omitting source_ids is for scope.
     """
     scope = capability.get("scopeAllowed")
     properties: dict[str, Any] = {}
@@ -94,6 +114,32 @@ def _parameters_for_scope(capability: dict[str, Any]) -> dict[str, Any]:
             f"capability {capability.get('key')!r} has unrecognized "
             f"scopeAllowed={scope!r}"
         )
+
+    _PASTABLE_TEXT_DESCRIPTIONS = {
+        "script_text": (
+            "The exact podcast/narration script text the user already "
+            "wrote or pasted in this conversation, if any -- pass it "
+            "through verbatim. Only set this when the user's own message "
+            "actually contains or clearly points at a script they "
+            "already have; omit it entirely to have this generate a new "
+            "script from the workspace's sources instead."
+        ),
+        "slide_text": (
+            "The exact slide deck / presentation outline text the user "
+            "already wrote or pasted in this conversation, if any -- "
+            "pass it through verbatim. Only set this when the user's own "
+            "message actually contains or clearly points at slides they "
+            "already have; omit it entirely to have this generate a new "
+            "outline from the workspace's sources instead."
+        ),
+    }
+    for field in capability.get("pastableTextFields") or []:
+        properties[field] = {
+            "type": "string",
+            "description": _PASTABLE_TEXT_DESCRIPTIONS.get(
+                field, f"Pre-existing {field} the user provided, if any."
+            ),
+        }
 
     return {"type": "object", "properties": properties, "required": required}
 
