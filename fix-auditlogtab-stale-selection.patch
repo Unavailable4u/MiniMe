@@ -1,0 +1,28 @@
+diff --git a/frontend/app/components/tabs/AuditLogTab.jsx b/frontend/app/components/tabs/AuditLogTab.jsx
+index 12a2910..c8b083e 100644
+--- a/frontend/app/components/tabs/AuditLogTab.jsx
++++ b/frontend/app/components/tabs/AuditLogTab.jsx
+@@ -61,7 +61,22 @@ function AuditLogTab() {
+   const [error, setError] = useState(null);
+ 
+   useEffect(() => {
+-    if (!selectedId && workspaces.length > 0) setSelectedId(workspaces[0].id);
++    // BUGFIX: this used to only fire `!selectedId` — a one-time default
++    // pick, never revisited. If the workspace behind `selectedId` later
++    // disappears from `workspaces` (deleted via ManageWorkspaceModal, or
++    // the user is removed from it), selectedId keeps pointing at an id
++    // no longer in the list: the <select> below renders a `value` with
++    // no matching <option> (browsers silently fall back to showing
++    // whichever option happens to be first, which doesn't match what's
++    // actually selected), and the audit fetch 404s ("Unknown
++    // workspace_id") even though the user may have several other
++    // workspaces whose audit log they can perfectly well view. Re-check
++    // membership on every `workspaces` change, not just when selectedId
++    // is empty, and fall back the same way the initial-pick branch
++    // already does.
++    if (workspaces.length === 0) return;
++    const stillExists = selectedId && workspaces.some((ws) => ws.id === selectedId);
++    if (!stillExists) setSelectedId(workspaces[0].id);
+   }, [workspaces, selectedId]);
+ 
+   useEffect(() => {
