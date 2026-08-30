@@ -658,6 +658,65 @@ def test_delete_workspace_unlinks_every_remaining_chat(monkeypatch):
     chat_workspace.write_audit.assert_called_once()
 
 
+def test_delete_workspace_detaches_chats_workspace_id(monkeypatch):
+    """Bug fix regression test: deleting a workspace must null out
+    workspace_id on every chat still pointing at it -- not just clear
+    linked_chat_ids -- or those chats keep showing as grouped under a
+    project that no longer exists (chat tab lists chats independent of
+    any workspace join, unlike tabs that re-resolve the workspace and
+    safely 404). This must run as an `update ... where workspace_id = %s`
+    against the chats table BEFORE (or as part of the same transaction
+    as) the `delete from workspaces` -- not filtered down to just
+    ws["chat_ids"], since that array intentionally omits other members'
+    private chats, which still need detaching."""
+    monkeypatch.setattr(chat_workspace, "_require_owner_or_partner", lambda *a, **kw: "owner")
+    monkeypatch.setattr(chat_workspace, "get_workspace",
+                         lambda *a, **kw: _ws_row(chat_ids=["chat_1", "chat_2"]))
+    monkeypatch.setattr(chat_workspace.chat_store, "chat_exists", lambda *a, **kw: True)
+    monkeypatch.setattr(chat_workspace.chat_store, "set_linked_chats", MagicMock())
+    cursor = FakeCursor()
+    _install_fake_cursor(monkeypatch, cursor)
+
+    chat_workspace.delete_workspace("ws_1", "owner_1")
+
+    detach_queries = [(q, p) for q, p in cursor.executed if "workspace_id = null" in q]
+    assert len(detach_queries) == 1
+    query, params = detach_queries[0]
+    assert "update chats" in query
+    assert "where workspace_id = %s" in query
+    assert params[-1] == "ws_1"
+
+    delete_queries = [q for q, _ in cursor.executed if q.strip().startswith("delete from workspaces")]
+    assert len(delete_queries) == 1
+
+
+def test_delete_workspace_snapshots_owner_and_partners_for_audit(monkeypatch):
+    """Bug fix (Option A): delete_workspace() must record every
+    owner/partner-tier user_id in its own write_audit() call, so
+    api/routes/workspaces.py's get_workspace_audit() has something to
+    authorize a former owner/partner against once the workspace (and its
+    live workspace_members rows) no longer exist -- see
+    audit_log.find_deletion_snapshot()."""
+    monkeypatch.setattr(chat_workspace, "_require_owner_or_partner", lambda *a, **kw: "owner")
+    monkeypatch.setattr(chat_workspace, "get_workspace",
+                         lambda *a, **kw: _ws_row(owner_id="owner_1", chat_ids=[]))
+    monkeypatch.setattr(chat_workspace.chat_store, "chat_exists", lambda *a, **kw: True)
+    monkeypatch.setattr(chat_workspace.chat_store, "set_linked_chats", MagicMock())
+    cursor = FakeCursor(fetchall_results=[[{"user_id": "partner_1"}, {"user_id": "partner_2"}]])
+    _install_fake_cursor(monkeypatch, cursor)
+
+    chat_workspace.delete_workspace("ws_1", "owner_1")
+
+    partner_query = [(q, p) for q, p in cursor.executed if "role = 'partner'" in q]
+    assert len(partner_query) == 1
+    assert partner_query[0][1] == ("ws_1",)
+
+    chat_workspace.write_audit.assert_called_once()
+    args, kwargs = chat_workspace.write_audit.call_args
+    detail = args[4] if len(args) > 4 else kwargs["detail"]
+    assert sorted(detail["authorized_viewer_ids"]) == ["owner_1", "partner_1", "partner_2"]
+
+
 def test_workspace_for_chat_returns_none_when_chat_missing_or_unowned(monkeypatch):
     cursor = FakeCursor(fetchone_results=[None])
     _install_fake_cursor(monkeypatch, cursor)

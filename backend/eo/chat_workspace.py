@@ -697,12 +697,64 @@ def remove_chat(ws_id: str, user_id: str, chat_id: str, delete_chat: bool = Fals
 def delete_workspace(ws_id: str, user_id: str) -> None:
     """Owner OR partner can delete — both tiers are full-power. A
     moderator cannot, regardless of how long they've been trusted with
-    membership management."""
+    membership management.
+
+    Bug fix: this used to only `delete from workspaces` and clear each
+    chat_ids member's linked_chat_ids, but never cleared chats.workspace_id
+    itself -- unlike remove_chat()'s non-delete_chat branch, which does
+    `update chats set workspace_id = null ...` when detaching a single
+    chat. That meant every chat that had been in the workspace kept a
+    workspace_id pointing at a row that no longer existed. Screens that
+    resolve membership by re-fetching the workspace (get_workspace,
+    workspace_for_chat) degrade safely -- a lookup on a deleted id just
+    404s/returns None -- so those looked correct. But the chat tab lists
+    a user's chats independent of any workspace join (chat_store.list_chats
+    is a plain `where owner_id = %s`) and groups them client-side by
+    cross-referencing each workspace's chat_ids; a stale, non-null
+    workspace_id left chats.workspace_id and the (now nonexistent)
+    workspace's contents implicitly still associated on any code path
+    that keys off that column directly, so deleted projects' chats could
+    keep showing as grouped there even though every other tab looked
+    clean. Explicitly nulling workspace_id here -- for every chat that
+    points at ws_id, not just the ones ws["chat_ids"] surfaces (that
+    array intentionally omits other members' private chats, but those
+    still need detaching) -- makes chats fully standalone the moment the
+    workspace is gone, matching the product's own "member chats survive,
+    they just stop auto-sharing memory" framing for this action.
+
+    Bug fix (Option A, audit-log follow-up): api/routes/workspaces.py's
+    get_workspace_audit() authorizes a caller via chat_workspace.member_role(),
+    which needs the workspaces row (and, for a joint workspace, the
+    workspace_members rows) to still exist -- both gone the instant this
+    function returns, so a workspace's own "who deleted this and when"
+    audit entry became permanently unreachable through that route,
+    directly contradicting eo/audit_log.py's own "independent of the
+    current state of the thing itself" promise. Snapshotting every
+    owner/partner-tier user_id into THIS delete event's detail (read back
+    via audit_log.find_deletion_snapshot()) gives that route something to
+    authorize against once the live membership is gone -- captured here,
+    before either table is touched, since ws["owner_id"] and the
+    workspace_members rows below are both gone by the time write_audit()
+    runs a few lines down.
+    """
     _require_owner_or_partner(ws_id, user_id)
     ws = get_workspace(ws_id, user_id)
+    authorized_viewer_ids = set()
+    if ws.get("owner_id"):
+        authorized_viewer_ids.add(ws["owner_id"])
     with db.cursor(user_id=user_id) as cur:
+        cur.execute(
+            "select user_id from workspace_members where workspace_id = %s and role = 'partner'",
+            (ws_id,),
+        )
+        authorized_viewer_ids.update(r["user_id"] for r in cur.fetchall())
+        cur.execute(
+            "update chats set workspace_id = null, updated_at = %s where workspace_id = %s",
+            (_now(), ws_id),
+        )
         cur.execute("delete from workspaces where id = %s", (ws_id,))
-    write_audit(user_id, "workspace.delete", "workspace", ws_id, {"name": ws["name"]})
+    write_audit(user_id, "workspace.delete", "workspace", ws_id,
+                {"name": ws["name"], "authorized_viewer_ids": sorted(authorized_viewer_ids)})
     for cid in ws["chat_ids"]:
         if chat_store.chat_exists(cid, user_id):
             chat_store.set_linked_chats(cid, user_id, [])

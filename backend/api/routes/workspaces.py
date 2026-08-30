@@ -390,11 +390,27 @@ def get_workspace_audit(ws_id: str, limit: int = Query(100, le=500),
     """Part 8.6: 'what happened to this workspace' — owner/partner-tier
     only, same restriction as delete_workspace/set_moderator_attribution_grant,
     since this surfaces every member add/remove/role-change and every
-    ownership transition, not just the caller's own actions."""
+    ownership transition, not just the caller's own actions.
+
+    Bug fix (Option A): member_role() needs the workspaces row (and, for
+    a joint workspace, workspace_members) to still exist -- both gone the
+    instant a workspace is deleted, which used to make its audit trail
+    (including its own "who deleted this and when" entry) permanently
+    unreachable here, contradicting eo/audit_log.py's own "independent of
+    the current state of the thing itself" promise. member_role()
+    returning None now means either "never existed" or "deleted" --
+    disambiguated by checking delete_workspace()'s own snapshot of who
+    was owner/partner at the moment it ran (audit_log.find_deletion_snapshot()).
+    A caller who wasn't in that snapshot gets the exact same 404 as
+    before; this only widens access for the people who already had it.
+    """
     role = chat_workspace.member_role(ws_id, owner_id)
     if role is None:
-        raise HTTPException(status_code=404, detail="Unknown workspace_id")
-    if role not in ("owner", "partner"):
+        snapshot = audit_log.find_deletion_snapshot("workspace", ws_id)
+        authorized_viewer_ids = (snapshot or {}).get("authorized_viewer_ids") or []
+        if owner_id not in authorized_viewer_ids:
+            raise HTTPException(status_code=404, detail="Unknown workspace_id")
+    elif role not in ("owner", "partner"):
         raise HTTPException(
             status_code=403,
             detail=f"user {owner_id} must be an owner or partner of workspace {ws_id} to view its audit log",

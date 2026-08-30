@@ -48,6 +48,39 @@ def write_audit(user_id: str, action: str, target_type: str, target_id: str,
         print(f"  [audit_log] write failed (action={action!r}, target={target_id!r}): {exc}")
 
 
+def find_deletion_snapshot(target_type: str, target_id: str) -> dict | None:
+    """Returns the `detail` dict of the most recent `<target_type>.delete`
+    audit entry for this target, or None if no such entry exists (the
+    target was never deleted through an audited path -- including "it
+    never existed at all").
+
+    Bug fix (Option A): this module's own docstring promises the audit
+    trail answers "what happened to this target ... independent of the
+    current state of the thing itself (which may have since been
+    deleted...)" -- but a route can only act on that promise if it has
+    SOME way to authorize a caller against a target whose live state
+    (and, for workspaces, live membership) is gone. Callers that record
+    an authorization snapshot in their own `<type>.delete` write_audit()
+    call (see chat_workspace.delete_workspace()'s `authorized_viewer_ids`)
+    can check the caller against this instead of a live lookup. Read via
+    `trusted=True` same as list_for_target()/list_for_user() -- this is
+    an internal authorization lookup a route makes on the caller's
+    behalf, not a caller-scoped read.
+    """
+    with db.cursor(trusted=True) as cur:
+        cur.execute(
+            """
+            select detail from audit_log
+            where target_type = %s and target_id = %s and action = %s
+            order by created_at desc
+            limit 1
+            """,
+            (target_type, target_id, f"{target_type}.delete"),
+        )
+        row = cur.fetchone()
+    return row["detail"] if row else None
+
+
 def list_for_target(target_type: str, target_id: str, limit: int = 100) -> list[dict]:
     """Everything that happened to one target (a workspace, a chat, ...),
     most recent first. No access check here — same discipline as every
