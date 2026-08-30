@@ -645,14 +645,39 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
   const [pendingDelete, setPendingDelete] = useState(null); // NEW — §2 fix
   const [deleting, setDeleting] = useState(false);
 
+  // BUGFIX — stale cross-project response: load() had no guard against
+  // out-of-order responses, unlike ContradictionsPanel/ExtractionPanel's
+  // own `cancelled`-flag effects further down this file. Switching the
+  // active project quickly enough (before the in-flight fetch for the
+  // previous one resolves) could let project A's response land after
+  // project B is already active, silently repainting B's source list
+  // with A's data -- and worse, leaving a stale `pendingDelete` node
+  // from A around, so confirming it would call deleteWorkspaceNode with
+  // B's wsId but A's node_id. wsIdRef tracks which project's response is
+  // still wanted; a response whose requestedWsId no longer matches it is
+  // simply dropped instead of committed to state.
+  const wsIdRef = useRef(wsId);
+
   async function load() {
+    const requestedWsId = wsId;
     setLoading(true);
-    const nodes = await fetchWorkspaceNodes(wsId, "source");
+    const nodes = await fetchWorkspaceNodes(requestedWsId, "source");
+    if (wsIdRef.current !== requestedWsId) return; // superseded by a project switch
     setSources((nodes || []).filter((n) => n.section === "research"));
     setLoading(false);
   }
 
-  useEffect(() => { load(); }, [wsId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    wsIdRef.current = wsId;
+    // Clear immediately rather than waiting on the fetch above, so a
+    // project switch never leaves the previous project's sources (or a
+    // delete confirmation pointed at one of its nodes) visible under the
+    // new project's header, even for the brief window before load()
+    // resolves.
+    setSources([]);
+    setPendingDelete(null);
+    load();
+  }, [wsId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // BUGFIX — live-panel bug, part 2: this panel's own `load()` only ever
   // ran once, on mount/wsId-change. A search dispatched via
@@ -755,6 +780,11 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
           : "Runs web_researcher against this scope's domain preset, in this project's own chat — sources found get written back here as they're indexed, same as academic_search."}
       </p>
 
+      {loading && sources.length === 0 && (
+        <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+          <Loader2 size={12} className="animate-spin" /> Loading sources…
+        </div>
+      )}
       {sources.length === 0 && !loading && (
         <p className="text-xs text-[var(--neutral-600)]">No sources indexed in this project yet — run a search above.</p>
       )}
@@ -813,12 +843,21 @@ function CitationGraphPanel({ wsId, fetchWorkspaceNodes, fetchGraphEdges }) {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(null);
 
+  // BUGFIX — same stale cross-project response class as SourcesPanel's
+  // own load() above (see that panel's comment for the full reasoning):
+  // switching projects quickly could let a slower project A response
+  // land after project B is active and overwrite B's graph with A's
+  // nodes/edges. wsIdRef guards against committing a superseded response.
+  const wsIdRef = useRef(wsId);
+
   async function load() {
+    const requestedWsId = wsId;
     setLoading(true);
     const [allNodes, allEdges] = await Promise.all([
-      fetchWorkspaceNodes(wsId), // no node_type filter — quality-flag/gap nodes belong on this graph too
-      fetchGraphEdges(wsId),
+      fetchWorkspaceNodes(requestedWsId), // no node_type filter — quality-flag/gap nodes belong on this graph too
+      fetchGraphEdges(requestedWsId),
     ]);
+    if (wsIdRef.current !== requestedWsId) return; // superseded by a project switch
     const researchNodes = (allNodes || []).filter((n) => n.section === "research");
     const researchIds = new Set(researchNodes.map((n) => n.node_id));
     const researchEdges = (allEdges || [])
@@ -829,7 +868,17 @@ function CitationGraphPanel({ wsId, fetchWorkspaceNodes, fetchGraphEdges }) {
     setLoading(false);
   }
 
-  useEffect(() => { load(); }, [wsId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    wsIdRef.current = wsId;
+    // Clear immediately, same reasoning as SourcesPanel's own reset: a
+    // project switch shouldn't leave the previous project's graph (or a
+    // node-detail panel selected from it) on screen while the new
+    // project's data is still loading.
+    setNodes([]);
+    setEdges([]);
+    setSelected(null);
+    load();
+  }, [wsId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // BUGFIX — see SourcesPanel's identical effect for the full reasoning:
   // reload once dock.state.loading falls back to false (a run just
@@ -853,7 +902,11 @@ function CitationGraphPanel({ wsId, fetchWorkspaceNodes, fetchGraphEdges }) {
           <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> Refresh
         </button>
       </div>
-      {nodes.length === 0 ? (
+      {loading && nodes.length === 0 ? (
+        <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5">
+          <Loader2 size={12} className="animate-spin" /> Loading citation graph…
+        </div>
+      ) : nodes.length === 0 ? (
         <p className="text-xs text-[var(--neutral-600)]">No citation data yet — run a search from the Sources tab first.</p>
       ) : (
         <div className="flex-1 min-h-[420px] border border-[var(--neutral-800)] rounded-lg overflow-hidden">
