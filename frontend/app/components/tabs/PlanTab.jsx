@@ -67,9 +67,14 @@ const PROMOTE_LABELS = {
 // result has no "text"/"issues"/"fixed_code"/"code"/"answer"/"papers",
 // it falls through to the summary branch, so this IS exactly what
 // renders in chat). Manual fields stay as the fallback/override in case
-// the sentence's exact wording ever drifts. Requires the
-// SessionContext.jsx openScopedSubChat/sendTask appSlug patch — without
-// it this silently falls back to today's un-scoped dispatch.
+// the sentence's exact wording ever drifts.
+// BUG FIX — this used to require "the SessionContext.jsx
+// openScopedSubChat/sendTask appSlug patch" (this comment's own prior
+// wording) that was never actually applied: openScopedSubChat/sendTask
+// had no appSlug parameter at all, and this panel's own call passed
+// appSlug into the unrelated `topicId` slot besides. Both are now fixed
+// (see SessionContext.jsx's sendTask/openScopedSubChat and this file's
+// own start() below) — app_slug now genuinely reaches the backend.
 function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
   const [pasted, setPasted] = useState("");
   const [appSlug, setAppSlug] = useState("");
@@ -90,7 +95,19 @@ function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
     if (!appSlug.trim() || !cycleGoal.trim()) return;
     setStarting(true);
     try {
-      const chatId = await openScopedSubChat(wsId, cycleGoal.trim(), appSlug.trim());
+      // BUG FIX — appSlug was previously passed as openScopedSubChat's
+      // 3rd positional arg, which is `topicId` (a Notebooks topic-
+      // grounding id), not app_slug — there was no way to pass an
+      // app_slug at all before openScopedSubChat/sendTask grew the
+      // appSlug param above them. That meant this app_slug field was
+      // pure UI theater: never reaching the backend as `topicId` did
+      // nothing useful with an app_slug string, and the actual
+      // TaskRequest.app_slug stayed unset, so hardware_speccer/
+      // file_manager silently built into a fresh app dir instead of the
+      // one handoff_packager already scoped and wrote files under. Now
+      // passed positionally correctly: no topicId/scope for this
+      // dispatch, appSlug in its own new slot.
+      const chatId = await openScopedSubChat(wsId, cycleGoal.trim(), null, null, appSlug.trim());
       onOpenChat?.(chatId);
     } finally {
       setStarting(false);
