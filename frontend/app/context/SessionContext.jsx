@@ -2175,7 +2175,19 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // defaults to null so every other call site (which already has a
   // correctly up-to-date `sessionId` by the time it calls sendTask)
   // behaves exactly as before.
-  const sendTask = useCallback(async (taskText, topicId = null, scope = null, sessionOverride = null) => {
+  // appSlugOverride (BUG FIX — PlanTab's "Start Building this" silently
+  // un-scoped): TaskRequest.app_slug (backend/api/routes/tasks.py) was
+  // never forwarded from this function at all, so PlanTab's
+  // StartBuildingPanel — the one caller that actually needs a SPECIFIC
+  // app_slug, the one handoff_packager.py already scoped and wrote real
+  // files under — had no way to reach it. Without it, task_runner.py's
+  // set_app_slug() fell back to its throwaway
+  // f"{slugify(task_text)}_{session_id[:8]}" namespace, unrelated to the
+  // app handoff_packager prepared, so "Start building this" silently
+  // built into a fresh, empty app dir instead of resuming the handed-off
+  // one. Optional and defaults to null so every other call site behaves
+  // exactly as before.
+  const sendTask = useCallback(async (taskText, topicId = null, scope = null, sessionOverride = null, appSlugOverride = null) => {
     const effectiveSessionId = sessionOverride || sessionId;   // FIX — see param doc above
     const userMessage = { role: "user", text: taskText };   // CHANGED — named so it can be persisted below
     setMessages((prev) => [...prev, userMessage]);
@@ -2239,6 +2251,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
           mode,
           ...(topicId ? { topic_id: topicId } : {}),   // NEW — Step 6.11.c
           ...(scope ? { scope } : {}),   // NEW — task 13e
+          ...(appSlugOverride ? { app_slug: appSlugOverride } : {}),   // BUG FIX — see param doc above
         }),
       });
       const data = await res.json();
@@ -2274,7 +2287,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // that lands this value goes nowhere past this console.debug.
   // (Relocated here in 2.3k, right after sendTask's own declaration — see
   // the note left in its old spot near createWorkspaceChat for why.)
-  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null, scope = null) => {
+  const openScopedSubChat = useCallback(async (wsId, taskText, topicId = null, scope = null, appSlug = null) => {
     // Step 6.11.c: topicId now actually reaches sendTask() and rides the
     // /api/task POST body as topic_id. The server still only logs it
     // (see api/server.py's post_task()) — 6.11.f is what makes routing
@@ -2284,6 +2297,13 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     // sub-tab to steer the Panel toward web_researcher with a domain
     // scope instead of academic_search — see that file for the phrasing
     // this pairs with.
+    // appSlug (BUG FIX — PlanTab's "Start Building this" silently
+    // un-scoped): same pass-through shape as topicId/scope above, rides
+    // sendTask()'s own new appSlugOverride param through to the POST
+    // body as `app_slug` — see sendTask's own comment for the bug this
+    // closes. PlanTab's StartBuildingPanel is the only caller that
+    // passes this today; every other call site keeps passing neither and
+    // behaves exactly as before.
     // FIX — dispatched-task-lands-in-wrong-chat bug: sendTask() used to
     // be called bare here, which meant it read `sessionId` from state —
     // but createWorkspaceChat()'s setSessionId(chat.id) hadn't actually
@@ -2295,7 +2315,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     // stayed empty forever, because they were watching the wrong chat.
     // Passing chatId through explicitly closes that race.
     const chatId = await createWorkspaceChat(wsId);
-    await sendTask(taskText, topicId, scope, chatId);
+    await sendTask(taskText, topicId, scope, chatId, appSlug);
     return chatId;
   }, [createWorkspaceChat, sendTask]);
 
