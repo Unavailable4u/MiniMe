@@ -35,6 +35,7 @@ Recovery table (the contract every downstream phase must respect):
         request. Never treat as a size or auth problem.
 """
 
+import re
 from enum import Enum
 
 
@@ -44,6 +45,29 @@ class ErrorBucket(Enum):
     MALFORMED_REQUEST = "malformed_request"                # our payload is actually wrong
     PERMANENT_AUTH = "permanent_auth"                      # bad/revoked key, no amount of retrying helps
     TRANSIENT_NETWORK = "transient_network"                # timeout, 5xx, connection reset
+
+
+# Bug fix (2026-09-01): a 429 whose body reports the quota limit itself
+# as zero (e.g. Google's `'quota_limit_value': '0'`) is not a rolling
+# window that will ever open on its own -- it means this key/project/
+# region combination has NO allocation at all for the call type in
+# question, a project/key configuration problem, not transient
+# contention. The RATE_LIMIT_WINDOW recovery action (wait for the
+# window to reset, retry the same request) can never succeed here: zero
+# stays zero regardless of how long anything waits. Checked BEFORE
+# _RATE_WINDOW_PHRASES below, since the same body also contains
+# ordinary rate-window wording ("requests per minute") that would
+# otherwise shadow this more specific and more actionable signal.
+_ZERO_QUOTA_PATTERN = re.compile(r"quota_limit_value[\"']?\s*:\s*[\"']?0\b")
+
+
+def _is_permanent_zero_quota(body: str) -> bool:
+    """True when the provider's own error body states the applicable
+    quota limit is zero -- see _ZERO_QUOTA_PATTERN's docstring above.
+    `body` is expected already-lowercased text, same convention as
+    every other phrase check in this module; the pattern itself has no
+    letters that case-fold, so this is safe either way."""
+    return bool(_ZERO_QUOTA_PATTERN.search(body))
 
 
 # Wording providers actually use for a rolling per-minute/per-hour quota,
@@ -178,6 +202,16 @@ def classify_error(exc, response=None) -> ErrorBucket:
          problem it isn't.
     """
     body = _body_text(exc, response=response)
+
+    # Bug fix (2026-09-01): checked before the rate-window phrases below
+    # on purpose -- a zero-quota body also contains ordinary "requests
+    # per minute" wording, which would otherwise misclassify this as an
+    # ordinary, waitable RATE_LIMIT_WINDOW. See _is_permanent_zero_quota's
+    # docstring: zero quota never opens on its own, no matter how long a
+    # caller waits, so this needs PERMANENT_AUTH's "don't retry, cool
+    # down, alert" recovery action instead.
+    if _is_permanent_zero_quota(body):
+        return ErrorBucket.PERMANENT_AUTH
 
     if any(phrase in body for phrase in _RATE_WINDOW_PHRASES):
         return ErrorBucket.RATE_LIMIT_WINDOW
