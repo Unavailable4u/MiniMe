@@ -1074,11 +1074,52 @@ def _select_gemini_review_chain() -> list:
     return [{"provider": "gemini", "model": "gemini-3.6-flash", "key_env": ranked[0]}]
 
 
-# Reserved output budget per chunked review call. Kept well under any
-# provider's real ceiling (Groq's smallest reviewer model here is 8000
-# tpm) so there's always room left for input after subtracting this --
-# see _plan_review_chunks() below for how the two combine.
+# Reserved output budget used ONLY when planning how many chars of
+# SOURCE fit in a chunk (a conservative worst-case reservation so chunk
+# boundaries stay stable regardless of which provider ends up using
+# them). NOT a per-call output cap on its own -- see
+# _review_output_budget() below, which sizes the ACTUAL cap per call
+# from each call's real estimated input and each provider's real tpm.
+# Bug fix (2026-09-01 v2): an earlier version of this fix used this
+# same flat 1500 figure as the literal max_tokens for every review
+# call, groq and mistral alike. That starved mistral (25000 tpm --
+# plenty of headroom) down to the same tiny budget sized for groq's
+# worst case (8000 tpm), truncating both providers' reviews mid-output
+# (finish_reason=length) even though mistral had 3x the room to spare.
 _REVIEW_CHUNK_OUTPUT_TOKENS = 1500
+
+# Bug fix (2026-09-01 v2): upper bound on the ADAPTIVE per-call output
+# cap below. A review has little real use for more than this, and an
+# unbounded cap would just re-invite the original "can never fit"
+# tpm-ceiling failure on a borderline input by claiming more output
+# room than a low-tpm provider can actually spare.
+_REVIEW_OUTPUT_CEILING_TOKENS = 4096
+
+
+def _review_output_budget(system_prompt: str, user_content: str,
+                           tpm_limit: "int | None") -> "int | None":
+    """Sizes a per-call max_tokens override to THIS call's real
+    estimated input, instead of reusing one flat constant for every
+    provider regardless of how much headroom it actually has. Returns
+    None when tpm_limit is unknown for this provider/model -- same
+    "don't fabricate a number, fall back to the flat model-family
+    default" posture the rest of this budget-aware code already
+    follows (see _max_tokens_for()'s own docstring).
+
+    Floors at _REVIEW_CHUNK_OUTPUT_TOKENS: chunk boundaries were chosen
+    assuming this much output room would be reserved, so this is always
+    safe to grant, never enough to blow the tpm ceiling that sizing
+    already accounted for. Ceilings at _REVIEW_OUTPUT_CEILING_TOKENS:
+    a high-tpm provider like mistral (25000 tpm) shouldn't be allowed
+    to claim a near-unbounded amount just because a small file's
+    estimated input leaves a lot of arithmetic headroom.
+    """
+    if tpm_limit is None:
+        return None
+    from utils.llm_client import _estimate_tokens_for_call, _MAX_TOKENS_SAFETY_MARGIN
+    estimated = _estimate_tokens_for_call(system_prompt, user_content)
+    available = tpm_limit - _MAX_TOKENS_SAFETY_MARGIN - estimated
+    return max(_REVIEW_CHUNK_OUTPUT_TOKENS, min(_REVIEW_OUTPUT_CEILING_TOKENS, available))
 
 
 def _split_source_by_symbols(source: str, symbols: list[SymbolInfo],
@@ -1245,15 +1286,11 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
         # actual input was. For a low-tpm model, input + that flat default
         # can still exceed the whole per-minute budget on its own -- the
         # exact "can never fit" failure this chunking system was meant to
-        # prevent. Capping output tokens the same way on *both* branches
-        # whenever we have a real tpm figure to reason about closes that
-        # gap; tpm_limit is None only when we couldn't compute a budget at
-        # all, in which case there's nothing to cap against and behavior
-        # is unchanged from before chunking existed.
-        capped_chain = (
-            [dict(step, max_tokens=_REVIEW_CHUNK_OUTPUT_TOKENS) for step in chain]
-            if tpm_limit is not None else chain
-        )
+        # prevent. v2 (below): the cap itself is now computed per call via
+        # _review_output_budget() rather than reusing one flat constant
+        # for every provider -- see that function's docstring for why a
+        # single shared number under-served a higher-tpm provider like
+        # mistral once groq's fix exposed the same gap on its side too.
 
         try:
             if whole_file_fits:
@@ -1261,12 +1298,16 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
                     f"File: {target.relative_to(REPO_ROOT)}\n\n"
                     f"=== SOURCE (complete file) ===\n{source}\n\n{static_context}"
                 )
-                text = generate_text(system_prompt, user_content, capped_chain,
+                output_budget = _review_output_budget(system_prompt, user_content, tpm_limit)
+                call_chain = (
+                    [dict(step, max_tokens=output_budget) for step in chain]
+                    if output_budget is not None else chain
+                )
+                text = generate_text(system_prompt, user_content, call_chain,
                                       agent_name=f"self_audit-{name}-reviewer")
                 result[name] = {"model": model, "review": text}
             else:
                 chunks = _split_source_by_symbols(source, symbols, source_budget_chars)
-                chunk_chain = capped_chain
                 reviews = []
                 for i, chunk_source in enumerate(chunks, start=1):
                     user_content = (
@@ -1274,6 +1315,11 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
                         f"=== SOURCE (chunk {i}/{len(chunks)} of this file -- NOT the "
                         f"whole file, the static context below IS for the whole file) ===\n"
                         f"{chunk_source}\n\n{static_context}"
+                    )
+                    output_budget = _review_output_budget(system_prompt, user_content, tpm_limit)
+                    chunk_chain = (
+                        [dict(step, max_tokens=output_budget) for step in chain]
+                        if output_budget is not None else chain
                     )
                     chunk_text = generate_text(system_prompt, user_content, chunk_chain,
                                                 agent_name=f"self_audit-{name}-reviewer-chunk{i}")

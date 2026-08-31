@@ -117,3 +117,96 @@ diagnosis run for its own sake)
 - Phase 1's first genuine from-scratch diagnosis (as opposed to
   tool-debugging) hasn't happened yet — worth a clean re-run once the
   multi-LLM review layer exists.
+
+---
+
+## 2026-09-01 — Session 2: Multi-LLM review layer — token cap bug found and fixed
+
+### Target audited: the multi-LLM review layer itself
+(`backend/eo/self_audit.py`, `backend/utils/llm_client.py`,
+`backend/utils/llm_errors.py` — tool-debugging, not a target-file finding)
+
+**Attempt 1 — groq crashed outright ("can never fit" tpm-ceiling failure)**
+- Reported: groq's whole-file review branch had no output-token cap at
+  all, so `_max_tokens_for()`'s flat model-family default plus the
+  file's real input size exceeded groq's entire 8000-tpm per-minute
+  budget on its own — unwinnable regardless of retries.
+- Category: hard fact.
+- Decided/outcome: capped output tokens at a flat
+  `_REVIEW_CHUNK_OUTPUT_TOKENS = 1500` on both the whole-file and
+  chunked branches. Fixed groq's crash. Committed as `9b896ff`.
+
+**Attempt 2 — the fix for Attempt 1 introduced a new bug (flat cap starved mistral)**
+- Reported: after Attempt 1's fix, a real run against
+  `agents/code_writer_lean.py` showed groq *and* mistral both hitting
+  `finish_reason=length` mid-review. Root cause: the flat `1500` cap
+  was sized for groq's worst case (8000 tpm) but applied identically to
+  mistral, which has 25000 tpm — 3x the real headroom — so mistral's
+  reviews were truncated despite having plenty of room to spare.
+- Category: hard fact, confirmed by comparing each provider's real tpm
+  figure in `QUOTA_CONFIG` against the flat constant.
+- Decided/outcome: replaced the flat cap with a per-call, per-provider
+  adaptive budget — `_review_output_budget()` — sized from that call's
+  actual estimated input and that provider's real tpm, floored at 1500
+  and ceilinged at 4096. First patch for this arrived mis-targeted (see
+  below), regenerated correctly, applied, and re-verified against a
+  real run: groq and mistral both returned full, untruncated,
+  well-formed reviews with no crash and no truncation.
+
+**Process note — a patch was generated against the wrong base and had to be regenerated**
+- The first attempt at Attempt 2's patch failed to `git apply` with
+  three "patch does not apply" errors (`self_audit.py:1236`,
+  `llm_client.py:135`, `llm_errors.py:35`). Diagnosis: not a corrupted
+  patch file — it was built assuming a stale base. Two of the three
+  files (`llm_client.py`, `llm_errors.py`) already had their target
+  state committed at HEAD (an unrelated zero-quota fix from the same
+  `9b896ff` commit), so the patch's search context for those no longer
+  existed. The third (`self_audit.py`) was the opposite problem — the
+  patch assumed the *original, pre-Attempt-1* code, but HEAD already
+  had Attempt 1's flat cap applied to both branches, a state the patch
+  never accounted for.
+- Category: hard fact, confirmed by cloning the actual `self-mod/
+  experiment` branch and reproducing the failure directly rather than
+  guessing from the error text alone.
+- Decided/outcome: regenerated the patch against the real current HEAD
+  (touching only `self_audit.py`, since the other two needed no further
+  change), verified `git apply --check` passes clean on a fresh clone,
+  and confirmed the patched file compiles before handing it over.
+  Applied and confirmed working via a real `--ai-review` run. **Not yet
+  committed** — do that next, e.g. `fix: replace flat output-token cap
+  with per-call adaptive budget in multi-LLM review layer`.
+
+**Known limitation — logged, not fixed this session: gemini truncation**
+- The same real run also showed gemini truncating
+  (`finish_reason=length` on its last chain step, only 620 chars of
+  partial output returned). Confirmed this is unrelated to the bug just
+  fixed: gemini is gated by RPM/RPD in `QUOTA_CONFIG`, not TPM, so
+  `rate_ledger._tpm_limit_for("gemini", ...)` returns `None` and
+  `_review_output_budget()` correctly no-ops for it (same "don't
+  fabricate a number" posture the rest of this code already follows) —
+  meaning gemini's code path is untouched by tonight's fix, for better
+  or worse. Why it truncates at only 620 chars when its flat default
+  (`DEFAULT_MAX_TOKENS = 8192`) should be generous remains
+  unexplained — something else (a provider-side ceiling on
+  `gemini-3.6-flash`, or the continuation/retry logic exhausting its
+  budget) is the likely suspect, not yet traced.
+- Category: single-source guess (the "why" is still open) sitting on
+  top of a hard fact (that it happens, reproducibly).
+- Decision: not yet made whether to fix now or carry forward like
+  `reference_count_elsewhere` — open item below.
+
+### Open items carried forward
+
+- **Gemini truncation** (see above) — decide: investigate the real
+  cause now, or log as a known limitation and move on.
+- Phase 1's first genuine from-scratch diagnosis (as opposed to
+  tool-debugging) still hasn't happened — groq and mistral are now
+  trustworthy enough post-fix that this is unblocked.
+- Tonight's `self_audit.py` fix (Attempt 2 above) needs an actual
+  commit on `self-mod/experiment` — currently applied but uncommitted.
+
+### Open items resolved this session
+
+- **Scan cap** — confirmed: `MAX_SCAN_FILES = 4000` in
+  `backend/eo/self_audit.py`. Carried as unconfirmed since Session 1;
+  closing it out.
