@@ -1140,8 +1140,8 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
             result[name] = {"error": f"no chain available for {name}"}
             continue
         try:
-            text, *_ = generate_text(system_prompt, user_content, chain,
-                                      agent_name=f"self_audit-{name}-reviewer")
+            text = generate_text(system_prompt, user_content, chain,
+                                  agent_name=f"self_audit-{name}-reviewer")
             result[name] = {"model": chain[0]["model"], "review": text}
         except Exception as e:  # noqa: BLE001 -- one bad reviewer shouldn't tank the others
             result[name] = {"model": chain[0]["model"], "error": str(e)}
@@ -1277,4 +1277,3 @@ def _main():
 
 if __name__ == "__main__":
     _main()
-print("Symbol cross-reference counts are name-only, not fully-qualified — treat high reference_count_elsewhere on common names (run, get, process, etc.) with skepticism until confidence tiers are added.")
