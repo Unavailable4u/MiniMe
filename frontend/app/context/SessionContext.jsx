@@ -1881,6 +1881,24 @@ const fetchVideoOverviewUrl = useCallback(async (wsId) => {
   return URL.createObjectURL(blob);
 }, []);
 
+// NEW — Patch 5 (Presentation rehearsal reachability patch), step 2: same
+// blob → object URL wrapper as fetchPodcastAudioUrl/fetchVideoOverviewUrl
+// above, over the new GET .../notebooks/presentation_rehearsal/audio
+// route (step 1). presentation_rehearsal has had a working generation
+// target and manifest/chat-tool entry since Phase 5 steps 5.10/5.11, but
+// no way for the UI to read the audio back until this route existed.
+const fetchRehearsalAudioUrl = useCallback(async (wsId) => {
+  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/presentation_rehearsal/audio`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Couldn't fetch rehearsal audio (${res.status})`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}, []);
+
 const gradeQuiz = useCallback(async (quizText, answers) => {
   const res = await fetch(`${API_URL}/api/notes/study/quiz/grade`, {
     method: "POST",
@@ -2622,6 +2640,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   synthesizePodcast,   // NEW — Part 4 §4.4: podcast synthesis
   buildVideoOverview,   // NEW — Part 4 §4.4: video overview (narrated slideshow)
   fetchPodcastAudioUrl, fetchVideoOverviewUrl,   // NEW — Frontend paste-box patch (patch 4): read back saved panel_content media
+  fetchRehearsalAudioUrl,   // NEW — Patch 5 (Presentation rehearsal reachability patch): same, for presentation_rehearsal
   fetchWorkspaceAudit, fetchMyAudit,   // NEW — Part 8.6: audit log
   }), [
     sessionId, API_URL, messages, loading,
@@ -2644,7 +2663,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     classifyIntent, markTopicDone, fetchWorkspaceProgress, setWorkspaceProgress, fetchDeviceSpec, refreshPartPrices,
     toggleInstructionStep, proposeClusters, fetchClusterCandidates, acceptClusterCandidate, rejectClusterCandidate, openScopedSubChat,
     gradeQuiz, recordQuizAttempt, fetchMissedQuestions, synthesizePodcast, buildVideoOverview, fetchWorkspaceAudit,
-    fetchMyAudit, fetchPodcastAudioUrl, fetchVideoOverviewUrl,
+    fetchMyAudit, fetchPodcastAudioUrl, fetchVideoOverviewUrl, fetchRehearsalAudioUrl,
   ]);
   return (
     <SessionContext.Provider value={value}>

@@ -1158,7 +1158,7 @@ function StudyView({ workspaceId }) {
   // chat message all land in the exact same "podcast"/"video_overview"/
   // "slide_deck" panel rows instead of two parallel, never-reusing-
   // each-other systems.
-  const { fetchPanelContent, generateNotebooks, fetchPodcastAudioUrl, fetchVideoOverviewUrl } = useSession();
+  const { fetchPanelContent, generateNotebooks, fetchPodcastAudioUrl, fetchVideoOverviewUrl, fetchRehearsalAudioUrl } = useSession();
   const [kind, setKind] = useState("flashcards");
   const [text, setText] = useState("");
   const [rendered, setRendered] = useState("");
@@ -1328,17 +1328,54 @@ function StudyView({ workspaceId }) {
     }
   }
 
+  // NEW — Patch 5 (Presentation rehearsal reachability patch), step 3:
+  // presentation_rehearsal state -- has had a real generation target and
+  // chat-tool entry since Phase 5 steps 5.10/5.11, but no UI to reach it
+  // at all until this patch. No paste box (unlike podcast/slide_deck) --
+  // _generate_presentation_rehearsal() always writes its own script via
+  // generate_rehearsal_script(), it doesn't take pasted text -- so the
+  // only inputs here are the mode/difficulty scope keys that function
+  // already reads.
+  const [rehearsalMode, setRehearsalMode] = useState("judge");
+  const [rehearsalDifficulty, setRehearsalDifficulty] = useState("expert");
+  const [rehearsalScriptText, setRehearsalScriptText] = useState("");
+  const [rehearsalAudioUrl, setRehearsalAudioUrl] = useState("");
+  const [generatingRehearsal, setGeneratingRehearsal] = useState(false);
+  const [rehearsalError, setRehearsalError] = useState("");
+  const [rehearsalUpdatedAt, setRehearsalUpdatedAt] = useState(null);
+
+  async function handleGenerateRehearsal() {
+    setGeneratingRehearsal(true);
+    setRehearsalError("");
+    try {
+      const { branches } = await generateNotebooks(
+        workspaceId,
+        ["presentation_rehearsal"],
+        { mode: rehearsalMode, difficulty: rehearsalDifficulty },
+      );
+      const branch = branches.find((b) => b.panel_key === "presentation_rehearsal");
+      if (branch?.status === "error") throw new Error(branch.error || "Couldn't generate the rehearsal.");
+      setRehearsalScriptText(branch?.result?.script_text || "");
+      setRehearsalUpdatedAt(branch?.result?.updated_at || null);
+      setRehearsalAudioUrl(await fetchRehearsalAudioUrl(workspaceId));
+    } catch (err) {
+      setRehearsalError(String(err.message || err));
+    } finally {
+      setGeneratingRehearsal(false);
+    }
+  }
+
   // NEW — Frontend paste-box patch (patch 4): best-effort "load what's
-  // already there" for the three media kinds, on tab switch -- the
+  // already there" for the media kinds, on tab switch -- the
   // same courtesy PERSISTED_KINDS' own effect above already gives
   // flashcards/quiz/study_guide, so switching to Podcast/Presentation/
-  // Video overview shows a chat-generated result immediately instead of
-  // looking empty until someone hits Generate again. Silently leaves
-  // fields blank on any failure (no saved panel yet, no media file on
-  // disk for it, network hiccup) -- a blank paste box is the correct
+  // Video overview/Rehearsal shows a chat-generated result immediately
+  // instead of looking empty until someone hits Generate again. Silently
+  // leaves fields blank on any failure (no saved panel yet, no media
+  // file on disk for it, network hiccup) -- a blank state is the correct
   // resting state for "nothing generated yet," not an error to surface.
   useEffect(() => {
-    if (!["podcast", "slide_deck", "video_overview"].includes(kind)) return;
+    if (!["podcast", "slide_deck", "video_overview", "presentation_rehearsal"].includes(kind)) return;
     let cancelled = false;
     (async () => {
       let saved;
@@ -1374,6 +1411,17 @@ function StudyView({ workspaceId }) {
             if (!cancelled) setVideoUrl(url);
           } catch { /* saved row exists but no playable file — leave blank */ }
         }
+      } else if (kind === "presentation_rehearsal") {
+        setRehearsalUpdatedAt(saved.updated_at || null);
+        if (data.mode) setRehearsalMode((prev) => data.mode || prev);
+        if (data.difficulty) setRehearsalDifficulty((prev) => data.difficulty || prev);
+        if (data.script_text) setRehearsalScriptText((prev) => prev || data.script_text);
+        if (data.audio_path) {
+          try {
+            const url = await fetchRehearsalAudioUrl(workspaceId);
+            if (!cancelled) setRehearsalAudioUrl(url);
+          } catch { /* saved row exists but no playable file — leave blank */ }
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -1386,14 +1434,18 @@ function StudyView({ workspaceId }) {
         {/* CHANGED — Frontend paste-box patch (patch 4): "slide_deck"
             added as its own "Presentation" tab (it had no tab at all
             before this patch — slides only ever existed as a hidden
-            first stage inside a video build). */}
-        {["flashcards", "quiz", "study_guide", "podcast", "slide_deck", "video_overview"].map((k) => (
+            first stage inside a video build).
+            CHANGED — Patch 5 (Presentation rehearsal reachability patch):
+            "presentation_rehearsal" added as "Rehearsal" -- same gap,
+            different kind (had a working backend target since Phase 5
+            step 5.10 but no tab at all until now). */}
+        {["flashcards", "quiz", "study_guide", "podcast", "slide_deck", "video_overview", "presentation_rehearsal"].map((k) => (
           <button
             key={k}
             onClick={() => { setKind(k); setRendered(""); setText(""); }}
             className={`text-xs rounded-lg px-3 py-1 ${kind === k ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"}`}
           >
-            {k === "flashcards" ? "Flashcards" : k === "quiz" ? "Quiz" : k === "study_guide" ? "Study guide" : k === "podcast" ? "Podcast" : k === "slide_deck" ? "Presentation" : "Video overview"}
+            {k === "flashcards" ? "Flashcards" : k === "quiz" ? "Quiz" : k === "study_guide" ? "Study guide" : k === "podcast" ? "Podcast" : k === "slide_deck" ? "Presentation" : k === "video_overview" ? "Video overview" : "Rehearsal"}
           </button>
         ))}
       </div>
@@ -1419,6 +1471,12 @@ function StudyView({ workspaceId }) {
         <p className="text-xs text-[var(--neutral-500)]">
           Optionally paste your own slide outline below to reformat it. Leave it blank to generate one from this
           notebook&apos;s sources.
+        </p>
+      )}
+      {kind === "presentation_rehearsal" && (
+        <p className="text-xs text-[var(--neutral-500)]">
+          Pick a mode and difficulty, then generate an audio rehearsal for defending or presenting this
+          notebook&apos;s material.
         </p>
       )}
       {kind === "video_overview" && (
@@ -1606,6 +1664,67 @@ function StudyView({ workspaceId }) {
               >
                 Download mp4
               </a>
+            </div>
+          )}
+        </div>
+      ) : kind === "presentation_rehearsal" ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <select
+              id="notebook-rehearsal-mode"
+              name="notebookRehearsalMode"
+              value={rehearsalMode}
+              onChange={(e) => setRehearsalMode(e.target.value)}
+              aria-label="Rehearsal mode"
+              className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+            >
+              <option value="judge">Judge (skeptical panelist)</option>
+              <option value="two_host">Two-host (friendly co-presenter)</option>
+              <option value="devils_advocate">Devil&apos;s advocate (debate partner)</option>
+            </select>
+            <select
+              id="notebook-rehearsal-difficulty"
+              name="notebookRehearsalDifficulty"
+              value={rehearsalDifficulty}
+              onChange={(e) => setRehearsalDifficulty(e.target.value)}
+              aria-label="Rehearsal difficulty"
+              className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+            >
+              <option value="novice">Novice</option>
+              <option value="expert">Expert</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleGenerateRehearsal}
+              disabled={generatingRehearsal}
+              className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            >
+              {generatingRehearsal && <Loader2 size={12} className="animate-spin" />}
+              {generatingRehearsal ? "Generating…" : rehearsalAudioUrl ? "Regenerate" : "Generate"}
+            </button>
+            {rehearsalUpdatedAt && !generatingRehearsal && (
+              <span className="text-[10px] text-[var(--neutral-600)]">Generated {timeAgo(rehearsalUpdatedAt)}</span>
+            )}
+          </div>
+          {rehearsalError && (
+            <p className="text-xs text-red-400">{rehearsalError}</p>
+          )}
+          {rehearsalAudioUrl && (
+            <div className="rounded-lg border border-[var(--neutral-800)] p-3 space-y-2">
+              <audio controls src={rehearsalAudioUrl} className="w-full" />
+              <a
+                href={rehearsalAudioUrl}
+                download="presentation_rehearsal.mp3"
+                className="text-[11px] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
+              >
+                Download mp3
+              </a>
+            </div>
+          )}
+          {rehearsalScriptText && (
+            <div className="rounded-lg border border-[var(--neutral-800)] p-4">
+              <pre className="text-xs whitespace-pre-wrap font-mono text-[var(--neutral-200)]">{rehearsalScriptText}</pre>
             </div>
           )}
         </div>

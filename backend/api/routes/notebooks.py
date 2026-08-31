@@ -559,6 +559,31 @@ def _load_saved_video_path(ws_id: str) -> str | None:
     return None
 
 
+def _load_saved_rehearsal(ws_id: str) -> tuple[str, str | None]:
+    """Patch 5 (Presentation rehearsal reachability patch), step 1. Same
+    shape and same "don't promise a path that then 404s" posture as
+    _load_saved_podcast() above, just reading the "presentation_rehearsal"
+    panel_key instead of "podcast" -- that panel's content is a
+    {"script_text", "audio_path", "mode", "difficulty"} JSON string
+    (see _generate_presentation_rehearsal()'s own docstring), so only
+    the two fields this helper needs are pulled out of it.
+    """
+    row = panel_content.get_content(ws_id, "presentation_rehearsal")
+    if not row["content"]:
+        return "", None
+    try:
+        data = json.loads(row["content"])
+    except (json.JSONDecodeError, TypeError):
+        return "", None
+    script_text = (data.get("script_text") or "").strip()
+    if not script_text:
+        return "", None
+    audio_filename = data.get("audio_path")
+    if audio_filename and os.path.exists(os.path.join(NOTES_EXPORTS_DIR, audio_filename)):
+        return script_text, audio_filename
+    return script_text, None
+
+
 def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     """Phase 5 step 5.6, rewritten by the Video Overview reuse patch,
     step 2. Raises LookupError/ValueError on failure, same contract as
@@ -781,9 +806,9 @@ def _generate_presentation_rehearsal(ws_id: str, scope: dict | None, owner_id: s
         "audio_bytes": os.path.getsize(out_path),
         "updated_at": saved["updated_at"],
         "message": (
-            "Rehearsal script + audio generated and saved (Phase 5 step 5.10). "
-            "Not yet reachable via Generate or the chat tool list -- that's "
-            f"step 5.11. The mp3 exists on disk at {out_path!r} for now."
+            "Rehearsal script + audio generated and saved (Phase 5 step 5.10), "
+            "reachable via Generate as of step 5.11, and servable via "
+            "GET .../notebooks/presentation_rehearsal/audio as of patch 5."
         ),
     }
 
@@ -1455,6 +1480,34 @@ def notebooks_video_overview_video(ws_id: str, owner_id: str = Depends(require_a
         os.path.join(NOTES_EXPORTS_DIR, video_filename),
         media_type="video/mp4",
         filename=video_filename,
+    )
+
+
+# Patch 5 (Presentation rehearsal reachability patch), step 1: closes the
+# same "no GET route serves the mp3 back" gap the Frontend paste-box patch
+# (patch 4) closed for "podcast" above -- presentation_rehearsal got a
+# generation target (step 5.10) and a manifest/chat-tool entry (step 5.11)
+# but was left with no way to fetch the audio it saves, and no frontend
+# reachability at all. Same workspace-scoped, filename-resolved-server-side
+# shape as notebooks_podcast_audio() above, just against the
+# "presentation_rehearsal" panel via _load_saved_rehearsal().
+@router.get("/api/workspaces/{ws_id}/notebooks/presentation_rehearsal/audio")
+def notebooks_presentation_rehearsal_audio(ws_id: str, owner_id: str = Depends(require_auth)):
+    try:
+        chat_workspace.get_workspace(ws_id, owner_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Unknown workspace_id")
+
+    _, audio_filename = _load_saved_rehearsal(ws_id)
+    if not audio_filename:
+        raise HTTPException(
+            status_code=404,
+            detail="No presentation rehearsal audio saved for this workspace yet -- generate one first.",
+        )
+    return FileResponse(
+        os.path.join(NOTES_EXPORTS_DIR, audio_filename),
+        media_type="audio/mpeg",
+        filename=audio_filename,
     )
 
 
