@@ -1236,18 +1236,37 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
             or len(source) <= source_budget_chars
         )
 
+        # Bug fix (2026-09-01): max_tokens was only ever capped down to
+        # _REVIEW_CHUNK_OUTPUT_TOKENS on the chunked branch below. A file
+        # small enough to fit whole (whole_file_fits=True) still went out
+        # with NO override, so _max_tokens_for() fell back to its flat
+        # model-family default (capped only at tpm_limit - safety margin,
+        # e.g. 6500 for groq's 8000-tpm model) regardless of how small the
+        # actual input was. For a low-tpm model, input + that flat default
+        # can still exceed the whole per-minute budget on its own -- the
+        # exact "can never fit" failure this chunking system was meant to
+        # prevent. Capping output tokens the same way on *both* branches
+        # whenever we have a real tpm figure to reason about closes that
+        # gap; tpm_limit is None only when we couldn't compute a budget at
+        # all, in which case there's nothing to cap against and behavior
+        # is unchanged from before chunking existed.
+        capped_chain = (
+            [dict(step, max_tokens=_REVIEW_CHUNK_OUTPUT_TOKENS) for step in chain]
+            if tpm_limit is not None else chain
+        )
+
         try:
             if whole_file_fits:
                 user_content = (
                     f"File: {target.relative_to(REPO_ROOT)}\n\n"
                     f"=== SOURCE (complete file) ===\n{source}\n\n{static_context}"
                 )
-                text = generate_text(system_prompt, user_content, chain,
+                text = generate_text(system_prompt, user_content, capped_chain,
                                       agent_name=f"self_audit-{name}-reviewer")
                 result[name] = {"model": model, "review": text}
             else:
                 chunks = _split_source_by_symbols(source, symbols, source_budget_chars)
-                chunk_chain = [dict(step, max_tokens=_REVIEW_CHUNK_OUTPUT_TOKENS) for step in chain]
+                chunk_chain = capped_chain
                 reviews = []
                 for i, chunk_source in enumerate(chunks, start=1):
                     user_content = (

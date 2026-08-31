@@ -135,7 +135,7 @@ from utils.embedding import embed_text, embed_text_with_fallback  # noqa: F401
 # blocks below with the five-bucket recovery table classify_error()'s
 # own docstring documents; see llm_errors.py's module docstring for the
 # full table this dispatch must respect.
-from utils.llm_errors import ErrorBucket, classify_error
+from utils.llm_errors import ErrorBucket, _body_text, _is_permanent_zero_quota, classify_error
 
 # D1 audit fix -- see eo/executor.py's matching _trace_logger; same
 # TRACE_EXPORT_FAILED marker convention so tracing-side failures from
@@ -508,6 +508,14 @@ def _retry_after_seconds(exc) -> float:
          A Retry-After header or "try again in Xs" text answers "how
          long until quota resets," which isn't the question a bad/
          revoked key is asking.
+      0b. Bug fix (2026-09-01) -- same treatment for a 429 whose body
+          reports the quota limit itself as zero (classify_error()
+          already routes this to PERMANENT_AUTH; this is the matching
+          duration-side fix so that bucket actually gets its long
+          cooldown here too, instead of falling through to the
+          Retry-After/short-window signals below, which answer "when
+          does the window reset" -- a question that doesn't apply when
+          the allocation is zero and isn't time-windowed at all).
       1. A real `Retry-After` response header -- standard for 429s, and
          what the Groq/OpenAI SDKs expose via exc.response.headers when
          the provider sends one.
@@ -516,6 +524,8 @@ def _retry_after_seconds(exc) -> float:
       3. _DEFAULT_COOLDOWN_SECONDS, if neither signal is present.
     """
     if _status_code_from_exc(exc) in _PERMANENT_ERROR_STATUS_CODES:
+        return _PERMANENT_ERROR_COOLDOWN_SECONDS
+    if _is_permanent_zero_quota(_body_text(exc)):
         return _PERMANENT_ERROR_COOLDOWN_SECONDS
 
     response = getattr(exc, "response", None)
