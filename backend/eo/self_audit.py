@@ -271,6 +271,7 @@ class AuditReport:
     execution_hotspots: list[ExecutionHotspot] = field(default_factory=list)
     churn: ChurnSummary | None = None
     llm_summary: str | None = None
+    ai_review: dict | None = None
     notes: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
@@ -291,6 +292,7 @@ class AuditReport:
                 "execution_hotspots": [asdict(h) for h in self.execution_hotspots],
                 "churn": asdict(self.churn) if self.churn else None,
                 "llm_summary": self.llm_summary,
+                "ai_review": self.ai_review,
                 "notes": self.notes,
             },
             indent=2,
@@ -1014,9 +1016,142 @@ def _llm_summary(target: Path, findings: list[Finding], test_summary: dict | Non
 # 9. Entry point
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# 8a. Multi-LLM review (opt-in, 2026-08-30 -- see SELF_MOD_LOG.md).
+# Unlike _llm_summary() above (which only sees pre-computed findings),
+# this gives each of 3 INDEPENDENT reviewers the target's actual source,
+# so they can reason about wiring/data-flow correctness and spot bugs
+# static analysis wouldn't catch -- the whole point of adding this was
+# that a purely static + mocked-test tool wasn't meaningfully different
+# from CI/lint/semgrep the repo already has. Deliberately different
+# providers, not the same model 3x (diversity of judgment > throughput
+# here) -- Groq and Mistral reuse the existing shared, low-volume,
+# no-number keys already used by several other agents (see
+# agents/documentation_agent.py, agents/dataset_analyst.py, etc.).
+# Gemini has no such shared key -- every numbered GEMINI_API_KEY_N in
+# eo/registry.py's AGENT_CAPABILITIES is already claimed by a tagged
+# role or a dedicated agent's own CHAIN (see
+# agents/performance_reviewer.py's docstring for _13/_14 specifically)
+# -- so _select_gemini_review_chain() below picks whichever tagged key
+# currently has the most quota headroom instead, same ranking approach
+# agents/reviewer.py's own _select_workers() already uses.
+# --------------------------------------------------------------------------
+
+GROQ_REVIEW_CHAIN = [
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "GROQ_API_KEY"},
+]
+MISTRAL_REVIEW_CHAIN = [
+    {"provider": "mistral", "model": "mistral-medium-latest", "key_env": "MISTRAL_API_KEY"},
+]
+
+
+def _select_gemini_review_chain() -> list:
+    """Picks a currently-usable tagged Gemini key: filters out anything
+    eo/quota_sentinel.py's cooldown tracking marks as cooling_down (a
+    REAL prior rate-limit hit, not a guess) FIRST, then ranks what's
+    left by today's usage pct, lowest first -- same two-step approach
+    agents/reviewer.py's own _select_workers() uses. Deliberately does
+    NOT hardcode any specific "these key numbers are bad" list: a
+    manual key-health check run on 2026-08-30 showed 12 of 17 Gemini
+    keys mid-rate-limit at that moment (see SELF_MOD_LOG.md) -- that
+    list is a snapshot, not a fact, and would already be wrong by the
+    next time this runs. Falls through to an empty chain (Gemini
+    skipped, not crashed) if every tagged key is currently cooling
+    down -- the two other reviewers still run either way."""
+    try:
+        from eo.registry import AGENT_CAPABILITIES
+        from eo.quota_sentinel import get_quota_snapshot
+    except ImportError:
+        return []
+    pool = [k for k, info in AGENT_CAPABILITIES.items() if info.get("provider") == "gemini"]
+    if not pool:
+        return []
+    snapshot = get_quota_snapshot()
+    usable = [k for k in pool if not (snapshot.get(k) or {}).get("cooling_down", False)]
+    if not usable:
+        return []  # every tagged Gemini key is currently cooling down -- skip, don't guess
+    ranked = sorted(usable, key=lambda k: (snapshot.get(k) or {}).get("pct") or 0.0)
+    return [{"provider": "gemini", "model": "gemini-3.6-flash", "key_env": ranked[0]}]
+
+
+def _multi_llm_review(target: Path, source: str, findings: list[Finding],
+                       symbols: list[SymbolInfo], import_graph: ImportGraph | None,
+                       test_summary: dict | None) -> dict:
+    """Runs 2-3 independent reviewers over the target's real source.
+    Every reviewer's raw output is kept SEPARATE (no merging/voting) --
+    this is a diagnosis tool for a human to read and verify, not a
+    production gate that needs one verdict (contrast
+    agents/reviewer.py's own aggregate_reviews(), which DOES merge,
+    because it gates a task). Never raises: a failed reviewer gets an
+    "error" field instead of tanking the whole audit."""
+    try:
+        from utils.llm_client import generate_text
+    except ImportError:
+        return {"error": "utils.llm_client not importable -- skipping AI review"}
+
+    findings_text = "\n".join(
+        f"- [{f.severity}/{f.category}/{f.confidence}] line {f.line}: {f.description}"
+        for f in findings
+    ) or "(no static findings)"
+    symbols_text = "\n".join(
+        f"- {s.name} ({s.kind}, line {s.line}): complexity={s.cyclomatic_complexity}, "
+        f"external_calls={s.external_calls}, refs_elsewhere={s.reference_count_elsewhere} "
+        f"(name-only match, treat with skepticism on common names)"
+        for s in symbols
+    ) or "(no symbols)"
+    imports_text = json.dumps(import_graph.imports_from_target if import_graph else [], indent=2)
+    test_text = json.dumps(test_summary, indent=2) if test_summary else "(tests not run)"
+
+    system_prompt = (
+        "You are one of several INDEPENDENT reviewers examining the same Python file -- "
+        "your job is to reason carefully, not to agree with anything else. You will not "
+        "see any other reviewer's output. Given the file's full source plus static "
+        "analysis context, identify:\n"
+        "1. WIRING / DATA-FLOW issues: does data returned from a call actually get used "
+        "correctly by the caller? Are error paths handled, or silently swallowed? Does "
+        "anything write to one key/variable but read from a different one?\n"
+        "2. BUGS static analysis likely missed: logic errors, off-by-one, wrong "
+        "condition, anything that would only be caught by actually reading the code.\n"
+        "3. EFFICIENCY / COMPLEXITY: any clearly wasteful pattern (repeated work, "
+        "unnecessary nesting, an obviously better data structure) -- note the static "
+        "complexity numbers given as context, don't just restate them.\n\n"
+        "Cite line numbers where you can. Be explicit about your own confidence -- say "
+        "so plainly if you're not sure. Do not suggest a fix or rewrite -- this is "
+        "diagnosis only. If you find nothing in a category, say so briefly rather than "
+        "inventing something to fill the section."
+    )
+    user_content = (
+        f"File: {target.relative_to(REPO_ROOT)}\n\n"
+        f"=== SOURCE ===\n{source}\n\n"
+        f"=== Static findings (already known, don't just repeat these) ===\n{findings_text}\n\n"
+        f"=== Symbols ===\n{symbols_text}\n\n"
+        f"=== Imports ===\n{imports_text}\n\n"
+        f"=== Test run ===\n{test_text}"
+    )
+
+    reviewers = {
+        "groq": GROQ_REVIEW_CHAIN,
+        "mistral": MISTRAL_REVIEW_CHAIN,
+        "gemini": _select_gemini_review_chain(),
+    }
+    result: dict = {}
+    for name, chain in reviewers.items():
+        if not chain:
+            result[name] = {"error": f"no chain available for {name}"}
+            continue
+        try:
+            text, *_ = generate_text(system_prompt, user_content, chain,
+                                      agent_name=f"self_audit-{name}-reviewer")
+            result[name] = {"model": chain[0]["model"], "review": text}
+        except Exception as e:  # noqa: BLE001 -- one bad reviewer shouldn't tank the others
+            result[name] = {"model": chain[0]["model"], "error": str(e)}
+    return result
+
+
 def audit_file(raw_path: str, run_tests: bool = True, run_profile: bool = True,
                 run_crossref: bool = True, run_churn: bool = True,
-                use_semgrep: bool = True, llm_chain: list | None = None) -> AuditReport:
+                use_semgrep: bool = True, llm_chain: list | None = None,
+                run_ai_review: bool = False) -> AuditReport:
     target = _validate_target_path(raw_path)
     source = target.read_text(encoding="utf-8")  # read-only
 
@@ -1071,6 +1206,11 @@ def audit_file(raw_path: str, run_tests: bool = True, run_profile: bool = True,
         summary = _llm_summary(target, findings, test_summary, execution_hotspots,
                                 dead_code_candidates, llm_chain)
 
+    ai_review = None
+    if run_ai_review:
+        ai_review = _multi_llm_review(target, source, findings, symbols,
+                                       import_graph, test_summary)
+
     return AuditReport(
         target=str(target.relative_to(REPO_ROOT)),
         generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1083,6 +1223,7 @@ def audit_file(raw_path: str, run_tests: bool = True, run_profile: bool = True,
         execution_hotspots=execution_hotspots,
         churn=churn,
         llm_summary=summary,
+        ai_review=ai_review,
         notes=notes,
     )
 
@@ -1100,6 +1241,10 @@ def _main():
     parser.add_argument("--llm-summary", action="store_true",
                          help="Also synthesize a plain-language summary via generate_text "
                               "(requires a chain to be wired in -- see EXAMPLE_CHAIN below)")
+    parser.add_argument("--ai-review", action="store_true",
+                         help="Run 3 independent LLM reviewers (Groq/Mistral/Gemini) over "
+                              "the real source -- up to 3 real LLM calls per invocation, "
+                              "counts as one iteration-cap action either way")
     args = parser.parse_args()
 
     # Wire a real cheap chain here once you've picked Basic's model shortlist
@@ -1121,6 +1266,7 @@ def _main():
             run_churn=not args.no_churn,
             use_semgrep=not args.no_semgrep,
             llm_chain=EXAMPLE_CHAIN if args.llm_summary else None,
+            run_ai_review=args.ai_review,
         )
     except AuditPathRejected as e:
         print(f"REFUSED: {e}", file=sys.stderr)
