@@ -1,0 +1,190 @@
+diff --git a/backend/eo/self_audit.py b/backend/eo/self_audit.py
+index 3ef9c6f..cacc2d9 100644
+--- a/backend/eo/self_audit.py
++++ b/backend/eo/self_audit.py
+@@ -1074,6 +1074,62 @@ def _select_gemini_review_chain() -> list:
+     return [{"provider": "gemini", "model": "gemini-3.6-flash", "key_env": ranked[0]}]
+ 
+ 
++# Reserved output budget per chunked review call. Kept well under any
++# provider's real ceiling (Groq's smallest reviewer model here is 8000
++# tpm) so there's always room left for input after subtracting this --
++# see _plan_review_chunks() below for how the two combine.
++_REVIEW_CHUNK_OUTPUT_TOKENS = 1500
++
++
++def _split_source_by_symbols(source: str, symbols: list[SymbolInfo],
++                              budget_chars: int) -> list[str]:
++    """Splits `source` into coherent chunks -- whole functions/classes,
++    never one cut in half -- sized to fit under `budget_chars`. Reuses
++    the symbol table self_audit already computed (line/loc per symbol)
++    as the boundary, same "one small unit per call" shape as
++    agents/code_writer_lean.py's one-module-spec-per-call pattern,
++    applied to review instead of generation. Falls back to a flat
++    line-count split only if no symbols were found at all (e.g. a file
++    the symbol pass couldn't parse) -- still chunked, just without
++    function-aware boundaries.
++    """
++    lines = source.split("\n")
++    if not symbols:
++        chunks, current, current_len = [], [], 0
++        for line in lines:
++            current.append(line)
++            current_len += len(line) + 1
++            if current_len >= budget_chars:
++                chunks.append("\n".join(current))
++                current, current_len = [], 0
++        if current:
++            chunks.append("\n".join(current))
++        return chunks or [source]
++
++    ordered = sorted(symbols, key=lambda s: s.line)
++    # Preamble = everything before the first symbol (imports, module
++    # docstring, module-level constants) -- travels with the first chunk
++    # rather than getting its own, since it's rarely useful reviewed alone.
++    preamble = "\n".join(lines[:ordered[0].line - 1]).strip()
++
++    chunks: list[str] = []
++    current_parts = [preamble] if preamble else []
++    current_len = len(preamble)
++
++    for sym in ordered:
++        start, end = sym.line - 1, sym.line - 1 + sym.loc
++        sym_source = "\n".join(lines[start:end])
++        if current_parts and current_len + len(sym_source) > budget_chars:
++            chunks.append("\n\n".join(current_parts))
++            current_parts, current_len = [], 0
++        current_parts.append(sym_source)
++        current_len += len(sym_source)
++
++    if current_parts:
++        chunks.append("\n\n".join(current_parts))
++    return chunks or [source]
++
++
+ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
+                        symbols: list[SymbolInfo], import_graph: ImportGraph | None,
+                        test_summary: dict | None) -> dict:
+@@ -1083,9 +1139,30 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
+     production gate that needs one verdict (contrast
+     agents/reviewer.py's own aggregate_reviews(), which DOES merge,
+     because it gates a task). Never raises: a failed reviewer gets an
+-    "error" field instead of tanking the whole audit."""
++    "error" field instead of tanking the whole audit.
++
++    Chunking (added after the 2026-08-31 tpm-ceiling finding): a
++    whole-file prompt was the only call site in the codebase that
++    didn't follow the rest of the system's small-context-per-call
++    convention (contrast code_writer_lean.py's one-module-spec-per-call).
++    For a low-tpm reviewer (Groq's models here run 6000-8000 tpm), that
++    guaranteed a pre-flight rejection on anything but a tiny file,
++    independent of prompt quality. Each provider now gets its own
++    per-call budget computed from its real verified tpm figure
++    (rate_ledger._tpm_limit_for, the same source _max_tokens_for already
++    trusts) minus the safety margin and this call's reserved output
++    budget; if the whole file fits, one call goes out exactly as
++    before. If it doesn't, source is split along symbol boundaries
++    (_split_source_by_symbols) and reviewed in sequential passes, each
++    chunk labeled with which lines it covers and reminded that static
++    context (findings/symbols/imports/tests) already describes the
++    whole file, not just this slice -- individual chunk reviews are
++    concatenated under one "review" string per provider, in order, so
++    nothing about the result shape changes for callers."""
+     try:
+-        from utils.llm_client import generate_text
++        from utils.llm_client import (generate_text, _estimate_tokens_for_call,
++                                       _MAX_TOKENS_SAFETY_MARGIN)
++        from utils import rate_ledger
+     except ImportError:
+         return {"error": "utils.llm_client not importable -- skipping AI review"}
+ 
+@@ -1105,8 +1182,8 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
+     system_prompt = (
+         "You are one of several INDEPENDENT reviewers examining the same Python file -- "
+         "your job is to reason carefully, not to agree with anything else. You will not "
+-        "see any other reviewer's output. Given the file's full source plus static "
+-        "analysis context, identify:\n"
++        "see any other reviewer's output. Given the file's source (possibly only part of "
++        "it -- see below) plus static analysis context covering the WHOLE file, identify:\n"
+         "1. WIRING / DATA-FLOW issues: does data returned from a call actually get used "
+         "correctly by the caller? Are error paths handled, or silently swallowed? Does "
+         "anything write to one key/variable but read from a different one?\n"
+@@ -1120,11 +1197,10 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
+         "diagnosis only. If you find nothing in a category, say so briefly rather than "
+         "inventing something to fill the section."
+     )
+-    user_content = (
+-        f"File: {target.relative_to(REPO_ROOT)}\n\n"
+-        f"=== SOURCE ===\n{source}\n\n"
+-        f"=== Static findings (already known, don't just repeat these) ===\n{findings_text}\n\n"
+-        f"=== Symbols ===\n{symbols_text}\n\n"
++    static_context = (
++        f"=== Static findings for the WHOLE file (already known, don't just repeat these) ===\n"
++        f"{findings_text}\n\n"
++        f"=== Symbols for the WHOLE file ===\n{symbols_text}\n\n"
+         f"=== Imports ===\n{imports_text}\n\n"
+         f"=== Test run ===\n{test_text}"
+     )
+@@ -1139,12 +1215,58 @@ def _multi_llm_review(target: Path, source: str, findings: list[Finding],
+         if not chain:
+             result[name] = {"error": f"no chain available for {name}"}
+             continue
++
++        model = chain[0]["model"]
++        tpm_limit = rate_ledger._tpm_limit_for(chain[0]["provider"], model)
++        fixed_tokens = _estimate_tokens_for_call(
++            system_prompt, f"File: {target.relative_to(REPO_ROOT)}\n\n{static_context}"
++        )
++
++        if tpm_limit is None:
++            # No verified tpm figure for this provider/model -- same
++            # "don't fabricate a number" posture _max_tokens_for() takes;
++            # send the whole file in one call as before.
++            source_budget_chars = None
++        else:
++            available = tpm_limit - _MAX_TOKENS_SAFETY_MARGIN - fixed_tokens - _REVIEW_CHUNK_OUTPUT_TOKENS
++            source_budget_chars = max(available, 200) * 4  # 200-token floor: always make forward progress
++
++        whole_file_fits = (
++            source_budget_chars is None
++            or len(source) <= source_budget_chars
++        )
++
+         try:
+-            text = generate_text(system_prompt, user_content, chain,
+-                                  agent_name=f"self_audit-{name}-reviewer")
+-            result[name] = {"model": chain[0]["model"], "review": text}
++            if whole_file_fits:
++                user_content = (
++                    f"File: {target.relative_to(REPO_ROOT)}\n\n"
++                    f"=== SOURCE (complete file) ===\n{source}\n\n{static_context}"
++                )
++                text = generate_text(system_prompt, user_content, chain,
++                                      agent_name=f"self_audit-{name}-reviewer")
++                result[name] = {"model": model, "review": text}
++            else:
++                chunks = _split_source_by_symbols(source, symbols, source_budget_chars)
++                chunk_chain = [dict(step, max_tokens=_REVIEW_CHUNK_OUTPUT_TOKENS) for step in chain]
++                reviews = []
++                for i, chunk_source in enumerate(chunks, start=1):
++                    user_content = (
++                        f"File: {target.relative_to(REPO_ROOT)}\n\n"
++                        f"=== SOURCE (chunk {i}/{len(chunks)} of this file -- NOT the "
++                        f"whole file, the static context below IS for the whole file) ===\n"
++                        f"{chunk_source}\n\n{static_context}"
++                    )
++                    chunk_text = generate_text(system_prompt, user_content, chunk_chain,
++                                                agent_name=f"self_audit-{name}-reviewer-chunk{i}")
++                    reviews.append(f"--- Chunk {i}/{len(chunks)} ---\n{chunk_text}")
++                result[name] = {
++                    "model": model,
++                    "review": "\n\n".join(reviews),
++                    "chunked": True,
++                    "chunk_count": len(chunks),
++                }
+         except Exception as e:  # noqa: BLE001 -- one bad reviewer shouldn't tank the others
+-            result[name] = {"model": chain[0]["model"], "error": str(e)}
++            result[name] = {"model": model, "error": str(e)}
+     return result
+ 
+ 
