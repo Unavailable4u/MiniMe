@@ -309,6 +309,95 @@ STRICT_FORMAT_ROLES = frozenset({
     "wireframe_sketcher",
 })
 
+# Bug fix (audit follow-up): the two roles above whose output feeds
+# tts_synthesizer.py's "LABEL:" line parser specifically -- podcast_
+# scriptwriter's "HOST A:"/"HOST B:" lines and rehearsal_scriptwriter's
+# "JUDGE:"/"HOST A:"/"ADVOCATE:" lines. Both are STRICT_FORMAT_ROLES
+# already, but that set only controls skill-retrieval scoping (see the
+# comment above it) -- it never actually checked the model's OWN output
+# against the format it demands. Under provider/quota pressure a reroute
+# can land on a weaker fallback model that ignores the "HOST A:"-style
+# instruction entirely and returns plain prose instead (this is exactly
+# what produced the "no speaker-labeled dialogue lines found in
+# script_text" ValueError two whole pipeline stages later, in
+# tts_synthesizer.synthesize_podcast() -- after the LLM call was already
+# spent). Validating here, right after generation, catches that failure
+# at its source and gets one retry instead of silently handing a broken
+# script forward to a caller that has no way to regenerate it cheaply.
+DIALOGUE_LABEL_ROLES = frozenset({
+    "podcast_scriptwriter",
+    "rehearsal_scriptwriter",
+})
+
+
+def _has_speaker_labeled_dialogue(text: str) -> bool:
+    """True if `text` contains at least one line tts_synthesizer.py's own
+    parser would recognize as a speaker turn. Deferred import, not a
+    top-level one -- same circular-import posture every other cross-
+    module import in this file already uses -- and reuses tts_synthesizer's
+    actual parser (not a hand-rolled duplicate regex here) so this check
+    can never drift out of sync with what the real downstream consumer
+    accepts."""
+    from agents.tts_synthesizer import _parse_script
+    return any(entry[0] == "speech" for entry in _parse_script(text or ""))
+
+
+# Bug fix (audit follow-up, gap 3): slide_planner is in STRICT_FORMAT_ROLES
+# for the exact same reason podcast_scriptwriter/rehearsal_scriptwriter
+# are (see that set's own comment above) -- its output feeds
+# graph/adapters.py's markdown_text_to_artifact()/video_overview_builder.py
+# per-'## '-heading frames just as rigidly as a "LABEL:" line feeds
+# tts_synthesizer.py -- but only the two dialogue roles got a generation-
+# time check. A reroute onto a weaker model can just as easily ignore
+# "one '## Slide Title' per slide" and hand back an ordinary Markdown
+# report instead (this is the literal failure this set's own docstring
+# above already documents happening on a blank Presentation-tab prompt).
+HEADING_FORMAT_ROLES = frozenset({
+    "slide_planner",
+})
+
+
+def _has_slide_headings(text: str) -> bool:
+    """True if `text` parses into at least one real '## '-headed section
+    via the exact same parser markdown_text_to_artifact() (and therefore
+    build_video_overview()) will use on it downstream -- not just a
+    non-empty string. Deferred import, same reasoning as
+    _has_speaker_labeled_dialogue() above."""
+    from agents.importer import parse_markdown_text
+    if not (text or "").strip():
+        return False
+    return bool(parse_markdown_text(text, default_title="").get("sections"))
+
+
+# One shared table instead of one bespoke if-block per role category:
+# role -> (checker, what-went-wrong instruction appended to the retry's
+# system prompt). Adding a THIRD structurally-validated role in the
+# future (flashcard_writer/quiz_writer's checkbox format is the obvious
+# next candidate -- see STRICT_FORMAT_ROLES's own comment for their
+# downstream parsers) means adding one entry here, not duplicating the
+# retry machinery below again.
+STRUCTURAL_FORMAT_CHECKS = {
+    **{role: (
+        _has_speaker_labeled_dialogue,
+        "your previous answer did not use the required speaker-label "
+        "format at all (e.g. 'HOST A: ...', 'JUDGE: ...') -- it must be "
+        "dialogue, not prose or notes. Rewrite it as real spoken lines, "
+        "each one starting with a short, consistent, ALL-CAPS label "
+        "immediately followed by a colon, exactly as instructed above.",
+        "speaker-labeled dialogue lines (e.g. 'HOST A: ...')",
+    ) for role in DIALOGUE_LABEL_ROLES},
+    **{role: (
+        _has_slide_headings,
+        "your previous answer did not use the required slide structure "
+        "at all -- it must be a '# Deck Title' line followed by one "
+        "'## Slide Title' heading per slide, not a plain report or "
+        "unheaded prose. Rewrite it with that exact heading structure, "
+        "exactly as instructed above.",
+        "any '## Slide Title' headings",
+    ) for role in HEADING_FORMAT_ROLES},
+}
+
+
 MARKDOWN_INSTRUCTION = (
     "\n\nFormat your answer in Markdown: use fenced code blocks with a "
     "language tag for any code, use tables for tabular data, use headers/"
@@ -916,6 +1005,57 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
             domain=domain,
         )
     body, next_destination = parse_next_tag(raw)
+
+    # Bug fix (audit follow-up): see STRUCTURAL_FORMAT_CHECKS above for
+    # why this exists. One retry only, same "one more honest attempt, not
+    # a way to paper over a real failure indefinitely" posture the
+    # RuntimeError retry above already uses -- a SECOND consecutive
+    # format miss almost certainly means the source material itself
+    # doesn't support the requested format (or every reachable model in
+    # the chain is struggling the same way), not one unlucky reroute, so
+    # this raises a clear, specific error instead of silently persisting
+    # bad content for a caller (podcast_scriptwriter.py, rehearsal_
+    # scriptwriter.py, slide_deck_planner.py) that has no way to tell a
+    # well-formed result from a broken one itself.
+    format_check = STRUCTURAL_FORMAT_CHECKS.get(role)
+    if format_check is not None:
+        checker, correction_hint, what_missing = format_check
+        if not checker(body):
+            print(
+                f"  [generic:{role}] output failed its structural format "
+                f"check -- retrying once with an explicit format correction."
+            )
+            retry_system_prompt = (
+                system_prompt + f"\n\nIMPORTANT: {correction_hint}"
+            )
+            try:
+                retry_raw = generate_text(
+                    system_prompt=retry_system_prompt,
+                    user_content=context,
+                    chain=chain,
+                    agent_name=f"generic:{role}",
+                    session_id=session_id,
+                    domain=domain,
+                )
+            except RuntimeError:
+                retry_raw = None
+            if retry_raw is not None:
+                retry_body, retry_next_destination = parse_next_tag(retry_raw)
+                if checker(retry_body):
+                    body, next_destination = retry_body, retry_next_destination
+                else:
+                    raise ValueError(
+                        f"{role}: model output still had no {what_missing} "
+                        "after one retry -- giving up rather than passing "
+                        "unusable content downstream."
+                    )
+            else:
+                raise ValueError(
+                    f"{role}: model output had no {what_missing}, and the "
+                    "retry chain was exhausted -- giving up rather than "
+                    "passing unusable content downstream."
+                )
+
     if session_id:
         bus_write(f"stage_output:{session_id}:{role}", body)
         # Patch C3 — additional write, not a replacement of the line

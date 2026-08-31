@@ -87,6 +87,42 @@ NOTES_EXPORTS_DIR = os.path.join(
     "data", "exports",
 )
 
+# Bug fix (audit follow-up, gap 3): _generate_video_overview() below (and
+# _generate_slide_deck()) can source slide_text/script_text from a PASTED
+# value or a PREVIOUSLY SAVED panel row, not just a fresh generic_worker
+# run -- and generic_worker.run()'s own format validation/retry (see
+# agents/generic_worker.py's DIALOGUE_LABEL_ROLES) only ever runs on a
+# FRESH generation. A pasted value the user typed by hand, or a row saved
+# before that validation existed (or saved from a run that predates this
+# fix), reaches synthesize_podcast()/markdown_text_to_artifact() completely
+# unchecked -- the exact same "no speaker-labeled dialogue lines" /
+# "no '## ' headings" failure, just from a different entry point the
+# generation-time fix can't see. These two checks close that gap at the
+# one place both entry points (fresh generation and reuse) actually
+# converge: right before the text is trusted.
+def _is_usable_dialogue_script(text: str) -> bool:
+    """True if `text` has at least one line tts_synthesizer.py's own
+    parser would recognize as a speaker turn. Deferred import, same
+    circular-import posture this module already uses elsewhere, and
+    reuses the real downstream parser rather than a second hand-rolled
+    regex -- see agents/generic_worker.py's near-identical helper."""
+    from agents.tts_synthesizer import _parse_script
+    return any(entry[0] == "speech" for entry in _parse_script(text or ""))
+
+
+def _is_usable_slide_deck(text: str) -> bool:
+    """True if `text` parses into at least one real '## '-headed slide
+    section via the exact same parser markdown_text_to_artifact() (and
+    therefore build_video_overview()) will use on it later -- not just a
+    non-empty string. A pasted or saved value with no real headings at
+    all (plain prose, a bare title, an empty paste) parses to zero
+    sections and would otherwise reach video_overview_builder.py as a
+    deck with nothing to render."""
+    from agents.importer import parse_markdown_text
+    if not (text or "").strip():
+        return False
+    return bool(parse_markdown_text(text, default_title="").get("sections"))
+
 
 class ClipUrlRequest(BaseModel):
     url: str
@@ -425,6 +461,21 @@ def _generate_slide_deck(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     scope = scope or {}
     source_node_ids = scope.get("source_node_ids")
     pasted_slide = (scope.get("slide_text") or "").strip()
+    # Bug fix (audit follow-up, gap 3): a paste-box value that isn't a
+    # real '## '-headed deck (pasted plain prose, an accidental partial
+    # paste, ...) used to go straight to generate_slide_deck()'s
+    # raw_context as if it were trustworthy slide content, then reach
+    # video_overview_builder.py as a deck with nothing to render. Falling
+    # through to a fresh, whole-notebook generation instead is exactly
+    # today's existing "nothing pasted" behavior -- so an unusable paste
+    # degrades to the same well-tested path a blank paste box already
+    # takes, rather than a new failure mode.
+    if pasted_slide and not _is_usable_slide_deck(pasted_slide):
+        print(
+            "  [notebooks:slide_deck] pasted slide_text has no usable "
+            "'## ' headings -- ignoring the paste and generating fresh."
+        )
+        pasted_slide = ""
     if pasted_slide:
         slide_text = generate_slide_deck(ws_id, raw_context=pasted_slide)
     else:
@@ -646,6 +697,39 @@ def _generate_video_overview(ws_id: str, scope: dict | None, owner_id: str) -> d
     pasted_script = (scope.get("script_text") or "").strip()
     saved_slide = "" if pasted_slide else _load_saved_text(ws_id, "slide_deck", "slide_text")
     saved_script, saved_audio_filename = ("", None) if pasted_script else _load_saved_podcast(ws_id)
+
+    # Bug fix (audit follow-up, gap 3): all four of these can reach this
+    # point WITHOUT ever having passed through generic_worker.run()'s own
+    # format validation/retry -- pasted_slide/pasted_script are typed by
+    # hand, and saved_slide/saved_script/saved_audio_filename are read
+    # straight from a previously saved panel row that may have been
+    # written before this fix existed, or by some other path entirely.
+    # Trusting any of them unchecked is exactly how a stale or malformed
+    # value reaches synthesize_podcast()/video_overview_builder.py here
+    # even after generation-time validation is airtight. Treat an
+    # unusable one exactly like an absent one -- same "fall through to
+    # deriving or generating fresh" behavior every branch below already
+    # has for a genuinely missing half, just reached from one more input
+    # shape. A saved value being discarded here also means its audio
+    # can't be trusted either, so saved_audio_filename is cleared with it.
+    if pasted_slide and not _is_usable_slide_deck(pasted_slide):
+        print("  [notebooks:video_overview] pasted slide_text has no usable "
+              "'## ' headings -- treating as not provided.")
+        pasted_slide = ""
+    if saved_slide and not _is_usable_slide_deck(saved_slide):
+        print("  [notebooks:video_overview] saved slide_deck panel has no "
+              "usable '## ' headings -- treating as not provided.")
+        saved_slide = ""
+    if pasted_script and not _is_usable_dialogue_script(pasted_script):
+        print("  [notebooks:video_overview] pasted script_text has no "
+              "speaker-labeled dialogue lines -- treating as not provided.")
+        pasted_script = ""
+    if saved_script and not _is_usable_dialogue_script(saved_script):
+        print("  [notebooks:video_overview] saved podcast panel has no "
+              "speaker-labeled dialogue lines -- treating as not provided "
+              "(its audio is discarded too, since it narrates the same "
+              "unusable script).")
+        saved_script, saved_audio_filename = "", None
 
     have_slide = pasted_slide or saved_slide
     have_script = pasted_script or saved_script

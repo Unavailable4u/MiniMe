@@ -1548,6 +1548,43 @@ def _record_ledger_event(session_id: str, kind: str) -> None:
         print(f"  [llm_client] _record_ledger_event failed (non-fatal): {exc}")
 
 
+# Bug fix (audit follow-up): usage:{provider}:{key_id}:{date} (and the
+# same-shaped usage_by_domain:*/usage_by_workspace:* keys below) is a
+# per-CALENDAR-DAY record -- there is never a legitimate reason for one
+# to live past the day or two after the date embedded in its own key
+# name. Before this fix these writes had no TTL at all, so a bad value
+# ever written under this key -- e.g. the pre-Migration-Part-8 tracking
+# system's incompatible "a flat, never-date-scoped usage:{key_env}
+# counter" shape (see eo/quota_sentinel.py's own module docstring) --
+# would sit there forever and get read by every later day's log_usage()
+# call under a DIFFERENT date-scoped key today, sure, but any other
+# non-dict value written by any future bug would have the exact same
+# unbounded lifetime. A short TTL makes any such corruption self-heal
+# within a couple of days instead of persisting indefinitely.
+_USAGE_RECORD_TTL_SECONDS = 2 * 24 * 60 * 60  # 2 days -- one full day of
+# slack past the date in the key itself, so a read issued right at a UTC
+# day boundary never sees the key vanish out from under it mid-request.
+
+
+def _read_usage_record(key: str) -> dict:
+    """Bug fix (audit follow-up): bus_read() returns exactly whatever was
+    JSON-decoded from Redis, with no shape guarantee -- log_usage() below
+    (and its domain/workspace siblings) immediately does
+    `current.get("requests", 0) + 1` on that result, which raises
+    AttributeError: 'str' object has no attribute 'get' the moment
+    anything other than a dict is stored at this key (silently caught by
+    log_usage()'s own try/except as a "non-fatal" usage-logging failure
+    -- meaning it fails exactly when you're already trying to understand
+    quota pressure). Centralizing the read here, instead of three
+    separate `bus_read(key, default={...})` call sites each trusting the
+    stored shape, means every one of them gets the same defensive
+    isinstance check for free and can never drift out of sync again."""
+    record = bus_read(key, default=None)
+    if not isinstance(record, dict):
+        return {"requests": 0, "tokens": 0}
+    return record
+
+
 def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=None,
               path: str = None, agent_name: str = "Agent", domain: str = None,
               model: str = None) -> None:
@@ -1615,13 +1652,13 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
     try:
         today = date.today().isoformat()
         db_key = f"usage:{provider}:{key_id}:{today}"
-        current = bus_read(db_key, default={"requests": 0, "tokens": 0})
+        current = _read_usage_record(db_key)
         current["requests"] = current.get("requests", 0) + 1
         if tokens is not None:
             current["tokens"] = current.get("tokens", 0) + tokens
         if model is not None:
             current["model"] = model
-        bus_write(db_key, current)
+        bus_write(db_key, current, ex=_USAGE_RECORD_TTL_SECONDS)
 
         workspace_id = None
         if session_id:
@@ -1634,19 +1671,19 @@ def log_usage(provider: str, key_id: str, tokens, session_id: str = None, tier=N
 
         if domain:
             dom_key = f"usage_by_domain:{domain}:{today}"
-            dom_current = bus_read(dom_key, default={"requests": 0, "tokens": 0})
+            dom_current = _read_usage_record(dom_key)
             dom_current["requests"] = dom_current.get("requests", 0) + 1
             if tokens is not None:
                 dom_current["tokens"] = dom_current.get("tokens", 0) + tokens
-            bus_write(dom_key, dom_current)
+            bus_write(dom_key, dom_current, ex=_USAGE_RECORD_TTL_SECONDS)
 
         if workspace_id:
             ws_key = f"usage_by_workspace:{workspace_id}:{today}"
-            ws_current = bus_read(ws_key, default={"requests": 0, "tokens": 0})
+            ws_current = _read_usage_record(ws_key)
             ws_current["requests"] = ws_current.get("requests", 0) + 1
             if tokens is not None:
                 ws_current["tokens"] = ws_current.get("tokens", 0) + tokens
-            bus_write(ws_key, ws_current)
+            bus_write(ws_key, ws_current, ex=_USAGE_RECORD_TTL_SECONDS)
 
         emit_event(
             "usage_update",
