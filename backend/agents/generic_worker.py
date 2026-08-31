@@ -260,6 +260,55 @@ PROVIDER_DEFAULT_MODEL = {
     "cloudflare": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 }
 
+# FIX (Study tab formatting bug): get_relevant_skill() below embeds
+# task_text -- which for every source-grounded Generate target (slide
+# deck, podcast, rehearsal, quiz, flashcards, ...) is just "Source
+# material:\n\n<the notebook's actual content>", with NO mention of the
+# task TYPE anywhere in it (the instruction to write a slide deck vs. a
+# podcast vs. a quiz lives only in `brief`, the role's system prompt,
+# never in task_text/the embedded string). So skill retrieval is really
+# a TOPIC search ("what have I written before about alternators?"), not
+# a task-type search ("what have I learned about writing slide decks?")
+# -- it will happily return a skill doc written for a totally different
+# role (e.g. a rich study-guide/report skill full of tables and Mermaid
+# diagrams) purely because it covered the same source material, and
+# that guidance then gets injected into the system prompt as "Guidance
+# from a similar task type you've handled before," actively steering
+# the model away from a strict role brief like slide_planner's toward
+# whatever unrelated format that retrieved doc modeled. This is exactly
+# what produced a full Markdown report (tables, blockquotes, a Mermaid
+# diagram, no "# Deck Title"/"## Slide Title" structure at all) out of
+# slide_planner on a blank Presentation-tab prompt: the retrieved skill
+# was almost certainly written for this same notebook's Study Guide or
+# topic-notes content, not for a slide deck.
+#
+# Proper fix would be scoping skill retrieval by task type, not just
+# content (e.g. embedding "role:{role}\n{task_text}" instead of raw
+# task_text) -- a larger change affecting every role's self-improvement
+# loop, out of scope for a targeted fix. The safe, surgical fix here:
+# skip skill retrieval ENTIRELY for roles whose brief already specifies
+# an exact, machine-parsed output structure a downstream frontend
+# component depends on byte-for-byte -- for these roles a cross-topic
+# "similar task" addition is pure downside (it can only ever compete
+# with the required structure, never usefully supplement it, since
+# there's no "free-form part" of the answer left for it to improve).
+# Each entry's downstream parser: slide_planner -> markdown_text_to_
+# artifact()/video_overview_builder.py's per-'## '-heading frames;
+# flashcard_writer -> FlashcardFlipper.jsx; quiz_writer -> QuizRunner.jsx
+# checkbox parsing; podcast_scriptwriter/rehearsal_scriptwriter ->
+# tts_synthesizer.py's "LABEL:" line parser (this is the same subsystem
+# the "no speaker-labeled dialogue lines" bug already lived in);
+# wireframe_sketcher -> its own docstring's "output ONLY one fenced
+# ```html code block" contract.
+STRICT_FORMAT_ROLES = frozenset({
+    "slide_planner",
+    "flashcard_writer",
+    "quiz_writer",
+    "podcast_scriptwriter",
+    "rehearsal_scriptwriter",
+    "wireframe_sketcher",
+})
+
 MARKDOWN_INSTRUCTION = (
     "\n\nFormat your answer in Markdown: use fenced code blocks with a "
     "language tag for any code, use tables for tabular data, use headers/"
@@ -779,8 +828,8 @@ def run(role: str, task_text: str, input_keys: list = None, session_id: str = No
     # that apply regardless of task type) and framed as guidance, not
     # as part of the role's own identity/brief, so a role with a skill
     # match doesn't read as if the skill doc IS its brief.
-    skill_doc = get_relevant_skill(task_text)
-    if not skill_doc:
+    skill_doc = "" if role in STRICT_FORMAT_ROLES else get_relevant_skill(task_text)
+    if not skill_doc and role not in STRICT_FORMAT_ROLES:
         # NEW — Part 6 §E2, task 14, self-improvement loop: "" here is
         # the load-bearing "no skill matches this task type yet" signal
         # get_relevant_skill()'s own docstring describes, not just
