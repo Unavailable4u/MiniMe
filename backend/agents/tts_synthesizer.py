@@ -103,20 +103,52 @@ _POOL_SIZE = 8
 _voice_pool_cache: list[str] | None = None
 
 
+# FIX: models frequently wrap a speaker label in Markdown emphasis --
+# "**HOST A:** ..." or "**HOST A**: ..." or "*JUDGE:* ..." -- which the
+# label regexes below never matched (they expect the line to start with
+# a bare uppercase letter). That silently produced zero "speech" entries
+# for an otherwise well-formed script, surfacing as the opaque "no
+# speaker-labeled dialogue lines found in script_text" ValueError with
+# no way to tell why. This strips a leading run of "*"/"_" and a
+# matching run right before the colon (covering both wrapping styles)
+# before the label regexes ever see the line.
+_LEADING_EMPHASIS_RE = re.compile(r"^([*_]{1,2})")
+_LABEL_CLOSING_EMPHASIS_RE = re.compile(r"^([A-Za-z][A-Za-z0-9 _]{0,24}?)([*_]{1,2})(\s*:)")
+# Cleans a leftover emphasis marker off the START of the spoken text
+# itself once the label has already been matched -- e.g. "**HOST A:**
+# Welcome..." leaves "** Welcome..." as the captured text group after
+# the label regexes match (the closing "**" sits right after the colon,
+# not before it, so _LABEL_CLOSING_EMPHASIS_RE above doesn't catch it).
+_TRAILING_EMPHASIS_RE = re.compile(r"^[*_]{1,2}\s*")
+
+
+def _strip_label_emphasis(raw_line: str) -> str:
+    """Best-effort removal of Markdown emphasis markers wrapping a
+    speaker label at the start of a line. Only touches text before the
+    first colon, so emphasis used elsewhere in the spoken text itself
+    (e.g. "HOST A: this is *really* important") is left untouched."""
+    line = _LEADING_EMPHASIS_RE.sub("", raw_line.lstrip(), count=1)
+    line = _LABEL_CLOSING_EMPHASIS_RE.sub(r"\1\3", line, count=1)
+    return line
+
+
 def _match_speaker_line(raw_line: str) -> tuple[str, str] | None:
     """Returns (label, text) for a recognized speaker line, or None.
     Checks the pinned HOST A/HOST B pattern first (exact legacy
     behavior), then falls back to the generic ALL-CAPS rule for any
-    other label."""
-    match = _HOST_RE.match(raw_line)
-    if match:
-        text = match.group(2).strip()
-        return (match.group(1).upper(), text) if text else None
+    other label. Tries the line as-is first (preserves exact legacy
+    behavior byte-for-byte for every script that never used emphasis),
+    then retries with emphasis markers stripped."""
+    for candidate in (raw_line, _strip_label_emphasis(raw_line)):
+        match = _HOST_RE.match(candidate)
+        if match:
+            text = _TRAILING_EMPHASIS_RE.sub("", match.group(2).strip(), count=1)
+            return (match.group(1).upper(), text) if text else None
 
-    match = _GENERIC_SPEAKER_RE.match(raw_line)
-    if match:
-        text = match.group(2).strip()
-        return (match.group(1).strip(), text) if text else None
+        match = _GENERIC_SPEAKER_RE.match(candidate)
+        if match:
+            text = _TRAILING_EMPHASIS_RE.sub("", match.group(2).strip(), count=1)
+            return (match.group(1).strip(), text) if text else None
 
     return None
 
@@ -283,7 +315,14 @@ def synthesize_podcast(
     """
     entries = _parse_script(script_text)
     if not any(entry[0] == "speech" for entry in entries):
-        raise ValueError("no speaker-labeled dialogue lines found in script_text")
+        # FIX: include a preview of what was actually received so this
+        # is debuggable from the error alone instead of requiring a
+        # code-dive every time a script comes back in an unexpected shape.
+        preview = script_text.strip()[:200].replace("\n", " ")
+        raise ValueError(
+            "no speaker-labeled dialogue lines found in script_text "
+            f"(expected lines like 'HOST A: ...'; got: {preview!r})"
+        )
     asyncio.run(_synthesize_all(entries, out_path, voice_overrides))
     return out_path
 

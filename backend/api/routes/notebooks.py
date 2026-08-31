@@ -414,9 +414,21 @@ def _generate_slide_deck(ws_id: str, scope: dict | None, owner_id: str) -> dict:
     call already gives -- notebooks_generate()'s surrounding try/except
     turns that into a normal "error" branch the same way any other
     target's raise already does.
+
+    FIX: this previously ignored scope["slide_text"] entirely and always
+    regenerated from workspace sources, even when the caller (the
+    Presentation tab's optional paste box) pasted an outline to reformat.
+    _generate_video_overview() already reads this exact scope key
+    correctly via generate_slide_deck()'s raw_context parameter -- this
+    target was just missed when the paste-box scope contract was added.
     """
-    source_node_ids = (scope or {}).get("source_node_ids")
-    slide_text = generate_slide_deck(ws_id, source_node_ids)
+    scope = scope or {}
+    source_node_ids = scope.get("source_node_ids")
+    pasted_slide = (scope.get("slide_text") or "").strip()
+    if pasted_slide:
+        slide_text = generate_slide_deck(ws_id, raw_context=pasted_slide)
+    else:
+        slide_text = generate_slide_deck(ws_id, source_node_ids)
 
     # NEW: persisted under its own "slide_deck" panel_key (added to
     # eo/panel_content.py's VALID_PANEL_KEYS/GENERATED_PANEL_KEYS
