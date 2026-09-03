@@ -153,6 +153,48 @@ def _match_speaker_line(raw_line: str) -> tuple[str, str] | None:
     return None
 
 
+# BUGFIX (rehearsal validation gap): both the generation-time retry check
+# (generic_worker.py's DIALOGUE_LABEL_ROLES / _has_speaker_labeled_dialogue)
+# and the reuse-time check (api/routes/notebooks.py's
+# _is_usable_dialogue_script) used to accept ANY text with "at least one"
+# line _match_speaker_line() recognizes as a speaker turn. That rule is
+# intentionally permissive for actual synthesis (it has to accept whatever
+# custom label the model or a pasted script uses), but it's far too
+# permissive as a validity check: a plain Markdown report with scattered
+# bolded key terms -- "**Frame**: cast-iron...", "**VERDICT:** ..." --
+# parses into several *distinct*, each-appearing-once "speech" entries
+# under that same generic ALL-CAPS-word-before-colon rule, so "at least
+# one" was trivially satisfied by a report that was never dialogue at all
+# (the exact failure the Rehearsal tab hit: a judge-persona report slipped
+# through as if it were a real script and got silently mis-synthesized).
+#
+# Real spoken dialogue -- a judge asking several questions, two hosts
+# alternating turns -- always reuses the same small set of speaker labels
+# across multiple lines. A report's incidental bold-colon lines essentially
+# never repeat a label. Requiring at least one label to recur is a cheap,
+# general signal that doesn't need to hardcode which labels are "real" for
+# a given mode.
+def has_repeating_speaker_labels(script_text: str) -> bool:
+    """True if `script_text` parses into at least one speaker label that
+    appears on two or more separate lines. Stricter than "at least one
+    recognized speaker line" -- see the module comment above this
+    function for why that weaker check let non-dialogue text through."""
+    from collections import Counter
+    counts = Counter(label for kind, label, *_ in _parse_script(script_text or "") if kind == "speech")
+    return any(count >= 2 for count in counts.values())
+
+
+def has_pause_markers(script_text: str) -> bool:
+    """True if `script_text` contains at least one '[PAUSE]'/'[PAUSE:N]'
+    line. rehearsal_scriptwriter's brief (eo/registry.py) mandates a pause
+    after every question ("Never skip the pause-then-model-answer
+    sequence"), and an ordinary report/prose response never happens to
+    contain that bracket syntax -- a clean, cheap signal for telling a
+    real rehearsal script apart from a report that merely has a couple of
+    incidentally repeating bold labels."""
+    return any(entry[0] == "pause" for entry in _parse_script(script_text or ""))
+
+
 def _parse_script(script_text: str) -> list[tuple]:
     """Splits script_text into an ordered list of entries, each either
     ("speech", label, text) or ("pause", seconds). A line matching

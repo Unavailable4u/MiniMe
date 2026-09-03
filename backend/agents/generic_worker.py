@@ -331,15 +331,33 @@ DIALOGUE_LABEL_ROLES = frozenset({
 
 
 def _has_speaker_labeled_dialogue(text: str) -> bool:
-    """True if `text` contains at least one line tts_synthesizer.py's own
-    parser would recognize as a speaker turn. Deferred import, not a
-    top-level one -- same circular-import posture every other cross-
-    module import in this file already uses -- and reuses tts_synthesizer's
-    actual parser (not a hand-rolled duplicate regex here) so this check
-    can never drift out of sync with what the real downstream consumer
-    accepts."""
-    from agents.tts_synthesizer import _parse_script
-    return any(entry[0] == "speech" for entry in _parse_script(text or ""))
+    """True if `text` reuses at least one speaker label across two or
+    more lines. Deferred import, not a top-level one -- same circular-
+    import posture every other cross-module import in this file already
+    uses -- and reuses tts_synthesizer's own has_repeating_speaker_labels()
+    (not a hand-rolled duplicate regex here) so this check can never drift
+    out of sync with what the real downstream consumer accepts.
+
+    BUGFIX (rehearsal validation gap): this used to accept "at least one"
+    recognized speaker line, which a plain Markdown report satisfies by
+    accident the moment it contains one bolded "**Word:** ..." line (see
+    tts_synthesizer.has_repeating_speaker_labels()'s own docstring for the
+    concrete case that slipped through). Requiring a label to repeat is
+    what actually distinguishes real dialogue from a report."""
+    from agents.tts_synthesizer import has_repeating_speaker_labels
+    return has_repeating_speaker_labels(text)
+
+
+def _has_rehearsal_dialogue_shape(text: str) -> bool:
+    """Stricter than _has_speaker_labeled_dialogue() above: rehearsal_
+    scriptwriter's brief additionally mandates a '[PAUSE:N]' line after
+    every question ("Never skip the pause-then-model-answer sequence"),
+    which an ordinary report never happens to contain -- a second, cheap,
+    independent signal on top of the repeating-label check, used only for
+    this one role since podcast_scriptwriter's brief has no equivalent
+    pause requirement."""
+    from agents.tts_synthesizer import has_repeating_speaker_labels, has_pause_markers
+    return has_repeating_speaker_labels(text) and has_pause_markers(text)
 
 
 # Bug fix (audit follow-up, gap 3): slide_planner is in STRICT_FORMAT_ROLES
@@ -395,6 +413,25 @@ STRUCTURAL_FORMAT_CHECKS = {
         "exactly as instructed above.",
         "any '## Slide Title' headings",
     ) for role in HEADING_FORMAT_ROLES},
+    # OVERRIDES the shared DIALOGUE_LABEL_ROLES entry above for this one
+    # role: rehearsal_scriptwriter's brief additionally requires a
+    # '[PAUSE:N]' line after every question, which _has_rehearsal_
+    # dialogue_shape() also checks for -- see that function's docstring.
+    # Must come after the DIALOGUE_LABEL_ROLES ** spread above so this
+    # key wins the dict merge.
+    "rehearsal_scriptwriter": (
+        _has_rehearsal_dialogue_shape,
+        "your previous answer did not use the required rehearsal-script "
+        "format -- it must be real spoken dialogue with the SAME speaker "
+        "label reused across multiple lines (e.g. 'JUDGE: ...' repeated "
+        "for each question, or alternating 'HOST A:'/'HOST B:'), and it "
+        "must include a '[PAUSE:8]' (or similar) line after every "
+        "question followed by a 'MODEL ANSWER:' line -- not a report, "
+        "summary, or one-off bolded labels. Rewrite it as a real "
+        "question-pause-answer script, exactly as instructed above.",
+        "a real dialogue script with repeated speaker labels and "
+        "'[PAUSE:N]' markers",
+    ),
 }
 
 

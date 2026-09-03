@@ -8,6 +8,15 @@ import FlashcardFlipper from "../notebooks/FlashcardFlipper";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import QuizRunner from "../notebooks/QuizRunner";
 import StudyGuideViewer from "../notebooks/StudyGuideViewer";
+// BUGFIX (rendering audit): Presentation ("slide_deck") and Rehearsal
+// ("presentation_rehearsal") both used to dump their raw agent output
+// into a bare <pre> tag -- literal '**bold**', '## Heading', pipe
+// tables, and ```mermaid fences all rendered as plain text instead of
+// formatted HTML/diagrams. StudyGuideViewer already solved this exact
+// problem for the Study Guide panel by wrapping the shared <Markdown>
+// renderer (react-markdown + remark-gfm + Mermaid support) -- reusing
+// it directly here instead of introducing a third bespoke text dump.
+import Markdown from "../Markdown";
 import KnowledgeGraphView from "../KnowledgeGraphView";
 import MermaidDiagram from "../MermaidDiagram";
 import NotebooksGeneratePicker from "../notebooks/NotebooksGeneratePicker"; // NEW — Notebooks integration guide §4.1: picker/chip-confirmation "Generate" flow
@@ -1610,8 +1619,8 @@ function StudyView({ workspaceId }) {
             <p className="text-xs text-red-400">{presentationError}</p>
           )}
           {presentationResult && (
-            <div className="rounded-lg border border-[var(--neutral-800)] p-4">
-              <pre className="text-xs whitespace-pre-wrap font-mono text-[var(--neutral-200)]">{presentationResult}</pre>
+            <div className="rounded-lg border border-[var(--neutral-800)] p-4 [&_.markdown-body]:text-xs">
+              <Markdown>{presentationResult}</Markdown>
             </div>
           )}
         </div>
@@ -1723,8 +1732,8 @@ function StudyView({ workspaceId }) {
             </div>
           )}
           {rehearsalScriptText && (
-            <div className="rounded-lg border border-[var(--neutral-800)] p-4">
-              <pre className="text-xs whitespace-pre-wrap font-mono text-[var(--neutral-200)]">{rehearsalScriptText}</pre>
+            <div className="rounded-lg border border-[var(--neutral-800)] p-4 [&_.markdown-body]:text-xs">
+              <Markdown>{rehearsalScriptText}</Markdown>
             </div>
           )}
         </div>

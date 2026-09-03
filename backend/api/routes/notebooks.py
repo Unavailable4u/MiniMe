@@ -101,13 +101,41 @@ NOTES_EXPORTS_DIR = os.path.join(
 # one place both entry points (fresh generation and reuse) actually
 # converge: right before the text is trusted.
 def _is_usable_dialogue_script(text: str) -> bool:
-    """True if `text` has at least one line tts_synthesizer.py's own
-    parser would recognize as a speaker turn. Deferred import, same
-    circular-import posture this module already uses elsewhere, and
-    reuses the real downstream parser rather than a second hand-rolled
-    regex -- see agents/generic_worker.py's near-identical helper."""
-    from agents.tts_synthesizer import _parse_script
-    return any(entry[0] == "speech" for entry in _parse_script(text or ""))
+    """True if `text` reuses at least one speaker label across two or
+    more lines. Deferred import, same circular-import posture this
+    module already uses elsewhere, and reuses the real downstream
+    checker rather than a second hand-rolled regex -- see
+    agents/generic_worker.py's near-identical helper.
+
+    BUGFIX (rehearsal validation gap): this used to accept "at least one"
+    recognized speaker line -- a plain Markdown report with even one
+    bolded "**Word:** ..." line (e.g. "**VERDICT:** The material is
+    excellent...") satisfies that trivially, which is exactly how a
+    report generated for the Rehearsal tab slipped past this gate and
+    got silently mis-synthesized as if it were a real script. Requiring a
+    label to repeat across multiple lines is what actually distinguishes
+    dialogue from a report; see tts_synthesizer.has_repeating_speaker_
+    labels()'s own docstring for the full reasoning."""
+    from agents.tts_synthesizer import has_repeating_speaker_labels
+    return has_repeating_speaker_labels(text or "")
+
+
+def _is_usable_rehearsal_script(text: str) -> bool:
+    """Stricter than _is_usable_dialogue_script() above, for
+    presentation_rehearsal specifically: also requires at least one
+    '[PAUSE:N]' marker, matching rehearsal_scriptwriter's own brief
+    ("never skip the pause-then-model-answer sequence") -- an ordinary
+    report never happens to contain that bracket syntax, so this is a
+    second, independent signal beyond the repeating-label check. Used as
+    a defensive check right after generation (agents/generic_worker.py's
+    STRUCTURAL_FORMAT_CHECKS already retries once at the source for this
+    same failure mode, but that's a separate module reached through a
+    different code path -- checking again here, right before the text is
+    trusted and synthesized to audio, costs nothing and catches it even
+    if that retry is ever bypassed or changed)."""
+    from agents.tts_synthesizer import has_repeating_speaker_labels, has_pause_markers
+    text = text or ""
+    return has_repeating_speaker_labels(text) and has_pause_markers(text)
 
 
 def _is_usable_slide_deck(text: str) -> bool:
@@ -875,6 +903,24 @@ def _generate_presentation_rehearsal(ws_id: str, scope: dict | None, owner_id: s
     difficulty = scope.get("difficulty") or "expert"
 
     script_text = generate_rehearsal_script(ws_id, mode, difficulty, source_node_ids)
+
+    # BUGFIX (rehearsal validation gap): generic_worker.py's generation-
+    # time retry (STRUCTURAL_FORMAT_CHECKS) already guards against this
+    # at the source, but this endpoint never re-checked its own result --
+    # a report that happened to satisfy even the STRICTER retry check (or
+    # reached this function through some future path that skips that
+    # retry) would otherwise go straight to synthesize_podcast() and get
+    # silently mis-synthesized/persisted as if it were a real script.
+    # Same "check again right before the text is trusted" posture
+    # _is_usable_dialogue_script()'s own docstring already explains for
+    # the video-overview reuse path.
+    if not _is_usable_rehearsal_script(script_text):
+        preview = script_text.strip()[:200].replace("\n", " ")
+        raise ValueError(
+            "rehearsal_scriptwriter produced text that doesn't look like "
+            "a real dialogue script (no repeated speaker label and/or no "
+            f"'[PAUSE:N]' marker found) -- got: {preview!r}"
+        )
 
     audio_filename = f"presentation_rehearsal_{ws_id}.mp3"
     out_path = os.path.join(NOTES_EXPORTS_DIR, audio_filename)

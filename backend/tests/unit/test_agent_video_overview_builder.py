@@ -28,32 +28,34 @@ import agents.video_overview_builder as vob
 # ---------------------------------------------------------------------------
 class TestLoadFonts:
     def test_returns_truetype_fonts_when_available(self):
-        title_font, body_font = vob._load_fonts()
+        title_font, body_font, small_font = vob._load_fonts()
         # Either a real ImageFont.FreeTypeFont (host has DejaVu) or the
         # bitmap ImageFont.ImageFont fallback -- both are valid
         # PIL font objects usable by ImageDraw.text.
         assert title_font is not None
         assert body_font is not None
+        assert small_font is not None
 
     def test_falls_back_to_bitmap_font_on_os_error(self, monkeypatch):
         # ImageFont.load_default() itself calls truetype() internally on
         # this Pillow version, so the fake must only reject the specific
-        # DejaVuSans lookups _load_fonts() makes -- a blanket raise would
-        # also break the fallback path it's supposed to exercise.
+        # named TrueType lookups _load_fonts() makes (string font names)
+        # -- a blanket raise would also break the fallback path itself.
         real_truetype = ImageFont.truetype
 
-        def _raise_for_dejavu(font, *args, **kwargs):
-            if isinstance(font, str) and "DejaVu" in font:
+        def _raise_for_named_fonts(font, *args, **kwargs):
+            if isinstance(font, str):
                 raise OSError("no such font on this host")
             return real_truetype(font, *args, **kwargs)
 
-        monkeypatch.setattr(ImageFont, "truetype", _raise_for_dejavu)
-        title_font, body_font = vob._load_fonts()
+        monkeypatch.setattr(ImageFont, "truetype", _raise_for_named_fonts)
+        title_font, body_font, small_font = vob._load_fonts()
         # Pillow's built-in bitmap default font -- a missing system font
         # degrades legibility, it must not crash the whole build.
         default_font = ImageFont.load_default()
         assert type(title_font) is type(default_font)
         assert type(body_font) is type(default_font)
+        assert type(small_font) is type(default_font)
 
 
 # ---------------------------------------------------------------------------
