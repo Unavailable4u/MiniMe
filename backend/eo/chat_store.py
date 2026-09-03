@@ -502,6 +502,58 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
     return chat
 
 
+def get_recent_messages(chat_id: str, owner_id: str, limit: int) -> dict | None:
+    """Perf audit item #3/#4 follow-up: a lean read for callers that only
+    ever want the TAIL of a chat's history -- specifically
+    get_linked_context_text() and estimate_batch_context_tokens() below,
+    which previously got their "last N messages" by calling the
+    unpaginated get_chat() (every message, oldest-first) and then
+    slicing `[-max_turns_per_chat:]` in Python. That meant every agent
+    step, for every linked chat, read that chat's ENTIRE message
+    history out of chat_messages -- and, for get_linked_context_text(),
+    the CALLING chat's own full history too, which wasn't even used --
+    just to keep the last handful of rows. Exactly the O(n)-per-access
+    cost the #1/#2 migration eliminated from the read path, quietly
+    reintroduced one call site later on a much hotter path (per agent
+    step, not per page load).
+
+    This does the trimming in the query instead: the same
+    `order by seq desc limit %s` shape get_chat()'s before_seq branch
+    already uses for "load older messages," reversed back to
+    oldest-first before returning so downstream iteration/slicing at
+    the call sites doesn't need to change. Title + messages come back
+    together under ONE cursor (one pool checkout, two indexed queries)
+    instead of a separate chat_exists() check plus get_chat()'s own two
+    queries -- fewer round trips as well as less data per round trip.
+
+    Returns None if chat_id doesn't exist or isn't owned by owner_id --
+    same "doesn't distinguish missing vs. not-yours" discipline as
+    every other function in this module -- so callers can use a single
+    `is None` check instead of a separate chat_exists() call.
+
+    Deliberately NOT routed through chat_page_cache.py: that cache is
+    scoped specifically to before_seq-paginated *page* requests (see
+    its own module docstring for why), and this is a distinct "latest
+    N" shape -- the same reasoning get_chat()'s own latest-N branch
+    already follows for never being cached, since the tail changes
+    every time the chat gets a new message."""
+    with db.cursor(user_id=owner_id) as cur:
+        cur.execute(
+            "select title from chats where id = %s and owner_id = %s",
+            (chat_id, owner_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cur.execute(
+            "select payload from chat_messages where chat_id = %s "
+            "order by seq desc limit %s",
+            (chat_id, limit),
+        )
+        messages = [r["payload"] for r in reversed(cur.fetchall())]
+    return {"title": row["title"], "messages": messages}
+
+
 def chat_exists(chat_id: str, owner_id: str) -> bool:
     with db.cursor(user_id=owner_id) as cur:
         cur.execute("select 1 from chats where id = %s and owner_id = %s", (chat_id, owner_id))
@@ -743,22 +795,42 @@ def get_linked_context_text(chat_id: str, owner_id: str, max_turns_per_chat: int
     """Builds a labeled block of recent turns from every chat that
     chat_id links TO (its linked_chat_ids), for injection into the
     agents' context. Returns "" if the chat has no links or doesn't
-    exist (or isn't owned by owner_id)."""
-    if not chat_exists(chat_id, owner_id):
+    exist (or isn't owned by owner_id).
+
+    Perf audit item #3/#4 follow-up: this is called from
+    conversation_memory.get_full_context(), which every generation role
+    (responder, generic_worker, prompt_writer_lean, note_taker, sga,
+    loop_v4, task_runner) calls on effectively every agent step -- so
+    for any chat with linked_chat_ids set, this used to run an
+    unpaginated get_chat() for chat_id itself (whose `messages` were
+    never even read here -- only linked_chat_ids was used off it) PLUS
+    one unpaginated get_chat() per linked chat, each shipping that
+    chat's entire history over the wire just to keep the last
+    max_turns_per_chat messages. Replaced with: one metadata-only query
+    for chat_id's own linked_chat_ids (no messages fetched at all for
+    the calling chat), then one bounded get_recent_messages() call per
+    linked chat instead of chat_exists()+get_chat() per linked chat --
+    same result, O(links * max_turns_per_chat) data read instead of
+    O(links * full chat length)."""
+    with db.cursor(user_id=owner_id) as cur:
+        cur.execute(
+            "select linked_chat_ids from chats where id = %s and owner_id = %s",
+            (chat_id, owner_id),
+        )
+        row = cur.fetchone()
+    if not row:
         return ""
-    chat = get_chat(chat_id, owner_id)
-    linked_ids = chat.get("linked_chat_ids") or []
+    linked_ids = row.get("linked_chat_ids") or []
     if not linked_ids:
         return ""
 
     blocks = []
     for linked_id in linked_ids:
-        if not chat_exists(linked_id, owner_id):
+        linked = get_recent_messages(linked_id, owner_id, max_turns_per_chat)
+        if linked is None:
             continue
-        linked = get_chat(linked_id, owner_id)
-        recent = linked["messages"][-max_turns_per_chat:]
         lines = []
-        for m in recent:
+        for m in linked["messages"]:
             text = m.get("text", "") if m.get("role") == "user" else _extract_answer_text(m)
             text = (text or "").strip().replace("\n", " ")
             if len(text) > char_limit:
@@ -779,13 +851,30 @@ def estimate_batch_context_tokens(owner_id: str, chat_ids: list, max_turns_per_c
     module) — every candidate chat_id is checked against owner_id, so
     a batch can never be estimated (or created) across chats the
     caller doesn't own."""
-    valid_ids = [cid for cid in chat_ids if chat_exists(cid, owner_id)]
+    # Perf audit item #3/#4 follow-up: fetch each distinct chat_id at
+    # most once, bounded to the last max_turns_per_chat messages via
+    # get_recent_messages() -- instead of a chat_exists() pre-pass plus
+    # one unpaginated get_chat() per valid id (each shipping that
+    # chat's ENTIRE history just to keep the last few messages).
+    # `fetched` caches None for missing/not-owned ids too, so a
+    # duplicate id in chat_ids never triggers a second round trip.
+    # valid_ids below deliberately still preserves duplicates (matching
+    # the original chat_exists()-filtered list) so member_count and the
+    # per-chat-token loops keep their exact prior behavior for repeated
+    # ids -- only the fetch itself is deduped.
+    fetched = {}
+    for cid in chat_ids:
+        if cid not in fetched:
+            fetched[cid] = get_recent_messages(cid, owner_id, max_turns_per_chat)
+    valid_ids = [cid for cid in chat_ids if fetched.get(cid) is not None]
+
     blocks_by_chat = {}
     for cid in valid_ids:
-        chat = get_chat(cid, owner_id)
-        recent = chat["messages"][-max_turns_per_chat:]
+        if cid in blocks_by_chat:
+            continue
+        chat = fetched[cid]
         lines = []
-        for m in recent:
+        for m in chat["messages"]:
             text = m.get("text", "") if m.get("role") == "user" else _extract_answer_text(m)
             text = (text or "").strip().replace("\n", " ")
             if len(text) > char_limit:

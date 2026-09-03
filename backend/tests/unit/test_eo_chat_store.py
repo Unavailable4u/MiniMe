@@ -528,36 +528,83 @@ def test_delete_chat_swallows_bus_delete_failures(monkeypatch):
 # get_linked_context_text / estimate_batch_context_tokens
 # ---------------------------------------------------------------------
 
+# ---------------------------------------------------------------------
+# get_recent_messages — perf audit item #3/#4 follow-up: the bounded
+# "last N messages" read get_linked_context_text/
+# estimate_batch_context_tokens now use instead of chat_exists() +
+# unpaginated get_chat().
+# ---------------------------------------------------------------------
+
+def test_get_recent_messages_none_when_chat_missing_or_not_owned(monkeypatch):
+    cur = FakeCursor(fetchone_results=[None])
+    _install_fake_cursor(monkeypatch, cur)
+
+    assert chat_store.get_recent_messages("chat_1", "owner_1", limit=6) is None
+    # Only the title-lookup query should have run -- no chat_messages
+    # query when the chat doesn't exist/isn't owned.
+    assert len(cur.executed) == 1
+    assert "from chats" in cur.executed[0][0]
+
+
+def test_get_recent_messages_bounds_query_and_reorders_oldest_first(monkeypatch):
+    # Rows come back newest-first (order by seq desc limit %s) --
+    # get_recent_messages must reverse them before returning.
+    cur = FakeCursor(
+        fetchone_results=[{"title": "Linked Chat"}],
+        fetchall_results=[[
+            {"payload": {"role": "assistant", "text": "newest"}},
+            {"payload": {"role": "user", "text": "oldest"}},
+        ]],
+    )
+    _install_fake_cursor(monkeypatch, cur)
+
+    result = chat_store.get_recent_messages("chat_2", "owner_1", limit=2)
+
+    assert result == {
+        "title": "Linked Chat",
+        "messages": [
+            {"role": "user", "text": "oldest"},
+            {"role": "assistant", "text": "newest"},
+        ],
+    }
+    # Second query is the bounded chat_messages read, not the
+    # unpaginated get_chat() shape.
+    query, params = cur.executed[1]
+    assert "from chat_messages" in query
+    assert "order by seq desc limit" in query
+    assert params == ("chat_2", 2)
+
+
+# ---------------------------------------------------------------------
+# get_linked_context_text / estimate_batch_context_tokens
+# ---------------------------------------------------------------------
+
 def test_get_linked_context_text_empty_when_chat_missing(monkeypatch):
-    monkeypatch.setattr(chat_store, "chat_exists", lambda *a, **kw: False)
+    # select linked_chat_ids ... -> no row (missing or not owned)
+    _install_fake_cursor(monkeypatch, FakeCursor(fetchone_results=[None]))
     assert chat_store.get_linked_context_text("chat_1", "owner_1") == ""
 
 
 def test_get_linked_context_text_empty_when_no_links(monkeypatch):
-    monkeypatch.setattr(chat_store, "chat_exists", lambda *a, **kw: True)
-    monkeypatch.setattr(chat_store, "get_chat",
-                         lambda *a, **kw: {"linked_chat_ids": [], "messages": [], "title": "t"})
+    _install_fake_cursor(monkeypatch, FakeCursor(fetchone_results=[{"linked_chat_ids": []}]))
     assert chat_store.get_linked_context_text("chat_1", "owner_1") == ""
 
 
 def test_get_linked_context_text_skips_links_the_owner_no_longer_has_access_to(monkeypatch):
-    def fake_exists(chat_id, owner_id):
-        return chat_id == "chat_1"  # linked chat is gone/not owned
-
-    monkeypatch.setattr(chat_store, "chat_exists", fake_exists)
-    monkeypatch.setattr(chat_store, "get_chat", lambda *a, **kw: {
-        "linked_chat_ids": ["chat_2"], "messages": [], "title": "t"})
+    # The calling chat's own metadata lookup is still a real db.cursor()
+    # call; only the per-linked-chat read is mocked at get_recent_messages,
+    # since that's the seam this function now calls through.
+    _install_fake_cursor(monkeypatch, FakeCursor(fetchone_results=[{"linked_chat_ids": ["chat_2"]}]))
+    monkeypatch.setattr(chat_store, "get_recent_messages", lambda *a, **kw: None)
 
     assert chat_store.get_linked_context_text("chat_1", "owner_1") == ""
 
 
 def test_get_linked_context_text_formats_user_and_assistant_lines_and_truncates(monkeypatch):
-    def fake_exists(chat_id, owner_id):
-        return True
+    _install_fake_cursor(monkeypatch, FakeCursor(fetchone_results=[{"linked_chat_ids": ["chat_2"]}]))
 
-    def fake_get_chat(chat_id, owner_id):
-        if chat_id == "chat_1":
-            return {"linked_chat_ids": ["chat_2"], "messages": [], "title": "main"}
+    def fake_recent(chat_id, owner_id, limit):
+        assert chat_id == "chat_2"
         return {
             "title": "Linked Chat",
             "messages": [
@@ -566,8 +613,7 @@ def test_get_linked_context_text_formats_user_and_assistant_lines_and_truncates(
             ],
         }
 
-    monkeypatch.setattr(chat_store, "chat_exists", fake_exists)
-    monkeypatch.setattr(chat_store, "get_chat", fake_get_chat)
+    monkeypatch.setattr(chat_store, "get_recent_messages", fake_recent)
 
     text = chat_store.get_linked_context_text("chat_1", "owner_1", char_limit=400)
 
@@ -587,14 +633,12 @@ def test_extract_answer_text_prefers_answer_then_code_then_output_then_message()
 
 
 def test_estimate_batch_context_tokens_filters_to_owned_existing_chats(monkeypatch):
-    def fake_exists(chat_id, owner_id):
-        return chat_id != "chat_ghost"
-
-    def fake_get_chat(chat_id, owner_id):
+    def fake_recent(chat_id, owner_id, limit):
+        if chat_id == "chat_ghost":
+            return None
         return {"messages": [{"role": "user", "text": "hi " * 20}], "title": chat_id}
 
-    monkeypatch.setattr(chat_store, "chat_exists", fake_exists)
-    monkeypatch.setattr(chat_store, "get_chat", fake_get_chat)
+    monkeypatch.setattr(chat_store, "get_recent_messages", fake_recent)
 
     result = chat_store.estimate_batch_context_tokens(
         "owner_1", ["chat_1", "chat_2", "chat_ghost"])
@@ -604,7 +648,7 @@ def test_estimate_batch_context_tokens_filters_to_owned_existing_chats(monkeypat
 
 
 def test_estimate_batch_context_tokens_all_zero_when_no_valid_chats(monkeypatch):
-    monkeypatch.setattr(chat_store, "chat_exists", lambda *a, **kw: False)
+    monkeypatch.setattr(chat_store, "get_recent_messages", lambda *a, **kw: None)
 
     result = chat_store.estimate_batch_context_tokens("owner_1", ["chat_1"])
 
@@ -612,6 +656,24 @@ def test_estimate_batch_context_tokens_all_zero_when_no_valid_chats(monkeypatch)
         "member_count": 0, "per_chat_tokens": {},
         "max_tokens_per_message": 0, "avg_tokens_per_message": 0,
     }
+
+
+def test_estimate_batch_context_tokens_fetches_duplicate_ids_only_once(monkeypatch):
+    calls = []
+
+    def fake_recent(chat_id, owner_id, limit):
+        calls.append(chat_id)
+        return {"messages": [{"role": "user", "text": "hi"}], "title": chat_id}
+
+    monkeypatch.setattr(chat_store, "get_recent_messages", fake_recent)
+
+    result = chat_store.estimate_batch_context_tokens("owner_1", ["chat_1", "chat_1", "chat_2"])
+
+    # member_count preserves the original duplicate-counting behavior...
+    assert result["member_count"] == 3
+    # ...but chat_1 was only actually fetched once.
+    assert calls.count("chat_1") == 1
+    assert calls.count("chat_2") == 1
 
 
 # ---------------------------------------------------------------------
