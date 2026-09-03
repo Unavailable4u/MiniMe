@@ -232,26 +232,36 @@ function StepRow({ step, onResume, dedupNote }) {
       <button
         type="button"
         onClick={() => hasBody && setOpen((o) => !o)}
-        className={`w-full flex items-center justify-between px-3 py-2 text-left ${
+        className={`w-full flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 px-3 py-2 text-left ${
           hasBody ? "cursor-pointer" : "cursor-default"
         }`}
       >
-        <span className={`flex items-center gap-1.5 font-medium ${color}`}>
-          {hasBody && <span className="text-[var(--neutral-600)]">{open ? "▾" : "▸"}</span>}
-          <span style={{ color: category.color }} aria-hidden="true">{category.icon}</span>
-          {step.role}
+        {/* `min-w-0` lets this flex child shrink below its content's
+            natural width (the flex default is `min-width: auto`, which
+            is exactly what was pushing the row wider than the card and
+            forcing the status/duration span out past the border on a
+            narrow Working Panel) and `break-words` wraps a long role
+            name inside the card instead of stretching the row. */}
+        <span className={`flex items-center gap-1.5 font-medium min-w-0 ${color}`}>
+          {hasBody && <span className="text-[var(--neutral-600)] shrink-0">{open ? "▾" : "▸"}</span>}
+          <span style={{ color: category.color }} aria-hidden="true" className="shrink-0">{category.icon}</span>
+          <span className="break-words">{step.role}</span>
           {/* NEW — Phase 8 step 8.2: undefined for any step captured
               before this patch (persisted snapshots have no `path` on
               them yet) -- TIER_LABELS[undefined] is undefined, so this
               silently renders nothing for old data instead of "Tier
               undefined". */}
           {TIER_LABELS[step.path] && (
-            <span className="font-normal text-[10px] text-[var(--neutral-600)]">
+            <span className="font-normal text-[10px] text-[var(--neutral-600)] shrink-0">
               {TIER_LABELS[step.path]}
             </span>
           )}
         </span>
-        <span className={step.status === "running" ? "animate-pulse text-[var(--neutral-500)]" : isPaused ? "text-amber-500" : "text-[var(--neutral-500)]"}>
+        {/* `shrink-0` keeps this from getting squeezed into a garbled
+            wrap mid-word; the outer `flex-wrap` above means it simply
+            drops to its own line under the role name once the row is
+            too narrow for both, rather than overflowing sideways. */}
+        <span className={`shrink-0 ${step.status === "running" ? "animate-pulse text-[var(--neutral-500)]" : isPaused ? "text-amber-500" : "text-[var(--neutral-500)]"}`}>
           {isPaused ? "awaiting approval" : step.status}
           {step.durationMs != null ? ` · ${step.durationMs}ms` : ""}
         </span>
