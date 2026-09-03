@@ -1187,12 +1187,22 @@ def set_moderator_attribution_grant(ws_id: str, actor_id: str, moderator_user_id
     }
 
 
-def can_see_attribution(ws_id: str, user_id: str) -> bool:
-    """Used by api/server.py's get_chat route to decide whether to
+def can_see_attribution(ws_id: str, user_id: str, role: str | None = None) -> bool:
+    """Used by api/routes/chats.py's get_chat route to decide whether to
     strip author_id from messages before returning them. Owner/partner/
     moderator: always true. viewer/editor: true only if the
-    workspace's show_attribution flag is on."""
-    role = member_role(ws_id, user_id)
+    workspace's show_attribution flag is on.
+
+    Perf audit item #2 (B4 follow-up): callers that already resolved the
+    requester's role in this workspace (e.g. get_chat's prior call to
+    chat_store.resolve_chat_access(), which itself calls member_role())
+    can pass it in via `role` to skip a redundant member_role() lookup —
+    same two queries (workspaces, workspace_members) otherwise repeated
+    for an answer already computed a few lines earlier in the request.
+    Defaults to None, which preserves the original behavior of resolving
+    the role here for any caller that doesn't already have it."""
+    if role is None:
+        role = member_role(ws_id, user_id)
     if role in ("owner", "partner", "moderator"):
         return True
     if role in ("viewer", "editor"):

@@ -16,7 +16,7 @@ down near the deploy routes) — same domain, so they move together
 rather than leaving one half behind.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api.deps import _resolve_chat_or_404, require_auth
@@ -65,6 +65,22 @@ class AppendMessageRequest(BaseModel):
     message: dict
 
 
+# Perf audit item #4 (optional hardening): the default GET /api/chats/{id}
+# has always been served today by chat_store.get_chat() (limit/before_seq/
+# after_seq is opt-in pagination -- see that function's docstring), and the
+# current frontend always passes limit=60 (or after_seq) on its chat-open
+# flow (checked in WorkspaceDockContext.jsx), so there's no known caller
+# relying on the fully-unbounded shape in practice. This constant exists so
+# that guarantee is enforced here, server-side, instead of resting entirely
+# on "every current caller happens to pass limit" -- a future/other caller
+# that omits limit no longer silently reintroduces the pre-migration "ship
+# the whole chat" cost. Set to the route's own existing max (`le=200` below)
+# so this only changes behavior for a bare request with no params at all;
+# any caller already passing an explicit limit, before_seq, or after_seq is
+# completely unaffected.
+DEFAULT_CHAT_PAGE_LIMIT = 200
+
+
 @router.post("/api/projects", dependencies=[Depends(require_auth)])
 def register_project_endpoint(req: RegisterProjectRequest):
     unit = generate_control_unit(req.display_name)
@@ -98,12 +114,24 @@ def create_chat(req: CreateChatRequest, owner_id: str = Depends(require_auth)):
 @router.get("/api/chats/{chat_id}")
 def get_chat(
     chat_id: str,
+    background_tasks: BackgroundTasks,
     owner_id: str = Depends(require_auth),
     limit: int | None = Query(default=None, ge=1, le=200),
     before_seq: int | None = Query(default=None, ge=0),
     after_seq: int | None = Query(default=None, ge=0),
 ):
-    real_owner_id = _resolve_chat_or_404(chat_id, owner_id)
+    # Perf audit item #2 (B4 follow-up): resolve access via
+    # chat_store.resolve_chat_access() directly (rather than
+    # _resolve_chat_or_404(), which discards the role) so the role it
+    # computes can be reused below by can_see_attribution() instead of
+    # being looked up a second time. get_chat never needs require_edit,
+    # so this is a behavior-preserving substitution for the 404 case —
+    # same resolution, same "doesn't exist vs. not shared with you"
+    # 404, just without throwing away the role we already paid for.
+    resolved = chat_store.resolve_chat_access(chat_id, owner_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Unknown chat_id")
+    real_owner_id, requester_role = resolved
     if after_seq is not None and (limit is not None or before_seq is not None):
         # Perf audit item #5: after_seq is a distinct fetch mode (see
         # chat_store.get_chat() docstring) — reject an ambiguous
@@ -112,22 +140,36 @@ def get_chat(
             status_code=400,
             detail="after_seq cannot be combined with limit or before_seq",
         )
+    if limit is None and before_seq is None and after_seq is None:
+        # Perf audit item #4: bare "no params at all" request -- apply
+        # the server-side default instead of falling through to
+        # chat_store.get_chat()'s unbounded limit=None branch. A caller
+        # that explicitly passed before_seq or after_seq is left alone;
+        # this only closes the "forgot to paginate" gap.
+        limit = DEFAULT_CHAT_PAGE_LIMIT
     try:
         # Perf audit item #3: limit/before_seq pass straight through to
         # chat_store.get_chat() (already supported it — see that
         # function's docstring — this is the "wire it into a route"
-        # step). Both default to None, so a plain GET with no query
-        # params is byte-for-byte the same unpaginated call every
-        # existing caller (including this route, before this change)
-        # already relies on.
+        # step). A plain GET with no query params no longer reaches
+        # chat_store.get_chat() as limit=None, though -- see item #4's
+        # DEFAULT_CHAT_PAGE_LIMIT fallback above, which now applies in
+        # that exact case.
         #
         # Perf audit item #5: after_seq passes through the same way —
         # "give me only what's new since seq N", for a client that
         # already has messages 1..N cached from a previous open of
         # this chat. Defaults to None, so it's a no-op unless a caller
         # opts in.
+        # Perf audit item #7 follow-up: passing this request's
+        # BackgroundTasks handle through lets the before_seq branch's
+        # cache bookkeeping (hit/miss stats, hit counter, threshold
+        # cache-populate) run after the response is sent instead of
+        # blocking on it -- see get_chat()'s own docstring for the
+        # full reasoning.
         chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit,
-                                    before_seq=before_seq, after_seq=after_seq)
+                                    before_seq=before_seq, after_seq=after_seq,
+                                    background_tasks=background_tasks)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown chat_id")
 
@@ -136,7 +178,7 @@ def get_chat(
     # `owner_id` here is the ACTUAL caller (pre-resolution) — the right
     # identity to check attribution visibility against, not real_owner_id.
     ws_id = chat.get("workspace_id")
-    if ws_id and not chat_workspace.can_see_attribution(ws_id, owner_id):
+    if ws_id and not chat_workspace.can_see_attribution(ws_id, owner_id, role=requester_role):
         chat["messages"] = [
             {k: v for k, v in m.items() if k != "author_id"} for m in chat.get("messages", [])
         ]

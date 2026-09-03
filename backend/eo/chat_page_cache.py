@@ -56,7 +56,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from memory.bus import read, write
+from memory.bus import incr, read, write
 
 # How many independent misses on the exact same (chat_id, before_seq,
 # limit) page, within HIT_WINDOW_SECONDS, before the page is considered
@@ -64,6 +64,33 @@ from memory.bus import read, write
 # measured number -- tune once you have real hit-count data; there's
 # nothing structural tying this to 3.
 HIT_THRESHOLD = 3
+
+# Perf audit item #3 follow-up: once /api/system/chat-page-cache-stats's
+# hit_rate and /api/system/backend-latency-probe's numbers are both in,
+# decide whether the HIT_THRESHOLD/HIT_WINDOW_SECONDS two-tunable
+# rolling-window gating above is worth its complexity, or whether a
+# simpler rule -- cache a page the moment it's been independently
+# missed twice, full stop, with its counter's TTL tied to
+# CACHE_TTL_SECONDS instead of its own separate HIT_WINDOW_SECONDS --
+# gets similar real-world behavior with fewer moving parts (one less
+# tunable to reason about) at the same round-trip cost (still a single
+# incr() per miss either way -- see note_page_miss() below).
+#
+# Defaults to False, preserving the original threshold=3/1-hour-window
+# behavior exactly. This is a decision the perf audit explicitly says
+# needs real hit_rate data behind it, not something to flip blindly --
+# don't set this true until that data actually supports it. Once it
+# does, set CHAT_PAGE_CACHE_SIMPLE_HEURISTIC=true (no code change
+# needed) to switch over.
+SIMPLE_HEURISTIC = os.getenv("CHAT_PAGE_CACHE_SIMPLE_HEURISTIC", "false").lower() == "true"
+
+# The "requested twice" threshold for SIMPLE_HEURISTIC above. Kept as
+# its own constant (rather than reusing HIT_THRESHOLD) since the two
+# modes are deliberately allowed to disagree on their number --
+# SIMPLE_HEURISTIC's whole premise is "lower the bar, drop the
+# rolling-window nuance," not "keep the same threshold with less
+# bookkeeping."
+SIMPLE_HIT_THRESHOLD = 2
 
 # Rolling window the hit counter lives in. Deliberately much shorter than
 # CACHE_TTL_SECONDS below -- this window is only about detecting "hit
@@ -82,12 +109,80 @@ HIT_WINDOW_SECONDS = 60 * 60  # 1 hour
 CACHE_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days
 
 
+# Perf audit item #3: this module already tracked a PER-PAGE miss
+# counter (see note_page_miss() below) for its own hit-threshold
+# gating, but that's not the same thing as knowing whether the cache
+# is actually worth its per-call Redis REST overhead (B4) overall.
+# These two keys are a separate, deliberately coarse GLOBAL counter —
+# every before_seq-paginated lookup bumps exactly one of them — so
+# real traffic can answer that go/no-go question via get_cache_stats()
+# before anyone spends more engineering time tuning HIT_THRESHOLD or
+# deciding whether to rip this module out. Not scoped per-chat or
+# per-page; that's what the per-page counters above are for.
+_STATS_HIT_KEY = "chat_page_cache:stats:hits"
+_STATS_MISS_KEY = "chat_page_cache:stats:misses"
+
+# How long the aggregate counters are kept before expiring. Long
+# enough to accumulate a meaningful sample across normal usage
+# patterns (unlike HIT_WINDOW_SECONDS, which is intentionally short —
+# that one's detecting a burst, this one's just tallying totals), but
+# not infinite, so a stale measurement from months ago doesn't linger
+# forever if nobody ever reads it.
+STATS_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
+
+
 def _hits_key(chat_id: str, before_seq: int, limit: int) -> str:
     return f"chat_page_hits:{chat_id}:{before_seq}:{limit}"
 
 
 def _page_key(chat_id: str, before_seq: int, limit: int) -> str:
     return f"chat_page_cache:{chat_id}:{before_seq}:{limit}"
+
+
+def record_cache_result(hit: bool) -> None:
+    """Bumps the global hit or miss counter. Call this once per
+    before_seq-paginated lookup, right after get_cached_page() —
+    exactly the same call site that already knows whether `cached`
+    came back None or not, so there's no extra Redis round trip beyond
+    the one this module already made for the actual lookup.
+
+    Uses memory.bus.incr() (atomic INCR, 1 REST round trip — 2 on a
+    counter's first increment in a STATS_TTL_SECONDS cycle, for the
+    follow-up EXPIRE), instead of the read-then-write pattern this
+    function used originally. That earlier version cost 2 round trips
+    on every single call and had a lost-update race under concurrent
+    requests; INCR is both cheaper and race-free."""
+    key = _STATS_HIT_KEY if hit else _STATS_MISS_KEY
+    incr(key, ex=STATS_TTL_SECONDS)
+
+
+def get_cache_stats() -> dict:
+    """Returns {"hits": int, "misses": int, "hit_rate": float | None,
+    "simple_heuristic_enabled": bool} for the global before_seq-page-
+    cache counters. hit_rate is None (rather than 0.0) when there's no
+    data yet at all, so "definitely cold" isn't confused with "haven't
+    measured." This is the number perf-audit item #3 asks for before
+    deciding whether item #7 (this whole module) is worth keeping
+    enabled given B4's per-call Redis REST overhead: a low hit rate
+    here means every before_seq page load is paying for a Redis GET
+    (and often a second GET+SET for the per-page hit counter) that
+    essentially never pays off.
+
+    simple_heuristic_enabled reports which gating mode (see
+    SIMPLE_HEURISTIC above) actually produced these numbers -- relevant
+    context when reading hit_rate, since the two modes cache pages
+    under different conditions (HIT_THRESHOLD=3/rolling-window vs.
+    SIMPLE_HIT_THRESHOLD=2/fixed-window) and aren't directly comparable
+    across a mode switch."""
+    hits = read(_STATS_HIT_KEY, default=0) or 0
+    misses = read(_STATS_MISS_KEY, default=0) or 0
+    total = hits + misses
+    return {
+        "hits": hits,
+        "misses": misses,
+        "hit_rate": (hits / total) if total else None,
+        "simple_heuristic_enabled": SIMPLE_HEURISTIC,
+    }
 
 
 def get_cached_page(chat_id: str, before_seq: int, limit: int) -> dict | None:
@@ -109,16 +204,33 @@ def note_page_miss(chat_id: str, before_seq: int, limit: int,
     a page that never gets requested again just leaves an unused
     counter key to expire after HIT_WINDOW_SECONDS, nothing more.
 
-    Deliberately not atomic (read-modify-write, not INCR) — a lost
-    update under concurrent misses just means the threshold gets
-    crossed a request or two later than the exact Nth hit, which is
-    harmless for a "should this become hot?" heuristic. Not worth a
-    second Redis primitive for that.
+    Uses memory.bus.incr() (atomic INCR, 1 REST round trip — 2 on this
+    key's first increment in a HIT_WINDOW_SECONDS cycle, for the
+    follow-up EXPIRE) instead of the original read-then-write. One
+    real behavior change from that switch: the window is now FIXED
+    from the first miss in a cycle, not sliding/reset on every miss
+    (read()/write(key, ..., ex=...) refreshed the TTL on every call;
+    incr()'s EXPIRE only fires on creation) — acceptable here since
+    this was always an approximate "should this become hot?" heuristic,
+    not a precise rolling window, and the atomicity this buys removes
+    the lost-update race the previous version's docstring called out
+    as a known (accepted) limitation.
+
+    When SIMPLE_HEURISTIC is on, this instead uses SIMPLE_HIT_THRESHOLD
+    (2) and ties the counter's own TTL to CACHE_TTL_SECONDS rather than
+    the separate HIT_WINDOW_SECONDS -- "cache it the moment two
+    independent callers have missed on it, ever (within a week)," no
+    rolling-window nuance at all. Same round-trip cost either way: one
+    incr() call.
     """
     hits_key = _hits_key(chat_id, before_seq, limit)
-    hits = (read(hits_key, default=0) or 0) + 1
-    write(hits_key, hits, ex=HIT_WINDOW_SECONDS)
-    if hits >= HIT_THRESHOLD:
+    if SIMPLE_HEURISTIC:
+        hits = incr(hits_key, ex=CACHE_TTL_SECONDS)
+        threshold = SIMPLE_HIT_THRESHOLD
+    else:
+        hits = incr(hits_key, ex=HIT_WINDOW_SECONDS)
+        threshold = HIT_THRESHOLD
+    if hits >= threshold:
         write(
             _page_key(chat_id, before_seq, limit),
             {"messages": messages, "has_more": has_more},
