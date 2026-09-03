@@ -242,10 +242,10 @@ function StepRow({ step, onResume, dedupNote }) {
             forcing the status/duration span out past the border on a
             narrow Working Panel) and `break-words` wraps a long role
             name inside the card instead of stretching the row. */}
-        <span className={`flex items-center gap-1.5 font-medium min-w-0 ${color}`}>
+        <span className={`flex flex-wrap items-center gap-1.5 gap-y-0.5 font-medium min-w-0 ${color}`}>
           {hasBody && <span className="text-[var(--neutral-600)] shrink-0">{open ? "▾" : "▸"}</span>}
           <span style={{ color: category.color }} aria-hidden="true" className="shrink-0">{category.icon}</span>
-          <span className="break-words">{step.role}</span>
+          <span className="break-words min-w-0">{step.role}</span>
           {/* NEW — Phase 8 step 8.2: undefined for any step captured
               before this patch (persisted snapshots have no `path` on
               them yet) -- TIER_LABELS[undefined] is undefined, so this
