@@ -101,8 +101,17 @@ def get_chat(
     owner_id: str = Depends(require_auth),
     limit: int | None = Query(default=None, ge=1, le=200),
     before_seq: int | None = Query(default=None, ge=0),
+    after_seq: int | None = Query(default=None, ge=0),
 ):
     real_owner_id = _resolve_chat_or_404(chat_id, owner_id)
+    if after_seq is not None and (limit is not None or before_seq is not None):
+        # Perf audit item #5: after_seq is a distinct fetch mode (see
+        # chat_store.get_chat() docstring) — reject an ambiguous
+        # combined request instead of silently picking one.
+        raise HTTPException(
+            status_code=400,
+            detail="after_seq cannot be combined with limit or before_seq",
+        )
     try:
         # Perf audit item #3: limit/before_seq pass straight through to
         # chat_store.get_chat() (already supported it — see that
@@ -111,7 +120,14 @@ def get_chat(
         # params is byte-for-byte the same unpaginated call every
         # existing caller (including this route, before this change)
         # already relies on.
-        chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit, before_seq=before_seq)
+        #
+        # Perf audit item #5: after_seq passes through the same way —
+        # "give me only what's new since seq N", for a client that
+        # already has messages 1..N cached from a previous open of
+        # this chat. Defaults to None, so it's a no-op unless a caller
+        # opts in.
+        chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit,
+                                    before_seq=before_seq, after_seq=after_seq)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown chat_id")
 
