@@ -130,6 +130,20 @@ def chat_page_cache_stats():
     return chat_page_cache.get_cache_stats()
 
 
+@router.get("/api/system/db-pool-stats", dependencies=[Depends(require_auth)])
+def db_pool_stats():
+    # Perf audit §4.6 / priority #9 (part 3): surfaces the global
+    # getconn()-outcome counters eo/db.py's _getconn_with_retry() records
+    # on every checkout (see that function's own docstring and
+    # get_pool_stats()). This is the number to pull before raising
+    # DB_POOL_MAX / api/server.py's APP_THREAD_POOL_SIZE any further --
+    # a nonzero "exhausted" means real requests got a 503 today, not a
+    # hypothetical one. Same "aggregate counters, no per-user scoping
+    # needed beyond logged-in" reasoning as chat_page_cache_stats above.
+    return db.get_pool_stats()
+
+
+
 @router.get("/api/quota", dependencies=[Depends(require_auth)])
 def quota():
     # Phase 8a — today's daily-quota figures (existing) plus a
