@@ -1111,7 +1111,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   }
 
   return (
-    <div className={stacked ? "flex flex-col h-full" : "flex h-full max-w-6xl mx-auto"}>
+    <div className={stacked ? "flex flex-col h-full w-full" : "flex h-full w-full"}>
       {/* LEFT (or BOTTOM, when stacked) — Chat Box. `order-2` only takes
           effect in stacked mode (flex-col), putting this below the
           Working Panel without needing to reorder the JSX itself.
