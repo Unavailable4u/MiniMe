@@ -166,6 +166,33 @@ def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXE
         )
     except Exception as exc:
         traceback.print_exc()  # full detail still logged, as before — Patch I.1 only sanitizes `message`
+        # Bug fix (2026-09): a failure in a LATER role (test_writer,
+        # sandbox_tester, etc.) used to silently discard whatever
+        # code_writers/file_manager had already durably written to the
+        # bus earlier in the SAME run, purely because _write_code_files()
+        # only ever ran from the clean-return path below, gated on the
+        # overall response's status=="ok" -- a status this exception path
+        # can never produce. The two executor.py/llm_client.py fixes
+        # alongside this one mean most such failures now degrade one
+        # role instead of aborting the whole run, but this is a
+        # best-effort backstop for whatever still reaches here: if this
+        # was an existing chat (req.session_id set) and code_writers
+        # already ran this turn, its output is still sitting on the bus
+        # regardless of what failed afterward -- attempt to persist it
+        # rather than losing already-finished work. Fully fail-open, same
+        # as _write_code_files() itself: a synthetic {"status": "ok",
+        # "tier": 3} is only enough to pass its own gate -- it still reads
+        # real bus keys and no-ops on its own if there's genuinely
+        # nothing there yet (no code_writers run this turn), and any
+        # failure in this best-effort attempt is swallowed so it can
+        # never turn an already-computed error response into a 500.
+        if req.session_id:
+            try:
+                from api.task_runner import _write_code_files
+                _write_code_files({"status": "ok", "tier": 3}, req.session_id, owner_id)
+            except Exception as writeback_exc:
+                print(f"  [post_task] best-effort code write-back after error failed, "
+                      f"skipped (fail-open): {writeback_exc}")
         return TaskResponse(
             decision={},
             tier=-1,

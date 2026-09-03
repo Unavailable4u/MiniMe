@@ -1817,6 +1817,19 @@ REAL_ACTION_ROLES = {
     # computed result. See agents/performance_reviewer.py's own
     # docstring.
     "performance_reviewer": "performance_reviewer",
+    # Bug fix (2026-09): "sandbox_tester" is an extremely natural label for
+    # the Inspector/Panel to suggest for any "test my app" task, and the
+    # real module (agents/sandbox_tester.py's run_sandbox_tester(), already
+    # registered in ROLE_REGISTRY above) does genuine sandboxed execution —
+    # but this map had no entry for it, so every hires-driven run staffing
+    # a role literally named "sandbox_tester" silently fell through
+    # resolve_role()'s generic_worker default instead, same failure mode
+    # this file's own comments above already document for hardware_speccer
+    # before ITS entry was added. That meant "testing" was actually just
+    # an LLM guessing at test results with no code ever executed. Adding
+    # the entry here routes it to the real module, consistent with every
+    # other genuinely-executed role in this map.
+    "sandbox_tester": "sandbox_tester",
 }
 
 # Robustness fix (2026-08): Inspector/Panel classifiers freely invent

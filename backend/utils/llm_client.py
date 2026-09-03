@@ -3012,7 +3012,29 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             # same as _handle_transient_error() already does for other
             # unrecoverable-on-this-step-but-not-on-the-chain failures.
             if is_last:
-                raise
+                # Bug fix (2026-09): this WAS a bare `raise`, which
+                # re-raises _StepUnwinnableError itself (a plain
+                # RuntimeError subclass) straight out of generate_text()
+                # -- it never reaches this function's own terminal
+                # "raise ChainExhaustedError(...)" site below, because a
+                # raised exception unwinds the call stack immediately
+                # rather than falling through to later code. That let a
+                # single unfundable step take down the entire task (see
+                # eo/executor.py's _run_loop(): it only degrades
+                # ChainExhaustedError gracefully and continues to
+                # whatever doesn't depend on this role; every other
+                # exception re-raises and kills the whole run). This is
+                # exactly the "genuinely tried everything, nothing
+                # worked" terminal case ChainExhaustedError exists for
+                # (this WAS the last chain step, so there's truly nowhere
+                # left to reroute to) -- raise that instead so the
+                # existing per-role degrade-and-continue path actually
+                # applies here too.
+                raise ChainExhaustedError(
+                    f"[{agent_name}] {label} cannot fit under its tpm ceiling no matter "
+                    f"how long we wait, and no later chain step is available to reroute "
+                    f"to. Last error: {_unwinnable_exc}"
+                ) from _unwinnable_exc
             print(f"  [{agent_name}] {label} cannot fit under its tpm "
                   f"ceiling no matter how long we wait -- rerouting to "
                   f"the next chain step instead of failing the request.")
@@ -3099,6 +3121,31 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             if _action == "retry-in-place":
                 continue  # retry the SAME step now
             break  # move on to next chain step (or fall off the end, if is_last)
+        except Exception as _hard_exc:
+            # Bug fix (2026-09): a genuinely non-transient provider error
+            # (not in _TRANSIENT_ERRORS -- e.g. _call_cloudflare_step()'s
+            # own real-4xx re-raise, documented there as "a real bug,
+            # don't mask it") falls through every branch above uncaught,
+            # so it escaped this function entirely as a raw, unclassified
+            # exception -- skipping both the reroute-to-next-provider
+            # logic just above AND this function's own intended terminal
+            # "raise ChainExhaustedError(...)" site (a raised exception
+            # unwinds the stack immediately; it never falls through to
+            # that later code). eo/executor.py's per-role catch only
+            # degrades ChainExhaustedError gracefully, so this was taking
+            # down the entire task over one provider's hard failure on
+            # one step. Preserve the "don't mask it" intent -- this is
+            # NOT retried or rerouted here, same as before -- but once
+            # there's genuinely no later chain step left to try, surface
+            # it as the same terminal "chain exhausted" outcome every
+            # other unrecoverable-on-this-step case already produces, so
+            # only this one role degrades instead of the whole run.
+            if is_last:
+                raise ChainExhaustedError(
+                    f"[{agent_name}] {label} failed with a non-retryable error and no "
+                    f"later chain step is available to reroute to. Last error: {_hard_exc}"
+                ) from _hard_exc
+            raise
     return "next-step", "", accumulated_text, continuations_used, last_exc
 
 
