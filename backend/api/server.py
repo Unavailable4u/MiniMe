@@ -15,6 +15,11 @@ import os
 import signal
 import sys
 
+# perf audit §4.6 / priority #9 (part 2): used at startup to size the
+# AnyIO thread limiter that backs Starlette's run_in_threadpool -- see
+# the _lifespan() hook and APP_THREAD_POOL_SIZE below.
+import anyio.to_thread
+
 # Windows-only: asyncio.create_subprocess_exec() (used by eo/mcp_client.py to
 # launch stdio-transport MCP servers) only works under the ProactorEventLoop.
 # uvicorn --reload runs this module in a fresh worker subprocess, so the
@@ -52,10 +57,12 @@ from fastapi import (  # NEW — §9b
     FastAPI,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # B6 — auth/JWT verification (SUPABASE_URL, require_auth,
 # _verify_supabase_jwt, _resolve_chat_or_404, etc.) moved to api/deps.py
@@ -64,6 +71,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.deps import _verify_supabase_jwt
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
+from eo.db import DatabaseUnavailable  # NEW — perf audit §4.6 / #9 (part 2)
 from utils.llm_client import request_shutdown  # NEW — Patch 6.2
 from api.routes.chats import router as chats_router
 from api.routes.code import router as code_router
@@ -107,6 +115,26 @@ from eo import ws_registry  # NEW — §9b: per-session WebSocket connection reg
 # logic lives in eo/local_workspace.py alongside the registry it shares
 # module state with, rather than split across two files.
 from eo.local_workspace import router as local_workspace_router
+
+# perf audit §4.6 / priority #9 (part 2): Starlette's run_in_threadpool
+# (what every sync `def` route below runs on) uses AnyIO's *default*
+# thread limiter if nothing configures it -- and that default is 40
+# tokens, a library constant nobody in this codebase chose (verified
+# against anyio's own source, _backends/_asyncio.py). Since this process
+# runs as a single uvicorn worker (see backend.Dockerfile — no
+# --workers), that unconfigured 40 was, in effect, this whole app's
+# real concurrency ceiling for every sync route, DB-bound or not.
+#
+# Set explicitly here instead, and default it to match eo/db.py's
+# DB_POOL_MAX (also 20 by default) rather than leaving the two to drift
+# independently: most sync routes touch the DB, so admitting more
+# concurrent requests than the DB pool can serve just moves the queue
+# from "waiting for a thread" to "waiting for a connection" (now
+# handled gracefully via DatabaseUnavailable/503 below, but still —
+# better to size the outer limit to match the inner one on purpose).
+# Raise both together if you have headroom on your Postgres/pooler
+# connection limit; see eo/db.py's own comment on DB_POOL_MAX.
+APP_THREAD_POOL_SIZE = int(os.getenv("APP_THREAD_POOL_SIZE", "20"))
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
@@ -166,6 +194,12 @@ def _handle_sigint(signum, frame):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # perf audit §4.6 / priority #9 (part 2): current_default_thread_limiter()
+    # is a per-event-loop RunVar, so it can only be set once a loop is
+    # actually running -- this lifespan hook (which only executes after
+    # uvicorn's real event loop is up) is the right place, same reasoning
+    # as ws_registry.set_event_loop() just below needing the running loop.
+    anyio.to_thread.current_default_thread_limiter().total_tokens = APP_THREAD_POOL_SIZE
     # NEW — Data Layer architecture §9b: eo/notify.py's notify() runs
     # synchronously, often from Starlette's sync-endpoint threadpool
     # (every agent call site — see agents/source_manager.py,
@@ -208,6 +242,24 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# perf audit §4.6 / priority #9 (part 1): eo/db.py's cursor() now retries
+# briefly on its own before giving up, but once it does give up, this is
+# what turns that into a real HTTP response — a 503 + Retry-After the
+# client can act on — instead of an unhandled DatabaseUnavailable
+# bubbling up as a bare 500 with no indication the DB pool (not the
+# route itself) was the problem.
+@app.exception_handler(DatabaseUnavailable)
+async def _database_unavailable_handler(request: Request, exc: DatabaseUnavailable):
+    retry_after_seconds = max(1, round(exc.retry_after))
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database is temporarily at capacity. Please retry shortly.",
+        },
+        headers={"Retry-After": str(retry_after_seconds)},
+    )
 
 # B6 — routers split out of this file (imported near the top of this
 # file, alongside the other imports). tasks_router owns /api/task*,
