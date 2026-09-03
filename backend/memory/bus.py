@@ -128,16 +128,28 @@ def _namespaced(key: str) -> str:
             # this were namespaced, the stream endpoint's read() would land in
             # the wrong (or default/global) namespace and silently miss, same
             # failure mode paused_execution: was exempted to avoid.
-            or key.startswith("scratchpad:")):   # NEW — Patch B7 (§3.5):
-        # same exemption, same reasoning as paused_execution:/conversation:
-        # above -- a task's ephemeral working notes are a property of the
-        # SESSION, not whatever app_slug happens to be active in whichever
-        # call context (an agent mid-dispatch, a routes/tasks.py request,
-        # a resume) is touching the scratchpad at that moment. Without this
-        # exemption, a write_note() from one app_slug context and a
-        # list_notes()/resolve_note() from another would silently land on
-        # two different Redis keys, the exact failure mode this exemption
-        # list already exists to close off.
+            or key.startswith("scratchpad:")   # NEW — Patch B7 (§3.5):
+            # same exemption, same reasoning as paused_execution:/conversation:
+            # above -- a task's ephemeral working notes are a property of the
+            # SESSION, not whatever app_slug happens to be active in whichever
+            # call context (an agent mid-dispatch, a routes/tasks.py request,
+            # a resume) is touching the scratchpad at that moment. Without this
+            # exemption, a write_note() from one app_slug context and a
+            # list_notes()/resolve_note() from another would silently land on
+            # two different Redis keys, the exact failure mode this exemption
+            # list already exists to close off.
+            or key.startswith("chat_page_cache:") or key.startswith("chat_page_hits:")):
+        # NEW — perf audit item #7 (server-side hot-page cache): a cached
+        # older-messages page or its hit counter is a property of the
+        # CHAT, not whatever app_slug happens to be active on whichever
+        # request touches it -- eo/chat_page_cache.py's writer runs inside
+        # a GET /api/chats/{chat_id} request (no app_slug context at all,
+        # normally), and there is no other call site for these two
+        # prefixes to ever collide with. Same reasoning as conversation:/
+        # workspace_facts: above: exempting is what makes "the same
+        # chat_id always resolves to the same key" true regardless of
+        # calling context, rather than accidentally true only when no
+        # app_slug happens to be set.
         return key
     slug = _current_app_slug()
     return f"{slug}:{key}" if slug else key

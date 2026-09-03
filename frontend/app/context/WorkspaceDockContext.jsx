@@ -79,6 +79,7 @@ import { supabase } from "../lib/supabaseClient";
 import { getSuggestedFollowUp } from "../lib/notebookAffinities";   // NEW — Phase 3 step 3.2
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
 import { readProactiveSuggestionsEnabled } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
+import { getCachedChat, putCachedChat } from "../lib/chatMessageCache";   // Perf audit item #6
 
 // Duplicated from SessionContext.jsx rather than imported from it. This
 // file is meant to be the "child" in the mother/child relationship
@@ -1060,19 +1061,61 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       // (from the response's has_more) drives the "Load older messages"
       // affordance in WorkspaceChatPanel.jsx; loadOlderMessages below
       // fetches earlier pages on demand.
-      const res = await fetch(`${API_URL}/api/chats/${chatId}?limit=60`, { headers: await authHeaders() });
-      if (!res.ok) return null;
-      const chat = await res.json();
+      //
+      // Perf audit item #6: if this chat has a client-side cache entry
+      // (see lib/chatMessageCache.js for the full design/safety notes),
+      // paint from it immediately — before any network round trip — then
+      // fetch only what's changed since (?after_seq=<cached latestSeq>)
+      // instead of re-requesting the same limit=60 page. A cache miss
+      // (new device, evicted entry, first time this chat's been opened
+      // here) falls straight through to the exact same limit=60 request
+      // as before this patch — this is additive, not a replacement path.
       const { getWorkspaceIdForChat, refreshChatList } = callbacksRef.current;
       const key = normalizeDockKey(getWorkspaceIdForChat?.(chatId) ?? null, chatId);
-      if (key) {
-        setState(key, { sessionId: chatId, messages: chat.messages || [], hasMoreOlder: !!chat.has_more, loadingOlder: false });
+      const cached = await getCachedChat(chatId);
+      if (cached && key) {
+        setState(key, {
+          sessionId: chatId,
+          messages: cached.messages,
+          hasMoreOlder: cached.hasMoreOlder,
+          loadingOlder: false,
+        });
         resetLiveRunState(key);
       }
       localStorage.setItem(ACTIVE_CHAT_KEY, chatId);
       setLastActiveChatId(chatId);
+
+      const url = cached
+        ? `${API_URL}/api/chats/${chatId}?after_seq=${cached.latestSeq}`
+        : `${API_URL}/api/chats/${chatId}?limit=60`;
+      const res = await fetch(url, { headers: await authHeaders() });
+      if (!res.ok) {
+        // Cache miss + failed fetch: nothing to show, same as before.
+        // Cache hit + failed delta fetch: user still sees the cached
+        // messages already painted above — a failed top-up is better
+        // than showing nothing.
+        return cached ? { id: chatId, messages: cached.messages, has_more: cached.hasMoreOlder } : null;
+      }
+      const chat = await res.json();
+
+      // Delta responses come back oldest-first and strictly after
+      // cached.latestSeq (see get_chat()'s after_seq docstring) — safe
+      // to append with no dedup/overlap handling needed.
+      const messages = cached
+        ? (chat.messages?.length ? [...cached.messages, ...chat.messages] : cached.messages)
+        : (chat.messages || []);
+      const hasMoreOlder = cached ? cached.hasMoreOlder : !!chat.has_more;
+
+      if (key) {
+        setState(key, { sessionId: chatId, messages, hasMoreOlder, loadingOlder: false });
+        if (!cached) resetLiveRunState(key); // already reset above when painting from cache
+      }
+      // Fire-and-forget: never block the UI update above on an
+      // IndexedDB write.
+      putCachedChat(chatId, messages, hasMoreOlder);
+
       if (!skipListReload) await refreshChatList?.();
-      return chat;
+      return { ...chat, messages, has_more: hasMoreOlder };
     };
 
     // Perf audit item #3: the actual "load older messages on scroll-up"

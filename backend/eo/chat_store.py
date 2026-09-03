@@ -41,6 +41,7 @@ import uuid
 from datetime import UTC, datetime
 
 from eo import db
+from eo import chat_page_cache
 from eo.audit_log import write_audit
 
 
@@ -105,14 +106,16 @@ _CHAT_COLUMNS = (
 # Step 1.4/#2: originally used only by get_chat()'s read path; now also
 # used by append_message() and export_chats() (perf audit item #2),
 # since neither needs the JSONB `messages` column anymore -- both read
-# messages from chat_messages instead. restore_chats(), rename_chat(),
-# set_chat_tags(), etc. still select the old column via _CHAT_COLUMNS
-# above -- untouched on purpose, out of scope for item #2 (see
-# append_message()'s docstring for the one known gap this leaves:
-# restore_chats() writes chats.messages but does not seed
-# chat_messages, so a restored chat's history won't appear via
-# get_chat() either -- pre-existing since the item #1 cutover, not
-# introduced by this patch).
+# messages from chat_messages instead. rename_chat(), set_chat_tags(),
+# etc. still select the old column via _CHAT_COLUMNS above -- untouched
+# on purpose, out of scope for item #2 (those functions don't return
+# `messages` to a caller that would notice either way).
+#
+# restore_chats() (below) USED to be the one known gap left by the
+# item #1 cutover -- it wrote into chats.messages but never seeded
+# chat_messages, so a restored chat's history silently didn't show up
+# via get_chat() (which reads exclusively from chat_messages). Fixed
+# as perf audit item #8 -- see that function's own docstring.
 _CHAT_COLUMNS_NO_MESSAGES = (
     "id, title, created_at, updated_at, linked_chat_ids, tags, template_id, workspace_id"
 )
@@ -184,11 +187,35 @@ def restore_chats(owner_id: str, exported_chats: list[dict], workspace_id: str |
     workspace_id, if given, attaches every restored chat to that
     workspace directly in the same insert — caller (chat_workspace.py /
     api/server.py) is responsible for checking the caller actually has
-    edit access to that workspace before calling this."""
+    edit access to that workspace before calling this.
+
+    Perf audit item #8: seeds chat_messages from the exported message
+    array in the SAME transaction as the chats insert, same convention
+    scripts/backfill_chat_messages.py already uses for the same
+    array-to-rows conversion (seq = array position — the only ordering
+    that's ever unambiguous for a JSON array, see that script's own
+    comment on why created_at can't be used instead). This closes the
+    gap flagged inline just above (_CHAT_COLUMNS_NO_MESSAGES's comment)
+    and in append_message()'s docstring: before this, a restored chat's
+    history silently didn't appear via get_chat(), because that
+    function has read exclusively from chat_messages since the item #1
+    cutover, and nothing wrote into chat_messages for a restored chat
+    until now.
+
+    The chats.messages column itself is written as an empty array here
+    now, NOT the full historical array like before this patch — that
+    column is dead weight post-cutover (never read by anything; see
+    the module-level comment above), so writing a potentially large
+    JSONB blob into it on every restore was pure waste: extra bytes
+    stored and a slower INSERT for no reader on the other end. Matches
+    create_chat()'s own convention (empty array at creation, never
+    touched again) rather than reintroducing the exact per-row cost
+    the item #1/#2 migration was written to eliminate."""
     restored = []
     with db.cursor(user_id=owner_id) as cur:
         for chat in exported_chats:
             chat_id = new_chat_id()
+            messages = chat.get("messages") or []
             # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS column list above; every value is a %s param
             cur.execute(
                 f"""
@@ -199,9 +226,26 @@ def restore_chats(owner_id: str, exported_chats: list[dict], workspace_id: str |
                 """,
                 (chat_id, chat.get("title", "Restored Chat"), owner_id,
                  _clean_tags(chat.get("tags")), chat.get("template_id"),
-                 db.Json(chat.get("messages") or []), [], workspace_id),
+                 db.Json([]), [], workspace_id),
             )
-            restored.append(_row_to_chat(cur.fetchone()))
+            row = cur.fetchone()
+            if messages:
+                # Same shape as backfill_chat_messages.py's
+                # _backfill_one_chat(): one executemany, seq = array
+                # position, role pulled out for filtering exactly like
+                # every other chat_messages writer in this file does.
+                rows = [
+                    (chat_id, owner_id, seq, msg.get("role"), db.Json(msg))
+                    for seq, msg in enumerate(messages)
+                ]
+                cur.executemany(
+                    """
+                    insert into chat_messages (chat_id, owner_id, seq, role, payload)
+                    values (%s, %s, %s, %s, %s)
+                    """,
+                    rows,
+                )
+            restored.append(_row_to_chat(row))
     return restored
 
 
@@ -296,20 +340,20 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
 
 
 def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
-             before_seq: int | None = None) -> dict:
+             before_seq: int | None = None, after_seq: int | None = None) -> dict:
     """Step 1.4: messages now come from chat_messages (the normalized
     table written by append_message()'s dual-write -- see step 1.3),
     NOT the old chats.messages JSONB column. This query no longer
     selects that column at all, so opening a chat no longer ships its
     entire historical blob over the wire just to read a title.
 
-    Default behavior (limit=None) is UNCHANGED from before this step:
-    every message, oldest-first -- every existing caller (this file's
-    get_linked_context_text/estimate_batch_context_tokens, and
-    api/server.py's chat routes) still gets the exact same shape it
-    always has, just sourced from a table that's cheap to query
-    instead of a column that gets more expensive to touch as a chat
-    grows.
+    Default behavior (limit=None, after_seq=None) is UNCHANGED from
+    before this step: every message, oldest-first -- every existing
+    caller (this file's get_linked_context_text/
+    estimate_batch_context_tokens, and api/server.py's chat routes)
+    still gets the exact same shape it always has, just sourced from a
+    table that's cheap to query instead of a column that gets more
+    expensive to touch as a chat grows.
 
     limit/before_seq are OPT-IN pagination for callers that want it —
     wired into GET /api/chats/{chat_id} as of perf audit item #3 (query
@@ -319,6 +363,29 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
     strictly before before_seq, for "load older messages" on
     scroll-up), still returned oldest-first so callers never have to
     special-case ordering based on whether they paginated.
+
+    Perf audit item #7: before_seq-paginated pages may be served from
+    eo/chat_page_cache.py's Redis cache instead of Postgres, for pages
+    that have been independently requested enough times to be considered
+    hot (see that module for the full policy). This is invisible to
+    every caller of get_chat() — same params in, same shape out, only
+    the source differs. Never applies to the unpaginated or plain
+    "latest N" shapes of this call (see chat_page_cache.py's module
+    docstring for why those two are deliberately excluded).
+
+    after_seq (perf audit item #5) is the delta-fetch complement:
+    "give me only what's new since seq N", for a caller that already
+    has messages 1..N cached from a previous open of this same chat.
+    Mutually exclusive with before_seq/limit -- this is a strictly
+    forward, unbounded read (every message after N, oldest-first,
+    no has_more/paging semantics) rather than a backward page, since
+    the whole point is "however many messages arrived since last time"
+    with no reasonable page size to guess up front. Uses the same
+    chat_messages_chat_id_seq_idx index as before_seq -- WHERE
+    chat_id = %s AND seq > %s ORDER BY seq is a direct index range
+    scan, not a new access path. If after_seq is at or beyond the
+    latest seq (nothing new since last time), this is a cheap
+    index-only scan that returns zero rows -- not a full table read.
 
     Perf audit item #3/#4-adjacent: every returned message dict now
     carries its own `seq` (the chat_messages row's ordering column),
@@ -358,35 +425,76 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
             raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
 
         has_more = False
-        if limit is None:
+        if after_seq is not None:
+            # Perf audit item #5: delta fetch. Deliberately its own
+            # branch rather than folded into the before_seq/limit
+            # branch below -- the two are different shapes of query
+            # (forward+unbounded vs backward+paged) and forcing them
+            # through one code path would mean either giving after_seq
+            # a limit it doesn't need or giving before_seq the
+            # "no has_more" semantics it does need. Not combined with
+            # limit/before_seq in the same call; caller picks one mode.
+            cur.execute(
+                "select id, seq, payload from chat_messages where chat_id = %s and seq > %s "
+                "order by seq asc",
+                (chat_id, after_seq),
+            )
+            messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in cur.fetchall()]
+        elif limit is None:
             cur.execute(
                 "select id, seq, payload from chat_messages where chat_id = %s order by seq asc",
                 (chat_id,),
             )
             messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in cur.fetchall()]
         else:
-            params = [chat_id]
-            extra_clause = ""
-            if before_seq is not None:
-                extra_clause = " and seq < %s"
-                params.append(before_seq)
-            # Fetch one extra row purely to detect whether there's more
-            # beyond this page -- trimmed back off below, never
-            # returned to the caller.
-            params.append(limit + 1)
-            # nosemgrep: sqlalchemy-execute-raw-query -- extra_clause is one of two hardcoded literals set a few lines above (never derived from input); every value is a %s param
-            cur.execute(
-                f"select id, seq, payload from chat_messages where chat_id = %s{extra_clause} "
-                f"order by seq desc limit %s",
-                params,
+            # Perf audit item #7: before_seq-paginated pages ("load
+            # older messages") are the one shape of this query that's a
+            # fixed, closed seq range -- see eo/chat_page_cache.py's
+            # module docstring for the full reasoning. Checked here,
+            # ahead of the Postgres query, ONLY when before_seq is
+            # actually given; the plain "latest N" shape (limit given,
+            # before_seq=None) always falls straight through to Postgres,
+            # since its result changes every time someone sends a new
+            # message and caching it would need an invalidation story
+            # this cache deliberately doesn't take on.
+            cached = (
+                chat_page_cache.get_cached_page(chat_id, before_seq, limit)
+                if before_seq is not None else None
             )
-            rows = cur.fetchall()
-            has_more = len(rows) > limit
-            rows = rows[:limit]
-            # fetched newest-first (for LIMIT to grab the right end of
-            # the range); reversed back to oldest-first before
-            # returning, matching the unpaginated case above.
-            messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in reversed(rows)]
+            if cached is not None:
+                messages = cached["messages"]
+                has_more = cached["has_more"]
+            else:
+                params = [chat_id]
+                extra_clause = ""
+                if before_seq is not None:
+                    extra_clause = " and seq < %s"
+                    params.append(before_seq)
+                # Fetch one extra row purely to detect whether there's more
+                # beyond this page -- trimmed back off below, never
+                # returned to the caller.
+                params.append(limit + 1)
+                # nosemgrep: sqlalchemy-execute-raw-query -- extra_clause is one of two hardcoded literals set a few lines above (never derived from input); every value is a %s param
+                cur.execute(
+                    f"select id, seq, payload from chat_messages where chat_id = %s{extra_clause} "
+                    f"order by seq desc limit %s",
+                    params,
+                )
+                rows = cur.fetchall()
+                has_more = len(rows) > limit
+                rows = rows[:limit]
+                # fetched newest-first (for LIMIT to grab the right end of
+                # the range); reversed back to oldest-first before
+                # returning, matching the unpaginated case above.
+                messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in reversed(rows)]
+                if before_seq is not None:
+                    # Miss on a cacheable (before_seq-paginated) page --
+                    # bumps its hit counter and, only once it's crossed
+                    # HIT_THRESHOLD independent misses, actually caches
+                    # it. See chat_page_cache.note_page_miss()'s own
+                    # docstring for why this is safe to call
+                    # unconditionally on every such miss.
+                    chat_page_cache.note_page_miss(chat_id, before_seq, limit, messages, has_more)
 
     chat = _row_to_chat(row, include_messages=False)
     chat["messages"] = messages
