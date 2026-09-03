@@ -1154,7 +1154,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           )
         ) : (
         <>
-        <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
+        <div className="h-10 px-4 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)]">Chat Box</span>
           <div className="flex items-center gap-3">
             {/* Part 2 §2.5: per-session toggle, off by default — most
@@ -1575,7 +1575,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         ) : stacked ? (
           <div className="flex flex-col w-full" style={{ height: workingPanelHeight }}>
             <div className="flex-1 min-h-0 flex flex-col border-b border-[var(--neutral-800)]">
-              <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
+              <div className="h-10 px-4 border-b border-[var(--neutral-800)] flex items-center justify-between">
                 <span className="text-xs font-medium text-[var(--neutral-400)]">Working Panel</span>
                 <button
                   onClick={toggleWorkingPanel}
@@ -1603,7 +1603,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               className="w-1.5 shrink-0 cursor-col-resize hover:bg-[var(--neutral-700)] active:bg-[var(--neutral-600)] transition-colors"
             />
             <div className="flex-1 min-w-0 flex flex-col border-l border-[var(--neutral-800)]">
-              <div className="px-4 py-2 border-b border-[var(--neutral-800)] flex items-center justify-between">
+              <div className="h-10 px-4 border-b border-[var(--neutral-800)] flex items-center justify-between">
                 <span className="text-xs font-medium text-[var(--neutral-400)]">Working Panel</span>
                 <button
                   onClick={toggleWorkingPanel}

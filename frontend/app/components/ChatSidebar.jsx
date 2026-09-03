@@ -230,7 +230,7 @@ export default function ChatSidebar({ collapsed, onToggle }) {
 
   return (
     <div className="w-64 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
+      <div className="h-10 flex items-center justify-between px-3 border-b border-[var(--neutral-800)]">
         <span className="text-xs font-medium text-[var(--neutral-400)]">Chats</span>
         <div className="flex items-center gap-2">
           <button onClick={createNewChat} title="New chat" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
