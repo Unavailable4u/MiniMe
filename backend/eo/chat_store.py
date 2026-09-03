@@ -340,7 +340,8 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
 
 
 def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
-             before_seq: int | None = None, after_seq: int | None = None) -> dict:
+             before_seq: int | None = None, after_seq: int | None = None,
+             background_tasks=None) -> dict:
     """Step 1.4: messages now come from chat_messages (the normalized
     table written by append_message()'s dual-write -- see step 1.3),
     NOT the old chats.messages JSONB column. This query no longer
@@ -372,6 +373,21 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
     the source differs. Never applies to the unpaginated or plain
     "latest N" shapes of this call (see chat_page_cache.py's module
     docstring for why those two are deliberately excluded).
+
+    background_tasks (perf audit item #7 follow-up, B4/§4.4): an
+    optional object exposing FastAPI's BackgroundTasks.add_task(func,
+    *args, **kwargs) interface (untyped here on purpose, so this module
+    doesn't have to import fastapi just for a type hint). When given,
+    the cache-bookkeeping side effects on the before_seq path (global
+    hit/miss stats, this page's own hit counter, and the eventual
+    "promote to cached" write once HIT_THRESHOLD is crossed) run AFTER
+    the response is already sent, instead of blocking on 2-6 Redis REST
+    round trips the response never actually needed. Defaults to None,
+    which runs that bookkeeping synchronously exactly as before — the
+    few callers that call get_chat() directly without a request/response
+    cycle (chat_workspace.py, tags.py, notebooks.py) all pass
+    before_seq=None anyway, so this parameter is a no-op for them
+    regardless of whether they ever pass it.
 
     after_seq (perf audit item #5) is the delta-fetch complement:
     "give me only what's new since seq N", for a caller that already
@@ -461,6 +477,24 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
                 chat_page_cache.get_cached_page(chat_id, before_seq, limit)
                 if before_seq is not None else None
             )
+            if before_seq is not None:
+                # Perf audit item #3: bump the global hit/miss counter
+                # for every before_seq-paginated lookup, cached or not —
+                # this is the raw data get_cache_stats() reports on to
+                # answer whether item #7's cache is actually worth its
+                # per-call Redis REST overhead. No extra round trip:
+                # `cached` was just computed above.
+                #
+                # Perf audit item #7 follow-up: this is pure bookkeeping
+                # the response doesn't depend on, so when a
+                # background_tasks handle is available it runs AFTER
+                # the response is sent instead of blocking on it.
+                if background_tasks is not None:
+                    background_tasks.add_task(
+                        chat_page_cache.record_cache_result, hit=cached is not None,
+                    )
+                else:
+                    chat_page_cache.record_cache_result(hit=cached is not None)
             if cached is not None:
                 messages = cached["messages"]
                 has_more = cached["has_more"]
@@ -494,7 +528,19 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
                     # it. See chat_page_cache.note_page_miss()'s own
                     # docstring for why this is safe to call
                     # unconditionally on every such miss.
-                    chat_page_cache.note_page_miss(chat_id, before_seq, limit, messages, has_more)
+                    #
+                    # Perf audit item #7 follow-up: same deferral as
+                    # record_cache_result() above -- `messages`/
+                    # `has_more` are already final at this point (this
+                    # runs after the Postgres fetch), so the response
+                    # doesn't wait on this bookkeeping either.
+                    if background_tasks is not None:
+                        background_tasks.add_task(
+                            chat_page_cache.note_page_miss,
+                            chat_id, before_seq, limit, messages, has_more,
+                        )
+                    else:
+                        chat_page_cache.note_page_miss(chat_id, before_seq, limit, messages, has_more)
 
     chat = _row_to_chat(row, include_messages=False)
     chat["messages"] = messages

@@ -9,8 +9,9 @@ from upstash_redis import Redis
 from upstash_vector import Index
 
 load_dotenv()
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 redis = Redis(
-    url=os.getenv("UPSTASH_REDIS_REST_URL"),
+    url=UPSTASH_REDIS_REST_URL,
     token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
 )
 def slugify(text: str, max_len: int = 40) -> str:
@@ -281,12 +282,49 @@ def read_many(keys: list, default=None) -> dict:
         original_key: (json.loads(raw) if raw is not None else default)
         for original_key, raw in zip(keys, raw_values)
     }
-def delete(key: str) -> None:
+def ping() -> str:
+    """Perf audit item #4.4 follow-up (B4 region check): a bare Upstash
+    PING -- no key, no namespacing, no JSON encode/decode -- the
+    purest possible measurement of "how long does one Redis REST round
+    trip take from this process," for comparing against Postgres's own
+    round-trip time via api/routes/system.py's latency probe. Not used
+    by any cache logic; this exists purely for that measurement."""
+    return redis.ping()
     """Delete a key from memory entirely (as opposed to write(key, [])
     or write(key, None), which leave a namespaced key sitting in Redis
     with an empty/null value forever). Used by eo/chat_store.py's
     delete_chat() to actually clear a session's conversation history."""
     redis.delete(_namespaced(key))
+
+
+def incr(key: str, ex: int = None) -> int:
+    """Atomically increments an integer counter by 1 and returns the
+    new value — a SINGLE Upstash REST round trip (INCR), versus the
+    read()-then-write() pattern used everywhere else in this module
+    for JSON values, which costs two round trips (a GET, then a SET)
+    AND has a lost-update race under concurrent callers (read-modify-
+    write, not atomic). Only appropriate for plain integer counters,
+    never JSON-shaped values — read()/write() remain the right tool
+    for those; this intentionally skips the json.dumps/loads round
+    trip too, since Redis's own INCR already treats the value as an
+    integer.
+
+    ex: optional TTL in seconds, applied via a follow-up EXPIRE call
+    ONLY the first time this key is created in this cycle (detected by
+    the returned value being 1) — NOT reapplied on every increment.
+    That makes this a fixed window from first increment, not a sliding
+    one that resets on every call: one extra REST call on the very
+    first increment of a cycle, instead of one extra call on EVERY
+    increment (which is what write(..., ex=...) does today, and is the
+    right tradeoff for a plain "how many times in the last N seconds"
+    counter). A caller that genuinely needs a sliding window should
+    keep using read()/write(key, ..., ex=...) instead.
+    """
+    namespaced_key = _namespaced(key)
+    value = redis.incr(namespaced_key)
+    if ex is not None and value == 1:
+        redis.expire(namespaced_key, ex)
+    return value
 def append_cycle_history(cycle_num: int, report: dict):
     """Store each cycle's report under its own key, for long-term memory."""
     write(f"cycle:{cycle_num}:report", report)
