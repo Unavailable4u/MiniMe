@@ -290,6 +290,9 @@ def ping() -> str:
     round-trip time via api/routes/system.py's latency probe. Not used
     by any cache logic; this exists purely for that measurement."""
     return redis.ping()
+
+
+def delete(key: str) -> None:
     """Delete a key from memory entirely (as opposed to write(key, [])
     or write(key, None), which leave a namespaced key sitting in Redis
     with an empty/null value forever). Used by eo/chat_store.py's
