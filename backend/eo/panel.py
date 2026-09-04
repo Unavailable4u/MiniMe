@@ -43,7 +43,7 @@ from eo.registry import (
     AGENT_CAPABILITIES,
     add_role_prompt,
     get_role_prompt,
-    record_role_hire,
+    record_role_hires,
 )
 from eo.structure import PATH_TO_TIER, TIER_TO_PATH, build_reference_structure_addition
 from relay.emitter import emit_event
@@ -529,6 +529,16 @@ def staff_task(classification: dict, quota_status: dict = None,
         quota_status = get_quota_snapshot()
     suggested_agents = classification.get("suggested_agents", [])
     hires = []
+    # Perf audit follow-up (registry.py N+1, write side): collected here
+    # instead of calling record_role_hire() once per iteration below --
+    # that called write() (a full role-prompts blob PUT to the memory
+    # bus) on every single hire, so a 5-role task meant 5 sequential
+    # full-blob writes. record_role_hires() below does the same
+    # times_hired bookkeeping against one already-loaded (cached) dict
+    # and writes it back exactly once for the whole batch, mirroring
+    # the "one round trip for the whole operation" shape
+    # list_role_metadata() already uses on the read side.
+    hired_role_names = []
     for role_name in suggested_agents:
         candidate = _best_match(role_name, quota_status)
         if candidate is None:
@@ -537,12 +547,14 @@ def staff_task(classification: dict, quota_status: dict = None,
             role_name, task_text or classification.get("reasoning", ""),
             session_id=session_id, tier=classification.get("tier"),
         )
-        # Part 2 §2.2 follow-through: this was flagged as a one-line
-        # addition to make once staff_task() was back in scope --
-        # counts every real hire so the Role Library UI's times_hired
-        # reflects actual usage, not just brief-writing events.
-        record_role_hire(role_name)
+        hired_role_names.append(role_name)
         hires.append({"role": role_name, "agent_key": candidate, "brief": brief})
+    # Part 2 §2.2 follow-through: this was flagged as a one-line
+    # addition to make once staff_task() was back in scope -- counts
+    # every real hire so the Role Library UI's times_hired reflects
+    # actual usage, not just brief-writing events. No-ops (zero writes)
+    # if nothing was actually hired this task.
+    record_role_hires(hired_role_names)
     return hires
 
 

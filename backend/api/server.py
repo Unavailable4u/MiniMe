@@ -134,6 +134,15 @@ from eo.local_workspace import router as local_workspace_router
 # better to size the outer limit to match the inner one on purpose).
 # Raise both together if you have headroom on your Postgres/pooler
 # connection limit; see eo/db.py's own comment on DB_POOL_MAX.
+#
+# perf audit §4.6 / priority #9 (part 6): this limiter now serves fast
+# sync routes only. The five long-running agent-task routes in
+# api/routes/tasks.py (post_task, post_task_preview, post_task_confirm,
+# post_resume, post_task_from_template) dispatch through
+# eo/agent_task_pool.py's own dedicated executor instead of landing
+# here, so a handful of in-flight agent runs can no longer eat into
+# this budget. See that module's docstring for the reasoning and
+# AGENT_TASK_POOL_SIZE for its independent sizing knob.
 APP_THREAD_POOL_SIZE = int(os.getenv("APP_THREAD_POOL_SIZE", "20"))
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")

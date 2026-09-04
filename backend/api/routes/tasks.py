@@ -38,6 +38,10 @@ from eo import (
     chat_workspace,  # NEW — B6 cleanup: get_tasks_for_workspace's ws_id -> chat_id resolution
     timeline_node_blurbs,  # NEW — CO4 patch 5
 )
+from eo.agent_task_pool import run_in_agent_pool  # NEW — perf audit §4.6 / priority #9 (part 6):
+# dedicated executor for the five long-running agent-task routes below,
+# separate from api/server.py's shared APP_THREAD_POOL_SIZE limiter --
+# see eo/agent_task_pool.py's own docstring for why.
 from eo.data_store import VersionConflict  # NEW — C4: revise_section's optimistic-concurrency error
 from eo.executor import resume_graph
 from eo.registry import (
@@ -141,9 +145,16 @@ class TaskResponse(BaseModel):
 
 
 @router.post("/api/task", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXED — capture owner_id
+async def post_task(req: TaskRequest, owner_id: str = Depends(require_auth)):   # FIXED — capture owner_id
+    # perf audit §4.6 / priority #9 (part 6): run_task() is a full agent
+    # run (potentially minutes long) -- dispatched through the dedicated
+    # agent-task pool (see eo/agent_task_pool.py) instead of running
+    # synchronously on api/server.py's shared fast-route thread limiter,
+    # so a handful of in-flight runs can no longer starve unrelated fast
+    # requests of their own thread budget.
     try:
-        return run_task(
+        return await run_in_agent_pool(
+            run_task,
             task_text=req.task_text,
             tier_override=req.tier_override,
             directed_task_type_override=req.directed_task_type,
@@ -244,10 +255,17 @@ class ConfirmTaskRequest(BaseModel):
 
 
 @router.post("/api/task/preview", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_auth)):   # FIXED
-    """... docstring unchanged ..."""
+async def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_auth)):   # FIXED
+    """... docstring unchanged ...
+
+    perf audit §4.6 / priority #9 (part 6): dispatched through the
+    dedicated agent-task pool, same reasoning as post_task() above --
+    preview_task() runs real classification/hire-resolution work, not a
+    cheap lookup.
+    """
     try:
-        return preview_task(
+        return await run_in_agent_pool(
+            preview_task,
             task_text=req.task_text,
             tier_override=req.tier_override,
             directed_task_type_override=req.directed_task_type,
@@ -272,14 +290,21 @@ def post_task_preview(req: PreviewTaskRequest, owner_id: str = Depends(require_a
 
 
 @router.post("/api/task/confirm", response_model=TaskResponse)
-def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_auth)):
+async def post_task_confirm(req: ConfirmTaskRequest, owner_id: str = Depends(require_auth)):
     """Part 2 §2.5 — dispatches a (possibly user-edited) hires list from
     a prior POST /api/task/preview response, without calling staff_task()
     again. Each hire's `update_library` flag controls whether an edited
     brief is a one-off override or becomes the new stored default via
-    eo/registry.py's update_role_prompt() (2.2)."""
+    eo/registry.py's update_role_prompt() (2.2).
+
+    perf audit §4.6 / priority #9 (part 6): dispatched through the
+    dedicated agent-task pool, same reasoning as post_task() above --
+    this is the actual full agent dispatch, same cost as post_task()
+    once preview has already resolved the hires.
+    """
     try:
-        return confirm_task(
+        return await run_in_agent_pool(
+            confirm_task,
             task_text=req.task_text,
             decision=req.decision,
             hires=[h.dict() for h in req.hires],
@@ -490,11 +515,19 @@ class ResumeResponse(BaseModel):
 
 
 @router.post("/api/resume", response_model=ResumeResponse)
-def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
+async def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
     """Part 2 §2.4: resumes a run paused at an approval_roles checkpoint.
     Mirrors post_task()'s error-handling shape (clean JSON on unexpected
     failure, real HTTP status codes for the specific, anticipated
     failure modes resume_graph() raises).
+
+    perf audit §4.6 / priority #9 (part 6): resume_graph() continues a
+    real agent run from its paused checkpoint through to completion (or
+    the next pause) -- the same cost profile as run_task()/confirm_task(),
+    so it's dispatched through the same dedicated agent-task pool. Only
+    the resume_graph() call itself goes through the pool; the
+    request/response formatting around it here is cheap and stays on
+    this route's own async context.
 
     Part 8.8 regression fix: session_id and chat_id are the same string
     everywhere in this system (see the comment above _resolve_chat_or_404),
@@ -520,7 +553,7 @@ def post_resume(req: ResumeRequest, owner_id: str = Depends(require_auth)):
         decision["expected_version"] = req.expected_version
 
     try:
-        result = resume_graph(req.session_id, decision)
+        result = await run_in_agent_pool(resume_graph, req.session_id, decision)
     except VersionConflict as exc:
         # NEW — C4: revise_section's expected_version didn't match the
         # section's current stored version — a real conflict (someone
@@ -829,12 +862,17 @@ class RunFromTemplateRequest(BaseModel):
 
 
 @router.post("/api/task/from-template", response_model=TaskResponse, dependencies=[Depends(require_auth)])
-def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends(require_auth)):
+async def post_task_from_template(req: RunFromTemplateRequest, owner_id: str = Depends(require_auth)):
     """Part 2 §2.3/§2.6 — starts a new task from a saved workflow
     template instead of running Inspector/Panel classification.
-    Mirrors post_task()'s exact error-handling shape."""
+    Mirrors post_task()'s exact error-handling shape.
+
+    perf audit §4.6 / priority #9 (part 6): dispatched through the
+    dedicated agent-task pool, same reasoning as post_task() above.
+    """
     try:
-        return run_task_from_template(
+        return await run_in_agent_pool(
+            run_task_from_template,
             template_id=req.template_id,
             task_text=req.task_text,
             session_id=req.session_id,

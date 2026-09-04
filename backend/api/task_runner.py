@@ -107,7 +107,10 @@ from eo.structure import (  # NEW — Part 2 §2.3/§2.6; record_template_run NE
     record_template_run,
 )
 from eo.workspace_code_files import (
-    write_file as write_code_file,  # NEW — Code sub-tab write-back, patch 9
+    write_files as write_code_files_batch,  # perf audit follow-up (registry.py N+1, part 3):
+    # replaces the old per-file write_file() loop below with one
+    # multi-row upsert -- see this function's own docstring and
+    # write_files()'s in eo/workspace_code_files.py.
 )
 from relay.emitter import (  # NEW — live-refetch fix, patch 3 follow-up
     EventType,
@@ -759,10 +762,25 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
     of this patch. A "paused" response has nothing finished yet to
     write, same as _write_plan_panels()'s own guard.
 
-    Same fail-open posture as _write_plan_panels() throughout: a single
-    file's write failing doesn't stop the rest of file_map's entries
-    from being tried, and this must never turn an already-computed chat
-    answer into a 500 over a persistence hiccup.
+    Same fail-open posture as _write_plan_panels() throughout: this
+    still must never turn an already-computed chat answer into a 500
+    over a persistence hiccup.
+
+    Perf audit follow-up (registry.py N+1, part 3): used to call
+    write_file() once per file in file_map -- each call was its own
+    Postgres pool checkout for the upsert PLUS a second checkout for
+    write_audit(), so N files meant 2N sequential round trips on the
+    hot path of every finished code task. Now builds the whole batch
+    up front and writes it in one call to write_files() -- 2 pool
+    checkouts total, not 2N. Trade-off: write_files() validates every
+    path before running its single batch statement, so ANY file in the
+    batch failing validation (or the statement itself failing) now
+    fails the whole batch, caught here at batch granularity instead of
+    the old per-file granularity -- see write_files()'s own docstring
+    for why that's an acceptable trade-off in practice (file_map's
+    paths come from file_manager.py/structure_architect.py, not raw
+    user input, so a validation failure here would be a genuine
+    upstream bug rather than a routine occurrence).
     """
     if response.get("status") != "ok" or response.get("tier") != 3:
         return
@@ -786,28 +804,52 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
         return
 
     ws_id = workspace["id"]
+
+    # Build the batch first -- one entry per file_map member whose code
+    # is non-empty, same non-empty filtering the old loop did before
+    # ever reaching write_file(), just collected instead of written
+    # immediately. Path validation itself happens inside write_files()
+    # (see its own docstring for why that's fine here).
+    pending_files = []
     for module_name, rel_path in file_map.items():
         data = code_source.get(module_name)
         if data is None:
             continue
         if isinstance(data, dict):
             code = data.get("code", "")
-            language = data.get("language")   # None falls through to write_file()'s own extension guess
+            language = data.get("language")   # None falls through to write_files()'s own extension guess
         else:
             code = data if isinstance(data, str) else ""
             language = None
         if not code:
             continue
-        try:
-            saved = write_code_file(ws_id, rel_path, code, owner_id, language=language)
-        except Exception as exc:
-            print(f"  [task_runner] code write-back failed for module={module_name!r} "
-                  f"path={rel_path!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
-            continue
-        # NEW — same live-refetch pattern as _write_plan_panels()'s
-        # PANEL_CONTENT_UPDATED emission: tell every dock/tab that has
-        # this workspace open to re-fetch the Code sub-tab now, instead
-        # of leaving it to sit unseen until the next full page reload.
+        pending_files.append({"file_path": rel_path, "content": code, "language": language})
+
+    if not pending_files:
+        return
+
+    try:
+        saved_rows = write_code_files_batch(ws_id, pending_files, owner_id)
+    except Exception as exc:
+        # A per-file ValueError from _validate_file_path() (or any other
+        # write failure) fails the WHOLE batch here -- see write_files()'s
+        # own docstring for why that trade-off is acceptable in practice.
+        # Still fail-open at the batch level: this must never turn an
+        # already-computed chat answer into a 500.
+        print(f"  [task_runner] code write-back batch failed for "
+              f"{len(pending_files)} file(s), ws_id={ws_id!r}, skipped "
+              f"(fail-open): {exc}")
+        return
+
+    # NEW — same live-refetch pattern as _write_plan_panels()'s
+    # PANEL_CONTENT_UPDATED emission: tell every dock/tab that has this
+    # workspace open to re-fetch the Code sub-tab now, instead of
+    # leaving it to sit unseen until the next full page reload. Still
+    # one event per file (not batched) -- unlike the DB writes above,
+    # this isn't a connection-pool cost, and each event's payload
+    # carries a single file_path the frontend already knows how to
+    # handle; batching this is a separate, lower-priority change.
+    for saved in saved_rows:
         try:
             emit_workspace_event(
                 EventType.CODE_FILE_UPDATED,
@@ -817,7 +859,8 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
             )
         except Exception as exc:
             print(f"  [task_runner] code-file-updated event emission failed for "
-                  f"path={rel_path!r} ws_id={ws_id!r}, skipped (fail-open): {exc}")
+                  f"path={saved.get('file_path')!r} ws_id={ws_id!r}, skipped "
+                  f"(fail-open): {exc}")
 
 
 def _quota_summary(response: dict, session_id: str) -> dict:

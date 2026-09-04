@@ -218,6 +218,89 @@ def write_file(ws_id: str, file_path: str, content: str, user_id: str, language:
     return _row_to_file(row)
 
 
+def write_files(ws_id: str, files: list[dict], user_id: str) -> list[dict]:
+    """Bulk counterpart to write_file() above — perf audit follow-up
+    (registry.py N+1, part 3): api/task_runner.py's _write_code_files()
+    used to call write_file() once per generated file after every
+    completed tier-3 code task, and each of THOSE calls did its own
+    db.cursor() upsert PLUS its own separate write_audit() insert --
+    2 pool checkouts per file, so N generated files meant 2N sequential
+    Postgres round trips on the hot path of every finished code task.
+
+    This does the same upsert for every file in ONE multi-row
+    `INSERT ... VALUES (...), (...), ... ON CONFLICT DO UPDATE`
+    (one pool checkout total for the file writes, not N), then a single
+    best-effort audit row summarizing the whole batch (one more
+    checkout, not N) instead of one audit row per file -- same "a
+    written fact, not a blow-by-blow log" tradeoff export_chats()
+    already documents elsewhere in this codebase for its own bulk path.
+    2 pool checkouts total for N files, down from 2N.
+
+    `files`: list of {"file_path": str, "content": str,
+    "language": str | None} dicts. Every file_path is validated with
+    _validate_file_path() up front, same check write_file() runs --
+    an invalid path raises immediately, same "fail loud on a bad path"
+    posture as the single-file path, since a malformed file_path this
+    early is a caller bug, not a runtime condition worth quietly
+    dropping the way the fail-open wrapper around each call in
+    task_runner.py handles genuine write/network failures.
+
+    Trade-off vs. calling write_file() N times in a loop: N independent
+    calls means one file's failure doesn't stop the rest from being
+    tried; this single-statement batch validates every path up front
+    and either writes every file in `files` or writes none of them and
+    raises (a bad path, or a DB/connection-level failure), for the
+    caller's own fail-open wrapper to catch at batch granularity
+    instead of per-file granularity. In practice file_map's paths come
+    from file_manager.py/structure_architect.py, not raw user input, so
+    a validation failure here would be a genuine upstream bug rather
+    than a routine occurrence -- and a genuine mid-batch DB failure
+    (e.g. a connection drop) would very likely have failed most/all of
+    the N individual calls too under the same conditions.
+
+    Returns an empty list without touching the database at all when
+    `files` is empty -- same "no-op instead of a zero-row round trip"
+    discipline eo/registry.py's record_role_hires() companion function
+    uses for an empty hire list."""
+    if not files:
+        return []
+
+    now = _now()
+    rows_params = []
+    for f in files:
+        file_path = f["file_path"]
+        _validate_file_path(file_path)
+        resolved_language = f.get("language") or _infer_language(file_path)
+        rows_params.append((ws_id, file_path, f["content"], resolved_language, now, user_id))
+
+    placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(rows_params))
+    flat_params = [p for row in rows_params for p in row]
+
+    with db.cursor(user_id=user_id) as cur:
+        cur.execute(
+            f"""
+            insert into workspace_code_files (workspace_id, file_path, content, language, updated_at, updated_by)
+            values {placeholders}
+            on conflict (workspace_id, file_path)
+            do update set content = excluded.content, language = excluded.language,
+                          updated_at = excluded.updated_at, updated_by = excluded.updated_by
+            returning workspace_id, file_path, content, language, updated_at, updated_by
+            """,
+            flat_params,
+        )
+        rows = cur.fetchall()
+
+    # Best-effort, same "never let audit logging break the real
+    # operation it's attached to" contract write_audit() itself
+    # documents -- a failure here must not undo or fail the file writes
+    # above, which have already committed by this point.
+    write_audit(
+        user_id, "code_files.batch_write", "workspace", ws_id,
+        {"file_paths": [r["file_path"] for r in rows], "count": len(rows)},
+    )
+    return [_row_to_file(r) for r in rows]
+
+
 def build_zip_archive(ws_id: str) -> bytes | None:
     """Patch 11: zips the current file set for a workspace, in memory —
     returns None when there are zero saved files (route layer turns that
