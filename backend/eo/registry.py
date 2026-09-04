@@ -1652,16 +1652,53 @@ def record_role_hire(role_name: str, user_id: str | None = None) -> None:
     for §2.3/§2.5); exposed here now so that follow-up has something to
     call. Creates a bare counter entry rather than raising if the role
     somehow isn't in the store yet (a hire can in principle race a
-    first-ever brief write)."""
+    first-ever brief write).
+
+    Single-role convenience wrapper over record_role_hires() below —
+    kept as its own function (rather than deleted in favor of always
+    calling the bulk version with a 1-item list) since any call site
+    hiring exactly one role reads more plainly this way. Costs exactly
+    the same one write() as record_role_hires([role_name])."""
+    record_role_hires([role_name], user_id=user_id)
+
+
+def record_role_hires(role_names: list, user_id: str | None = None) -> None:
+    """Bulk counterpart to record_role_hire() above — one write() for
+    every role staff_task() just hired, instead of one write() PER
+    role. record_role_hire() itself already only paid for a *read* once
+    per task (via _load_prompts()'s per-run cache, see that function's
+    own comment) — the write side never got the same treatment: every
+    call unconditionally serialized and PUT the *entire* role-prompts
+    blob to the memory bus over HTTP, so a 5-role hire meant 5
+    sequential full-blob writes even though only 5 individual entries
+    (out of however many roles exist total) actually changed.
+
+    Mutates every hired role's counter against the SAME cached dict
+    _load_prompts() already returned (exactly like record_role_hire()
+    did per-call), then calls write() exactly once at the end covering
+    every mutation in this batch — same "one round trip for the whole
+    operation" shape list_role_metadata() already uses on the read
+    side. Duplicate names in role_names (a role hired more than once in
+    the same task, if that's ever possible) each still increment
+    times_hired correctly, same as calling record_role_hire() that many
+    times would.
+
+    No-ops on an empty list without touching the store at all — a task
+    that hired zero roles (falls through every candidate in
+    staff_task()'s loop) shouldn't cost even the one read()
+    _load_prompts() would otherwise do."""
+    if not role_names:
+        return
     key = _role_prompts_key(user_id)
     prompts = _load_prompts(user_id)
-    entry = prompts.get(role_name) or {
-        "brief": None, "source": "panel_brief_writer",
-        "updated_at": None, "times_hired": 0,
-        "pinned": False, "pinned_at": None, "capability_tags": [],
-    }
-    entry["times_hired"] = entry.get("times_hired", 0) + 1
-    prompts[role_name] = entry
+    for role_name in role_names:
+        entry = prompts.get(role_name) or {
+            "brief": None, "source": "panel_brief_writer",
+            "updated_at": None, "times_hired": 0,
+            "pinned": False, "pinned_at": None, "capability_tags": [],
+        }
+        entry["times_hired"] = entry.get("times_hired", 0) + 1
+        prompts[role_name] = entry
     write(key, prompts)
 
 

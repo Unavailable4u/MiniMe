@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import require_auth
-from eo import chat_page_cache, db
+from eo import agent_task_pool, chat_page_cache, db
 from eo.quota_sentinel import (
     get_quota_snapshot,
     get_rate_window_snapshot,
@@ -142,6 +142,17 @@ def db_pool_stats():
     # needed beyond logged-in" reasoning as chat_page_cache_stats above.
     return db.get_pool_stats()
 
+
+@router.get("/api/system/agent-pool-stats", dependencies=[Depends(require_auth)])
+def agent_pool_stats():
+    # perf audit §4.6 / priority #9 (part 6): companion to db_pool_stats()
+    # above, for the dedicated agent-task executor (eo/agent_task_pool.py)
+    # that post_task/post_task_preview/post_task_confirm/post_resume/
+    # post_task_from_template now dispatch through instead of the shared
+    # fast-route thread limiter. A nonzero "queued_on_submit" relative to
+    # "started_immediately" means agent runs are routinely waiting behind
+    # each other -- check this before raising AGENT_TASK_POOL_SIZE.
+    return agent_task_pool.get_agent_pool_stats()
 
 
 @router.get("/api/quota", dependencies=[Depends(require_auth)])
