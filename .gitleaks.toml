@@ -23,6 +23,7 @@ paths = [
   # in an assert tuple) that trip generic-api-key's key-name-plus-nearby-
   # string heuristic. No real secret material lives under tests/.
   '''backend/tests/''',
+  '''backend/token\.txt''',
 ]
 regexes = [
   '''^[-+ ]?[A-Z][A-Z0-9_]*_KEY_\d+=?$''',
