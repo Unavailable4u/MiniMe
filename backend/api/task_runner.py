@@ -844,23 +844,31 @@ def _write_code_files(response: dict, session_id: str, owner_id: str) -> None:
     # NEW — same live-refetch pattern as _write_plan_panels()'s
     # PANEL_CONTENT_UPDATED emission: tell every dock/tab that has this
     # workspace open to re-fetch the Code sub-tab now, instead of
-    # leaving it to sit unseen until the next full page reload. Still
-    # one event per file (not batched) -- unlike the DB writes above,
-    # this isn't a connection-pool cost, and each event's payload
-    # carries a single file_path the frontend already knows how to
-    # handle; batching this is a separate, lower-priority change.
-    for saved in saved_rows:
-        try:
-            emit_workspace_event(
-                EventType.CODE_FILE_UPDATED,
-                workspace_id=ws_id,
-                agent="code_writers",
-                payload={"file_path": saved.get("file_path"), "workspace_id": ws_id},
-            )
-        except Exception as exc:
-            print(f"  [task_runner] code-file-updated event emission failed for "
-                  f"path={saved.get('file_path')!r} ws_id={ws_id!r}, skipped "
-                  f"(fail-open): {exc}")
+    # leaving it to sit unseen until the next full page reload. Coalesced
+    # (perf follow-up) into ONE event carrying every saved file's path,
+    # instead of one CODE_FILE_UPDATED per file -- not a DB-pool cost
+    # like the write above (this is a single fire-and-forget HTTP call
+    # either way), but N separate events for one task meant N separate
+    # frontend re-fetches of the file tree back to back. payload's
+    # "file_path" key is kept (set to the last file) alongside the new
+    # "file_paths" list so any consumer still reading the old singular
+    # key doesn't silently stop working.
+    file_paths = [saved.get("file_path") for saved in saved_rows]
+    try:
+        emit_workspace_event(
+            EventType.CODE_FILE_UPDATED,
+            workspace_id=ws_id,
+            agent="code_writers",
+            payload={
+                "file_path": file_paths[-1] if file_paths else None,
+                "file_paths": file_paths,
+                "workspace_id": ws_id,
+            },
+        )
+    except Exception as exc:
+        print(f"  [task_runner] code-file-updated event emission failed for "
+              f"{len(file_paths)} path(s) ws_id={ws_id!r}, skipped "
+              f"(fail-open): {exc}")
 
 
 def _quota_summary(response: dict, session_id: str) -> dict:

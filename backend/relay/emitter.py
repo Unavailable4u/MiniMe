@@ -155,14 +155,19 @@ class EventType(str, Enum):
     PANEL_CONTENT_UPDATED = "panel_content_updated"
 
     # Code sub-tab write-back, patch 9: fired from api/task_runner.py's
-    # _write_code_files() after each successful workspace_code_files
-    # write, same "workspace channel, not session channel" reasoning as
-    # PANEL_CONTENT_UPDATED immediately above — a code file write needs
-    # to reach every dock/tab that has that WORKSPACE's Build tab open,
-    # not just the session whose chat turn produced it. Payload shape:
-    # {file_path, workspace_id}. Frontend handler: BuildTab.jsx's
-    # workspace-${selected.id} subscription (patch 10, once the file-tree
-    # view exists to actually react to it).
+    # _write_code_files() once per batch of successful workspace_code_files
+    # writes (coalesced, perf follow-up -- was one CODE_FILE_UPDATED per
+    # file, which meant N separate frontend file-tree re-fetches for a
+    # single task), same "workspace channel, not session channel"
+    # reasoning as PANEL_CONTENT_UPDATED immediately above — a code file
+    # write needs to reach every dock/tab that has that WORKSPACE's Build
+    # tab open, not just the session whose chat turn produced it. Payload
+    # shape: {file_path, file_paths, workspace_id} -- file_paths is the
+    # full list of changed paths for the batch; file_path is kept (set to
+    # the last path) for any consumer still reading the old singular key.
+    # Frontend handler: BuildTab.jsx's workspace-${selected.id}
+    # subscription (patch 10, once the file-tree view exists to actually
+    # react to it).
     CODE_FILE_UPDATED = "code_file_updated"
 
     # PATCH-A additions: real call sites (agents/*.py) that were firing
