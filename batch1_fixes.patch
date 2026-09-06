@@ -1,0 +1,66 @@
+diff --git a/backend/api/server.py b/backend/api/server.py
+index 000b019..d611003 100644
+--- a/backend/api/server.py
++++ b/backend/api/server.py
+@@ -151,7 +151,7 @@ if SENTRY_DSN:
+         dsn=SENTRY_DSN,
+         environment=os.getenv("ENVIRONMENT", "development"),
+         integrations=[FastApiIntegration()],
+-        traces_sample_rate=1.0,
++        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+     )
+ 
+ # B6 — run_task/preview_task/confirm_task/run_task_from_template,
+diff --git a/backend/eo/chat_store.py b/backend/eo/chat_store.py
+index 1ba59a7..a833005 100644
+--- a/backend/eo/chat_store.py
++++ b/backend/eo/chat_store.py
+@@ -276,8 +276,7 @@ def find_chat_for_template(owner_id: str, template_id: str) -> dict | None:
+     with db.cursor(user_id=owner_id) as cur:
+         cur.execute(
+             """
+-            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
+-                   jsonb_array_length(messages) as message_count
++            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id
+             from chats
+             where owner_id = %s and template_id = %s
+             order by updated_at desc
+@@ -302,7 +301,6 @@ def list_chats(owner_id: str) -> list:
+             """
+             select c.id, c.title, c.created_at, c.updated_at, c.linked_chat_ids,
+                    c.tags, c.template_id,
+-                   jsonb_array_length(c.messages) as message_count,
+                    lm.payload -> 'data' ->> 'status' as last_status
+             from chats c
+             left join lateral (
+@@ -327,8 +325,7 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
+     with db.cursor(user_id=owner_id) as cur:
+         cur.execute(
+             """
+-            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
+-                   jsonb_array_length(messages) as message_count
++            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id
+             from chats
+             where owner_id = %s and %s = any(tags)
+             order by updated_at desc
+diff --git a/backend/eo/conversation_memory.py b/backend/eo/conversation_memory.py
+index 74dc2a1..ea918ad 100644
+--- a/backend/eo/conversation_memory.py
++++ b/backend/eo/conversation_memory.py
+@@ -36,6 +36,7 @@ FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see
+ LIGHT_CONTEXT_TURNS = 6    # how many recent turns the classifier sees
+ FULL_TURN_CHAR_LIMIT = 1500    # per-turn truncation for the full view
+ LIGHT_TURN_CHAR_LIMIT = 120     # per-turn truncation for the light view
++CONVERSATION_TTL = int(os.getenv("CONVERSATION_TTL_SECONDS", str(60 * 60 * 24 * 30)))  # 30 days — NEW, perf audit §1: without this, conversation:{session_id} keys never expire and accumulate in Redis forever
+ 
+ 
+ def _key(session_id: str) -> str:
+@@ -109,7 +110,7 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None) ->
+         # durable-fact routing step can resolve session_id -> workspace.
+         rolling_summary.fold_turns_async(session_id, dropped, owner_id=owner_id)
+         turns = turns[-MAX_STORED_TURNS:]
+-    write(_key(session_id), turns)
++    write(_key(session_id), turns, ex=CONVERSATION_TTL)
+     if role == "assistant":
+         try:
+             from agents.note_taker import note_from_latest_turn_async

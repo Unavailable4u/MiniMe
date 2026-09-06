@@ -276,8 +276,7 @@ def find_chat_for_template(owner_id: str, template_id: str) -> dict | None:
     with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             """
-            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
-                   jsonb_array_length(messages) as message_count
+            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id
             from chats
             where owner_id = %s and template_id = %s
             order by updated_at desc
@@ -302,7 +301,6 @@ def list_chats(owner_id: str) -> list:
             """
             select c.id, c.title, c.created_at, c.updated_at, c.linked_chat_ids,
                    c.tags, c.template_id,
-                   jsonb_array_length(c.messages) as message_count,
                    lm.payload -> 'data' ->> 'status' as last_status
             from chats c
             left join lateral (
@@ -327,8 +325,7 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
     with db.cursor(user_id=owner_id) as cur:
         cur.execute(
             """
-            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id,
-                   jsonb_array_length(messages) as message_count
+            select id, title, created_at, updated_at, linked_chat_ids, tags, template_id
             from chats
             where owner_id = %s and %s = any(tags)
             order by updated_at desc
