@@ -265,17 +265,17 @@ class BuildVideoOverviewRequest(BaseModel):
 # caller changes, not the store" reasoning as guide §6.5's Mind Map note.
 
 def _most_recently_active_chat_id(ws_id: str, owner_id: str) -> str | None:
+    """Perf audit item #5/§5.3: used to loop every chat_id in the
+    workspace and call unpaginated chat_store.get_chat() (full message
+    history, every message) purely to compare updated_at and pick the
+    max. Now a single lean metadata-only query via
+    chat_store.get_chats_metadata() -- id/updated_at/tags, never the
+    message history this function never read anyway."""
     ws = chat_workspace.get_workspace(ws_id, owner_id)
-    chats = []
-    for chat_id in ws.get("chat_ids") or []:
-        try:
-            chats.append(chat_store.get_chat(chat_id, owner_id))
-        except Exception:
-            continue   # a chat this user can no longer access -- skip it, don't fail the whole scan
-    if not chats:
+    metadata = chat_store.get_chats_metadata(owner_id, ws.get("chat_ids") or [])
+    if not metadata:
         return None
-    chats.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
-    return chats[0]["id"]
+    return max(metadata.items(), key=lambda kv: kv[1]["updated_at"] or "")[0]
 
 
 def _generate_clusters(ws_id: str, scope: dict | None, owner_id: str) -> dict:

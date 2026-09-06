@@ -72,6 +72,7 @@ from api.deps import _verify_supabase_jwt
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
 from eo.db import DatabaseUnavailable  # NEW — perf audit §4.6 / #9 (part 2)
+from eo.agent_task_pool import AgentPoolSaturated, AgentTaskTimeout  # NEW — perf audit items #6/#7
 from utils.llm_client import request_shutdown  # NEW — Patch 6.2
 from api.routes.chats import router as chats_router
 from api.routes.code import router as code_router
@@ -268,6 +269,38 @@ async def _database_unavailable_handler(request: Request, exc: DatabaseUnavailab
             "detail": "Database is temporarily at capacity. Please retry shortly.",
         },
         headers={"Retry-After": str(retry_after_seconds)},
+    )
+
+
+# Perf audit item #6/§3.2: mirrors the DatabaseUnavailable handler just
+# above — a 503 + Retry-After the client can act on, instead of an
+# unhandled AgentPoolSaturated bubbling up as a bare 500 with no
+# indication the agent-task queue (not the route itself) was the
+# problem.
+@app.exception_handler(AgentPoolSaturated)
+async def _agent_pool_saturated_handler(request: Request, exc: AgentPoolSaturated):
+    retry_after_seconds = max(1, round(exc.retry_after))
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Agent task queue is temporarily at capacity. Please retry shortly.",
+        },
+        headers={"Retry-After": str(retry_after_seconds)},
+    )
+
+
+# Perf audit item #7/§3.4: a 504 (server-side wall-clock deadline hit,
+# distinct from a client-side request timeout) instead of the caller
+# hanging indefinitely behind a stuck LLM fallback chain. See
+# AgentTaskTimeout's own docstring — the underlying task keeps running
+# in the background; this only bounds how long the HTTP caller waits.
+@app.exception_handler(AgentTaskTimeout)
+async def _agent_task_timeout_handler(request: Request, exc: AgentTaskTimeout):
+    return JSONResponse(
+        status_code=504,
+        content={
+            "detail": "Agent task exceeded its wall-clock deadline and was abandoned by the server.",
+        },
     )
 
 # B6 — routers split out of this file (imported near the top of this

@@ -37,12 +37,28 @@ module's own WHERE-clause scoping IS the access control. Do not remove
 the owner_id filter from any query on the assumption RLS has you covered.
 -----------------------------------------------------------------------------
 """
+import os
 import uuid
 from datetime import UTC, datetime
 
 from eo import db
 from eo import chat_page_cache
 from eo.audit_log import write_audit
+
+# Perf audit item #2 (§5.1): after_seq's delta-fetch query
+# ("everything after seq N") had no LIMIT at all -- a cold/reset
+# client cursor, a long offline gap, or a scripted caller could pull an
+# entire chat's history in one response. Deliberately a separate,
+# higher constant than api/routes/chats.py's DEFAULT_CHAT_PAGE_LIMIT
+# (200) rather than reusing that same number: after_seq is a "catch up
+# on everything since last time" cursor read, not a UI page, and a
+# caller that's been offline a while legitimately has more to catch up
+# on than one page's worth. Enforced here, inside get_chat() itself,
+# so every caller gets the same protection whether it arrives via
+# api/routes/chats.py's query param or calls this function directly
+# (chat_workspace.py, tags.py, notebooks.py all do the latter, always
+# with after_seq=None today, but nothing stops that from changing).
+AFTER_SEQ_MAX_ROWS = int(os.getenv("AFTER_SEQ_MAX_ROWS", "500"))
 
 
 def _now():
@@ -336,6 +352,115 @@ def list_chats_by_tag(owner_id: str, tag: str) -> list:
     return [_row_to_chat(r, include_messages=False) for r in rows]
 
 
+def get_chats_metadata(owner_id: str, chat_ids: list) -> dict[str, dict]:
+    """Lean batch read for callers that only need a chat's updated_at
+    and/or tags -- not its full message history. Perf audit item #5
+    (§5.3): replaces the "loop chat_ids, call the unpaginated get_chat()
+    per id" pattern in api/routes/notebooks.py's
+    _most_recently_active_chat_id() and eo/tags.py's
+    distinct_tags_for_workspace() with a single indexed query, since
+    neither of those callers ever reads a message off the result.
+
+    Returns {chat_id: {"updated_at": iso_str, "tags": [...]}} for
+    whichever of chat_ids actually exist and are owned by owner_id --
+    a chat_id that doesn't resolve (deleted, or belongs to someone
+    else) is simply absent from the result, matching the "skip it,
+    don't fail the whole scan" contract both callers above already
+    relied on via get_chat()'s per-id try/except."""
+    if not chat_ids:
+        return {}
+    with db.cursor(user_id=owner_id) as cur:
+        cur.execute(
+            "select id, updated_at, tags from chats where owner_id = %s and id = any(%s)",
+            (owner_id, list(chat_ids)),
+        )
+        rows = cur.fetchall()
+    return {
+        row["id"]: {"updated_at": _iso(row["updated_at"]), "tags": row.get("tags") or []}
+        for row in rows
+    }
+
+
+def set_linked_chats_bulk(owner_id: str, links_by_chat_id: dict) -> dict[str, dict]:
+    """Batched version of set_linked_chats() for callers relinking many
+    chats in one action -- perf audit item #4/§5.5.
+    chat_workspace._sync() and memory_batch._sync_members() both used
+    to loop set_linked_chats() once per chat_id, which (per §3.5) costs
+    3 queries and its own connection checkout each time: one
+    set_config() RLS round trip, one validation SELECT, one
+    single-row UPDATE...RETURNING. A batch/workspace action touching N
+    chats paid N connection checkouts and 3N queries. This does the
+    same validation and update in exactly two queries total, regardless
+    of N:
+      1. One SELECT validating every requested linked_chat_id across
+         every chat_id at once (same ownership filter
+         set_linked_chats() already applies per-call).
+      2. One multi-row UPDATE ... FROM (VALUES ...) that sets every
+         chat's linked_chat_ids and updated_at in a single round trip.
+
+    Also drops the dead `messages` JSONB column from what's returned
+    (perf audit item #3's remaining gap for this call site) -- callers
+    of this bulk path don't read `messages` off the result any more
+    than set_linked_chats()'s callers did.
+
+    Returns {chat_id: chat_dict} for every chat_id in links_by_chat_id
+    that exists and is owned by owner_id -- a chat_id that doesn't
+    resolve is simply absent from the result rather than raising and
+    aborting the whole batch over one bad id (matching the
+    "skip what doesn't apply" discipline callers already use around
+    chat_exists() checks elsewhere in this codebase)."""
+    if not links_by_chat_id:
+        return {}
+
+    chat_ids = list(links_by_chat_id.keys())
+    candidate_ids = set(chat_ids)
+    for linked_ids in links_by_chat_id.values():
+        candidate_ids.update(linked_ids)
+
+    with db.cursor(user_id=owner_id) as cur:
+        cur.execute(
+            "select id from chats where owner_id = %s and id = any(%s)",
+            (owner_id, list(candidate_ids)),
+        )
+        existing_ids = {r["id"] for r in cur.fetchall()}
+
+        rows_for_update = []
+        for chat_id, linked_chat_ids in links_by_chat_id.items():
+            if chat_id not in existing_ids:
+                continue  # not owned by owner_id / doesn't exist -- skip, don't fail the batch
+            clean_links = [c for c in linked_chat_ids if c != chat_id and c in existing_ids]
+            rows_for_update.append((chat_id, clean_links))
+
+        if not rows_for_update:
+            return {}
+
+        now = _now()
+        # One (%s, %s::text[]) placeholder pair per row -- a static,
+        # per-row shape repeated len(rows_for_update) times, never
+        # derived from caller input, so this is safe to interpolate.
+        # nosemgrep: sqlalchemy-execute-raw-query -- values_clause is the static "(%s, %s::text[])" shape repeated per row above; every value is bound as a %s param
+        values_clause = ", ".join("(%s, %s::text[])" for _ in rows_for_update)
+        params = [now]
+        for chat_id, clean_links in rows_for_update:
+            params.extend([chat_id, clean_links])
+        params.append(owner_id)
+
+        cur.execute(
+            f"""
+            update chats as c
+            set linked_chat_ids = v.linked_chat_ids, updated_at = %s
+            from (values {values_clause}) as v(chat_id, linked_chat_ids)
+            where c.id = v.chat_id and c.owner_id = %s
+            returning c.id, c.title, c.created_at, c.updated_at, c.linked_chat_ids,
+                      c.tags, c.template_id, c.workspace_id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    return {row["id"]: _row_to_chat(row, include_messages=False) for row in rows}
+
+
 def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
              before_seq: int | None = None, after_seq: int | None = None,
              background_tasks=None) -> dict:
@@ -447,12 +572,22 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
             # a limit it doesn't need or giving before_seq the
             # "no has_more" semantics it does need. Not combined with
             # limit/before_seq in the same call; caller picks one mode.
+            # Perf audit item #2: fetch one extra row purely to detect
+            # whether there's more beyond AFTER_SEQ_MAX_ROWS -- same
+            # "fetch limit+1, trim, flag has_more" shape as the
+            # before_seq branch below, so a caller that hits the cap
+            # gets has_more=True and can re-call with after_seq bumped
+            # to the last seq it received, instead of silently losing
+            # whatever fell past the cap.
             cur.execute(
                 "select id, seq, payload from chat_messages where chat_id = %s and seq > %s "
-                "order by seq asc",
-                (chat_id, after_seq),
+                "order by seq asc limit %s",
+                (chat_id, after_seq, AFTER_SEQ_MAX_ROWS + 1),
             )
-            messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in cur.fetchall()]
+            rows = cur.fetchall()
+            has_more = len(rows) > AFTER_SEQ_MAX_ROWS
+            rows = rows[:AFTER_SEQ_MAX_ROWS]
+            messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in rows]
         elif limit is None:
             cur.execute(
                 "select id, seq, payload from chat_messages where chat_id = %s order by seq asc",

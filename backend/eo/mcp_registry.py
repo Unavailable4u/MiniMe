@@ -54,6 +54,7 @@ Place this file at: eo/mcp_registry.py
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -227,11 +228,26 @@ async def connect_configured_servers(path: str | None = None) -> dict[str, str |
     raising and aborting backend startup over one bad server -- a
     missing GITHUB_MCP_TOKEN should mean "no GitHub tools available
     this run", not "the whole API process refuses to start".
+
+    Perf audit item #8(b)/§6.2: this is called once, inside
+    api/server.py's `_lifespan` hook, and the whole app's readiness to
+    serve any traffic waits on it returning. It used to `await` each
+    enabled server's connect_server() call sequentially, each with its
+    own _HANDSHAKE_TIMEOUT_SECONDS=15s ceiling (plus subprocess-spawn
+    time for stdio servers) -- so N enabled servers meant up to N
+    sequential handshakes, and a single slow-but-not-dead server could
+    add close to 15s to every deploy/restart on its own, compounding
+    linearly with more such servers. Now connects every enabled server
+    concurrently via asyncio.gather(..., return_exceptions=False --
+    each coroutine below already catches its own MCPClientError, so
+    nothing propagates out of gather() to abort the others), so N
+    handshakes run in parallel and this function's total wall-clock
+    cost is roughly the SLOWEST single server's handshake, not the SUM
+    of all of them.
     """
-    results: dict[str, str | None] = {}
-    for server in load_server_configs(path):
-        if not server.enabled:
-            continue
+    servers = [server for server in load_server_configs(path) if server.enabled]
+
+    async def _connect_one(server: MCPServerConfig) -> tuple[str, str | None]:
         try:
             await mcp_client.connect_server(
                 server.name,
@@ -241,7 +257,7 @@ async def connect_configured_servers(path: str | None = None) -> dict[str, str |
                 url=server.url,
                 headers=server.headers,
             )
-            results[server.name] = None
+            return server.name, None
         except MCPClientError as exc:
             # Logged, not raised -- see docstring above. print() matches
             # this codebase's existing convention for startup-path
@@ -250,8 +266,10 @@ async def connect_configured_servers(path: str | None = None) -> dict[str, str |
             # logging) rather than introducing a new logging setup for
             # just this one module.
             print(f"[mcp_registry] failed to connect MCP server {server.name!r}: {exc}")
-            results[server.name] = str(exc)
-    return results
+            return server.name, str(exc)
+
+    outcomes = await asyncio.gather(*[_connect_one(server) for server in servers])
+    return dict(outcomes)
 
 
 def list_mcp_servers(path: str | None = None) -> list[dict[str, Any]]:

@@ -68,9 +68,14 @@ def distinct_tags_for_workspace(workspace_id: str, user_id: str) -> list[str]:
     except FileNotFoundError:
         ws = None
     if ws:
-        for chat_id in ws["chat_ids"]:
-            if chat_store.chat_exists(chat_id, user_id):
-                tags.update(chat_store.get_chat(chat_id, user_id).get("tags") or [])
+        # Perf audit item #5/§5.3: used to call chat_store.chat_exists()
+        # AND THEN unpaginated chat_store.get_chat() per chat_id, only
+        # to read .tags off the result. Now a single lean metadata-only
+        # query via chat_store.get_chats_metadata() for the whole
+        # workspace's chat_ids at once.
+        metadata = chat_store.get_chats_metadata(user_id, ws["chat_ids"])
+        for meta in metadata.values():
+            tags.update(meta["tags"])
 
     # query_text is just the workspace_id itself — the query text barely
     # matters here since every result is going to be inspected for its

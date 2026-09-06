@@ -526,10 +526,13 @@ def _require_owner_or_partner(ws_id: str, user_id: str) -> str:
 
 def _sync(chat_ids: list, owner_id: str):
     """Every member links to every OTHER member — mutual linking for
-    memory sharing, unchanged logic from before."""
-    for cid in chat_ids:
-        others = [m for m in chat_ids if m != cid]
-        chat_store.set_linked_chats(cid, owner_id, others)
+    memory sharing, same logic as before. Perf audit item #4/§5.5:
+    batched via chat_store.set_linked_chats_bulk() (one validation
+    query + one multi-row UPDATE) instead of one
+    chat_store.set_linked_chats() call per chat_id — see that
+    function's docstring for the query-count win."""
+    links_by_chat_id = {cid: [m for m in chat_ids if m != cid] for cid in chat_ids}
+    chat_store.set_linked_chats_bulk(owner_id, links_by_chat_id)
 
 
 def _sync_by_owner(chat_ids: list):

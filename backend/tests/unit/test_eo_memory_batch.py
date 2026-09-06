@@ -240,12 +240,13 @@ def test_create_batch_syncs_members_mutually(monkeypatch):
 
     monkeypatch.setattr(memory_batch.db, "cursor", fake_cursor)
     sync_mock = MagicMock()
-    monkeypatch.setattr(memory_batch.chat_store, "set_linked_chats", sync_mock)
+    monkeypatch.setattr(memory_batch.chat_store, "set_linked_chats_bulk", sync_mock)
 
     memory_batch.create_batch("owner_1", "My Batch", ["chat_1", "chat_2"])
 
-    sync_mock.assert_any_call("chat_1", "owner_1", ["chat_2"])
-    sync_mock.assert_any_call("chat_2", "owner_1", ["chat_1"])
+    sync_mock.assert_called_once_with(
+        "owner_1", {"chat_1": ["chat_2"], "chat_2": ["chat_1"]}
+    )
 
 
 # ---------------------------------------------------------------------
@@ -428,13 +429,14 @@ def test_add_member_inserts_and_resyncs_when_chat_id_is_owned(monkeypatch):
 
     monkeypatch.setattr(memory_batch.db, "cursor", fake_cursor)
     sync_mock = MagicMock()
-    monkeypatch.setattr(memory_batch.chat_store, "set_linked_chats", sync_mock)
+    monkeypatch.setattr(memory_batch.chat_store, "set_linked_chats_bulk", sync_mock)
 
     result = memory_batch.add_member("batch_1", "owner_1", "chat_2")
 
     assert result["member_chat_ids"] == ["chat_1", "chat_2"]
-    sync_mock.assert_any_call("chat_1", "owner_1", ["chat_2"])
-    sync_mock.assert_any_call("chat_2", "owner_1", ["chat_1"])
+    sync_mock.assert_called_once_with(
+        "owner_1", {"chat_1": ["chat_2"], "chat_2": ["chat_1"]}
+    )
 
 
 def test_add_member_raises_file_not_found_for_unknown_batch(monkeypatch):
