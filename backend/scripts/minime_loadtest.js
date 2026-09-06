@@ -13,12 +13,14 @@ Prereqs:
 
 Run one scenario at a time, e.g.:
   k6 run -e BASE_URL=http://localhost:8000 -e TOKEN=$(cat /tmp/token.txt) \
-     -e CHAT_ID=chat_xxxxxxxxxxxx \
-     --scenario db_pool_pressure minime_loadtest.js
+     -e CHAT_ID=chat_xxxxxxxxxxxx -e SCENARIO=db_pool_pressure \
+     minime_loadtest.js
 
-Or run everything (scenarios execute in parallel unless you pass
---scenario) — probably don't do that on a first run, since
-agent_task_burst has real cost implications (see its own comment below).
+k6 has no built-in --scenario CLI flag — filtering is done in-script via
+the SCENARIO env var above (see the `scenarios:` export below). Omitting
+SCENARIO runs every scenario at once — probably don't do that on a first
+run, since pool_starvation has real LLM cost implications (see its own
+comment below).
 
 While a scenario runs, poll the relevant stats endpoint in another
 terminal to watch the numbers move in real time, e.g.:
@@ -33,6 +35,7 @@ import { Trend } from 'k6/metrics';
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8000';
 const TOKEN = __ENV.TOKEN;
 const CHAT_ID = __ENV.CHAT_ID; // a seeded chat with 100+ messages, see seed_load_test_data.py
+const SCENARIO = __ENV.SCENARIO; // e.g. "db_pool_pressure" — filters which scenario(s) run below
 
 if (!TOKEN) {
   throw new Error('Set -e TOKEN=<jwt from scripts/get_test_jwt.py>');
@@ -46,8 +49,7 @@ const authHeaders = { headers: { Authorization: `Bearer ${TOKEN}` } };
 const fastRouteLatency = new Trend('fast_route_latency', true);
 const slowRouteLatency = new Trend('slow_route_latency', true);
 
-export const options = {
-  scenarios: {
+const allScenarios = {
     // --- Finding §3.1/§3.2: does the dedicated agent pool actually
     // protect fast routes, and does its unbounded queue matter in
     // practice? Runs a small burst of "slow" agent-pool requests
@@ -99,7 +101,18 @@ export const options = {
       startTime: '0s',
       maxDuration: '60s',
     },
-  },
+};
+
+if (SCENARIO && !allScenarios[SCENARIO]) {
+  throw new Error(
+    `Unknown SCENARIO "${SCENARIO}". Valid options: ${Object.keys(allScenarios).join(', ')}`
+  );
+}
+
+export const options = {
+  // SCENARIO env var picks a single scenario to run; omit it to run all of
+  // them at once (see the cost warning above before doing that).
+  scenarios: SCENARIO ? { [SCENARIO]: allScenarios[SCENARIO] } : allScenarios,
   thresholds: {
     // Tune these once you have a baseline — starting point only.
     fast_route_latency: ['p(95)<500'],
