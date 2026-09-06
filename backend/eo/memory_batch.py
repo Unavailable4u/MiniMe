@@ -58,10 +58,18 @@ _BATCH_SELECT = """
 
 
 def _sync_members(member_ids: list[str], owner_id: str):
-    """Every member links to every OTHER member — makes the group mutual."""
-    for cid in member_ids:
-        others = [m for m in member_ids if m != cid]
-        chat_store.set_linked_chats(cid, owner_id, others)
+    """Every member links to every OTHER member — makes the group
+    mutual. Perf audit item #4/§5.5: batched via
+    chat_store.set_linked_chats_bulk() (one validation query + one
+    multi-row UPDATE) instead of one chat_store.set_linked_chats() call
+    per member_id — see that function's docstring for the query-count
+    win. Note: add_member() below still re-syncs the FULL updated
+    membership list on every add (§3.6's separately-flagged nuance,
+    not addressed by this batching change) — this only cuts the query
+    count for whatever member set _sync_members() is called with, not
+    how much of the batch gets re-synced."""
+    links_by_chat_id = {cid: [m for m in member_ids if m != cid] for cid in member_ids}
+    chat_store.set_linked_chats_bulk(owner_id, links_by_chat_id)
 
 
 def _owned_chat_ids(chat_ids: list[str], owner_id: str) -> list[str]:

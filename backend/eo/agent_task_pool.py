@@ -65,6 +65,72 @@ _executor = ThreadPoolExecutor(
     thread_name_prefix="agent-task",
 )
 
+# Perf audit item #6/§3.2: a plain ThreadPoolExecutor's backing queue
+# (a queue.SimpleQueue) has no maxsize -- nothing previously capped how
+# many submissions could pile up beyond AGENT_TASK_POOL_SIZE concurrent
+# workers, so a burst of submissions just queued indefinitely with no
+# rejection or shedding. This is a soft cap checked at submit time (not
+# a true blocking bounded queue -- ThreadPoolExecutor doesn't expose a
+# maxsize= constructor arg to bound its internal SimpleQueue directly),
+# but it's enough to turn "queues forever, caller has no idea its
+# request is still sitting there" into an immediate 503 the client can
+# retry or give up on -- same posture eo/db.py already takes on
+# connection-pool exhaustion. Chosen as the straightforward default
+# rather than moving agent-task execution to a real background worker
+# (the alternative this section named); re-evaluate against
+# /api/system/agent-pool-stats' queued_rate once this is live, per that
+# section's own recommendation, before raising or removing this cap.
+AGENT_TASK_MAX_QUEUE_DEPTH = int(os.getenv("AGENT_TASK_MAX_QUEUE_DEPTH", "50"))
+
+# Perf audit item #7/§3.4: utils/llm_client.py's own per-step ceilings
+# (MAX_CHAIN_STEPS, the rate-limit/ledger wait budgets, etc.) bound
+# each individual retry/wait, but nothing above generate_text() ever
+# bounded the WHOLE call -- that section measured a genuinely
+# multi-minute worst case across a 3-step fallback chain. 300s is a
+# deliberately generous default, comfortably above that measured worst
+# case, so this only fires on a call that's actually stuck, not merely
+# slow. Override via env if your own /api/task SLA needs it tighter.
+AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS = float(
+    os.getenv("AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS", "300")
+)
+
+
+class AgentPoolSaturated(Exception):
+    """Raised by run_in_agent_pool() when the in-process queue is
+    already at or beyond AGENT_TASK_MAX_QUEUE_DEPTH at submit time.
+
+    Carries `retry_after` (seconds) so the caller can tell the client
+    how long to back off -- same shape as eo/db.py's
+    DatabaseUnavailable, which api/server.py's exception handler for
+    this exception deliberately mirrors."""
+
+    def __init__(self, retry_after: float = 5.0):
+        self.retry_after = retry_after
+        super().__init__(
+            f"agent task pool queue is saturated "
+            f"(AGENT_TASK_MAX_QUEUE_DEPTH={AGENT_TASK_MAX_QUEUE_DEPTH}); "
+            f"retry after ~{retry_after:.0f}s"
+        )
+
+
+class AgentTaskTimeout(Exception):
+    """Raised by run_in_agent_pool() when a single call exceeds
+    AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS.
+
+    Note: the underlying thread is NOT cancelled when this fires --
+    Python's ThreadPoolExecutor has no hard-cancel primitive for a
+    thread that's already running, so the task keeps executing in the
+    background even after this raises. This bounds how long the HTTP
+    caller waits, not how much work actually happens; true hard
+    cancellation would need cooperative checks inside the task itself,
+    out of scope for this fix."""
+
+    def __init__(self, timeout_seconds: float):
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"agent task exceeded its {timeout_seconds:.0f}s wall-clock deadline"
+        )
+
 # Same key-naming/versioning convention as eo/db.py's _STATS_*_KEY
 # constants -- a global, Redis-backed, cross-restart tally rather than
 # in-process counters that reset on every deploy.
@@ -126,6 +192,15 @@ async def run_in_agent_pool(fn, /, *args, **kwargs):
     app-slug scope, anything else using this pattern) is visible to
     code running on the dedicated executor thread, exactly as it would
     have been under Starlette's run_in_threadpool.
+
+    Perf audit item #6/§3.2: raises AgentPoolSaturated instead of
+    submitting when the in-process queue is already at
+    AGENT_TASK_MAX_QUEUE_DEPTH -- see that exception's own docstring.
+
+    Perf audit item #7/§3.4: the wait below is now bounded by
+    asyncio.wait_for(), so a single call can never block its caller
+    past AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS -- see AgentTaskTimeout's
+    own docstring for exactly what that does and doesn't guarantee.
     """
     global _last_saturation_alert_at
 
@@ -133,6 +208,14 @@ async def run_in_agent_pool(fn, /, *args, **kwargs):
     active = len(_executor._threads) if _executor._threads else 0
     queue_depth = _executor._work_queue.qsize()
     likely_queued = active >= AGENT_TASK_POOL_SIZE and queue_depth > 0
+
+    if queue_depth >= AGENT_TASK_MAX_QUEUE_DEPTH:
+        sentry_sdk.capture_message(
+            f"eo.agent_task_pool: rejecting submit -- queue_depth={queue_depth} "
+            f"at or beyond AGENT_TASK_MAX_QUEUE_DEPTH={AGENT_TASK_MAX_QUEUE_DEPTH}",
+            level="warning",
+        )
+        raise AgentPoolSaturated()
 
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()
@@ -151,7 +234,9 @@ async def run_in_agent_pool(fn, /, *args, **kwargs):
             )
 
     try:
-        result = await future
+        result = await asyncio.wait_for(future, timeout=AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise AgentTaskTimeout(AGENT_TASK_WALL_CLOCK_DEADLINE_SECONDS) from exc
     finally:
         waited = time.monotonic() - t0
         stats_key = _STATS_QUEUED_KEY if waited >= _IMMEDIATE_THRESHOLD_SECONDS else _STATS_STARTED_KEY

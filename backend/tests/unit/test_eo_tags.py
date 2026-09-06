@@ -78,13 +78,13 @@ def test_distinct_tags_for_workspace_merges_and_dedupes_chat_and_node_tags(monke
         tags.chat_workspace, "get_workspace",
         lambda ws_id, user_id: {"chat_ids": ["c1", "c2"]},
     )
-    monkeypatch.setattr(tags.chat_store, "chat_exists", lambda chat_id, user_id: True)
-
-    chats = {
-        "c1": {"tags": ["alpha", "beta"]},
-        "c2": {"tags": ["beta", "gamma"]},
-    }
-    monkeypatch.setattr(tags.chat_store, "get_chat", lambda chat_id, user_id: chats[chat_id])
+    monkeypatch.setattr(
+        tags.chat_store, "get_chats_metadata",
+        lambda user_id, chat_ids: {
+            "c1": {"updated_at": "2020-01-01T00:00:00+00:00", "tags": ["alpha", "beta"]},
+            "c2": {"updated_at": "2020-01-01T00:00:00+00:00", "tags": ["beta", "gamma"]},
+        },
+    )
     monkeypatch.setattr(
         tags.knowledge_graph, "search_nodes",
         lambda *a, **k: [{"tags": ["gamma", "delta"]}],
@@ -96,23 +96,21 @@ def test_distinct_tags_for_workspace_merges_and_dedupes_chat_and_node_tags(monke
 
 
 def test_distinct_tags_for_workspace_skips_chats_that_dont_exist(monkeypatch):
-    """chat_exists() gating a stale chat_id (deleted chat still linked
-    in the workspace's chat_ids array) must skip straight past it
-    without calling get_chat() at all -- get_chat() left un-mocked would
-    raise/None-explode if it were reached for c_deleted."""
+    """A stale chat_id (deleted chat still linked in the workspace's
+    chat_ids array) must simply be absent from
+    chat_store.get_chats_metadata()'s result rather than raising --
+    perf audit item #5 moved the existence/ownership filtering into
+    that single batch query, replacing this module's own
+    chat_exists()-then-get_chat() per-id loop."""
     monkeypatch.setattr(
         tags.chat_workspace, "get_workspace",
         lambda ws_id, user_id: {"chat_ids": ["c_live", "c_deleted"]},
     )
     monkeypatch.setattr(
-        tags.chat_store, "chat_exists",
-        lambda chat_id, user_id: chat_id == "c_live",
-    )
-    monkeypatch.setattr(
-        tags.chat_store, "get_chat",
-        lambda chat_id, user_id: {"tags": ["live-tag"]} if chat_id == "c_live" else pytest.fail(
-            "get_chat() must not be called for a chat that doesn't exist"
-        ),
+        tags.chat_store, "get_chats_metadata",
+        lambda user_id, chat_ids: {
+            "c_live": {"updated_at": "2020-01-01T00:00:00+00:00", "tags": ["live-tag"]},
+        },
     )
     monkeypatch.setattr(tags.knowledge_graph, "search_nodes", lambda *a, **k: [])
 
@@ -122,15 +120,19 @@ def test_distinct_tags_for_workspace_skips_chats_that_dont_exist(monkeypatch):
 
 
 def test_distinct_tags_for_workspace_chat_with_no_tags_field_does_not_raise(monkeypatch):
-    """get_chat() returning a chat dict with no "tags" key (or an
-    explicit None) must fall back to an empty list, not raise on
-    NoneType being iterated/unioned."""
+    """get_chats_metadata() returning an empty tags list for a chat
+    (its own documented contract -- see that function's docstring)
+    must not raise when unioned."""
     monkeypatch.setattr(
         tags.chat_workspace, "get_workspace",
         lambda ws_id, user_id: {"chat_ids": ["c1"]},
     )
-    monkeypatch.setattr(tags.chat_store, "chat_exists", lambda chat_id, user_id: True)
-    monkeypatch.setattr(tags.chat_store, "get_chat", lambda chat_id, user_id: {"tags": None})
+    monkeypatch.setattr(
+        tags.chat_store, "get_chats_metadata",
+        lambda user_id, chat_ids: {
+            "c1": {"updated_at": "2020-01-01T00:00:00+00:00", "tags": []},
+        },
+    )
     monkeypatch.setattr(tags.knowledge_graph, "search_nodes", lambda *a, **k: [])
 
     assert tags.distinct_tags_for_workspace("ws_1", "user_1") == []
