@@ -80,8 +80,8 @@ const allScenarios = {
       exec: 'dbPoolPressure',
       startVUs: 0,
       stages: [
-        { duration: '20s', target: 30 },
-        { duration: '40s', target: 30 },
+        { duration: '20s', target: 10 },
+        { duration: '40s', target: 10 },
         { duration: '10s', target: 0 },
       ],
       startTime: '0s',

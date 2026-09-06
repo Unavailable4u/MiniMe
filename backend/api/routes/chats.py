@@ -120,18 +120,6 @@ def get_chat(
     before_seq: int | None = Query(default=None, ge=0),
     after_seq: int | None = Query(default=None, ge=0),
 ):
-    # Perf audit item #2 (B4 follow-up): resolve access via
-    # chat_store.resolve_chat_access() directly (rather than
-    # _resolve_chat_or_404(), which discards the role) so the role it
-    # computes can be reused below by can_see_attribution() instead of
-    # being looked up a second time. get_chat never needs require_edit,
-    # so this is a behavior-preserving substitution for the 404 case —
-    # same resolution, same "doesn't exist vs. not shared with you"
-    # 404, just without throwing away the role we already paid for.
-    resolved = chat_store.resolve_chat_access(chat_id, owner_id)
-    if resolved is None:
-        raise HTTPException(status_code=404, detail="Unknown chat_id")
-    real_owner_id, requester_role = resolved
     if after_seq is not None and (limit is not None or before_seq is not None):
         # Perf audit item #5: after_seq is a distinct fetch mode (see
         # chat_store.get_chat() docstring) — reject an ambiguous
@@ -147,6 +135,26 @@ def get_chat(
         # that explicitly passed before_seq or after_seq is left alone;
         # this only closes the "forgot to paginate" gap.
         limit = DEFAULT_CHAT_PAGE_LIMIT
+
+    # DB pool audit follow-up: try the owner fast path first instead of
+    # always paying for chat_store.resolve_chat_access() up front.
+    # get_chat()'s own "where id = %s and owner_id = %s" query already
+    # proves both existence AND ownership in a single round trip — for
+    # the overwhelmingly common case (a user opening their own chat),
+    # that's the ONLY query this route needs. Previously every request
+    # paid for resolve_chat_access() (-> chat_exists(), its own
+    # connection) BEFORE get_chat() (a second, separate connection),
+    # i.e. two full pool checkouts even when the requester turned out
+    # to be the plain owner. Confirmed via db-pool-stats + per-query
+    # timing during the connection-pool audit: each checkout costs
+    # ~300-350ms against this project's Supabase pooler, so the old
+    # ordering added a fixed ~300-350ms to every single request here.
+    # Only requests where the caller ISN'T the owner (a shared chat, a
+    # collaborator, or a genuinely unknown chat_id) now fall through to
+    # the slower resolve_chat_access() path and its extra connection —
+    # exactly the cases that actually need it.
+    real_owner_id = owner_id
+    requester_role = "owner"
     try:
         # Perf audit item #3: limit/before_seq pass straight through to
         # chat_store.get_chat() (already supported it — see that
@@ -167,11 +175,24 @@ def get_chat(
         # cache-populate) run after the response is sent instead of
         # blocking on it -- see get_chat()'s own docstring for the
         # full reasoning.
-        chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit,
+        chat = chat_store.get_chat(chat_id, owner_id, limit=limit,
                                     before_seq=before_seq, after_seq=after_seq,
                                     background_tasks=background_tasks)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Unknown chat_id")
+        # Not the owner (or chat_id genuinely doesn't exist) -- fall
+        # back to the original resolve_chat_access() + retry path.
+        # Same "doesn't exist vs. not shared with you" 404 as before,
+        # just no longer paid for on the common owner path.
+        resolved = chat_store.resolve_chat_access(chat_id, owner_id)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail="Unknown chat_id")
+        real_owner_id, requester_role = resolved
+        try:
+            chat = chat_store.get_chat(chat_id, real_owner_id, limit=limit,
+                                        before_seq=before_seq, after_seq=after_seq,
+                                        background_tasks=background_tasks)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Unknown chat_id")
 
     # Part 8.4: strip author_id from each message if this requester's
     # role/workspace setting says they shouldn't see who-wrote-what.

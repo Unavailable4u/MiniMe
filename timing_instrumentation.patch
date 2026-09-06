@@ -1,0 +1,45 @@
+diff --git a/backend/eo/chat_store.py b/backend/eo/chat_store.py
+index c662607..d4e7b5c 100644
+--- a/backend/eo/chat_store.py
++++ b/backend/eo/chat_store.py
+@@ -552,13 +552,19 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
+     returned (fetches limit+1 rows under the hood and trims the extra
+     one, rather than a separate count() round trip). It's always False
+     on the unpaginated path, since that path returns everything."""
++    import time as _time  # TEMP instrumentation -- remove after diagnosis
++    _t_enter = _time.monotonic()
+     with db.cursor(user_id=owner_id) as cur:
++        _t_got_conn = _time.monotonic()
++        print(f"[TIMING] connection acquired: {(_t_got_conn - _t_enter)*1000:.0f}ms", flush=True)
+         # nosemgrep: sqlalchemy-execute-raw-query -- interpolates only the static _CHAT_COLUMNS_NO_MESSAGES column list above; every value is a %s param
+         cur.execute(
+             f"select {_CHAT_COLUMNS_NO_MESSAGES} from chats where id = %s and owner_id = %s",
+             (chat_id, owner_id),
+         )
+         row = cur.fetchone()
++        _t_chat_row = _time.monotonic()
++        print(f"[TIMING] chat row query: {(_t_chat_row - _t_got_conn)*1000:.0f}ms", flush=True)
+         if not row:
+             raise FileNotFoundError(f"Unknown chat_id: {chat_id!r}")
+ 
+@@ -653,6 +659,7 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
+                 # the range); reversed back to oldest-first before
+                 # returning, matching the unpaginated case above.
+                 messages = [{**r["payload"], "id": r["id"], "seq": r["seq"]} for r in reversed(rows)]
++                print(f"[TIMING] messages query+build: {(_time.monotonic() - _t_chat_row)*1000:.0f}ms", flush=True)  # TEMP
+                 if before_seq is not None:
+                     # Miss on a cacheable (before_seq-paginated) page --
+                     # bumps its hit counter and, only once it's crossed
+@@ -674,9 +681,12 @@ def get_chat(chat_id: str, owner_id: str, limit: int | None = None,
+                     else:
+                         chat_page_cache.note_page_miss(chat_id, before_seq, limit, messages, has_more)
+ 
++    _t_after_cursor = _time.monotonic()  # TEMP
++    print(f"[TIMING] cursor block total (incl. commit): {(_t_after_cursor - _t_enter)*1000:.0f}ms", flush=True)  # TEMP
+     chat = _row_to_chat(row, include_messages=False)
+     chat["messages"] = messages
+     chat["has_more"] = has_more
++    print(f"[TIMING] get_chat() total: {(_time.monotonic() - _t_enter)*1000:.0f}ms", flush=True)  # TEMP
+     return chat
+ 
+ 
