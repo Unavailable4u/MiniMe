@@ -36,6 +36,7 @@ FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see
 LIGHT_CONTEXT_TURNS = 6    # how many recent turns the classifier sees
 FULL_TURN_CHAR_LIMIT = 1500    # per-turn truncation for the full view
 LIGHT_TURN_CHAR_LIMIT = 120     # per-turn truncation for the light view
+CONVERSATION_TTL = int(os.getenv("CONVERSATION_TTL_SECONDS", str(60 * 60 * 24 * 30)))  # 30 days — NEW, perf audit §1: without this, conversation:{session_id} keys never expire and accumulate in Redis forever
 
 
 def _key(session_id: str) -> str:
@@ -109,7 +110,7 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None) -> 
         # durable-fact routing step can resolve session_id -> workspace.
         rolling_summary.fold_turns_async(session_id, dropped, owner_id=owner_id)
         turns = turns[-MAX_STORED_TURNS:]
-    write(_key(session_id), turns)
+    write(_key(session_id), turns, ex=CONVERSATION_TTL)
     if role == "assistant":
         try:
             from agents.note_taker import note_from_latest_turn_async

@@ -151,7 +151,7 @@ if SENTRY_DSN:
         dsn=SENTRY_DSN,
         environment=os.getenv("ENVIRONMENT", "development"),
         integrations=[FastApiIntegration()],
-        traces_sample_rate=1.0,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
     )
 
 # B6 — run_task/preview_task/confirm_task/run_task_from_template,
