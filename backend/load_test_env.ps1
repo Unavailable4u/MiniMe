@@ -22,7 +22,7 @@ $env:TOKEN = Get-Content $tokenPath -Raw
 
 # EDIT THIS to the chat_id you actually want to test against -- grab a
 # real one from seed_load_test_data.py's printed output.
-$env:CHAT_ID = "chat_f6c202796e06"
+$env:CHAT_ID = "chat_d49eb4328c25"
 
 $tokenLength = $env:TOKEN.Length
 
