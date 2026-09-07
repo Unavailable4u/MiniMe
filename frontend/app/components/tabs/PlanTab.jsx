@@ -23,7 +23,7 @@ import MechView from "../MechView";                           // NEW — Bluepri
 // equivalent import and render block.
 import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
-  Rocket, FolderOpen, MoreVertical, ArrowUpRight,
+  FolderOpen, MoreVertical, ArrowUpRight,
   Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Pencil, Check, X,
   Trash2, Sparkles, ImageOff,
 } from "lucide-react";
@@ -63,108 +63,10 @@ const PROMOTE_LABELS = {
   growth: "Growth",
 };
 
-// --- Start Building (§5.6) — the one genuinely live panel in this
-// domain. Auto-parses handoff_packager's own summary sentence
-// (confirmed verbatim from eo/result_render.py: since handoff_packager's
-// result has no "text"/"issues"/"fixed_code"/"code"/"answer"/"papers",
-// it falls through to the summary branch, so this IS exactly what
-// renders in chat). Manual fields stay as the fallback/override in case
-// the sentence's exact wording ever drifts.
-// BUG FIX — this used to require "the SessionContext.jsx
-// openScopedSubChat/sendTask appSlug patch" (this comment's own prior
-// wording) that was never actually applied: openScopedSubChat/sendTask
-// had no appSlug parameter at all, and this panel's own call passed
-// appSlug into the unrelated `topicId` slot besides. Both are now fixed
-// (see SessionContext.jsx's sendTask/openScopedSubChat and this file's
-// own start() below) — app_slug now genuinely reaches the backend.
-function StartBuildingPanel({ wsId, openScopedSubChat, onOpenChat }) {
-  const [pasted, setPasted] = useState("");
-  const [appSlug, setAppSlug] = useState("");
-  const [cycleGoal, setCycleGoal] = useState("");
-  const [starting, setStarting] = useState(false);
-
-  function parsePasted(text) {
-    setPasted(text);
-    // Matches handoff_packager.py's exact f-string:
-    // '...first cycle target: "{target_feature}"... app_slug "{app_slug}"...'
-    const slugMatch = /app_slug "([^"]+)"/.exec(text);
-    const targetMatch = /first cycle target: "([^"]+)"/.exec(text);
-    if (slugMatch) setAppSlug(slugMatch[1]);
-    if (targetMatch) setCycleGoal(`Implement ${targetMatch[1]} as scoped in the PRD's first cycle.`);
-  }
-
-  async function start() {
-    if (!appSlug.trim() || !cycleGoal.trim()) return;
-    setStarting(true);
-    try {
-      // BUG FIX — appSlug was previously passed as openScopedSubChat's
-      // 3rd positional arg, which is `topicId` (a Notebooks topic-
-      // grounding id), not app_slug — there was no way to pass an
-      // app_slug at all before openScopedSubChat/sendTask grew the
-      // appSlug param above them. That meant this app_slug field was
-      // pure UI theater: never reaching the backend as `topicId` did
-      // nothing useful with an app_slug string, and the actual
-      // TaskRequest.app_slug stayed unset, so hardware_speccer/
-      // file_manager silently built into a fresh app dir instead of the
-      // one handoff_packager already scoped and wrote files under. Now
-      // passed positionally correctly: no topicId/scope for this
-      // dispatch, appSlug in its own new slot.
-      const chatId = await openScopedSubChat(wsId, cycleGoal.trim(), null, null, appSlug.trim());
-      onOpenChat?.(chatId);
-    } finally {
-      setStarting(false);
-    }
-  }
-
-  return (
-    <div className="space-y-4 max-w-lg">
-      <div>
-        <label htmlFor="plan-handoff-pasted" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
-          Paste handoff_packager&apos;s chat response (optional — auto-fills the fields below)
-        </label>
-        <textarea
-          id="plan-handoff-pasted"
-          name="planHandoffPasted"
-          value={pasted}
-          onChange={(e) => parsePasted(e.target.value)}
-          placeholder='Handoff ready for "..." — 4 feature(s), first cycle target: "Auth". Scoped to app_slug "my-app_ab12cd34"...'
-          rows={2}
-          className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
-        />
-      </div>
-      <div>
-        <label htmlFor="plan-app-slug" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">App slug</label>
-        <input
-          id="plan-app-slug"
-          value={appSlug}
-          onChange={(e) => setAppSlug(e.target.value)}
-          placeholder="my-app_ab12cd34"
-          className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
-        />
-      </div>
-      <div>
-        <label htmlFor="plan-cycle-goal" className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">First task / cycle goal</label>
-        <textarea
-          id="plan-cycle-goal"
-          name="planCycleGoal"
-          value={cycleGoal}
-          onChange={(e) => setCycleGoal(e.target.value)}
-          placeholder="Implement Auth as scoped in the PRD's first cycle."
-          rows={3}
-          className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)]"
-        />
-      </div>
-      <button
-        onClick={start}
-        disabled={starting || !appSlug.trim() || !cycleGoal.trim()}
-        className="flex items-center gap-1.5 text-xs bg-[var(--cyber-amber)] text-black rounded px-3 py-2 font-medium disabled:opacity-50"
-      >
-        <Rocket size={13} /> {starting ? "Starting…" : "Start building this"}
-      </button>
-    </div>
-  );
-}
-
+// Start Building removed as a dedicated Plan-tab panel/sub-tab — the
+// handoff-to-build flow is now purely chat-triggered (just tell the
+// assistant to start building in this project's chat) rather than a
+// manual paste/handoff UI.
 const SUB_TABS = [
   { id: "prd", label: "PRD", icon: FileText },
   { id: "architecture", label: "Architecture", icon: GitBranch },
@@ -176,7 +78,6 @@ const SUB_TABS = [
   // BUILD_VIEWS sub-nav (this patch). Decision: wireframing is closer to
   // build-time UI work than plan-time spec docs.
   { id: "blueprint", label: "Blueprint", icon: Cpu },
-  { id: "start_building", label: "Start Building", icon: Rocket },
 ];
 
 // Strips an optional ```mermaid fenced code block wrapper so a raw paste
@@ -187,7 +88,7 @@ function unfenceMermaid(text) {
 }
 
 function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
-  const { promoteWorkspace, openScopedSubChat,
+  const { promoteWorkspace,
     fetchPanelContent, savePanelContent,
     // toggleInstructionStep removed — patch 7: only BlueprintView's
     // Instructions view used it, and that view moved to BuildTab.jsx.
@@ -588,7 +489,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
       </div>
       )}
 
-      <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex-1 min-h-0 min-w-0 flex flex-col">
         {/* PARITY FIX — title + promote row, same shape as Notebooks/Tasks —
             this was missing entirely, so a plan project had no path
             forward to Build. */}
@@ -772,13 +673,6 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     refreshSignal={planPanelRefreshSignal}
                   />
                 )}
-                {t.id === "start_building" && (
-                  <StartBuildingPanel
-                    wsId={activeWs.id}
-                    openScopedSubChat={openScopedSubChat}
-                    onOpenChat={onOpenChat}
-                  />
-                )}
               </div>
             ))
           )}
@@ -790,7 +684,7 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
           added below so this actually resolves the ws:${activeWs.id}
           dock slot (previously bare, silently left on the legacy global
           sessionId — same gap Research/Build/Test all had). */}
-      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 420 }}>
         <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} stacked />
       </div>
       {!chatDockCollapsed && (
