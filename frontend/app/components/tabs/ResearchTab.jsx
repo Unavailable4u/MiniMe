@@ -408,7 +408,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
       </div>
       )}
 
-      <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex-1 min-h-0 min-w-0 flex flex-col">
         {/* NEW — §8 fix: title + promote row, same shape as NotebooksTab's
             header — this was missing entirely, so a research project had
             no path forward to Plan. */}
@@ -557,7 +557,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
           independent collapse state/localStorage key so the two tabs'
           dock visibility don't interfere with each other. Hidden below
           lg, matching Notebooks' and WorkingPanel's own breakpoint. */}
-      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
+      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 420 }}>
         <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} stacked />
       </div>
       {!chatDockCollapsed && (
