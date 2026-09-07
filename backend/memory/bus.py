@@ -186,7 +186,7 @@ def write(key: str, value, ex: int = None):
     Omitted (None) preserves every existing caller's behavior exactly
     -- a plain, non-expiring SET, same as before this param existed.
     """
-    redis.set(_namespaced(key), json.dumps(value), ex=ex)
+    redis.set(_namespaced(key), json.dumps(value, default=str), ex=ex)
     if key == "app_slug":
         # Keeps the context-local value in sync with an explicit
         # write(KEYS["app_slug"], ...) call within the SAME

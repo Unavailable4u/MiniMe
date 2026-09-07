@@ -4,9 +4,10 @@ import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import WorkspaceChatPanel from "../WorkspaceChatPanel";
+import WireframePreview from "../WireframePreview"; // NEW — patch 12 (Plan/Build wireframes split): relocated from PlanTab.jsx's Wireframes sub-tab. Same component, same round-trip contract (onRequestEdit re-sends into the currently open chat) -- only the tab it renders in changed.
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
-import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1
+import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1. CHANGED — patch 12: useWorkspaceDock added, same hook PlanTab.jsx used to source WireframesPanel's sessionId/sendTask -- Build now owns that wiring instead.
 import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, Pencil, Check, X, Trash2, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
@@ -59,10 +60,15 @@ const COLUMNS = [
 // nested-tab-bar pattern PlanTab.jsx's own BLUEPRINT_VIEWS uses.
 // UPDATED — patch 10: third sub-view, Code, added alongside Tasks/
 // Instructions. Same nav bar, no new pattern.
+// UPDATED — patch 12 (Plan/Build wireframes split): fourth sub-view,
+// Wireframes, relocated here from PlanTab.jsx's SUB_TABS — decided this
+// pass that wireframing is build-time UI work, not a plan-time spec
+// document. Same nav bar, no new pattern.
 const BUILD_VIEWS = [
   { id: "tasks", label: "Tasks" },
   { id: "instructions", label: "Instructions" },
   { id: "code", label: "Code" },
+  { id: "wireframes", label: "Wireframes" },
 ];
 
 function statusFor(featureStatus, featureName) {
@@ -162,6 +168,110 @@ function IntegrationChecklist({ integrations }) {
         ))}
       </ul>
     </Card>
+  );
+}
+
+// Strips an optional ```html (or ```mermaid) fenced code block wrapper so
+// a raw paste of either the bare markup or the fenced chat-rendered form
+// both work. Copied from PlanTab.jsx's own unfenceMermaid() as part of
+// patch 12 (Wireframes relocation) -- that copy stays in PlanTab.jsx too,
+// since its DiagramPastePanel (architecture/schema) still needs it; not
+// worth threading a shared import across two tabs for one small helper.
+function unfenceMermaid(text) {
+  const m = /```(?:mermaid)?\s*\n?([\s\S]*?)```/.exec(text || "");
+  return (m ? m[1] : text || "").trim();
+}
+
+// --- Wireframes — paste the initial HTML, then edit via the existing
+// WireframePreview.jsx round trip. Per WireframePreview's own docstring,
+// onRequestEdit reuses the ordinary chat-send function, and the edit
+// round-trip only works while the CURRENTLY ACTIVE chat (sessionId) is
+// the same one that actually ran wireframe_sketcher — flagged plainly
+// here rather than hidden, same discipline as every other known
+// simplification in this domain.
+//
+// NEW — patch 12 (Plan/Build wireframes split): relocated verbatim from
+// PlanTab.jsx's own WireframesPanel. Persistence is unchanged — still
+// eo/panel_content.py under panelKey "wireframes", the same generic
+// per-workspace store PlanTab wrote to, so a wireframe pasted before
+// this patch shows up here too, no migration needed. sessionId/sendTask
+// now come from this tab's own `dock` (scoped to the selected build
+// project) instead of Plan's.
+//
+// NOT wired to PanelSourceBadge (carried over from PlanTab, patch 4) —
+// "wireframes" was never one of PLAN_ROLE_PANEL_MAP's six roles (see
+// eo/panel_content.py's own comment on that map), so
+// write_panel_from_role() never writes this panel_key and content_source
+// would read "manual" unconditionally, every time, for every workspace —
+// a badge that can only ever show one static label isn't telling the
+// person anything a badge is for. Revisit only if wireframe_sketcher ever
+// gets a direct-write path of its own.
+function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, sessionId, sendTask }) {
+  const [raw, setRaw] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const html = unfenceMermaid(raw.replace(/```html/i, "```")); // reuse the same fence-stripper for ```html blocks
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setSavedAt(null);
+    fetchPanelContent(workspaceId, "wireframes").then((saved) => {
+      if (cancelled) return;
+      setRaw(saved?.content || "");
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceId, fetchPanelContent]);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await savePanelContent(workspaceId, "wireframes", raw);
+      setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return <div className="text-xs text-cyber-dim flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-cyber-dim">
+        Paste wireframe_sketcher&apos;s HTML output below (raw or a fenced <code>```html</code> block).
+        &quot;Send edit&quot; below re-sends the edit instruction into whichever chat is currently open
+        (session <code>{sessionId ? sessionId.slice(0, 8) : "none"}</code>) — this only produces a
+        real follow-up wireframe if that&apos;s the same chat that generated this one (§5.5/§5.7).
+      </p>
+      <textarea
+        id="build-wireframe-paste-raw"
+        name="buildWireframePasteRaw"
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        placeholder="<!doctype html>..."
+        rows={6}
+        className="w-full bg-black/30 border border-cyber-border rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="text-xs bg-[var(--cyber-amber)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        {savedAt && !saving && <span className="text-[11px] text-cyber-dim">Saved</span>}
+      </div>
+      <WireframePreview
+        html={html}
+        screenLabel="Pasted wireframe"
+        onRequestEdit={sendTask ? (instruction) => sendTask(instruction) : undefined}
+      />
+    </div>
   );
 }
 
@@ -965,7 +1075,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // same global SessionContext PlanTab.jsx's BlueprintView already used
   // for these -- confirmed workspace-scoped, not Plan-tab-scoped, so no
   // new plumbing needed here.
-  const { promoteWorkspace, API_URL, fetchDeviceSpec, toggleInstructionStep } = useSession();
+  // CHANGED — patch 12: fetchPanelContent/savePanelContent added, same
+  // generic eo/panel_content.py-backed pair PlanTab.jsx already used for
+  // its six paste panels -- workspace-scoped, not Plan-tab-scoped, so no
+  // new plumbing needed here, just pulling them in for the relocated
+  // WireframesPanel below.
+  const { promoteWorkspace, API_URL, fetchDeviceSpec, toggleInstructionStep, fetchPanelContent, savePanelContent } = useSession();
   const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
@@ -1145,6 +1260,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   }
 
   const selected = buildProjects.find((w) => w.id === selectedWsId);
+
+  // NEW — patch 12: same dock PlanTab.jsx used to source WireframesPanel's
+  // "re-send edit into whichever chat is currently open" (sessionId,
+  // sendTask) — scoped to the selected build project's own dock, which
+  // WorkspaceChatPanel below already reads/writes, so both stay in sync.
+  const dock = useWorkspaceDock(selected?.id);
 
   // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
   // floating over this tab's own content, so this just reports which
@@ -1420,6 +1541,18 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
               // NEW — patch 10: Code sub-tab, file tree + inline editor,
               // wired to patch 8's GET/PUT .../code/files endpoints.
               <CodeView workspaceId={selected.id} apiUrl={API_URL} />
+            ) : buildView === "wireframes" ? (
+              // NEW — patch 12 (Plan/Build wireframes split): relocated
+              // from PlanTab.jsx's own Wireframes sub-tab. sessionId/
+              // sendTask come from this tab's own `dock` (declared above,
+              // scoped to `selected`), same wiring shape Plan used.
+              <WireframesPanel
+                workspaceId={selected.id}
+                fetchPanelContent={fetchPanelContent}
+                savePanelContent={savePanelContent}
+                sessionId={dock.state.sessionId}
+                sendTask={dock.sendTask}
+              />
             ) : (
               <>
                 {promoteError && <p className="text-xs text-red-400">{promoteError}</p>}

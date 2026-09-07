@@ -18,7 +18,7 @@ module.exports = {
         },
       },
       fontFamily: {
-        display: ["Orbitron", "sans-serif"],       // headers, labels, buttons
+        display: ["Syne", "sans-serif"],            // headers, labels, buttons
         body: ["Rajdhani", "sans-serif"],           // paragraph / prose text
         mono: ["Share Tech Mono", "monospace"],     // code blocks
       },

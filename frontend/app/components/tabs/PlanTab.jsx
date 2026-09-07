@@ -4,7 +4,9 @@ import { useSession } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
 import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import MermaidDiagram from "../MermaidDiagram";
-import WireframePreview from "../WireframePreview";
+// WireframePreview import removed — Wireframes sub-tab relocated to
+// BuildTab.jsx (this patch). See BuildTab.jsx for the equivalent import
+// and WireframesPanel definition.
 import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
@@ -21,7 +23,7 @@ import MechView from "../MechView";                           // NEW — Bluepri
 // equivalent import and render block.
 import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
-  LayoutTemplate, Rocket, FolderOpen, MoreVertical, ArrowUpRight,
+  Rocket, FolderOpen, MoreVertical, ArrowUpRight,
   Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Pencil, Check, X,
   Trash2, Sparkles, ImageOff,
 } from "lucide-react";
@@ -170,7 +172,9 @@ const SUB_TABS = [
   { id: "api_contract", label: "API Contract", icon: Webhook },
   { id: "devils_advocate", label: "Devil's Advocate", icon: Skull },
   { id: "feasibility", label: "Feasibility", icon: Calculator },
-  { id: "wireframes", label: "Wireframes", icon: LayoutTemplate },
+  // "wireframes" entry removed — Wireframes relocated to BuildTab.jsx's
+  // BUILD_VIEWS sub-nav (this patch). Decision: wireframing is closer to
+  // build-time UI work than plan-time spec docs.
   { id: "blueprint", label: "Blueprint", icon: Cpu },
   { id: "start_building", label: "Start Building", icon: Rocket },
 ];
@@ -196,8 +200,8 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
   // useSession() (legacy/global) while switchChat here (dock-based) wrote
   // into a dock slot the visible panel never read. Fixed below by passing
   // workspaceId={activeWs?.id} to the panel (now the same key switchChat
-  // already resolves to, and the same key `dock` below already uses for
-  // WireframesPanel).
+  // already resolves to, and the same key `dock` below resolves for the
+  // assistant-turn refresh signal further down).
   const { switchChat, renameChat, deleteChat, createWorkspaceChat } = useWorkspaceDockActions();
   // NEW — item #11 / C1: same row-highlight source ChatSidebar's nested
   // chat rows use, so a chat opened from here highlights consistently
@@ -344,11 +348,12 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
     onActiveWorkspaceChange?.(activeWs?.id || null, activeWs?.name);
   }, [activeWs?.id, activeWs?.name, onActiveWorkspaceChange]);
 
-  // NEW — step 3e: WireframesPanel's "re-send edit into whichever chat is
-  // currently open" only makes sense scoped to activeWs's own dock now —
-  // WorkspaceChatPanel below is already reading/writing that same dock
-  // (step 3d), so this keeps both in sync instead of one reading the
-  // dock and the other reading a legacy sessionId nothing updates anymore.
+  // NEW — step 3e: scoped to activeWs's own dock so WorkspaceChatPanel
+  // below (already reading/writing that same dock, step 3d) and the
+  // assistant-turn refresh signal further down stay in sync instead of
+  // one reading the dock and the other reading a legacy sessionId
+  // nothing updates anymore. (WireframesPanel, formerly wired to this
+  // same dock, relocated to BuildTab.jsx — this patch.)
   const dock = useWorkspaceDock(activeWs?.id);
 
   // NEW — patch 3 (chat-to-panel writes): api/task_runner.py's
@@ -413,10 +418,10 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
 
   // FIX — sub-tabs were a ternary chain (conditional render), which
   // unmounts whichever sub-tab you leave and destroys its local state
-  // (a paste-box's contents, wireframe edits, an in-progress
-  // Start Building form). Same "stays mounted, hidden via CSS"
-  // technique AppShell.jsx already uses for top-level tabs, applied
-  // one level down for this tab's own sub-tabs — same fix as ResearchTab.
+  // (a paste-box's contents, an in-progress Start Building form). Same
+  // "stays mounted, hidden via CSS" technique AppShell.jsx already uses
+  // for top-level tabs, applied one level down for this tab's own
+  // sub-tabs — same fix as ResearchTab.
   const [visitedSubTabs, setVisitedSubTabs] = useState(() => new Set([subTab]));
   useEffect(() => {
     setVisitedSubTabs((prev) => (prev.has(subTab) ? prev : new Set(prev).add(subTab)));
@@ -757,15 +762,8 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
                     estimateBanner="Rough complexity signal — not a time/cost estimate (Part 5 §5.4)"
                   />
                 )}
-                {t.id === "wireframes" && (
-                  <WireframesPanel
-                    workspaceId={activeWs.id}
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    sessionId={dock.state.sessionId}
-                    sendTask={dock.sendTask}
-                  />
-                )}
+                {/* "wireframes" render branch removed — see BuildTab.jsx
+                    for the relocated WireframesPanel render. */}
                 {t.id === "blueprint" && (
                   <BlueprintView
                     workspaceId={activeWs.id}
@@ -1079,93 +1077,13 @@ function DiagramPastePanel({ workspaceId, panelKey, fetchPanelContent, savePanel
   );
 }
 
-// --- Wireframes — paste the initial HTML, then edit via the existing
-// WireframePreview.jsx round trip. Per WireframePreview's own docstring,
-// onRequestEdit reuses the ordinary chat-send function, and the edit
-// round-trip only works while the CURRENTLY ACTIVE chat (sessionId) is
-// the same one that actually ran wireframe_sketcher — flagged plainly
-// here rather than hidden, same discipline as every other known
-// simplification in this domain.
-// FIX — the pasted HTML now persists via eo/panel_content.py under
-// panelKey "wireframes". The live edit-round-trip (sendTask, scoped to
-// the currently open chat) is unchanged and still session-scoped, not
-// something this store can fix — only the paste itself survives reload now.
-//
-// NOT wired to PanelSourceBadge (patch 4, decided this pass) — "wireframes"
-// was never one of PLAN_ROLE_PANEL_MAP's six roles (see eo/panel_content.py's
-// own comment on that map), so write_panel_from_role() never writes this
-// panel_key and content_source would read "manual" unconditionally, every
-// time, for every workspace — a badge that can only ever show one static
-// label isn't telling the person anything a badge is for. Revisit only if
-// wireframe_sketcher ever gets a direct-write path of its own.
-function WireframesPanel({ workspaceId, fetchPanelContent, savePanelContent, sessionId, sendTask }) {
-  const [raw, setRaw] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [savedAt, setSavedAt] = useState(null);
-  const html = unfenceMermaid(raw.replace(/```html/i, "```")); // reuse the same fence-stripper for ```html blocks
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setSavedAt(null);
-    fetchPanelContent(workspaceId, "wireframes").then((saved) => {
-      if (cancelled) return;
-      setRaw(saved?.content || "");
-      setLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [workspaceId, fetchPanelContent]);
-
-  async function handleSave() {
-    setSaving(true);
-    try {
-      await savePanelContent(workspaceId, "wireframes", raw);
-      setSavedAt(Date.now());
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (loading) {
-    return <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading…</div>;
-  }
-
-  return (
-    <div className="space-y-3">
-      <p className="text-[11px] text-[var(--neutral-600)]">
-        Paste wireframe_sketcher&apos;s HTML output below (raw or a fenced <code>```html</code> block).
-        &quot;Send edit&quot; below re-sends the edit instruction into whichever chat is currently open
-        (session <code>{sessionId ? sessionId.slice(0, 8) : "none"}</code>) — this only produces a
-        real follow-up wireframe if that&apos;s the same chat that generated this one (§5.5/§5.7).
-      </p>
-      <textarea
-        id="plan-wireframe-paste-raw"
-        name="planWireframePasteRaw"
-        value={raw}
-        onChange={(e) => setRaw(e.target.value)}
-        placeholder="<!doctype html>..."
-        rows={6}
-        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
-      />
-      <div className="flex items-center gap-2">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="text-xs bg-[var(--cyber-amber)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
-        {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
-      </div>
-      <WireframePreview
-        html={html}
-        screenLabel="Pasted wireframe"
-        onRequestEdit={sendTask ? (instruction) => sendTask(instruction) : undefined}
-      />
-    </div>
-  );
-}
+// WireframesPanel — relocated to BuildTab.jsx (this patch). Wireframing
+// is build-time UI work, not a plan-time spec document, so it now lives
+// in BuildTab's BUILD_VIEWS sub-nav alongside Tasks/Instructions/Code,
+// wired to that tab's own dock (sessionId/sendTask) and the same
+// generic fetchPanelContent/savePanelContent("wireframes") persistence
+// as before — only the tab changed, not the storage key or backend
+// contract. See BuildTab.jsx for the moved implementation.
 
 // --- Blueprint — Parts / Wiring / Mech / Instructions. UNLIKE every
 // other sub-tab above, this isn't a paste-and-save panel: it reads
