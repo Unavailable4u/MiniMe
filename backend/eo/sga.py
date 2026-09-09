@@ -35,6 +35,7 @@ import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import conversation_memory  # NEW — Part 23 fix, see _call_one() below
+from memory.bus import incr, read  # NEW — perf audit follow-up (#1): resolve/escalate stats
 from relay.emitter import emit_event
 from utils.llm_client import generate_text
 
@@ -185,6 +186,90 @@ def _requests_simulation_domain(task_text: str) -> bool:
 # Tuning defaults — not measured yet, see Part 1's note on calibrating
 # these against real latency data once live.
 STAGE_TIMEOUTS = {1: 1.0, 2: 2.0, 3: 3.0}
+
+# Perf audit follow-up (latency discussion, point #1): the "not
+# measured yet" note above is exactly what this counter block answers.
+# attempt() is the fast path this whole module exists for -- Stage 1
+# alone resolving is the cheap case; Stage 2/3 means 2-3 parallel calls
+# were already spent before an answer came back; an escalation means
+# eo/inspector.py's Inspector (and possibly the Panel) runs next. Which
+# of these actually happens, and — for escalations — WHY, is the thing
+# to know before touching STAGE_TIMEOUTS or _requests_verification()'s
+# keyword list: a deterministic keyword match (zero SGA calls spent) is
+# a very different signal from "all three stages genuinely judged this
+# beyond them." Same shape as eo/chat_page_cache.py's global hit/miss
+# counters and utils/llm_client.py's matching ledger-event-stats added
+# alongside this patch: one incr() per outcome, 30-day rolling TTL,
+# read back by get_sga_stats() below.
+_SGA_STATS_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days -- matches
+# chat_page_cache.py's STATS_TTL_SECONDS/llm_client.py's
+# _LEDGER_EVENT_STATS_TTL_SECONDS.
+
+_SGA_RESOLVED_STAGE_KEYS = {
+    1: "sga_stats:resolved:stage1",
+    2: "sga_stats:resolved:stage2",
+    3: "sga_stats:resolved:stage3",
+}
+_SGA_ESCALATED_REASON_KEYS = {
+    # Deterministic keyword short-circuits (_requests_verification()/
+    # _requests_simulation_domain()) -- zero SGA calls spent, decided
+    # before Stage 1 even starts.
+    "verification_keyword": "sga_stats:escalated:verification_keyword",
+    "simulation_domain": "sga_stats:escalated:simulation_domain",
+    # Every stage actually ran (or the 1/2/3s predicted-latency budget
+    # ran out) and none produced a non-ESCALATE answer.
+    "no_confident_answer": "sga_stats:escalated:no_confident_answer",
+}
+
+
+def _note_resolved(stage: int) -> None:
+    """Best-effort; never raises -- a missed increment here must never
+    take down the actual SGA answer it's counting. Same non-fatal
+    posture as utils/llm_client.py's _record_ledger_event()."""
+    try:
+        incr(_SGA_RESOLVED_STAGE_KEYS[stage], ex=_SGA_STATS_TTL_SECONDS)
+    except Exception as exc:
+        print(f"  [sga] _note_resolved failed (non-fatal): {exc}")
+
+
+def _note_escalated(reason: str) -> None:
+    """Same non-fatal posture as _note_resolved() above."""
+    try:
+        incr(_SGA_ESCALATED_REASON_KEYS[reason], ex=_SGA_STATS_TTL_SECONDS)
+    except Exception as exc:
+        print(f"  [sga] _note_escalated failed (non-fatal): {exc}")
+
+
+def get_sga_stats() -> dict:
+    """Returns {"resolved_by_stage": {1: int, 2: int, 3: int},
+    "escalated_by_reason": {"verification_keyword": int,
+    "simulation_domain": int, "no_confident_answer": int},
+    "total_resolved": int, "total_escalated": int, "resolve_rate":
+    float | None}. resolve_rate is None (not 0.0) with no data yet,
+    same "don't confuse cold with zero" convention
+    eo/chat_page_cache.get_cache_stats()'s hit_rate already uses.
+
+    Pull this before touching STAGE_TIMEOUTS's guessed cutoffs or
+    _requests_verification()'s keyword list (see this module's own
+    "not measured yet" note above STAGE_TIMEOUTS) -- a low
+    resolve_rate with most escalations landing in
+    "verification_keyword" points at an overly broad keyword match,
+    not at Stage 1-3 themselves being too conservative."""
+    resolved = {stage: (read(key, default=0) or 0)
+                for stage, key in _SGA_RESOLVED_STAGE_KEYS.items()}
+    escalated = {reason: (read(key, default=0) or 0)
+                 for reason, key in _SGA_ESCALATED_REASON_KEYS.items()}
+    total_resolved = sum(resolved.values())
+    total_escalated = sum(escalated.values())
+    total = total_resolved + total_escalated
+    return {
+        "resolved_by_stage": resolved,
+        "escalated_by_reason": escalated,
+        "total_resolved": total_resolved,
+        "total_escalated": total_escalated,
+        "resolve_rate": (total_resolved / total) if total else None,
+    }
+
 
 _rotation = itertools.cycle(["sga_1", "sga_2", "sga_3"])
 
@@ -341,17 +426,21 @@ def attempt(task_text: str, session_id: str = None) -> dict:
     returned before Part 5) are unaffected.
     """
     skip_reason = None
+    skip_stat_reason = None  # NEW — perf audit follow-up (#1)
     if _requests_verification(task_text):
         skip_reason = "task explicitly requires review/approval SGA can't provide alone"
+        skip_stat_reason = "verification_keyword"
     elif _requests_simulation_domain(task_text):
         skip_reason = ("Test tab simulation dispatch — requires the multi-persona "
                         "simulate pipeline, not a single blended SGA answer")
+        skip_stat_reason = "simulation_domain"
 
     if skip_reason:
         emit_event("agent_start", session_id, agent="sga_relay",
                    payload={"label": "SGA — attempting direct answer"})
         emit_event("agent_done", session_id, agent="sga_relay",
                    payload={"summary": f"escalated to Inspector — {skip_reason}"})
+        _note_escalated(skip_stat_reason)  # NEW — perf audit follow-up (#1)
         return {"resolved": False}
 
     order = _rotate_start()
@@ -374,6 +463,7 @@ def attempt(task_text: str, session_id: str = None) -> dict:
             if "ESCALATE" not in results[agent_key]["answer"].upper():
                 emit_event("agent_done", session_id, agent="sga_relay",
                            payload={"summary": f"resolved at stage {stage} ({agent_key})"})
+                _note_resolved(stage)  # NEW — perf audit follow-up (#1)
                 return {
                     "resolved": True,
                     "answer": results[agent_key]["answer"],
@@ -388,6 +478,7 @@ def attempt(task_text: str, session_id: str = None) -> dict:
 
     emit_event("agent_done", session_id, agent="sga_relay",
                payload={"summary": "escalated to Inspector — no confident SGA answer"})
+    _note_escalated("no_confident_answer")  # NEW — perf audit follow-up (#1)
     return {"resolved": False}
 
 
