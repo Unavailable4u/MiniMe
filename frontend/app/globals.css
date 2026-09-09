@@ -1,4 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Syne:wght@600;700;800&display=swap');
+/* Inter + JetBrains Mono — added for the redesigned auth screen
+   (LoginScreen.jsx's "Auth Matrix" look). Additive only: nothing
+   elsewhere references these font-families yet, so this doesn't
+   change any existing screen's appearance. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -257,4 +262,23 @@ code, pre, .font-mono {
   stroke: var(--cyber-cyan);
   stroke-width: 3px;
   filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.6));
+}
+
+/* ---------------------------------------------------------------
+   Auth screen entrance transition — LoginScreen.jsx applies this via
+   `key={mode}` on its card wrapper, so it re-plays on every sign-in /
+   sign-up toggle instead of just on first mount.
+----------------------------------------------------------------*/
+@keyframes authFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.auth-fade-in {
+  animation: authFadeIn 0.35s ease both;
 }
