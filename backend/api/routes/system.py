@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import require_auth
-from eo import agent_task_pool, chat_page_cache, db
+from eo import agent_task_pool, chat_page_cache, db, sga  # NEW — sga: perf audit follow-up (#1)
 from eo.quota_sentinel import (
     get_quota_snapshot,
     get_rate_window_snapshot,
@@ -28,6 +28,7 @@ from eo.quota_sentinel import (
     get_usage_history_scoped,
 )
 from memory import bus
+from utils.llm_client import get_ledger_event_stats  # NEW — perf audit follow-up (#5)
 
 router = APIRouter()
 
@@ -153,6 +154,38 @@ def agent_pool_stats():
     # "started_immediately" means agent runs are routinely waiting behind
     # each other -- check this before raising AGENT_TASK_POOL_SIZE.
     return agent_task_pool.get_agent_pool_stats()
+
+
+@router.get("/api/system/sga-stats", dependencies=[Depends(require_auth)])
+def sga_stats():
+    # Perf audit follow-up (latency discussion, point #1): surfaces the
+    # global resolve/escalate counters eo/sga.py's attempt() now records
+    # on every call (see that module's get_sga_stats() docstring). Pull
+    # this before touching STAGE_TIMEOUTS's guessed 1.0/2.0/3.0s
+    # cutoffs or _requests_verification()'s keyword list -- a low
+    # resolve_rate with most of escalated_by_reason landing in
+    # "verification_keyword" means the keyword match is over-triggering
+    # (zero SGA calls even attempted), which is a very different fix
+    # from "Stage 1-3 themselves are too conservative." Same "aggregate
+    # counters, no per-user scoping needed beyond logged-in" posture as
+    # chat_page_cache_stats/db_pool_stats/agent_pool_stats above.
+    return sga.get_sga_stats()
+
+
+@router.get("/api/system/ledger-event-stats", dependencies=[Depends(require_auth)])
+def ledger_event_stats():
+    # Perf audit follow-up (latency discussion, point #5): surfaces the
+    # global wait/reroute/provider_failure counters
+    # utils/llm_client.py's _record_ledger_event() now records on every
+    # ledger-gating decision (see get_ledger_event_stats()'s own
+    # docstring). A high reroute_rate confirms generate_text() already
+    # treats "another provider has headroom" as the common case rather
+    # than sleeping and retrying the same one -- check here before
+    # touching any of _handle_transient_error()'s retry-vs-reroute
+    # branches. Same posture as the other /api/system/*-stats routes
+    # above: aggregate counters, no per-user scoping needed beyond
+    # logged-in.
+    return get_ledger_event_stats()
 
 
 @router.get("/api/quota", dependencies=[Depends(require_auth)])

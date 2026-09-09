@@ -3,6 +3,18 @@ const { withSentryConfig } = require("@sentry/nextjs");
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  async redirects() {
+    // /landing used to be the standalone marketing route; its content now
+    // lives at "/" itself (see app/page.js), so anything still pointing at
+    // the old URL gets sent to the new one instead of 404ing.
+    return [
+      {
+        source: "/landing",
+        destination: "/",
+        permanent: true,
+      },
+    ];
+  },
   webpack: (config) => {
     // Known upstream issue in @sentry/nextjs v10: it bundles
     // @apm-js-collab/tracing-hooks (used by its "orchestrion" auto-instrumentation)

@@ -106,6 +106,7 @@ from openai import OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
 
 from eo.tracing import get_tracer, truncate_for_trace
+from memory.bus import incr as bus_incr
 from memory.bus import read as bus_read
 from memory.bus import write as bus_write
 from relay.emitter import emit_event
@@ -1509,6 +1510,29 @@ def _call_cloudflare_step(creds, model: str, system_prompt: str, user_content: s
     return text.strip(), usage, finish_reason, response.headers
 
 
+# Perf audit follow-up (latency discussion, point #5): the per-session
+# ledger_events:{session_id} counter below answers "how did THIS run
+# behave," which is what api/task_runner.py's per-task quota_summary
+# needs -- but it can't answer the standing aggregate question the
+# discussion raised: in practice, does generate_text() mostly reroute
+# to another provider immediately, or does it mostly sleep-and-retry
+# the same one in place? Answering that by walking every session_id's
+# own short-TTL'd (1h) key would mean already having a durable list of
+# every session_id that ever ran, which nothing keeps. Instead, this is
+# a second, GLOBAL, non-session-scoped tally -- same shape as
+# eo/chat_page_cache.py's _STATS_HIT_KEY/_STATS_MISS_KEY: one incr()
+# per event, a 30-day rolling TTL (refreshed only on each key's first
+# increment in a cycle, per incr()'s own docstring), read back by
+# get_ledger_event_stats() below.
+_LEDGER_EVENT_STATS_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days -- matches
+# chat_page_cache.py's STATS_TTL_SECONDS: long enough for a meaningful
+# sample, not infinite.
+
+
+def _ledger_event_stats_key(kind: str) -> str:
+    return f"ledger_events_global:{kind}"
+
+
 def _record_ledger_event(session_id: str, kind: str) -> None:
     """Phase 8c -- best-effort per-task counter of how the ledger's
     gating actually behaved during this run, read back at the end of
@@ -1536,8 +1560,24 @@ def _record_ledger_event(session_id: str, kind: str) -> None:
     undercounts a best-effort dashboard figure by at most a handful,
     not something worth a distributed lock for. Never raises -- an
     accounting miss here must never take down the actual call it's
-    counting."""
-    if not session_id or kind not in ("wait", "reroute", "provider_failure"):
+    counting.
+
+    Perf audit follow-up (#5): also bumps the GLOBAL counter above
+    (see _ledger_event_stats_key()), in its own separate try/except so
+    a hiccup writing the dashboard aggregate can never affect, or get
+    blamed for a failure in, the per-session accounting the real
+    per-task quota_summary depends on. That bump happens BEFORE the
+    session_id check below and doesn't require one -- unlike the
+    per-session write, the global tally isn't attributing to any one
+    run, so it still counts non-HTTP callers (e.g. eo/loop_v4.py's CLI
+    `main()` path) that may never have minted a real session_id."""
+    if kind not in ("wait", "reroute", "provider_failure"):
+        return
+    try:
+        bus_incr(_ledger_event_stats_key(kind), ex=_LEDGER_EVENT_STATS_TTL_SECONDS)
+    except Exception as exc:
+        print(f"  [llm_client] _record_ledger_event global counter failed (non-fatal): {exc}")
+    if not session_id:
         return
     try:
         db_key = f"ledger_events:{session_id}"
@@ -1546,6 +1586,38 @@ def _record_ledger_event(session_id: str, kind: str) -> None:
         bus_write(db_key, current, ex=3600)
     except Exception as exc:
         print(f"  [llm_client] _record_ledger_event failed (non-fatal): {exc}")
+
+
+def get_ledger_event_stats() -> dict:
+    """Perf audit follow-up (#5): the GLOBAL counterpart to
+    eo/quota_sentinel.get_ledger_event_counts()'s per-session view --
+    see _record_ledger_event()'s own docstring for why a second,
+    non-session-scoped counter exists.
+
+    Returns {"wait": int, "reroute": int, "provider_failure": int,
+    "reroute_rate": float | None}. reroute_rate is computed over
+    wait+reroute only (deliberately excluding provider_failure, which
+    answers a different question -- "did a call that went out fail" --
+    from "did the ledger avoid waiting before the call went out"), and
+    is None rather than 0.0 with no data yet, same "don't confuse cold
+    with zero" convention eo/chat_page_cache.get_cache_stats()'s own
+    hit_rate already uses.
+
+    This is the number the latency discussion's point #5 asks for:
+    a high reroute_rate confirms generate_text() already treats
+    "another provider has headroom" as the common case, not
+    "sleep and retry the same one" -- check here before touching any
+    of _handle_transient_error()'s retry-vs-reroute branches."""
+    wait = bus_read(_ledger_event_stats_key("wait"), default=0) or 0
+    reroute = bus_read(_ledger_event_stats_key("reroute"), default=0) or 0
+    provider_failure = bus_read(_ledger_event_stats_key("provider_failure"), default=0) or 0
+    gating_total = wait + reroute
+    return {
+        "wait": wait,
+        "reroute": reroute,
+        "provider_failure": provider_failure,
+        "reroute_rate": (reroute / gating_total) if gating_total else None,
+    }
 
 
 # Bug fix (audit follow-up): usage:{provider}:{key_id}:{date} (and the
