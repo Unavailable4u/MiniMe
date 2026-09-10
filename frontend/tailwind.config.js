@@ -22,9 +22,9 @@ module.exports = {
         },
       },
       fontFamily: {
-        display: ["Syne", "sans-serif"],            // headers, labels, buttons
-        body: ["Rajdhani", "sans-serif"],           // paragraph / prose text
-        mono: ["Share Tech Mono", "monospace"],     // code blocks
+        display: ["Sora", "sans-serif"],            // headers, labels, buttons
+        body: ["Inter", "sans-serif"],               // paragraph / prose text
+        mono: ["JetBrains Mono", "monospace"],       // code blocks
       },
       boxShadow: {
         // Was a colored neon blur; now a plain subtle ring (matches

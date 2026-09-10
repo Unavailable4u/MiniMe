@@ -136,10 +136,10 @@ export default function LoginScreen() {
               </div>
               <div className="flex flex-col items-center gap-0.5">
                 <div className="flex items-center gap-1.5">
-                  <span className="font-['Syne'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold uppercase tracking-tight text-[#e1e2eb]">
+                  <span className="font-['Sora'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold uppercase tracking-tight text-[#e1e2eb]">
                     MINI ME
                   </span>
-                  <span className="font-['Syne'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold uppercase text-[#ff5168] drop-shadow-[0_0_12px_rgba(255,81,104,0.7)]">
+                  <span className="font-['Sora'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold uppercase text-[#ff5168] drop-shadow-[0_0_12px_rgba(255,81,104,0.7)]">
                     AI
                   </span>
                 </div>
