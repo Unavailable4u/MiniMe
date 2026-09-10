@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Query
 
 from api.deps import require_auth
-from eo import agent_task_pool, chat_page_cache, db, sga  # NEW — sga: perf audit follow-up (#1)
+from eo import agent_task_pool, chat_page_cache, conversation_memory, db, sga, tool_budget  # NEW — sga: perf audit follow-up (#1); tool_budget: perf audit follow-up (#6); conversation_memory: perf audit follow-up (#3b)
 from eo.quota_sentinel import (
     get_quota_snapshot,
     get_rate_window_snapshot,
@@ -170,6 +170,40 @@ def sga_stats():
     # counters, no per-user scoping needed beyond logged-in" posture as
     # chat_page_cache_stats/db_pool_stats/agent_pool_stats above.
     return sga.get_sga_stats()
+
+
+@router.get("/api/system/tool-budget-stats", dependencies=[Depends(require_auth)])
+def tool_budget_stats():
+    # Perf audit follow-up (item #6): surfaces the global
+    # increment/hit counters eo/tool_budget.py's increment()/
+    # over_threshold() now record on every counted role-step (see
+    # get_tool_budget_stats()'s own docstring). Pull this after
+    # DEFAULT_TOOL_CALL_BUDGET was lowered (40 -> 15, see that
+    # constant's docstring in eo/tool_budget.py) to see whether the
+    # new number is actually calibrated -- a hit_rate near 0 means
+    # it's still comfortably high; a hit_rate that's uncomfortably
+    # high across real chat-tab sessions means it should come back
+    # up. Same "aggregate counters, no per-user scoping needed beyond
+    # logged-in" posture as the other /api/system/*-stats routes
+    # above.
+    return tool_budget.get_tool_budget_stats()
+
+
+@router.get("/api/system/conversation-thread-stats", dependencies=[Depends(require_auth)])
+def conversation_thread_stats():
+    # Perf audit follow-up (item #3b): surfaces the global
+    # routed/created/reused/skipped counters
+    # eo/conversation_memory.py's _route_to_thread() now records on
+    # every user-turn routing decision (see
+    # get_conversation_thread_stats()'s own docstring). Pull this
+    # before touching THREAD_SIMILARITY_THRESHOLD or
+    # MAX_THREADS_PER_SESSION -- a low created_new_thread rate relative
+    # to routed_existing_thread means most sessions already stay
+    # on-topic and branching rarely fires at all, which would mean
+    # item #3 (the "worth storing?" pre-filter) alone was already
+    # handling most of the noise this feature was built to catch. Same
+    # posture as the other /api/system/*-stats routes above.
+    return conversation_memory.get_conversation_thread_stats()
 
 
 @router.get("/api/system/ledger-event-stats", dependencies=[Depends(require_auth)])
