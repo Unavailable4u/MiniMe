@@ -69,20 +69,20 @@ export default function Markdown({ children, onCitationClick }) {
               // Styled as a small superscript-ish citation chip rather
               // than a normal link -- distinct enough that it doesn't
               // read as "click to leave the page," which is what a
-              // plain cyan underlined link would otherwise imply.
+              // plain underlined link would otherwise imply.
               return (
                 <button
                   type="button"
                   onClick={() => onCitationClick?.(nodeId)}
                   title={`Jump to source: ${nodeId}`}
-                  className="inline-flex items-center px-1 rounded bg-cyan-950/60 border border-cyan-800/60 text-[0.75em] text-cyan-300 hover:bg-cyan-900/60 hover:text-cyan-200 align-middle"
+                  className="inline-flex items-center px-1 rounded bg-blue-950/60 border border-blue-800/60 text-[0.75em] text-blue-300 hover:bg-blue-900/60 hover:text-blue-200 align-middle"
                 >
                   {linkChildren}
                 </button>
               );
             }
             return (
-              <a className="text-cyan-400 underline underline-offset-2 hover:text-cyan-300" href={href} target="_blank" rel="noreferrer" {...rest}>
+              <a className="text-blue-400 underline underline-offset-2 hover:text-blue-300" href={href} target="_blank" rel="noreferrer" {...rest}>
                 {linkChildren}
               </a>
             );
