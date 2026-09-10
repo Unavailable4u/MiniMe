@@ -83,12 +83,19 @@
   --neutral-900-a50: rgba(23, 23, 23, 0.5);
   --neutral-800-a70: rgba(38, 38, 38, 0.7);
 
-  /* Accent — currently just mirrors neutral-100/900 (today's literal
-     "bg-neutral-100 text-neutral-900" primary-button pattern), kept as
-     its own pair so an accent-color picker can retarget just these two
-     later without touching the neutral ramp. */
-  --accent: var(--neutral-100);
-  --accent-text: var(--neutral-900);
+  /* Accent — was a plain white/near-black pair (the literal
+     "bg-neutral-100 text-neutral-900" primary-button pattern). Every
+     primary button in the app (bg-[var(--accent)] text-[var(--accent-text)])
+     reads off just these two variables, so retargeting them here reskins
+     every button in one place without touching individual components.
+     Retargeted to the app's existing --cyber-violet accent (already used
+     for the Research/Test/Growth tab action buttons) so "primary action"
+     is one consistent cyber-violet color everywhere instead of white.
+     Text stays near-black (not white) for contrast — --cyber-violet is a
+     light-toned purple, and dark text against it is the same pairing
+     those existing buttons already use (text-black). */
+  --accent: var(--cyber-violet);
+  --accent-text: var(--neutral-950);
 }
 
 /* ---------------------------------------------------------------
@@ -144,6 +151,24 @@ button, .font-display {
 code, pre, .font-mono {
   font-family: 'JetBrains Mono', monospace;
 }
+
+/* ---------------------------------------------------------------
+   Code output syntax highlighting — fenced ```code blocks in agent/
+   chat output (Markdown.jsx) previously rendered as flat, single-color
+   text on a black background (no token coloring at all). These classes
+   are applied by app/lib/highlightCode.js's tokenizer to give fenced
+   code blocks VS Code "Dark+" style coloring instead. Inline `code`
+   spans and the plain-text fallback are unaffected.
+----------------------------------------------------------------*/
+.tok-comment  { color: #6a9955; font-style: italic; }
+.tok-string   { color: #ce9178; }
+.tok-number   { color: #b5cea8; }
+.tok-keyword  { color: #c586c0; } /* control flow: if/else/for/return/import... */
+.tok-decl     { color: #569cd6; } /* declarations: const/let/function/class/def... */
+.tok-const    { color: #569cd6; } /* true/false/null/None/undefined... */
+.tok-func     { color: #dcdcaa; } /* identifier immediately followed by ( */
+.tok-type     { color: #4ec9b0; } /* PascalCase identifiers */
+.tok-prop     { color: #9cdcfe; } /* JSON object keys */
 
 /* ---------------------------------------------------------------
    Scrollbars — default browser scrollbars break the theme instantly
