@@ -33,9 +33,11 @@ doesn't reintroduce the exact classification tax point #1 already
 identified. See _should_store()'s own docstring for the store-if-unsure
 bias this is built around.
 """
+import math
 import os
 import re
 import sys
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eo import (
@@ -64,8 +66,278 @@ CONVERSATION_MEMORY_FILTER_ENABLED = os.getenv("CONVERSATION_MEMORY_FILTER_ENABL
 CONVERSATION_MEMORY_AMBIGUOUS_LLM_ENABLED = os.getenv("CONVERSATION_MEMORY_AMBIGUOUS_LLM_ENABLED", "true").lower() != "false"
 
 
-def _key(session_id: str) -> str:
-    return f"conversation:{session_id}"
+def _key(session_id: str, thread_id: str = "main") -> str:
+    # "main" keeps the exact legacy key shape ("conversation:{session_id}",
+    # no suffix) that every pre-branching session's turns already live
+    # under, and that scripts/verify_delete_leak.py's delete-leak check
+    # looks for by name — so a session that never branches (the
+    # overwhelming majority, per _route_to_thread()'s own bias toward
+    # staying on the active thread) is byte-for-byte unaffected by this
+    # patch. Only a session that actually drifts topic and gets routed
+    # to a second thread ever touches the new suffixed key shape below.
+    if thread_id == MAIN_THREAD_ID:
+        return f"conversation:{session_id}"
+    return f"conversation:{session_id}:thread:{thread_id}"
+
+
+# ---------------------------------------------------------------------
+# Topic-branched threads — perf audit follow-up (#3b), built last and
+# only after the append_turn() "worth storing?" pre-filter above shipped
+# on its own (see that patch's module-doc note and this feature's own
+# docstrings below for why the order mattered).
+#
+# The problem this solves: a single flat per-session turn list means a
+# user drifting off-topic and back pollutes get_full_context()/
+# get_light_context()'s "recent turns" window with turns from an
+# unrelated tangent, which is exactly the kind of noise the Inspector/
+# Panel and generation agents shouldn't have to read through.
+#
+# The shape deliberately mirrors two primitives already in this
+# codebase rather than inventing new patterns:
+#   - Notebooks' topic_id (api/task_runner.py's _topic_scoped_task_text())
+#     is the same idea one level up — "scope retrieval to a specific
+#     topic instead of the whole workspace." A caller that already has
+#     a topic_id (e.g. a Notebooks-backed chat) can pass it straight
+#     through as `thread_id` below instead of paying for auto-routing.
+#   - parent_thread_id below is the same shape as eo/chat_store.py's
+#     linked_chat_ids — a lightweight pointer between related contexts,
+#     not a full tree structure.
+#
+# Routing itself is deliberately NOT an LLM call — same reasoning
+# eo/routing_memory.py already leans on for its own retrieval step:
+# utils/embedding.embed_text() is already wired up and cheap, so a new
+# user turn is embedded once and compared against each existing
+# thread's running centroid via plain cosine similarity. This adds one
+# embedding call per *user* turn (assistant turns just follow whatever
+# thread the paired user turn landed on), never a second classification
+# LLM call — so it doesn't reintroduce the exact "pay for a decision
+# before real work" tax point #1 already identified elsewhere in this
+# pipeline.
+# ---------------------------------------------------------------------
+
+MAIN_THREAD_ID = "main"
+
+# How many distinct topic threads a single session is allowed to
+# accumulate before routing starts reusing the stalest one instead of
+# minting a new one. Bounded on purpose: an unbounded thread count
+# turns one runaway session into unbounded storage keys, and in
+# practice a chat session rarely juggles more than a handful of live
+# topics at once.
+MAX_THREADS_PER_SESSION = int(os.getenv("CONVERSATION_MAX_THREADS", "6"))
+
+# Cosine-similarity floor for "this is the same topic as an existing
+# thread." Chosen conservatively high (favoring under-branching over
+# over-branching): a false "same thread" merge just costs a little
+# context-window noise, same direction _should_store()'s own
+# store-if-unsure bias already leans, whereas a false "new thread"
+# split fragments context that should have stayed together. Tune from
+# get_conversation_thread_stats() below rather than guessing further.
+THREAD_SIMILARITY_THRESHOLD = float(os.getenv("CONVERSATION_THREAD_SIMILARITY_THRESHOLD", "0.72"))
+
+CONVERSATION_THREAD_ROUTING_ENABLED = os.getenv("CONVERSATION_THREAD_ROUTING_ENABLED", "true").lower() != "false"
+
+_THREAD_STATS_KEYS = {
+    "routed_existing_thread": "conv_thread_stats:routed_existing",
+    "created_new_thread": "conv_thread_stats:created_new",
+    "reused_stale_thread": "conv_thread_stats:reused_stale",
+    "routing_skipped_disabled": "conv_thread_stats:skipped_disabled",
+    "routing_skipped_error": "conv_thread_stats:skipped_error",
+}
+
+
+def _threads_key(session_id: str) -> str:
+    return f"conversation_threads:{session_id}"
+
+
+def _active_thread_key(session_id: str) -> str:
+    return f"conversation_active_thread:{session_id}"
+
+
+def _note_thread_stat(reason: str) -> None:
+    """Best-effort; never raises — same non-fatal posture as this
+    module's _note_store_stat() right above."""
+    try:
+        incr(_THREAD_STATS_KEYS[reason], ex=_STATS_TTL_SECONDS)
+    except Exception as exc:
+        print(f"  [Conversation Memory] _note_thread_stat({reason!r}) failed (non-fatal): {exc}")
+
+
+def get_conversation_thread_stats() -> dict:
+    """Returns counts for each path _route_to_thread() can resolve
+    through, plus a rollup. Pull this before touching
+    THREAD_SIMILARITY_THRESHOLD or MAX_THREADS_PER_SESSION — a low
+    created_new_thread rate relative to routed_existing_thread means
+    real sessions mostly stay on-topic already and branching rarely
+    fires (nothing to tune); a high routing_skipped_error rate means
+    the embedding call itself is failing more than the threshold
+    matters."""
+    counts = {reason: (read(key, default=0) or 0) for reason, key in _THREAD_STATS_KEYS.items()}
+    total = sum(counts.values())
+    return {**counts, "total_routing_decisions": total}
+
+
+def _cosine_similarity(a: list, b: list) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _embed_for_routing(text: str):
+    """Returns an embedding vector for `text`, or None on any failure
+    (missing HF key, network error, etc.) — routing always has a safe
+    fallback (stay on the active thread, or "main") for a None return,
+    so this never needs to raise. Imported lazily, same reasoning
+    eo/routing_memory.py already documents for its own _embed import:
+    keeps a network/HF dependency out of this module's own import
+    chain for callers that never touch threading at all."""
+    try:
+        from utils.embedding import embed_text
+        return embed_text(text)
+    except Exception as exc:
+        print(f"  [Conversation Memory] thread-routing embed skipped (non-fatal): {exc}")
+        return None
+
+
+def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None) -> str:
+    """Returns the thread_id a new *user* turn belongs to, and updates
+    the thread registry + active-thread pointer to match. Assistant
+    turns never call this directly — see append_turn()'s own docstring
+    — they just follow whatever the paired user turn already resolved.
+
+    explicit_thread_id: a caller that already knows the topic (e.g. a
+    Notebooks-backed chat passing its own topic_id straight through,
+    mirroring api/task_runner.py's _topic_scoped_task_text() one layer
+    up) skips auto-routing entirely and just registers/refreshes that
+    thread's centroid. This is the escape hatch for a caller who
+    shouldn't have to trust embedding similarity to find a topic it
+    already has an id for.
+
+    Auto-routing itself, when no explicit id is given:
+      1. Disabled via env var, or the embedding call fails -> fall back
+         to whatever thread is already active (or "main" if there
+         isn't one yet). Bias, deliberately: an unavailable router
+         should never fragment a session it can't confidently route,
+         same "store-if-unsure" direction _should_store() already
+         takes for the sibling filter above.
+      2. No threads registered yet -> this turn starts "main".
+      3. Compare against every existing thread's centroid; the best
+         match at/above THREAD_SIMILARITY_THRESHOLD wins, and that
+         thread's centroid is nudged toward the new vector (simple
+         running average weighted by turn_count) so a long-lived
+         thread's centroid tracks its topic as it evolves rather than
+         freezing at its first message.
+      4. No match clears the bar -> a new thread is created, with
+         parent_thread_id set to whatever was active before (the same
+         lightweight pointer shape as eo/chat_store.py's
+         linked_chat_ids) — UNLESS the session is already at
+         MAX_THREADS_PER_SESSION, in which case the least-recently-
+         updated existing thread is reused (its centroid replaced
+         outright, not averaged, since it's now genuinely a different
+         topic) rather than growing storage without bound.
+    """
+    registry = read(_threads_key(session_id), default=[])
+    now = time.time()
+
+    if explicit_thread_id:
+        entry = next((t for t in registry if t["thread_id"] == explicit_thread_id), None)
+        vector = _embed_for_routing(text)
+        if entry is None:
+            registry.append({
+                "thread_id": explicit_thread_id,
+                "centroid": vector,
+                "parent_thread_id": read(_active_thread_key(session_id), default=None),
+                "updated_at": now,
+                "turn_count": 1,
+            })
+        elif vector is not None:
+            entry["centroid"] = _ema_centroid(entry.get("centroid"), vector, entry.get("turn_count", 1))
+            entry["turn_count"] = entry.get("turn_count", 1) + 1
+            entry["updated_at"] = now
+        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
+        write(_active_thread_key(session_id), explicit_thread_id, ex=CONVERSATION_TTL)
+        return explicit_thread_id
+
+    if not CONVERSATION_THREAD_ROUTING_ENABLED:
+        _note_thread_stat("routing_skipped_disabled")
+        return read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+
+    vector = _embed_for_routing(text)
+    if vector is None:
+        _note_thread_stat("routing_skipped_error")
+        return read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+
+    if not registry:
+        registry = [{
+            "thread_id": MAIN_THREAD_ID, "centroid": vector,
+            "parent_thread_id": None, "updated_at": now, "turn_count": 1,
+        }]
+        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
+        write(_active_thread_key(session_id), MAIN_THREAD_ID, ex=CONVERSATION_TTL)
+        _note_thread_stat("created_new_thread")
+        return MAIN_THREAD_ID
+
+    best_thread, best_score = None, -1.0
+    for entry in registry:
+        score = _cosine_similarity(vector, entry.get("centroid"))
+        if score > best_score:
+            best_thread, best_score = entry, score
+
+    if best_score >= THREAD_SIMILARITY_THRESHOLD:
+        best_thread["centroid"] = _ema_centroid(best_thread.get("centroid"), vector, best_thread.get("turn_count", 1))
+        best_thread["turn_count"] = best_thread.get("turn_count", 1) + 1
+        best_thread["updated_at"] = now
+        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
+        write(_active_thread_key(session_id), best_thread["thread_id"], ex=CONVERSATION_TTL)
+        _note_thread_stat("routed_existing_thread")
+        return best_thread["thread_id"]
+
+    if len(registry) >= MAX_THREADS_PER_SESSION:
+        stalest = min(registry, key=lambda t: t.get("updated_at", 0))
+        stalest["centroid"] = vector
+        stalest["turn_count"] = 1
+        stalest["updated_at"] = now
+        stalest["parent_thread_id"] = read(_active_thread_key(session_id), default=None)
+        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
+        write(_active_thread_key(session_id), stalest["thread_id"], ex=CONVERSATION_TTL)
+        _note_thread_stat("reused_stale_thread")
+        return stalest["thread_id"]
+
+    new_thread_id = f"topic_{int(now * 1000)}"
+    registry.append({
+        "thread_id": new_thread_id, "centroid": vector,
+        "parent_thread_id": read(_active_thread_key(session_id), default=None),
+        "updated_at": now, "turn_count": 1,
+    })
+    write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
+    write(_active_thread_key(session_id), new_thread_id, ex=CONVERSATION_TTL)
+    _note_thread_stat("created_new_thread")
+    return new_thread_id
+
+
+def _ema_centroid(old_centroid, new_vector, turn_count: int):
+    """Running average of a thread's centroid, weighted by how many
+    turns have already contributed to it — a thread with 20 turns
+    behind it shouldn't have its topic yanked by one new message the
+    way a brand-new 1-turn thread should. Falls back to the new vector
+    outright if there's no usable old centroid to blend with."""
+    if not old_centroid or len(old_centroid) != len(new_vector):
+        return new_vector
+    weight_old = turn_count / (turn_count + 1)
+    weight_new = 1 / (turn_count + 1)
+    return [weight_old * o + weight_new * n for o, n in zip(old_centroid, new_vector)]
+
+
+def list_threads(session_id: str) -> list:
+    """Returns this session's thread registry as-is (thread_id,
+    centroid, parent_thread_id, updated_at, turn_count per entry) —
+    exposed for a future debugging endpoint or UI thread-picker, not
+    called anywhere in this patch itself."""
+    return read(_threads_key(session_id), default=[])
 
 
 def _workspace_facts_text(session_id: str, owner_id: str = None) -> str:
@@ -273,7 +545,8 @@ def _should_store(text: str, session_id: str = None) -> bool:
     return store
 
 
-def append_turn(session_id: str, role: str, text: str, owner_id: str = None) -> None:
+def append_turn(session_id: str, role: str, text: str, owner_id: str = None,
+                 thread_id: str = None) -> None:
     """Appends one turn ({"role": "user"|"assistant", "text": ...}) to
     this session's transcript. No-op if session_id is falsy — same
     fail-quiet convention relay/emitter.py already uses for a missing
@@ -282,12 +555,43 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None) -> 
 
     NEW — perf audit follow-up (#3): also a no-op (turn neither stored
     nor mined by the note-taker) if _should_store() judges this turn
-    pure filler — see that function and the module docstring above."""
+    pure filler — see that function and the module docstring above.
+
+    thread_id — NEW, perf audit follow-up (#3b), topic-branched
+    threads: optional. A caller that already knows the topic (e.g. a
+    Notebooks-backed chat with its own topic_id) can pass it straight
+    through and skip auto-routing entirely — see _route_to_thread()'s
+    own docstring for exactly how an explicit id is handled.
+
+    Every existing call site in this codebase (api/task_runner.py,
+    eo/loop_v4.py, agents/note_taker.py, etc.) calls this without
+    thread_id at all, which is intentional and unchanged behavior for
+    them: a "user" turn with no explicit thread_id auto-routes via
+    embedding similarity against the session's existing threads
+    (falling back to "main" whenever routing can't confidently place
+    it — see _route_to_thread()); an "assistant" turn never re-routes
+    on its own, it simply lands in whatever thread the user turn it's
+    replying to already resolved to, via the active-thread pointer
+    _route_to_thread() maintains. So a session that never drifts topic
+    behaves exactly as it did before this patch — same single "main"
+    thread, same legacy storage key (see _key()'s own docstring)."""
     if not session_id or not text:
         return
     if not _should_store(text, session_id=session_id):
         return
-    turns = read(_key(session_id), default=[])
+
+    if role == "user":
+        resolved_thread_id = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
+    elif thread_id:
+        # An assistant turn with an explicit thread_id (rare — mainly
+        # useful for tests/backfills) still registers/refreshes that
+        # thread rather than silently ignoring the hint.
+        resolved_thread_id = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
+    else:
+        resolved_thread_id = read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+
+    key = _key(session_id, resolved_thread_id)
+    turns = read(key, default=[])
     turns.append({"role": role, "text": text})
     if len(turns) > MAX_STORED_TURNS:
         dropped = turns[:len(turns) - MAX_STORED_TURNS]
@@ -299,7 +603,7 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None) -> 
         # durable-fact routing step can resolve session_id -> workspace.
         rolling_summary.fold_turns_async(session_id, dropped, owner_id=owner_id)
         turns = turns[-MAX_STORED_TURNS:]
-    write(_key(session_id), turns, ex=CONVERSATION_TTL)
+    write(key, turns, ex=CONVERSATION_TTL)
     if role == "assistant":
         try:
             from agents.note_taker import note_from_latest_turn_async
@@ -309,11 +613,23 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None) -> 
             print(f"  [Conversation Memory] note-taker dispatch skipped: {exc}")
 
 
-def get_full_context(session_id: str, owner_id: str = None, max_turns: int = FULL_CONTEXT_TURNS) -> str:
-    """... (unchanged from previous fix) ..."""
+def get_full_context(session_id: str, owner_id: str = None, max_turns: int = FULL_CONTEXT_TURNS,
+                      thread_id: str = None) -> str:
+    """... (unchanged from previous fix) ...
+
+    thread_id — NEW, perf audit follow-up (#3b): optional. Defaults to
+    whatever thread append_turn() most recently routed this session's
+    active turn to (via the active-thread pointer), so an existing
+    caller that doesn't pass this reads exactly the narrow, on-topic
+    window that thread-branching exists to produce, with no call-site
+    changes required. Pass an explicit thread_id to read a *different*
+    (e.g. earlier, now-inactive) thread's context instead — see
+    list_threads() for discovering what thread ids exist for a
+    session."""
     if not session_id:
         return ""
-    turns = read(_key(session_id), default=[])
+    resolved_thread_id = thread_id or read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+    turns = read(_key(session_id, resolved_thread_id), default=[])
     recent = turns[-max_turns:]
     lines = []
     for t in recent:
@@ -344,11 +660,17 @@ def get_full_context(session_id: str, owner_id: str = None, max_turns: int = FUL
     return memory_blocks or body
 
 
-def get_light_context(session_id: str, owner_id: str = None, max_turns: int = LIGHT_CONTEXT_TURNS) -> str:
-    """... (unchanged from previous fix) ..."""
+def get_light_context(session_id: str, owner_id: str = None, max_turns: int = LIGHT_CONTEXT_TURNS,
+                       thread_id: str = None) -> str:
+    """... (unchanged from previous fix) ...
+
+    thread_id — NEW, perf audit follow-up (#3b): same default/override
+    behavior as get_full_context()'s own thread_id parameter — see
+    that function's docstring."""
     if not session_id:
         return ""
-    turns = read(_key(session_id), default=[])
+    resolved_thread_id = thread_id or read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+    turns = read(_key(session_id, resolved_thread_id), default=[])
     recent = turns[-max_turns:]
     lines = []
     for t in recent:
