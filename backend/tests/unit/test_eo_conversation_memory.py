@@ -42,6 +42,13 @@ import pytest
 
 from eo import conversation_memory
 
+# Captured before any fixture can monkeypatch conversation_memory over
+# it (see _default_ambiguous_classifier_stores below) -- the direct
+# _classify_ambiguous_turn() tests further down restore this real
+# implementation for their own duration so they can exercise it
+# instead of the autouse stub every other test in this file relies on.
+_REAL_CLASSIFY_AMBIGUOUS_TURN = conversation_memory._classify_ambiguous_turn
+
 
 @pytest.fixture(autouse=True)
 def _no_workspace_context(monkeypatch):
@@ -65,6 +72,24 @@ def _no_note_taker_dispatch(monkeypatch):
     depend on (or trigger) the real note-taking pipeline."""
     from agents import note_taker
     monkeypatch.setattr(note_taker, "note_from_latest_turn_async", MagicMock())
+
+
+@pytest.fixture(autouse=True)
+def _default_ambiguous_classifier_stores(monkeypatch):
+    """Autouse: _should_store()'s ambiguous tier (perf audit follow-up
+    #3) does a lazy `from eo.sga import SGA_CHAINS` / `from
+    utils.llm_client import generate_text` inside
+    _classify_ambiguous_turn() -- stub that function directly so
+    ordinary unit tests (most of which append short strings like
+    "hello"/"hi"/"one") never attempt a real provider call. The
+    default, (True, False) i.e. "store, via fallback," matches the
+    store-if-unsure bias _classify_ambiguous_turn() is built around, so
+    every pre-existing test in this file that expects a short turn to
+    end up stored keeps working unchanged. Tests below that exercise
+    the classifier itself, or a genuine SKIP verdict, override this
+    explicitly."""
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn",
+                         lambda *a, **kw: (True, False))
 
 
 # ---------------------------------------------------------------------
@@ -134,6 +159,156 @@ def test_append_turn_note_taker_dispatch_failure_never_propagates(fake_bus, monk
 
     turns = conversation_memory.read(conversation_memory._key("sess_1"), default=[])
     assert turns[-1]["text"] == "answer"  # the turn is still stored
+
+
+# ---------------------------------------------------------------------
+# _should_store / append_turn's "worth storing" pre-filter
+# (perf audit follow-up #3)
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "ok", "Ok!", "okay.", "  thanks  ", "Thanks so much!", "thx", "ty",
+    "sounds good.", "sounds good!", "no", "nope", "cool", "great", "np",
+    "lol", "haha", "+1", "👍", "K", "kk",
+])
+def test_should_store_skips_bare_acknowledgements(text):
+    assert conversation_memory._should_store(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "please write a haiku about the sea",
+    "make it shorter",
+    "the login bug is in session refresh",
+    "use TypeScript for this project",
+])
+def test_should_store_stores_text_at_or_above_the_definite_length_floor(text):
+    assert len(text) >= conversation_memory._DEFINITELY_STORE_MIN_CHARS
+    assert conversation_memory._should_store(text) is True
+
+
+def test_should_store_escalates_short_non_filler_text_to_the_ambiguous_classifier(monkeypatch):
+    classifier = MagicMock(return_value=(True, True))
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", classifier)
+
+    result = conversation_memory._should_store("what time?")
+
+    assert result is True
+    classifier.assert_called_once()
+    assert classifier.call_args.args[0] == "what time?"
+
+
+def test_should_store_is_a_full_passthrough_when_the_filter_is_disabled(monkeypatch):
+    monkeypatch.setattr(conversation_memory, "CONVERSATION_MEMORY_FILTER_ENABLED", False)
+    classifier = MagicMock()
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", classifier)
+
+    assert conversation_memory._should_store("ok") is True  # would otherwise be skipped
+    classifier.assert_not_called()  # disabled filter shouldn't even run the deterministic tiers
+
+
+def test_append_turn_does_not_store_a_bare_acknowledgement(fake_bus):
+    conversation_memory.append_turn("sess_1", "user", "thanks!")
+    assert conversation_memory.read(conversation_memory._key("sess_1"), default=None) is None
+
+
+def test_append_turn_stores_a_bare_acknowledgement_when_filter_disabled(fake_bus, monkeypatch):
+    monkeypatch.setattr(conversation_memory, "CONVERSATION_MEMORY_FILTER_ENABLED", False)
+    conversation_memory.append_turn("sess_1", "user", "thanks!")
+    turns = conversation_memory.read(conversation_memory._key("sess_1"), default=[])
+    assert turns == [{"role": "user", "text": "thanks!"}]
+
+
+def test_append_turn_does_not_dispatch_note_taker_for_a_skipped_turn(fake_bus):
+    from agents import note_taker
+    conversation_memory.append_turn("sess_1", "user", "question here, a real one")
+    conversation_memory.append_turn("sess_1", "assistant", "ok")  # bare ack, skipped
+    note_taker.note_from_latest_turn_async.assert_not_called()
+
+
+# ---------------------------------------------------------------------
+# _classify_ambiguous_turn
+# ---------------------------------------------------------------------
+
+def test_classify_ambiguous_turn_returns_skip_on_a_skip_verdict(monkeypatch):
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", _REAL_CLASSIFY_AMBIGUOUS_TURN)
+    import utils.llm_client as llm_client
+    monkeypatch.setattr(llm_client, "generate_text", lambda **kw: "SKIP")
+
+    store, used_llm = conversation_memory._classify_ambiguous_turn("np")
+
+    assert (store, used_llm) == (False, True)
+
+
+def test_classify_ambiguous_turn_returns_store_on_a_store_verdict(monkeypatch):
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", _REAL_CLASSIFY_AMBIGUOUS_TURN)
+    import utils.llm_client as llm_client
+    monkeypatch.setattr(llm_client, "generate_text", lambda **kw: "STORE")
+
+    store, used_llm = conversation_memory._classify_ambiguous_turn("my flight is at 6")
+
+    assert (store, used_llm) == (True, True)
+
+
+def test_classify_ambiguous_turn_defaults_to_store_on_an_unparseable_answer(monkeypatch):
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", _REAL_CLASSIFY_AMBIGUOUS_TURN)
+    import utils.llm_client as llm_client
+    monkeypatch.setattr(llm_client, "generate_text", lambda **kw: "uh, sure I guess")
+
+    store, used_llm = conversation_memory._classify_ambiguous_turn("hmm")
+
+    assert (store, used_llm) == (True, False)
+
+
+def test_classify_ambiguous_turn_defaults_to_store_on_a_provider_error(monkeypatch):
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", _REAL_CLASSIFY_AMBIGUOUS_TURN)
+    import utils.llm_client as llm_client
+
+    def boom(**kw):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(llm_client, "generate_text", boom)
+
+    store, used_llm = conversation_memory._classify_ambiguous_turn("hmm")
+
+    assert (store, used_llm) == (True, False)
+
+
+def test_classify_ambiguous_turn_skips_the_llm_call_entirely_when_disabled(monkeypatch):
+    monkeypatch.setattr(conversation_memory, "_classify_ambiguous_turn", _REAL_CLASSIFY_AMBIGUOUS_TURN)
+    import utils.llm_client as llm_client
+    called = MagicMock()
+    monkeypatch.setattr(llm_client, "generate_text", called)
+    monkeypatch.setattr(conversation_memory, "CONVERSATION_MEMORY_AMBIGUOUS_LLM_ENABLED", False)
+
+    store, used_llm = conversation_memory._classify_ambiguous_turn("hmm")
+
+    assert (store, used_llm) == (True, False)
+    called.assert_not_called()
+
+
+# ---------------------------------------------------------------------
+# get_conversation_memory_store_stats
+# ---------------------------------------------------------------------
+
+def test_get_conversation_memory_store_stats_starts_cold_not_zero(fake_bus):
+    stats = conversation_memory.get_conversation_memory_store_stats()
+    assert stats["total_stored"] == 0
+    assert stats["total_skipped"] == 0
+    assert stats["skip_rate"] is None
+
+
+def test_get_conversation_memory_store_stats_counts_stored_and_skipped_turns(fake_bus):
+    conversation_memory.append_turn("sess_1", "user", "the login bug is in session refresh")  # definite store
+    conversation_memory.append_turn("sess_1", "user", "thanks!")  # ack, skipped
+    conversation_memory.append_turn("sess_1", "user", "thanks!")  # ack, skipped
+
+    stats = conversation_memory.get_conversation_memory_store_stats()
+
+    assert stats["stored_definite"] == 1
+    assert stats["skipped_ack"] == 2
+    assert stats["total_stored"] == 1
+    assert stats["total_skipped"] == 2
+    assert stats["skip_rate"] == pytest.approx(2 / 3)
 
 
 # ---------------------------------------------------------------------

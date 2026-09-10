@@ -359,3 +359,59 @@ def test_invalidate_cache_returns_zero_when_query_raises(monkeypatch, fake_index
         raise RuntimeError("Vector unavailable")
     fake_index.query = boom
     assert semantic_cache.invalidate_cache("a correction", workspace_id="ws-1") == 0
+
+
+# ---------------------------------------------------------------------
+# format_reference_block — perf audit follow-up (#4): the bounded
+# reuse-as-is / revise-just-the-part / full-rewrite-as-fallback
+# instruction that replaced the old open-ended "build on it, refine it,
+# or diverge... as this new ask calls for" wrapper both generative call
+# sites (api/task_runner.py, eo/loop_v4.py) prepend ahead of a
+# get_cached_reference() hit.
+# ---------------------------------------------------------------------
+
+def test_format_reference_block_returns_empty_string_for_falsy_input():
+    assert semantic_cache.format_reference_block("") == ""
+    assert semantic_cache.format_reference_block(None) == ""
+
+
+def test_format_reference_block_embeds_the_reference_answer_verbatim():
+    result = semantic_cache.format_reference_block("Use exponential backoff with a 2s base.")
+    assert result.endswith("Use exponential backoff with a 2s base.")
+
+
+def test_format_reference_block_offers_reuse_as_is_as_the_cheap_default():
+    result = semantic_cache.format_reference_block("some prior answer")
+    assert "reuse it as-is" in result
+    assert "don't rewrite something that's already right" in result
+
+
+def test_format_reference_block_scopes_a_genuine_change_to_the_relevant_part():
+    result = semantic_cache.format_reference_block("some prior answer")
+    assert "revise just that part" in result
+
+
+def test_format_reference_block_keeps_a_full_rewrite_as_a_fallback_only():
+    result = semantic_cache.format_reference_block("some prior answer")
+    assert "Only write a full new answer if this ask genuinely calls for a different" in result
+
+
+def test_format_reference_block_no_longer_uses_the_old_open_ended_wording():
+    # Regression guard: the pre-patch instruction set no ceiling at all
+    # ("build on it, refine it, or diverge... as this new ask calls
+    # for") -- confirms this phrasing was actually replaced, not just
+    # supplemented.
+    result = semantic_cache.format_reference_block("some prior answer")
+    assert "diverge from it as this new ask calls for" not in result
+    assert "don't just repeat it verbatim" not in result
+
+
+def test_format_reference_block_is_callable_unconditionally():
+    # Regression guard for the call-site refactor: both
+    # api/task_runner.py and eo/loop_v4.py now do
+    # `task_text + format_reference_block(reference_answer)`
+    # unconditionally rather than branching on reference_answer
+    # themselves first -- confirm that's actually safe end to end.
+    task_text = "write a deployment checklist"
+    assert task_text + semantic_cache.format_reference_block(None) == task_text
+    assert task_text + semantic_cache.format_reference_block("prior checklist text") != task_text

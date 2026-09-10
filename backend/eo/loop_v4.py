@@ -80,6 +80,7 @@ from eo.semantic_cache import (
     CACHE_CLASS_GENERATIVE,
     check_cache,
     classify_cache_class,
+    format_reference_block,  # NEW — perf audit follow-up (#4): bounded reference-reuse instruction
     get_cached_reference,
     write_cache,
 )
@@ -490,14 +491,13 @@ def main():
         elif cache_class == CACHE_CLASS_GENERATIVE:
             reference_answer = get_cached_reference(task_text, app_slug=opts["app"])
 
+        # CHANGED — perf audit follow-up (#4): bounded reference-reuse
+        # instruction instead of open-ended; see eo/semantic_cache.py's
+        # format_reference_block()/REFERENCE_BLOCK_TEMPLATE. Prompt-only,
+        # same branch structure as before.
         sga_input = task_text
         if reference_answer:
-            sga_input = (
-                f"{task_text}\n\n"
-                f"(Reference — your previous answer to a similar ask. Build on it, "
-                f"refine it, or diverge from it as this new ask calls for; don't just "
-                f"repeat it verbatim.)\n{reference_answer}"
-            )
+            sga_input = task_text + format_reference_block(reference_answer)
 
         sga_result = sga_attempt(sga_input, session_id=session_id)   # Patch B7: may include reference context; Patch B8: threads session_id
         if sga_result["resolved"]:

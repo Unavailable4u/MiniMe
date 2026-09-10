@@ -91,6 +91,7 @@ from eo.semantic_cache import (
     CACHE_CLASS_GENERATIVE,
     check_cache,
     classify_cache_class,
+    format_reference_block,  # NEW — perf audit follow-up (#4): bounded reference-reuse instruction
     get_cached_reference,
     write_cache,
 )
@@ -1571,14 +1572,15 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     # NEW — Patch B7: fold the prior answer in as reference context rather
     # than replaying it. grounded_task_text (not task_text) so the model
     # still sees the grounded prompt from the bug #4 fix above.
+    # CHANGED — perf audit follow-up (#4): the wrapping instruction is now
+    # bounded (reuse-as-is / revise-just-the-part-that-changed / full
+    # rewrite only as a fallback) instead of open-ended — see
+    # eo/semantic_cache.py's format_reference_block()/REFERENCE_BLOCK_TEMPLATE
+    # for the wording and reasoning; this is a prompt-only change, the
+    # branch structure here is unchanged.
     sga_input = grounded_task_text
     if reference_answer:
-        sga_input = (
-            f"{grounded_task_text}\n\n"
-            f"(Reference — your previous answer to a similar ask. Build on it, "
-            f"refine it, or diverge from it as this new ask calls for; don't just "
-            f"repeat it verbatim.)\n{reference_answer}"
-        )
+        sga_input = grounded_task_text + format_reference_block(reference_answer)
 
     sga_result = sga_attempt(sga_input, session_id=session_id)   # CHANGED — bug #4 fix, was task_text; Patch B7, may include reference
     if sga_result["resolved"]:
