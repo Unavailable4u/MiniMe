@@ -2,6 +2,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MermaidDiagram from "./MermaidDiagram";
+import { tokenizeCode } from "../lib/highlightCode";
 
 // Shared markdown renderer for agent output (MessageBubble's ResultBody,
 // AgentStepList's step bodies). Custom-styled per element instead of
@@ -195,6 +196,17 @@ export default function Markdown({ children, onCitationClick }) {
               );
             }
 
+            // BUGFIX (code output audit): fenced blocks previously rendered
+            // {children} straight through — flat, single-color text on the
+            // bg-black/50 panel below, no token coloring at all. tokenizeCode
+            // (app/lib/highlightCode.js) splits the block into comment/
+            // string/number/keyword/decl/const/func/type tokens; each typed
+            // token gets its matching `.tok-<type>` class from globals.css
+            // (VS Code "Dark+" colors), and untyped tokens render as plain
+            // text exactly as before — so an unrecognized language still
+            // falls back to today's flat rendering instead of erroring.
+            const codeText = String(children).replace(/\n$/, "");
+            const tokens = tokenizeCode(codeText, lang);
             return (
               <div className="rounded-lg border border-[var(--neutral-800)] bg-black/50 overflow-hidden my-2">
                 {lang && (
@@ -204,7 +216,15 @@ export default function Markdown({ children, onCitationClick }) {
                 )}
                 <pre className="overflow-x-auto p-3 text-xs">
                   <code className={className} {...rest}>
-                    {children}
+                    {tokens.map((tok, i) =>
+                      tok.type ? (
+                        <span key={i} className={`tok-${tok.type}`}>
+                          {tok.text}
+                        </span>
+                      ) : (
+                        tok.text
+                      )
+                    )}
                   </code>
                 </pre>
               </div>
