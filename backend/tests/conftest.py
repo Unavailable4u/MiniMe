@@ -104,6 +104,31 @@ class FakeRedis:
             keys = keys[0]
         return [self._store.get(k) for k in keys]
 
+    def incr(self, key):
+        # NEW — perf audit follow-up (#3): memory/bus.py's incr()
+        # (used by eo/sga.py's resolve/escalate counters and, as of
+        # this patch, eo/conversation_memory.py's store/skip counters)
+        # had no FakeRedis support at all before this — any test that
+        # exercised a counter path would either get a raw AttributeError
+        # (caught and silently swallowed by every caller's own
+        # non-fatal try/except, per those modules' own convention) or,
+        # if asserting on the counter's value, fail outright. Stored as
+        # a str, matching real Upstash's wire format (bus.py's read()
+        # then json.loads()'s it back into an int the same way it does
+        # for a genuine INCR reply).
+        current = int(self._store.get(key, 0) or 0) + 1
+        self._store[key] = str(current)
+        return current
+
+    def expire(self, key, seconds):
+        # NEW — perf audit follow-up (#3): memory/bus.py's incr(...,
+        # ex=...) issues a follow-up EXPIRE the first time a counter
+        # key is created. FakeRedis doesn't model TTLs at all (see
+        # fake_bus's own docstring: a fresh instance per test already
+        # gives every counter a clean slate), so this just needs to
+        # exist and not raise.
+        return True
+
     # Convenience for tests that want to inspect/seed state directly
     def _dump(self):
         return dict(self._store)

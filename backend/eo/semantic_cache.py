@@ -46,6 +46,17 @@ Two independent fixes bundled together:
      SYSTEM_VERSION (env var SGA_SYSTEM_VERSION, or the default below)
      whenever a prompt/agent/model change is meaningful enough that old
      answers shouldn't be trusted or replayed anymore.
+  5. Perf audit follow-up (#4) — REFERENCE_BLOCK_TEMPLATE /
+     format_reference_block(): the instruction GENERATIVE call sites
+     wrap around a get_cached_reference() hit used to be open-ended
+     ("build on it, refine it, or diverge... as this new ask calls
+     for"), which had no ceiling — a repeat-ish ask that needed no real
+     change still paid for a full free rewrite. Bounded now: reuse-as-is
+     is the cheap default, a genuine change is scoped to the part that
+     needs it, and a full rewrite remains available as the model's own
+     fallback rather than its default. Prompt-only — see
+     format_reference_block()'s own docstring, further down, for the
+     full reasoning and the two call sites that share it.
 """
 import hashlib
 import os
@@ -318,6 +329,50 @@ def get_cached_reference(task_text: str, app_slug: str = None, workspace_id: str
         return None
 
     return meta.get("answer") or None
+
+
+# Perf audit follow-up (#4) — the instruction wrapped around a reference
+# answer at each GENERATIVE call site (api/task_runner.py, eo/loop_v4.py;
+# see get_cached_reference()'s own docstring above for why the wrap
+# happens at the call site rather than in this function). Used to be
+# open-ended: "build on it, refine it, or diverge from it as this new
+# ask calls for; don't just repeat it verbatim" set no ceiling at all,
+# so a repeat-ish ask that needed no real change still paid for a full
+# free rewrite — sometimes landing on something worse than the answer
+# already sitting in the cache.
+#
+# Bounded now, in the same spirit as _VERIFY_SYSTEM_PROMPT above (a
+# plain instruction the model itself acts on — nothing downstream
+# parses or branches on which option it took, so this needs no new
+# code, just this wording): reuse-as-is is offered first as the cheap
+# default; a genuine change is scoped to "just the part that needs it"
+# rather than a full rewrite by default; a full rewrite is still
+# available, but only as the model's own fallback when the new ask
+# genuinely calls for a different approach — not the path of least
+# resistance it was before.
+REFERENCE_BLOCK_TEMPLATE = (
+    "\n\n(Reference — your previous answer to a similar ask, given as a "
+    "starting point rather than something to regenerate from scratch. If it "
+    "still fully answers this new ask, say so briefly and reuse it as-is — "
+    "don't rewrite something that's already right. If only part of it needs "
+    "to change, revise just that part and leave the rest as it was. Only "
+    "write a full new answer if this ask genuinely calls for a different "
+    "approach or framing than the one below.)\n{reference_answer}"
+)
+
+
+def format_reference_block(reference_answer: str) -> str:
+    """Formats get_cached_reference()'s return value into the bounded
+    instruction block both generative call sites append to their
+    fresh-generation prompt — a single source of truth for text that
+    used to be duplicated verbatim in api/task_runner.py and
+    eo/loop_v4.py (see REFERENCE_BLOCK_TEMPLATE above for the wording
+    itself). Returns "" on a falsy reference_answer, so a caller can do
+    `task_text + format_reference_block(reference_answer)` unconditionally
+    instead of guarding the call itself."""
+    if not reference_answer:
+        return ""
+    return REFERENCE_BLOCK_TEMPLATE.format(reference_answer=reference_answer)
 
 
 def invalidate_cache(text: str, app_slug: str = None, workspace_id: str = None) -> int:
