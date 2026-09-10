@@ -24,7 +24,7 @@ const TOOLTIP_STYLE = {
   border: "1px solid #1a2740",
   borderRadius: 6,
   fontSize: 11,
-  fontFamily: "'Share Tech Mono', monospace",
+  fontFamily: "'JetBrains Mono', monospace",
   color: "#d6e4f0",
 };
 
@@ -278,7 +278,7 @@ function UsageHistoryPanel({ apiUrl }) {
                 />
                 <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
                 <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }} />
+                <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} />
                 {providerNames.map((p) => (
                   <Bar key={p} dataKey={p} fill={colorFor(p)} radius={[2, 2, 0, 0]} />
                 ))}
@@ -436,7 +436,7 @@ function ProjectSectionUsagePanel({ apiUrl }) {
               <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} tickFormatter={(d) => d.slice(5)} />
               <YAxis tick={{ fontSize: 10, fill: "#64748b" }} />
               <Tooltip contentStyle={TOOLTIP_STYLE} />
-              <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'Share Tech Mono', monospace" }} />
+              <Legend wrapperStyle={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }} />
               {data.domain && <Bar dataKey="domain" name={domain || "domain"} fill="#22d3ee" radius={[2, 2, 0, 0]} />}
               {data.workspace && <Bar dataKey="workspace" name="workspace" fill="#a78bfa" radius={[2, 2, 0, 0]} />}
             </BarChart>

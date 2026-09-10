@@ -1,9 +1,11 @@
-@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Syne:wght@600;700;800&display=swap');
-/* Inter + JetBrains Mono — added for the redesigned auth screen
-   (LoginScreen.jsx's "Auth Matrix" look). Additive only: nothing
-   elsewhere references these font-families yet, so this doesn't
-   change any existing screen's appearance. */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+/* App-wide type system — three fonts total, shared with the landing
+   page's own font-loading (LandingPage.jsx): Sora for headings/
+   buttons/nav labels, Inter for body text/paragraphs/form labels,
+   JetBrains Mono for stats/timestamps/code/small uppercase tags.
+   Replaces the previous eight-font mix (Rajdhani, Syne, Share Tech
+   Mono, Sora, Inter, IBM Plex Mono, plus the JetBrains Mono/Inter
+   pair that had been added additively for the auth screen). */
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -128,19 +130,19 @@ html, body {
 body {
   background-color:#151515;
   color: var(--neutral-100);
-  font-family: 'Rajdhani', sans-serif;
+  font-family: 'Inter', sans-serif;
   position: relative;
   min-height: 100vh;
 }
 
 h1, h2, h3, h4, h5, h6,
 button, .font-display {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Sora', sans-serif;
   letter-spacing: 0.02em;
 }
 
 code, pre, .font-mono {
-  font-family: 'Share Tech Mono', monospace;
+  font-family: 'JetBrains Mono', monospace;
 }
 
 /* ---------------------------------------------------------------
@@ -180,7 +182,7 @@ code, pre, .font-mono {
 
 /* Primary action button */
 .cyber-btn {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Sora', sans-serif;
   font-size: 0.8rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -219,7 +221,7 @@ code, pre, .font-mono {
   border: 1px solid var(--cyber-border);
   border-radius: 0.5rem;
   color: var(--cyber-text);
-  font-family: 'Rajdhani', sans-serif;
+  font-family: 'Inter', sans-serif;
   padding: 0.75rem 1rem;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
