@@ -473,7 +473,7 @@ def member_role(ws_id: str, user_id: str) -> str | None:
         ws = cur.fetchone()
         if not ws:
             return None
-        if ws["owner_id"] is not None and ws["owner_id"] == user_id:
+        if ws["owner_id"] is not None and str(ws["owner_id"]) == user_id:
             return "owner"
         cur.execute(
             "select role from workspace_members where workspace_id = %s and user_id = %s",

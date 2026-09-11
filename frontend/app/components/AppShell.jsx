@@ -7,6 +7,7 @@ import { UsageStatsProvider, useUsageStats } from "../context/UsageStatsContext"
 import { WorkspacesProvider, useWorkspaces } from "../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces moved out of SessionContext
 import { ChatListProvider, useChatList } from "../context/ChatListContext";   // NEW — Item 2 concern split, slice 4: chats/refreshChatList moved out of SessionContext
 import { WorkspaceDockProvider, useWorkspaceDockActions } from "../context/WorkspaceDockContext";   // NEW — step 3d/3e-prereq: WorkspaceChatPanel calls useWorkspaceDock() unconditionally, and the lifecycle functions (switchChat etc.) now live here too, needing refreshChatList/getWorkspaceIdForChat/getChats threaded in — see WorkspaceDockBridge below. useWorkspaceDockActions is the step 3e cutover for AppShellBody's own openChat below.
+import { useBootProgress } from "../context/BootProgressContext";   // NEW — loading-screen wiring: lets the bootstrap effect below report real completion to Gate.jsx's splash instead of it running on a fixed timer
 import ChatSidebar from "./ChatSidebar";
 import ChatTab from "./tabs/ChatTab";   // stays a static import — "chat" is the initial activeTab and always the first (often only) tab visited/mounted on load, so there's nothing to defer here.
 import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
@@ -180,6 +181,7 @@ function AppShellBody() {
   const { fetchBatches } = useSession();
   const { fetchWorkspaces } = useWorkspaces();
   const { refreshChatList } = useChatList();
+  const { markTaskDone } = useBootProgress();   // NEW — loading-screen wiring: see the bootstrap effect below
   const [activeTab, setActiveTabState] = useState("chat");
   // NEW — §4 fix: tabs that have been visited at least once stay mounted
   // (hidden via CSS, not unmounted) so their in-memory state — sub-tab,
@@ -261,11 +263,17 @@ function AppShellBody() {
   // out concurrently; only the chat-restore decision below still awaits
   // refreshChatList() specifically, since it genuinely needs that data.
   useEffect(() => {
-    fetchBatches();     // NEW — §4: independent of the chat list, no reason to wait on it (see comment above)
-    fetchWorkspaces();  // NEW — §7: same
+    // NEW — loading-screen wiring: each branch marks its own boot task
+    // done via .finally()/on every exit path, success or failure alike,
+    // so a failed fetch can never leave Gate.jsx's splash waiting
+    // forever on a signal that will never arrive — better to reveal the
+    // (possibly partially-loaded) app than to strand the visitor behind
+    // a permanent splash screen.
+    fetchBatches().finally(() => markTaskDone("batches"));     // NEW — §4: independent of the chat list, no reason to wait on it (see comment above)
+    fetchWorkspaces().finally(() => markTaskDone("workspaces"));  // NEW — §7: same
     (async () => {
       const list = await refreshChatList();
-      if (list === null) return;
+      if (list === null) { markTaskDone("chatBootstrap"); return; }
       const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
       const stillExists = savedId && list.some((c) => c.id === savedId);
 
@@ -278,6 +286,7 @@ function AppShellBody() {
       } else {
         await createNewChat();
       }
+      markTaskDone("chatBootstrap");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
