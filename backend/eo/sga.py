@@ -25,6 +25,7 @@ check that short-circuits straight to escalation -- zero SGA calls spent
 or iteration by another agent. SYSTEM_PROMPT is also updated as a
 secondary defense for phrasings the keyword check doesn't catch.
 """
+import concurrent.futures
 import itertools
 import json
 import logging
@@ -183,9 +184,104 @@ def _requests_simulation_domain(task_text: str) -> bool:
     this tab's own known dispatch shape."""
     return bool(_SIMULATION_DISPATCH_RE.match((task_text or "").strip()))
 
-# Tuning defaults — not measured yet, see Part 1's note on calibrating
-# these against real latency data once live.
+# Tuning defaults — describe when it's worth hedging with another SGA
+# agent in parallel. Evaluated only AFTER a stage's calls actually
+# settle (a resolved answer, a real per-call failure, or hitting
+# _SGA_SAFETY_TIMEOUT below) — never used to cut off a call that's
+# still genuinely in flight and might succeed. Not measured yet, see
+# Part 1's note on calibrating these against real latency data once
+# live.
 STAGE_TIMEOUTS = {1: 1.0, 2: 2.0, 3: 3.0}
+
+# Latency audit fix (2026-09-12): attempt()'s stage loop used to run
+# _call_one() sequentially and only check STAGE_TIMEOUTS *after* every
+# blocking call in a stage had already returned -- so Stage 2/3's
+# "parallel" claim above was never true, and none of the 1s/2s/3s
+# numbers were ever an enforced ceiling. Worse, _call_one() ->
+# generate_text() can sleep-and-retry in place for up to
+# _LEDGER_WAIT_CAP_SECONDS (20s, see utils/llm_client.py) per rate-
+# limited chain step with nothing here able to cut it off, so a single
+# unlucky "hi" landing on a rate-limited key could burn 30+ seconds.
+#
+# First attempt at a fix used STAGE_TIMEOUTS itself (1.0/2.0/3.0s) as a
+# literal wait timeout on the in-flight call. That was wrong and made
+# things worse: 1-3s is completely ordinary latency for a real Groq
+# round trip, so a 1s hard cutoff abandoned almost every message --
+# not just rate-limited ones -- mid-flight and kicked it to Inspector
+# before its own SGA call had a chance to finish successfully.
+# STAGE_TIMEOUTS was only ever meant to gate a *hedging* decision
+# ("should we also start another agent"), never to preempt a call that
+# hasn't actually failed or hung yet -- the original sequential code
+# only ever checked it AFTER a call had already returned.
+#
+# _SGA_SAFETY_TIMEOUT is the separate, correct answer to "how do we
+# stop a truly stuck/rate-limited call": a hard per-stage wait cap
+# sized well above ordinary round-trip latency, so it essentially
+# never fires on a healthy call and only kicks in once a call is
+# genuinely hung.
+_SGA_SAFETY_TIMEOUT = 8.0
+
+# A single shared, module-level executor (rather than one created fresh
+# per attempt() call) so concurrent inbound messages don't each spin up
+# their own thread pool. This matters specifically because every SGA
+# account is shared across every incoming message (see this module's
+# docstring) -- under real traffic, a burst of messages landing during
+# a rate-limited window would otherwise each abandon their own 3-thread
+# pool via shutdown(wait=False) (which does NOT kill running threads,
+# only stops accepting new work), and those orphaned threads can each
+# stay alive for up to llm_client.py's own ~100s worst-case retry
+# budget. A bounded shared pool caps how many of those can pile up at
+# once instead of growing unbounded under load. max_workers=32
+# comfortably covers three SGA agents times a healthy burst of
+# concurrent requests.
+_STAGE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=32, thread_name_prefix="sga-relay"
+)
+
+
+def _run_stage(active: list, task_text: str, session_id: str, futures: dict) -> dict:
+    """Submits any not-yet-submitted agents in `active` to the shared
+    executor -- agents already submitted by an earlier stage are reused
+    via `futures`, not re-invoked, fixing a pre-existing inefficiency
+    where escalating to Stage 2/3 re-ran Stage 1's own agent a second
+    time -- and waits up to _SGA_SAFETY_TIMEOUT for a usable result.
+
+    Returns as soon as ANY agent in `active` produces a non-ESCALATE
+    answer rather than waiting for the rest of the stage to settle.
+    (In practice this stage-by-stage design never has more than one
+    genuinely still-pending future in a single call here -- every
+    earlier stage's agent has already resolved or the loop wouldn't
+    have advanced past it -- but checking-as-we-go costs nothing and
+    keeps this correct if that ever changes.) Calls still pending when
+    the safety cap expires are abandoned -- left running in the
+    background, see _STAGE_EXECUTOR's docstring above -- and simply
+    excluded from the returned dict.
+
+    Returns {agent_key: result} for every call that both completed
+    within the cap AND didn't raise -- same shape callers already
+    handle."""
+    for agent_key in active:
+        if agent_key not in futures:
+            futures[agent_key] = _STAGE_EXECUTOR.submit(
+                _call_one, agent_key, task_text, session_id
+            )
+    pending = {futures[k]: k for k in active}
+    results = {}
+    try:
+        for fut in concurrent.futures.as_completed(pending, timeout=_SGA_SAFETY_TIMEOUT):
+            agent_key = pending[fut]
+            try:
+                result = fut.result()
+            except Exception:
+                continue
+            results[agent_key] = result
+            if "ESCALATE" not in result["answer"].upper():
+                break  # good answer in hand -- stop waiting on any stage sibling
+    except concurrent.futures.TimeoutError:
+        # Safety cap's up -- keep whatever already came back (already
+        # collected above) and abandon the rest; do not block further.
+        pass
+    return results
 
 # Perf audit follow-up (latency discussion, point #1): the "not
 # measured yet" note above is exactly what this counter block answers.
@@ -448,28 +544,33 @@ def attempt(task_text: str, session_id: str = None) -> dict:
                payload={"label": "SGA — attempting direct answer"})
 
     started = time.monotonic()
+    futures = {}
     active = [order[0]]
     stage = 1
     while stage <= 3:
         deadline = STAGE_TIMEOUTS[stage]
-        results = {}
+        results = _run_stage(active, task_text, session_id, futures)
+
+        # CHANGED — Part 5: each result is {"answer", "memorable",
+        # "category"}, not a bare string. Checked in `active` order
+        # (i.e. Stage 1's own agent first) so a tie between agents that
+        # both resolved within the safety cap still prefers the same
+        # agent the old sequential loop would have returned first.
         for agent_key in active:
-            try:
-                results[agent_key] = _call_one(agent_key, task_text, session_id)
-            except Exception:
-                continue
-            # CHANGED — Part 5: results[agent_key] is now
-            # {"answer", "memorable", "category"}, not a bare string.
-            if "ESCALATE" not in results[agent_key]["answer"].upper():
+            result = results.get(agent_key)
+            if result and "ESCALATE" not in result["answer"].upper():
                 emit_event("agent_done", session_id, agent="sga_relay",
                            payload={"summary": f"resolved at stage {stage} ({agent_key})"})
                 _note_resolved(stage)  # NEW — perf audit follow-up (#1)
                 return {
                     "resolved": True,
-                    "answer": results[agent_key]["answer"],
-                    "memorable": results[agent_key]["memorable"],
-                    "category": results[agent_key]["category"],
+                    "answer": result["answer"],
+                    "memorable": result["memorable"],
+                    "category": result["category"],
                 }
+        # Same escalation decision the original code made: only
+        # measured after this stage's calls actually settled (or hit
+        # the safety cap), never by cutting a healthy call short.
         elapsed = time.monotonic() - started
         if elapsed > deadline or stage == 3:
             break
