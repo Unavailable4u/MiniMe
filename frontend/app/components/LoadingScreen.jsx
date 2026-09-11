@@ -514,7 +514,17 @@ export default function LoadingScreen({ progress = 0, ready = false, onDone }) {
 
   return (
     <>
-      <style>{STYLES}</style>
+      {/* dangerouslySetInnerHTML, not a JSX text child: <style> is an
+          HTML "raw text" element, so the browser never decodes entities
+          inside it. React's SSR serializer HTML-escapes quote chars in
+          *any* text child (server emits `&quot;`), but hydration writes
+          the raw STYLES string with real `"` chars via the DOM API —
+          two different strings in the same node, so a text-child
+          <style>{STYLES}</style> always mismatches on hydrate whenever
+          the CSS itself contains quotes (font-family stacks, content:
+          values, etc). dangerouslySetInnerHTML skips the escaping step
+          so server and client agree. */}
+      <style dangerouslySetInnerHTML={{ __html: STYLES }} />
       <div ref={rootRef} className="mm-loading-screen">
         <div className="mm-vignette" ref={vignetteRef} />
         <div className="mm-stage">
