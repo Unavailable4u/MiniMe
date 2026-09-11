@@ -288,7 +288,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
         </div>
       ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
-        <div className="px-3 py-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
+        <div className="h-10 px-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
             <STAGE_THEME.research.Icon size={13} className={STAGE_THEME.research.color} /> Research projects
           </span>
@@ -413,7 +413,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
             header — this was missing entirely, so a research project had
             no path forward to Plan. */}
         {activeWs && (
-          <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--neutral-800)]">
+          <div className="h-10 flex items-center justify-between px-3 border-b border-[var(--neutral-800)]">
             <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
             <div className="flex items-center gap-2 shrink-0">
               {(() => {
@@ -493,7 +493,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
         {promoteError && (
           <p className="text-xs text-red-400 px-3 pt-2">{promoteError}</p>
         )}
-        <div className="flex items-center gap-1 px-3 py-2 border-b border-[var(--neutral-800)] overflow-x-auto">
+        <div className="h-10 flex items-center justify-center gap-1 px-3 border-b border-[var(--neutral-800)] overflow-x-auto">
           {SUB_TABS.map((t) => {
             const Icon = t.icon;
             return (

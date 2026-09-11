@@ -294,7 +294,7 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
 
       {/* Right-hand content pane */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <nav className="flex gap-1 px-3 py-2 border-b border-[var(--neutral-800)]">
+        <nav className="h-10 flex items-center justify-center gap-1 px-3 border-b border-[var(--neutral-800)]">
           {SUB_TABS.map((t) => {
             const Icon = t.icon;
             const built = t.id === "voice" || t.id === "content" || t.id === "calendar" || t.id === "audit"; // implemented so far

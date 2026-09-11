@@ -330,9 +330,14 @@ function AppShellBody() {
 
   return (
     <div className="flex flex-col h-screen">
-      <header className="border-b border-[var(--neutral-800)] px-4 py-3 flex items-center gap-6">
-        <h1 className="text-sm font-medium text-[var(--neutral-400)]">MiniMe</h1>
-        <nav className="flex gap-1">
+      <header className="relative border-b border-[var(--neutral-800)] px-4 py-3 flex items-center gap-6">
+        <h1 className="flex items-center gap-1.5 text-sm font-bold tracking-tight">
+          <img src="/minime-logo.svg" alt="" className="w-5 h-5 object-contain" />
+          <span className="text-[var(--neutral-200)]">
+            Mini<span className="text-[#ff5168]">Me</span>
+          </span>
+        </h1>
+        <nav className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-1 max-w-[calc(100%-320px)] overflow-x-auto">
           {TABS.map((t) => (
             <button
               key={t.id}
