@@ -1439,7 +1439,7 @@ function StudyView({ workspaceId }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-center gap-2 flex-wrap">
         {/* CHANGED — Frontend paste-box patch (patch 4): "slide_deck"
             added as its own "Presentation" tab (it had no tab at all
             before this patch — slides only ever existed as a hidden
@@ -3021,7 +3021,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
         </div>
       ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
-        <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
+        <div className="h-10 px-3 flex items-center justify-between border-b border-[var(--neutral-800)]">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
             <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
           </span>
@@ -3265,8 +3265,8 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               )
             ) : (
               <>
-            <div className="flex items-center justify-between gap-2 border-b border-[var(--neutral-800)] pb-2">
-              <nav className="flex gap-1">
+            <div className="relative min-h-10 px-1 flex items-center border-b border-[var(--neutral-800)]">
+              <nav className="flex gap-1 mx-auto">
                 {SUB_TABS.map((t) => (
                   <button
                     key={t.id}
@@ -3303,11 +3303,13 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                   writes to, so it doesn't need workspace nodes or a
                   post-run refresh callback anymore — see
                   NotebooksGeneratePicker.jsx's file header. */}
-              <NotebooksGeneratePicker
-                workspaceId={selected.id}
-                generateNotebooks={generateNotebooks}
-                onNavigateSubTab={setSubTab}
-              />
+              <div className="absolute right-1 top-1/2 -translate-y-1/2">
+                <NotebooksGeneratePicker
+                  workspaceId={selected.id}
+                  generateNotebooks={generateNotebooks}
+                  onNavigateSubTab={setSubTab}
+                />
+              </div>
             </div>
 
             {/* CHANGED — Sources + Backlinks merged into "Library".

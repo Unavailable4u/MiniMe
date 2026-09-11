@@ -1296,7 +1296,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
         </div>
       ) : (
       <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
-        <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--neutral-800)]">
+        <div className="h-10 px-3 flex items-center justify-between border-b border-[var(--neutral-800)]">
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
             <STAGE_THEME.build.Icon size={13} className={STAGE_THEME.build.color} /> Build
           </span>
@@ -1515,7 +1515,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
 
             {/* NEW — patch 7: Tasks / Instructions sub-nav, same small
                 tab-bar pattern as PlanTab's BlueprintView. */}
-            <nav className="flex gap-1">
+            <nav className="flex gap-1 justify-center">
               {BUILD_VIEWS.map((v) => (
                 <button
                   key={v.id}

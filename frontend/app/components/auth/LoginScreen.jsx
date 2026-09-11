@@ -135,14 +135,10 @@ export default function LoginScreen() {
                 />
               </div>
               <div className="flex flex-col items-center gap-0.5">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-['Sora'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold uppercase tracking-tight text-[#e1e2eb]">
-                    MINI ME
-                  </span>
-                  <span className="font-['Sora'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold uppercase text-[#ff5168] drop-shadow-[0_0_12px_rgba(255,81,104,0.7)]">
-                    AI
-                  </span>
-                </div>
+                <p className="font-['Sora'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold tracking-tight text-[#e1e2eb]">
+                  Mini
+                  <span className="text-[#ff5168] drop-shadow-[0_0_12px_rgba(255,81,104,0.7)]">Me</span>
+                </p>
                 <p className="font-['JetBrains_Mono'] text-[10px] tracking-[0.08em] uppercase text-[#ae8788]">
                   Engineering-Caliber Intelligence
                 </p>
