@@ -15,8 +15,8 @@ module.exports = {
           bg: "var(--neutral-950)",     // page background
           panel: "var(--neutral-900)",  // card / panel background
           border: "var(--neutral-800)", // default panel/input border
-          cyan: "var(--neutral-100)",   // primary accent — buttons, active states, links
-          magenta: "#ef4444",           // danger accent — warnings, destructive actions
+          cyan: "var(--cyber-cyan)",    // primary accent — buttons, active states, links (brand crimson)
+          magenta: "var(--cyber-magenta)", // danger accent — warnings, destructive actions (brand crimson)
           text: "var(--neutral-100)",   // primary body text
           dim: "var(--neutral-500)",    // secondary / muted text
         },
@@ -31,7 +31,7 @@ module.exports = {
         // --cyber-glow in globals.css).
         "glow-cyan": "0 0 0 1px rgba(255, 255, 255, 0.08)",
         "glow-cyan-lg": "0 0 0 1px rgba(255, 255, 255, 0.12)",
-        "glow-magenta": "0 0 0 1px rgba(239, 68, 68, 0.25)",
+        "glow-magenta": "0 0 0 1px rgba(255, 32, 82, 0.25)",
       },
       backgroundImage: {
         "cyber-grid":
