@@ -140,6 +140,58 @@ function autoQuoteUnescapedParenLabels(text) {
     .join("\n");
 }
 
+// Rendering audit, Bug 7 (reported): a plain rectangle node or edge label
+// carrying a literal, un-escaped `"` -- not the two-character `\"` sequence
+// normalizeMermaidText() already handles above, an actual quote character --
+// immediately opens a Mermaid STR token and desyncs the parser. This is the
+// exact, recurring "Parse error ... got 'STR'" seen on OLED[0.96" OLED
+// SSD1306]: hardware_speccer's screen-size specs routinely carry a raw inch
+// mark, and unlike the parens case above, that's a character Mermaid can
+// never treat as plain label text unless the label is quoted.
+//
+// Same conservative shape as autoQuoteUnescapedParenLabels() above:
+//   1. A label that's already a clean, single quoted string (starts AND
+//      ends with `"`, with no further quote inside) is left completely
+//      untouched -- never double-wrapped.
+//   2. Any other raw `"` found in the label is escaped to the HTML entity
+//      `&quot;` (Mermaid renders labels as HTML, so it still displays as a
+//      normal quote mark) and the whole label is (re)wrapped in quotes so
+//      the parser sees one opaque string token.
+// Only square-bracket rectangle nodes and `|...|` edge labels are handled,
+// matching the scope autoQuoteUnescapedParenLabels() already settled on --
+// round/diamond/stadium shapes stay out of scope here for the same
+// "can't be disambiguated by regex" reason noted above.
+function autoEscapeUnquotedDoubleQuotes(text) {
+  if (!text) return text;
+  function fixLabel(label) {
+    if (!label.includes('"')) return null; // nothing risky, caller keeps original
+    const wrapped = label.length >= 2 && label.startsWith('"') && label.endsWith('"');
+    const inner = wrapped ? label.slice(1, -1) : label;
+    if (wrapped && !inner.includes('"')) return null; // already a clean quoted label
+    return inner.replace(/"/g, "&quot;");
+  }
+  return text
+    .split("\n")
+    .map((line) => {
+      line = line.replace(
+        /([A-Za-z][A-Za-z0-9_]*)\[([^[\]]*)\]/g,
+        (full, id, label) => {
+          const fixed = fixLabel(label);
+          return fixed === null ? full : `${id}["${fixed}"]`;
+        }
+      );
+      line = line.replace(
+        /\|([^|]*)\|/g,
+        (full, label) => {
+          const fixed = fixLabel(label);
+          return fixed === null ? full : `|"${fixed}"|`;
+        }
+      );
+      return line;
+    })
+    .join("\n");
+}
+
 function MermaidDiagram({
   mermaidText,
   onNodeClick,
@@ -187,7 +239,7 @@ function MermaidDiagram({
     setFailed(false);
     if (ref.current && mermaidText) {
       const renderId = `mermaid-diagram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      mermaid.render(renderId, autoQuoteUnescapedParenLabels(normalizeMermaidText(mermaidText)))
+      mermaid.render(renderId, autoQuoteUnescapedParenLabels(autoEscapeUnquotedDoubleQuotes(normalizeMermaidText(mermaidText))))
         .then(({ svg }) => {
           if (!cancelled && ref.current) {
             ref.current.innerHTML = svg;
