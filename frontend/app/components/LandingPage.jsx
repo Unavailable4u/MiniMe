@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { supabase } from "../lib/supabaseClient";
+import { clearLocalAppState } from "../lib/clearLocalAppState";   // BUGFIX — see that file's header comment; this page's own Sign out button calls supabase.auth.signOut() directly, bypassing AuthContext.jsx's signOut(), so it needs this same cleanup independently
 
 // ---------------------------------------------------------------------
 // Ported verbatim from minime_new.html (the standalone static template).
@@ -321,7 +322,9 @@ export default function LandingPage() {
         if (navSignOutBtn) {
           navSignOutBtn.addEventListener('click', function () {
             closeMenu();
-            supabase.auth.signOut();
+            supabase.auth.signOut().then(function () {
+              clearLocalAppState();   // BUGFIX — see lib/clearLocalAppState.js
+            });
           });
         }
       })();
