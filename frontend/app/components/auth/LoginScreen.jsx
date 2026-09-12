@@ -21,7 +21,7 @@ import { useAuth } from "../../context/AuthContext";
 // "Auth Matrix" redesign — Operator Login / Registration screen.
 //
 // Deliberately styled with its own arbitrary-value palette (surface
-// #0b0e14, primary-container #ff5168, secondary-container #00eefc,
+// #0b0e14, primary-container #FF2052, secondary-container #00eefc,
 // tertiary-container #b56eff, etc.) instead of the app-wide --cyber-*
 // / --neutral-* tokens in globals.css. This is a scoped visual upgrade
 // for just this one screen — the rest of the app stays on the cyan
@@ -96,25 +96,25 @@ export default function LoginScreen() {
   return (
     <div className="h-screen w-full flex items-center justify-center px-4 overflow-hidden relative bg-[#0b0e14]">
       {/* Ambient cyber glows */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[680px] h-[680px] bg-[#ff5168]/10 rounded-full blur-[140px] pointer-events-none" />
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[680px] h-[680px] bg-[#FF2052]/10 rounded-full blur-[140px] pointer-events-none" />
       <div className="absolute bottom-10 left-10 w-96 h-96 bg-[#00eefc]/5 rounded-full blur-[110px] pointer-events-none" />
       <div className="absolute top-20 right-10 w-80 h-80 bg-[#b56eff]/10 rounded-full blur-[100px] pointer-events-none" />
 
       {/* key={mode} forces a remount so .auth-fade-in replays on every
           sign in / sign up toggle, not just on first page load. */}
       <div key={mode} className="auth-fade-in relative w-full max-w-[480px] z-10">
-        <div className="relative w-full bg-[#0b0e14]/90 backdrop-blur-2xl rounded shadow-[0_0_50px_rgba(255,81,104,0.12)] overflow-hidden border border-white/5">
+        <div className="relative w-full bg-[#0b0e14]/90 backdrop-blur-2xl rounded shadow-[0_0_50px_rgba(255,32,82,0.12)] overflow-hidden border border-white/5">
           {/* HUD ribbon — dot/label color flips crimson↔cyan between
               sign-in and sign-up so the mode swap reads at a glance. */}
           <div className="w-full bg-[#191c22] px-4 py-2 flex items-center gap-2">
             <span
               className={`w-2 h-2 rounded-full animate-pulse ${
-                isSignup ? "bg-[#00eefc]" : "bg-[#ff5168]"
+                isSignup ? "bg-[#00eefc]" : "bg-[#FF2052]"
               }`}
             />
             <span
               className={`font-['JetBrains_Mono'] text-[10px] tracking-[0.08em] uppercase ${
-                isSignup ? "text-[#00eefc]" : "text-[#ff5168]"
+                isSignup ? "text-[#00eefc]" : "text-[#FF2052]"
               }`}
             >
               {isSignup
@@ -127,17 +127,17 @@ export default function LoginScreen() {
             {/* Brand */}
             <div className="flex flex-col items-center text-center gap-2">
               <div className="relative flex items-center justify-center">
-                <div className="absolute inset-0 bg-[#ff5168]/30 blur-xl rounded-full" />
+                <div className="absolute inset-0 bg-[#FF2052]/30 blur-xl rounded-full" />
                 <img
                   src="/minime-logo.svg"
                   alt="MiniMe"
-                  className="relative w-16 h-16 object-contain rounded drop-shadow-[0_0_15px_rgba(255,81,104,0.6)]"
+                  className="relative w-16 h-16 object-contain rounded drop-shadow-[0_0_15px_rgba(255,32,82,0.6)]"
                 />
               </div>
               <div className="flex flex-col items-center gap-0.5">
                 <p className="font-['Sora'] text-[24px] md:text-[32px] leading-[30px] md:leading-[40px] font-bold tracking-tight text-[#e1e2eb]">
                   Mini
-                  <span className="text-[#ff5168] drop-shadow-[0_0_12px_rgba(255,81,104,0.7)]">Me</span>
+                  <span className="text-[#FF2052] drop-shadow-[0_0_12px_rgba(255,32,82,0.7)]">Me</span>
                 </p>
                 <p className="font-['JetBrains_Mono'] text-[10px] tracking-[0.08em] uppercase text-[#ae8788]">
                   Engineering-Caliber Intelligence
@@ -149,8 +149,8 @@ export default function LoginScreen() {
             <div className="flex flex-col gap-2">
               <div className="grid grid-cols-2 gap-2">
                 <button type="button" className={ssoBigClass}>
-                  <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#ff5168] scale-x-0 group-hover:scale-x-100 transition-transform origin-center" />
-                  <GoogleIcon className="w-5 h-5 group-hover:drop-shadow-[0_0_8px_#ff5168] transition-all" />
+                  <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#FF2052] scale-x-0 group-hover:scale-x-100 transition-transform origin-center" />
+                  <GoogleIcon className="w-5 h-5 group-hover:drop-shadow-[0_0_8px_#FF2052] transition-all" />
                   <span className="font-['JetBrains_Mono'] text-[13px] tracking-[0.04em] font-semibold uppercase">
                     Google
                   </span>
@@ -226,7 +226,7 @@ export default function LoginScreen() {
                     htmlFor="login-email"
                     className="font-['JetBrains_Mono'] text-[11px] tracking-[0.12em] font-bold uppercase text-[#e7bcbd] flex items-center gap-1.5"
                   >
-                    <span className="w-1.5 h-1.5 bg-[#ff5168] rounded-full" />
+                    <span className="w-1.5 h-1.5 bg-[#FF2052] rounded-full" />
                     Email Address/Username
                   </label>
                   <span className="font-['JetBrains_Mono'] text-[10px] tracking-[0.08em] text-[#ae8788]">
@@ -245,7 +245,7 @@ export default function LoginScreen() {
                     placeholder="operator_09@gx.aether.ai"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className={`${inputClass} focus:ring-1 focus:ring-[#ff5168]`}
+                    className={`${inputClass} focus:ring-1 focus:ring-[#FF2052]`}
                   />
                 </div>
               </div>
@@ -262,7 +262,7 @@ export default function LoginScreen() {
                   {!isSignup && (
                     <a
                       href="#"
-                      className="font-['JetBrains_Mono'] text-[10px] tracking-[0.08em] text-[#ffb3b6] hover:text-[#ff5168] transition-colors uppercase"
+                      className="font-['JetBrains_Mono'] text-[10px] tracking-[0.08em] text-[#ffb3b6] hover:text-[#FF2052] transition-colors uppercase"
                     >
                       Forgot password?
                     </a>
@@ -302,7 +302,7 @@ export default function LoginScreen() {
                       onChange={(e) => setRemember(e.target.checked)}
                       className="peer sr-only"
                     />
-                    <div className="w-4 h-4 bg-[#1d2026] peer-checked:bg-[#ff5168] flex items-center justify-center rounded-[2px] transition-colors">
+                    <div className="w-4 h-4 bg-[#1d2026] peer-checked:bg-[#FF2052] flex items-center justify-center rounded-[2px] transition-colors">
                       <Check
                         size={12}
                         strokeWidth={3}
@@ -332,7 +332,7 @@ export default function LoginScreen() {
               <button
                 type="submit"
                 disabled={submitting}
-                className="group relative w-full mt-1 py-2.5 px-6 bg-gradient-to-r from-[#ff5168] to-[#be0037] hover:to-[#ff5168] text-[#68001a] font-['JetBrains_Mono'] text-[11px] tracking-[0.12em] font-bold uppercase rounded transition-all shadow-[0_0_24px_rgba(255,81,104,0.45)] hover:shadow-[0_0_32px_rgba(255,81,104,0.7)] flex items-center justify-center gap-2 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed"
+                className="group relative w-full mt-1 py-2.5 px-6 bg-gradient-to-r from-[#FF2052] to-[#be0037] hover:to-[#FF2052] text-white font-['JetBrains_Mono'] text-[11px] tracking-[0.12em] font-bold uppercase rounded transition-all shadow-[0_0_24px_rgba(255,32,82,0.45)] hover:shadow-[0_0_32px_rgba(255,32,82,0.7)] flex items-center justify-center gap-2 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <span className="absolute top-0 left-0 w-full h-px bg-[#ffb3b6]/40" />
                 {isSignup ? (

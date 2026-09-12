@@ -38,12 +38,11 @@
   --cyber-text: var(--neutral-100);
   --cyber-dim: var(--neutral-500);
 
-  /* Primary accent — was neon cyan (#22d3ee); now the same light-on-dark
-     accent already used for the app's primary buttons (--accent below),
-     so "primary action" reads as one consistent color everywhere. */
-  --cyber-cyan: var(--neutral-100);
-  /* Danger / destructive accent — was neon magenta (#f472b6). */
-  --cyber-magenta: #ef4444;
+  /* Primary accent — brand crimson (#FF2052), used for buttons, active
+     states, and links everywhere in the app. */
+  --cyber-cyan: #FF2052;
+  /* Danger / destructive accent — unified with the same brand crimson. */
+  --cyber-magenta: #FF2052;
   /* Status/category accents — were referenced by ChatSidebar.jsx and
      several stage tabs but never actually defined, so they silently
      fell back to inherited text color. Defined here as muted,
@@ -94,8 +93,8 @@
      Text stays near-black (not white) for contrast — --cyber-violet is a
      light-toned purple, and dark text against it is the same pairing
      those existing buttons already use (text-black). */
-  --accent: var(--cyber-magenta);
-  --accent-text: var(--neutral-950);
+  --accent: #FF2052;
+  --accent-text: #ffffff;
 }
 
 /* ---------------------------------------------------------------
@@ -211,33 +210,35 @@ code, pre, .font-mono {
   font-size: 0.8rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--cyber-cyan);
-  background-color: var(--neutral-800);
-  border: 1px solid var(--cyber-border);
+  color: var(--accent-text);
+  background-color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 0.375rem;
   padding: 0.5rem 1rem;
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 .cyber-btn:hover {
-  background-color: var(--neutral-700);
-  border-color: var(--neutral-600);
+  background-color: #e0134a;
+  border-color: #e0134a;
 }
 .cyber-btn:active {
-  background-color: var(--neutral-600);
+  background-color: #b80f3a;
+  border-color: #b80f3a;
 }
 .cyber-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-/* Secondary / warning variant */
+/* Secondary / warning variant — unified with the same crimson fill */
 .cyber-btn-magenta {
-  color: var(--cyber-magenta);
-  border-color: var(--cyber-magenta);
-  background-color: rgba(239, 68, 68, 0.08);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  background-color: var(--accent);
 }
 .cyber-btn-magenta:hover {
-  background-color: rgba(239, 68, 68, 0.15);
+  background-color: #e0134a;
+  border-color: #e0134a;
 }
 
 /* Chat input / text areas */
