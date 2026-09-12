@@ -85,6 +85,61 @@ function normalizeMermaidText(text) {
   return text.replace(/\\"/g, "'").replace(/\\n/g, " ");
 }
 
+// Rendering audit, Bug 5 follow-up: normalizeMermaidText() above only ever
+// fixed the "escaped-quote/escaped-newline survived a JSON round-trip"
+// failure mode. The failure actually reproduced by this component's console
+// spam ("Moist[Soil Moisture (Analog)]", parser expecting a shape-close
+// token and instead hitting the bare `(` of "(Analog)") is failure mode #1
+// from _sanitize_mermaid_label()'s own docstring (structure_architect.py):
+// an unquoted `id[Label with (parens)]` node. The deterministic backend
+// builders (structure_architect.py, architecture_diagrammer.py,
+// schema_diagrammer.py, hardware_speccer.py's _build_wiring_mermaid()) all
+// route every label through that sanitizer and always emit a quoted
+// `id["label"]`, so they can't produce this. But this component is also
+// handed genuinely freeform, LLM-authored Mermaid straight out of chat
+// markdown (see the module-level comment above on generic_worker.py's
+// MARKDOWN_INSTRUCTION) and Mind Map's PRD content -- text nobody's Python
+// sanitizer ever touched. Rather than only detecting that failure after
+// mermaid.render() has already rejected (today's fallback-to-raw-source
+// behavior), auto-repair the specific, unambiguous case client-side first:
+// a plain rectangle node (`id[...]`) or a `|...|` edge label whose text
+// contains an unescaped "(" or ")" and isn't already quoted gets its label
+// wrapped in quotes, exactly the transform _sanitize_mermaid_label()
+// would've produced server-side had this text gone through it.
+//
+// Deliberately narrow, for two reasons:
+//   1. Content already starting with `"` (i.e. already a quoted label) is
+//      excluded by the character class below, so an already-correct
+//      `id["Soil Moisture (Analog)"]` is left untouched -- this never
+//      double-quotes.
+//   2. Mermaid's cylinder shape is `id[(Label)]` -- square brackets with a
+//      *literal* parenthesized wrapper as the shape delimiter, not a label
+//      containing parens. Content that itself is fully wrapped in a single
+//      `(...)` pair (`^\(.*\)$`) is left alone so a legitimate cylinder
+//      node isn't misread as "an unquoted label with parens" and flattened
+//      into a quoted rectangle.
+// Diamond/hexagon/stadium/subroutine/round shapes aren't touched: their
+// delimiters either don't collide with parens the same way, or (round,
+// `id(Label)`) can't be disambiguated by a regex at all -- those still fall
+// back to the raw-source display below exactly as before this fix.
+function autoQuoteUnescapedParenLabels(text) {
+  if (!text) return text;
+  return text
+    .split("\n")
+    .map((line) => {
+      line = line.replace(
+        /([A-Za-z][A-Za-z0-9_]*)\[([^[\]"]*[()][^[\]"]*)\]/g,
+        (full, id, label) => (/^\(.*\)$/.test(label) ? full : `${id}["${label.trim()}"]`)
+      );
+      line = line.replace(
+        /\|([^|"]*[()][^|"]*)\|/g,
+        (_, label) => `|"${label.trim()}"|`
+      );
+      return line;
+    })
+    .join("\n");
+}
+
 function MermaidDiagram({
   mermaidText,
   onNodeClick,
@@ -132,7 +187,7 @@ function MermaidDiagram({
     setFailed(false);
     if (ref.current && mermaidText) {
       const renderId = `mermaid-diagram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      mermaid.render(renderId, normalizeMermaidText(mermaidText))
+      mermaid.render(renderId, autoQuoteUnescapedParenLabels(normalizeMermaidText(mermaidText)))
         .then(({ svg }) => {
           if (!cancelled && ref.current) {
             ref.current.innerHTML = svg;
@@ -192,8 +247,18 @@ function MermaidDiagram({
           }
         })
         .catch((err) => {
+          // Bug fix: React 18 StrictMode (dev only) intentionally mounts,
+          // cleans up, then remounts every effect once, so this effect's
+          // *first* pass is always aborted (cancelled=true) before its
+          // *second* pass's own mermaid.render() call even settles --
+          // both promises still reject with the same parse error, which is
+          // why the console previously showed the exact same "Mermaid
+          // render failed" stack twice per diagram. Only the still-current
+          // pass's failure is real/actionable; a cancelled pass's own
+          // rejection is expected noise, not a second bug.
+          if (cancelled) return;
           console.error("Mermaid render failed:", err);
-          if (!cancelled) setFailed(true);
+          setFailed(true);
           // Belt-and-braces: some mermaid versions still append a stray
           // `#renderId` error node to the document body on failure even
           // with suppressErrorRendering set. Clean it up if present so it
