@@ -137,6 +137,14 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
       if (selectedWsId !== ws.id) selectWorkspace(ws.id);
       await createWorkspaceChat(ws.id);
       if (dockCollapsed) toggleDock();
+    } catch (err) {
+      // Bug fix: no catch here previously -- a failed create-chat
+      // request (backend unreachable, CORS, network drop, etc.)
+      // crashed with an unhandled promise rejection instead of
+      // telling the user anything. Same inline alert() fallback
+      // NotebooksTab's rename/progress handlers already use --
+      // there's no toast system in these tab files.
+      alert(`Couldn't create chat: ${err.message || err}`);
     } finally {
       setCreatingChatForWs(null);
     }
@@ -736,7 +744,7 @@ function ContentView({ wsId, onDispatched }) {
       <button
         onClick={handleDispatch}
         disabled={dispatching || !coreMessage.trim() || selectedPlatforms.length === 0}
-        className="text-xs bg-[var(--cyber-violet)] text-black rounded-lg px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
+        className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
       >
         {dispatching ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
         {dispatching ? "Dispatching…" : `Adapt for ${selectedPlatforms.length} platform${selectedPlatforms.length === 1 ? "" : "s"}`}
@@ -1257,7 +1265,7 @@ function ContentAuditView({ wsId }) {
           <button
             onClick={runPagespeed}
             disabled={psLoading || !url.trim()}
-            className="shrink-0 flex items-center gap-1.5 text-xs bg-[var(--cyber-amber)] text-black rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            className="shrink-0 flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
           >
             {psLoading ? <Loader2 size={12} className="animate-spin" /> : "Run check"}
           </button>
@@ -1375,13 +1383,13 @@ function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelConte
         onChange={(e) => setRaw(e.target.value)}
         placeholder="Paste the role's markdown output here…"
         rows={8}
-        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-amber)] font-mono"
+        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] font-mono"
       />
       <div className="flex items-center gap-2">
         <button
           onClick={handleSave}
           disabled={saving}
-          className="text-xs bg-[var(--cyber-amber)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save"}
         </button>

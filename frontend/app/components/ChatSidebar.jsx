@@ -233,7 +233,18 @@ export default function ChatSidebar({ collapsed, onToggle }) {
       <div className="h-10 flex items-center justify-between px-3 border-b border-[var(--neutral-800)]">
         <span className="text-xs font-medium text-[var(--neutral-400)]">Chats</span>
         <div className="flex items-center gap-2">
-          <button onClick={createNewChat} title="New chat" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
+          <button
+            onClick={() => {
+              // Bug fix: this used to call createNewChat directly as the
+              // onClick handler, so a failed request (backend unreachable,
+              // CORS, etc.) threw as an unhandled promise rejection with
+              // no feedback to the user at all. Same alert() fallback
+              // used elsewhere in this codebase where there's no toast
+              // system.
+              createNewChat().catch((err) => alert(`Couldn't create chat: ${err.message || err}`));
+            }}
+            title="New chat"
+            className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
             <Plus size={15} />
           </button>
           <button onClick={() => setCreatingWorkspace(true)} title="New project" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">

@@ -241,6 +241,14 @@ function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, 
       if (activeWsId !== ws.id) setActiveWsId(ws.id);
       await createWorkspaceChat(ws.id);
       if (chatDockCollapsed) toggleChatDock();
+    } catch (err) {
+      // Bug fix: no catch here previously -- a failed create-chat
+      // request (backend unreachable, CORS, network drop, etc.)
+      // crashed with an unhandled promise rejection instead of
+      // telling the user anything. Same inline alert() fallback
+      // NotebooksTab's rename/progress handlers already use --
+      // there's no toast system in these tab files.
+      alert(`Couldn't create chat: ${err.message || err}`);
     } finally {
       setCreatingChatForWs(null);
     }
@@ -648,7 +656,7 @@ function TestTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, 
         <button
           onClick={toggleChatDock}
           title="Open chat"
-          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--cyber-violet)] text-black rounded-full p-3 shadow-lg"
+          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
           <MessageSquare size={18} />
         </button>
@@ -718,7 +726,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
             name="testSimType"
             value={simType}
             onChange={(e) => setSimType(e.target.value)}
-            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-violet)]"
+            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           >
             {SIMULATION_TYPES.map((s) => (
               <option key={s.id} value={s.id}>{s.label}</option>
@@ -737,7 +745,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
             onChange={(e) => setTarget(e.target.value)}
             placeholder="Describe the feature, pricing, PRD excerpt, or app being tested — e.g. 'the new $12/mo Pro tier with unlimited exports'"
             rows={3}
-            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)]"
+            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)]"
           />
           <p className="text-[10px] text-[var(--neutral-600)] mt-1">
             No auto-fill from the Build cycle&apos;s handoff summary yet — paste or describe it manually.
@@ -752,7 +760,7 @@ function RunSimulationPanel({ wsId, openScopedSubChat, openInDock, onDispatched 
         <button
           onClick={run}
           disabled={dispatching || !target.trim()}
-          className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
         >
           {dispatching ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
           {dispatching ? "Dispatching…" : "Run simulation"}
@@ -1042,13 +1050,13 @@ function PersonasPanel({ fetchRoles, updateRolePrompt, setRolePinned }) {
                     value={draftBrief}
                     onChange={(e) => setDraftBrief(e.target.value)}
                     rows={4}
-                    className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-[11px] outline-none focus:border-[var(--cyber-violet)]"
+                    className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-[11px] outline-none focus:border-[var(--cyber-cyan)]"
                   />
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => saveEdit(role)}
                       disabled={savingRole === role || !draftBrief.trim()}
-                      className="text-[11px] bg-[var(--cyber-violet)] text-black rounded px-2 py-1 font-medium disabled:opacity-50 flex items-center gap-1"
+                      className="text-[11px] bg-[var(--accent)] text-[var(--accent-text)] rounded px-2 py-1 font-medium disabled:opacity-50 flex items-center gap-1"
                     >
                       {savingRole === role ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />} Save
                     </button>

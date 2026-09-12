@@ -272,21 +272,32 @@ function AppShellBody() {
     fetchBatches().finally(() => markTaskDone("batches"));     // NEW — §4: independent of the chat list, no reason to wait on it (see comment above)
     fetchWorkspaces().finally(() => markTaskDone("workspaces"));  // NEW — §7: same
     (async () => {
-      const list = await refreshChatList();
-      if (list === null) { markTaskDone("chatBootstrap"); return; }
-      const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
-      const stillExists = savedId && list.some((c) => c.id === savedId);
+      try {
+        const list = await refreshChatList();
+        if (list === null) return;
+        const savedId = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_CHAT_KEY) : null;
+        const stillExists = savedId && list.some((c) => c.id === savedId);
 
-      if (stillExists) {
-        await switchChat(savedId, { skipListReload: true });
-      } else if (list.length > 0) {
-        // Don't silently jump to a "new chat" tab on reload — reopen
-        // whatever chat is most recently updated instead.
-        await switchChat(list[0].id, { skipListReload: true });
-      } else {
-        await createNewChat();
+        if (stillExists) {
+          await switchChat(savedId, { skipListReload: true });
+        } else if (list.length > 0) {
+          // Don't silently jump to a "new chat" tab on reload — reopen
+          // whatever chat is most recently updated instead.
+          await switchChat(list[0].id, { skipListReload: true });
+        } else {
+          await createNewChat();
+        }
+      } catch (err) {
+        // Bug fix: this whole block used to run with no try/catch, so a
+        // failed request in here (backend unreachable, CORS, etc.) threw
+        // before markTaskDone ever ran below -- leaving Gate.jsx's splash
+        // screen stuck forever instead of revealing the (possibly
+        // partially-loaded) app, same failure mode the fetchBatches/
+        // fetchWorkspaces calls above are already guarded against.
+        console.error("Chat bootstrap failed:", err);
+      } finally {
+        markTaskDone("chatBootstrap");
       }
-      markTaskDone("chatBootstrap");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -378,14 +389,14 @@ function AppShellBody() {
           <AccountMenu />
         </div>
       </header>
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 min-w-0">
         {activeTab === "chat" && (
           <ChatSidebar
             collapsed={sidebarCollapsed}
             onToggle={toggleSidebar}
           />
         )}
-        <div className="flex-1 min-h-0">
+        <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
           {/* NEW — §4 fix: every visited tab stays mounted (display: none
               instead of unmounting) so switching tabs doesn't wipe out
               in-component state. Only tabs that have actually been opened

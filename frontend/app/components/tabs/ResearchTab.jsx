@@ -183,6 +183,14 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
       if (activeWsId !== ws.id) setActiveWsId(ws.id);
       await createWorkspaceChat(ws.id);
       if (chatDockCollapsed) toggleChatDock();
+    } catch (err) {
+      // Bug fix: no catch here previously -- a failed create-chat
+      // request (backend unreachable, CORS, network drop, etc.)
+      // crashed with an unhandled promise rejection instead of
+      // telling the user anything. Same inline alert() fallback
+      // NotebooksTab's rename/progress handlers already use --
+      // there's no toast system in these tab files.
+      alert(`Couldn't create chat: ${err.message || err}`);
     } finally {
       setCreatingChatForWs(null);
     }
@@ -569,7 +577,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
         <button
           onClick={toggleChatDock}
           title="Open chat"
-          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--cyber-violet)] text-black rounded-full p-3 shadow-lg"
+          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
           <MessageSquare size={18} />
         </button>
@@ -743,7 +751,7 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
           name="researchSearchScope"
           value={searchScope}
           onChange={(e) => setSearchScope(e.target.value)}
-          className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] shrink-0"
+          className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] shrink-0"
         >
           {RESEARCH_SCOPE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -757,12 +765,12 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
           onKeyDown={(e) => e.key === "Enter" && runSearch()}
           aria-label="Research query"
           placeholder="e.g. transformer attention mechanisms, systematic review of..."
-          className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)]"
+          className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)]"
         />
         <button
           onClick={runSearch}
           disabled={searching || !query.trim()}
-          className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1"
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1"
         >
           <Search size={13} /> {searching ? "Dispatching…" : "Search"}
         </button>
@@ -1040,7 +1048,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addField(); } }}
               aria-label="Add a field name"
               placeholder="Add a field name and press Enter"
-              className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-1.5 text-xs outline-none focus:border-[var(--cyber-violet)]"
+              className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
             />
             <button
               onClick={addField}
@@ -1060,7 +1068,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
               name="researchSourceScope"
               value={nodeType}
               onChange={(e) => setNodeType(e.target.value)}
-              className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-violet)]"
+              className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
             >
               {NODE_TYPE_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -1076,7 +1084,7 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
         <button
           onClick={generate}
           disabled={generating || fields.length === 0 || !wsId}
-          className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
         >
           {generating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
           {generating ? "Extracting…" : "Generate table"}
@@ -1115,13 +1123,13 @@ function ExtractionPanel({ wsId, buildExtractionTable, fetchPanelContent, savePa
                 onChange={(e) => setRaw(e.target.value)}
                 placeholder="| Title | Year | Sample Size | Methodology | ... |&#10;|---|---|---|---|---|&#10;| ... |"
                 rows={6}
-                className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
+                className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] font-mono"
               />
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleRawSave}
                   disabled={rawSaving}
-                  className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+                  className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
                 >
                   {rawSaving ? "Saving…" : "Save"}
                 </button>
@@ -1194,13 +1202,13 @@ function ContradictionsPanel({ workspaceId, fetchPanelContent, savePanelContent 
         onChange={(e) => setRaw(e.target.value)}
         placeholder="Paste the role's markdown output here…"
         rows={6}
-        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)] font-mono"
+        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] font-mono"
       />
       <div className="flex items-center gap-2">
         <button
           onClick={handleSave}
           disabled={saving}
-          className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-1.5 font-medium disabled:opacity-50"
+          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save"}
         </button>
@@ -1258,12 +1266,12 @@ function DatasetPanel({ wsId, onDispatched }) {
         onChange={(e) => setTask(e.target.value)}
         placeholder="analyze sales.csv: show the trend by region for Q3"
         rows={3}
-        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-violet)]"
+        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)]"
       />
       <button
         onClick={run}
         disabled={running || !task.trim()}
-        className="text-xs bg-[var(--cyber-violet)] text-black rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1"
+        className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1"
       >
         <ExternalLink size={13} /> {running ? "Dispatching…" : "Run in chat"}
       </button>

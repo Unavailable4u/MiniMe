@@ -292,32 +292,62 @@ function MermaidDiagram({
     clone.style.maxWidth = "";
 
     const svgString = new XMLSerializer().serializeToString(clone);
+    const safeName = (exportFilename || "diagram").replace(/[^a-z0-9\-_ ]/gi, "").trim() || "diagram";
+
+    // Bug fix: rasterizing to PNG can throw a *synchronous* SecurityError
+    // ("Tainted canvases may not be exported") that previously crashed the
+    // page with an unhandled-runtime-error overlay. This isn't a corner
+    // case here -- Mermaid renders flowchart/mindmap node & edge labels as
+    // HTML wrapped in an SVG <foreignObject> by default, and Chrome/Firefox
+    // both taint *any* canvas a foreignObject-containing SVG is drawn onto,
+    // even though the SVG itself is a same-origin blob URL with no external
+    // resources. Falling back to a plain .svg download (which never touches
+    // canvas, so it can't be tainted) means the user still gets a usable
+    // export instead of a crash.
+    function downloadSvgFallback() {
+      const svgOnlyUrl = URL.createObjectURL(new Blob([svgString], { type: "image/svg+xml;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = svgOnlyUrl;
+      link.download = `${safeName}.svg`;
+      link.click();
+      URL.revokeObjectURL(svgOnlyUrl);
+    }
+
     const svgUrl = URL.createObjectURL(new Blob([svgString], { type: "image/svg+xml;charset=utf-8" }));
     const img = new Image();
     img.onload = () => {
-      const scale = 2;
-      const canvas = document.createElement("canvas");
-      canvas.width = baseSize.w * scale;
-      canvas.height = baseSize.h * scale;
-      const ctx = canvas.getContext("2d");
-      // Dark fill so a diagram with a transparent background doesn't
-      // turn into near-invisible light text on white when opened
-      // outside the app.
-      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--neutral-950")?.trim() || "#0a0a0f";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(svgUrl);
-      canvas.toBlob((blob) => {
-        if (!blob) return;
-        const safeName = (exportFilename || "diagram").replace(/[^a-z0-9\-_ ]/gi, "").trim() || "diagram";
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = `${safeName}.png`;
-        link.click();
-        URL.revokeObjectURL(link.href);
-      });
+      try {
+        const scale = 2;
+        const canvas = document.createElement("canvas");
+        canvas.width = baseSize.w * scale;
+        canvas.height = baseSize.h * scale;
+        const ctx = canvas.getContext("2d");
+        // Dark fill so a diagram with a transparent background doesn't
+        // turn into near-invisible light text on white when opened
+        // outside the app.
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--neutral-950")?.trim() || "#0a0a0f";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(svgUrl);
+        canvas.toBlob((blob) => {
+          if (!blob) { downloadSvgFallback(); return; }
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = `${safeName}.png`;
+          link.click();
+          URL.revokeObjectURL(link.href);
+        });
+      } catch (err) {
+        // SecurityError from a tainted canvas lands here.
+        console.warn("PNG export failed, falling back to SVG:", err);
+        URL.revokeObjectURL(svgUrl);
+        downloadSvgFallback();
+      }
     };
-    img.onerror = () => URL.revokeObjectURL(svgUrl);
+    img.onerror = () => {
+      URL.revokeObjectURL(svgUrl);
+      downloadSvgFallback();
+    };
     img.src = svgUrl;
   }
 
