@@ -2904,6 +2904,14 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
       if (selectedId !== ws.id) setSelectedId(ws.id);
       await createWorkspaceChat(ws.id);
       if (chatDockCollapsed) toggleChatDock();
+    } catch (err) {
+      // Bug fix: no catch here previously -- a failed create-chat
+      // request (backend unreachable, CORS, network drop, etc.)
+      // crashed with an unhandled promise rejection instead of
+      // telling the user anything. Same inline alert() fallback
+      // NotebooksTab's rename/progress handlers already use --
+      // there's no toast system in these tab files.
+      alert(`Couldn't create chat: ${err.message || err}`);
     } finally {
       setCreatingChatForWs(null);
     }

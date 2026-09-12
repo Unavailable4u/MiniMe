@@ -229,10 +229,22 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // currently active — "Create first chat" would be misleading there.
   const needsBrandNewChat = needsChatFirst && !dock.state.sessionId;
   const [creatingChat, setCreatingChat] = useState(false);
+  const [createChatError, setCreateChatError] = useState(null);
   async function handleCreateFirstChat() {
     setCreatingChat(true);
+    setCreateChatError(null);
     try {
       await createWorkspaceChat(workspaceId);
+    } catch (err) {
+      // Bug fix: this previously had no catch, so a failed request here
+      // (backend unreachable, CORS misconfigured, network drop, etc.)
+      // surfaced as an unhandled promise rejection / crash overlay
+      // instead of a message the user can actually act on.
+      setCreateChatError(
+        err instanceof TypeError
+          ? "Couldn't reach the server — check that it's running and try again."
+          : err.message || "Couldn't create the chat — try again."
+      );
     } finally {
       setCreatingChat(false);
     }
@@ -1378,20 +1390,23 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             has dispatched yet, so there's nothing for the compose bar to
             usefully do until Confirm/Cancel resolves it. */}
         {needsChatFirst ? (
-          <div className="border-t border-[var(--neutral-800)] p-4 flex items-center justify-between gap-3">
-            <p className="text-xs text-[var(--neutral-500)]">
-              {needsBrandNewChat
-                ? "Create a chat to start sending tasks, attaching files, or running Generate."
-                : "Select a chat from the sidebar to continue — or start a new one."}
-            </p>
-            <button
-              onClick={handleCreateFirstChat}
-              disabled={creatingChat}
-              className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
-            >
-              {creatingChat ? <Loader2 size={13} className="animate-spin" /> : <MessageSquare size={13} />}
-              {creatingChat ? "Creating…" : needsBrandNewChat ? "Create first chat" : "Start new chat"}
-            </button>
+          <div className="border-t border-[var(--neutral-800)] p-4 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-[var(--neutral-500)]">
+                {needsBrandNewChat
+                  ? "Create a chat to start sending tasks, attaching files, or running Generate."
+                  : "Select a chat from the sidebar to continue — or start a new one."}
+              </p>
+              <button
+                onClick={handleCreateFirstChat}
+                disabled={creatingChat}
+                className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+              >
+                {creatingChat ? <Loader2 size={13} className="animate-spin" /> : <MessageSquare size={13} />}
+                {creatingChat ? "Creating…" : needsBrandNewChat ? "Create first chat" : "Start new chat"}
+              </button>
+            </div>
+            {createChatError && <p className="text-xs text-red-400">{createChatError}</p>}
           </div>
         ) : pendingHireReview ? (
           <div className="border-t border-[var(--neutral-800)] p-4">
