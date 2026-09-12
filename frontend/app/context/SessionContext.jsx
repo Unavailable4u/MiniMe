@@ -2,6 +2,7 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { getPusherClient, onPusherConnectionChange } from "../lib/pusherClient";
 import { supabase } from "../lib/supabaseClient";
+import { authHeaders, authedFetch } from "../lib/authFetch";   // BUGFIX — moved out of this file, see re-export comment below
 import { useUsageStats } from "./UsageStatsContext";   // NEW — Item 2 concern split, slice 2: usageStats/usageHistory/combinedUsageHistory/handleUsageEvent now live there
 import { useWorkspaces } from "./WorkspacesContext";   // NEW — Item 2 concern split, slice 3: workspaces/fetchWorkspaces now live there
 import { useChatList } from "./ChatListContext";   // NEW — Item 2 concern split, slice 4: chats/refreshChatList now live there (see that file's header comment for what's still deliberately NOT moved: messages/sessionId/live-run state)
@@ -20,14 +21,19 @@ const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — persists which cha
 // supabase-js's client already keeps the in-memory session current
 // (including silent refresh) — reading it live here means a call made
 // right after a token refresh never races against a stale cached value.
-export async function authHeaders(opts = {}) {
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
-  const headers = {};
-  if (opts.json) headers["Content-Type"] = "application/json";
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
+//
+// MOVED — now defined once in lib/authFetch.js (was duplicated here,
+// ChatListContext.jsx, and WorkspacesContext.jsx). Re-exported under the
+// same name so the dozen components that already do
+// `import { authHeaders } from "../context/SessionContext"` don't need to
+// change. See that file's header comment for authedFetch(), the 401-retry
+// wrapper added alongside it as part of the sign-out -> sign-in auth-storm
+// fix — fetchBatches() below is the one call site in this file that's part
+// of the mount-time bootstrap trio (with fetchWorkspaces/refreshChatList
+// in the other two split contexts) that actually hit that bug, so it's the
+// one switched to authedFetch(); every other fetch() in this file still
+// builds its headers from authHeaders() the same as before.
+export { authHeaders };
 
 const SessionContext = createContext(null);
 
@@ -737,10 +743,25 @@ export function SessionProvider({ children }) {
   // an earlier one), and if so, is that dependency's const
   // declaration actually above this one in source order?
   const fetchBatches = useCallback(async () => {
-    const res = await fetch(`${API_URL}/api/batches`, {
+    // BUGFIX — this used to be a plain fetch() with no res.ok check, unlike
+    // its two mount-time siblings (fetchWorkspaces in WorkspacesContext.jsx,
+    // refreshChatList in ChatListContext.jsx), which both already guard
+    // against a non-array error body. A 401 here (e.g. the sign-out ->
+    // sign-in "Invalid token" storm — see lib/authFetch.js) meant
+    // `setBatches({detail: "Invalid token"})`, handing every consumer of
+    // `batches` a non-array and crashing the first .map()/.filter() over it.
+    // authedFetch() also gives this one real retry against a freshly
+    // refreshed token before it gets treated as a genuine failure.
+    const res = await authedFetch(`${API_URL}/api/batches`, {
       headers: await authHeaders(),
     });
-    setBatches(await res.json());
+    const body = await res.json();
+    if (!res.ok || !Array.isArray(body)) {
+      console.error("Failed to load batches:", res.status, body);
+      setBatches([]);
+      return;
+    }
+    setBatches(body);
   }, []);
 
   const createBatch = useCallback(async (name, memberChatIds) => {

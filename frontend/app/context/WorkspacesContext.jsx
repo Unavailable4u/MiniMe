@@ -41,22 +41,15 @@
 // and calls `fetchWorkspaces()` (its own mount effect) internally — see
 // AppShell.jsx's provider tree.
 import { createContext, useContext, useState, useCallback, useMemo } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { authHeaders, authedFetch } from "../lib/authFetch";
+// BUGFIX — authHeaders() used to be duplicated inline here (same reasoning
+// WorkspaceDockContext.jsx gives for its own copy). Pulled into
+// lib/authFetch.js instead, alongside the new authedFetch() 401-retry
+// wrapper — see that file's header comment for the sign-out -> sign-in
+// auth-storm bug this fixes. fetchWorkspaces() below is part of the
+// mount-time bootstrap trio that actually hit it.
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-// Duplicated from SessionContext.jsx rather than imported from it, same
-// reasoning WorkspaceDockContext.jsx gives for its own copy of this
-// function: both read the same env vars via the same shared
-// supabaseClient.js singleton, so they can't drift in practice.
-async function authHeaders(opts = {}) {
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
-  const headers = {};
-  if (opts.json) headers["Content-Type"] = "application/json";
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
 
 const WorkspacesContext = createContext(null);
 
@@ -73,7 +66,7 @@ export function WorkspacesProvider({ children }) {
   // functions' fetchBatches() 1:1. Unchanged from SessionContext.jsx —
   // pure extraction, only the definition site moved.
   const fetchWorkspaces = useCallback(async () => {
-    const res = await fetch(`${API_URL}/api/workspaces`, {
+    const res = await authedFetch(`${API_URL}/api/workspaces`, {
       headers: await authHeaders(),
     });
     const body = await res.json();

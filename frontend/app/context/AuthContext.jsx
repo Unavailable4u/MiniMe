@@ -17,6 +17,7 @@
 "use client";
 import { createContext, useContext, useState, useEffect } from "react";
 import { supabase } from "../lib/supabaseClient";
+import { clearLocalAppState } from "../lib/clearLocalAppState";   // BUGFIX — see that file's header comment
 
 const AuthContext = createContext(null);
 
@@ -92,6 +93,12 @@ export function AuthProvider({ children, initialUser }) {
 
   async function signOut() {
     await supabase.auth.signOut();
+    // Clear AFTER signOut() resolves, not before — signOut() itself does
+    // not read any of these app-level keys, and clearing first would mean
+    // a signOut() that throws (network error, etc.) leaves the user still
+    // signed in but with their sidebar/tab state already wiped for no
+    // reason.
+    clearLocalAppState();
   }
 
   // Lets a SIGNED-IN user set/change their own display name and avatar

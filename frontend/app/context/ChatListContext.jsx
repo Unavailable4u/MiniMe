@@ -46,22 +46,15 @@
 // linkChats, createWorkspaceChat, persistMessageTo, ...) all call
 // refreshChatList()/read `chats` directly.
 import { createContext, useContext, useState, useCallback, useMemo } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { authHeaders, authedFetch } from "../lib/authFetch";
+// BUGFIX — authHeaders() used to be duplicated inline here (same reasoning
+// WorkspacesContext.jsx/WorkspaceDockContext.jsx gave for their own
+// copies). Pulled into lib/authFetch.js instead, alongside the new
+// authedFetch() 401-retry wrapper — see that file's header comment for the
+// sign-out -> sign-in auth-storm bug this fixes. refreshChatList() below
+// is part of the mount-time bootstrap trio that actually hit it.
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-// Duplicated from SessionContext.jsx rather than imported from it, same
-// reasoning WorkspacesContext.jsx/WorkspaceDockContext.jsx give for their
-// own copies: both read the same env vars via the same shared
-// supabaseClient.js singleton, so they can't drift in practice.
-async function authHeaders(opts = {}) {
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
-  const headers = {};
-  if (opts.json) headers["Content-Type"] = "application/json";
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
 
 const ChatListContext = createContext(null);
 
@@ -90,7 +83,7 @@ export function ChatListProvider({ children }) {
   // that only ever set state and returned nothing (the old shape) can't
   // make that distinction for its caller.
   const refreshChatList = useCallback(async () => {
-    const res = await fetch(`${API_URL}/api/chats`, {
+    const res = await authedFetch(`${API_URL}/api/chats`, {
       headers: await authHeaders(),
     });
     const body = await res.json();
