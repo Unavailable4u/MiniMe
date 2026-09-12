@@ -94,7 +94,7 @@
      Text stays near-black (not white) for contrast — --cyber-violet is a
      light-toned purple, and dark text against it is the same pairing
      those existing buttons already use (text-black). */
-  --accent: var(--cyber-violet);
+  --accent: var(--cyber-magenta);
   --accent-text: var(--neutral-950);
 }
 
