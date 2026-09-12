@@ -46,6 +46,28 @@ export async function authHeaders(opts = {}) {
 // function name at the call site does.
 export async function authedFetch(url, init = {}) {
   let res = await fetch(url, init);
+
+  // BUGFIX (mount-burst 503s never retried): api/server.py's
+  // DatabaseUnavailable/AgentPoolSaturated handlers return 503 + a
+  // Retry-After header specifically so a client can recover from a
+  // transient pool-capacity hit (exactly what a cold-start burst of
+  // mount-time fetches can trigger) — see _database_unavailable_handler's
+  // own comment there ("a 503 + Retry-After the client can act on").
+  // Nothing on the frontend ever honored that contract: a request that
+  // lost the race for a DB connection just surfaced "temporarily at
+  // capacity" straight to the caller with no retry, unlike a 401, which
+  // already got one. One bounded retry here closes that gap — capped at
+  // 5s regardless of what Retry-After asks for, so a misbehaving backend
+  // can't stall the UI indefinitely.
+  if (res.status === 503) {
+    const retryAfterMs = Math.min(
+      (parseInt(res.headers.get("Retry-After"), 10) || 1) * 1000,
+      5000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+    res = await fetch(url, init);
+  }
+
   if (res.status !== 401) return res;
 
   // getSession() above already returned *a* token, so a 401 here means

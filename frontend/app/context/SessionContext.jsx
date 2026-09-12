@@ -235,7 +235,7 @@ export function SessionProvider({ children }) {
     // (set by the agent_done branch below, before this is called) alone.
     const refetchFullStep = async (sid, role, stepId) => {
       try {
-        const res = await fetch(
+        const res = await authedFetch(
           `${API_URL}/api/task/${sid}/step/${encodeURIComponent(role)}/full`,
           { headers: await authHeaders() }
         );
@@ -765,7 +765,7 @@ export function SessionProvider({ children }) {
   }, []);
 
   const createBatch = useCallback(async (name, memberChatIds) => {
-    await fetch(`${API_URL}/api/batches`, {
+    await authedFetch(`${API_URL}/api/batches`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ name, member_chat_ids: memberChatIds }),
@@ -777,7 +777,7 @@ export function SessionProvider({ children }) {
 // context state — it's ephemeral per-modal-open, computed fresh each
 // time the checkbox selection changes.
   const estimateBatch = useCallback(async (chatIds) => {
-    const res = await fetch(`${API_URL}/api/batches/estimate`, {
+    const res = await authedFetch(`${API_URL}/api/batches/estimate`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ chat_ids: chatIds }),
@@ -799,7 +799,7 @@ export function SessionProvider({ children }) {
   // tab's own "New project" button) create a workspace that natively
   // belongs to that tab. Omitted = old behavior (backend defaults to
   // "note"), so existing Chat/Notebooks callers are unaffected.
-  const res = await fetch(`${API_URL}/api/workspaces`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify(stage ? { name, stage } : { name }),
@@ -816,7 +816,7 @@ export function SessionProvider({ children }) {
 // case in 2.3k. Moved to right after addWorkspaceChat's own declaration.
 
   const renameWorkspace = useCallback(async (wsId, name) => {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
+  await authedFetch(`${API_URL}/api/workspaces/${wsId}/rename`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ name }),
@@ -839,7 +839,7 @@ export function SessionProvider({ children }) {
 // back down to just fetchWorkspaces/refreshChatList, same as its
 // neighbors in this batch.
 const addWorkspaceChat = useCallback(async (wsId, chatId) => {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/chats`, {
+  await authedFetch(`${API_URL}/api/workspaces/${wsId}/chats`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ chat_id: chatId }),
@@ -870,7 +870,7 @@ const createWorkspaceWithChats = useCallback(async (name, chatIds = [], stage) =
 // function's job shrinks to exactly what it does — hit the endpoint,
 // keep `workspaces`/`chats` in sync — and nothing else.
 const removeWorkspaceChat = useCallback(async (wsId, chatId, deleteChat = false) => {
-  await fetch(
+  await authedFetch(
     `${API_URL}/api/workspaces/${wsId}/chats/${chatId}?delete_chat=${deleteChat}`,
     { method: "DELETE", headers: await authHeaders() }
   );
@@ -879,7 +879,7 @@ const removeWorkspaceChat = useCallback(async (wsId, chatId, deleteChat = false)
 }, [fetchWorkspaces, refreshChatList]);
 
 const deleteWorkspace = useCallback(async (wsId) => {
-  await fetch(`${API_URL}/api/workspaces/${wsId}`, {
+  await authedFetch(`${API_URL}/api/workspaces/${wsId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -903,7 +903,7 @@ const deleteWorkspace = useCallback(async (wsId) => {
 // supports both (see chat_workspace.promote()) — no other client-side
 // logic needed here.
 const promoteWorkspace = useCallback(async (wsId, toStage = null, mode = "complete") => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/promote`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/promote`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ to_stage: toStage, mode }),
@@ -932,7 +932,7 @@ const promoteWorkspace = useCallback(async (wsId, toStage = null, mode = "comple
 // ManageWorkspaceModal needs a real error message to show on failure.
 
 const exportWorkspace = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/export`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/export`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -943,7 +943,7 @@ const exportWorkspace = useCallback(async (wsId) => {
 }, []);
 
 const importWorkspace = useCallback(async (wsId, manifest) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/import`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/import`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ manifest }),
@@ -967,7 +967,7 @@ const importWorkspace = useCallback(async (wsId, manifest) => {
 // leaveWorkspaceMembership is the odd one out -- it calls
 // fetchWorkspaces/refreshChatList on success, so it depends on those two.
 const fetchWorkspaceMembers = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/members`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -978,7 +978,7 @@ const fetchWorkspaceMembers = useCallback(async (wsId) => {
 }, []);
 
 const addWorkspaceMember = useCallback(async (wsId, email, role = "viewer") => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/members`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ email, role }),
@@ -991,7 +991,7 @@ const addWorkspaceMember = useCallback(async (wsId, email, role = "viewer") => {
 }, []);
 
 const updateWorkspaceMemberRole = useCallback(async (wsId, targetUserId, role) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ role }),
@@ -1004,7 +1004,7 @@ const updateWorkspaceMemberRole = useCallback(async (wsId, targetUserId, role) =
 }, []);
 
 const removeWorkspaceMember = useCallback(async (wsId, targetUserId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/members/${targetUserId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1016,7 +1016,7 @@ const removeWorkspaceMember = useCallback(async (wsId, targetUserId) => {
 }, []);
 
 const leaveWorkspaceMembership = useCallback(async (wsId, successorId = null) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/leave`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/leave`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ successor_id: successorId }),
@@ -1037,7 +1037,7 @@ const leaveWorkspaceMembership = useCallback(async (wsId, successorId = null) =>
 // setMemberAttributionGrant close over nothing, so `[]`; the other
 // three call fetchWorkspaces() on success, so they depend on it.
 const forceRemoveOwner = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/owner/remove`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/owner/remove`, {
     method: "POST",
     headers: await authHeaders(),
   });
@@ -1051,7 +1051,7 @@ const forceRemoveOwner = useCallback(async (wsId) => {
 }, [fetchWorkspaces]);
 
 const fetchWorkspaceVotes = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1062,7 +1062,7 @@ const fetchWorkspaceVotes = useCallback(async (wsId) => {
 }, []);
 
 const castWorkspaceVote = useCallback(async (wsId, voteTarget = null) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/votes`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ vote_target: voteTarget }),
@@ -1077,7 +1077,7 @@ const castWorkspaceVote = useCallback(async (wsId, voteTarget = null) => {
 }, [fetchWorkspaces]);
 
 const setWorkspaceAttribution = useCallback(async (wsId, show) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/attribution`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/attribution`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ show }),
@@ -1092,7 +1092,7 @@ const setWorkspaceAttribution = useCallback(async (wsId, show) => {
 }, [fetchWorkspaces]);
 
 const setMemberAttributionGrant = useCallback(async (wsId, targetUserId, canToggle) => {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_URL}/api/workspaces/${wsId}/members/${targetUserId}/attribution-grant`,
     {
       method: "PATCH",
@@ -1129,7 +1129,7 @@ const setMemberAttributionGrant = useCallback(async (wsId, targetUserId, canTogg
 // what this useCallback pass is meant to touch.
 const fetchWorkspaceNodes = useCallback(async (wsId, nodeType) => {
   const qs = nodeType ? `?node_type=${encodeURIComponent(nodeType)}` : "";
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes${qs}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/nodes${qs}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
@@ -1141,7 +1141,7 @@ const fetchWorkspaceNodes = useCallback(async (wsId, nodeType) => {
 // ingestFile()'s callers already follow via onIngested), since the
 // delete endpoint itself only returns {status, id}, not a fresh list.
 const deleteWorkspaceNode = useCallback(async (wsId, nodeId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1150,7 +1150,7 @@ const deleteWorkspaceNode = useCallback(async (wsId, nodeId) => {
 }, []);
 
 const renameWorkspaceNode = useCallback(async (wsId, nodeId, title) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}/rename`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/nodes/${nodeId}/rename`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ title }),
@@ -1160,7 +1160,7 @@ const renameWorkspaceNode = useCallback(async (wsId, nodeId, title) => {
 }, []);
 
 const fetchGraphEdges = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/graph/edges?workspace_id=${encodeURIComponent(wsId)}`, {
+  const res = await authedFetch(`${API_URL}/api/graph/edges?workspace_id=${encodeURIComponent(wsId)}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
@@ -1174,7 +1174,7 @@ const fetchGraphEdges = useCallback(async (wsId) => {
 // (e.g. "no ingested sources with content found") rather than silently
 // returning nothing.
 const buildExtractionTable = useCallback(async (wsId, fieldNames, { nodeType, expanded } = {}) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/table`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/table`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({
@@ -1201,7 +1201,7 @@ const buildExtractionTable = useCallback(async (wsId, fieldNames, { nodeType, ex
 // api/server.py's get_simulation_results() docstring for why this reads
 // the bus instead of wrapping review_aggregator.py.
 const fetchSimulationResults = useCallback(async (wsId, sessionId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/simulate`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/simulate`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ session_id: sessionId }),
@@ -1239,7 +1239,7 @@ const fetchSimulationResults = useCallback(async (wsId, sessionId) => {
 // Converting the plain ones here would fight that existing design, not
 // help it, so this batch stops before them.
 const fetchRoles = useCallback(async () => {
-  const res = await fetch(`${API_URL}/api/roles`, {
+  const res = await authedFetch(`${API_URL}/api/roles`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1254,7 +1254,7 @@ const fetchRoles = useCallback(async () => {
 }, []);
 
 const updateRolePrompt = useCallback(async (roleName, brief) => {
-  const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}`, {
+  const res = await authedFetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}`, {
     method: "PUT",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ brief }),
@@ -1271,7 +1271,7 @@ const updateRolePrompt = useCallback(async (roleName, brief) => {
 }, []);
 
 const setRolePinned = useCallback(async (roleName, pinned) => {
-  const res = await fetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}/pin`, {
+  const res = await authedFetch(`${API_URL}/api/roles/${encodeURIComponent(roleName)}/pin`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ pinned }),
@@ -1315,7 +1315,7 @@ const setRolePinned = useCallback(async (roleName, pinned) => {
 // keeps every existing call site untouched.
 
 async function ingestClip(wsId, url, signal, sessionId) {
-  const res = await fetch(`${API_URL}/api/notes/clip`, {
+  const res = await authedFetch(`${API_URL}/api/notes/clip`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ url, workspace_id: wsId, session_id: sessionId || null }),
@@ -1326,7 +1326,7 @@ async function ingestClip(wsId, url, signal, sessionId) {
 }
 
 async function ingestVideoUrl(wsId, url, signal, sessionId) {
-  const res = await fetch(`${API_URL}/api/notes/video`, {
+  const res = await authedFetch(`${API_URL}/api/notes/video`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ url, workspace_id: wsId, session_id: sessionId || null }),
@@ -1341,7 +1341,7 @@ async function ingestFile(wsId, file, signal, sessionId) {
   form.append("workspace_id", wsId);
   form.append("file", file);
   if (sessionId) form.append("session_id", sessionId);
-  const res = await fetch(`${API_URL}/api/notes/import`, {
+  const res = await authedFetch(`${API_URL}/api/notes/import`, {
     method: "POST",
     headers: await authHeaders(),
     body: form,
@@ -1356,7 +1356,7 @@ async function ingestPdfFile(wsId, file, signal, sessionId) {
   form.append("workspace_id", wsId);
   form.append("file", file);
   if (sessionId) form.append("session_id", sessionId);
-  const res = await fetch(`${API_URL}/api/notes/pdf`, {
+  const res = await authedFetch(`${API_URL}/api/notes/pdf`, {
     method: "POST",
     headers: await authHeaders(),
     body: form,
@@ -1371,7 +1371,7 @@ async function ingestVoiceFile(wsId, file, signal, sessionId) {
   form.append("workspace_id", wsId);
   form.append("file", file);
   if (sessionId) form.append("session_id", sessionId);
-  const res = await fetch(`${API_URL}/api/notes/voice`, {
+  const res = await authedFetch(`${API_URL}/api/notes/voice`, {
     method: "POST",
     headers: await authHeaders(),
     body: form,
@@ -1385,7 +1385,7 @@ async function ingestVoiceFile(wsId, file, signal, sessionId) {
 // posture as note-candidates below.
 
 const detectBacklinks = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/backlinks/detect`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/backlinks/detect`, {
     method: "POST",
     headers: await authHeaders(),
   });
@@ -1398,7 +1398,7 @@ const detectBacklinks = useCallback(async (wsId) => {
 // the frontend by design -- there's no corresponding save function
 // here on purpose, matching api/server.py's GET-only route.
 const fetchNodeSummaries = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/graph/node_summaries`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/graph/node_summaries`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return {};
@@ -1414,7 +1414,7 @@ const fetchNodeSummaries = useCallback(async (wsId) => {
 // apply_patch() (source_manager.py / backlink_detector.py), never a
 // direct frontend call.
 const fetchTopicsGraph = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/topics/graph`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/topics/graph`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return { nodes: [], edges: [] };
@@ -1425,7 +1425,7 @@ const fetchTopicsGraph = useCallback(async (wsId) => {
 // accept/reject here is the review step Definition-of-Done #6 requires.
 
 const fetchNoteCandidates = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
@@ -1438,7 +1438,7 @@ const fetchNoteCandidates = useCallback(async (wsId) => {
 // see that module's docstring for why an index isn't safe once two
 // users can be reviewing the same pending list at once.
 const acceptNoteCandidate = useCallback(async (wsId, candidateId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}/accept`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
@@ -1446,7 +1446,7 @@ const acceptNoteCandidate = useCallback(async (wsId, candidateId) => {
 }, []);
 
 const rejectNoteCandidate = useCallback(async (wsId, candidateId) => {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}`, {
+  await authedFetch(`${API_URL}/api/workspaces/${wsId}/notes/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1460,7 +1460,7 @@ const rejectNoteCandidate = useCallback(async (wsId, candidateId) => {
 // see bug audit §9).
 
 const fetchWorkspaceFacts = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return { brand_voice: "", target_user: "", tech_stack: [], custom: {} };
@@ -1468,7 +1468,7 @@ const fetchWorkspaceFacts = useCallback(async (wsId) => {
 }, []);
 
 const saveWorkspaceFacts = useCallback(async (wsId, facts) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/facts`, {
     method: "PUT",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify(facts),
@@ -1477,7 +1477,7 @@ const saveWorkspaceFacts = useCallback(async (wsId, facts) => {
 }, []);
 
 const fetchFactCandidates = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
@@ -1485,7 +1485,7 @@ const fetchFactCandidates = useCallback(async (wsId) => {
 }, []);
 
 const acceptFactCandidate = useCallback(async (wsId, candidateId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}/accept`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
@@ -1493,7 +1493,7 @@ const acceptFactCandidate = useCallback(async (wsId, candidateId) => {
 }, []);
 
 const rejectFactCandidate = useCallback(async (wsId, candidateId) => {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}`, {
+  await authedFetch(`${API_URL}/api/workspaces/${wsId}/facts/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1507,7 +1507,7 @@ const rejectFactCandidate = useCallback(async (wsId, candidateId) => {
 // candidate store above — a candidate_id, never a list index.
 
 const submitCorrection = useCallback(async (wsId, { text, scopeNodeId }) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/corrections`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ text, scope_node_id: scopeNodeId ?? null }),
@@ -1516,7 +1516,7 @@ const submitCorrection = useCallback(async (wsId, { text, scopeNodeId }) => {
 }, []);
 
 const fetchPatchCandidates = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
@@ -1524,7 +1524,7 @@ const fetchPatchCandidates = useCallback(async (wsId) => {
 }, []);
 
 const acceptPatchCandidate = useCallback(async (wsId, candidateId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}/accept`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}/accept`, {
     method: "POST",
     headers: await authHeaders(),
   });
@@ -1532,7 +1532,7 @@ const acceptPatchCandidate = useCallback(async (wsId, candidateId) => {
 }, []);
 
 const rejectPatchCandidate = useCallback(async (wsId, candidateId) => {
-  await fetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}`, {
+  await authedFetch(`${API_URL}/api/workspaces/${wsId}/corrections/candidates/${candidateId}`, {
     method: "DELETE",
     headers: await authHeaders(),
   });
@@ -1546,7 +1546,7 @@ const rejectPatchCandidate = useCallback(async (wsId, candidateId) => {
 // "study_flashcards", "study_quiz", "study_guide", "prd", ...).
 
 const fetchPanelContent = useCallback(async (wsId, panelKey) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return { workspace_id: wsId, panel_key: panelKey, content: "", updated_at: null, updated_by: null };
@@ -1565,7 +1565,7 @@ const fetchPanelContent = useCallback(async (wsId, panelKey) => {
 // diff against a last-viewed mark, and fetching all of them via N
 // single-panel calls just to read a timestamp would be wasteful.
 const fetchPanelContentList = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/panels`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return {};
@@ -1581,7 +1581,7 @@ const savePanelContent = useCallback(async (wsId, panelKey, content) => {
   // other caller) needs a try/catch around this call the same way it
   // already has one around synthesizePodcast/buildVideoOverview -- not
   // silently succeeding is the point.
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/panels/${panelKey}`, {
     method: "PUT",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ content }),
@@ -1601,7 +1601,7 @@ const savePanelContent = useCallback(async (wsId, panelKey, content) => {
 // failure (e.g. Backlinks' concept pass erroring) doesn't take down
 // Flashcards' result in the same response.
 const generateNotebooks = useCallback(async (wsId, targets, scope) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/generate`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notebooks/generate`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ targets, scope: scope || null }),
@@ -1624,7 +1624,7 @@ const generateNotebooks = useCallback(async (wsId, targets, scope) => {
 // the caller's await and interrupt the real send path.
 const classifyIntent = useCallback(async (wsId, message) => {
   try {
-    const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/classify-intent`, {
+    const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notebooks/classify-intent`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ message }),
@@ -1648,7 +1648,7 @@ const classifyIntent = useCallback(async (wsId, message) => {
 // decision — no confirmation needed), since it's the same one-field
 // PUT a person could already do by hand from the board.
 const markTopicDone = useCallback(async (wsId, topicId) => {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_URL}/api/workspaces/${wsId}/progress?topic_id=${encodeURIComponent(topicId)}`,
     {
       method: "PUT",
@@ -1673,7 +1673,7 @@ const markTopicDone = useCallback(async (wsId, topicId) => {
 // above already takes.
 const fetchWorkspaceProgress = useCallback(async (wsId, topicId) => {
   const qs = topicId ? `?topic_id=${encodeURIComponent(topicId)}` : "";
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/progress${qs}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/progress${qs}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return topicId ? null : {};
@@ -1687,7 +1687,7 @@ const fetchWorkspaceProgress = useCallback(async (wsId, topicId) => {
 // board. `status`/`notes` are both optional and independent, mirroring
 // set_progress()'s own merge-update semantics — pass only what changed.
 const setWorkspaceProgress = useCallback(async (wsId, topicId, { status, notes } = {}) => {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_URL}/api/workspaces/${wsId}/progress?topic_id=${encodeURIComponent(topicId)}`,
     {
       method: "PUT",
@@ -1710,7 +1710,7 @@ const setWorkspaceProgress = useCallback(async (wsId, topicId, { status, notes }
 // `sourceNodeIds` is optional — omitted/empty means "search the whole
 // notebook's topics," same convention generateNotebooks' `scope` uses.
 const generateTopicWorkflow = useCallback(async (wsId, topicLabel, sourceNodeIds) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/topics/workflow`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/topics/workflow`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ topic_label: topicLabel, source_node_ids: sourceNodeIds || null }),
@@ -1728,7 +1728,7 @@ const generateTopicWorkflow = useCallback(async (wsId, topicLabel, sourceNodeIds
 // api/server.py's GET/PATCH .../device-spec... routes.
 
 const fetchDeviceSpec = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/device-spec`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/device-spec`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1748,7 +1748,7 @@ const fetchDeviceSpec = useCallback(async (wsId) => {
 // parts it's handed rather than re-reading a stored spec, so BlueprintView
 // must pass spec.parts through here, not just a workspace id.
 const refreshPartPrices = useCallback(async (wsId, parts) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/parts/refresh-prices`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/parts/refresh-prices`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ parts, force_refresh: true }),
@@ -1759,7 +1759,7 @@ const refreshPartPrices = useCallback(async (wsId, parts) => {
 }, []);
 
 const toggleInstructionStep = useCallback(async (wsId, stepId, done) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/device-spec/instructions/steps/${stepId}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/device-spec/instructions/steps/${stepId}`, {
     method: "PATCH",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ done }),
@@ -1776,7 +1776,7 @@ const toggleInstructionStep = useCallback(async (wsId, stepId, done) => {
 // clusters" button.
 
 const proposeClusters = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/clusters/propose`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/clusters/propose`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
   });
@@ -1785,7 +1785,7 @@ const proposeClusters = useCallback(async (wsId) => {
 }, []);
 
 const fetchClusterCandidates = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/clusters/candidates`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/clusters/candidates`, {
     headers: await authHeaders(),
   });
   if (!res.ok) return [];
@@ -1793,7 +1793,7 @@ const fetchClusterCandidates = useCallback(async (wsId) => {
 }, []);
 
 const acceptClusterCandidate = useCallback(async (wsId, candidateId) => {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_URL}/api/workspaces/${wsId}/clusters/candidates/${encodeURIComponent(candidateId)}/accept`,
     { method: "POST", headers: await authHeaders({ json: true }) }
   );
@@ -1801,7 +1801,7 @@ const acceptClusterCandidate = useCallback(async (wsId, candidateId) => {
 }, []);
 
 const rejectClusterCandidate = useCallback(async (wsId, candidateId) => {
-  await fetch(
+  await authedFetch(
     `${API_URL}/api/workspaces/${wsId}/clusters/candidates/${encodeURIComponent(candidateId)}`,
     { method: "DELETE", headers: await authHeaders() }
   );
@@ -1823,7 +1823,7 @@ const rejectClusterCandidate = useCallback(async (wsId, candidateId) => {
 // loading state for the duration of this await rather than expecting a
 // fast round trip.
 const synthesizePodcast = useCallback(async (scriptText, title) => {
-  const res = await fetch(`${API_URL}/api/notes/podcast/synthesize`, {
+  const res = await authedFetch(`${API_URL}/api/notes/podcast/synthesize`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ script_text: scriptText, title: title || "podcast" }),
@@ -1846,7 +1846,7 @@ const synthesizePodcast = useCallback(async (scriptText, title) => {
 // rather than re-synthesizing it, and 404s with a clear message if it
 // isn't there yet.
 const buildVideoOverview = useCallback(async (slideText, podcastTitle, title) => {
-  const res = await fetch(`${API_URL}/api/notes/video-overview/build`, {
+  const res = await authedFetch(`${API_URL}/api/notes/video-overview/build`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({
@@ -1879,7 +1879,7 @@ const buildVideoOverview = useCallback(async (slideText, podcastTitle, title) =>
 // actually reach _generate_podcast()/_generate_video_overview()), then
 // call one of these to fetch the resulting media once it's saved.
 const fetchPodcastAudioUrl = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/podcast/audio`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notebooks/podcast/audio`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1891,7 +1891,7 @@ const fetchPodcastAudioUrl = useCallback(async (wsId) => {
 }, []);
 
 const fetchVideoOverviewUrl = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/video_overview/video`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notebooks/video_overview/video`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1909,7 +1909,7 @@ const fetchVideoOverviewUrl = useCallback(async (wsId) => {
 // target and manifest/chat-tool entry since Phase 5 steps 5.10/5.11, but
 // no way for the UI to read the audio back until this route existed.
 const fetchRehearsalAudioUrl = useCallback(async (wsId) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/notebooks/presentation_rehearsal/audio`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/notebooks/presentation_rehearsal/audio`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1921,7 +1921,7 @@ const fetchRehearsalAudioUrl = useCallback(async (wsId) => {
 }, []);
 
 const gradeQuiz = useCallback(async (quizText, answers) => {
-  const res = await fetch(`${API_URL}/api/notes/study/quiz/grade`, {
+  const res = await authedFetch(`${API_URL}/api/notes/study/quiz/grade`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ quiz_text: quizText, answers }),
@@ -1948,7 +1948,7 @@ const gradeQuiz = useCallback(async (quizText, answers) => {
 const recordQuizAttempt = useCallback(async (wsId, quizNodeId, quizText, answers, topicId) => {
   const body = { workspace_id: wsId, quiz_node_id: quizNodeId, quiz_text: quizText, answers };
   if (topicId) body.topic_id = topicId;
-  const res = await fetch(`${API_URL}/api/notes/study/quiz/attempts`, {
+  const res = await authedFetch(`${API_URL}/api/notes/study/quiz/attempts`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify(body),
@@ -1957,7 +1957,7 @@ const recordQuizAttempt = useCallback(async (wsId, quizNodeId, quizText, answers
 }, []);
 
 const fetchMissedQuestions = useCallback(async (wsId, quizNodeId) => {
-  const res = await fetch(
+  const res = await authedFetch(
     `${API_URL}/api/notes/study/quiz/missed?workspace_id=${encodeURIComponent(wsId)}&quiz_node_id=${encodeURIComponent(quizNodeId)}`,
     { headers: await authHeaders() }
   );
@@ -1970,7 +1970,7 @@ const fetchMissedQuestions = useCallback(async (wsId, quizNodeId) => {
 // here means "you're not owner/partner" — a real, distinct state the UI
 // needs to show, not "there's nothing to show yet."
 const fetchWorkspaceAudit = useCallback(async (wsId, limit = 100) => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/audit?limit=${limit}`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/audit?limit=${limit}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -1996,7 +1996,7 @@ const fetchWorkspaceAudit = useCallback(async (wsId, limit = 100) => {
 // in the dep array so this doesn't silently stale-close over whatever
 // sendTask reference existed at mount.
 const fetchMyAudit = useCallback(async (limit = 100) => {
-  const res = await fetch(`${API_URL}/api/audit/me?limit=${limit}`, {
+  const res = await authedFetch(`${API_URL}/api/audit/me?limit=${limit}`, {
     headers: await authHeaders(),
   });
   if (!res.ok) {
@@ -2013,7 +2013,7 @@ const fetchMyAudit = useCallback(async (limit = 100) => {
 // as createNewChat() (sessionId, ACTIVE_CHAT_KEY, messages) plus the
 // workspace-list refresh addWorkspaceChat used to do, just in one fetch.
 const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/chats/create`, {
+  const res = await authedFetch(`${API_URL}/api/workspaces/${wsId}/chats/create`, {
     method: "POST",
     headers: await authHeaders({ json: true }),
     body: JSON.stringify({ title }),
@@ -2061,7 +2061,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // comment explaining why it'd be fine (which is what I almost wrote
   // here) would have been wrong.
   const renameBatch = useCallback(async (batchId, name) => {
-    await fetch(`${API_URL}/api/batches/${batchId}/rename`, {
+    await authedFetch(`${API_URL}/api/batches/${batchId}/rename`, {
       method: "PATCH",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ name }),
@@ -2070,7 +2070,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   }, [fetchBatches]);
 
   const unlinkBatchMembers = useCallback(async (batchId, chatIds) => {
-    await fetch(`${API_URL}/api/batches/${batchId}/unlink`, {
+    await authedFetch(`${API_URL}/api/batches/${batchId}/unlink`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ chat_ids: chatIds }),
@@ -2080,7 +2080,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   }, [fetchBatches, refreshChatList]);
 
   const deleteBatch = useCallback(async (batchId) => {
-    await fetch(`${API_URL}/api/batches/${batchId}`, {
+    await authedFetch(`${API_URL}/api/batches/${batchId}`, {
       method: "DELETE",
       headers: await authHeaders(),
     });
@@ -2096,7 +2096,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     // errors silently either — a failed save here is exactly the "lost
     // my chat" bug again, just moved one layer down.
     try {
-      await fetch(`${API_URL}/api/chats/${sessionId}/messages`, {
+      await authedFetch(`${API_URL}/api/chats/${sessionId}/messages`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({ message }),
@@ -2113,7 +2113,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // the person currently has open. These two are the same two API calls,
   // parameterized by an explicit chatId instead of the active sessionId.
   const createChatSilently = useCallback(async (title) => {
-    const res = await fetch(`${API_URL}/api/chats`, {
+    const res = await authedFetch(`${API_URL}/api/chats`, {
       method: "POST",
       headers: await authHeaders({ json: true }),
       body: JSON.stringify({ title: title || "New Chat" }),
@@ -2125,7 +2125,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
 
   const persistMessageTo = useCallback(async (chatId, message) => {
     try {
-      await fetch(`${API_URL}/api/chats/${chatId}/messages`, {
+      await authedFetch(`${API_URL}/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({ message }),
@@ -2173,7 +2173,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     await refreshChatList();   // shows up in the sidebar right away, not just once the run finishes
 
     try {
-      const res = await fetch(`${API_URL}/api/task/from-template`, {
+      const res = await authedFetch(`${API_URL}/api/task/from-template`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({ template_id: templateId, task_text: taskText, session_id: chatId }),
@@ -2282,7 +2282,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     // into reviewing hires first.
     if (reviewBeforeDispatch) {
       try {
-        const res = await fetch(`${API_URL}/api/task/preview`, {
+        const res = await authedFetch(`${API_URL}/api/task/preview`, {
           method: "POST",
           headers: await authHeaders({ json: true }),
           body: JSON.stringify({ task_text: taskText, session_id: effectiveSessionId, mode }),
@@ -2320,7 +2320,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     }
 
     try {
-      const res = await fetch(`${API_URL}/api/task`, {
+      const res = await authedFetch(`${API_URL}/api/task`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({
@@ -2409,7 +2409,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   const resumeRun = useCallback(async (decision) => {
     if (!pausedRun) return;
     try {
-      const res = await fetch(`${API_URL}/api/resume`, {
+      const res = await authedFetch(`${API_URL}/api/resume`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({ session_id: pausedRun.sessionId, ...decision }),
@@ -2443,7 +2443,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     setLoading(true);
     _resetLiveRunState();
     try {
-      const res = await fetch(`${API_URL}/api/task/confirm`, {
+      const res = await authedFetch(`${API_URL}/api/task/confirm`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({
@@ -2483,7 +2483,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     const name = prompt("Display name for this project:");
     if (!path || !name) return;
     try {
-      const res = await fetch(`${API_URL}/api/projects`, {
+      const res = await authedFetch(`${API_URL}/api/projects`, {
         method: "POST",
         headers: await authHeaders({ json: true }),
         body: JSON.stringify({ path, display_name: name }),

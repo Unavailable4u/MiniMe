@@ -33,7 +33,19 @@ export function clearLocalAppState() {
   const keysToClear = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (key && key.startsWith("minime_")) keysToClear.push(key);
+    if (!key) continue;
+    if (key.startsWith("minime_")) keysToClear.push(key);
+    // BUGFIX (stale pre-migration auth fossil): before supabaseClient.js
+    // switched to @supabase/ssr's createBrowserClient(), the plain
+    // supabase-js client wrote the session to localStorage under this
+    // exact key. The live session now lives in a cookie instead, so
+    // nothing ever updates or reads this key again — it just sits there
+    // holding whatever (now long-expired) session was last active before
+    // the migration, ready to confuse the next person who goes looking
+    // for "the" access token in localStorage. Harmless to the app either
+    // way (nothing reads it), but worth sweeping up on sign-out so it
+    // doesn't outlive its usefulness in any given browser profile.
+    if (key.startsWith("sb-") && key.endsWith("-auth-token")) keysToClear.push(key);
   }
   keysToClear.forEach((key) => localStorage.removeItem(key));
 }
