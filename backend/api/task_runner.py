@@ -41,6 +41,7 @@ of them individually.
 """
 import os
 import sys
+import threading  # NEW — perf audit follow-up (#6b): background write_cache()
 import uuid
 from concurrent.futures import ThreadPoolExecutor  # NEW — perf audit follow-up (#5)
 
@@ -1597,9 +1598,24 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
     original task_text exactly as before.
     """
     import time as _time  # TEMP TIMING
-    _t = _time.monotonic()  # TEMP TIMING
-    conv_context = conversation_memory.get_full_context(session_id)
-    print(f"  [TIMING] get_full_context: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+
+    # PERF FIX (perf audit follow-up): get_full_context() used to run
+    # here unconditionally, on every single task, before we even know
+    # whether anything downstream will use it. It doesn't -- sga_attempt()
+    # below takes sga_input/session_id only, and the bundle this function
+    # returns to the Inspector path doesn't carry conv_context either
+    # (see this function's own return statement). Its only real
+    # consumers are check_cache()'s and write_cache()'s context
+    # fingerprints further down, so it's now fetched lazily -- at most
+    # once, memoized -- and only by whichever of those branches actually
+    # runs.
+    _conv_context_cache = {}
+    def _get_conv_context():
+        if "value" not in _conv_context_cache:
+            _t = _time.monotonic()  # TEMP TIMING
+            _conv_context_cache["value"] = conversation_memory.get_full_context(session_id)
+            print(f"  [TIMING] get_full_context (lazy): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+        return _conv_context_cache["value"]
 
     _t = _time.monotonic()  # TEMP TIMING
     workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
@@ -1666,7 +1682,7 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
     if tier_override is None and mode != "beast":
         if cache_class == CACHE_CLASS_DETERMINISTIC:
             cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id,
-                                 context_text=conv_context, session_id=session_id)
+                                 context_text=_get_conv_context(), session_id=session_id)
             if cached:
                 _record_routing_fact(workspace_id, "cache", task_text, session_id)   # NEW — D1
                 return {"resolved": False, "response": {
@@ -1698,8 +1714,20 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
     sga_result = sga_attempt(sga_input, session_id=session_id)   # CHANGED — bug #4 fix, was task_text; Patch B7, may include reference
     print(f"  [TIMING] sga_attempt: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
     if sga_result["resolved"]:
-        write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id,
-                    context_text=conv_context, cache_class=cache_class)   # CHANGED — Patch B7, tags the entry
+        # PERF FIX (perf audit follow-up): write_cache() does an
+        # embed_text() call plus a vector index upsert() -- two more
+        # network round-trips (~2s combined) that were previously paid
+        # synchronously, on the critical path, before the user ever saw
+        # their answer. Nothing in the response below depends on this
+        # having finished, so it now runs in the background instead.
+        # Trade-off: on a hard process kill this write can be lost (a
+        # daemon thread doesn't survive interpreter shutdown) -- same
+        # "best-effort cache, not a database" posture check_cache()'s
+        # own miss-just-regenerates behavior already assumes elsewhere.
+        def _write_cache_bg() -> None:
+            write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id,
+                        context_text=_get_conv_context(), cache_class=cache_class)   # CHANGED — Patch B7, tags the entry
+        threading.Thread(target=_write_cache_bg, daemon=True).start()
         _record_routing_fact(workspace_id, "sga", task_text, session_id)   # NEW — D1
         _maybe_record_sga_fact(workspace_id, task_text, session_id, sga_result)   # NEW — Part 5 follow-up
         return {"resolved": False, "response": {

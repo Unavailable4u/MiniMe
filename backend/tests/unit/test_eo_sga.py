@@ -251,7 +251,7 @@ def test_attempt_falls_through_to_a_later_stage_that_resolves(monkeypatch):
     # without raising once the deadline allows a second stage.
     calls = {"n": 0}
 
-    def fake_call_one(agent_key, task_text, session_id=None):
+    def fake_call_one(agent_key, task_text, session_id=None, conv_context=""):
         calls["n"] += 1
         if calls["n"] == 1:
             return {"answer": "ESCALATE", "memorable": False, "category": None}

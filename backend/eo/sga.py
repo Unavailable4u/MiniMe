@@ -239,7 +239,8 @@ _STAGE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 
-def _run_stage(active: list, task_text: str, session_id: str, futures: dict) -> dict:
+def _run_stage(active: list, task_text: str, session_id: str, futures: dict,
+               conv_context: str = "") -> dict:
     """Submits any not-yet-submitted agents in `active` to the shared
     executor -- agents already submitted by an earlier stage are reused
     via `futures`, not re-invoked, fixing a pre-existing inefficiency
@@ -263,7 +264,7 @@ def _run_stage(active: list, task_text: str, session_id: str, futures: dict) -> 
     for agent_key in active:
         if agent_key not in futures:
             futures[agent_key] = _STAGE_EXECUTOR.submit(
-                _call_one, agent_key, task_text, session_id
+                _call_one, agent_key, task_text, session_id, conv_context=conv_context
             )
     pending = {futures[k]: k for k in active}
     results = {}
@@ -468,7 +469,8 @@ def _parse_structured_response(raw: str) -> dict:
     return {"answer": answer.strip(), "memorable": memorable, "category": category}
 
 
-def _call_one(agent_key: str, task_text: str, session_id: str = None) -> dict:
+def _call_one(agent_key: str, task_text: str, session_id: str = None,
+              conv_context: str = "") -> dict:
     # Migration Part 26 §5 fix: this took session_id as a parameter but
     # never passed it into generate_text() below -- every SGA call's
     # usage/events went out unscoped (session_id=None) even mid-session,
@@ -489,7 +491,14 @@ def _call_one(agent_key: str, task_text: str, session_id: str = None) -> dict:
     # ahead of the task text sent to the model; the task_text argument
     # itself, and anything the caller does with it afterward, is
     # untouched.
-    conv_context = conversation_memory.get_full_context(session_id)   # NEW — Part 23 fix
+    #
+    # PERF FIX (perf audit follow-up): this used to call
+    # conversation_memory.get_full_context(session_id) itself, every
+    # single time -- up to 6x per attempt() (once per agent, per stage,
+    # across a Stage 1 -> 2 -> 3 escalation), each one a fresh Upstash
+    # Redis round-trip. attempt() now fetches it exactly once and passes
+    # it down through _run_stage(); this function just uses what it's
+    # given.
     user_content = task_text
     if conv_context:
         user_content = f"Recent conversation:\n{conv_context}\n\nTask: {task_text}"   # NEW — Part 23 fix
@@ -543,13 +552,17 @@ def attempt(task_text: str, session_id: str = None) -> dict:
     emit_event("agent_start", session_id, agent="sga_relay",
                payload={"label": "SGA — attempting direct answer"})
 
+    # PERF FIX: fetched once here instead of once per _call_one() --
+    # see that function's own comment.
+    conv_context = conversation_memory.get_full_context(session_id)
+
     started = time.monotonic()
     futures = {}
     active = [order[0]]
     stage = 1
     while stage <= 3:
         deadline = STAGE_TIMEOUTS[stage]
-        results = _run_stage(active, task_text, session_id, futures)
+        results = _run_stage(active, task_text, session_id, futures, conv_context=conv_context)
 
         # CHANGED — Part 5: each result is {"answer", "memorable",
         # "category"}, not a bare string. Checked in `active` order
