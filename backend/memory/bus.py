@@ -203,6 +203,48 @@ def read(key: str, default=None):
     if key == "app_slug":
         _app_slug_ctx.set(value)
     return value
+
+
+def write_many(items: dict, ex: int = None) -> None:
+    """Batch-write multiple key/value pairs in a SINGLE HTTPS round trip
+    via Upstash's pipeline endpoint, instead of one write() call per
+    key. Mirrors read_many()'s MGET batching (see that function's own
+    docstring), but for writes -- Upstash Redis has no MSET-with-TTL
+    primitive, so this uses redis.pipeline() (queues N SET commands,
+    sends them as one batched HTTP request, one response) rather than
+    a single native command the way read_many()'s MGET is.
+
+    Perf audit follow-up (#3c): this exists because several hot paths
+    (eo/conversation_memory.py's append_turn()/_route_to_thread(),
+    utils/rate_ledger.py's reserve()) were issuing 2-3 sequential,
+    independent write() calls per request -- each one its own
+    round trip to Upstash, stacking latency instead of overlapping it.
+    Those call sites now collect everything they need to persist into
+    one dict and call this once instead.
+
+    items: {key: value}, JSON-encoded exactly like write() does.
+    Un-namespaced keys in, same as read()/write() -- _namespaced() is
+    applied per-key here. Does NOT special-case "app_slug" the way
+    write() does (see that function's app_slug_ctx sync) -- none of
+    today's callers batch that key, and a caller that ever needs to
+    should call write() for it directly instead.
+
+    ex: single TTL applied to every key in this batch. Callers that
+    need per-key TTLs should fall back to individual write() calls for
+    now -- none of today's callers need that; every existing batched
+    write site already shares one TTL across the whole set (e.g.
+    CONVERSATION_TTL for conversation_memory.py's registry/active-
+    thread/turns keys together).
+
+    No-op on an empty dict, same "nothing to do" convention read_many()
+    uses for an empty key list.
+    """
+    if not items:
+        return
+    pipe = redis.pipeline()
+    for key, value in items.items():
+        pipe.set(_namespaced(key), json.dumps(value, default=str), ex=ex)
+    pipe.exec()
 def read_stage_output_text(session_id: str, role: str) -> str | None:
     """Bug fix (2026-08-12): reads a stage_output:{session_id}:{role} key
     and returns its text content regardless of which of the two shapes

@@ -1,1 +1,0 @@
-﻿{"model":"openai/gpt-oss-safeguard-20b","messages":[{"role":"system","content":"You are a content-policy classifier. Respond with exactly one word: SAFE or UNSAFE."},{"role":"user","content":"hi"}],"max_tokens":512}

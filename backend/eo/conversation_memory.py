@@ -37,6 +37,7 @@ import math
 import os
 import re
 import sys
+import threading  # NEW — perf audit follow-up (#3c): fire-and-forget stats, same pattern rolling_summary.fold_turns_async() already uses
 import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,7 +48,7 @@ from eo import (
     user_profile,  # NEW — Patch B3, silent per-account personalization
     workspace_facts,  # NEW — Part 0 §0.3, tier-3 memory
 )
-from memory.bus import incr, read, write  # incr — NEW, perf audit follow-up (#3): store/skip stats
+from memory.bus import incr, read, write, write_many  # incr — NEW, perf audit follow-up (#3): store/skip stats; write_many — NEW, follow-up (#3c): batched pipelined writes
 
 MAX_STORED_TURNS = 20      # hard cap on raw storage growth per session
 FULL_CONTEXT_TURNS = 6     # how many recent turns generation agents see
@@ -154,12 +155,20 @@ def _active_thread_key(session_id: str) -> str:
 
 
 def _note_thread_stat(reason: str) -> None:
-    """Best-effort; never raises — same non-fatal posture as this
-    module's _note_store_stat() right above."""
-    try:
-        incr(_THREAD_STATS_KEYS[reason], ex=_STATS_TTL_SECONDS)
-    except Exception as exc:
-        print(f"  [Conversation Memory] _note_thread_stat({reason!r}) failed (non-fatal): {exc}")
+    """Best-effort, fire-and-forget — perf audit follow-up (#3c): this
+    is a stats counter (memory.bus.incr(), its own separate Upstash
+    round trip), not something the response depends on, so it has no
+    business blocking the turn it's counting. Was previously a
+    synchronous call sitting directly in _route_to_thread()'s return
+    path on every single routed turn. Same threading.Thread(daemon=True)
+    fire-and-forget shape eo/rolling_summary.py's fold_turns_async()
+    already uses, and for the same reason."""
+    def _do():
+        try:
+            incr(_THREAD_STATS_KEYS[reason], ex=_STATS_TTL_SECONDS)
+        except Exception as exc:
+            print(f"  [Conversation Memory] _note_thread_stat({reason!r}) failed (non-fatal): {exc}")
+    threading.Thread(target=_do, daemon=True).start()
 
 
 def get_conversation_thread_stats() -> dict:
@@ -203,11 +212,28 @@ def _embed_for_routing(text: str):
         return None
 
 
-def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None) -> str:
-    """Returns the thread_id a new *user* turn belongs to, and updates
-    the thread registry + active-thread pointer to match. Assistant
-    turns never call this directly — see append_turn()'s own docstring
-    — they just follow whatever the paired user turn already resolved.
+def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None) -> "tuple[str, dict]":
+    """Returns (thread_id, pending_writes). Assistant turns never call
+    this directly — see append_turn()'s own docstring — they just
+    follow whatever the paired user turn already resolved.
+
+    pending_writes — NEW, perf audit follow-up (#3c): a {key: value}
+    map (unnamespaced, every entry meant to share append_turn()'s own
+    CONVERSATION_TTL) that this function has computed but NOT yet
+    written to Upstash. Every branch below used to call write() twice,
+    immediately, itself (registry + active-thread pointer) — two
+    sequential round trips on every single routed turn, on top of
+    append_turn()'s own separate read-then-write of the turns list
+    right after this function returns. Deferring these lets
+    append_turn() merge them with its turns-list write into ONE
+    memory.bus.write_many() pipelined call instead of three sequential
+    ones. A branch that only reads (routing disabled, or the embed
+    call failed) returns {} — nothing pending, same as before this
+    patch, just explicit about it now instead of having already
+    written nothing.
+
+    Updates the thread registry + active-thread pointer to match, once
+    the caller actually persists pending_writes.
 
     explicit_thread_id: a caller that already knows the topic (e.g. a
     Notebooks-backed chat passing its own topic_id straight through,
@@ -258,28 +284,30 @@ def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None)
             entry["centroid"] = _ema_centroid(entry.get("centroid"), vector, entry.get("turn_count", 1))
             entry["turn_count"] = entry.get("turn_count", 1) + 1
             entry["updated_at"] = now
-        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
-        write(_active_thread_key(session_id), explicit_thread_id, ex=CONVERSATION_TTL)
-        return explicit_thread_id
+        return explicit_thread_id, {
+            _threads_key(session_id): registry,
+            _active_thread_key(session_id): explicit_thread_id,
+        }
 
     if not CONVERSATION_THREAD_ROUTING_ENABLED:
         _note_thread_stat("routing_skipped_disabled")
-        return read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+        return read(_active_thread_key(session_id), default=MAIN_THREAD_ID), {}
 
     vector = _embed_for_routing(text)
     if vector is None:
         _note_thread_stat("routing_skipped_error")
-        return read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
+        return read(_active_thread_key(session_id), default=MAIN_THREAD_ID), {}
 
     if not registry:
         registry = [{
             "thread_id": MAIN_THREAD_ID, "centroid": vector,
             "parent_thread_id": None, "updated_at": now, "turn_count": 1,
         }]
-        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
-        write(_active_thread_key(session_id), MAIN_THREAD_ID, ex=CONVERSATION_TTL)
         _note_thread_stat("created_new_thread")
-        return MAIN_THREAD_ID
+        return MAIN_THREAD_ID, {
+            _threads_key(session_id): registry,
+            _active_thread_key(session_id): MAIN_THREAD_ID,
+        }
 
     best_thread, best_score = None, -1.0
     for entry in registry:
@@ -291,10 +319,11 @@ def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None)
         best_thread["centroid"] = _ema_centroid(best_thread.get("centroid"), vector, best_thread.get("turn_count", 1))
         best_thread["turn_count"] = best_thread.get("turn_count", 1) + 1
         best_thread["updated_at"] = now
-        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
-        write(_active_thread_key(session_id), best_thread["thread_id"], ex=CONVERSATION_TTL)
         _note_thread_stat("routed_existing_thread")
-        return best_thread["thread_id"]
+        return best_thread["thread_id"], {
+            _threads_key(session_id): registry,
+            _active_thread_key(session_id): best_thread["thread_id"],
+        }
 
     if len(registry) >= MAX_THREADS_PER_SESSION:
         stalest = min(registry, key=lambda t: t.get("updated_at", 0))
@@ -302,10 +331,11 @@ def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None)
         stalest["turn_count"] = 1
         stalest["updated_at"] = now
         stalest["parent_thread_id"] = read(_active_thread_key(session_id), default=None)
-        write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
-        write(_active_thread_key(session_id), stalest["thread_id"], ex=CONVERSATION_TTL)
         _note_thread_stat("reused_stale_thread")
-        return stalest["thread_id"]
+        return stalest["thread_id"], {
+            _threads_key(session_id): registry,
+            _active_thread_key(session_id): stalest["thread_id"],
+        }
 
     new_thread_id = f"topic_{int(now * 1000)}"
     registry.append({
@@ -313,10 +343,11 @@ def _route_to_thread(session_id: str, text: str, explicit_thread_id: str = None)
         "parent_thread_id": read(_active_thread_key(session_id), default=None),
         "updated_at": now, "turn_count": 1,
     })
-    write(_threads_key(session_id), registry, ex=CONVERSATION_TTL)
-    write(_active_thread_key(session_id), new_thread_id, ex=CONVERSATION_TTL)
     _note_thread_stat("created_new_thread")
-    return new_thread_id
+    return new_thread_id, {
+        _threads_key(session_id): registry,
+        _active_thread_key(session_id): new_thread_id,
+    }
 
 
 def _ema_centroid(old_centroid, new_vector, turn_count: int):
@@ -429,13 +460,21 @@ _STORE_STATS_KEYS = {
 
 
 def _note_store_stat(reason: str) -> None:
-    """Best-effort; never raises — a missed increment here must never
-    block a turn from being (or not being) stored. Same non-fatal
-    posture as eo/sga.py's _note_resolved()/_note_escalated()."""
-    try:
-        incr(_STORE_STATS_KEYS[reason], ex=_STATS_TTL_SECONDS)
-    except Exception as exc:
-        print(f"  [Conversation Memory] _note_store_stat({reason!r}) failed (non-fatal): {exc}")
+    """Best-effort, fire-and-forget — perf audit follow-up (#3c): same
+    reasoning as _note_thread_stat() above. This one is on an even
+    hotter path than that one — _should_store() calls it on literally
+    every turn, routed or not, stored or not — so a synchronous
+    Upstash INCR here taxed every single message. A missed/delayed
+    increment still must never block a turn from being (or not being)
+    stored, same non-fatal posture as eo/sga.py's
+    _note_resolved()/_note_escalated(); it just no longer blocks it
+    either."""
+    def _do():
+        try:
+            incr(_STORE_STATS_KEYS[reason], ex=_STATS_TTL_SECONDS)
+        except Exception as exc:
+            print(f"  [Conversation Memory] _note_store_stat({reason!r}) failed (non-fatal): {exc}")
+    threading.Thread(target=_do, daemon=True).start()
 
 
 def get_conversation_memory_store_stats() -> dict:
@@ -580,13 +619,20 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None,
     if not _should_store(text, session_id=session_id):
         return
 
+    # pending_writes — perf audit follow-up (#3c): collects whatever
+    # _route_to_thread() computed but deferred (thread registry +
+    # active-thread pointer — see its own docstring), so it can be
+    # persisted in the SAME pipelined call as the turns-list write
+    # below, instead of three sequential round trips (two from routing,
+    # one for the turns list) on every stored user turn.
+    pending_writes = {}
     if role == "user":
-        resolved_thread_id = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
+        resolved_thread_id, pending_writes = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
     elif thread_id:
         # An assistant turn with an explicit thread_id (rare — mainly
         # useful for tests/backfills) still registers/refreshes that
         # thread rather than silently ignoring the hint.
-        resolved_thread_id = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
+        resolved_thread_id, pending_writes = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
     else:
         resolved_thread_id = read(_active_thread_key(session_id), default=MAIN_THREAD_ID)
 
@@ -603,7 +649,8 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None,
         # durable-fact routing step can resolve session_id -> workspace.
         rolling_summary.fold_turns_async(session_id, dropped, owner_id=owner_id)
         turns = turns[-MAX_STORED_TURNS:]
-    write(key, turns, ex=CONVERSATION_TTL)
+    pending_writes[key] = turns
+    write_many(pending_writes, ex=CONVERSATION_TTL)
     if role == "assistant":
         try:
             from agents.note_taker import note_from_latest_turn_async

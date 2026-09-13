@@ -769,16 +769,32 @@ def _headroom_write_ttl(headroom: dict, now: float) -> int:
     return _HEADROOM_DEFAULT_TTL
 
 
-def _bump_window(provider: str, key_id: str, model: str, amount: int, now: float) -> str:
+def _bump_window(provider: str, key_id: str, model: str, amount: int, now: float,
+                  existing_record: "dict | None" = None) -> str:
     """Shared read-modify-write of the self-tracked sliding window,
     factored out of record_usage() so reserve() can call the identical
     increment logic for its provisional booking. Returns the slice key
     that was incremented, so the caller can store it and correct that
     EXACT slice later via _adjust_window_slice() -- release_reservation()
     can run well after the 5s slice that was originally booked has
-    rolled over, so "whatever the current slice is now" would be wrong."""
+    rolled over, so "whatever the current slice is now" would be wrong.
+
+    existing_record -- NEW, perf audit follow-up (#3c): when the caller
+    already read this exact window key a moment ago for its own
+    tpm/rpm-limit check (e.g. _reserve_tokens_mode()'s tpm_limit
+    branch, which reads the window to sum current_usage BEFORE deciding
+    whether to call this function at all), pass that record here
+    instead of letting this function issue a second, redundant GET for
+    the same key it was just handed. Traced against a live run: this
+    was a real, measured extra Upstash round trip on every tokens-mode
+    reserve() call that fell through to the sliding-window fallback --
+    not a latent/theoretical one. None (default, unchanged) preserves
+    the original behavior -- reads the key itself -- for every call
+    site that doesn't already have the record in hand (the fresh-
+    headroom-hit branch and the tpm_limit-is-None branch, neither of
+    which reads the window key before calling this)."""
     key = _window_key(provider, key_id, model)
-    record = bus_read(key, default=None) or {"slices": {}}
+    record = existing_record if existing_record is not None else (bus_read(key, default=None) or {"slices": {}})
     slices = _prune_window(record.get("slices", {}), now)
     slice_start = str(int(now // _SLICE_SECONDS) * _SLICE_SECONDS)
     slices[slice_start] = slices.get(slice_start, 0) + amount
@@ -926,7 +942,11 @@ def _reserve_tokens_mode(provider: str, key_id: str, model: str, estimated_units
     slices = _prune_window(window_record.get("slices", {}), now)
     current_usage = sum(slices.values())
     if current_usage + _prospective_tokens <= tpm_limit:
-        slice_key = _bump_window(provider, key_id, model, estimated_units, now)
+        # Perf audit follow-up (#3c): pass the record we just read above
+        # straight in — _bump_window() would otherwise re-fetch this
+        # exact key a second time before it can do anything with it.
+        slice_key = _bump_window(provider, key_id, model, estimated_units, now,
+                                  existing_record=window_record)
         return True, 0.0, {
             "headroom_field": None, "headroom_decrement": None,
             "window_slice_key": slice_key, "window_increment": estimated_units,
