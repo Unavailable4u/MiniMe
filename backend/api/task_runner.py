@@ -988,7 +988,11 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         }
 
     session_id = session_id or str(uuid.uuid4())
+    import time as _time  # TEMP TIMING
+    _t_turn = _time.monotonic()  # TEMP TIMING
     conversation_memory.append_turn(session_id, "user", task_text)
+    print(f"  [TIMING] append_turn (user): {_time.monotonic() - _t_turn:.2f}s")  # TEMP TIMING
+    _t_inner = _time.monotonic()  # TEMP TIMING
     response = _run_task_inner(
         task_text, tier_override=tier_override, directed_task_type_override=directed_task_type_override,
         app_slug=app_slug, run_tests=run_tests, session_id=session_id,
@@ -1001,6 +1005,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         scope=scope,   # NEW — task 13d/13e
         tab=tab,   # NEW — Patch B6
     )
+    print(f"  [TIMING] _run_task_inner total: {_time.monotonic() - _t_inner:.2f}s")  # TEMP TIMING
     _write_plan_panels(response, session_id, owner_id)   # NEW — chat-to-panel writes, patch 2
     _write_code_files(response, session_id, owner_id)   # NEW — Code sub-tab write-back, patch 9
     response["quota_summary"] = _quota_summary(response, session_id)   # NEW — Phase 8c
@@ -1493,10 +1498,15 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     grounded in, so cache/SGA/classification below still see the
     original task_text exactly as before.
     """
+    import time as _time  # TEMP TIMING
+    _t = _time.monotonic()  # TEMP TIMING
     conv_context = conversation_memory.get_full_context(session_id)
+    print(f"  [TIMING] get_full_context: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
 
+    _t = _time.monotonic()  # TEMP TIMING
     workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
     workspace_id = workspace["id"] if workspace else None
+    print(f"  [TIMING] workspace_for_chat: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
 
     if attachment:
         kind = attachment.get("kind")
@@ -1543,8 +1553,10 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     # docstring) so the "resolved" dict below can carry them through to
     # _run_task_inner()'s new prerequisite-suggestion pass without a
     # second retrieval call.
+    _t = _time.monotonic()  # TEMP TIMING
     grounded_task_text, grounded_node_ids = _grounded_task_text(
         workspace_id, task_text, session_id=session_id, topic_id=topic_id)   # topic_id NEW — Step 6.11.f
+    print(f"  [TIMING] _grounded_task_text: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
 
     # NEW — Patch B7: classify before touching the cache at all. Deterministic
     # asks keep the exact check_cache()/write_cache() replay behavior that
@@ -1552,6 +1564,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     # get_cached_reference() below only supplies prior material to build on.
     cache_class = classify_cache_class(task_text)
     reference_answer = None
+    _t = _time.monotonic()  # TEMP TIMING
     if tier_override is None and mode != "beast":
         if cache_class == CACHE_CLASS_DETERMINISTIC:
             cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id,
@@ -1582,7 +1595,10 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     if reference_answer:
         sga_input = grounded_task_text + format_reference_block(reference_answer)
 
+    print(f"  [TIMING] cache check ({cache_class}): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+    _t = _time.monotonic()  # TEMP TIMING
     sga_result = sga_attempt(sga_input, session_id=session_id)   # CHANGED — bug #4 fix, was task_text; Patch B7, may include reference
+    print(f"  [TIMING] sga_attempt: {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
     if sga_result["resolved"]:
         write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id,
                     context_text=conv_context, cache_class=cache_class)   # CHANGED — Patch B7, tags the entry

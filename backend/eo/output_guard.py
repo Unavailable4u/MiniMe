@@ -447,6 +447,8 @@ def check_content_safety(text: str, label: str = "") -> tuple[bool, str]:
     if not os.environ.get("GROQ_API_KEY"):
         return True, ""
     try:
+        import time as _time  # TEMP TIMING
+        _t0 = _time.monotonic()  # TEMP TIMING
         raw = generate_text(
             system_prompt=_SAFEGUARD_SYSTEM_PROMPT,
             user_content=text[:8000],
@@ -454,6 +456,7 @@ def check_content_safety(text: str, label: str = "") -> tuple[bool, str]:
             agent_name="content_safeguard",
             allow_continuation=False,
         )
+        print(f"  [TIMING] check_content_safety: {_time.monotonic() - _t0:.2f}s")  # TEMP TIMING
         verdict = (raw or "").strip().upper()
         if verdict.startswith("UNSAFE"):
             return False, f"flagged by {SAFEGUARD_MODEL} ({label or 'content'})"

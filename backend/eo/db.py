@@ -152,6 +152,8 @@ def _get_pool() -> ConnectionPool:
             # for min_size connections but doesn't wait for them here, so
             # constructing the pool (on first real db.cursor() call, same
             # lazy timing as before) doesn't itself stall the caller.
+            check=ConnectionPool.check_connection,   # NEW — pings before handing out, transparently reconnects dead ones
+            max_idle=300,                             # NEW — proactively recycle before Supabase's own idle-reap hits it
             open=True,
         )
     return _pool
