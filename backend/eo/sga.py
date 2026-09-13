@@ -64,16 +64,48 @@ logger = logging.getLogger(__name__)
 # SGA's own design, exactly the kind of task that should ESCALATE to
 # eo/inspector.py's routing instead of being force-fit into a truncated
 # SGA response.
+# Bug fix (2026-09-13, Groq-latency audit): every model below is a
+# reasoning model that thinks by default on Groq -- openai/gpt-oss-120b
+# and qwen/qwen3.6-27b both support a reasoning_effort control, but
+# nothing in this file ever set it (that suppression lived only in
+# utils/llm_client.py's openrouter branch, which direct-Groq calls like
+# these never went through). Fixed at the source in
+# utils/llm_client.py's _call_step() / _GROQ_REASONING_EFFORT_BY_MODEL
+# instead of here, so every direct-Groq caller in the codebase benefits,
+# not just SGA -- nothing in this file needed to change.
+#
+# Bug fix (2026-09-13, SGA-latency audit #2): production [TIMING] logs
+# after the reasoning_effort fix above showed reasoning_tokens=12 and
+# ledger_wait=0.00s on a gpt-oss-120b call that still took 6.19s wall
+# time -- confirming neither hidden-reasoning burn nor rate-limit
+# waiting explains the remaining latency; it's just gpt-oss-120b's own
+# inference time on Groq. openai/gpt-oss-20b runs at ~1000 tok/s on
+# Groq's stated throughput figures vs. ~500 for gpt-oss-120b/
+# qwen3.6-27b -- roughly double -- in the same reasoning_effort-tunable
+# family (still covered by _GROQ_REASONING_EFFORT_BY_MODEL's "low"
+# entry, unmodified). Promoted to primary below; gpt-oss-120b now sits
+# behind it as the in-chain fallback (used on a transient provider
+# failure -- rate limit, 5xx, timeout -- NOT as a quality/ESCALATE
+# fallback; that judgment is still entirely SGA's own SYSTEM_PROMPT
+# decision, unaffected by which model made it), with qwen/qwen3.6-27b
+# still last. This is a real speed/quality trade-off (20B is a smaller
+# model than 120B) rather than a pure bug fix -- worth watching
+# ESCALATE rates and answer quality after this change, same as any
+# model swap, and easy to revert by swapping the first two entries back
+# if that doesn't hold up.
 SGA_CHAINS = {
     "sga_1": [
+        {"provider": "groq", "model": "openai/gpt-oss-20b", "key_env": "SGA_GROQ_1", "max_tokens": 1024},
         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_1", "max_tokens": 1024},
         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_1", "max_tokens": 1024},
     ],
     "sga_2": [
+        {"provider": "groq", "model": "openai/gpt-oss-20b", "key_env": "SGA_GROQ_2", "max_tokens": 1024},
         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_2", "max_tokens": 1024},
         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_2", "max_tokens": 1024},
     ],
     "sga_3": [
+        {"provider": "groq", "model": "openai/gpt-oss-20b", "key_env": "SGA_GROQ_3", "max_tokens": 1024},
         {"provider": "groq", "model": "openai/gpt-oss-120b", "key_env": "SGA_GROQ_3", "max_tokens": 1024},
         {"provider": "groq", "model": "qwen/qwen3.6-27b", "key_env": "SGA_GROQ_3", "max_tokens": 1024},
     ],
