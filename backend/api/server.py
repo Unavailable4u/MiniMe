@@ -71,6 +71,7 @@ from fastapi.responses import JSONResponse
 from api.deps import _verify_supabase_jwt
 from eo import mcp_client  # NEW — Patch A2: clean shutdown of any live MCP connections
 from eo import mcp_registry  # NEW — Patch A2: startup connect for configured MCP servers
+from eo import db  # NEW — startup DB pool warm-up, see _lifespan()
 from eo.db import DatabaseUnavailable  # NEW — perf audit §4.6 / #9 (part 2)
 from eo.agent_task_pool import AgentPoolSaturated, AgentTaskTimeout  # NEW — perf audit items #6/#7
 from utils.llm_client import request_shutdown  # NEW — Patch 6.2
@@ -222,6 +223,16 @@ async def _lifespan(app: FastAPI):
     # (module import alone can happen under --reload's parent process
     # too; this is the one place we know we're the live server).
     signal.signal(signal.SIGINT, _handle_sigint)
+    # BUGFIX (mount-burst 503s): eo/db.py builds its Postgres pool
+    # lazily and non-blocking (open=True kicks off background connects
+    # but doesn't wait) -- so without this, "Application startup
+    # complete" fires before the DB is actually reachable, and the
+    # frontend's parallel mount-time fetches (chats/batches/workspaces)
+    # race the still-opening pool and lose, surfacing as a 503 that
+    # only clears once the pool finishes connecting a moment later.
+    # db.warm_pool() is a blocking psycopg_pool call, so it's run on a
+    # worker thread rather than the event loop.
+    await anyio.to_thread.run_sync(db.warm_pool)
     # NEW — Patch A2: connect every `enabled` server in
     # backend/config/mcp_servers.json exactly once, at real server
     # startup (not on every --reload parent-process import, same

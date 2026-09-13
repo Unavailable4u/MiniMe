@@ -31,6 +31,26 @@
 // live below all three, next to the supabaseClient.js singleton itself.
 import { supabase } from "./supabaseClient";
 
+// BUGFIX (401 storm survives its own retry): SessionContext,
+// WorkspacesContext, and ChatListContext each fire their bootstrap
+// fetch independently, so a sign-out -> sign-in transition can put all
+// three through authedFetch()'s 401 branch at nearly the same instant.
+// Without this, each one calls supabase.auth.refreshSession()
+// separately -- three redundant network round trips racing each other
+// instead of one. Defense-in-depth alongside AppShell.jsx's single
+// pre-fan-out getUser() call: that fixes the common case at the
+// source, this closes the gap for any other/future caller that hits a
+// 401 the same way.
+let inFlightRefresh = null;
+function refreshOnce() {
+  if (!inFlightRefresh) {
+    inFlightRefresh = supabase.auth
+      .refreshSession()
+      .finally(() => { inFlightRefresh = null; });
+  }
+  return inFlightRefresh;
+}
+
 export async function authHeaders(opts = {}) {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
@@ -76,7 +96,7 @@ export async function authedFetch(url, init = {}) {
   // is actually signed out.
   let refreshed;
   try {
-    refreshed = await supabase.auth.refreshSession();
+    refreshed = await refreshOnce();
   } catch {
     return res; // refresh itself threw (e.g. no session at all) -- surface the original 401
   }

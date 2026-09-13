@@ -157,6 +157,24 @@ def _get_pool() -> ConnectionPool:
     return _pool
 
 
+def warm_pool(timeout: float = 10.0) -> None:
+    """Blocks until DB_POOL_MIN connections are actually established.
+
+    _get_pool() constructs the pool with open=True, which only kicks off
+    background connection workers -- it does not wait for them. Left on
+    its own, the pool is still "opening" the instant the first real
+    request lands, so uvicorn's "Application startup complete" message
+    does not mean the DB is actually ready to serve traffic.
+
+    Call this once, synchronously, from api/server.py's startup
+    lifespan (before `yield`) so the app doesn't accept requests until
+    the pool has real connections -- see that call site's own comment
+    for why this fixes the mount-time 503 burst instead of just
+    retrying around it.
+    """
+    _get_pool().wait(timeout=timeout)
+
+
 def _getconn_with_timeout(pool: ConnectionPool):
     """pool.getconn(), tallied for get_pool_stats() and translated into
     DatabaseUnavailable (instead of a raw PoolTimeout) on failure so
