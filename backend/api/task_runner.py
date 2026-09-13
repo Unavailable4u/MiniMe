@@ -1531,6 +1531,71 @@ def _maybe_record_sga_fact(workspace_id: str, task_text: str, session_id: str, s
         print(f"  [task_runner] SGA fact write failed, skipped (fail-open): {exc}")
 
 
+def _workspace_grounding_and_cache_check(task_text: str, session_id: str, owner_id: str,
+                                          app_slug: str, topic_id: str, tier_override: int,
+                                          mode: str, get_conv_context) -> dict:
+    """PERF FIX (2026-09-13, SGA-latency audit #2): the workspace_for_chat()
+    -> _grounded_task_text() -> deterministic check_cache() chain,
+    pulled out of _try_cache_and_sga() so its fast (skip_generative_cache
+    =True) branch can run this in a ThreadPoolExecutor future alongside
+    sga_attempt() instead of before it -- see that branch's own comment
+    for the reasoning and the trade-off this implies. Behavior here is
+    otherwise byte-for-byte the original serial logic; only the caller
+    changed.
+
+    get_conv_context: the caller's memoized `_get_conv_context` closure,
+    passed in rather than redefined here so a cache hit's context
+    fingerprint and any later write_cache() call in the SAME original
+    request share the one memoized fetch, exactly as before this
+    extraction.
+
+    Returns {"cache_hit": <response dict>, "workspace_id": ...} if a
+    deterministic check_cache() hit resolved the task (caller should
+    return that response and discard any in-flight SGA attempt), else
+    {"workspace_id":, "grounded_task_text":, "grounded_node_ids":,
+    "cache_class":}.
+    """
+    import time as _time  # TEMP TIMING
+
+    _t = _time.monotonic()  # TEMP TIMING
+    workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None
+    workspace_id = workspace["id"] if workspace else None
+    print(f"  [TIMING] workspace_for_chat (parallel): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+
+    _t = _time.monotonic()  # TEMP TIMING
+    grounded_task_text, grounded_node_ids = _grounded_task_text(
+        workspace_id, task_text, session_id=session_id, topic_id=topic_id)
+    print(f"  [TIMING] _grounded_task_text (parallel): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+
+    cache_class = classify_cache_class(task_text)
+    _t = _time.monotonic()  # TEMP TIMING
+    if tier_override is None and mode != "beast" and cache_class == CACHE_CLASS_DETERMINISTIC:
+        cached = check_cache(task_text, app_slug=app_slug, workspace_id=workspace_id,
+                             context_text=get_conv_context(), session_id=session_id)
+        if cached:
+            print(f"  [TIMING] cache check ({cache_class}, parallel): "
+                  f"{_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+            return {
+                "cache_hit": {
+                    "decision": {},
+                    "tier": "cache",
+                    "session_id": session_id,
+                    "status": "ok",
+                    "result": {"answer": cached},
+                    "message": None,
+                },
+                "workspace_id": workspace_id,
+            }
+    print(f"  [TIMING] cache check ({cache_class}, parallel): "
+          f"{_time.monotonic() - _t:.2f}s")  # TEMP TIMING
+    return {
+        "workspace_id": workspace_id,
+        "grounded_task_text": grounded_task_text,
+        "grounded_node_ids": grounded_node_ids,
+        "cache_class": cache_class,
+    }
+
+
 def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, session_id: str, mode: str,
                         owner_id: str = None, attachment: dict = None, topic_id: str = None,
                         skip_generative_cache: bool = False) -> dict:
@@ -1616,6 +1681,92 @@ def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, sessio
             _conv_context_cache["value"] = conversation_memory.get_full_context(session_id)
             print(f"  [TIMING] get_full_context (lazy): {_time.monotonic() - _t:.2f}s")  # TEMP TIMING
         return _conv_context_cache["value"]
+
+    # PERF FIX (2026-09-13, SGA-latency audit #2): run_task()'s fast
+    # pre-safety attempt (the ONLY caller that sets
+    # skip_generative_cache=True) was paying for workspace_for_chat()
+    # (~1.7s in production, see the [TIMING] logs) SERIALLY before
+    # sga_attempt() (~5-8x longer) even started. SGA's own job
+    # (SYSTEM_PROMPT: "answer directly and quickly ... else ESCALATE")
+    # is a judgment about the raw request text, not about workspace
+    # material, so it doesn't need grounded_task_text to run -- firing
+    # it against the plain, ungrounded task_text CONCURRENTLY with
+    # workspace_for_chat() -> _grounded_task_text() -> the deterministic
+    # check_cache() lookup (which also needs workspace_id) hides
+    # whichever side finishes first behind the other, instead of always
+    # paying for both back to back.
+    #
+    # Trade-off, stated plainly rather than left implicit: if the
+    # deterministic check_cache() lookup (running in the OTHER thread)
+    # comes back with a hit, the sga_attempt() call already in flight
+    # was wasted spend -- real, but small and rare (an exact-key cache
+    # hit means this exact task_text was already answered before,
+    # which is not the common shape of a live chat message), traded
+    # for hiding ~1.7s of latency on every fast-path call rather than
+    # only the ones that happen to need it. This mirrors the trade-off
+    # skip_generative_cache=True already makes on this exact path (see
+    # this function's own docstring above) -- latency over
+    # completeness, deliberately, and ONLY for the caller that asked
+    # for that trade-off via skip_generative_cache=True. Every other
+    # caller (skip_generative_cache=False -- _resolve_decision_and_hires(),
+    # preview_task()) falls through to the original, untouched serial
+    # path below this block; attachment-bearing turns never reach this
+    # branch either (run_task()'s fast attempt never sets attachment,
+    # per this function's own docstring), so process_upload() below
+    # keeps its exact original behavior too.
+    if skip_generative_cache and attachment is None:
+        with ThreadPoolExecutor(max_workers=2) as _fast_pool:
+            _sga_future = _fast_pool.submit(sga_attempt, task_text, session_id=session_id)
+            _grounding_future = _fast_pool.submit(
+                _workspace_grounding_and_cache_check, task_text, session_id, owner_id,
+                app_slug, topic_id, tier_override, mode, _get_conv_context)
+            grounding = _grounding_future.result()
+            if "cache_hit" in grounding:
+                _record_routing_fact(grounding["workspace_id"], "cache", task_text, session_id)
+                # .result() (not .cancel()) so a real exception from the
+                # discarded SGA attempt still surfaces in the logs
+                # instead of vanishing silently -- only its VALUE is
+                # being thrown away here, not its execution.
+                try:
+                    _sga_future.result()
+                except Exception as _discarded_exc:
+                    print(f"  [task_runner] discarded fast-path SGA attempt "
+                          f"raised after a cache hit already resolved the "
+                          f"task: {_discarded_exc!r}")
+                return {"resolved": False, "response": grounding["cache_hit"]}
+            sga_result = _sga_future.result()
+            workspace_id = grounding["workspace_id"]
+            grounded_task_text = grounding["grounded_task_text"]
+            grounded_node_ids = grounding["grounded_node_ids"]
+            cache_class = grounding["cache_class"]
+
+        if sga_result["resolved"]:
+            # Same background-write trade-off already established below
+            # for the non-parallel path -- see that copy's own comment.
+            def _write_cache_bg() -> None:
+                write_cache(task_text, sga_result["answer"], app_slug=app_slug, workspace_id=workspace_id,
+                            context_text=_get_conv_context(), cache_class=cache_class)
+            threading.Thread(target=_write_cache_bg, daemon=True).start()
+            _record_routing_fact(workspace_id, "sga", task_text, session_id)
+            _maybe_record_sga_fact(workspace_id, task_text, session_id, sga_result)
+            return {"resolved": False, "response": {
+                    "decision": {},
+                    "tier": "sga",
+                    "session_id": session_id,
+                    "status": "ok",
+                    "result": {"answer": sga_result["answer"]},
+                    "message": None,
+                }}
+
+        # SGA escalated: hand the Inspector path exactly the bundle it
+        # would have gotten from the original serial code below --
+        # grounded_task_text computed here is not wasted, it's exactly
+        # what _resolve_decision_and_hires() needs next.
+        return {
+            "workspace_id": workspace_id,
+            "grounded_task_text": grounded_task_text,
+            "grounded_node_ids": grounded_node_ids,
+        }
 
     _t = _time.monotonic()  # TEMP TIMING
     workspace = chat_workspace.workspace_for_chat(session_id, owner_id) if (session_id and owner_id) else None

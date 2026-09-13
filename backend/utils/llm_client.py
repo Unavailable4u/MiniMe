@@ -167,6 +167,30 @@ QUOTA_CONFIG = {
         "llama-3.1-8b-instant":    {"rpm": 30, "rpd": 14400, "tpm": 6000,  "tpd": 500000},
         "qwen/qwen3.6-27b":        {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
         "openai/gpt-oss-120b":     {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
+        # Bug fix (2026-09-13, SGA-latency audit #2): openai/gpt-oss-20b
+        # was completely absent from QUOTA_CONFIG despite eo/sga.py now
+        # using it as SGA's PRIMARY model (promoted for its ~2x Groq
+        # throughput over gpt-oss-120b/qwen3.6-27b) -- same failure mode
+        # already fixed once below for gpt-oss-safeguard-20b: with no
+        # entry here, _gating_mode_for()/_tpm_limit_for() have nothing
+        # to gate on, the ledger fails open, and the app stops
+        # self-throttling until Groq's own API starts 413ing it instead
+        # -- which would then force every SGA call back onto the
+        # (slower) gpt-oss-120b fallback anyway, quietly undoing the
+        # whole point of this promotion.
+        #
+        # UNVERIFIED PLACEHOLDER, not a confirmed figure -- unlike the
+        # entries above (each individually checked against this
+        # account's Free Plan Limits page on 2026-07-30), this reuses
+        # gpt-oss-120b's confirmed numbers as a same-tier stand-in
+        # (mirroring how gpt-oss-safeguard-20b's entry below was added),
+        # since gpt-oss-20b's actual free-tier ceiling for THIS account
+        # hasn't been checked. Being a smaller/cheaper model, its real
+        # limit may well be higher (undercounting here just means
+        # sending fewer requests than necessary, fails safe) -- but
+        # confirm against the dashboard and correct this before
+        # trusting it as a real ceiling.
+        "openai/gpt-oss-20b":      {"rpm": 30, "rpd": 1000,  "tpm": 8000,  "tpd": 200000},
         # Root-cause audit fix (2026-08-27): this model was completely
         # absent from QUOTA_CONFIG, so _gating_mode_for()/_tpm_limit_for()
         # had nothing to gate on and every call through output_guard.py's
@@ -367,6 +391,38 @@ HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 # model silently burning the whole max_tokens budget on hidden reasoning,
 # returning empty text with finish_reason == "length").
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Bug fix (2026-09-13, SGA Groq-latency audit): _call_step()'s reasoning
+# suppression used to be gated to `provider == "openrouter"` only (see
+# the _is_openrouter_reasoning_guard branch below). Every Groq-hosted
+# model this codebase calls directly -- openai/gpt-oss-120b/20b and
+# qwen/qwen3.6-27b -- is ALSO a reasoning model that thinks by default
+# on Groq (confirmed against console.groq.com/docs/reasoning), and that
+# branch never fired for provider == "groq", so every direct-Groq call
+# was silently paying for hidden chain-of-thought tokens even on a
+# trivial "Hi." Those reasoning tokens count fully against the model's
+# tpm budget (see QUOTA_CONFIG above), so this was also the likely
+# hidden driver of ledger-gate waits on calls that looked "fresh."
+#
+# Groq's reasoning_effort values are model-specific, not a single
+# on/off switch:
+#   - Qwen 3.x models (console.groq.com/docs/reasoning, "Options for
+#     Reasoning Effort (Qwen 3.6 27B)") expose a real "none" that fully
+#     disables reasoning-token generation.
+#   - GPT-OSS 20B/120B only expose "low"/"medium"/"high" -- there is no
+#     "none" for this family. "low" is the closest thing to "off" Groq
+#     allows; default (unset) is "medium".
+# Models not in this map (llama-3.x -- now Enterprise-only per Groq's
+# 2026-08-16 free/developer-tier deprecation, mistral, gemini) don't
+# support the parameter at all and must be left untouched; sending it
+# to a model that doesn't recognize it is a 400, not a no-op.
+_GROQ_REASONING_EFFORT_BY_MODEL = {
+    "qwen/qwen3.6-27b": "none",
+    "qwen/qwen3.8-27b": "none",
+    "openai/gpt-oss-120b": "low",
+    "openai/gpt-oss-20b": "low",
+    "openai/gpt-oss-safeguard-20b": "low",
+}
 
 _TRANSIENT_SDK_ERRORS = (
     GroqRateLimitError, GroqAPIStatusError,
@@ -1107,8 +1163,11 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
     like a normal (if unhelpful) response to any caller that doesn't
     specifically check for it.
 
-    Fix here is two-part, both gated on provider == "openrouter" so
-    groq/mistral/gemini call behavior is unchanged:
+    Fix here is two-part, gated on provider == "openrouter" so
+    mistral/gemini call behavior is unchanged (provider == "groq" gets
+    its own, separately-gated reasoning suppression -- see
+    _GROQ_REASONING_EFFORT_BY_MODEL above -- since Groq's parameter
+    shape/values differ from OpenRouter's `extra_body` one):
       1. Send `extra_body={"reasoning": {"exclude": true}}` so OpenRouter
          suppresses reasoning-token spend on models that support the
          param, leaving the full max_tokens budget for visible output.
@@ -1189,6 +1248,24 @@ def _call_step(client, model: str, system_prompt: str, user_content: str,
         # (harmlessly, per OpenRouter's docs) by models that don't expose
         # a reasoning budget at all.
         kwargs["extra_body"] = {"reasoning": {"exclude": True}}
+    elif provider == "groq":
+        # Bug fix (2026-09-13, SGA Groq-latency audit): mirror the
+        # openrouter branch above for direct Groq calls -- see
+        # _GROQ_REASONING_EFFORT_BY_MODEL's module-level comment for why
+        # this is a per-model value rather than a single flag, and why
+        # models absent from that map (llama-3.x/mistral/gemini shaped
+        # calls never reach this branch anyway) are deliberately left
+        # alone rather than guessing a value that would 400.
+        _groq_reasoning_effort = _GROQ_REASONING_EFFORT_BY_MODEL.get(model)
+        if _groq_reasoning_effort is not None:
+            kwargs["reasoning_effort"] = _groq_reasoning_effort
+            # include_reasoning=False just keeps the (still-generated,
+            # for the gpt-oss family at "low") reasoning text out of the
+            # response payload -- it does NOT reduce token spend on its
+            # own, "reasoning_effort" above is what does that. Harmless
+            # no-op for "none"-effort qwen calls, which never populate
+            # the reasoning field to begin with.
+            kwargs["include_reasoning"] = False
     raw_response = client.chat.completions.with_raw_response.create(**kwargs)
     headers = getattr(raw_response, "headers", None) or {}
     response = raw_response.parse()
@@ -3138,6 +3215,26 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             _log_usage(provider, key, usage, session_id, tier, path, agent_name, domain=domain, model=model)
             _record_ledger_bookkeeping(provider, key, model, usage, headroom_headers,
                                         reservation_id=_reservation_id)
+            # Diagnostic (2026-09-13, SGA Groq-latency audit): the two
+            # numbers that were previously invisible inside a single
+            # [TIMING] sga_attempt bucket (see api/task_runner.py) --
+            # hidden reasoning-token spend and time actually slept
+            # inside the pre-flight rate-limit gate for THIS step.
+            # Split out here, per step, so a slow call can be attributed
+            # to one cause or the other (or neither) instead of guessed
+            # at from a single end-to-end wall-clock number. Cheap
+            # (attribute lookups + one conditional print) and safe to
+            # leave on permanently -- getattr() chains no-op to None on
+            # any provider/response shape that doesn't have this usage
+            # sub-field, so this never raises on gemini/mistral/cloudflare.
+            _reasoning_tokens = getattr(
+                getattr(usage, "completion_tokens_details", None),
+                "reasoning_tokens", None,
+            )
+            if _reasoning_tokens or same_step_ledger_wait_elapsed:
+                print(f"  [TIMING] {agent_name} {label}: "
+                      f"reasoning_tokens={_reasoning_tokens or 0}, "
+                      f"ledger_wait={same_step_ledger_wait_elapsed:.2f}s")
             full_text = accumulated_text + text
             _action, accumulated_text, continuations_used = _handle_finish_reason(
                 accumulated_text, full_text, finish_reason, allow_continuation,
