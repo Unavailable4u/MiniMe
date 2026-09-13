@@ -584,8 +584,34 @@ def _should_store(text: str, session_id: str = None) -> bool:
     return store
 
 
+def precompute_route_for_turn(session_id: str, text: str, role: str = "user",
+                               thread_id: str = None) -> "tuple[str, dict] | None":
+    """Perf audit follow-up (#5): the routing half of append_turn(), split
+    out so a caller can kick off _route_to_thread()'s embedding call (the
+    ~7s cost seen in profiling) concurrently with unrelated I/O — e.g.
+    api/task_runner.py's run_task() running this alongside
+    check_content_safety() in a ThreadPoolExecutor, instead of paying both
+    latencies back to back.
+
+    Safe to call speculatively, including for text that later turns out
+    to be unsafe or filler: _route_to_thread() itself never writes
+    anything (see its own docstring — writes are deferred to
+    append_turn()'s pending_writes merge), so a discarded result here
+    has no side effects. Pass the return value straight through as
+    append_turn()'s precomputed_route= to skip its redundant internal
+    routing call.
+
+    Returns None for the same case append_turn() itself skips routing
+    (an assistant turn with no explicit thread_id) — there's nothing to
+    precompute for that path, it just reads the active-thread pointer.
+    """
+    if role == "user" or thread_id:
+        return _route_to_thread(session_id, text, explicit_thread_id=thread_id)
+    return None
+
+
 def append_turn(session_id: str, role: str, text: str, owner_id: str = None,
-                 thread_id: str = None) -> None:
+                 thread_id: str = None, precomputed_route: "tuple[str, dict] | None" = None) -> None:
     """Appends one turn ({"role": "user"|"assistant", "text": ...}) to
     this session's transcript. No-op if session_id is falsy — same
     fail-quiet convention relay/emitter.py already uses for a missing
@@ -613,7 +639,15 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None,
     replying to already resolved to, via the active-thread pointer
     _route_to_thread() maintains. So a session that never drifts topic
     behaves exactly as it did before this patch — same single "main"
-    thread, same legacy storage key (see _key()'s own docstring)."""
+    thread, same legacy storage key (see _key()'s own docstring).
+
+    precomputed_route — NEW, perf audit follow-up (#5): a caller that
+    already ran precompute_route_for_turn() (e.g. concurrently with
+    check_content_safety(), before it knew whether this text would even
+    end up getting stored) can pass that result straight through here to
+    skip a second, redundant _route_to_thread() call. None (the
+    default) preserves the original behavior of routing inline, so
+    every existing call site is unaffected."""
     if not session_id or not text:
         return
     if not _should_store(text, session_id=session_id):
@@ -626,7 +660,12 @@ def append_turn(session_id: str, role: str, text: str, owner_id: str = None,
     # below, instead of three sequential round trips (two from routing,
     # one for the turns list) on every stored user turn.
     pending_writes = {}
-    if role == "user":
+    if precomputed_route is not None:
+        # Perf audit follow-up (#5): routing already ran (concurrently
+        # with something else, typically check_content_safety()) —
+        # reuse it instead of paying the embedding call twice.
+        resolved_thread_id, pending_writes = precomputed_route
+    elif role == "user":
         resolved_thread_id, pending_writes = _route_to_thread(session_id, text, explicit_thread_id=thread_id)
     elif thread_id:
         # An assistant turn with an explicit thread_id (rare — mainly

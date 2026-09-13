@@ -42,6 +42,7 @@ of them individually.
 import os
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor  # NEW — perf audit follow-up (#5)
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -967,14 +968,78 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
     that doesn't set it (every existing caller before this patch) —
     identical behavior to today: no budget enforcement at all.
     """
-    # NEW — Patch 13: content-safety guard at intake, before this
-    # task_text is persisted to conversation_memory or dispatched to any
-    # role. Deliberately checked before the session_id/append_turn lines
-    # just below -- a flagged task never gets a turn recorded and never
-    # reaches _run_task_inner()'s hire/dispatch machinery at all.
-    is_safe, reason = check_content_safety(task_text, label="task_text")
+    session_id = session_id or str(uuid.uuid4())
+    import time as _time  # TEMP TIMING
+
+    # NEW — perf audit follow-up (#6): eo/sga.py's attempt() docstring
+    # says SGA is meant to be "the FIRST thing every task hits (before
+    # the Inspector, before responder.py)" — try the cache/SGA
+    # short-circuit here, before check_content_safety() even runs, on
+    # skip_generative_cache=True so a task simple enough for SGA to
+    # resolve outright never pays for the ~14s semantic cache lookup
+    # (that lookup's only purpose is handing SGA reference material —
+    # moot if SGA doesn't need it to resolve). Never attempted for
+    # attachment-bearing turns: those always go through the normal,
+    # safety-checked path below, unaffected by any of this (see
+    # _try_cache_and_sga()'s own docstring).
+    #
+    # If this resolves ("sga level"), check_content_safety() is SKIPPED
+    # ENTIRELY for this task_text — the trade-off being made here is
+    # latency vs. moderation coverage on the cheap/trivial-reply path.
+    # Anything that does NOT resolve here ("Inspector level") falls
+    # through completely unaffected: check_content_safety() still gates
+    # append_turn() exactly as before this patch, and
+    # _run_task_inner() reuses this exact attempt's precomputed
+    # workspace/grounding — it does NOT run _try_cache_and_sga() (and
+    # therefore sga_attempt()) a second time on the same task_text.
+    fast_bundle = None
+    if attachment is None:
+        _t_fast = _time.monotonic()  # TEMP TIMING
+        fast_bundle = _try_cache_and_sga(task_text, tier_override, app_slug, session_id, mode,
+                                          owner_id=owner_id, attachment=None, topic_id=topic_id,
+                                          skip_generative_cache=True)
+        print(f"  [TIMING] cache/sga fast attempt (pre-safety): "
+              f"{_time.monotonic() - _t_fast:.2f}s")  # TEMP TIMING
+
+        if "response" in fast_bundle:
+            # sga level: resolved before content-safety or Inspector
+            # classification ever ran — skip both, mirror run_task()'s
+            # normal turn-recording/response-shaping tail below exactly.
+            conversation_memory.append_turn(session_id, "user", task_text)
+            response = fast_bundle["response"]
+            _write_plan_panels(response, session_id, owner_id)
+            _write_code_files(response, session_id, owner_id)
+            response["quota_summary"] = _quota_summary(response, session_id)
+            conversation_memory.append_turn(session_id, "assistant", _extract_answer_text(response))
+            return response
+
+    # Inspector level (or an attachment-bearing turn, which never
+    # attempts the fast path above): everything below is unchanged from
+    # before this patch.
+    #
+    # NEW — Patch 13, CHANGED — perf audit follow-up (#5): content-safety
+    # guard at intake, before this task_text is persisted to
+    # conversation_memory or dispatched to any role. Still deliberately
+    # gates append_turn() below -- a flagged task never gets a turn
+    # recorded and never reaches _run_task_inner()'s hire/dispatch
+    # machinery at all -- but check_content_safety() (a Groq LLM call,
+    # ~8-9s) and conversation_memory's thread-routing embedding call
+    # (~7s) don't depend on each other, so they're run concurrently
+    # here instead of back to back. precompute_route_for_turn() itself
+    # never writes anything (see its own docstring), so running it
+    # before we know the safety verdict is safe to discard below on the
+    # fail-closed path -- nothing has been persisted either way.
+    _t_turn = _time.monotonic()  # TEMP TIMING
+    with ThreadPoolExecutor(max_workers=2) as _intake_pool:
+        _safety_future = _intake_pool.submit(check_content_safety, task_text, label="task_text")
+        _route_future = _intake_pool.submit(
+            conversation_memory.precompute_route_for_turn, session_id, task_text)
+        is_safe, reason = _safety_future.result()
+        precomputed_route = _route_future.result()
+    print(f"  [TIMING] check_content_safety + route (parallel): "
+          f"{_time.monotonic() - _t_turn:.2f}s")  # TEMP TIMING
+
     if not is_safe:
-        session_id = session_id or str(uuid.uuid4())
         print(f"  [task_runner] run_task: task_text failed content-safety "
               f"guard, returning early (fail-closed): {reason}")
         return {
@@ -987,10 +1052,8 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
             "message": "This request couldn't be processed.",
         }
 
-    session_id = session_id or str(uuid.uuid4())
-    import time as _time  # TEMP TIMING
     _t_turn = _time.monotonic()  # TEMP TIMING
-    conversation_memory.append_turn(session_id, "user", task_text)
+    conversation_memory.append_turn(session_id, "user", task_text, precomputed_route=precomputed_route)
     print(f"  [TIMING] append_turn (user): {_time.monotonic() - _t_turn:.2f}s")  # TEMP TIMING
     _t_inner = _time.monotonic()  # TEMP TIMING
     response = _run_task_inner(
@@ -1004,6 +1067,7 @@ def run_task(task_text: str, tier_override: int = None, directed_task_type_overr
         topic_id=topic_id,   # NEW — Step 6.11.f
         scope=scope,   # NEW — task 13d/13e
         tab=tab,   # NEW — Patch B6
+        precomputed_cache_sga=fast_bundle,   # NEW — perf audit follow-up (#6), avoids a second sga_attempt()
     )
     print(f"  [TIMING] _run_task_inner total: {_time.monotonic() - _t_inner:.2f}s")  # TEMP TIMING
     _write_plan_panels(response, session_id, owner_id)   # NEW — chat-to-panel writes, patch 2
@@ -1466,17 +1530,47 @@ def _maybe_record_sga_fact(workspace_id: str, task_text: str, session_id: str, s
         print(f"  [task_runner] SGA fact write failed, skipped (fail-open): {exc}")
 
 
-def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
-                                 app_slug: str, session_id: str, mode: str, owner_id: str = None,
-                                 attachment: dict = None, topic_id: str = None) -> dict:
-    """Part 2 §2.5: the shared first half of dispatch — semantic cache,
-    SGA, Inspector/Panel classification, staff_task()'s hiring, and mode
-    adjustment — factored out of _run_task_inner() so preview_task() can
-    stop exactly here (before any tier actually executes) instead of
-    duplicating this logic.
-    ...
-    owner_id: NEW — passed straight through to loop_v4._get_decision()
-    so conversation_memory's linked-chat lookup can be owner-scoped.
+def _try_cache_and_sga(task_text: str, tier_override: int, app_slug: str, session_id: str, mode: str,
+                        owner_id: str = None, attachment: dict = None, topic_id: str = None,
+                        skip_generative_cache: bool = False) -> dict:
+    """Perf audit follow-up (#6): the cache/SGA short-circuit half of
+    what used to be the start of _resolve_decision_and_hires(), split
+    out so run_task() can attempt it BEFORE check_content_safety() and
+    before append_turn() — see run_task()'s own comment for why. This
+    is the exact same logic that lived there before this patch, just
+    under a name that reflects what it actually does (nothing here
+    touches the Inspector or staff_task()).
+
+    Returns one of two shapes:
+      - {"resolved": False, "response": {...}} — attachment dispatch,
+        a deterministic cache hit, or an SGA answer. This is a FINAL
+        response; the caller returns it (or, for run_task()'s fast
+        pre-safety attempt, uses response["result"]/etc. directly)
+        without any further dispatch. Same shape/contract
+        _resolve_decision_and_hires() always returned for these three
+        cases, so existing callers (preview_task(), _run_task_inner())
+        are unaffected when they get this back.
+      - {"workspace_id":..., "grounded_task_text":..., "grounded_node_ids":...}
+        — nothing short-circuited it. The caller (normally
+        _resolve_decision_and_hires(), continuing on to Inspector
+        classification) should use these precomputed values instead of
+        re-deriving them, and must not call this function a second
+        time for the same task_text — see precomputed= on
+        _resolve_decision_and_hires() below.
+
+    skip_generative_cache — NEW, perf audit follow-up (#6): when True,
+    skips get_cached_reference() (the semantic/embedding + vector-index
+    lookup — ~14s in profiling) for CACHE_CLASS_GENERATIVE asks; SGA
+    just answers without reference material instead. Used by
+    run_task()'s fast pre-Inspector attempt: a task simple enough for
+    SGA to resolve outright doesn't need semantically-similar prior
+    material fetched for it first. False (default) preserves the
+    original behavior for every other caller — the *deterministic*
+    check_cache() path is untouched either way regardless of this flag,
+    since that's a free exact-key hit, not a semantic search.
+
+    owner_id: passed straight through to loop_v4._get_decision() by the
+    caller — unused directly here except for workspace_for_chat().
 
     attachment: NEW — Data Layer §4a. When set, `{"kind": ..., "payload":
     ...}` (plus any of process_upload()'s optional ingest_kwargs, e.g.
@@ -1489,6 +1583,10 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
     to guess a domain/agent-set for; it always means "hire Source
     Manager", which (via agents/source_manager.py's own §3a wiring)
     hires the Backlink Detector right after itself, unconditionally.
+    run_task()'s fast pre-safety attempt never sets this (attachment-
+    bearing turns always go through the normal, safety-checked path —
+    see its own comment), so this branch only ever runs post-safety,
+    same as before this patch.
 
     topic_id: NEW — Step 6.11.f. Passed straight through to
     _grounded_task_text() below, which tries the deterministic
@@ -1579,7 +1677,7 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
                     "result": {"answer": cached},
                     "message": None,
                 }}
-        elif cache_class == CACHE_CLASS_GENERATIVE:
+        elif cache_class == CACHE_CLASS_GENERATIVE and not skip_generative_cache:
             reference_answer = get_cached_reference(task_text, app_slug=app_slug, workspace_id=workspace_id)
 
     # NEW — Patch B7: fold the prior answer in as reference context rather
@@ -1612,6 +1710,60 @@ def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_tas
                 "result": {"answer": sga_result["answer"]},
                 "message": None,
             }}
+
+    # Nothing short-circuited: caller continues on to Inspector
+    # classification (_resolve_decision_and_hires() below) with these
+    # already computed — see this function's own docstring for the
+    # contract.
+    return {
+        "workspace_id": workspace_id,
+        "grounded_task_text": grounded_task_text,
+        "grounded_node_ids": grounded_node_ids,
+    }
+
+
+def _resolve_decision_and_hires(task_text: str, tier_override: int, directed_task_type_override: str,
+                                 app_slug: str, session_id: str, mode: str, owner_id: str = None,
+                                 attachment: dict = None, topic_id: str = None,
+                                 precomputed: dict = None) -> dict:
+    """Part 2 §2.5: the shared first half of dispatch — semantic cache,
+    SGA, Inspector/Panel classification, staff_task()'s hiring, and mode
+    adjustment — factored out of _run_task_inner() so preview_task() can
+    stop exactly here (before any tier actually executes) instead of
+    duplicating this logic.
+
+    CHANGED — perf audit follow-up (#6): the cache/SGA half of this is
+    now _try_cache_and_sga() (see its own docstring); this function
+    calls it exactly like before UNLESS precomputed is given.
+
+    precomputed: NEW — perf audit follow-up (#6). When the caller
+    (run_task()) already ran _try_cache_and_sga() itself — its fast
+    pre-content-safety attempt — and that attempt came back
+    unresolved (an "Inspector-level" task, not an "sga level" one),
+    it passes that exact return value straight through here instead of
+    this function calling _try_cache_and_sga() a second time. That
+    would otherwise mean re-deriving workspace_id/grounded_task_text
+    AND re-running sga_attempt() a second time on the same task_text —
+    same LLM call, same answer, pure wasted latency on top of whatever
+    the Inspector path already costs. None (the default) preserves the
+    original behavior exactly: preview_task() and any other caller
+    that doesn't know about the fast pre-safety attempt still gets
+    _try_cache_and_sga() run fresh, right here, same as always.
+
+    owner_id: NEW — passed straight through to loop_v4._get_decision()
+    so conversation_memory's linked-chat lookup can be owner-scoped.
+    """
+    if precomputed is not None:
+        bundle = precomputed
+    else:
+        bundle = _try_cache_and_sga(task_text, tier_override, app_slug, session_id, mode,
+                                     owner_id=owner_id, attachment=attachment, topic_id=topic_id)
+        if "response" in bundle:
+            return bundle
+
+    workspace_id = bundle["workspace_id"]
+    grounded_task_text = bundle["grounded_task_text"]
+    grounded_node_ids = bundle["grounded_node_ids"]
 
     decision = loop_v4._get_decision(task_text, tier_override, directed_task_type_override,
                                       session_id=session_id, owner_id=owner_id)   # FIXED — now passes owner_id
@@ -1730,7 +1882,7 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
                      approval_roles: set = None,
                      no_conversation_context_roles: set = None, owner_id: str = None,
                      attachment: dict = None, topic_id: str = None, scope: str = None,
-                     tab: str = None) -> dict:
+                     tab: str = None, precomputed_cache_sga: dict = None) -> dict:
     """The actual routing/execution body — split out of run_task() so
     that wrapper can do turn-recording on either side without every
     early-return point needing to do it individually. session_id is
@@ -1744,10 +1896,16 @@ def _run_task_inner(task_text: str, tier_override: int = None, directed_task_typ
     web_researcher reads it; a no-op for every other role/tier.
     tab: Patch B6 — passed through unchanged to _dispatch_resolved() ->
     _run_tier3_hires(). Only eo/executor.py's _run_loop() reads it, to
-    gate the tool-call budget pause to the chat tab."""
+    gate the tool-call budget pause to the chat tab.
+    precomputed_cache_sga: NEW — perf audit follow-up (#6). run_task()'s
+    fast pre-safety cache/SGA attempt, forwarded straight through to
+    _resolve_decision_and_hires()'s own precomputed= so it isn't
+    re-run. None for any caller that doesn't have one (e.g. a future
+    direct caller of _run_task_inner()) — same as before this patch."""
     resolved = _resolve_decision_and_hires(task_text, tier_override, directed_task_type_override,
                                             app_slug, session_id, mode, owner_id=owner_id,
-                                            attachment=attachment, topic_id=topic_id)   # FIXED / 6.11.f
+                                            attachment=attachment, topic_id=topic_id,
+                                            precomputed=precomputed_cache_sga)   # FIXED / 6.11.f / perf #6
     if not resolved["resolved"]:
         return resolved["response"]
     # CHANGED — bug #4 fix: dispatch the grounded text (falls back to the
