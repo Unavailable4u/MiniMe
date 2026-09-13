@@ -129,9 +129,51 @@ class FakeRedis:
         # exist and not raise.
         return True
 
+    def pipeline(self):
+        # NEW — perf audit follow-up (#3c): memory/bus.py's new
+        # write_many() calls redis.pipeline() to batch several SETs
+        # into one round trip (see that function's own docstring for
+        # why). Real Upstash's Pipeline queues commands and only
+        # applies them on .exec() — this fake mirrors that ordering
+        # (not just aliasing straight to self.set()) so a test that
+        # somehow depends on batch-vs-immediate timing would still see
+        # the right behavior, not just the right end state.
+        return _FakePipeline(self)
+
     # Convenience for tests that want to inspect/seed state directly
     def _dump(self):
         return dict(self._store)
+
+
+class _FakePipeline:
+    """Minimal in-memory stand-in for upstash_redis.Redis's Pipeline —
+    queues (command, args) pairs via .set()/.get()/etc., then applies
+    them against the SAME FakeRedis store, in order, on .exec(). Only
+    implements what memory.bus.write_many() actually calls (.set(),
+    .exec()); extend this alongside FakeRedis itself if a future
+    bus.py function pipelines a different command."""
+
+    def __init__(self, fake_redis: "FakeRedis"):
+        self._fake_redis = fake_redis
+        self._ops = []
+
+    def set(self, key, value, *args, **kwargs):
+        self._ops.append(("set", key, value, args, kwargs))
+        return self
+
+    def get(self, key):
+        self._ops.append(("get", key, None, (), {}))
+        return self
+
+    def exec(self):
+        results = []
+        for op, key, value, args, kwargs in self._ops:
+            if op == "set":
+                results.append(self._fake_redis.set(key, value, *args, **kwargs))
+            elif op == "get":
+                results.append(self._fake_redis.get(key))
+        self._ops = []
+        return results
 
 
 @pytest.fixture(autouse=True)

@@ -1362,8 +1362,13 @@ def _run_loop(agent_names, role_names, idx, results, auto_inserted, stage_revisi
             # would otherwise silently overwrite itself across multiple
             # generic_worker hires in the same plan.
             results[role] = result
-            print(f"  [Executor] done: {current_name}" if not role_failed
-                  else f"  [Executor] failed (degraded): {current_name}")
+            # CHANGED — perf audit follow-up: duration_ms was already
+            # computed on the line above (and already sent to the event
+            # bus/Langfuse a few lines down via `payload`), it just never
+            # made it into this print — so the terminal never showed which
+            # role actually ate the time on a slow run.
+            print(f"  [Executor] done: {current_name} ({duration_ms}ms)" if not role_failed
+                  else f"  [Executor] failed (degraded): {current_name} ({duration_ms}ms)")
             if _role_span is not None:
                 try:
                     _role_span.update(output=_summarize(result, role=role))
