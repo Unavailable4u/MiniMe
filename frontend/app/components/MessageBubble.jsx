@@ -8,6 +8,7 @@ import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
 import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
 import ArtifactRenderer from "./ArtifactRenderer";   // NEW — Phase CO, CO2
+import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark beside each assistant reply
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));   // NEW — Phase 3 step 3.2
 
@@ -212,7 +213,12 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isA
   const { data } = message;
   const style = tierStyle(data);
   return (
-    <div className="flex justify-start">
+    <div className="flex justify-start items-start gap-2">
+      {/* NEW — animated brand-mark, same spot Claude/other AI chat UIs
+          put their assistant avatar. Idle (non-"thinking") variant: see
+          AssistantAvatar.jsx's own header comment for why this doesn't
+          replay a reveal animation on every virtualized-list remount. */}
+      <AssistantAvatar size={26} className="mt-0.5" />
       <div className="bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-[80%] space-y-[var(--density-card-gap)]">
         <div className={`flex items-center gap-1.5 text-xs font-medium ${style.text}`}>
           <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />

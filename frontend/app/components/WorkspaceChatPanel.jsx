@@ -15,6 +15,7 @@ import HireReviewScreen from "./HireReviewScreen";
 import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, PanelLeftOpen, PanelLeftClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import { ingestFileByExtension } from "../lib/ingestDispatch";
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
+import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
 
 // NEW — §6: this component is the composition that used to live directly
 // inside ChatTab.jsx (chat box + resizable/collapsible WorkingPanel dock).
@@ -192,6 +193,53 @@ function clampWorkingPanelHeight(h) {
   return Math.min(WORKING_PANEL_MAX_HEIGHT, Math.max(WORKING_PANEL_MIN_HEIGHT, h));
 }
 
+// NEW — one-line echo of WorkingPanel/AgentStepList's live feed, for the
+// "Working…" row below. Deliberately thin: just the LAST step (same
+// "sequential execution -> last entry is the currently-running one"
+// assumption AgentStepList.jsx's own header comment documents), a role
+// name with underscores swapped for spaces, no icons/colors/durations —
+// those stay AgentStepList's job. decisionEvents is only consulted when
+// there's no step yet at all (e.g. a cache-tier hit never runs a single
+// agent — see AgentStepList.jsx's own comment on that same case), so a
+// near-instant reply still shows something truer than a generic
+// "Thinking…" for the one frame it's visible.
+function currentWorkLabel(liveSteps, decisionEvents) {
+  const lastStep = liveSteps && liveSteps.length > 0 ? liveSteps[liveSteps.length - 1] : null;
+  if (lastStep) {
+    const role = lastStep.role ? lastStep.role.replace(/_/g, " ") : "agent";
+    if (lastStep.status === "awaiting_approval") return `Awaiting approval on ${role}`;
+    if (lastStep.status === "error") return `${role} hit an error`;
+    if (lastStep.status === "done") return `${role} done`;
+    return `Running ${role}…`;
+  }
+  const lastDecision =
+    decisionEvents && decisionEvents.length > 0 ? decisionEvents[decisionEvents.length - 1] : null;
+  if (lastDecision?.type === "cache_hit") return "Serving from cache…";
+  if (lastDecision?.type === "worker_pool_selection") return "Selecting worker pool…";
+  return "Thinking…";
+}
+
+// NEW — elapsed-time readout for the "Working…" row. Purely local:
+// starts its own clock the moment it mounts (which is the moment
+// `loading` flips true, since the parent only renders this while
+// `loading` is true — see the render site below) and clears on
+// unmount. No server round trip either way, just a 1s setInterval —
+// same reasoning as currentWorkLabel above for why this doesn't add
+// latency or request volume.
+function ThinkingElapsed() {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    const startedAt = Date.now();
+    const id = setInterval(() => {
+      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return <span className="tabular-nums">{seconds}s</span>;
+}
+
 // NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
 // resolution). `activeContext` is the caller's best guess at "what the
 // person is currently looking at" -- { type: "topic", id, label } or
@@ -258,6 +306,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
 
   const messages = dock.state.messages;
   const loading = dock.state.loading;
+  // NEW — thinking-row status label: the SAME liveSteps/decisionEvents
+  // WorkingPanel.jsx already renders in full, off the SAME dock.state
+  // (populated by the session-${sessionId} Pusher subscription that
+  // lives in WorkspaceDockContext.jsx at the dock level, not inside
+  // WorkingPanel itself — so these are already up to date here whether
+  // or not WorkingPanel is even mounted/expanded). Reading them a
+  // second time, in one more place, is a render-only operation: no new
+  // subscription, no new request, no added latency or server load.
+  const liveSteps = dock.state.liveSteps;
+  const decisionEvents = dock.state.decisionEvents;
   const hasMoreOlder = dock.state.hasMoreOlder;   // NEW — perf audit item #3
   const loadingOlder = dock.state.loadingOlder;   // NEW — perf audit item #3
   const mode = dockMode;
@@ -1353,7 +1411,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               ESTIMATED_ROW_HEIGHT above bumped by the same 16px so the
               pre-measurement estimate accounts for it too. */}
           {loading && (
-            <div className="text-[var(--neutral-500)] text-sm animate-pulse">Working…</div>
+            // CHANGED — was plain `animate-pulse` "Working…" text. The
+            // mark itself now draws-in/undraws in a loop
+            // (AssistantAvatar.jsx, `thinking` mode) — same "the logo
+            // is composing a reply" treatment Claude/other AI chat UIs
+            // use. The label is now a thin live echo of liveSteps/
+            // decisionEvents (currentWorkLabel above — same data
+            // WorkingPanel already shows in full, no new cost to read
+            // it here too), and an elapsed-time readout (ThinkingElapsed
+            // above, purely client-side) sits after it so a slow tier-3
+            // run never looks stuck with no feedback.
+            <div className="flex items-center gap-2 text-[var(--neutral-500)] text-sm">
+              <AssistantAvatar size={20} thinking />
+              <span>{currentWorkLabel(liveSteps, decisionEvents)}</span>
+              <span className="text-[var(--neutral-600)]">· <ThinkingElapsed /></span>
+            </div>
           )}
           {/* NEW — Phase 4 step 4.6: live feed of generationNotifications
               (step 4.5's dock-state field, fed straight off the
