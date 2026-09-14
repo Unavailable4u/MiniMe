@@ -224,6 +224,16 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isA
           <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
           {style.label}
           <span className="text-[var(--neutral-600)] font-normal">· {data.status}</span>
+          {/* NEW — per-leg reply time (WorkspaceDockContext.jsx's
+              finishRun/buildAssistantMessage). Whole seconds, same
+              formatting as ThinkingElapsed's live "Working…" readout, so
+              the number a person watched ticking up while waiting is the
+              same number that stays behind on the bubble once it lands. */}
+          {typeof message.elapsedMs === "number" && (
+            <span className="text-[var(--neutral-600)] font-normal tabular-nums">
+              · {Math.max(1, Math.round(message.elapsedMs / 1000))}s
+            </span>
+          )}
         </div>
         <ResultBody data={data} />
         {/* NEW — CO3 patch 3/4: resume right from the chat bubble, not

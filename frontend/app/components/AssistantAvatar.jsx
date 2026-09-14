@@ -37,14 +37,33 @@ const PATH2_D =
 // every turn, not once per session the way LoadingScreen's intro
 // does), with path2 given a small stagger so the two strokes don't
 // land in perfect lockstep.
+// fillDelay = -0.8 * drawDuration, same ratio LoadingScreen.jsx's intro
+// uses (fillDelay: -880 over a 1100ms draw). The fill only needs to
+// take over after a brief opening flourish of stroke — letting the
+// stroke trace the *entire* outline at full opacity is what was
+// making the mark's tighter corners look like they overlapped
+// themselves, since a constant-width round-joined stroke doesn't
+// trace a variable-width glyph outline's sharp corners cleanly.
 function getPath1Timeline() {
-  return { drawDuration: 700, drawDelay: 0, easing: "cubic-bezier(0.65, 0, 0.35, 1)" };
+  return {
+    drawDuration: 700,
+    drawDelay: 0,
+    easing: "cubic-bezier(0.65, 0, 0.35, 1)",
+    fillDuration: 0,
+    fillDelay: -560,
+  };
 }
 function getPath2Timeline() {
-  return { drawDuration: 700, drawDelay: 90, easing: "cubic-bezier(0.65, 0, 0.35, 1)" };
+  return {
+    drawDuration: 700,
+    drawDelay: 90,
+    easing: "cubic-bezier(0.65, 0, 0.35, 1)",
+    fillDuration: 0,
+    fillDelay: -560,
+  };
 }
 const HOLD_MS = 480; // pause on the fully-drawn mark before undrawing
-const UNDRAW_MS = 340; // quick undraw before the next loop iteration
+const UNDRAW_MS = 340; // quick fade back to blank before the next loop iteration
 const REST_MS = 140; // brief blank pause between loop iterations
 
 const STYLES = `
@@ -53,13 +72,11 @@ const STYLES = `
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  border-radius: 999px;
-  background: radial-gradient(circle, rgba(255,32,82,0.14) 0%, rgba(255,32,82,0) 72%);
 }
 
 .mm-avatar-mark {
-  width: 62%;
-  height: 62%;
+  width: 100%;
+  height: 100%;
   overflow: visible;
 }
 
@@ -100,23 +117,34 @@ export default function AssistantAvatar({ size = 26, thinking = false, className
       new Promise((resolve) => timeouts.push(setTimeout(resolve, ms)));
 
     function prepare(path) {
+      path.getAnimations().forEach((anim) => anim.cancel());
       const length = path.getTotalLength();
       path.style.fill = FILL_COLOR;
+      path.style.fillOpacity = "0";
       path.style.stroke = FILL_COLOR;
-      path.style.strokeWidth = "3";
+      path.style.strokeWidth = "2.5";
       path.style.strokeLinecap = "round";
       path.style.strokeLinejoin = "round";
+      path.style.strokeOpacity = "1";
       path.style.strokeDasharray = length;
+      path.style.strokeDashoffset = length;
       return length;
     }
 
+    // Two separate animate() calls — same technique as LoadingScreen.jsx's
+    // animatePath() / the original reference template — rather than one
+    // animation interpolating strokeDashoffset and fillOpacity together.
+    // Interpolating both at once made the fill fade in across the *whole*
+    // shape while the outline was still only partially drawn, so corners
+    // the pen hadn't reached yet were already ghosting in with fill; that
+    // mismatch is what read as "overlapping" and made the mark look
+    // thicker than intended. Keeping the draw and the fill as independent
+    // animations (the fill starting only once its own delay hits, per
+    // timeline.fillDelay) keeps them visually in sync with each other.
     function drawIn(path, timeline) {
       const length = prepare(path);
-      return path.animate(
-        [
-          { strokeDashoffset: length, fillOpacity: 0, strokeOpacity: 1 },
-          { strokeDashoffset: 0, fillOpacity: 1, strokeOpacity: 0 },
-        ],
+      path.animate(
+        [{ strokeDashoffset: length }, { strokeDashoffset: 0 }],
         {
           duration: timeline.drawDuration,
           delay: timeline.drawDelay,
@@ -124,15 +152,24 @@ export default function AssistantAvatar({ size = 26, thinking = false, className
           fill: "forwards",
         }
       );
-    }
-
-    function undraw(path) {
-      const length = path.getTotalLength();
+      const totalFillDelay = timeline.drawDelay + timeline.drawDuration + timeline.fillDelay;
       return path.animate(
         [
-          { strokeDashoffset: 0, fillOpacity: 1, strokeOpacity: 0 },
-          { strokeDashoffset: length, fillOpacity: 0, strokeOpacity: 1 },
+          { fillOpacity: 0, strokeOpacity: 1 },
+          { fillOpacity: 1, strokeOpacity: 0 },
         ],
+        { duration: timeline.fillDuration, delay: totalFillDelay, easing: "ease-out", fill: "forwards" }
+      );
+    }
+
+    // Just fade the solid mark back out. drawIn() above only ever shows a
+    // brief flourish of stroke before the fill takes over (see fillDelay),
+    // so there's no long traced length to retrace on the way out — a
+    // straight fillOpacity fade is the clean "blank" state the loop
+    // pauses on between reps.
+    function undraw(path) {
+      return path.animate(
+        [{ fillOpacity: 1 }, { fillOpacity: 0 }],
         { duration: UNDRAW_MS, easing: "ease-in", fill: "forwards" }
       );
     }
