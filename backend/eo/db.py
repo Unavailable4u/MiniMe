@@ -290,7 +290,7 @@ def cursor(user_id: str | None = None, trusted: bool = False):
         # per cursor).
         with conn.cursor() as cur:
             if user_id is not None:
-                cur.execute("SELECT set_config('app.current_user_id', %s, true)", (user_id,))
+                cur.execute("SELECT set_config('app.current_user_id', %s::text, true)", (user_id,))
             if trusted:
                 cur.execute("SELECT set_config('app.trusted_internal', 'true', true)")
             yield cur

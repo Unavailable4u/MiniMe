@@ -770,7 +770,16 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // etc. — those refs existed in SessionContext only to dodge stale
     // closures over React state; this store's `states` map is already
     // always current, so no parallel ref bookkeeping is needed here.
-    const buildAssistantMessage = (key, taskText, data) => {
+    // `elapsedMs` — NEW: per-leg reply time, deliberately not a
+    // cross-pause running total. Each caller of finishRun() captures its
+    // own `legStartedAt` right before the fetch that produces THIS
+    // message (see sendTask/resumeRun/confirmHireReview below) and
+    // finishRun() turns that into a duration right here. A paused ->
+    // resumed run is two legs, two independent timings (matches
+    // ThinkingElapsed's own reset-per-run behavior: fresh clock every
+    // time `loading` starts a new run) — no accumulator, no persisted
+    // "total time across the whole conversation" to keep in sync.
+    const buildAssistantMessage = (key, taskText, data, elapsedMs = null) => {
       const s = getState(key);
       return {
         role: "assistant",
@@ -782,6 +791,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
         dependencyMap: s.dependencyMap,
         structurePlan: s.structurePlan,
         decisionEvents: s.decisionEvents, // NEW — CO4 patch 3
+        elapsedMs, // NEW — ms from this leg's fetch firing to its response landing
       };
     };
 
@@ -849,8 +859,9 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // pausedRun, etc.) when that key still belongs to the same session
     // — i.e. the user hasn't switched this dock to a different chat
     // while the run was in flight.
-    const finishRun = (key, dockSessionId, taskText, data, extraStateWhenFresh = {}) => {
-      const assistantMessage = buildAssistantMessage(key, taskText, data);
+    const finishRun = (key, dockSessionId, taskText, data, extraStateWhenFresh = {}, legStartedAt = null) => {
+      const elapsedMs = legStartedAt != null ? Date.now() - legStartedAt : null;
+      const assistantMessage = buildAssistantMessage(key, taskText, data, elapsedMs);
       persistMessageToSession(dockSessionId, assistantMessage);
       if (isStaleRun(key, dockSessionId)) {
         console.warn(
@@ -907,6 +918,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       persistMessageToSession(dockSessionId, userMessage);
       setState(key, { loading: true });
       resetLiveRunState(key);
+      const legStartedAt = Date.now(); // NEW — this leg's clock; same moment `loading` flips true, so it lines up with ThinkingElapsed's own start
 
       if (reviewBeforeDispatch) {
         try {
@@ -935,9 +947,9 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
             });
             return;
           }
-          finishRun(key, dockSessionId, taskText, data, { loading: false });
+          finishRun(key, dockSessionId, taskText, data, { loading: false }, legStartedAt);
         } catch (err) {
-          finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, { loading: false });
+          finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, { loading: false }, legStartedAt);
         }
         return;
       }
@@ -967,12 +979,12 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           if (!isStaleRun(key, dockSessionId)) {
             setState(key, { pausedRun: { taskText, sessionId: data.session_id || dockSessionId } });
           }
-          finishRun(key, dockSessionId, taskText, data);
+          finishRun(key, dockSessionId, taskText, data, {}, legStartedAt);
           return;
         }
-        finishRun(key, dockSessionId, taskText, data, { loading: false });
+        finishRun(key, dockSessionId, taskText, data, { loading: false }, legStartedAt);
       } catch (err) {
-        finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, { loading: false });
+        finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, { loading: false }, legStartedAt);
       }
     };
 
@@ -980,6 +992,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       const pausedRun = states.get(key)?.pausedRun;
       if (!pausedRun) return;
       const dockSessionId = pausedRun.sessionId;   // FIX — captured once, see sendTask's note above
+      const legStartedAt = Date.now(); // NEW — a resume is its own leg, timed independently of whatever the original paused run took
       try {
         const res = await fetch(`${API_URL}/api/resume`, {
           method: "POST",
@@ -997,13 +1010,13 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           if (!isStaleRun(key, dockSessionId)) {
             setState(key, { pausedRun: { taskText: pausedRun.taskText, sessionId: data.session_id || pausedRun.sessionId } });
           }
-          finishRun(key, dockSessionId, pausedRun.taskText, data);
+          finishRun(key, dockSessionId, pausedRun.taskText, data, {}, legStartedAt);
           return;
         }
-        finishRun(key, dockSessionId, pausedRun.taskText, data, { loading: false, pausedRun: null });
+        finishRun(key, dockSessionId, pausedRun.taskText, data, { loading: false, pausedRun: null }, legStartedAt);
       } catch (err) {
         finishRun(key, dockSessionId, pausedRun.taskText, { status: "error", message: String(err) },
-          { loading: false, pausedRun: null, pausedApproval: null });
+          { loading: false, pausedRun: null, pausedApproval: null }, legStartedAt);
       }
     };
 
@@ -1018,6 +1031,7 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
       const dockWorkspaceId = key && key.startsWith("ws:") ? key.slice(3) : null;
       setState(key, { loading: true });
       resetLiveRunState(key);
+      const legStartedAt = Date.now(); // NEW — same per-leg timing as sendTask/resumeRun
       try {
         const res = await fetch(`${API_URL}/api/task/confirm`, {
           method: "POST",
@@ -1028,9 +1042,9 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
           }),
         });
         const data = await res.json();
-        finishRun(key, dockSessionId, taskText, data);
+        finishRun(key, dockSessionId, taskText, data, {}, legStartedAt);
       } catch (err) {
-        finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) });
+        finishRun(key, dockSessionId, taskText, { status: "error", message: String(err) }, {}, legStartedAt);
       } finally {
         if (!isStaleRun(key, dockSessionId)) setState(key, { loading: false, pendingHireReview: null });
       }
