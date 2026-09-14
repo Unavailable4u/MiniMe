@@ -219,25 +219,73 @@ function currentWorkLabel(liveSteps, decisionEvents) {
   return "Thinking…";
 }
 
-// NEW — elapsed-time readout for the "Working…" row. Purely local:
-// starts its own clock the moment it mounts (which is the moment
-// `loading` flips true, since the parent only renders this while
-// `loading` is true — see the render site below) and clears on
-// unmount. No server round trip either way, just a 1s setInterval —
-// same reasoning as currentWorkLabel above for why this doesn't add
-// latency or request volume.
-function ThinkingElapsed() {
+// NEW — the "Working…" row, plus its elapsed-time readout. Fully
+// self-contained on purpose: it owns its own start-time ref and both
+// the live (while loading) and frozen (once loading ends) seconds
+// counts internally, so nothing here reaches into WorkspaceChatPanel's
+// own state. Purely local either way — a 1s setInterval, no server
+// round trip, no added latency or request volume — same reasoning as
+// currentWorkLabel above.
+//
+// Render behavior:
+//   - `loading` true: shows the drawing/thinking mark, the live label,
+//     and a ticking "Ns" counter.
+//   - `loading` just flipped false: keeps rendering, now showing the
+//     last tick as a frozen "Replied in Ns" line, so the timer doesn't
+//     just vanish the instant the reply lands.
+//   - `loading` false and no run has happened yet: renders nothing.
+function ThinkingRow({ loading, label }) {
   const [seconds, setSeconds] = useState(0);
+  const [finalSeconds, setFinalSeconds] = useState(null);
+  const startedAtRef = useRef(null);
+  const wasLoadingRef = useRef(false);
 
+  // Tracks the loading edges: false->true starts a fresh clock and
+  // clears any previous "Replied in Ns" readout; true->false freezes
+  // the last tick as finalSeconds.
   useEffect(() => {
-    const startedAt = Date.now();
+    if (loading && !wasLoadingRef.current) {
+      startedAtRef.current = Date.now();
+      setSeconds(0);
+      setFinalSeconds(null);
+    } else if (!loading && wasLoadingRef.current && startedAtRef.current != null) {
+      setFinalSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
+    }
+    wasLoadingRef.current = loading;
+  }, [loading]);
+
+  // The live 1s ticker, only running while loading is true.
+  useEffect(() => {
+    if (!loading) return undefined;
     const id = setInterval(() => {
-      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+      if (startedAtRef.current != null) {
+        setSeconds(Math.floor((Date.now() - startedAtRef.current) / 1000));
+      }
     }, 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [loading]);
 
-  return <span className="tabular-nums">{seconds}s</span>;
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-[var(--neutral-500)] text-sm">
+        <AssistantAvatar size={20} thinking />
+        <span>{label}</span>
+        <span className="text-[var(--neutral-600)]">
+          · <span className="tabular-nums">{seconds}s</span>
+        </span>
+      </div>
+    );
+  }
+
+  if (finalSeconds != null) {
+    return (
+      <div className="flex items-center gap-2 text-[var(--neutral-500)] text-xs">
+        <span className="tabular-nums">Replied in {finalSeconds}s</span>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 // NEW — Notebooks Chat-First refinement, Phase 2 step 2.6a (scope
@@ -1410,23 +1458,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               `pb-4` (matches the old space-y-4 amount), with
               ESTIMATED_ROW_HEIGHT above bumped by the same 16px so the
               pre-measurement estimate accounts for it too. */}
-          {loading && (
-            // CHANGED — was plain `animate-pulse` "Working…" text. The
-            // mark itself now draws-in/undraws in a loop
-            // (AssistantAvatar.jsx, `thinking` mode) — same "the logo
-            // is composing a reply" treatment Claude/other AI chat UIs
-            // use. The label is now a thin live echo of liveSteps/
-            // decisionEvents (currentWorkLabel above — same data
-            // WorkingPanel already shows in full, no new cost to read
-            // it here too), and an elapsed-time readout (ThinkingElapsed
-            // above, purely client-side) sits after it so a slow tier-3
-            // run never looks stuck with no feedback.
-            <div className="flex items-center gap-2 text-[var(--neutral-500)] text-sm">
-              <AssistantAvatar size={20} thinking />
-              <span>{currentWorkLabel(liveSteps, decisionEvents)}</span>
-              <span className="text-[var(--neutral-600)]">· <ThinkingElapsed /></span>
-            </div>
-          )}
+          {/* CHANGED — was plain `animate-pulse` "Working…" text, then a
+              loading-gated block that unmounted (timer included) the
+              instant the reply landed. ThinkingRow (above) now owns
+              that whole lifecycle itself: it renders the drawing mark +
+              live label + ticking seconds while `loading` is true, then
+              keeps rendering just long enough to show the frozen
+              "Replied in Ns" line once `loading` flips false, and
+              renders nothing before the first run or once the person
+              starts a new one. */}
+          <ThinkingRow loading={loading} label={currentWorkLabel(liveSteps, decisionEvents)} />
           {/* NEW — Phase 4 step 4.6: live feed of generationNotifications
               (step 4.5's dock-state field, fed straight off the
               session-${session_id} Pusher channel — no polling, updates
