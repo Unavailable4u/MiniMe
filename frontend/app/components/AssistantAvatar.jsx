@@ -7,12 +7,11 @@
 // use instead of a full-screen boot sequence. Two call sites:
 //
 //   - MessageBubble.jsx renders it once per finished assistant bubble,
-//     `thinking={false}` (the default): a static filled mark with a
-//     cheap CSS-only breathing pulse. No stroke-dash math and no WAAPI
-//     here on purpose — MessageRow.jsx's list is virtualized
-//     (react-window), so this can mount/unmount repeatedly as the user
-//     scrolls, and a CSS animation just keeps looping in place rather
-//     than replaying a "reveal" every time.
+//     `thinking={false}` (the default): a plain static filled mark,
+//     no animation at all — same treatment as the header logo beside
+//     "MiniMe" in AppShell.jsx. No stroke-dash math and no WAAPI here
+//     on purpose — MessageRow.jsx's list is virtualized (react-window),
+//     so this can mount/unmount repeatedly as the user scrolls.
 //
 //   - WorkspaceChatPanel.jsx renders it with `thinking` while a reply
 //     is in flight (dock.state.loading), in place of the old plain
@@ -20,9 +19,9 @@
 //     in a loop, same pen-stroke technique as LoadingScreen's intro,
 //     looped via the Web Animations API instead of one-shot.
 //
-// `prefers-reduced-motion` is respected in both modes: the idle pulse
-// is dropped via the stylesheet's own media query, and the thinking
-// loop's mount effect bails out before ever starting the WAAPI chain.
+// `prefers-reduced-motion` is respected in thinking mode: the loop's
+// mount effect bails out before ever starting the WAAPI chain. There's
+// nothing to gate in idle mode since it no longer animates.
 import { useEffect, useRef } from "react";
 
 const FILL_COLOR = "#FF2052"; // matches /public/minime-logo.svg + LoadingScreen.jsx
@@ -78,19 +77,6 @@ const STYLES = `
   width: 100%;
   height: 100%;
   overflow: visible;
-}
-
-.mm-avatar:not(.mm-avatar-thinking) .mm-avatar-mark {
-  animation: mmAvatarBreathe 2.6s ease-in-out infinite;
-}
-
-@keyframes mmAvatarBreathe {
-  0%, 100% { transform: scale(1);     filter: drop-shadow(0 0 2px rgba(255,32,82,0.25)); }
-  50%      { transform: scale(1.08);  filter: drop-shadow(0 0 6px rgba(255,32,82,0.55)); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mm-avatar-mark { animation: none !important; }
 }
 `;
 
