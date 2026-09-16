@@ -105,6 +105,7 @@ from openai import APIStatusError as OpenAIAPIStatusError
 from openai import OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
 
+from eo import db as _call_log_db
 from eo.tracing import get_tracer, truncate_for_trace
 from memory.bus import incr as bus_incr
 from memory.bus import read as bus_read
@@ -1893,6 +1894,182 @@ def _log_usage(provider: str, key_id: str, usage, session_id: str, tier, path, a
               agent_name=agent_name, domain=domain, model=model)
 
 
+# --------------------------------------------------------------------------
+# Cost-per-task + latency logging.
+#
+# Everything above (log_usage/_log_usage) answers "how many tokens has this
+# account used today" -- a TTL'd, per-(provider, key_id, date) Upstash
+# counter, read-modify-written on every call and built for
+# quota_sentinel.py's rate-limit checks. It's good at that. It cannot
+# answer "what did task X cost end to end" or "what's p95 latency for
+# report_writer on Groq" -- by the time anything reads that key, this
+# call's contribution has already been folded into the day's running
+# total, and there's no wall-clock timing or dollar figure in it at all,
+# only a token sum.
+#
+# This section is the fix: a small, hardcoded $/token price table
+# (provider+model, input vs. output priced separately -- they're rarely
+# the same rate) and a one-row-per-call write to a real Postgres table
+# (llm_call_log, migration 0008) via eo/db.py's existing connection pool
+# -- durable and queryable, unlike a TTL'd KV entry. _record_call_log()
+# below rides alongside _log_usage()'s own two call sites (_run_chain_step()
+# for the non-streaming path, _walk_chain_once_stream()'s "done" branch for
+# streaming) -- called right next to it, never in place of it: the Upstash
+# counter above still feeds quota_sentinel.py's live gating, this just also
+# lands a durable row for offline cost/latency queries. Nothing about the
+# agent call path itself changes, and this follows the exact same
+# "never raises, never blocks the real call it's describing" discipline
+# log_usage() above already does.
+# --------------------------------------------------------------------------
+
+# $ per 1,000,000 tokens, input vs. output priced separately, keyed by the
+# same (provider, model) strings this module's own CHAIN definitions use.
+# Hardcoded on purpose, same posture as QUOTA_CONFIG elsewhere in this
+# codebase: a verified figure or nothing, never a guess. Source each number
+# from the provider's own current pricing page before trusting it, and
+# re-check whenever a chain is repointed at a different model -- this table
+# does NOT update itself, and a stale entry silently under/over-states real
+# spend rather than erroring.
+#
+# huggingface is deliberately absent: the HF Inference router is
+# provider-passthrough (a given call can land on a different backend, at a
+# different rate, than the last one on the same model string), so a single
+# $/token figure here would misattribute cost some fraction of the time --
+# worse than the honest "unknown" an absent entry produces downstream (see
+# _compute_cost_usd()'s docstring). Add it back only once there's a real
+# per-backend rate to key on, not a single average.
+_TOKEN_PRICES_PER_MILLION = {
+    "groq": {
+        "openai/gpt-oss-120b":  {"input": 0.15, "output": 0.75},
+        "qwen/qwen3.6-27b":     {"input": 0.29, "output": 0.59},
+        "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+    },
+    "mistral": {
+        "mistral-medium-latest": {"input": 0.40, "output": 2.00},
+        "mistral-small-latest":  {"input": 0.10, "output": 0.30},
+    },
+    "gemini": {
+        "gemini-3.6-flash":      {"input": 0.15, "output": 0.60},
+        "gemini-3.1-flash-lite": {"input": 0.075, "output": 0.30},
+    },
+    "openrouter": {
+        "openrouter/free": {"input": 0.0, "output": 0.0},
+    },
+    "cloudflare": {
+        # Converted from Workers AI's Neurons pricing for the one model
+        # this repo's chains actually pin -- see the module docstring's
+        # CLOUDFLARE CAVEAT: usage is frequently absent from this
+        # provider's response entirely, so this entry often goes unused
+        # regardless of how accurate it is.
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {"input": 0.29, "output": 2.25},
+    },
+}
+
+
+def _compute_cost_usd(provider: str, model: str, input_tokens, output_tokens) -> "float | None":
+    """Looks up `_TOKEN_PRICES_PER_MILLION[provider][model]` and prices this
+    call. Returns None -- not 0.0 -- whenever the cost genuinely isn't
+    knowable: no model string, no price-table entry for this
+    provider/model (huggingface, or any model not yet added to the table
+    above), or no token counts at all. None flows through to a NULL
+    cost_usd column rather than a misleading "this call cost nothing,"
+    which a downstream SUM(cost_usd) query would otherwise silently treat
+    as free instead of unpriced -- see _record_call_log()'s docstring.
+
+    A provider/model WITH a table entry but only a partial token split
+    (e.g. output_tokens present, input_tokens not) still prices whichever
+    half is known and treats the missing half as zero for this call only
+    -- that's a real, if incomplete, lower-bound figure, not an unknown
+    one, so it's returned rather than nulled out."""
+    if not model or not provider:
+        return None
+    prices = _TOKEN_PRICES_PER_MILLION.get(provider, {}).get(model)
+    if prices is None:
+        return None
+    if input_tokens is None and output_tokens is None:
+        return None
+    cost = 0.0
+    if input_tokens is not None:
+        cost += (input_tokens / 1_000_000) * prices["input"]
+    if output_tokens is not None:
+        cost += (output_tokens / 1_000_000) * prices["output"]
+    return round(cost, 8)
+
+
+def _record_call_log(*, provider: str, model: str, key_id: str, agent_name: str,
+                      session_id: "str | None", tier, path: "str | None", domain: "str | None",
+                      usage, elapsed_ms: "float | None", finish_reason: "str | None" = None,
+                      error: "str | None" = None) -> None:
+    """One row per LLM call, written to Postgres (llm_call_log, migration
+    0008) -- the durable, queryable record this module's Upstash-backed
+    log_usage() above cannot provide (see the module section docstring
+    just above _TOKEN_PRICES_PER_MILLION). Called from the same two
+    chat-completion call sites as _log_usage() -- _run_chain_step() and
+    _walk_chain_once_stream()'s "done" branch -- immediately alongside it,
+    with the same provider/model/key/session_id/tier/path/domain/usage
+    already in scope there; nothing new needs threading through the chain
+    walk to call this.
+
+    `elapsed_ms` is wall-clock time for the real network call only (the
+    caller times strictly around call_fn()/the streamed request, from
+    dispatch to response) -- it deliberately does NOT include the
+    pre-flight ledger-gate wait (_ledger_gate()'s own
+    same_step_ledger_wait_elapsed, already tracked and printed
+    separately in _run_chain_step()) or any sleep-and-retry time from a
+    prior failed attempt on this same step. This is "how long did the
+    provider take to answer," not "how long did this step take
+    end-to-end including our own throttling" -- the two are useful for
+    different questions and conflating them would make the latency
+    figure this table exists to provide less trustworthy, not more.
+
+    input_tokens/output_tokens/cost_usd come from the same
+    _usage_details_from_usage()/_compute_cost_usd() this module already
+    uses elsewhere (D1 patch 2's Langfuse export, Phase 4's "neurons"
+    reservation truing) -- one tolerant unwrap of `usage`, not a second,
+    separately-drifting copy of it. All three columns are nullable and
+    left NULL (not 0) whenever the underlying figure isn't knowable for
+    this call, same "unknown stays unknown" posture as the rest of this
+    module's usage/cost handling.
+
+    Never raises, and never blocks the real call it's describing -- same
+    contract log_usage() above already documents for itself. A missing
+    DATABASE_URL, a pool timeout, a migration that hasn't been applied
+    yet: all degrade to one printed, non-fatal warning line, exactly like
+    a failed Upstash write would for log_usage().
+
+    trusted=True on the db.cursor() call (see eo/db.py's own docstring
+    for what that flag does and does not grant): this table has no
+    owner_id / per-user scoping at all -- see migration 0008's own header
+    comment for why -- and every call site here runs deep inside the LLM
+    fallback chain with no acting user_id in scope to pass even if the
+    table did check one."""
+    try:
+        usage_details = _usage_details_from_usage(usage) or {}
+        input_tokens = usage_details.get("input")
+        output_tokens = usage_details.get("output")
+        total_tokens = usage_details.get("total")
+        if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+            total_tokens = (input_tokens or 0) + (output_tokens or 0)
+        cost_usd = _compute_cost_usd(provider, model, input_tokens, output_tokens)
+        latency_ms = round(elapsed_ms) if elapsed_ms is not None else None
+        with _call_log_db.cursor(trusted=True) as cur:
+            cur.execute(
+                """
+                insert into llm_call_log
+                    (session_id, agent_name, provider, model, key_id, tier, path, domain,
+                     input_tokens, output_tokens, total_tokens, cost_usd, latency_ms,
+                     finish_reason, error)
+                values
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (session_id, agent_name, provider, model, key_id, tier, path, domain,
+                 input_tokens, output_tokens, total_tokens, cost_usd, latency_ms,
+                 finish_reason, error),
+            )
+    except Exception as exc:
+        print(f"  [{agent_name}] call-cost logging failed (non-fatal): {exc}")
+
+
 # CO5 follow-up -- spot-check probe for the groq
 # stream_options={"include_usage": True} question flagged in
 # stream_completion()'s docstring point 4. This does NOT fix anything by
@@ -3201,6 +3378,11 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
             # exactly once regardless of whether tracing itself succeeds.
             _traced = _traced_generation(label, model, system_prompt, prompt_for_step,
                                           agent_name, session_id, tier, path, domain)
+            # Cost-per-task + latency logging: timed strictly around the
+            # real network call below (see _record_call_log()'s docstring
+            # for why the pre-flight ledger-gate wait above is deliberately
+            # excluded from this figure).
+            _call_start = time.perf_counter()
             try:
                 # Fix 5: pass the loop's current max_tokens (possibly
                 # already shrunk by a previous retry-in-place iteration
@@ -3211,8 +3393,12 @@ def _run_chain_step(chain: list, index: int, is_last: bool, provider: str, model
                 _end_traced_generation(_traced, agent_name, label, None, None, None,
                                         exc_info=sys.exc_info())
                 raise
+            _call_elapsed_ms = (time.perf_counter() - _call_start) * 1000
             _end_traced_generation(_traced, agent_name, label, text, usage, finish_reason)
             _log_usage(provider, key, usage, session_id, tier, path, agent_name, domain=domain, model=model)
+            _record_call_log(provider=provider, model=model, key_id=key, agent_name=agent_name,
+                              session_id=session_id, tier=tier, path=path, domain=domain,
+                              usage=usage, elapsed_ms=_call_elapsed_ms, finish_reason=finish_reason)
             _record_ledger_bookkeeping(provider, key, model, usage, headroom_headers,
                                         reservation_id=_reservation_id)
             # Diagnostic (2026-09-13, SGA Groq-latency audit): the two
@@ -3904,6 +4090,12 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: 
                 # generate_text()'s "don't mask real bugs" rule).
                 loop.call_soon_threadsafe(chunk_queue.put_nowait, ("error", exc))
 
+        # Cost-per-task + latency logging: timed from just before the
+        # streamed request is dispatched to the worker thread, to the
+        # "done" event below -- the streaming twin of _run_chain_step()'s
+        # _call_start/_call_elapsed_ms timing (see _record_call_log()'s
+        # docstring for what this window does and doesn't include).
+        _stream_call_start = time.perf_counter()
         stream_task = asyncio.ensure_future(asyncio.to_thread(_run_stream_sync))
         started = False
 
@@ -3915,6 +4107,7 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: 
                 yield payload
             elif kind == "done":
                 usage, finish_reason = payload
+                _stream_elapsed_ms = (time.perf_counter() - _stream_call_start) * 1000
                 # D1 patch 2 part B -- usage only exists once the trailing
                 # usage-only SSE chunk lands (see docstring point 4), which
                 # is exactly this "done" branch, so the span can only be
@@ -3925,6 +4118,9 @@ async def _walk_chain_once_stream(system_prompt: str, user_content: str, chain: 
                 _probe_usage_shape(provider, model, usage, agent_name)
                 _log_usage(provider, key_env, usage, session_id, tier, path, agent_name,
                            domain=domain, model=model)
+                _record_call_log(provider=provider, model=model, key_id=key_env, agent_name=agent_name,
+                                  session_id=session_id, tier=tier, path=path, domain=domain,
+                                  usage=usage, elapsed_ms=_stream_elapsed_ms, finish_reason=finish_reason)
                 if finish_reason == "length":
                     print(f"  [{agent_name}] {label} truncated (finish_reason=length) "
                           f"mid-stream -- Fix C continuation is NOT implemented for "
