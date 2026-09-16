@@ -2215,7 +2215,17 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // so the message carries its own self-contained Working Panel section,
   // whether it came from sendTask()'s direct path or confirmHireReview()'s
   // post-review dispatch.
-  const _buildAssistantMessage = useCallback((taskText, data) => {
+  // `elapsedMs` — NEW: per-leg reply time, deliberately not a
+  // cross-pause running total. Each caller below captures its own
+  // `legStartedAt` right before the fetch that produces THIS message
+  // (see sendTask/resumeRun/confirmHireReview) and passes the resulting
+  // duration straight through here. A paused -> resumed run is two legs,
+  // two independent timings (matches ThinkingElapsed's own
+  // reset-per-run behavior: fresh clock every time `loading` starts a
+  // new run) — no accumulator, no persisted "total time across the
+  // whole conversation" to keep in sync. Mirrors
+  // WorkspaceDockContext.jsx's buildAssistantMessage.
+  const _buildAssistantMessage = useCallback((taskText, data, elapsedMs = null) => {
     return {
       role: "assistant",
       data,
@@ -2225,6 +2235,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
       roleRequests: roleRequestsRef.current,
       dependencyMap: dependencyMapRef.current,
       structurePlan: structurePlanRef.current,
+      elapsedMs, // NEW — ms from this leg's fetch firing to its response landing
     };
   }, []);
 
@@ -2275,6 +2286,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     // chat is just as invisible as a task dispatched against it.
     setLoading(true);
     _resetLiveRunState();
+    const legStartedAt = Date.now(); // NEW — this leg's clock; same moment `loading` flips true, so it lines up with ThinkingElapsed's own start
 
     // Part 2 §2.5: reviewBeforeDispatch is off by default (today's exact
     // one-click behavior, unchanged) — most tasks should stay one-click,
@@ -2306,12 +2318,12 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
         // tier-2/3) is a genuinely finished response, identical in shape
         // to what /api/task would have returned — handle it exactly like
         // the non-preview path below.
-        const assistantMessage = _buildAssistantMessage(taskText, data);
+        const assistantMessage = _buildAssistantMessage(taskText, data, Date.now() - legStartedAt);
         setMessages((prev) => [...prev, assistantMessage]);
         persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
         setLoading(false);
       } catch (err) {
-        const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+        const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) }, Date.now() - legStartedAt);
         setMessages((prev) => [...prev, assistantMessage]);
         persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
         setLoading(false);
@@ -2344,12 +2356,12 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
         setPausedRun({ taskText, sessionId: data.session_id || effectiveSessionId });
         return;
       }
-      const assistantMessage = _buildAssistantMessage(taskText, data);
+      const assistantMessage = _buildAssistantMessage(taskText, data, Date.now() - legStartedAt);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
       setLoading(false);
     } catch (err) {
-      const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+      const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) }, Date.now() - legStartedAt);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessageTo(effectiveSessionId, assistantMessage);   // FIX — see param doc above
       setLoading(false);
@@ -2408,6 +2420,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
   // sendTask()'s own direct-dispatch path.
   const resumeRun = useCallback(async (decision) => {
     if (!pausedRun) return;
+    const legStartedAt = Date.now(); // NEW — a resume is its own leg, timed independently of whatever the original paused run took
     try {
       const res = await authedFetch(`${API_URL}/api/resume`, {
         method: "POST",
@@ -2417,13 +2430,13 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
       const data = await res.json();
       setPausedApproval(null);
       if (data.status === "paused") return;
-      const assistantMessage = _buildAssistantMessage(pausedRun.taskText, data);
+      const assistantMessage = _buildAssistantMessage(pausedRun.taskText, data, Date.now() - legStartedAt);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);
       setLoading(false);
       setPausedRun(null);
     } catch (err) {
-      const assistantMessage = _buildAssistantMessage(pausedRun.taskText, { status: "error", message: String(err) });
+      const assistantMessage = _buildAssistantMessage(pausedRun.taskText, { status: "error", message: String(err) }, Date.now() - legStartedAt);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);
       setPausedApproval(null);
@@ -2442,6 +2455,7 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
     const { taskText, sessionId: reviewSessionId, decision } = pendingHireReview;
     setLoading(true);
     _resetLiveRunState();
+    const legStartedAt = Date.now(); // NEW — same per-leg timing as sendTask/resumeRun
     try {
       const res = await authedFetch(`${API_URL}/api/task/confirm`, {
         method: "POST",
@@ -2455,11 +2469,11 @@ const createWorkspaceChat = useCallback(async (wsId, title = "New Chat") => {
         }),
       });
       const data = await res.json();
-      const assistantMessage = _buildAssistantMessage(taskText, data);
+      const assistantMessage = _buildAssistantMessage(taskText, data, Date.now() - legStartedAt);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);
     } catch (err) {
-      const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) });
+      const assistantMessage = _buildAssistantMessage(taskText, { status: "error", message: String(err) }, Date.now() - legStartedAt);
       setMessages((prev) => [...prev, assistantMessage]);
       persistMessage(assistantMessage);
     } finally {

@@ -934,6 +934,78 @@
           "f4c1ddad221e"
         ],
         "content_hint": "conceptual"
+      },
+      "8ef74937-a028-4366-b8c2-c71862f299a2": {
+        "name": "List creation and element\u2011wise arithmetic",
+        "summary": "Shows how to create a list in Mathematica and perform basic element\u2011wise operations such as addition, subtraction, multiplication, and length calculation.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "4ce20a72-776e-4797-a260-7e3bab09a43e": {
+        "name": "Generating sequences with Range",
+        "summary": "Demonstrates the use of the Range function to produce integer sequences with optional start, end, and step arguments.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "5abf6938-3270-4815-a54d-81bd43396b12": {
+        "name": "List indexing, searching, and restructuring",
+        "summary": "Covers commands for accessing list elements (First, Last, Part), locating positions (Position), and modifying lists (Insert, Append, Prepend, Total).",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "911b7705-dfca-4550-bfaa-832f4125fbbd": {
+        "name": "Building tables and defining functions",
+        "summary": "Illustrates the Table construct for generating numeric tables and the definition of simple functions, then evaluating them over a range.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "296c7d12-0bf3-4192-ada5-95516233a20d": {
+        "name": "Trigonometric expression manipulation",
+        "summary": "Uses TrigExpand, TrigReduce, TrigFactor, Simplify, and FullSimplify to rewrite, reduce, factor, and simplify trigonometric expressions.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "aece2829-f6f9-4273-a0ed-dd3367d5a005": {
+        "name": "Power and root operations",
+        "summary": "Shows evaluation of powers with Power and extraction of square roots with Sqrt, including algebraic combinations.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "3ba8ab04-da0f-4f65-9222-d6801354b130": {
+        "name": "Solving algebraic and simultaneous equations",
+        "summary": "Applies Solve and NSolve to single\u2011variable quadratic equations and systems of linear equations, returning exact and numerical solutions.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
+      },
+      "11b28f63-33af-4ff0-b9d0-cd5c93dc3a00": {
+        "name": "Plotting and styling function graphs",
+        "summary": "Uses Plot to graph standard functions (Sin, Cos, Tan) over specified domains and mentions styling options for distinguishing multiple curves.",
+        "parent": null,
+        "source_section_ids": [
+          "ffabc3b60b0c"
+        ],
+        "content_hint": "procedural"
       }
     },
     "connections": [
