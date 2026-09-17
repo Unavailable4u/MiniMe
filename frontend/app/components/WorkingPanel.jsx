@@ -10,6 +10,7 @@ import TracesPanel from "./TracesPanel"; // NEW — D1 patch 5
 import DependencyGraph from "./DependencyGraph";
 import MermaidDiagram from "./MermaidDiagram";
 import SaveRunAsTemplate from "./SaveRunAsTemplate";
+import TouchCollapsibleGraph from "./TouchCollapsibleGraph"; // NEW — touch-scroll fix: collapses RoutingTraceGraph/DependencyGraph behind a tap-to-expand box on touch devices only
 
 // One section per assistant message that carries a snapshot (steps /
 // routeTrace / dependencyMap / structurePlan — all attached by
@@ -238,13 +239,15 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
       {notebooksGenerateRun && (
         <div className="space-y-2 border-b border-[var(--neutral-800)] pb-4">
           <p className="text-xs text-[var(--neutral-500)]">Generate</p>
-          <RoutingTraceGraph
-            branches={notebooksGenerateRun.branches}
-            onBranchClick={(panelKey) => {
-              const subTab = notebooksGenerateRun.branches.find((b) => b.panel_key === panelKey)?.subTab;
-              if (subTab) onNavigateSubTab?.(subTab);
-            }}
-          />
+          <TouchCollapsibleGraph label="routing graph">
+            <RoutingTraceGraph
+              branches={notebooksGenerateRun.branches}
+              onBranchClick={(panelKey) => {
+                const subTab = notebooksGenerateRun.branches.find((b) => b.panel_key === panelKey)?.subTab;
+                if (subTab) onNavigateSubTab?.(subTab);
+              }}
+            />
+          </TouchCollapsibleGraph>
         </div>
       )}
 
@@ -301,18 +304,22 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
             snapshot, same reasoning as AgentStepList just above.
           */}
           {(m.steps?.length > 0 || m.routeTrace?.length > 0 || m.decisionEvents?.length > 0) && (
-            <RoutingTraceGraph
-              trace={m.routeTrace}
-              suggestedAgents={m.data?.decision?.suggested_agents}
-              steps={m.steps}
-              roleRequests={m.roleRequests}
-              runStatus={m.data?.status === "error" ? "error" : "done"}
-              decisionEvents={m.decisionEvents}
-              blurbs={nodeBlurbs}
-            />
+            <TouchCollapsibleGraph label="routing graph">
+              <RoutingTraceGraph
+                trace={m.routeTrace}
+                suggestedAgents={m.data?.decision?.suggested_agents}
+                steps={m.steps}
+                roleRequests={m.roleRequests}
+                runStatus={m.data?.status === "error" ? "error" : "done"}
+                decisionEvents={m.decisionEvents}
+                blurbs={nodeBlurbs}
+              />
+            </TouchCollapsibleGraph>
           )}
           {m.dependencyMap && Object.keys(m.dependencyMap).length > 0 && (
-            <DependencyGraph map={m.dependencyMap} />
+            <TouchCollapsibleGraph label="dependency graph">
+              <DependencyGraph map={m.dependencyMap} />
+            </TouchCollapsibleGraph>
           )}
           {m.structurePlan && <MermaidDiagram mermaidText={m.structurePlan} />}
         </div>
@@ -357,17 +364,21 @@ export default function WorkingPanel({ isSyncingRef, workspaceId = null, chatId 
                 fills it in live as liveSteps arrives, instead of waiting
                 for two dispatch_events to accumulate first.
               */}
-              <RoutingTraceGraph
-                trace={routeTrace}
-                suggestedAgents={liveDecision?.suggested_agents}
-                steps={liveSteps}
-                roleRequests={roleRequests}
-                runStatus="running"
-                decisionEvents={decisionEvents}
-                blurbs={nodeBlurbs}
-              />
+              <TouchCollapsibleGraph label="routing graph">
+                <RoutingTraceGraph
+                  trace={routeTrace}
+                  suggestedAgents={liveDecision?.suggested_agents}
+                  steps={liveSteps}
+                  roleRequests={roleRequests}
+                  runStatus="running"
+                  decisionEvents={decisionEvents}
+                  blurbs={nodeBlurbs}
+                />
+              </TouchCollapsibleGraph>
               {Object.keys(dependencyMap).length > 0 && (
-                <DependencyGraph map={dependencyMap} />
+                <TouchCollapsibleGraph label="dependency graph">
+                  <DependencyGraph map={dependencyMap} />
+                </TouchCollapsibleGraph>
               )}
               {structurePlan && <MermaidDiagram mermaidText={structurePlan} />}
               <AgentStepList

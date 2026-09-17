@@ -2747,8 +2747,10 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // AppShell.jsx can't reach into this component's state directly (see
   // mobile/events.js's OPEN_TAB_SIDEBAR_EVENT comment), so this just
   // listens for the hamburger tap and flips its own drawer open —
-  // selecting a notebook or starting "New notebook" both close it again
-  // below, same as tapping a chat closes MobileChatSidebar.
+  // tapping a chat inside a notebook closes it again below (same as
+  // tapping a chat closes MobileChatSidebar); tapping a notebook itself
+  // does NOT close it, since that's how you reveal the chat list inside
+  // it in the first place — see the notebook-select button below.
   const [viewport] = useViewport();
   const isMobile = viewport === "mobile";
   const [mobileNotebooksDrawerOpen, setMobileNotebooksDrawerOpen] = useState(false);
@@ -2981,9 +2983,17 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // NEW — switches the active chat locally and makes sure the dock (or,
   // below `lg`, the full-screen overlay) is showing it — no tab jump,
   // this tab is self-contained regardless of viewport width.
+  // FIX — mobile: picking a chat from the notebook drawer used to force
+  // the dock open unconditionally whenever it was collapsed, which on
+  // mobile means the full-screen chat overlay (`lg:hidden fixed inset-0`
+  // below) slams over the whole screen the instant you tap a chat. On
+  // mobile that's the person's call, not something selecting a chat
+  // should decide for them — they can still open it themselves via the
+  // floating "Open chat" bubble (chatDockCollapsed branch further down).
+  // Desktop keeps the original auto-expand behavior.
   async function openInDock(chatId) {
     await switchChat(chatId);
-    if (chatDockCollapsed) toggleChatDock();
+    if (!isMobile && chatDockCollapsed) toggleChatDock();
   }
 
   // NEW — issue #3: "+" beside a notebook's name. Creates a chat nested
@@ -3097,138 +3107,148 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     onActiveWorkspaceChange?.(selected?.id || null, selected?.name);
   }, [selected?.id, selected?.name, onActiveWorkspaceChange]);
 
+  // CHANGED — mobile notebook UI pass, scope fix: notebookCreateForm and
+  // notebookRows used to be declared *inside* the desktop-column IIFE
+  // below, which made them invisible to the MobileDrawer block further
+  // down (a separate sibling JSX expression, not nested inside that
+  // IIFE) — so the drawer fell back to a hand-rolled, simplified re-
+  // implementation of the notebook list that never rendered a
+  // notebook's nested chats at all. Hoisting these two here, to the
+  // component's own render scope, lets both the desktop column and the
+  // MobileDrawer close over the exact same JSX instead of one of them
+  // silently drifting out of sync with the other. Still kept as plain
+  // JSX values (not their own function components) so re-render never
+  // remounts the "new notebook" <input> — a function component defined
+  // inside this render would lose input focus on every keystroke-
+  // triggered re-render, since React treats it as a brand-new component
+  // type each time.
+  const notebookCreateForm = creating && (
+    <form onSubmit={handleCreateNotebook} className="px-3 py-2 border-b border-[var(--neutral-900)] flex gap-1">
+      <input
+        autoFocus
+        id="notebook-new-name"
+        name="notebookNewName"
+        value={newName}
+        onChange={(e) => setNewName(e.target.value)}
+        aria-label="Notebook name"
+        placeholder="Notebook name"
+        disabled={submittingNotebook}
+        className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-1.5 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)] disabled:opacity-60"
+      />
+      <button type="submit" disabled={submittingNotebook || !newName.trim()}><Check size={13} className="text-green-400" /></button>
+    </form>
+  );
+
+  const notebookRows = (
+    <div className="flex-1 overflow-y-auto">
+      {notebooks.map((ws) => {
+        // NEW — issue #3: same expand-to-show-nested-chats mechanic
+        // ResearchTab now uses — this tab is also single-selection
+        // (one notebook active at a time), so "expand" just means
+        // "is the selected notebook," no separate toggle state.
+        const isSelected = ws.id === selectedId;
+        const memberChats = isSelected ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+        return (
+          <div key={ws.id} className="border-b border-[var(--neutral-900)]">
+            <div
+              className={`group flex items-center gap-1 ${
+                isSelected ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
+              }`}
+            >
+              <button
+                onClick={() => setSelectedId(ws.id)}
+                className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
+              >
+                <span className="flex items-center min-w-0">
+                  <WorkspaceStageIcons workspace={ws} />
+                  <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
+                </span>
+                {isSelected && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+              </button>
+              {/* NEW — issue #3: "+" creates a chat nested in this
+                  notebook, same idea as starting a new chat under a
+                  group in the Chat sidebar. */}
+              <button
+                onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
+                title="New chat in this notebook"
+                className="shrink-0 opacity-0 group-hover:opacity-100 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+                disabled={creatingChatForWs === ws.id}
+              >
+                {creatingChatForWs === ws.id ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Plus size={13} />
+                )}
+              </button>
+              <button
+                onClick={() => setManagingWorkspace(ws)}
+                title="Rename or delete notebook"
+                className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
+              >
+                <MoreVertical size={13} />
+              </button>
+            </div>
+            {memberChats.map((chat) => (
+              <div
+                key={chat.id}
+                onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobileNotebooksDrawerOpen(false); } }}
+                className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                  chat.id === activeChatId
+                    ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                    : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                }`}
+              >
+                {editingChatId === chat.id ? (
+                  <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      autoFocus
+                      id={`chat-title-${chat.id}`}
+                      name="chatTitle"
+                      aria-label="Chat title"
+                      value={editChatTitle}
+                      onChange={(e) => setEditChatTitle(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
+                      className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
+                    />
+                    <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
+                    <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
+                  </div>
+                ) : (
+                  <>
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate flex-1 min-w-0">{chat.title}</span>
+                    {/* NEW — issue #3: rename/delete, same controls
+                        ChatSidebar's own chat rows already offer. */}
+                    <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
+                      <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
+                        <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                      </button>
+                      <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
+                        <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      {notebooks.length === 0 && (
+        <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex h-full">
       {/* Notebook picker — this tab's own left column, distinct from the
           chat sidebar (which is hidden while this tab is active).
-          CHANGED — mobile notebook UI pass: the JSX below is now built
-          from two small pieces (notebookCreateForm, notebookRows)
-          shared between the desktop inline column right below and the
-          MobileDrawer further down, rather than being duplicated. Kept
-          as plain JSX values (not their own function components) so
-          re-render never remounts the "new notebook" <input> — a
-          function component defined inside this render would lose
-          input focus on every keystroke-triggered re-render, since
-          React treats it as a brand-new component type each time. */}
+          CHANGED — mobile notebook UI pass: notebookCreateForm and
+          notebookRows (hoisted above) are shared between the desktop
+          inline column right below and the MobileDrawer further down,
+          rather than being duplicated. */}
       {(() => {
-        const notebookCreateForm = creating && (
-          <form onSubmit={handleCreateNotebook} className="px-3 py-2 border-b border-[var(--neutral-900)] flex gap-1">
-            <input
-              autoFocus
-              id="notebook-new-name"
-              name="notebookNewName"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              aria-label="Notebook name"
-              placeholder="Notebook name"
-              disabled={submittingNotebook}
-              className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-1.5 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)] disabled:opacity-60"
-            />
-            <button type="submit" disabled={submittingNotebook || !newName.trim()}><Check size={13} className="text-green-400" /></button>
-          </form>
-        );
-
-        const notebookRows = (
-          <div className="flex-1 overflow-y-auto">
-            {notebooks.map((ws) => {
-              // NEW — issue #3: same expand-to-show-nested-chats mechanic
-              // ResearchTab now uses — this tab is also single-selection
-              // (one notebook active at a time), so "expand" just means
-              // "is the selected notebook," no separate toggle state.
-              const isSelected = ws.id === selectedId;
-              const memberChats = isSelected ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
-              return (
-                <div key={ws.id} className="border-b border-[var(--neutral-900)]">
-                  <div
-                    className={`group flex items-center gap-1 ${
-                      isSelected ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
-                    }`}
-                  >
-                    <button
-                      onClick={() => { setSelectedId(ws.id); setMobileNotebooksDrawerOpen(false); }}
-                      className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
-                    >
-                      <span className="flex items-center min-w-0">
-                        <WorkspaceStageIcons workspace={ws} />
-                        <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
-                      </span>
-                      {isSelected && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
-                    </button>
-                    {/* NEW — issue #3: "+" creates a chat nested in this
-                        notebook, same idea as starting a new chat under a
-                        group in the Chat sidebar. */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
-                      title="New chat in this notebook"
-                      className="shrink-0 opacity-0 group-hover:opacity-100 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-                      disabled={creatingChatForWs === ws.id}
-                    >
-                      {creatingChatForWs === ws.id ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <Plus size={13} />
-                      )}
-                    </button>
-                    <button
-                      onClick={() => setManagingWorkspace(ws)}
-                      title="Rename or delete notebook"
-                      className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
-                    >
-                      <MoreVertical size={13} />
-                    </button>
-                  </div>
-                  {memberChats.map((chat) => (
-                    <div
-                      key={chat.id}
-                      onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobileNotebooksDrawerOpen(false); } }}
-                      className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
-                        chat.id === activeChatId
-                          ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                          : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
-                      }`}
-                    >
-                      {editingChatId === chat.id ? (
-                        <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            autoFocus
-                            id={`chat-title-${chat.id}`}
-                            name="chatTitle"
-                            aria-label="Chat title"
-                            value={editChatTitle}
-                            onChange={(e) => setEditChatTitle(e.target.value)}
-                            onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                            className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
-                          />
-                          <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
-                          <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
-                        </div>
-                      ) : (
-                        <>
-                          <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
-                          <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                          {/* NEW — issue #3: rename/delete, same controls
-                              ChatSidebar's own chat rows already offer. */}
-                          <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
-                            <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
-                              <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                            </button>
-                            <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
-                              <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
-            {notebooks.length === 0 && (
-              <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
-            )}
-          </div>
-        );
-
         // CHANGED — mobile notebook UI pass: this whole column (both the
         // w-56 expanded state AND the old w-10 chevron-only collapsed
         // state) is desktop-only now. On mobile there's no room for
@@ -3308,27 +3328,17 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               );
               return notebookCreateFormMobile;
             })()}
-            {notebooks.map((ws) => {
-              const isSelected = ws.id === selectedId;
-              return (
-                <button
-                  key={ws.id}
-                  onClick={() => { setSelectedId(ws.id); setMobileNotebooksDrawerOpen(false); }}
-                  className={`flex items-center justify-between gap-1 px-3 py-3 text-left border-b border-[var(--neutral-900)] ${
-                    isSelected ? "bg-[var(--neutral-800-a70)]" : "active:bg-[var(--neutral-900)]"
-                  }`}
-                >
-                  <span className="flex items-center min-w-0">
-                    <WorkspaceStageIcons workspace={ws} />
-                    <span className="text-sm text-[var(--neutral-200)] truncate">{ws.name}</span>
-                  </span>
-                  {isSelected && <ChevronRight size={14} className="text-[var(--neutral-500)] shrink-0" />}
-                </button>
-              );
-            })}
-            {notebooks.length === 0 && (
-              <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
-            )}
+            {/* FIX — mobile notebook UI pass regression: this used to be a
+                hand-rolled re-implementation of the notebook list that only
+                rendered the notebook buttons themselves, dropping the
+                per-notebook `memberChats` rows entirely — so on mobile you
+                could see a notebook's name in this drawer but never the
+                chats inside it, with no way to open or select one. The
+                desktop column right above already builds `notebookRows`
+                (notebook button + "+"/manage controls + nested chat rows)
+                specifically so this drawer could share it instead of
+                duplicating it — reuse it here rather than re-diverging. */}
+            {notebookRows}
           </div>
         </MobileDrawer>
       )}
