@@ -167,6 +167,34 @@
   display: none;
 }
 
+/* NEW — mobile height fix: h-screen alone (height:100vh) is Tailwind's
+   utility for a fixed-viewport-height shell (see AppShell.jsx's outer
+   div), but 100vh on a mobile browser is measured against the LARGEST
+   viewport the browser chrome allows (address bar collapsed) — taller
+   than what's actually on screen the moment a page loads, which pushed
+   real content (the composer, tab bodies) below the visible fold and
+   forced an extra scroll to reach it. This class layers two
+   progressively more accurate fallbacks on top of h-screen's 100vh,
+   each only applying if the browser understands it (an unsupported
+   value leaves the previous declaration in the cascade untouched — the
+   standard progressive-enhancement pattern for a new CSS unit):
+     1. 100dvh — the *dynamic* viewport height, i.e. the real visible
+        area right now, which updates live as the address bar shows/
+        hides. Supported in every current mobile browser engine.
+     2. var(--app-vvh, 100dvh) — AppShell.jsx additionally mirrors
+        window.visualViewport's height (which also shrinks when the
+        on-screen keyboard opens, catching the one case dvh support has
+        historically been shakiest on — older iOS Safari) into
+        --app-vvh on mount/resize/scroll. Falls back to 100dvh itself
+        until that effect has run (SSR, or a browser with no
+        visualViewport at all), so there's never a moment with no
+        height rule in effect. */
+.app-shell-viewport {
+  height: 100vh;
+  height: 100dvh;
+  height: var(--app-vvh, 100dvh);
+}
+
 /* ---------------------------------------------------------------
    Base page styling
 ----------------------------------------------------------------*/

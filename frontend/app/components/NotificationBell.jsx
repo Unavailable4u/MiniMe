@@ -59,7 +59,22 @@ export default function NotificationBell({ onOpenChat }) {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 mt-1 w-80 max-h-96 overflow-y-auto rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-lg py-1 z-50">
+          {/* CHANGED — mobile fix: this bell renders inside mobile/
+              ChatSidebar.jsx's drawer, a column only ~256px wide. The old
+              `absolute right-0 w-80` positioned a 320px box off the
+              wrapping button's own right edge — inside a 256px column
+              that's guaranteed to bleed past the LEFT edge of the actual
+              screen, not just the drawer (exactly the "exceeds/cuts the
+              screen" report). Below 768px this now anchors to the
+              *viewport* instead of the button (`fixed left-3 right-3`,
+              no fixed width) so it can never be wider than the screen
+              minus a 12px margin on each side, whatever column it's
+              sitting in. `md:` and up (desktop/tablet header, plenty of
+              room) keeps the original button-relative positioning
+              unchanged. max-h swaps to a viewport-relative cap too, so a
+              short landscape phone can't have the list run off the
+              bottom either. */}
+          <div className="fixed left-3 right-3 top-14 max-h-[70vh] md:absolute md:inset-auto md:left-auto md:right-0 md:top-auto md:mt-1 md:w-80 md:max-h-96 overflow-y-auto rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-lg py-1 z-50">
             <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
               Notifications
             </div>
