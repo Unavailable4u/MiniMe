@@ -353,17 +353,26 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
           the chat box when false (via the `stacked` prop below, so the
           dock only ever needs the width this wrapper already gives it,
           never more) -- and renders its own toggle button in both
-          states (a MessageSquare rail button collapsed, PanelRightClose
-          expanded), so this wrapper only needs to size the container;
-          no chevron/toggle of our own like the old placeholder had. */}
-      {selectedWsId && (
-        <div
-          className={`shrink-0 border-l border-[var(--neutral-800)] ${
-            dockCollapsed ? "w-10" : "w-[480px]"
-          }`}
-        >
-          <WorkspaceChatPanel collapsed={dockCollapsed} onToggleCollapse={toggleDock} workspaceId={selectedWsId} stacked />
+          states, so this wrapper only needs to size the container; no
+          chevron/toggle of our own like the old placeholder had.
+          CHANGED — a closed dock used to leave a w-10 rail reserved here
+          permanently. It now renders nothing and the tab content takes
+          the width back; the floating bubble below is the way back in,
+          matching Research/Plan/Build/Test/Notebooks (this tab was the
+          only one of the six that never had one). */}
+      {selectedWsId && !dockCollapsed && (
+        <div className="shrink-0 border-l border-[var(--neutral-800)] w-[480px]">
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleDock} workspaceId={selectedWsId} stacked />
         </div>
+      )}
+      {selectedWsId && dockCollapsed && (
+        <button
+          onClick={toggleDock}
+          title="Open chat"
+          className="fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
+        >
+          <MessageSquare size={18} />
+        </button>
       )}
 
       {/* NEW — item #10 / B3: stage-aware create modal (B1). Auto-selects

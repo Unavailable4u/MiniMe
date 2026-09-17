@@ -565,9 +565,16 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
           independent collapse state/localStorage key so the two tabs'
           dock visibility don't interfere with each other. Hidden below
           lg, matching Notebooks' and WorkingPanel's own breakpoint. */}
-      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 420 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} stacked />
-      </div>
+      {/* CHANGED — a closed dock no longer reserves a narrow rail on the
+          right of the desktop layout. The dock is simply not rendered,
+          the tab content gets the full width back, and the way back in is
+          the floating bubble below — the same affordance this tab already
+          used below lg, now shown at every width. */}
+      {!chatDockCollapsed && (
+        <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: 420 }}>
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} stacked />
+        </div>
+      )}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
           <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={activeWs?.id} stacked />
@@ -577,7 +584,7 @@ function ResearchTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromot
         <button
           onClick={toggleChatDock}
           title="Open chat"
-          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
+          className="fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
           <MessageSquare size={18} />
         </button>
