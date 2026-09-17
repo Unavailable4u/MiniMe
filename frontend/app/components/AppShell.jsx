@@ -13,6 +13,10 @@ import ChatSidebar from "./ChatSidebar";
 import ChatTab from "./tabs/ChatTab";   // stays a static import — "chat" is the initial activeTab and always the first (often only) tab visited/mounted on load, so there's nothing to defer here.
 import AccountMenu from "./auth/AccountMenu";      // NEW — Part 8.9: signed-in user email + sign out
 import NotificationBell from "./NotificationBell";   // NEW — Part 8.9: cross-chat notification inbox
+import { useViewport } from "../hooks/useViewport";   // NEW — Phase 1 (mobile shell): structural nav fork below
+import MobileHeader from "./mobile/AppShell";           // NEW — Phase 1
+import MobileChatSidebar from "./mobile/ChatSidebar";   // NEW — Phase 1
+import { OPEN_WORKING_PANEL_EVENT } from "./mobile/events";   // NEW — Phase 1
 
 // NEW — perf audit §2.3 step A: the other ten tab bodies were all static
 // imports, so every one of them — including 3,100+-line NotebooksTab —
@@ -183,6 +187,8 @@ function AppShellBody() {
   const { fetchWorkspaces } = useWorkspaces();
   const { refreshChatList } = useChatList();
   const { markTaskDone } = useBootProgress();   // NEW — loading-screen wiring: see the bootstrap effect below
+  const [viewport] = useViewport();   // NEW — Phase 1 (mobile shell): "mobile" | "tablet" | "desktop"
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);   // NEW — Phase 1: drives mobile/ChatSidebar.jsx's drawer; desktop's own sidebarCollapsed (below) is untouched
   const [activeTab, setActiveTabState] = useState("chat");
   // NEW — §4 fix: tabs that have been visited at least once stay mounted
   // (hidden via CSS, not unmounted) so their in-memory state — sub-tab,
@@ -333,6 +339,16 @@ function AppShellBody() {
     });
   }
 
+  // NEW — Phase 1 (mobile shell): the mobile header's panel-toggle button
+  // has no direct reference to whichever WorkspaceChatPanel instance is
+  // currently mounted (that state is local to that component, per-dock —
+  // see WorkingPanelDrawer.jsx's own comment on why), so it signals via
+  // this module-level event instead of a prop. Same "custom event, no
+  // context needed" approach useDensity.js/useViewport.js already use.
+  function openMobileWorkingPanel() {
+    window.dispatchEvent(new Event(OPEN_WORKING_PANEL_EVENT));
+  }
+
   // Loads the given chat (same call ChatSidebar's own chat-switcher
   // uses) and switches the active tab to Chat, in one action — this is
   // what turns "Session: abc123" plain text into a real, working
@@ -365,50 +381,82 @@ function AppShellBody() {
 
   return (
     <div className="flex flex-col h-screen">
-      <header className="relative border-b border-[var(--neutral-800)] px-4 py-3 flex items-center gap-6">
-        <h1 className="flex items-center gap-1.5 text-sm font-bold tracking-tight">
-          <img src="/minime-logo.svg" alt="" className="w-5 h-5 object-contain" />
-          <span className="text-[var(--neutral-200)]">
-            Mini<span className="text-[#ff5168]">Me</span>
-          </span>
-        </h1>
-        <nav className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-1 max-w-[calc(100%-320px)] overflow-x-auto">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setActiveTab(t.id)}
-              className={`text-xs rounded-lg px-3 py-1.5 transition-colors ${
-                activeTab === t.id ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-        <div className="ml-auto flex items-center gap-3">
-          {/* NEW — items #5/#13: nav slot for the Data bubble. Only
-              mounted on the 7 tabs that resolve a workspaceId, and only
-              once that tab has actually reported one (a tab with no
-              project selected yet shows nothing here, not an empty
-              bubble). Role Library, Workflow Templates, Token Usage,
-              and Settings never hit WORKSPACE_TAB_IDS, so the slot is
-              simply absent there. */}
-          {WORKSPACE_TAB_IDS.has(activeTab) && activeWorkspaceContext?.id && (
-            <WorkspaceDataBubble
-              workspaceId={activeWorkspaceContext.id}
-              workspaceName={activeWorkspaceContext.name}
-              storageKey={`minime_databubble_collapsed_${activeWorkspaceContext.id}`}
-            />
-          )}
-          <NotificationBell onOpenChat={openChat} />
-          <AccountMenu />
-        </div>
-      </header>
+      {/* NEW — Phase 1 (mobile shell): structural fork, not a couple of
+          sm:/md: tweaks — see components/mobile/README.md. Below
+          "mobile" (<768px) this swaps the persistent nav row + ml-auto
+          icon cluster for a hamburger/scrollable-tabs/panel-toggle bar;
+          everything else in AppShellBody (state, effects, tab-render
+          logic just below) is unchanged and shared by both. Tablet
+          still gets the desktop header for now — Phase 7 revisits
+          whether it needs its own fork or just md: tweaks. */}
+      {viewport === "mobile" ? (
+        <MobileHeader
+          tabs={TABS}
+          activeTab={activeTab}
+          onSelectTab={setActiveTab}
+          showSidebarButton={activeTab === "chat"}
+          onOpenSidebar={() => setMobileSidebarOpen(true)}
+          showWorkingPanelButton={activeTab === "chat"}
+          onOpenWorkingPanel={openMobileWorkingPanel}
+        />
+      ) : (
+        <header className="relative border-b border-[var(--neutral-800)] px-4 py-3 flex items-center gap-6">
+          <h1 className="flex items-center gap-1.5 text-sm font-bold tracking-tight">
+            <img src="/minime-logo.svg" alt="" className="w-5 h-5 object-contain" />
+            <span className="text-[var(--neutral-200)]">
+              Mini<span className="text-[#ff5168]">Me</span>
+            </span>
+          </h1>
+          <nav className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-1 max-w-[calc(100%-320px)] overflow-x-auto">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setActiveTab(t.id)}
+                className={`text-xs rounded-lg px-3 py-1.5 transition-colors ${
+                  activeTab === t.id ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+          <div className="ml-auto flex items-center gap-3">
+            {/* NEW — items #5/#13: nav slot for the Data bubble. Only
+                mounted on the 7 tabs that resolve a workspaceId, and only
+                once that tab has actually reported one (a tab with no
+                project selected yet shows nothing here, not an empty
+                bubble). Role Library, Workflow Templates, Token Usage,
+                and Settings never hit WORKSPACE_TAB_IDS, so the slot is
+                simply absent there. */}
+            {WORKSPACE_TAB_IDS.has(activeTab) && activeWorkspaceContext?.id && (
+              <WorkspaceDataBubble
+                workspaceId={activeWorkspaceContext.id}
+                workspaceName={activeWorkspaceContext.name}
+                storageKey={`minime_databubble_collapsed_${activeWorkspaceContext.id}`}
+              />
+            )}
+            <NotificationBell onOpenChat={openChat} />
+            <AccountMenu />
+          </div>
+        </header>
+      )}
       <div className="flex flex-1 min-h-0 min-w-0">
-        {activeTab === "chat" && (
+        {/* CHANGED — Phase 1: desktop keeps the persistent flex-column
+            sidebar exactly as before; mobile renders the same "only on
+            the chat tab" ChatSidebar as a left-side overlay drawer
+            instead (mobile/ChatSidebar.jsx — see its own comment for
+            why account/notifications live inside it now). */}
+        {activeTab === "chat" && viewport !== "mobile" && (
           <ChatSidebar
             collapsed={sidebarCollapsed}
             onToggle={toggleSidebar}
+          />
+        )}
+        {activeTab === "chat" && viewport === "mobile" && (
+          <MobileChatSidebar
+            open={mobileSidebarOpen}
+            onClose={() => setMobileSidebarOpen(false)}
+            onOpenChat={openChat}
           />
         )}
         <div className="flex-1 min-h-0 min-w-0 overflow-hidden">

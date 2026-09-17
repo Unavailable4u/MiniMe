@@ -86,13 +86,37 @@ if (typeof window !== "undefined") {
 }
 
 export function useViewport() {
-  const [viewport, setViewportState] = useState(computeViewport);
+  // BUGFIX — hydration mismatch (surfaced once mobile/AppShell.jsx and
+  // WorkspaceChatPanel.jsx's mobile drawer started branching actual JSX
+  // *structure* on this value, not just CSS). `computeViewport()` was
+  // being used directly as useState's lazy initializer, which runs
+  // DURING the render itself — on the server that always sees
+  // `window === undefined` and falls back to "desktop" (per
+  // detectNatural() above), but on the real client, the very first
+  // render (the one React hydrates the server markup against) already
+  // sees the actual matchMedia result, e.g. "mobile" on a phone. Server
+  // said "desktop", client's first paint said "mobile" — before
+  // hydration ever gets a chance to reconcile them — which is exactly a
+  // "Expected server HTML to contain a matching <div> in <header>"-
+  // style hydration error for any component that renders a different
+  // element tree per viewport.
+  //
+  // Starting from the same fixed "desktop" value on every first render,
+  // server and client alike, keeps that first hydration pass identical
+  // no matter what the real device is. The effect below (which only
+  // ever runs on the client, never during SSR) then corrects it to the
+  // real value immediately after mount — a normal post-hydration state
+  // update, not a mismatch. Same category of fix as the usual
+  // "isClient" / useSyncExternalStore workaround for any window-
+  // dependent value read during render.
+  const [viewport, setViewportState] = useState("desktop");
 
   useEffect(() => {
     // Catch up in case a resize fired between module load and this
     // component mounting, and stay in sync with later resizes, other
     // component instances, and the "storage" event (override changed in
-    // another tab).
+    // another tab). This also does the one-time "desktop" -> real-value
+    // correction described above, since it always runs once on mount.
     setViewportState(computeViewport());
     function onChange() {
       setViewportState(computeViewport());

@@ -11,6 +11,9 @@ import { List, useDynamicRowHeight } from "react-window"; // Perf audit #3 step 
 // dead from the moment this landed and has been removed (step 9 cleanup).
 import GenerationNotificationRow from "./notebooks/GenerationNotificationRow";   // NEW — Phase 4 step 4.6
 import WorkingPanel from "./WorkingPanel";
+import { useViewport } from "../hooks/useViewport";   // NEW — Phase 1 (mobile shell)
+import WorkingPanelDrawer from "./mobile/WorkingPanelDrawer";   // NEW — Phase 1
+import { OPEN_WORKING_PANEL_EVENT } from "./mobile/events";   // NEW — Phase 1
 import HireReviewScreen from "./HireReviewScreen";
 import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, PanelLeftOpen, PanelLeftClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import { ingestFileByExtension } from "../lib/ingestDispatch";
@@ -427,9 +430,31 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // import comment above), nothing in this file ever read containerSize
   // again. Confirmed via search before removing.
 
+  const [viewport] = useViewport();   // NEW — Phase 1 (mobile shell)
   const [modeOpen, setModeOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+
+  // NEW — Phase 1 (mobile shell): lets mobile/AppShell.jsx's header
+  // button open this panel's own drawer without a prop connecting them
+  // (see mobile/events.js). Deliberately gated on `!stacked` — this is
+  // the one WorkspaceChatPanel instance rendered without `stacked`
+  // (the standalone Chat tab's dock; see that prop's own comment
+  // above), so it's the only one the mobile header actually has a
+  // button for today. The six `stacked` domain-tab docks stay mounted
+  // in the background too (AppShell's visitedTabs) and would otherwise
+  // each flip their own local workingPanelCollapsed in response to a
+  // button tap meant for Chat — silently changing what greets the
+  // person next time they open Research, say. Skipping the listener
+  // entirely for `stacked` instances avoids that.
+  useEffect(() => {
+    if (stacked) return;
+    function onOpen() {
+      setWorkingPanelCollapsed(false);
+    }
+    window.addEventListener(OPEN_WORKING_PANEL_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_WORKING_PANEL_EVENT, onOpen);
+  }, [stacked]);
   const [chatBoxCollapsed, setChatBoxCollapsed] = useState(false); // NEW — CO4 patch 1
   const [workingPanelWidth, setWorkingPanelWidth] = useState(WORKING_PANEL_DEFAULT_WIDTH);
   const [workingPanelHeight, setWorkingPanelHeight] = useState(WORKING_PANEL_DEFAULT_HEIGHT); // NEW — stacked layout's counterpart to workingPanelWidth
@@ -1636,6 +1661,25 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           asks for more width than its container already has. The
           standalone Chat tab doesn't pass `stacked`, so it keeps the
           original side-by-side layout, hidden below lg, unchanged. */}
+      {/* CHANGED — Phase 1 (mobile shell): the non-`stacked` branch used
+          to just be `hidden lg:flex` below 1024px, with no way back in
+          on either mobile or tablet — the collapsed-rail toggle inside
+          it was hidden along with everything else. On mobile
+          specifically that dead end is now replaced with a real drawer
+          (WorkingPanelDrawer.jsx), opened by mobile/AppShell.jsx's
+          header button via the listener above. Tablet keeps the
+          pre-existing `hidden lg:flex` behavior for now — same
+          "Phase 7, not this one" scoping as everywhere else in this
+          patch. `stacked` (the six domain-tab docks) is completely
+          unchanged. */}
+      {!stacked && viewport === "mobile" ? (
+        <WorkingPanelDrawer
+          open={!workingPanelCollapsed}
+          onClose={() => setWorkingPanelCollapsed(true)}
+        >
+          <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
+        </WorkingPanelDrawer>
+      ) : (
       <div className={stacked ? "flex flex-col shrink-0 order-1 w-full" : "hidden lg:flex shrink-0"}>
         {workingPanelCollapsed ? (
           stacked ? (
@@ -1707,6 +1751,7 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
