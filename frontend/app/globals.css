@@ -154,6 +154,19 @@
   --viewport-nav-gap: 0.25rem;
 }
 
+/* Phase 1: mobile/AppShell.jsx's horizontally-scrolling tab strip — the
+   scroll itself is the point (that's how you reach tabs 4-12), but a
+   visible horizontal scrollbar under a short nav row reads as a broken
+   layout rather than "swipe me", so it's hidden here the same way the
+   default vertical scrollbar is re-themed just above instead of just
+   left at the browser default. */
+[data-viewport="mobile"] .mobile-tab-scroll {
+  scrollbar-width: none;
+}
+[data-viewport="mobile"] .mobile-tab-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 /* ---------------------------------------------------------------
    Base page styling
 ----------------------------------------------------------------*/
