@@ -24,6 +24,9 @@ import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: 
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
 import { useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for issue #3 nested-chat row highlight
+import { useViewport } from "../../hooks/useViewport";   // NEW — mobile notebook UI pass: structural fork below, see components/mobile/README.md
+import MobileDrawer from "../mobile/MobileDrawer";        // NEW — mobile notebook UI pass: reuse the same drawer primitive ChatSidebar's mobile fork uses
+import { OPEN_TAB_SIDEBAR_EVENT } from "../mobile/events"; // NEW — mobile notebook UI pass: hamburger -> this tab's own notebook-picker drawer
 import {
   NotebookText, Plus, MessageSquareText, MessageSquare, FileText, GitBranch, Network,
   GraduationCap, Sparkles, X, Check, ChevronRight, ChevronLeft, BookMarked, Loader2, Layers,
@@ -1169,6 +1172,24 @@ function StudyView({ workspaceId }) {
   // each-other systems.
   const { fetchPanelContent, generateNotebooks, fetchPodcastAudioUrl, fetchVideoOverviewUrl, fetchRehearsalAudioUrl } = useSession();
   const [kind, setKind] = useState("flashcards");
+  // NEW — mobile notebook UI pass: on mobile, tapping the Study icon in
+  // the sub-tab rail should land on a picker (the same 7 kinds as the
+  // desktop pill row below, just presented as a grid of tap targets
+  // instead of a wrapped row of small pills), not straight into
+  // Flashcards. `studyPickerDismissed` starts false on every viewport
+  // (can't key the initial value off isMobile itself — useViewport()
+  // deliberately always reports "desktop" on the very first render,
+  // even on a phone, to avoid a hydration mismatch; see that hook's own
+  // comment) and only matters at all while isMobile is true, so desktop
+  // is unaffected either way. Picking a kind sets it true; the "back to
+  // options" chevron next to the kind's content (below) sets it false
+  // again without touching `kind`, so returning to the picker and
+  // picking the same kind again shows what was already loaded instead
+  // of re-fetching.
+  const [viewport] = useViewport();
+  const isMobile = viewport === "mobile";
+  const [studyPickerDismissed, setStudyPickerDismissed] = useState(false);
+  const showStudyPicker = isMobile && !studyPickerDismissed;
   const [text, setText] = useState("");
   const [rendered, setRendered] = useState("");
   // Flashcards/Quiz/Study Guide are fully auto-generated now: Generate
@@ -1437,8 +1458,19 @@ function StudyView({ workspaceId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, kind]);
 
+  const STUDY_KINDS = ["flashcards", "quiz", "study_guide", "podcast", "slide_deck", "video_overview", "presentation_rehearsal"];
+  const STUDY_KIND_LABEL = { flashcards: "Flashcards", quiz: "Quiz", study_guide: "Study guide", podcast: "Podcast", slide_deck: "Presentation", video_overview: "Video overview", presentation_rehearsal: "Rehearsal" };
+  const STUDY_KIND_ICON = { flashcards: Layers, quiz: ListChecks, study_guide: BookMarked, podcast: MessageSquareText, slide_deck: Sparkles, video_overview: Network, presentation_rehearsal: RotateCcw };
+
   return (
     <div className="space-y-3">
+      {/* CHANGED — mobile notebook UI pass: desktop keeps the wrapped
+          row of small pills (kind defaults to Flashcards and shows
+          immediately, pills double as the switcher). Mobile instead
+          shows a picker grid first (see showStudyPicker above) — this
+          row is hidden there so the two selection UIs never show at
+          once. */}
+      {!isMobile && (
       <div className="flex items-center justify-center gap-2 flex-wrap">
         {/* CHANGED — Frontend paste-box patch (patch 4): "slide_deck"
             added as its own "Presentation" tab (it had no tab at all
@@ -1448,16 +1480,54 @@ function StudyView({ workspaceId }) {
             "presentation_rehearsal" added as "Rehearsal" -- same gap,
             different kind (had a working backend target since Phase 5
             step 5.10 but no tab at all until now). */}
-        {["flashcards", "quiz", "study_guide", "podcast", "slide_deck", "video_overview", "presentation_rehearsal"].map((k) => (
+        {STUDY_KINDS.map((k) => (
           <button
             key={k}
             onClick={() => { setKind(k); setRendered(""); setText(""); }}
             className={`text-xs rounded-lg px-3 py-1 ${kind === k ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"}`}
           >
-            {k === "flashcards" ? "Flashcards" : k === "quiz" ? "Quiz" : k === "study_guide" ? "Study guide" : k === "podcast" ? "Podcast" : k === "slide_deck" ? "Presentation" : k === "video_overview" ? "Video overview" : "Rehearsal"}
+            {STUDY_KIND_LABEL[k]}
           </button>
         ))}
       </div>
+      )}
+
+      {/* NEW — mobile notebook UI pass: "when I click the study icon,
+          show the options (flashcards/quiz/rehearsal/etc) to choose
+          which one I'm opening" — a 2-column grid of icon+label tap
+          targets, each roughly a thumb-sized button. Picking one hides
+          this grid and shows that kind's editor below, same as tapping
+          a desktop pill; the chevron next to that kind's own heading
+          (added just below, mobile-only) comes back here without
+          losing what was loaded. */}
+      {showStudyPicker && (
+        <div className="grid grid-cols-2 gap-2">
+          {STUDY_KINDS.map((k) => {
+            const Icon = STUDY_KIND_ICON[k];
+            return (
+              <button
+                key={k}
+                onClick={() => { setKind(k); setRendered(""); setText(""); setStudyPickerDismissed(true); }}
+                className="flex flex-col items-center gap-1.5 rounded-lg border border-[var(--neutral-800)] py-4 text-[var(--neutral-300)] active:bg-[var(--neutral-900)]"
+              >
+                <Icon size={20} />
+                <span className="text-xs font-medium">{STUDY_KIND_LABEL[k]}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {!showStudyPicker && (
+      <>
+      {isMobile && (
+        <button
+          onClick={() => setStudyPickerDismissed(false)}
+          className="flex items-center gap-1 text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+        >
+          <ChevronLeft size={13} /> Study options
+        </button>
+      )}
       {/* CHANGED — Frontend paste-box patch (patch 4): all three paste
           boxes below are now optional, matching generateNotebooks()'s
           real three-way resolution -- leave it blank to reuse whatever
@@ -1738,6 +1808,8 @@ function StudyView({ workspaceId }) {
           )}
         </div>
       ) : null}
+      </>
+      )}
     </div>
   );
 }
@@ -2666,7 +2738,27 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   // NEW — §6.2: right-hand chat dock collapse state, restored from
   // localStorage on mount (same pattern as sidebarCollapsed elsewhere).
   const [chatDockCollapsed, setChatDockCollapsed] = useState(false);
-  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false); // NEW — collapsible project-picker sidebar (desktop only — see viewport branch below)
+  // NEW — mobile notebook UI pass. On mobile the notebook-picker column
+  // above never renders inline (there's no width to spare next to the
+  // sub-tab content) — it becomes a MobileHeader-hamburger-triggered
+  // MobileDrawer instead, same left-side-overlay idea
+  // mobile/ChatSidebar.jsx already uses for the Chat tab's own list.
+  // AppShell.jsx can't reach into this component's state directly (see
+  // mobile/events.js's OPEN_TAB_SIDEBAR_EVENT comment), so this just
+  // listens for the hamburger tap and flips its own drawer open —
+  // selecting a notebook or starting "New notebook" both close it again
+  // below, same as tapping a chat closes MobileChatSidebar.
+  const [viewport] = useViewport();
+  const isMobile = viewport === "mobile";
+  const [mobileNotebooksDrawerOpen, setMobileNotebooksDrawerOpen] = useState(false);
+  useEffect(() => {
+    function onOpenTabSidebar(e) {
+      if (e.detail?.tabId === "notebooks") setMobileNotebooksDrawerOpen(true);
+    }
+    window.addEventListener(OPEN_TAB_SIDEBAR_EVENT, onOpenTabSidebar);
+    return () => window.removeEventListener(OPEN_TAB_SIDEBAR_EVENT, onOpenTabSidebar);
+  }, []);
   // NEW — issue #3: nested-chat create/rename/delete state, same shape as
   // ResearchTab's own (and ChatSidebar's editingId/editTitle/pendingDelete
   // before that) — scoped to this tab's notebook list.
@@ -3008,31 +3100,18 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
   return (
     <div className="flex h-full">
       {/* Notebook picker — this tab's own left column, distinct from the
-          chat sidebar (which is hidden while this tab is active). */}
-      {projectsCollapsed ? (
-        <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
-          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show notebooks">
-            <ChevronRight size={16} />
-          </button>
-        </div>
-      ) : (
-      <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
-        <div className="h-10 px-3 flex items-center justify-between border-b border-[var(--neutral-800)]">
-          <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
-            <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
-          </span>
-          <div className="flex items-center gap-2">
-            <button onClick={() => setCreating((c) => !c)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
-              <Plus size={15} />
-            </button>
-            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
-                own ChevronLeft toggle. */}
-            <button onClick={toggleProjects} title="Hide notebooks" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
-              <ChevronLeft size={14} />
-            </button>
-          </div>
-        </div>
-        {creating && (
+          chat sidebar (which is hidden while this tab is active).
+          CHANGED — mobile notebook UI pass: the JSX below is now built
+          from two small pieces (notebookCreateForm, notebookRows)
+          shared between the desktop inline column right below and the
+          MobileDrawer further down, rather than being duplicated. Kept
+          as plain JSX values (not their own function components) so
+          re-render never remounts the "new notebook" <input> — a
+          function component defined inside this render would lose
+          input focus on every keystroke-triggered re-render, since
+          React treats it as a brand-new component type each time. */}
+      {(() => {
+        const notebookCreateForm = creating && (
           <form onSubmit={handleCreateNotebook} className="px-3 py-2 border-b border-[var(--neutral-900)] flex gap-1">
             <input
               autoFocus
@@ -3047,106 +3126,251 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             />
             <button type="submit" disabled={submittingNotebook || !newName.trim()}><Check size={13} className="text-green-400" /></button>
           </form>
-        )}
-        <div className="flex-1 overflow-y-auto">
-          {notebooks.map((ws) => {
-            // NEW — issue #3: same expand-to-show-nested-chats mechanic
-            // ResearchTab now uses — this tab is also single-selection
-            // (one notebook active at a time), so "expand" just means
-            // "is the selected notebook," no separate toggle state.
-            const isSelected = ws.id === selectedId;
-            const memberChats = isSelected ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
-            return (
-              <div key={ws.id} className="border-b border-[var(--neutral-900)]">
-                <div
-                  className={`group flex items-center gap-1 ${
-                    isSelected ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
-                  }`}
-                >
-                  <button
-                    onClick={() => setSelectedId(ws.id)}
-                    className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
-                  >
-                    <span className="flex items-center min-w-0">
-                      <WorkspaceStageIcons workspace={ws} />
-                      <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
-                    </span>
-                    {isSelected && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
-                  </button>
-                  {/* NEW — issue #3: "+" creates a chat nested in this
-                      notebook, same idea as starting a new chat under a
-                      group in the Chat sidebar. */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
-                    title="New chat in this notebook"
-                    className="shrink-0 opacity-0 group-hover:opacity-100 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-                    disabled={creatingChatForWs === ws.id}
-                  >
-                    {creatingChatForWs === ws.id ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <Plus size={13} />
-                    )}
-                  </button>
-                  <button
-                    onClick={() => setManagingWorkspace(ws)}
-                    title="Rename or delete notebook"
-                    className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
-                  >
-                    <MoreVertical size={13} />
-                  </button>
-                </div>
-                {memberChats.map((chat) => (
+        );
+
+        const notebookRows = (
+          <div className="flex-1 overflow-y-auto">
+            {notebooks.map((ws) => {
+              // NEW — issue #3: same expand-to-show-nested-chats mechanic
+              // ResearchTab now uses — this tab is also single-selection
+              // (one notebook active at a time), so "expand" just means
+              // "is the selected notebook," no separate toggle state.
+              const isSelected = ws.id === selectedId;
+              const memberChats = isSelected ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+              return (
+                <div key={ws.id} className="border-b border-[var(--neutral-900)]">
                   <div
-                    key={chat.id}
-                    onClick={() => editingChatId !== chat.id && openInDock(chat.id)}
-                    className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
-                      chat.id === activeChatId
-                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                    className={`group flex items-center gap-1 ${
+                      isSelected ? "bg-[var(--neutral-800-a70)]" : "hover:bg-[var(--neutral-900)]"
                     }`}
                   >
-                    {editingChatId === chat.id ? (
-                      <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          autoFocus
-                          id={`chat-title-${chat.id}`}
-                          name="chatTitle"
-                          aria-label="Chat title"
-                          value={editChatTitle}
-                          onChange={(e) => setEditChatTitle(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                          className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
-                        />
-                        <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
-                        <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
-                      </div>
-                    ) : (
-                      <>
-                        <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
-                        <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                        {/* NEW — issue #3: rename/delete, same controls
-                            ChatSidebar's own chat rows already offer. */}
-                        <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
-                          <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
-                            <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                          </button>
-                          <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
-                            <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                          </button>
-                        </div>
-                      </>
-                    )}
+                    <button
+                      onClick={() => { setSelectedId(ws.id); setMobileNotebooksDrawerOpen(false); }}
+                      className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
+                    >
+                      <span className="flex items-center min-w-0">
+                        <WorkspaceStageIcons workspace={ws} />
+                        <span className="text-xs text-[var(--neutral-200)] truncate">{ws.name}</span>
+                      </span>
+                      {isSelected && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+                    </button>
+                    {/* NEW — issue #3: "+" creates a chat nested in this
+                        notebook, same idea as starting a new chat under a
+                        group in the Chat sidebar. */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
+                      title="New chat in this notebook"
+                      className="shrink-0 opacity-0 group-hover:opacity-100 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+                      disabled={creatingChatForWs === ws.id}
+                    >
+                      {creatingChatForWs === ws.id ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Plus size={13} />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setManagingWorkspace(ws)}
+                      title="Rename or delete notebook"
+                      className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
+                    >
+                      <MoreVertical size={13} />
+                    </button>
                   </div>
-                ))}
+                  {memberChats.map((chat) => (
+                    <div
+                      key={chat.id}
+                      onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobileNotebooksDrawerOpen(false); } }}
+                      className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                        chat.id === activeChatId
+                          ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                          : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                      }`}
+                    >
+                      {editingChatId === chat.id ? (
+                        <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            autoFocus
+                            id={`chat-title-${chat.id}`}
+                            name="chatTitle"
+                            aria-label="Chat title"
+                            value={editChatTitle}
+                            onChange={(e) => setEditChatTitle(e.target.value)}
+                            onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
+                            className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
+                          />
+                          <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
+                          <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
+                        </div>
+                      ) : (
+                        <>
+                          <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                          <span className="truncate flex-1 min-w-0">{chat.title}</span>
+                          {/* NEW — issue #3: rename/delete, same controls
+                              ChatSidebar's own chat rows already offer. */}
+                          <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
+                            <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
+                              <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
+                              <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+            {notebooks.length === 0 && (
+              <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
+            )}
+          </div>
+        );
+
+        // CHANGED — mobile notebook UI pass: this whole column (both the
+        // w-56 expanded state AND the old w-10 chevron-only collapsed
+        // state) is desktop-only now. On mobile there's no room for
+        // either — the collapsed strip's slot is reused below for the
+        // sub-tab icon rail instead (see the "Sub-tab icon rail" block
+        // inside "Selected notebook"), and the full list only ever
+        // appears as the MobileDrawer a few lines down, opened via the
+        // header hamburger (mobile/AppShell.jsx) or the "Notebooks"
+        // label button next to the notebook name below.
+        if (isMobile) return null;
+
+        return projectsCollapsed ? (
+          <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
+            <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show notebooks">
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        ) : (
+          <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col h-full">
+            <div className="h-10 px-3 flex items-center justify-between border-b border-[var(--neutral-800)]">
+              <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+                <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
+              </span>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setCreating((c) => !c)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
+                  <Plus size={15} />
+                </button>
+                {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+                    own ChevronLeft toggle. */}
+                <button onClick={toggleProjects} title="Hide notebooks" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+                  <ChevronLeft size={14} />
+                </button>
               </div>
+            </div>
+            {notebookCreateForm}
+            {notebookRows}
+          </div>
+        );
+      })()}
+
+      {/* CHANGED — mobile notebook UI pass: same list, as a left-side
+          MobileDrawer. Opened by the mobile header's hamburger
+          (OPEN_TAB_SIDEBAR_EVENT, listened for above) or by tapping the
+          notebook name button in the content header below. */}
+      {isMobile && (
+        <MobileDrawer side="left" open={mobileNotebooksDrawerOpen} onClose={() => setMobileNotebooksDrawerOpen(false)}>
+          <div className="w-72 max-w-[80vw] flex flex-col h-full">
+            <div className="h-12 px-3 flex items-center justify-between border-b border-[var(--neutral-800)]">
+              <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+                <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
+              </span>
+              <div className="flex items-center gap-3">
+                <button onClick={() => setCreating((c) => !c)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)] p-1">
+                  <Plus size={16} />
+                </button>
+                <button onClick={() => setMobileNotebooksDrawerOpen(false)} title="Close" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1">
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+            {(() => {
+              const notebookCreateFormMobile = creating && (
+                <form onSubmit={handleCreateNotebook} className="px-3 py-2 border-b border-[var(--neutral-900)] flex gap-1">
+                  <input
+                    autoFocus
+                    id="notebook-new-name-mobile"
+                    name="notebookNewNameMobile"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    aria-label="Notebook name"
+                    placeholder="Notebook name"
+                    disabled={submittingNotebook}
+                    className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-1.5 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)] disabled:opacity-60"
+                  />
+                  <button type="submit" disabled={submittingNotebook || !newName.trim()}><Check size={13} className="text-green-400" /></button>
+                </form>
+              );
+              return notebookCreateFormMobile;
+            })()}
+            {notebooks.map((ws) => {
+              const isSelected = ws.id === selectedId;
+              return (
+                <button
+                  key={ws.id}
+                  onClick={() => { setSelectedId(ws.id); setMobileNotebooksDrawerOpen(false); }}
+                  className={`flex items-center justify-between gap-1 px-3 py-3 text-left border-b border-[var(--neutral-900)] ${
+                    isSelected ? "bg-[var(--neutral-800-a70)]" : "active:bg-[var(--neutral-900)]"
+                  }`}
+                >
+                  <span className="flex items-center min-w-0">
+                    <WorkspaceStageIcons workspace={ws} />
+                    <span className="text-sm text-[var(--neutral-200)] truncate">{ws.name}</span>
+                  </span>
+                  {isSelected && <ChevronRight size={14} className="text-[var(--neutral-500)] shrink-0" />}
+                </button>
+              );
+            })}
+            {notebooks.length === 0 && (
+              <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
+            )}
+          </div>
+        </MobileDrawer>
+      )}
+
+      {/* CHANGED — mobile notebook UI pass: vertical icon-only rail,
+          mobile's replacement for the desktop pill nav (see the
+          isMobile branch a few hundred lines down, right where that
+          pill nav lives) — same SUB_TABS list, same badges/dots, just
+          icons stacked in the column the desktop-collapsed notebook
+          picker used to occupy (w-10, same width) instead of a row of
+          labeled buttons that can't fit five labels on a phone. Only
+          shown once a notebook is selected and has an active chat —
+          before that there's no sub-tab content to switch between. */}
+      {isMobile && selected && hasActiveChat && (
+        <div className="w-12 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-2 gap-1">
+          {SUB_TABS.map((t) => {
+            const badgeCount = t.id === "insights" ? candidates.length + clusterCandidates.length : 0;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setSubTab(t.id)}
+                title={t.label}
+                className={`relative flex items-center justify-center w-9 h-9 rounded-lg ${
+                  subTab === t.id ? "bg-[var(--accent)] text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                }`}
+              >
+                <t.icon size={17} />
+                {badgeCount > 0 && (
+                  <span className="absolute -top-1 -right-1 text-[9px] leading-none bg-amber-500/90 text-black rounded-full px-1 py-0.5 font-medium">
+                    {badgeCount}
+                  </span>
+                )}
+                {UNREAD_DOT_TABS.includes(t.id) && subTab !== t.id && hasUnseenUpdate(t.id) && (
+                  <span
+                    className="absolute top-1 right-1.5 w-1.5 h-1.5 rounded-full bg-amber-400"
+                    title="New content since you last viewed this tab"
+                  />
+                )}
+              </button>
             );
           })}
-          {notebooks.length === 0 && (
-            <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">No notebooks yet — create one to start ingesting sources.</p>
-          )}
         </div>
-      </div>
       )}
 
       {/* Selected notebook */}
@@ -3162,9 +3386,9 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 return): this pane now always fills the remaining space
                 next to the notebook sidebar/chat dock, same as every
                 other domain tab's content column. */}
-            <div className="flex items-center justify-between">
-              <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-base font-medium text-[var(--neutral-100)] truncate min-w-0">{selected.name}</h2>
+              <div className="flex items-center gap-2 shrink-0">
                 {(() => {
                   // NEW — §2.2: a workspace can't be "promoted to" a stage
                   // it's already active in — matters now that partial
@@ -3175,6 +3399,53 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                     ? promoteTargetStage
                     : availableTargets[0];
                   if (!availableTargets.length) return null;
+
+                  // CHANGED — mobile notebook UI pass: the desktop control
+                  // is three separate components (target <select>,
+                  // complete/partial radiogroup, a fully-worded
+                  // "Promote to X →" button) — plenty of room on desktop,
+                  // but three tap targets plus a wide label don't fit next
+                  // to a notebook name on a phone. Mobile collapses target
+                  // + mode into ONE <select> (each option already encodes
+                  // both, e.g. "→ Research"/"→ Research, keep here too")
+                  // and reduces the action itself to a small icon-only
+                  // button — same information, one control to read and
+                  // one to tap instead of three.
+                  if (isMobile) {
+                    const comboValue = `${targetStage}|${promoteMode}`;
+                    return (
+                      <div className="flex items-center gap-1.5">
+                        <label className="sr-only" htmlFor="notebooks-promote-combo">Promote to</label>
+                        <select
+                          id="notebooks-promote-combo"
+                          value={comboValue}
+                          onChange={(e) => {
+                            const [stage, mode] = e.target.value.split("|");
+                            setPromoteTargetStage(stage);
+                            setPromoteMode(mode);
+                          }}
+                          disabled={promoting}
+                          className="max-w-[132px] bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg pl-2 pr-1 py-1.5 text-xs outline-none disabled:opacity-50"
+                        >
+                          {availableTargets.map((stage) => (
+                            <optgroup key={stage} label={PROMOTE_LABELS[stage]}>
+                              <option value={`${stage}|complete`}>→ {PROMOTE_LABELS[stage]}</option>
+                              <option value={`${stage}|partial`}>→ {PROMOTE_LABELS[stage]}, keep here too</option>
+                            </optgroup>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => handlePromote(selected.id, targetStage)}
+                          disabled={promoting}
+                          title={`${promoteMode === "partial" ? "Add to" : "Promote to"} ${PROMOTE_LABELS[targetStage]}`}
+                          className="shrink-0 flex items-center justify-center text-[var(--neutral-200)] border border-[var(--neutral-700)] rounded-lg p-1.5 disabled:opacity-50"
+                        >
+                          {promoting ? <Loader2 size={14} className="animate-spin" /> : <ArrowUpRight size={14} />}
+                        </button>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div className="flex items-center gap-2">
                       <label className="sr-only" htmlFor="notebooks-promote-target">Promote to</label>
@@ -3259,6 +3530,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
               )
             ) : (
               <>
+            {!isMobile && (
             <div className="relative min-h-10 px-1 flex items-center border-b border-[var(--neutral-800)]">
               <nav className="flex gap-1 mx-auto">
                 {SUB_TABS.map((t) => (
@@ -3305,6 +3577,33 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 />
               </div>
             </div>
+            )}
+            {/* CHANGED — mobile notebook UI pass: the horizontal pill nav
+                above (5 labeled buttons + a generate picker) doesn't fit
+                a phone width readably. Mobile instead gets a slim header
+                bar naming just the active sub-tab — in the app's own
+                brand accent color (var(--accent), the same crimson
+                already used for every active-state highlight/button in
+                this file), so it stays legible at a glance even though
+                only an icon represents it in the rail below — plus the
+                same generate picker, and a vertical icon-only rail (one
+                tap = one sub-tab, no label needed since the header bar
+                already names the one that's active) reusing the
+                horizontal real estate the desktop-only notebook-picker
+                column gave up on mobile (see the isMobile early-return
+                in the notebook-picker IIFE above). */}
+            {isMobile && (
+              <div className="h-10 px-3 flex items-center justify-between border-b border-[var(--neutral-800)]">
+                <span className="text-sm font-semibold text-[var(--accent)]">
+                  {SUB_TABS.find((t) => t.id === subTab)?.label}
+                </span>
+                <NotebooksGeneratePicker
+                  workspaceId={selected.id}
+                  generateNotebooks={generateNotebooks}
+                  onNavigateSubTab={setSubTab}
+                />
+              </div>
+            )}
 
             {/* CHANGED — Sources + Backlinks merged into "Library".
                 dockOpen tells LibraryView whether the chat dock is
@@ -3336,7 +3635,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 topicNodes={topicNodes}
                 topicEdges={topicEdges}
                 topicPulsingIds={topicPulsingIds}
-                dockOpen={!chatDockCollapsed}
+                dockOpen={isMobile || !chatDockCollapsed}
               />
             )}
             {/* CHANGED — Mind Map + Workflows merged into "Diagrams",
@@ -3382,7 +3681,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
                 candidates={candidates}
                 onAcceptCandidate={async (candidateId) => { await acceptNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
                 onRejectCandidate={async (candidateId) => { await rejectNoteCandidate(selected.id, candidateId); await loadNotebookData(selected.id); }}
-                dockOpen={!chatDockCollapsed}
+                dockOpen={isMobile || !chatDockCollapsed}
               />
             )}
             {/* CHANGED — Corrections + Patch Review merged into
