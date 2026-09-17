@@ -4,11 +4,10 @@ import { useSession } from "../context/SessionContext";
 import { useWorkspaces } from "../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useChatList } from "../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
 import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext"; // NEW — step 3e
-import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput } from "lucide-react";
+import { Plus, Trash2, Pencil, Link2, Settings2, ChevronLeft, ChevronRight, Check, X, FolderPlus, FolderInput, MoreVertical } from "lucide-react";
 import ManageBatchModal from "./ManageBatchModal";
 import CreateWorkspaceModal from "./CreateWorkspaceModal";
 import AttachChatToWorkspaceModal from "./AttachChatToWorkspaceModal";
-import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";
 import ManageWorkspaceModal from "./ManageWorkspaceModal";
 import ConfirmDialog from "./ConfirmDialog";
 import WorkspaceStageIcons from "./WorkspaceStageIcons"; // NEW — item #2: extracted so every stage tab can share this, not just ChatSidebar
@@ -63,6 +62,25 @@ export default function ChatSidebar({ collapsed, onToggle }) {
   const [editTitle, setEditTitle] = useState("");
   const [linkingId, setLinkingId] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null); // chat object or null
+  // NEW — per-chat-row options menu. Replaces the old always-hover-visible
+  // cluster of up to 5 separate icon buttons (create project, add to
+  // project, share memory, rename, delete) with one "..." button that
+  // opens a small dropdown carrying all of them. Only one row's menu is
+  // ever open at a time, so a single id (not a Set) is enough. Closed by
+  // the document-level mousedown listener below whenever the click lands
+  // outside any element marked data-chat-row-menu — every open button and
+  // every dropdown itself carries that marker (see renderChatRow), so a
+  // click that opens/toggles or acts on the menu is never mistaken for an
+  // "outside" click.
+  const [menuChatId, setMenuChatId] = useState(null);
+  useEffect(() => {
+    if (!menuChatId) return;
+    function handleClickOutside(e) {
+      if (!e.target.closest("[data-chat-row-menu]")) setMenuChatId(null);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [menuChatId]);
   // NEW — §4: which batch's manage modal is open. The modal itself is
   // built in §5 (ManageBatchModal) — for now this just tracks selection
   // so wiring the modal in next is a one-line render addition.
@@ -71,7 +89,6 @@ export default function ChatSidebar({ collapsed, onToggle }) {
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [creatingProjectFrom, setCreatingProjectFrom] = useState(null);
   const [attachingChatToProject, setAttachingChatToProject] = useState(null);
-  const [addingToWorkspace, setAddingToWorkspace] = useState(null);
   // NEW — §8: search bar. Client-side only — chats/batches/workspaces are
   // already loaded in state, no backend endpoint needed.
   const [query, setQuery] = useState("");
@@ -188,39 +205,79 @@ export default function ChatSidebar({ collapsed, onToggle }) {
                 Paused
               </span>
             )}
-            <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
-              {allowProjectActions && (
-                <>
-                  <button onClick={(e) => { e.stopPropagation(); openCreateProject([chat.id], chat.title); }} title="Create project from chat">
-                    <FolderPlus size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                  </button>
-                  <button onClick={(e) => { e.stopPropagation(); openAttachToProject(chat); }} title="Add chat to project">
-                    <FolderInput size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                  </button>
-                </>
-              )}
-              {/* Batched chats already show a badge in their batch header
-                  above, so only render the per-row Link2 badge for chats
-                  linked the old, non-batch way. */}
-              {!indent && chat.linked_chat_ids?.length > 0 && (
-                <Link2 size={12} className="text-[var(--neutral-500)]" title={`Linked to ${chat.linked_chat_ids.length} chat(s)`} />
-              )}
-              {/* Manual per-chat link button hidden once a chat is
-                  batched — batch membership (managed via §5's "Manage
-                  batch" modal) is now the single source of truth for its
-                  linked_chat_ids, so editing it here directly would fight
-                  memory_batch.py's _sync_members on the next batch edit. */}
-              {!indent && (
-                <button onClick={(e) => { e.stopPropagation(); setLinkingId(chat.id); }} title="Share memory with other chats">
-                  <Link2 size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                </button>
-              )}
-              <button onClick={(e) => { e.stopPropagation(); startRename(chat); }} title="Rename">
-                <Pencil size={12} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+            {/* Batched chats already show a badge in their batch header
+                above, so only render the per-row Link2 badge for chats
+                linked the old, non-batch way. Kept outside the menu (and
+                always visible, not hover-gated) since it's a status
+                indicator, same idea as the Paused badge above — not an
+                action to merge away. */}
+            {!indent && chat.linked_chat_ids?.length > 0 && (
+              <Link2 size={12} className="shrink-0 text-[var(--neutral-500)]" title={`Linked to ${chat.linked_chat_ids.length} chat(s)`} />
+            )}
+            {/* CHANGED — every per-row action (create project, add to
+                project, share memory, rename, delete) used to be its own
+                always-hover-visible icon button, up to 5 at once. Merged
+                into a single "..." menu, same consolidation as the
+                project/batch header rows below (one Settings2 icon) and
+                NotebooksTab's own notebook rows (one MoreVertical icon). */}
+            <div className="relative shrink-0" data-chat-row-menu>
+              <button
+                onClick={(e) => { e.stopPropagation(); setMenuChatId((id) => (id === chat.id ? null : chat.id)); }}
+                title="Chat options"
+                className="opacity-0 group-hover:opacity-100 p-1 -m-1 rounded text-[var(--neutral-500)] hover:text-[var(--neutral-200)] hover:bg-[var(--neutral-800)]"
+              >
+                <MoreVertical size={13} />
               </button>
-              <button onClick={(e) => { e.stopPropagation(); askDelete(chat); }} title="Delete">
-                <Trash2 size={12} className="text-[var(--neutral-500)] hover:text-red-400" />
-              </button>
+              {menuChatId === chat.id && (
+                <div
+                  data-chat-row-menu
+                  className="absolute right-0 top-full mt-1 z-20 w-44 rounded-lg border border-[var(--neutral-700)] bg-[var(--neutral-900)] py-1 shadow-lg"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {allowProjectActions && (
+                    <button
+                      onClick={() => { setMenuChatId(null); openCreateProject([chat.id], chat.title); }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+                    >
+                      <FolderPlus size={12} /> Create project from chat
+                    </button>
+                  )}
+                  {allowProjectActions && (
+                    <button
+                      onClick={() => { setMenuChatId(null); openAttachToProject(chat); }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+                    >
+                      <FolderInput size={12} /> Add to project
+                    </button>
+                  )}
+                  {/* Manual per-chat link hidden once a chat is batched —
+                      batch membership (managed via "Manage batch") is now
+                      the single source of truth for its linked_chat_ids,
+                      so editing it here directly would fight
+                      memory_batch.py's _sync_members on the next batch
+                      edit. */}
+                  {!indent && (
+                    <button
+                      onClick={() => { setMenuChatId(null); setLinkingId(chat.id); }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+                    >
+                      <Link2 size={12} /> Share memory with other chats
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setMenuChatId(null); startRename(chat); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+                  >
+                    <Pencil size={12} /> Rename
+                  </button>
+                  <button
+                    onClick={() => { setMenuChatId(null); askDelete(chat); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--neutral-400)] hover:bg-[var(--neutral-800)] hover:text-red-400"
+                  >
+                    <Trash2 size={12} /> Delete
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -283,9 +340,11 @@ export default function ChatSidebar({ collapsed, onToggle }) {
                 </span>
                 <div className="flex items-center gap-2">
                   <WorkspaceStageIcons workspace={ws} />
-                  <button onClick={() => setAddingToWorkspace(ws)} title="Add chat to project">
-                    <FolderInput size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                  </button>
+                  {/* CHANGED — was two icons (FolderInput "Add chat to
+                      project" + Settings2 "Manage project"). Adding a chat
+                      is now one of the actions inside "Manage project"
+                      itself (see its own "Chats in this project" section),
+                      so this row keeps just the one entry point in. */}
                   <button onClick={() => setManagingWorkspace(ws)} title="Manage project">
                     <Settings2 size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                   </button>
@@ -312,9 +371,11 @@ export default function ChatSidebar({ collapsed, onToggle }) {
                   {batch.name} · {memberChats.length}
                 </span>
                 <div className="flex items-center gap-2">
-                  <button onClick={() => openCreateProject(memberChats.map((chat) => chat.id), batch.name)} title="Create project from batch">
-                    <FolderPlus size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                  </button>
+                  {/* CHANGED — was two icons (FolderPlus "Create project
+                      from batch" + Settings2 "Manage batch"). Creating a
+                      project is now one of the actions inside "Manage
+                      batch" itself (passed down as onCreateProject), so
+                      this row keeps just the one entry point in. */}
                   <button onClick={() => openManageBatch(batch)} title="Manage batch">
                     <Settings2 size={11} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
                   </button>
@@ -341,6 +402,17 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           batch={batchesArr.find((b) => b.id === managingBatch.id) || managingBatch}
           allChats={chats}
           onClose={() => setManagingBatch(null)}
+          // NEW — replaces the batch header row's own FolderPlus button.
+          // Same membership filter renderChatRow's caller used: a chat
+          // already moved into a workspace isn't offered here either.
+          onCreateProject={() => {
+            const liveBatch = batchesArr.find((b) => b.id === managingBatch.id) || managingBatch;
+            const memberChatIds = chats
+              .filter((c) => liveBatch.member_chat_ids.includes(c.id) && !workspacedChatIds.has(c.id))
+              .map((c) => c.id);
+            setManagingBatch(null);
+            openCreateProject(memberChatIds, liveBatch.name);
+          }}
         />
       )}
 
@@ -369,15 +441,6 @@ export default function ChatSidebar({ collapsed, onToggle }) {
           chat={attachingChatToProject}
           workspaces={workspaces}
           onClose={() => setAttachingChatToProject(null)}
-        />
-      )}
-
-      {addingToWorkspace && (
-        <AddChatToWorkspaceModal
-          workspace={workspaces.find((w) => w.id === addingToWorkspace.id) || addingToWorkspace}
-          allChats={chats}
-          workspacedChatIds={workspacedChatIds}
-          onClose={() => setAddingToWorkspace(null)}
         />
       )}
 
