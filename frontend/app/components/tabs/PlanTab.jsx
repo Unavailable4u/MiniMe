@@ -1177,7 +1177,7 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
                 alt="AI-generated render of this device"
                 loading="lazy"
                 onError={() => setRenderFailed(true)}
-                className="w-full max-w-xs rounded-md border border-[var(--neutral-800)] mt-1"
+                className="block w-full max-w-xs mx-auto rounded-md border border-[var(--neutral-800)] mt-1"
               />
             )
           )}

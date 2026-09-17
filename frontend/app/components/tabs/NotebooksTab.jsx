@@ -1003,11 +1003,11 @@ function ProgressBoardView({ workspaceId, topicNodes, fetchWorkspaceProgress, se
 // to it would only squeeze the one view that most needs the room.
 //
 // Mind Map's width still isn't fixed, though: it's rendered inside
-// NotebooksTab's own content pane, whose max-width already expands as
-// the chat dock and the project sidebar collapse (see the "diagrams"
-// branch of contentMaxWidthClass() below) — so a big mind map keeps
-// getting more room the same way Library's side-by-side layout does,
-// it just never needs a second column to do it.
+// NotebooksTab's own content pane, which now always fills the space
+// left over once the chat dock and the project sidebar take theirs
+// (no max-width cap at all — see that pane's own comment) — so a big
+// mind map keeps getting more room the same way Library's side-by-side
+// layout does, it just never needs a second column to do it.
 // CHANGED — step 8: DiagramsView now owns the per-topic workflow state
 // that WorkflowsView (step 7) just renders. A Mind Map node click no
 // longer opens a sub-chat -- it calls generateTopicWorkflow(wsId, label)
@@ -2945,30 +2945,18 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
     await openInDock(chatId);
   }
 
-  // NEW — how wide the selected-notebook content pane gets to be, for
-  // sub-tabs that actually benefit from more than the default reading
-  // width (max-w-3xl, same as every other sub-tab keeps). Both the chat
-  // dock (chatDockCollapsed) and this tab's own project sidebar
-  // (projectsCollapsed) free up real horizontal space when they
-  // collapse, so this reacts to both rather than just one:
-  //  - "library"/"insights": widen only once the dock's closed, since
-  //    that's the difference between their two columns (Sources/
-  //    Backlinks, Facts&Clusters/Suggested notes) fitting side by side
-  //    or needing to stack (see LibraryView's/InsightsView's own
-  //    dockOpen prop).
-  //  - "diagrams": Mind Map can be large in either dimension on its
-  //    own (no second column involved, see DiagramsView above), so it
-  //    keeps expanding as either the dock or the sidebar collapses, and
-  //    drops the cap entirely once both have.
-  function contentMaxWidthClass() {
-    if (subTab === "library" || subTab === "insights") return chatDockCollapsed ? "max-w-6xl" : "max-w-3xl";
-    if (subTab === "diagrams") {
-      if (chatDockCollapsed && projectsCollapsed) return "max-w-none";
-      if (chatDockCollapsed || projectsCollapsed) return "max-w-5xl";
-      return "max-w-3xl";
-    }
-    return "max-w-3xl";
-  }
+  // CHANGED — this tab used to cap its content pane at max-w-3xl (only
+  // conditionally widening for "library"/"insights"/"diagrams") via a
+  // contentMaxWidthClass() helper, while every other domain tab
+  // (Research/Plan/Build/Test/Growth) never caps its content column's
+  // width at all — it's a plain flex-1 pane that fills whatever space
+  // the project sidebar and chat dock leave behind. That mismatch is
+  // exactly why Notebooks was leaving dead space on the right even with
+  // the dock closed: max-w-3xl doesn't stretch to fill a wider parent,
+  // it only ever shrinks it. Dropped entirely so this pane behaves like
+  // every sibling tab's — individual sub-views (LibraryView, etc.)
+  // already lay themselves out with flex-1/min-w-0 internally, so they
+  // pick up the freed width automatically without any changes there.
 
   // NEW — §8: promotes the notebook to Research and hands off navigation
   // to AppShell, which switches tabs and pre-selects it there.
@@ -3168,14 +3156,12 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
             Select or create a notebook to get started.
           </div>
         ) : (
-          <div className={`relative p-5 space-y-4 ${contentMaxWidthClass()}`}>
-            {/* CHANGED — widened from a flat max-w-3xl: Library's
-                side-by-side Sources/Backlinks layout (see LibraryView
-                below) and Diagrams' Mind Map (see DiagramsView below)
-                need the extra room the chat dock's/sidebar's collapsed
-                state just freed up on either side; every other sub-tab
-                keeps the original narrower reading width — see
-                contentMaxWidthClass() above. */}
+          <div className="relative p-5 space-y-4">
+            {/* CHANGED — no more max-width cap here (see the removed
+                contentMaxWidthClass() comment above this component's
+                return): this pane now always fills the remaining space
+                next to the notebook sidebar/chat dock, same as every
+                other domain tab's content column. */}
             <div className="flex items-center justify-between">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
               <div className="flex items-center gap-2">
@@ -3447,7 +3433,10 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
           title="Open chat"
           className="fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
-          <MessageSquareText size={18} />
+          {/* CHANGED — was MessageSquareText, the one outlier among the six
+              docked tabs' floating "Open chat" bubbles; every other tab
+              (Research/Plan/Build/Test/Growth) uses plain MessageSquare. */}
+          <MessageSquare size={18} />
         </button>
       )}
 

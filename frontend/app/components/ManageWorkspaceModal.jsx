@@ -4,8 +4,9 @@ import { useSession } from "../context/SessionContext";
 import { useWorkspaces } from "../context/WorkspacesContext";   // FIX — Item 2 concern split, slice 3 follow-up: this file was missed when workspaces/fetchWorkspaces moved out of useSession()
 import { useWorkspaceDockActions, useLastActiveChatId } from "../context/WorkspaceDockContext";   // NEW — bug #1 fix; useLastActiveChatId + switchChat/createNewChat NEW — Item 2 step 5 prerequisite
 import { useAuth } from "../context/AuthContext";
-import { Pencil, Check, X, FolderMinus, Trash2, UserPlus, LogOut, ShieldAlert, Eye, EyeOff, Download, Upload } from "lucide-react";
+import { Pencil, Check, X, FolderPlus, FolderMinus, Trash2, UserPlus, LogOut, ShieldAlert, Eye, EyeOff, Download, Upload } from "lucide-react";
 import ConfirmDialog from "./ConfirmDialog";
+import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";   // NEW — hosts "Add chat to project" here instead of its own sidebar icon (see ChatSidebar.jsx's project header row)
 
 // Part 8.9: mirrors eo/chat_workspace.py's five-tier role model exactly —
 // viewer < editor < moderator < partner <= owner. Kept as a local const
@@ -40,6 +41,11 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
   const [editingName, setEditingName] = useState(false);
   const [pendingRemove, setPendingRemove] = useState(null); // { chat, deleteChat }
   const [pendingDeleteWs, setPendingDeleteWs] = useState(false);
+  // NEW — "Add chat to project" used to be its own icon on the sidebar's
+  // project header row (ChatSidebar.jsx); consolidated into this modal
+  // instead, right next to the "Chats in this project" list it affects.
+  const [addingChat, setAddingChat] = useState(false);
+  const workspacedChatIds = new Set(workspaces.flatMap((w) => w.chat_ids));
 
   // NEW — Part 8.7: per-workspace backup/restore.
   const [exportBusy, setExportBusy] = useState(false);
@@ -320,7 +326,16 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
 
         {/* --- Chats in this project --- */}
         <div className="mb-3">
-          <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)] mb-1">Chats</p>
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">Chats</p>
+            <button
+              onClick={() => setAddingChat(true)}
+              title="Add chat to project"
+              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            >
+              <FolderPlus size={13} />
+            </button>
+          </div>
           <div className="space-y-1">
             {chatMembers.map((chat) => (
               <div key={chat.id} className="flex items-center justify-between gap-2 text-xs text-[var(--neutral-300)] py-1">
@@ -570,6 +585,15 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
           <button onClick={onClose} className="text-xs text-[var(--neutral-400)] px-3 py-1.5">Close</button>
         </div>
       </div>
+
+      {addingChat && (
+        <AddChatToWorkspaceModal
+          workspace={liveWorkspace}
+          allChats={allChats}
+          workspacedChatIds={workspacedChatIds}
+          onClose={() => setAddingChat(false)}
+        />
+      )}
 
       <ConfirmDialog
         open={!!pendingRemove}

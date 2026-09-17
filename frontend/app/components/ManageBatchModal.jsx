@@ -2,8 +2,9 @@
 import { useState } from "react";
 import { useSession } from "../context/SessionContext";
 import ConfirmDialog from "./ConfirmDialog";
+import { FolderPlus } from "lucide-react";
 
-export default function ManageBatchModal({ batch, allChats, onClose }) {
+export default function ManageBatchModal({ batch, allChats, onClose, onCreateProject }) {
   const { unlinkBatchMembers, renameBatch, deleteBatch } = useSession();
   const [checked, setChecked] = useState(new Set());
   const [editingName, setEditingName] = useState(false);
@@ -96,13 +97,27 @@ export default function ManageBatchModal({ batch, allChats, onClose }) {
           )}
 
           <div className="flex justify-between items-center pt-2 border-t" style={{ borderColor: "var(--cyber-border)" }}>
-            <button
-              onClick={() => setConfirmDeleteAll(true)}
-              className="text-xs"
-              style={{ color: "var(--cyber-magenta)" }}
-            >
-              Delete entire batch
-            </button>
+            <div className="flex items-center gap-3">
+              {/* NEW — used to be its own FolderPlus icon on the batch
+                  header row (ChatSidebar.jsx); consolidated in here next
+                  to the batch's other actions. */}
+              {onCreateProject && (
+                <button
+                  onClick={onCreateProject}
+                  className="flex items-center gap-1.5 text-xs"
+                  style={{ color: "var(--cyber-cyan)" }}
+                >
+                  <FolderPlus size={12} /> Create project
+                </button>
+              )}
+              <button
+                onClick={() => setConfirmDeleteAll(true)}
+                className="text-xs"
+                style={{ color: "var(--cyber-magenta)" }}
+              >
+                Delete entire batch
+              </button>
+            </div>
             <div className="flex gap-2">
               <button onClick={onClose} className="text-xs px-3 py-1.5" style={{ color: "var(--cyber-dim)" }}>
                 Close
