@@ -16,7 +16,7 @@ import NotificationBell from "./NotificationBell";   // NEW — Part 8.9: cross-
 import { useViewport } from "../hooks/useViewport";   // NEW — Phase 1 (mobile shell): structural nav fork below
 import MobileHeader from "./mobile/AppShell";           // NEW — Phase 1
 import MobileChatSidebar from "./mobile/ChatSidebar";   // NEW — Phase 1
-import { OPEN_WORKING_PANEL_EVENT } from "./mobile/events";   // NEW — Phase 1
+import { OPEN_WORKING_PANEL_EVENT, OPEN_TAB_SIDEBAR_EVENT } from "./mobile/events";   // NEW — Phase 1 / picker-drawer generalization
 
 // NEW — perf audit §2.3 step A: the other ten tab bodies were all static
 // imports, so every one of them — including 3,100+-line NotebooksTab —
@@ -381,6 +381,29 @@ function AppShellBody() {
     window.dispatchEvent(new Event(OPEN_WORKING_PANEL_EVENT));
   }
 
+  // NEW — mobile picker-drawer generalization: the hamburger used to be
+  // Chat-only (showSidebarButton={activeTab === "chat"} below). Every
+  // tab that has its own left-hand picker column on desktop (Notebooks'
+  // notebook list today; Research's/Build's project lists are the
+  // obvious next ones to wire up the same way) gets the same hamburger
+  // affordance on mobile instead of losing that picker entirely below
+  // 768px. Chat keeps its own dedicated open path (setMobileSidebarOpen
+  // — AppShell already owns that piece of state); every other listed
+  // tab doesn't have state AppShell can reach into, so it gets a plain
+  // cross-component event (see mobile/events.js's OPEN_TAB_SIDEBAR_EVENT
+  // comment) that the tab body itself listens for and answers with its
+  // own MobileDrawer, the same way WorkspaceChatPanel already answers
+  // OPEN_WORKING_PANEL_EVENT for the panel toggle.
+  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks"]);
+
+  function openMobileTabSidebar() {
+    if (activeTab === "chat") {
+      setMobileSidebarOpen(true);
+    } else {
+      window.dispatchEvent(new CustomEvent(OPEN_TAB_SIDEBAR_EVENT, { detail: { tabId: activeTab } }));
+    }
+  }
+
   // Loads the given chat (same call ChatSidebar's own chat-switcher
   // uses) and switches the active tab to Chat, in one action — this is
   // what turns "Session: abc123" plain text into a real, working
@@ -426,8 +449,9 @@ function AppShellBody() {
           tabs={TABS}
           activeTab={activeTab}
           onSelectTab={setActiveTab}
-          showSidebarButton={activeTab === "chat"}
-          onOpenSidebar={() => setMobileSidebarOpen(true)}
+          showSidebarButton={TABS_WITH_OWN_MOBILE_SIDEBAR.has(activeTab)}
+          onOpenSidebar={openMobileTabSidebar}
+          sidebarLabel={activeTab === "notebooks" ? "Notebooks" : "Chats"}
           showWorkingPanelButton={activeTab === "chat"}
           onOpenWorkingPanel={openMobileWorkingPanel}
         />

@@ -48,6 +48,7 @@ export default function MobileHeader({
   onSelectTab,
   showSidebarButton,
   onOpenSidebar,
+  sidebarLabel = "Chats", // NEW — picker-drawer generalization: Notebooks/Research/etc pass their own noun instead of the Chat-only default
   showWorkingPanelButton,
   onOpenWorkingPanel,
 }) {
@@ -155,7 +156,7 @@ export default function MobileHeader({
         {showSidebarButton ? (
           <button
             onClick={onOpenSidebar}
-            title="Chats"
+            title={sidebarLabel}
             className="text-[var(--neutral-300)] hover:text-white p-2 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
           >
             <Menu size={18} />
