@@ -21,7 +21,7 @@ import HireReviewScreen from "./HireReviewScreen";
 // below). ChevronUp/ChevronDown are what those headers show instead, and
 // X is the single "close the whole dock" button that replaces the old
 // trio of per-half collapse buttons.
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below
 import { ingestFileByExtension } from "../lib/ingestDispatch";
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
@@ -1255,6 +1255,19 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const activeMode = MODES.find((m) => m.id === mode) || MODES[0];
   const ActiveIcon = activeMode.icon;
 
+  // NEW — compact composer: on a phone-width screen, and on every
+  // `stacked` domain-tab dock (Notebooks/Research/Plan/Build/Test/
+  // Growth — narrow even on desktop, since the Chat Box there shares
+  // its column with the Working Panel), the original composer's
+  // attach button + labeled mode dropdown + textarea + "Send" text
+  // button in one `flex gap-2` row left almost no width for the
+  // textarea itself. Below, those same controls move inside the
+  // textbox as icon-only buttons instead (see the composer form JSX)
+  // — same handlers, same state, just a denser layout. The standalone
+  // Chat tab on a real desktop viewport is unaffected and keeps the
+  // original spread-out row with labeled buttons.
+  const compactComposer = stacked || viewport === "mobile";
+
   // NEW — the Chat Box half is only ever folded inside a `stacked`
   // domain-tab dock. On the standalone Chat tab (the one call site that
   // doesn't pass `stacked`) the conversation is the whole point of the
@@ -1649,102 +1662,193 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             ))}
           </div>
         )}
-        <form onSubmit={handleSubmit} className="border-t border-[var(--neutral-800)] p-4 flex gap-2 items-end">
-          {/* NEW — Data Layer §4b: attach a file straight into this
-              workspace's sources — no separate Sources tab trip needed.
-              Disabled without a resolved workspaceId (no active chat yet)
-              since process_upload() has nothing to attach the source to. */}
-          {/* NEW — §9.1: Notebooks passes hideAttach to drop this affordance
-              there (IngestionDropzone.jsx already covers uploads for that
-              tab). Every other tab leaves hideAttach unset and is unaffected. */}
-          {!hideAttach && (
-            <>
-              <input
-                ref={attachInputRef}
-                id="workspace-chat-attach-files"
-                name="attachFiles"
-                type="file"
-                multiple
-                aria-label="Attach files"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.length) handleAttachFiles(e.target.files);
-                  e.target.value = "";   // allow re-selecting the same file twice in a row
+        {/* NEW — Data Layer §4b: attach a file straight into this
+            workspace's sources — no separate Sources tab trip needed.
+            Disabled without a resolved workspaceId (no active chat yet)
+            since process_upload() has nothing to attach the source to. */}
+        {/* NEW — §9.1: Notebooks passes hideAttach to drop this affordance
+            there (IngestionDropzone.jsx already covers uploads for that
+            tab). Every other tab leaves hideAttach unset and is unaffected. */}
+        {/* Shared across both layouts below so the file input/handler
+            only exists once. */}
+        {(() => {
+          const attachInput = !hideAttach && (
+            <input
+              ref={attachInputRef}
+              id="workspace-chat-attach-files"
+              name="attachFiles"
+              type="file"
+              multiple
+              aria-label="Attach files"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) handleAttachFiles(e.target.files);
+                e.target.value = "";   // allow re-selecting the same file twice in a row
+              }}
+            />
+          );
+
+          // The mode dropdown's option list is identical in both layouts —
+          // only the trigger button (labeled vs icon-only) and the panel's
+          // positioning/width differ, so the options themselves are built
+          // once here and reused below.
+          const modeOptions = MODES.map((m) => {
+            const Icon = m.icon;
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => {
+                  setMode(m.id);
+                  setModeOpen(false);
                 }}
+                className={`w-full flex items-start gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--neutral-800)] transition-colors ${
+                  m.id === mode ? "bg-[var(--neutral-800-a70)]" : ""
+                }`}
+              >
+                <Icon size={15} className="mt-0.5 shrink-0" />
+                <span>
+                  <span className="block text-[var(--neutral-200)]">{m.label}</span>
+                  <span className="block text-[11px] text-[var(--neutral-500)]">{m.hint}</span>
+                </span>
+              </button>
+            );
+          });
+
+          if (compactComposer) {
+            // CHANGED — compact layout: attach/mode/send all become
+            // icon-only buttons living INSIDE the textbox's own border
+            // (a bordered wrapper around all four controls, textarea
+            // itself borderless/transparent) instead of a `flex gap-2`
+            // row of separately-bordered controls competing with the
+            // textarea for width. `pb-[env(safe-area-inset-bottom)]`
+            // keeps the send button clear of an iPhone's home-indicator
+            // now that layout.js's viewportFit:"cover" makes that inset
+            // meaningful.
+            return (
+              <form
+                onSubmit={handleSubmit}
+                className="border-t border-[var(--neutral-800)] p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]"
+              >
+                {attachInput}
+                <div className="flex items-end gap-1 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg focus-within:border-[var(--neutral-600)] transition-colors">
+                  <div className="flex items-center gap-0.5 pl-1 pb-1 shrink-0">
+                    {!hideAttach && (
+                      <button
+                        type="button"
+                        disabled={!workspaceId}
+                        onClick={() => attachInputRef.current?.click()}
+                        title={workspaceId ? "Attach a file (PDF, docs, slides, sheets, audio)" : "Open or start a chat to attach files"}
+                        className="flex items-center justify-center p-1.5 rounded-md text-[var(--neutral-400)] outline-none disabled:opacity-40 hover:bg-[var(--neutral-800)] hover:text-[var(--neutral-200)] transition-colors"
+                      >
+                        <Paperclip size={15} />
+                      </button>
+                    )}
+                    <div className="relative">
+                      <button
+                        type="button"
+                        disabled={loading}
+                        onClick={() => setModeOpen((o) => !o)}
+                        title={`Mode: ${activeMode.label} — ${activeMode.hint}`}
+                        className="flex items-center justify-center p-1.5 rounded-md text-[var(--neutral-400)] outline-none disabled:opacity-50 hover:bg-[var(--neutral-800)] hover:text-[var(--neutral-200)] transition-colors"
+                      >
+                        <ActiveIcon size={15} />
+                      </button>
+                      {modeOpen && (
+                        <div className="absolute bottom-full mb-2 left-0 w-56 max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-xl overflow-hidden z-10">
+                          {modeOptions}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <textarea
+                    id="chat-message-draft"
+                    name="chat-message-draft"
+                    ref={textareaRef}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Describe a task…"
+                    disabled={loading}
+                    rows={1}
+                    className="flex-1 min-w-0 resize-none bg-transparent border-0 px-1.5 py-2.5 text-sm outline-none disabled:opacity-50 leading-relaxed"
+                  />
+
+                  <div className="pr-1 pb-1 shrink-0">
+                    <button
+                      type="submit"
+                      disabled={loading || !draft.trim()}
+                      title="Send"
+                      className="flex items-center justify-center p-1.5 rounded-md bg-[var(--accent)] text-[var(--accent-text)] disabled:opacity-50 transition-colors"
+                    >
+                      <Send size={15} />
+                    </button>
+                  </div>
+                </div>
+              </form>
+            );
+          }
+
+          return (
+            <form onSubmit={handleSubmit} className="border-t border-[var(--neutral-800)] p-4 flex gap-2 items-end">
+              {!hideAttach && (
+                <>
+                  {attachInput}
+                  <button
+                    type="button"
+                    disabled={!workspaceId}
+                    onClick={() => attachInputRef.current?.click()}
+                    title={workspaceId ? "Attach a file (PDF, docs, slides, sheets, audio)" : "Open or start a chat to attach files"}
+                    className="flex items-center justify-center bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg p-2 text-sm outline-none disabled:opacity-40 hover:border-[var(--neutral-600)] transition-colors shrink-0"
+                  >
+                    <Paperclip size={15} className="text-[var(--neutral-400)]" />
+                  </button>
+                </>
+              )}
+
+              {/* Mode picker — custom dropdown (not a native <select>) so each
+                  option can carry its own icon. */}
+              <div className="relative">
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => setModeOpen((o) => !o)}
+                  className="flex items-center gap-1.5 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none disabled:opacity-50 hover:border-[var(--neutral-600)] transition-colors"
+                >
+                  <ActiveIcon size={14} />
+                  {activeMode.label}
+                  <ChevronDown size={13} className={`transition-transform ${modeOpen ? "rotate-180" : ""}`} />
+                </button>
+                {modeOpen && (
+                  <div className="absolute bottom-full mb-2 left-0 w-56 rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-xl overflow-hidden z-10">
+                    {modeOptions}
+                  </div>
+                )}
+              </div>
+
+              <textarea
+                id="chat-message-draft"
+                name="chat-message-draft"
+                ref={textareaRef}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Describe a task... (Shift+Enter for a new line)"
+                disabled={loading}
+                rows={1}
+                className="flex-1 resize-none bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--neutral-600)] disabled:opacity-50 leading-relaxed"
               />
               <button
-                type="button"
-                disabled={!workspaceId}
-                onClick={() => attachInputRef.current?.click()}
-                title={workspaceId ? "Attach a file (PDF, docs, slides, sheets, audio)" : "Open or start a chat to attach files"}
-                className="flex items-center justify-center bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg p-2 text-sm outline-none disabled:opacity-40 hover:border-[var(--neutral-600)] transition-colors shrink-0"
+                type="submit"
+                disabled={loading || !draft.trim()}
+                className="bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end"
               >
-                <Paperclip size={15} className="text-[var(--neutral-400)]" />
+                Send
               </button>
-            </>
-          )}
-
-          {/* Mode picker — custom dropdown (not a native <select>) so each
-              option can carry its own icon. */}
-          <div className="relative">
-            <button
-              type="button"
-              disabled={loading}
-              onClick={() => setModeOpen((o) => !o)}
-              className="flex items-center gap-1.5 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none disabled:opacity-50 hover:border-[var(--neutral-600)] transition-colors"
-            >
-              <ActiveIcon size={14} />
-              {activeMode.label}
-              <ChevronDown size={13} className={`transition-transform ${modeOpen ? "rotate-180" : ""}`} />
-            </button>
-            {modeOpen && (
-              <div className="absolute bottom-full mb-2 left-0 w-56 rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-xl overflow-hidden z-10">
-                {MODES.map((m) => {
-                  const Icon = m.icon;
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => {
-                        setMode(m.id);
-                        setModeOpen(false);
-                      }}
-                      className={`w-full flex items-start gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--neutral-800)] transition-colors ${
-                        m.id === mode ? "bg-[var(--neutral-800-a70)]" : ""
-                      }`}
-                    >
-                      <Icon size={15} className="mt-0.5 shrink-0" />
-                      <span>
-                        <span className="block text-[var(--neutral-200)]">{m.label}</span>
-                        <span className="block text-[11px] text-[var(--neutral-500)]">{m.hint}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <textarea
-            id="chat-message-draft"
-            name="chat-message-draft"
-            ref={textareaRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Describe a task... (Shift+Enter for a new line)"
-            disabled={loading}
-            rows={1}
-            className="flex-1 resize-none bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--neutral-600)] disabled:opacity-50 leading-relaxed"
-          />
-          <button
-            type="submit"
-            disabled={loading || !draft.trim()}
-            className="bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 self-end"
-          >
-            Send
-          </button>
-        </form>
+            </form>
+          );
+        })()}
         </>
         )}
       </div>

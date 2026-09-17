@@ -242,6 +242,38 @@ function AppShellBody() {
     }
   }, []);
 
+  // NEW — mobile height fix: `h-screen` (100vh) is sized off the LARGEST
+  // possible mobile-browser viewport (address bar collapsed), which is
+  // taller than what's actually visible the moment the page loads (bar
+  // still showing) — the shell rendered taller than the screen, so
+  // reaching the composer or any other bottom-of-page control took an
+  // extra scroll. `app-shell-viewport` in globals.css already upgrades
+  // the CSS fallback chain to 100dvh (tracks the real visible height as
+  // browser chrome shows/hides), which covers that case in every modern
+  // engine on its own with zero JS. This effect is the next rung up that
+  // same fallback chain: `window.visualViewport` additionally shrinks
+  // when the on-screen keyboard opens (100dvh's keyboard behavior is
+  // real but has historically been inconsistent across iOS Safari
+  // versions), so mirroring its height into `--app-vvh` and having the
+  // shell prefer that var when present is what keeps the composer from
+  // being covered by the keyboard specifically, on top of the chrome-
+  // show/hide case dvh already handles. No-ops (leaves the dvh fallback
+  // in charge) on any browser without visualViewport.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    function applyVvh() {
+      document.documentElement.style.setProperty("--app-vvh", `${vv.height}px`);
+    }
+    applyVvh();
+    vv.addEventListener("resize", applyVvh);
+    vv.addEventListener("scroll", applyVvh);
+    return () => {
+      vv.removeEventListener("resize", applyVvh);
+      vv.removeEventListener("scroll", applyVvh);
+    };
+  }, []);
+
   // NEW — Item 2 remaining piece, live-run-state slice, step 1: on mount,
   // load the chat list, then restore the last active chat (or create the
   // very first one). MOVED from SessionContext.jsx's own mount effect,
@@ -380,7 +412,7 @@ function AppShellBody() {
   }
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-screen app-shell-viewport">
       {/* NEW — Phase 1 (mobile shell): structural fork, not a couple of
           sm:/md: tweaks — see components/mobile/README.md. Below
           "mobile" (<768px) this swaps the persistent nav row + ml-auto
