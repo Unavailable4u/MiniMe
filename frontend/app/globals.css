@@ -123,6 +123,38 @@
 }
 
 /* ---------------------------------------------------------------
+   Viewport tokens — mobile/tablet/desktop, toggled via a
+   `data-viewport` attribute on <html> (see hooks/useViewport.js).
+   Phase 0 only: this defines the switch and a starter set of
+   `--viewport-*` variables for later cosmetic-only forks (spacing,
+   touch targets, hiding a column — see the file header comment in
+   useViewport.js for the cosmetic-vs-structural split). Desktop
+   values match what's already hard-coded today, so nothing consumes
+   these yet and there is zero visual change until a component opts
+   in. Structural forks (a genuinely different component tree, e.g.
+   AppShell's nav) don't use these tokens at all — they call
+   useViewport() in JS and render components/mobile/* instead.
+----------------------------------------------------------------*/
+:root,
+[data-viewport="desktop"] {
+  --viewport-content-padding: 1.5rem;
+  --viewport-touch-target: 2.25rem;
+  --viewport-nav-gap: 0.5rem;
+}
+
+[data-viewport="tablet"] {
+  --viewport-content-padding: 1rem;
+  --viewport-touch-target: 2.5rem;
+  --viewport-nav-gap: 0.375rem;
+}
+
+[data-viewport="mobile"] {
+  --viewport-content-padding: 0.75rem;
+  --viewport-touch-target: 2.75rem;
+  --viewport-nav-gap: 0.25rem;
+}
+
+/* ---------------------------------------------------------------
    Base page styling
 ----------------------------------------------------------------*/
 html, body {
