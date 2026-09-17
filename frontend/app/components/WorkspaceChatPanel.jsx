@@ -15,7 +15,13 @@ import { useViewport } from "../hooks/useViewport";   // NEW — Phase 1 (mobile
 import WorkingPanelDrawer from "./mobile/WorkingPanelDrawer";   // NEW — Phase 1
 import { OPEN_WORKING_PANEL_EVENT } from "./mobile/events";   // NEW — Phase 1
 import HireReviewScreen from "./HireReviewScreen";
-import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ClipboardCheck, PanelRightOpen, PanelRightClose, PanelLeftOpen, PanelLeftClose, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+// CHANGED — dock-controls simplification: PanelLeftOpen/PanelLeftClose are
+// gone along with the Chat Box's own collapse button and collapsed rail
+// (the section header itself is the control now, see the stacked headers
+// below). ChevronUp/ChevronDown are what those headers show instead, and
+// X is the single "close the whole dock" button that replaces the old
+// trio of per-half collapse buttons.
+import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
 import { ingestFileByExtension } from "../lib/ingestDispatch";
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
@@ -115,6 +121,16 @@ const WORKING_PANEL_HEIGHT_KEY = "minime_working_panel_height";
 const WORKING_PANEL_DEFAULT_HEIGHT = 320;
 const WORKING_PANEL_MIN_HEIGHT = 160;
 const WORKING_PANEL_MAX_HEIGHT = 640;
+
+// NEW — split auto-collapse. The drag handle between the two stacked
+// halves stays exactly as it was, but releasing it with either half
+// squeezed below this share of the dock's own height now folds that half
+// away instead of leaving a sliver too short to read anything in. Phrased
+// as a share rather than a pixel floor on purpose: a 1400px-tall dock and
+// a 600px one should give way at the same *visual* proportion, and the
+// existing WORKING_PANEL_MIN_HEIGHT (160px) is meaningless as a threshold
+// in a dock that's only 500px tall to begin with.
+const SPLIT_MIN_SHARE = 0.25;
 
 // NEW — Data Layer §4b: every chat-tab surface embeds this one component
 // (see the header comment above), so the attach affordance below —
@@ -459,6 +475,12 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const [workingPanelWidth, setWorkingPanelWidth] = useState(WORKING_PANEL_DEFAULT_WIDTH);
   const [workingPanelHeight, setWorkingPanelHeight] = useState(WORKING_PANEL_DEFAULT_HEIGHT); // NEW — stacked layout's counterpart to workingPanelWidth
   const resizeCleanupRef = useRef(null); // holds the active mousemove/mouseup remover, if a drag is in progress
+  // NEW — split auto-collapse: points at the outer stacked container so a
+  // vertical drag can turn the pointer position into a *share* of the
+  // dock's real height (see SPLIT_MIN_SHARE). Measured once per drag
+  // rather than tracked continuously — the dock can't be resized by
+  // anything else while a drag is in progress.
+  const splitContainerRef = useRef(null);
 
   // NEW — Data Layer §4b: attach button state. Same "own pushItem/
   // settleItem, own mountedRef guard" shape as IngestionDropzone.jsx,
@@ -515,8 +537,27 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   }
 
   useEffect(() => {
-    setWorkingPanelCollapsed(localStorage.getItem(WORKING_PANEL_KEY) === "1");
-    setChatBoxCollapsed(localStorage.getItem(CHAT_BOX_KEY) === "1"); // NEW — CO4 patch 1
+    const savedWorkingCollapsed = localStorage.getItem(WORKING_PANEL_KEY) === "1";
+    // CHANGED — the Chat Box half only folds inside a `stacked` domain-tab
+    // dock. The standalone Chat tab must never restore a collapsed
+    // conversation, and CHAT_BOX_KEY is a single shared key, so without
+    // this gate a fold performed in (say) Research would silently follow
+    // the user over to the Chat tab.
+    const savedChatBoxCollapsed = stacked && localStorage.getItem(CHAT_BOX_KEY) === "1";
+    if (savedWorkingCollapsed && savedChatBoxCollapsed) {
+      // Recovery path for state written by the old independent-toggle UI:
+      // both halves collapsed rendered the dock as an empty strip with no
+      // way back in short of closing it. The new header controls can't
+      // reach that state, but persisted values from before this change
+      // still can, so normalize it on the way in rather than restoring it.
+      setWorkingPanelCollapsed(false);
+      setChatBoxCollapsed(false);
+      localStorage.setItem(WORKING_PANEL_KEY, "0");
+      localStorage.setItem(CHAT_BOX_KEY, "0");
+    } else {
+      setWorkingPanelCollapsed(savedWorkingCollapsed);
+      setChatBoxCollapsed(savedChatBoxCollapsed);
+    }
     const savedWidth = parseInt(localStorage.getItem(WORKING_PANEL_WIDTH_KEY), 10);
     if (!Number.isNaN(savedWidth)) setWorkingPanelWidth(clampWorkingPanelWidth(savedWidth));
     const savedHeight = parseInt(localStorage.getItem(WORKING_PANEL_HEIGHT_KEY), 10);
@@ -525,20 +566,50 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     // without releasing the mouse), make sure the window listeners below
     // don't leak.
     return () => resizeCleanupRef.current?.();
-  }, []);
+  }, [stacked]);   // CHANGED — the restore above now reads `stacked`; it's fixed per call site, so this still runs once in practice.
   function toggleWorkingPanel() {
     setWorkingPanelCollapsed((prev) => {
       localStorage.setItem(WORKING_PANEL_KEY, !prev ? "1" : "0");
       return !prev;
     });
   }
-  // NEW — CO4 patch 1: same persisted-toggle shape as toggleWorkingPanel
-  // above, independent state/key, folds only the Chat Box side.
-  function toggleChatBox() {
-    setChatBoxCollapsed((prev) => {
-      localStorage.setItem(CHAT_BOX_KEY, !prev ? "1" : "0");
-      return !prev;
-    });
+  // CHANGED — CO4 patch 1's independent `toggleChatBox` is gone. The two
+  // halves are no longer toggled independently of each other: they're set
+  // together, as one split state, which is what makes "both collapsed"
+  // (an empty dock with no way back in) structurally unreachable instead
+  // of merely unlikely.
+  function setSplit(nextWorkingCollapsed, nextChatBoxCollapsed) {
+    setWorkingPanelCollapsed(nextWorkingCollapsed);
+    setChatBoxCollapsed(nextChatBoxCollapsed);
+    localStorage.setItem(WORKING_PANEL_KEY, nextWorkingCollapsed ? "1" : "0");
+    localStorage.setItem(CHAT_BOX_KEY, nextChatBoxCollapsed ? "1" : "0");
+  }
+
+  // NEW — the section-name boxes in the stacked dock's two headers are the
+  // controls now (they used to be inert labels sitting next to a collapse
+  // button each). One rule covers both:
+  //
+  //   both halves open      -> clicking a header folds THAT half away, and
+  //                            the other one takes the full height
+  //   this half on its own  -> clicking its header brings the other half
+  //                            back, without folding this one
+  //
+  // Which is to say: a header click toggles the *other* half's visibility.
+  // Neither header can produce an empty dock, and the single X button in
+  // the topmost header is the only way to close the dock entirely.
+  function handleChatBoxHeaderClick() {
+    if (workingPanelCollapsed) setSplit(false, false);
+    else setSplit(false, true);
+  }
+
+  function handleWorkingPanelHeaderClick() {
+    if (chatBoxCollapsed) setSplit(false, false);
+    else setSplit(true, false);
+  }
+
+  function persistWorkingPanelHeight(h) {
+    setWorkingPanelHeight(h);
+    localStorage.setItem(WORKING_PANEL_HEIGHT_KEY, String(h));
   }
 
   // Drag-to-resize — handle sits on the panel's left edge (it's docked
@@ -576,21 +647,50 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // Handle sits on the Working Panel's bottom edge (it's docked to the
   // top, Chat Box below it), so dragging down grows it and dragging up
   // shrinks it — same "only hit localStorage on mouseup" throttling.
+  //
+  // CHANGED — split auto-collapse (SPLIT_MIN_SHARE). The drag itself is
+  // unchanged from the user's side; what's new is what happens on release.
+  // Two things had to give for that:
+  //   1. The fixed [MIN, MAX] pixel clamp is relaxed to the container's
+  //      own height *for the duration of the drag*. Otherwise the pointer
+  //      physically can't reach the 25% line in a dock shorter than
+  //      WORKING_PANEL_MIN_HEIGHT / 0.25 = 640px, and the threshold would
+  //      quietly never fire. The clamp is re-applied on release.
+  //   2. The live height is tracked in a plain local (`liveHeight`) rather
+  //      than read back out of a setState updater on mouseup. Deciding to
+  //      collapse is a side effect, and side effects inside a state
+  //      updater run twice under StrictMode.
   function startWorkingPanelResizeVertical(e) {
     e.preventDefault();
     const startY = e.clientY;
     const startHeight = workingPanelHeight;
+    const containerHeight = splitContainerRef.current?.getBoundingClientRect().height || 0;
+    const dragMin = containerHeight > 0 ? 0 : WORKING_PANEL_MIN_HEIGHT;
+    const dragMax = containerHeight > 0 ? containerHeight : WORKING_PANEL_MAX_HEIGHT;
+    let liveHeight = startHeight;
 
     function onMouseMove(ev) {
       const deltaY = ev.clientY - startY;
-      setWorkingPanelHeight(clampWorkingPanelHeight(startHeight + deltaY));
+      liveHeight = Math.min(dragMax, Math.max(dragMin, startHeight + deltaY));
+      setWorkingPanelHeight(liveHeight);
     }
     function onMouseUp() {
       cleanup();
-      setWorkingPanelHeight((h) => {
-        localStorage.setItem(WORKING_PANEL_HEIGHT_KEY, String(h));
-        return h;
-      });
+      const floor = containerHeight * SPLIT_MIN_SHARE;
+      // On an auto-collapse the stored height reverts to where this drag
+      // started, not to the sliver it ended at — otherwise re-opening that
+      // half would bring it back a few pixels tall.
+      if (containerHeight > 0 && liveHeight < floor) {
+        persistWorkingPanelHeight(clampWorkingPanelHeight(startHeight));
+        setSplit(true, false);   // Working Panel squeezed too small -> fold it, Chat Box takes the height
+        return;
+      }
+      if (containerHeight > 0 && liveHeight > containerHeight - floor) {
+        persistWorkingPanelHeight(clampWorkingPanelHeight(startHeight));
+        setSplit(false, true);   // Chat Box squeezed too small -> fold it, Working Panel takes the height
+        return;
+      }
+      persistWorkingPanelHeight(clampWorkingPanelHeight(liveHeight));
     }
     function cleanup() {
       window.removeEventListener("mousemove", onMouseMove);
@@ -1155,9 +1255,20 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   const activeMode = MODES.find((m) => m.id === mode) || MODES[0];
   const ActiveIcon = activeMode.icon;
 
+  // NEW — the Chat Box half is only ever folded inside a `stacked`
+  // domain-tab dock. On the standalone Chat tab (the one call site that
+  // doesn't pass `stacked`) the conversation is the whole point of the
+  // screen, so it has no collapse affordance at all and this stays false
+  // regardless of what's sitting in CHAT_BOX_KEY.
+  const chatBoxFolded = stacked && chatBoxCollapsed;
+
   // NEW — §6: whole-panel collapsed rail. Only reachable when a parent
   // passes collapsed=true (i.e. when docked inside a domain tab) — the
   // standalone ChatTab wrapper never does this, so nothing changes there.
+  // CHANGED — the domain tabs no longer pass collapsed=true at all: a
+  // closed dock is now represented by the floating chat bubble those tabs
+  // already had for narrow viewports, not by a reserved rail. This branch
+  // is kept as a safe fallback for any caller that still passes the prop.
   if (collapsed) {
     return stacked ? (
       <div className="w-full h-10 flex flex-row items-center border-b border-[var(--neutral-800)] px-2">
@@ -1206,51 +1317,48 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   }
 
   return (
-    <div className={stacked ? "flex flex-col h-full w-full" : "flex h-full w-full"}>
+    <div ref={splitContainerRef} className={stacked ? "flex flex-col h-full w-full" : "flex h-full w-full"}>
       {/* LEFT (or BOTTOM, when stacked) — Chat Box. `order-2` only takes
           effect in stacked mode (flex-col), putting this below the
           Working Panel without needing to reorder the JSX itself.
-          NEW — CO4 patch 1: `chatBoxCollapsed` folds just this half to a
-          slim rail (same idea as the Working Panel's own collapsed rail
-          below), independent of `collapsed`/`onToggleCollapse` above,
-          which folds the whole docked panel instead. */}
+          CHANGED — CO4 patch 1's slim collapsed rail is gone. A folded
+          Chat Box now renders nothing at all (display:none, so the draft
+          in the composer and the message list's scroll position both
+          survive the fold) — the Working Panel's own header is what
+          brings it back, see handleWorkingPanelHeaderClick. That's also
+          why the top border is dropped when the Working Panel is folded:
+          the Chat Box is the topmost thing in the dock at that point, and
+          a border-t there reads as a stray line under the tab chrome. */}
       <div
         className={
           stacked
-            ? chatBoxCollapsed
-              ? "flex flex-col shrink-0 order-2 w-full"
+            ? chatBoxFolded
+              ? "hidden"
+              : workingPanelCollapsed
+              ? "flex flex-col flex-1 min-h-0 order-2"
               : "flex flex-col flex-1 min-h-0 order-2 border-t border-[var(--neutral-800)]"
-            : chatBoxCollapsed
-            ? "flex flex-col shrink-0"
             : "flex flex-col flex-1 min-w-0 border-r border-[var(--neutral-800)]"
         }
       >
-        {chatBoxCollapsed ? (
-          stacked ? (
-            <div className="h-10 w-full flex flex-row items-center border-t border-[var(--neutral-800)] px-2">
-              <button
-                onClick={toggleChatBox}
-                title="Show chat"
-                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
-              >
-                <PanelLeftOpen size={16} />
-              </button>
-            </div>
-          ) : (
-            <div className="w-10 h-full flex flex-col items-center border-r border-[var(--neutral-800)] pt-2">
-              <button
-                onClick={toggleChatBox}
-                title="Show chat"
-                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
-              >
-                <PanelLeftOpen size={16} />
-              </button>
-            </div>
-          )
-        ) : (
-        <>
         <div className="h-10 px-4 border-b border-[var(--neutral-800)] flex items-center justify-between">
-          <span className="text-xs font-medium text-[var(--neutral-400)]">Chat Box</span>
+          {/* CHANGED — in a stacked dock this label is the control (see
+              handleChatBoxHeaderClick): it folds the Chat Box when both
+              halves are open, and restores the Working Panel when the
+              Chat Box is on its own. On the standalone Chat tab it stays
+              an inert label — that conversation never folds. */}
+          {stacked ? (
+            <button
+              type="button"
+              onClick={handleChatBoxHeaderClick}
+              title={workingPanelCollapsed ? "Show the Working Panel as well" : "Hide the Chat Box"}
+              className="flex items-center gap-1.5 text-xs font-medium text-[var(--neutral-400)] hover:text-[var(--neutral-200)] border border-[var(--neutral-800)] hover:border-[var(--neutral-600)] rounded-md px-2 py-1 transition-colors"
+            >
+              Chat Box
+              {workingPanelCollapsed ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            </button>
+          ) : (
+            <span className="text-xs font-medium text-[var(--neutral-400)]">Chat Box</span>
+          )}
           <div className="flex items-center gap-3">
             {/* Part 2 §2.5: per-session toggle, off by default — most
                 tasks should stay one-click. When on, sendTask() calls
@@ -1269,28 +1377,21 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               <ClipboardCheck size={12} />
               Review hires
             </button>
-            {/* NEW — CO4 patch 1: collapses just this Chat Box half,
-                always available (unlike onToggleCollapse below, which
-                only exists when a parent docks this whole component). */}
-            <button
-              type="button"
-              onClick={toggleChatBox}
-              title="Collapse chat"
-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-            >
-              <PanelLeftClose size={14} />
-            </button>
-            {/* NEW — §6: only rendered when embedded in a docked context
-                (a parent passed onToggleCollapse). The standalone Chat
-                tab has no fold-away affordance for itself, same as today. */}
-            {onToggleCollapse && (
+            {/* CHANGED — the single close-the-whole-dock button. It lives
+                in whichever header is currently topmost, so it only
+                appears here when the Working Panel (order-1) is folded
+                away; otherwise the Working Panel header carries it. Still
+                only rendered when a parent actually docked this component
+                — the standalone Chat tab has nothing to close itself
+                into, same as before. */}
+            {onToggleCollapse && (!stacked || workingPanelCollapsed) && (
               <button
                 type="button"
                 onClick={onToggleCollapse}
-                title="Collapse chat"
+                title="Close chat"
                 className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
               >
-                <PanelRightClose size={14} />
+                <X size={14} />
               </button>
             )}
           </div>
@@ -1646,8 +1747,6 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         </form>
         </>
         )}
-        </>
-        )}
       </div>
 
       {/* RIGHT (or TOP, when stacked) — Working Panel: resizable when
@@ -1680,19 +1779,19 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
         </WorkingPanelDrawer>
       ) : (
-      <div className={stacked ? "flex flex-col shrink-0 order-1 w-full" : "hidden lg:flex shrink-0"}>
+      <div
+        className={
+          stacked
+            ? workingPanelCollapsed
+              ? "hidden"
+              : chatBoxFolded
+              ? "flex flex-col flex-1 min-h-0 order-1 w-full"
+              : "flex flex-col shrink-0 order-1 w-full"
+            : "hidden lg:flex shrink-0"
+        }
+      >
         {workingPanelCollapsed ? (
-          stacked ? (
-            <div className="h-10 w-full flex flex-row items-center border-b border-[var(--neutral-800)] px-2">
-              <button
-                onClick={toggleWorkingPanel}
-                title="Show Working Panel"
-                className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1.5 rounded-md hover:bg-[var(--neutral-900)] transition-colors"
-              >
-                <PanelRightOpen size={16} />
-              </button>
-            </div>
-          ) : (
+          stacked ? null : (
             <div className="w-10 flex flex-col items-center border-l border-[var(--neutral-800)] pt-2">
               <button
                 onClick={toggleWorkingPanel}
@@ -1704,27 +1803,57 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
             </div>
           )
         ) : stacked ? (
-          <div className="flex flex-col w-full" style={{ height: workingPanelHeight }}>
+          /* CHANGED — when the Chat Box is folded this half stops being a
+             fixed-height row and takes the dock's whole height instead
+             (flex-1), which is the "the other one covers the whole
+             section" half of the header behaviour. The drag handle goes
+             with it: there's no second pane left to resize against. */
+          <div
+            className={chatBoxFolded ? "flex flex-col w-full flex-1 min-h-0" : "flex flex-col w-full"}
+            style={chatBoxFolded ? undefined : { height: workingPanelHeight }}
+          >
             <div className="flex-1 min-h-0 flex flex-col border-b border-[var(--neutral-800)]">
               <div className="h-10 px-4 border-b border-[var(--neutral-800)] flex items-center justify-between">
-                <span className="text-xs font-medium text-[var(--neutral-400)]">Working Panel</span>
+                {/* CHANGED — same control-as-label treatment as the Chat
+                    Box header above: folds the Working Panel when both
+                    halves are open, brings the Chat Box back when the
+                    Working Panel is on its own. */}
                 <button
-                  onClick={toggleWorkingPanel}
-                  title="Collapse"
-                  className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                  type="button"
+                  onClick={handleWorkingPanelHeaderClick}
+                  title={chatBoxFolded ? "Show the Chat Box as well" : "Hide the Working Panel"}
+                  className="flex items-center gap-1.5 text-xs font-medium text-[var(--neutral-400)] hover:text-[var(--neutral-200)] border border-[var(--neutral-800)] hover:border-[var(--neutral-600)] rounded-md px-2 py-1 transition-colors"
                 >
-                  <PanelRightClose size={14} />
+                  Working Panel
+                  {chatBoxFolded ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
                 </button>
+                {/* CHANGED — the one close-the-whole-dock button, in the
+                    topmost header (this one, whenever the Working Panel
+                    is showing). Replaces the old three-button spread of
+                    "collapse chat" / "collapse working panel" / "collapse
+                    the lot". */}
+                {onToggleCollapse && (
+                  <button
+                    type="button"
+                    onClick={onToggleCollapse}
+                    title="Close chat"
+                    className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
               </div>
               <div className="flex-1 min-h-0">
                 <WorkingPanel isSyncingRef={isSyncingRef} workspaceId={workspaceId} chatId={chatId} onNavigateSubTab={onNavigateSubTab} />
               </div>
             </div>
-            <div
-              onMouseDown={startWorkingPanelResizeVertical}
-              title="Drag to resize"
-              className="h-1.5 w-full shrink-0 cursor-row-resize hover:bg-[var(--neutral-700)] active:bg-[var(--neutral-600)] transition-colors"
-            />
+            {!chatBoxFolded && (
+              <div
+                onMouseDown={startWorkingPanelResizeVertical}
+                title="Drag to resize"
+                className="h-1.5 w-full shrink-0 cursor-row-resize hover:bg-[var(--neutral-700)] active:bg-[var(--neutral-600)] transition-colors"
+              />
+            )}
           </div>
         ) : (
           <div className="flex" style={{ width: workingPanelWidth }}>

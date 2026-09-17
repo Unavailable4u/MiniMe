@@ -3424,10 +3424,15 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
         )}
       </div>
 
-      {/* Desktop dock — side-by-side, lg+. */}
-      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach activeContext={activeContext} />
-      </div>
+      {/* Desktop dock — side-by-side, lg+.
+          CHANGED — closed dock renders nothing on desktop instead of a
+          reserved rail; the floating bubble below is the way back in at
+          every width now. Same change across all six docked tabs. */}
+      {!chatDockCollapsed && (
+        <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: 560 }}>
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} onNavigateSubTab={setSubTab} stacked hideAttach activeContext={activeContext} />
+        </div>
+      )}
 
       {/* Below lg — full-screen overlay instead of a side dock, so this
           tab never depends on the standalone Chat tab, at any width. */}
@@ -3440,7 +3445,7 @@ function NotebooksTab({ onPromoted, onActiveWorkspaceChange }) {
         <button
           onClick={toggleChatDock}
           title="Open chat"
-          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
+          className="fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
           <MessageSquareText size={18} />
         </button>

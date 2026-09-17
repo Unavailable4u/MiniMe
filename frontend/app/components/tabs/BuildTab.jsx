@@ -1624,9 +1624,14 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
           shows/updates the right project's chat, same fix already
           applied to NotebooksTab. BuildTab never called switchChat
           itself, so no other change was needed here. */}
-      <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: chatDockCollapsed ? undefined : 560 }}>
-        <WorkspaceChatPanel collapsed={chatDockCollapsed} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
-      </div>
+      {/* CHANGED — closed dock renders nothing on desktop instead of a
+          reserved rail; the floating bubble below is the way back in at
+          every width now. Same change across all six docked tabs. */}
+      {!chatDockCollapsed && (
+        <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: 560 }}>
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+        </div>
+      )}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
           <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
@@ -1636,7 +1641,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
         <button
           onClick={toggleChatDock}
           title="Open chat"
-          className="lg:hidden fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
+          className="fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
           <MessageSquare size={18} />
         </button>
