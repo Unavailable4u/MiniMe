@@ -82,6 +82,20 @@ conflict this wrapper exists to solve. Since `WorkingPanel` is the
 shared dock embedded via `WorkspaceChatPanel`, its wrapping already
 benefits every tab that docks it, not just Chat.
 
+**Bug fix (post-Phase-4-write-up):** the wrapper's collapse gate was
+`isTouch` alone (`pointer: coarse`), so it never collapsed when
+"mobile" was being checked the way this app's own tooling checks
+it — `useViewport.js`'s `?forceViewport=mobile` override, or a
+desktop browser window narrowed/put into devtools responsive mode
+without a touch-emulating device preset. Both keep the pointer "fine"
+while `data-viewport` flips to "mobile", so the graphs stayed fully
+expanded and looked like the wrap silently hadn't applied. Gate is
+now `isTouch || viewport === "mobile"` — a real touch device still
+collapses regardless of width (the wide-landscape-tablet case
+`isTouch` alone existed for), and so does anything the app itself
+calls "mobile", which is the more relevant bar day to day than a
+physical-input check a resized window will never satisfy.
+
 **Correction, not a gap:** the previous version of this file listed
 `MermaidDiagram` (both in `WorkingPanel.jsx` and `NotebooksTab.jsx`)
 as unwrapped and assumed it had the same conflict — that assumption
