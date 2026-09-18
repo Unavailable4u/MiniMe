@@ -398,10 +398,13 @@ function AppShellBody() {
   // were all built and wired up, but "research" was never added to this
   // set, so the hamburger button silently didn't render at all on
   // Research's tab body — the drawer wasn't broken, it was just never
-  // reachable. Build's project list has the same shape but hasn't had
-  // its own mobile pass yet (Phase 5 — still "not started" per
-  // MOBILE_PLAN.md), so it stays off this list until that lands for real.
-  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks", "research"]);
+  // reachable. Added "plan" up front this time (components/mobile/PlanTab.jsx,
+  // ../tabs/PlanTab.jsx) so Plan doesn't repeat the same oversight. Build's
+  // project list has the same shape but hasn't had its own mobile pass yet
+  // (Phase 5 — still "not started" per MOBILE_PLAN.md), so it stays off
+  // this list until that lands for real — same "add it deliberately, not
+  // as an afterthought" note Research's own fix left behind.
+  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks", "research", "plan"]);
 
   function openMobileTabSidebar() {
     if (activeTab === "chat") {
@@ -461,9 +464,12 @@ function AppShellBody() {
           sidebarLabel={
             // NEW — Research fix: matches components/mobile/ResearchTab.jsx's
             // own drawer header text ("Research projects"), same way
-            // "Notebooks" already matches mobile/NotebooksTab.jsx's.
+            // "Notebooks" already matches mobile/NotebooksTab.jsx's. Plan
+            // added the same way — matches mobile/PlanTab.jsx's own drawer
+            // header text ("Plan projects").
             activeTab === "notebooks" ? "Notebooks"
               : activeTab === "research" ? "Research projects"
+              : activeTab === "plan" ? "Plan projects"
               : "Chats"
           }
           showWorkingPanelButton={activeTab === "chat"}

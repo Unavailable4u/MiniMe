@@ -18,6 +18,9 @@ import { getPusherClient } from "../../lib/pusherClient"; // NEW — live-refetc
 import PartsTable from "../PartsTable";                       // NEW — Blueprint sub-tab
 import WiringGraph from "../WiringGraph";                     // NEW — Blueprint sub-tab
 import MechView from "../MechView";                           // NEW — Blueprint sub-tab
+import { useViewport } from "../../hooks/useViewport";   // NEW — Phase 5: mobile UI retrofit, same reference pattern as components/mobile/ResearchTab.jsx/NotebooksTab.jsx
+import { OPEN_TAB_SIDEBAR_EVENT } from "../mobile/events"; // NEW — Phase 5: hamburger -> this tab's own project-picker drawer, same wiring as Notebooks/Research
+import MobilePlanTab from "../mobile/PlanTab"; // NEW — Phase 5: real structural fork, see that file and MOBILE_PLAN.md
 // InstructionChecklist import removed — patch 7 (T2/T3 Plan/Build split):
 // the checklist relocated to BuildTab.jsx. See BuildTab.jsx for the
 // equivalent import and render block.
@@ -56,8 +59,12 @@ const CHAT_DOCK_KEY = "minime_plan_chatdock_collapsed";
 // NEW — collapsible project-picker sidebar, same pattern as the chat
 // dock's own collapse above.
 const PROJECTS_KEY = "minime_plan_projects_collapsed";
-const PROMOTE_TARGETS = ["build", "test", "growth"];
-const PROMOTE_LABELS = {
+// NEW — Phase 5: exported (was module-local) so components/mobile/PlanTab.jsx
+// can build its mobile combo <select> off the same labels instead of a
+// forked copy that can drift out of sync — same convention as
+// ResearchTab.jsx's own exported PROMOTE_TARGETS/PROMOTE_LABELS.
+export const PROMOTE_TARGETS = ["build", "test", "growth"];
+export const PROMOTE_LABELS = {
   build: "Build",
   test: "Test",
   growth: "Growth",
@@ -67,7 +74,11 @@ const PROMOTE_LABELS = {
 // handoff-to-build flow is now purely chat-triggered (just tell the
 // assistant to start building in this project's chat) rather than a
 // manual paste/handoff UI.
-const SUB_TABS = [
+// NEW — Phase 5: exported (was module-local) so components/mobile/PlanTab.jsx
+// can build its icon rail off the same list instead of a forked copy —
+// same convention as ResearchTab.jsx's/NotebooksTab.jsx's own exported
+// SUB_TABS.
+export const SUB_TABS = [
   { id: "prd", label: "PRD", icon: FileText },
   { id: "architecture", label: "Architecture", icon: GitBranch },
   { id: "schema", label: "Schema", icon: Database },
@@ -87,7 +98,23 @@ function unfenceMermaid(text) {
   return (m ? m[1] : text || "").trim();
 }
 
-function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+// CHANGED — Phase 5: this used to be the component itself (default-
+// exported directly, its return JSX mixing desktop-only and shared markup
+// with no viewport branch at all — Plan hadn't been touched for mobile
+// yet). Same retrofit as NotebooksTab.jsx/ResearchTab.jsx: it's now a
+// controller hook — every bit of state, every effect, every handler, and
+// the JSX that's genuinely IDENTICAL on every viewport (projectRows,
+// subTabContent, dockAndModals) all still live here, unchanged,
+// completely unforked. Only the project-picker column (drawer on
+// mobile), the sub-tab nav (icon-only on mobile — Plan has SEVEN
+// sub-tabs, more than Notebooks/Research's five, so the mobile icon
+// rail gets its own overflow-y-auto rather than assuming they all fit
+// on a short screen), and the promote control (one combo <select> on
+// mobile instead of three separate widgets) ever differed by viewport,
+// so those are the only things each shell builds for itself, handed
+// back in via `renderRoot`'s slots — see PlanTabDesktop below and
+// components/mobile/PlanTab.jsx for the two callers.
+export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { promoteWorkspace,
     fetchPanelContent, savePanelContent,
     // toggleInstructionStep removed — patch 7: only BlueprintView's
@@ -147,6 +174,25 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
   const [editChatTitle, setEditChatTitle] = useState("");
   const [pendingDeleteChat, setPendingDeleteChat] = useState(null);
 
+  // NEW — Phase 5, same wiring as ResearchTab.jsx/NotebooksTab.jsx: on
+  // mobile the project-picker column below never renders inline (no
+  // width to spare next to sub-tab content) — it becomes a hamburger-
+  // triggered MobileDrawer instead. AppShell.jsx can't reach into this
+  // hook's state directly, so it dispatches OPEN_TAB_SIDEBAR_EVENT on
+  // hamburger tap and this just listens and flips its own drawer open
+  // (see AppShell.jsx's TABS_WITH_OWN_MOBILE_SIDEBAR, now including
+  // "plan").
+  const [viewport] = useViewport();
+  const isMobile = viewport === "mobile";
+  const [mobilePlanDrawerOpen, setMobilePlanDrawerOpen] = useState(false);
+  useEffect(() => {
+    function onOpenTabSidebar(e) {
+      if (e.detail?.tabId === "plan") setMobilePlanDrawerOpen(true);
+    }
+    window.addEventListener(OPEN_TAB_SIDEBAR_EVENT, onOpenTabSidebar);
+    return () => window.removeEventListener(OPEN_TAB_SIDEBAR_EVENT, onOpenTabSidebar);
+  }, []);
+
   useEffect(() => {
     setChatDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) === "1");
     setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
@@ -169,9 +215,19 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
     });
   }
 
+  // FIX — mobile: picking a chat from the project drawer used to force
+  // the dock open unconditionally whenever it was collapsed, which on
+  // mobile means the full-screen chat overlay (`lg:hidden fixed inset-0`
+  // in dockAndModals below) slams over the whole screen the instant you
+  // tap a chat. On mobile that's the person's call, not something
+  // selecting a chat should decide for them — they can still open it via
+  // the floating "Open chat" bubble (chatDockCollapsed branch below).
+  // Desktop keeps the original auto-expand behavior. Same fix as
+  // NotebooksTab.jsx's/ResearchTab.jsx's own openInDock — built in here
+  // from the start rather than retrofitted later.
   async function openInDock(chatId) {
     await switchChat(chatId);
-    if (chatDockCollapsed) toggleChatDock();
+    if (!isMobile && chatDockCollapsed) toggleChatDock();
   }
 
   // NEW — issue #3: "+" beside a project name. Creates a chat nested
@@ -354,339 +410,235 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
     }
   }
 
-  return (
-    <div className="flex h-full">
-      {/* Project picker — a "plan project" is just a workspace, same as a
-          "notebook"/"research project" is. No new container concept. */}
-      {projectsCollapsed ? (
-        <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
-          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
-            <ChevronRight size={16} />
-          </button>
-        </div>
-      ) : (
-      <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
-        <div className="h-10 px-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
-          <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
-            <STAGE_THEME.plan.Icon size={13} className={STAGE_THEME.plan.color} /> Plan projects
-          </span>
-          {/* NEW — item #10 / B3: native create, same stage-aware modal
-              ResearchTab's B2 wired up first. */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowCreateModal(true)}
-              title="New plan project"
-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-            >
-              <Plus size={14} />
-            </button>
-            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
-                own ChevronLeft toggle. */}
-            <button onClick={toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
-              <ChevronLeft size={14} />
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          {planProjects.length === 0 && (
-            <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
-              No plan projects yet — create one above, promote a research project from the Research tab, or use the chat sidebar&apos;s <FolderOpen size={11} className="inline" /> button.
-            </p>
-          )}
-          {planProjects.map((ws) => {
-            // NEW — item #11 / C1: nested chat list, mirrors ChatSidebar's
-            // memberChats pattern. Unlike ChatSidebar (a flat, always-
-            // expanded list across every workspace), this tab already has
-            // a single-selection model — one project active at a time —
-            // so "expand" here just means "is the active project" (the
-            // existing ChevronRight already marked that row as selected;
-            // now it also means "expanded"). Selecting a different
-            // project collapses the previous one's chat list the same way
-            // it already swaps the whole right-hand panel.
-            const isActive = ws.id === activeWsId;
-            const memberChats = isActive ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
-            return (
-              <div key={ws.id} className="border-b border-[var(--neutral-900)]">
-                <div
-                  className={`group flex items-center gap-1 ${
-                    isActive
-                      ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                      : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
-                  }`}
-                >
-                  <button
-                    onClick={() => setActiveWsId(ws.id)}
-                    className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
-                  >
-                    <span className="flex items-center min-w-0">
-                      <WorkspaceStageIcons workspace={ws} />
-                      <span className="truncate">{ws.name}</span>
-                    </span>
-                    {isActive && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
-                  </button>
-                  {/* NEW — issue #3: "+" creates a chat nested in this
-                      project, same idea as starting a new chat under a
-                      group in the Chat sidebar. */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
-                    title="New chat in this project"
-                    className="shrink-0 opacity-0 group-hover:opacity-100 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-                    disabled={creatingChatForWs === ws.id}
-                  >
-                    {creatingChatForWs === ws.id ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <Plus size={12} />
-                    )}
-                  </button>
-                  <button
-                    onClick={() => setManagingWorkspace(ws)}
-                    title="Rename or delete project"
-                    className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
-                  >
-                    <MoreVertical size={13} />
-                  </button>
-                </div>
-                {memberChats.map((chat) => (
-                  <div
-                    key={chat.id}
-                    onClick={() => editingChatId !== chat.id && openInDock(chat.id)}
-                    className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
-                      chat.id === activeChatId
-                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
-                    }`}
-                  >
-                    {editingChatId === chat.id ? (
-                      <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          autoFocus
-                          id={`chat-title-${chat.id}`}
-                          name="chatTitle"
-                          aria-label="Chat title"
-                          value={editChatTitle}
-                          onChange={(e) => setEditChatTitle(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                          className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
-                        />
-                        <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
-                        <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
-                      </div>
-                    ) : (
-                      <>
-                        <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
-                        <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                        {/* NEW — issue #3: rename/delete, same controls
-                            ChatSidebar's own chat rows already offer. */}
-                        <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
-                          <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
-                            <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                          </button>
-                          <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
-                            <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+  const promoteTargets = (() => {
+    // NEW — §2.2: exclude stages already active for this workspace —
+    // same rule as Notebooks/Research.
+    if (!activeWs) return null;
+    const activeHere = activeWs.active_stages || [activeWs.stage];
+    const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
+    if (!availableTargets.length) return null;
+    const targetStage = availableTargets.includes(promoteTargetStage) ? promoteTargetStage : availableTargets[0];
+    return { availableTargets, targetStage };
+  })();
+
+  // NEW — Phase 5: project-picker rows, shared between the desktop
+  // sidebar and the mobile drawer (components/mobile/PlanTab.jsx) —
+  // identical markup either way, only the container around it differs
+  // by viewport. Same "build once, share via controller" idea as
+  // ResearchTab.jsx's/NotebooksTab.jsx's own project/notebook rows.
+  const projectRows = (
+    <>
+      {planProjects.length === 0 && (
+        <p className="px-3 py-3 text-xs text-[var(--neutral-600)]">
+          No plan projects yet — create one above, promote a research project from the Research tab, or use the chat sidebar&apos;s <FolderOpen size={11} className="inline" /> button.
+        </p>
       )}
-
-      <div className="flex-1 min-h-0 min-w-0 flex flex-col">
-        {/* PARITY FIX — title + promote row, same shape as Notebooks/Tasks —
-            this was missing entirely, so a plan project had no path
-            forward to Build. */}
-        {activeWs && (
-          <div className="h-10 flex items-center justify-between px-3 border-b border-[var(--neutral-800)]">
-            <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
-            <div className="flex items-center gap-2 shrink-0">
-              {(() => {
-                // NEW — §2.2: exclude stages already active for this
-                // workspace — same rule as Notebooks/Research.
-                const activeHere = activeWs.active_stages || [activeWs.stage];
-                const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
-                const targetStage = availableTargets.includes(promoteTargetStage)
-                  ? promoteTargetStage
-                  : availableTargets[0];
-                if (!availableTargets.length) return null;
-                return (
-                  <>
-                    <label className="sr-only" htmlFor="plan-promote-target">Promote to</label>
-                    <select
-                      id="plan-promote-target"
-                      value={targetStage}
-                      onChange={(e) => setPromoteTargetStage(e.target.value)}
-                      disabled={promoting}
-                      className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
-                    >
-                      {availableTargets.map((stage) => (
-                        <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
-                      ))}
-                    </select>
-                    {/* NEW — §2.6 step 4: complete/partial toggle. */}
-                    <div
-                      role="radiogroup"
-                      aria-label="Promote mode"
-                      className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
-                    >
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={promoteMode === "complete"}
-                        onClick={() => setPromoteMode("complete")}
-                        disabled={promoting}
-                        title="Move the project fully into the target stage"
-                        className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
-                          promoteMode === "complete"
-                            ? "bg-[var(--accent)] text-[var(--accent-text)]"
-                            : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
-                        }`}
-                      >
-                        Complete
-                      </button>
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={promoteMode === "partial"}
-                        onClick={() => setPromoteMode("partial")}
-                        disabled={promoting}
-                        title="Keep the project active here too"
-                        className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
-                          promoteMode === "partial"
-                            ? "bg-[var(--accent)] text-[var(--accent-text)]"
-                            : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
-                        }`}
-                      >
-                        Partial
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => handlePromote(activeWs.id, targetStage)}
-                      disabled={promoting}
-                      className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
-                    >
-                      {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-                      {promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[targetStage]} →
-                    </button>
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-        )}
-        {promoteError && (
-          <p className="text-xs text-red-400 px-3 pt-2">{promoteError}</p>
-        )}
-
-        <div className="h-10 flex items-center justify-center gap-1 px-3 border-b border-[var(--neutral-800)] overflow-x-auto">
-          {SUB_TABS.map((t) => {
-            const Icon = t.icon;
-            return (
+      {planProjects.map((ws) => {
+        // NEW — item #11 / C1: nested chat list, mirrors ChatSidebar's
+        // memberChats pattern. Unlike ChatSidebar (a flat, always-
+        // expanded list across every workspace), this tab already has
+        // a single-selection model — one project active at a time —
+        // so "expand" here just means "is the active project" (the
+        // existing ChevronRight already marked that row as selected;
+        // now it also means "expanded"). Selecting a different
+        // project collapses the previous one's chat list the same way
+        // it already swaps the whole right-hand panel.
+        const isActive = ws.id === activeWsId;
+        const memberChats = isActive ? chats.filter((c) => ws.chat_ids.includes(c.id)) : [];
+        return (
+          <div key={ws.id} className="border-b border-[var(--neutral-900)]">
+            <div
+              className={`group flex items-center gap-1 ${
+                isActive
+                  ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                  : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
+              }`}
+            >
               <button
-                key={t.id}
-                onClick={() => setSubTab(t.id)}
-                className={`flex items-center gap-1.5 text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap ${
-                  subTab === t.id
-                    ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
-                    : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                onClick={() => setActiveWsId(ws.id)}
+                className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
+              >
+                <span className="flex items-center min-w-0">
+                  <WorkspaceStageIcons workspace={ws} />
+                  <span className="truncate">{ws.name}</span>
+                </span>
+                {isActive && <ChevronRight size={12} className="text-[var(--neutral-500)] shrink-0" />}
+              </button>
+              {/* NEW — issue #3: "+" creates a chat nested in this
+                  project, same idea as starting a new chat under a
+                  group in the Chat sidebar. */}
+              <button
+                onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
+                title="New chat in this project"
+                className={`shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)] ${
+                  // NEW — mobile polish, same reasoning as ResearchTab.jsx's
+                  // Sources cards: opacity-0-until-hover has no equivalent
+                  // on a touch screen, so this would look like it wasn't
+                  // there at all. Always visible on mobile; desktop keeps
+                  // the original hover-to-reveal.
+                  isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                }`}
+                disabled={creatingChatForWs === ws.id}
+              >
+                {creatingChatForWs === ws.id ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Plus size={12} />
+                )}
+              </button>
+              <button
+                onClick={() => setManagingWorkspace(ws)}
+                title="Rename or delete project"
+                className={`shrink-0 pr-2 text-[var(--neutral-600)] hover:text-[var(--neutral-200)] ${
+                  isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                 }`}
               >
-                <Icon size={13} />
-                {t.label}
+                <MoreVertical size={13} />
               </button>
-            );
-          })}
-        </div>
-
-        <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          {!activeWs ? (
-            <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
-          ) : (
-            SUB_TABS.filter((t) => visitedSubTabs.has(t.id)).map((t) => (
-              <div key={t.id} style={{ display: subTab === t.id ? "contents" : "none" }}>
-                {t.id === "prd" && (
-                  <MarkdownPastePanel
-                    workspaceId={activeWs.id}
-                    panelKey="prd"
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    refreshSignal={planPanelRefreshSignal}
-                    placeholder="prd_writer's output lands here automatically once it runs in this project's chat."
-                    paste_hint="Includes a Features/Priorities/First-cycle-scope section, per prd_writer's brief. You can also paste or edit it manually below."
-                  />
-                )}
-                {t.id === "architecture" && (
-                  <DiagramPastePanel
-                    workspaceId={activeWs.id}
-                    panelKey="architecture"
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    refreshSignal={planPanelRefreshSignal}
-                    roleLabel="architecture_diagrammer"
-                  />
-                )}
-                {t.id === "schema" && (
-                  <DiagramPastePanel
-                    workspaceId={activeWs.id}
-                    panelKey="schema"
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    refreshSignal={planPanelRefreshSignal}
-                    roleLabel="schema_diagrammer"
-                  />
-                )}
-                {t.id === "api_contract" && (
-                  <MarkdownPastePanel
-                    workspaceId={activeWs.id}
-                    panelKey="api_contract"
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    refreshSignal={planPanelRefreshSignal}
-                    placeholder="api_contract_writer's endpoint table lands here automatically once it runs in this project's chat."
-                  />
-                )}
-                {t.id === "devils_advocate" && (
-                  <MarkdownPastePanel
-                    workspaceId={activeWs.id}
-                    panelKey="devils_advocate"
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    refreshSignal={planPanelRefreshSignal}
-                    placeholder="devils_advocate's critique lands here automatically once it runs in this project's chat."
-                  />
-                )}
-                {t.id === "feasibility" && (
-                  <MarkdownPastePanel
-                    workspaceId={activeWs.id}
-                    panelKey="feasibility"
-                    fetchPanelContent={fetchPanelContent}
-                    savePanelContent={savePanelContent}
-                    refreshSignal={planPanelRefreshSignal}
-                    placeholder="feasibility_estimator's output lands here automatically once it runs in this project's chat."
-                    estimateBanner="Rough complexity signal — not a time/cost estimate (Part 5 §5.4)"
-                  />
-                )}
-                {/* "wireframes" render branch removed — see BuildTab.jsx
-                    for the relocated WireframesPanel render. */}
-                {t.id === "blueprint" && (
-                  <BlueprintView
-                    workspaceId={activeWs.id}
-                    fetchDeviceSpec={fetchDeviceSpec}
-                    refreshPartPrices={refreshPartPrices}
-                    refreshSignal={planPanelRefreshSignal}
-                  />
+            </div>
+            {memberChats.map((chat) => (
+              <div
+                key={chat.id}
+                onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobilePlanDrawerOpen(false); } }}
+                className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                  chat.id === activeChatId
+                    ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                    : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                }`}
+              >
+                {editingChatId === chat.id ? (
+                  <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      autoFocus
+                      id={`chat-title-${chat.id}`}
+                      name="chatTitle"
+                      aria-label="Chat title"
+                      value={editChatTitle}
+                      onChange={(e) => setEditChatTitle(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
+                      className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
+                    />
+                    <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
+                    <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
+                  </div>
+                ) : (
+                  <>
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate flex-1 min-w-0">{chat.title}</span>
+                    {/* NEW — issue #3: rename/delete, same controls
+                        ChatSidebar's own chat rows already offer.
+                        CHANGED — mobile polish: `hidden group-hover:flex`
+                        never reveals on a touch screen, same fix as the
+                        two buttons above — always `flex` on mobile. */}
+                    <div className={`items-center gap-1.5 shrink-0 ${isMobile ? "flex" : "hidden group-hover:flex"}`}>
+                      <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
+                        <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
+                      </button>
+                      <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
+                        <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
-            ))
-          )}
-        </div>
-      </div>
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
 
+  // Identical on every viewport — only the nav chrome around it
+  // (subTabNav, built per-shell below) ever differed.
+  const subTabContent = !activeWs ? (
+    <p className="text-xs text-[var(--neutral-600)]">Pick or create a project to get started.</p>
+  ) : (
+    SUB_TABS.filter((t) => visitedSubTabs.has(t.id)).map((t) => (
+      <div key={t.id} style={{ display: subTab === t.id ? "contents" : "none" }}>
+        {t.id === "prd" && (
+          <MarkdownPastePanel
+            workspaceId={activeWs.id}
+            panelKey="prd"
+            fetchPanelContent={fetchPanelContent}
+            savePanelContent={savePanelContent}
+            refreshSignal={planPanelRefreshSignal}
+            placeholder="prd_writer's output lands here automatically once it runs in this project's chat."
+            paste_hint="Includes a Features/Priorities/First-cycle-scope section, per prd_writer's brief. You can also paste or edit it manually below."
+          />
+        )}
+        {t.id === "architecture" && (
+          <DiagramPastePanel
+            workspaceId={activeWs.id}
+            panelKey="architecture"
+            fetchPanelContent={fetchPanelContent}
+            savePanelContent={savePanelContent}
+            refreshSignal={planPanelRefreshSignal}
+            roleLabel="architecture_diagrammer"
+          />
+        )}
+        {t.id === "schema" && (
+          <DiagramPastePanel
+            workspaceId={activeWs.id}
+            panelKey="schema"
+            fetchPanelContent={fetchPanelContent}
+            savePanelContent={savePanelContent}
+            refreshSignal={planPanelRefreshSignal}
+            roleLabel="schema_diagrammer"
+          />
+        )}
+        {t.id === "api_contract" && (
+          <MarkdownPastePanel
+            workspaceId={activeWs.id}
+            panelKey="api_contract"
+            fetchPanelContent={fetchPanelContent}
+            savePanelContent={savePanelContent}
+            refreshSignal={planPanelRefreshSignal}
+            placeholder="api_contract_writer's endpoint table lands here automatically once it runs in this project's chat."
+          />
+        )}
+        {t.id === "devils_advocate" && (
+          <MarkdownPastePanel
+            workspaceId={activeWs.id}
+            panelKey="devils_advocate"
+            fetchPanelContent={fetchPanelContent}
+            savePanelContent={savePanelContent}
+            refreshSignal={planPanelRefreshSignal}
+            placeholder="devils_advocate's critique lands here automatically once it runs in this project's chat."
+          />
+        )}
+        {t.id === "feasibility" && (
+          <MarkdownPastePanel
+            workspaceId={activeWs.id}
+            panelKey="feasibility"
+            fetchPanelContent={fetchPanelContent}
+            savePanelContent={savePanelContent}
+            refreshSignal={planPanelRefreshSignal}
+            placeholder="feasibility_estimator's output lands here automatically once it runs in this project's chat."
+            estimateBanner="Rough complexity signal — not a time/cost estimate (Part 5 §5.4)"
+          />
+        )}
+        {/* "wireframes" render branch removed — see BuildTab.jsx
+            for the relocated WireframesPanel render. */}
+        {t.id === "blueprint" && (
+          <BlueprintView
+            workspaceId={activeWs.id}
+            fetchDeviceSpec={fetchDeviceSpec}
+            refreshPartPrices={refreshPartPrices}
+            refreshSignal={planPanelRefreshSignal}
+          />
+        )}
+      </div>
+    ))
+  );
+
+  // NEW — embedded chat + WorkingPanel dock, scoped to this tab's own
+  // activeWs. Identical on every viewport — no isMobile check here,
+  // never was (the lg:hidden/hidden lg:flex pair below is a plain
+  // Tailwind breakpoint, same as ResearchTab.jsx's/NotebooksTab.jsx's
+  // own dockAndModals, not the useViewport() data-viewport switch the
+  // rest of this retrofit uses).
+  const dockAndModals = (
+    <>
       {/* PARITY FIX — desktop dock, side-by-side, lg+, same as
           Notebooks/Research. Step 3e follow-up fix: workspaceId prop
           added below so this actually resolves the ws:${activeWs.id}
@@ -748,8 +700,184 @@ function PlanTab({ onOpenChat, initialWorkspaceId, onConsumeInitialWorkspaceId, 
         onConfirm={confirmDeleteChat}
         onCancel={() => setPendingDeleteChat(null)}
       />
+    </>
+  );
+
+  // The actual assembler. Both shells call this exactly once, supplying
+  // only the four fragments that differ by viewport (project picker,
+  // icon rail, sub-tab nav, promote control) — everything else (the
+  // outer flex row, the title/promote header row, the empty state,
+  // subTabContent, dockAndModals) is built here so neither shell can
+  // silently drift out of sync with the other on the parts that were
+  // never supposed to differ in the first place. Same idea as
+  // ResearchTab.jsx's/NotebooksTab.jsx's renderRoot.
+  function renderRoot({ projectPicker, iconRail, subTabNav, promoteControl }) {
+    return (
+      <div className="flex h-full">
+        {projectPicker}
+        {iconRail}
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col">
+          {/* PARITY FIX — title + promote row, same shape as
+              Notebooks/Tasks — this was missing entirely, so a plan
+              project had no path forward to Build. */}
+          {activeWs && (
+            <div className="h-10 flex items-center justify-between px-3 border-b border-[var(--neutral-800)]">
+              <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{activeWs.name}</h2>
+              <div className="flex items-center gap-2 shrink-0">{promoteControl}</div>
+            </div>
+          )}
+          {promoteError && (
+            <p className="text-xs text-red-400 px-3 pt-2">{promoteError}</p>
+          )}
+          {subTabNav}
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
+            {subTabContent}
+          </div>
+        </div>
+        {dockAndModals}
+      </div>
+    );
+  }
+
+  return {
+    viewport, isMobile,
+    activeWs, planProjects, projectRows,
+    projectsCollapsed, toggleProjects,
+    mobilePlanDrawerOpen, setMobilePlanDrawerOpen,
+    showCreateModal, setShowCreateModal,
+    subTab, setSubTab,
+    promoteTargets, promoteTargetStage, setPromoteTargetStage, promoteMode, setPromoteMode, promoting, promoteError, handlePromote,
+    renderRoot,
+  };
+}
+
+// Desktop shell. Thin on purpose (same idea as NotebooksTabDesktop/
+// ResearchTabDesktop) — takes the already-built controller (see the
+// router at the bottom of this file, which calls the hook above exactly
+// once) and supplies only the project-picker column, the labeled
+// pill-row sub-tab nav, and the full 3-widget promote control — the
+// three things that only ever render on desktop. See
+// components/mobile/PlanTab.jsx for the counterpart, which takes the
+// same controller shape.
+function PlanTabDesktop({ controller: c }) {
+  const projectPicker = c.projectsCollapsed ? (
+    <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
+      <button onClick={c.toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
+        <ChevronRight size={16} />
+      </button>
+    </div>
+  ) : (
+    <div className="w-56 shrink-0 border-r border-[var(--neutral-800)] flex flex-col">
+      <div className="h-10 px-3 border-b border-[var(--neutral-800)] flex items-center justify-between">
+        <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
+          <STAGE_THEME.plan.Icon size={13} className={STAGE_THEME.plan.color} /> Plan projects
+        </span>
+        {/* NEW — item #10 / B3: native create, same stage-aware modal
+            ResearchTab's B2 wired up first. */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => c.setShowCreateModal(true)}
+            title="New plan project"
+            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+          >
+            <Plus size={14} />
+          </button>
+          {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+              own ChevronLeft toggle. */}
+          <button onClick={c.toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+            <ChevronLeft size={14} />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto">{c.projectRows}</div>
     </div>
   );
+
+  const promoteControl = c.promoteTargets && (
+    <>
+      <label className="sr-only" htmlFor="plan-promote-target">Promote to</label>
+      <select
+        id="plan-promote-target"
+        value={c.promoteTargets.targetStage}
+        onChange={(e) => c.setPromoteTargetStage(e.target.value)}
+        disabled={c.promoting}
+        className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+      >
+        {c.promoteTargets.availableTargets.map((stage) => (
+          <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+        ))}
+      </select>
+      {/* NEW — §2.6 step 4: complete/partial toggle. */}
+      <div
+        role="radiogroup"
+        aria-label="Promote mode"
+        className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
+      >
+        <button
+          type="button"
+          role="radio"
+          aria-checked={c.promoteMode === "complete"}
+          onClick={() => c.setPromoteMode("complete")}
+          disabled={c.promoting}
+          title="Move the project fully into the target stage"
+          className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+            c.promoteMode === "complete"
+              ? "bg-[var(--accent)] text-[var(--accent-text)]"
+              : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+          }`}
+        >
+          Complete
+        </button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={c.promoteMode === "partial"}
+          onClick={() => c.setPromoteMode("partial")}
+          disabled={c.promoting}
+          title="Keep the project active here too"
+          className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+            c.promoteMode === "partial"
+              ? "bg-[var(--accent)] text-[var(--accent-text)]"
+              : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+          }`}
+        >
+          Partial
+        </button>
+      </div>
+      <button
+        onClick={() => c.handlePromote(c.activeWs.id, c.promoteTargets.targetStage)}
+        disabled={c.promoting}
+        className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 shrink-0"
+      >
+        {c.promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+        {c.promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[c.promoteTargets.targetStage]} →
+      </button>
+    </>
+  );
+
+  const subTabNav = (
+    <div className="h-10 flex items-center justify-center gap-1 px-3 border-b border-[var(--neutral-800)] overflow-x-auto">
+      {SUB_TABS.map((t) => {
+        const Icon = t.icon;
+        return (
+          <button
+            key={t.id}
+            onClick={() => c.setSubTab(t.id)}
+            className={`flex items-center gap-1.5 text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap ${
+              c.subTab === t.id
+                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            }`}
+          >
+            <Icon size={13} />
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  return c.renderRoot({ projectPicker, iconRail: null, subTabNav, promoteControl });
 }
 
 // NEW — patch 4 (frontend): distinguishes "chat auto-filled this panel"
@@ -1246,6 +1374,20 @@ function BlueprintView({ workspaceId, fetchDeviceSpec, refreshPartPrices, refres
       {view === "mech" && <MechView mech={spec.mech} parts={spec.parts} />}
     </div>
   );
+}
+
+// NEW — Phase 5: the real router AppShell.jsx's dynamic import actually
+// renders, same shape as NotebooksTab.jsx's/ResearchTab.jsx's own router
+// at the bottom of those files (and how mobile/AppShell.jsx /
+// mobile/ChatSidebar.jsx are picked at their own call sites) rather than
+// branching on isMobile inline. The controller hook is called exactly
+// once here — never independently by either shell — since it owns
+// effects (data fetching, localStorage sync, the OPEN_TAB_SIDEBAR_EVENT
+// listener) that must not run twice per render.
+function PlanTab(props) {
+  const controller = usePlanTabController(props);
+  if (controller.viewport === "mobile") return <MobilePlanTab controller={controller} />;
+  return <PlanTabDesktop controller={controller} />;
 }
 
 // Item 6 (perf audit, tab-body pass): PlanTab takes props from its parent
