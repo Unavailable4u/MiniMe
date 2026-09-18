@@ -364,7 +364,17 @@ function ConfidenceBadge({ part }) {
  */
 function PartsSidePanel({ parts, placedPartIds, hiddenPartIds, onToggleHidden, selectedPartId, onSelect }) {
   return (
-    <div className="h-[480px] w-56 shrink-0 flex flex-col rounded-lg border border-[var(--neutral-800)] overflow-hidden">
+    // FIX — mobile: `w-56` (224px) was fixed regardless of viewport,
+    // which was fine back when this panel only ever sat beside the
+    // canvas at desktop widths, but forced the same narrow column once
+    // it's stacked full-width below the canvas on mobile (see the
+    // flex-col change above). Full width up to `md`, back to the
+    // original fixed sidebar width once it's actually sitting side by
+    // side with the canvas again. Height stays smaller on mobile too --
+    // 480px of scrollable part list stacked under a 480px canvas is a
+    // lot of vertical scrolling on a phone; the canvas keeps its full
+    // height since that's the part that actually needs the room.
+    <div className="h-56 md:h-[480px] w-full md:w-56 md:shrink-0 flex flex-col rounded-lg border border-[var(--neutral-800)] overflow-hidden">
       <div className="shrink-0 px-2 py-1.5 border-b border-[var(--neutral-800)] text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
         Parts ({parts.length})
       </div>
@@ -572,7 +582,15 @@ export default function MechView({ mech, parts }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex gap-2">
+      {/* FIX — mobile: this was a fixed `flex` (row) container, so below
+          `md` the 3D canvas and the parts side panel got squeezed onto
+          the same line -- both ended up too compact to actually use on
+          a phone-width screen. `flex-col md:flex-row` stacks the parts
+          list underneath the canvas on mobile/narrow tablet widths
+          (same `md` breakpoint useViewport.js's own mobile/tablet split
+          uses) and only puts them side by side once there's enough
+          width for the 3D view to stay usable next to it. */}
+      <div className="flex flex-col md:flex-row gap-2">
         <div className="relative h-[480px] flex-1 rounded-lg border border-[var(--neutral-800)] overflow-hidden bg-black/30">
           <ConfidenceBadge part={badgePart} />
           <Canvas

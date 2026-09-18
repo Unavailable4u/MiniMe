@@ -115,10 +115,16 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
 
       <div className="rounded-lg border border-[var(--neutral-800)] divide-y divide-[var(--neutral-900)]">
         {parts.map((p) => (
-          <div key={p.id} className="flex items-center gap-3 px-3 py-2.5">
+          <div key={p.id} className="flex items-start gap-1.5 px-3 py-2.5">
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-[var(--neutral-100)] font-medium truncate">{p.name}</span>
+              <div className="flex items-start gap-1.5 flex-wrap">
+                {/* FIX — mobile: this used to be `truncate` (single line,
+                    ellipsis), which cut long component names short on a
+                    narrow phone width. `break-words` + `min-w-0` let the
+                    name wrap onto as many lines as it needs instead,
+                    inside the space the flex row already gives it,
+                    rather than hiding part of the name. */}
+                <span className="text-xs text-[var(--neutral-100)] font-medium break-words min-w-0">{p.name}</span>
                 <span className={`text-[9px] uppercase border rounded px-1 ${CATEGORY_COLORS[p.category] || DEFAULT_CATEGORY_COLOR}`}>
                   {p.category}
                 </span>
@@ -171,7 +177,16 @@ export default function PartsTable({ parts, onRefreshPrices, refreshing }) {
               )}
             </div>
             <span className="text-xs text-[var(--neutral-500)] shrink-0">×{p.qty}</span>
-            <div className="text-right shrink-0 w-28">
+            {/* FIX — mobile: this was a fixed `w-28` (112px) box. Price
+                text is almost always much narrower than that, so on a
+                phone-width row the fixed box left a big empty stretch
+                between the qty column and the price digits themselves
+                (right-aligned text just floats in the middle of an
+                over-wide box). `max-w-[..]` instead of a fixed `w-..`
+                lets the box shrink down to whatever the price/vendor
+                text actually needs, only capping how wide it's allowed
+                to grow for a longer vendor name. */}
+            <div className="text-right shrink-0 max-w-[104px]">
               {p.estimated_price_bdt ? (
                 p.price_source === "estimated_print_cost" ? (
                   // Patch K.2 fix (surfaced while wiring K.3's badge into

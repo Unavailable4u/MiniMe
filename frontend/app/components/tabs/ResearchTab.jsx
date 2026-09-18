@@ -203,9 +203,18 @@ export function useResearchTabController({ initialWorkspaceId, onConsumeInitialW
     });
   }
   // NEW — same "switch + expand, no tab jump" helper as NotebooksTab.
+  // FIX — mobile: picking a chat from the project drawer used to force
+  // the dock open unconditionally whenever it was collapsed, which on
+  // mobile means the full-screen chat overlay (`lg:hidden fixed inset-0`
+  // in dockAndModals below) slams over the whole screen the instant you
+  // tap a chat. On mobile that's the person's call, not something
+  // selecting a chat should decide for them — they can still open it via
+  // the floating "Open chat" bubble (chatDockCollapsed branch below).
+  // Desktop keeps the original auto-expand behavior. Same fix as
+  // NotebooksTab.jsx's/PlanTab.jsx's own openInDock.
   async function openInDock(chatId) {
     await switchChat(chatId);
-    if (chatDockCollapsed) toggleChatDock();
+    if (!isMobile && chatDockCollapsed) toggleChatDock();
   }
 
   // NEW — FIX (live-panel bug): SourcesPanel/DatasetPanel now dispatch
