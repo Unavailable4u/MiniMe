@@ -104,7 +104,65 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
   here rather than leaving it to whoever reads this next. This is also
   the reference pattern for Research/Plan/Test/Growth/Build, since
   Notebooks' layout is close to identical to the rest.
-- Research, Plan, Test, Growth, Build: **not started.**
+- **Research: done, following the Notebooks reference pattern — plus one
+  cross-cutting bug found and fixed while finishing it.**
+  `components/tabs/ResearchTab.jsx` is now a `useResearchTabController`
+  hook plus a thin router (`ResearchTab` calls the hook once, renders
+  either `ResearchTabDesktop` or `components/mobile/ResearchTab.jsx` off
+  `controller.viewport`), same split as Notebooks. The mobile file
+  supplies the four things that actually differ by viewport — project
+  list as a `MobileDrawer` instead of a persistent column, a vertical
+  icon-only sub-tab rail (Research has the same five-tab count Notebooks
+  does), a one-line active-sub-tab header replacing the desktop pill
+  row, and a single combo `<select>` collapsing promote-target+mode into
+  one control — everything else (`projectRows`, `subTabContent`,
+  `dockAndModals`, `renderRoot`) stays shared, unforked, in the
+  controller.
+  - **Bug found and fixed: the drawer was built but unreachable.**
+    Research's project-picker drawer, its `mobileProjectsDrawerOpen`
+    state, and its `OPEN_TAB_SIDEBAR_EVENT` listener were all wired up
+    correctly — but `../AppShell.jsx`'s own `TABS_WITH_OWN_MOBILE_SIDEBAR`
+    set (which decides whether the mobile header even shows a hamburger
+    for the active tab) only ever listed `["chat", "notebooks"]`.
+    Research was never added, so the hamburger silently didn't render
+    on this tab at all — the drawer itself was never broken, just
+    unopenable. Fixed by adding `"research"` to that set and extending
+    `sidebarLabel` to show "Research projects" (matching the drawer's
+    own header text, same convention `"Notebooks"` already follows).
+    **Worth checking the same set for Build's project list once that
+    gets its own mobile pass** — it's the other tab called out in that
+    set's own header comment as "the obvious next one," so it's worth
+    confirming as a deliberate addition rather than the same oversight
+    repeating.
+  - **Sources sub-tab toolbar merged for mobile, same idea as the chat
+    composer's own compact mode.** The desktop row (a labeled scope
+    `<select>`, a free-text query input, a worded "Search" button, and a
+    separate Refresh icon) is four separately-bordered controls
+    competing for a phone's width — the same problem
+    `WorkspaceChatPanel`'s composer had with attach/mode/textarea/Send,
+    solved the same way: every control now lives inside ONE bordered box
+    as icon-only buttons around a borderless input (scope becomes an
+    icon trigger + dropdown, same pattern as the composer's mode picker;
+    Search and Refresh both stay as icon buttons rather than one folding
+    away, since both get tapped often here — see the dockLoading
+    auto-refresh effect in `SourcesPanel`). Desktop's row is untouched.
+    Gated on the controller's own `isMobile`, not a new viewport check.
+  - **Two small touch-usability fixes made in the same pass, since they
+    sit in the same section:** each source card's delete button used
+    `opacity-0 group-hover:opacity-100`, which never reveals on a touch
+    screen (there's no hover state to trigger it) — always visible on
+    mobile now, desktop keeps the original hover-to-reveal. Source
+    titles now wrap (`flex-1 min-w-0 break-words`) instead of risking
+    overflow next to a card's tags/delete button on a narrow screen.
+    **Same `opacity-0 group-hover:opacity-100` pattern exists elsewhere**
+    (GrowthTab, TestTab, BuildTab, PlanTab, NotebooksTab, ChatSidebar) —
+    left alone here since those tabs haven't had their own mobile pass
+    yet; worth applying the same fix when each of them does, not before.
+  - Not tested on a real phone yet — same "confirm on real hardware"
+    caveat as everything else in this pass; the drawer fix in particular
+    is worth a tap-through since it was invisible on mobile emulation
+    too (a missing hamburger button doesn't throw, it just isn't there).
+- Plan, Test, Growth, Build: **not started.**
 
 ## Phase 6 — Graphs/canvases
 **Ahead of schedule for the two tabs converted so far.**

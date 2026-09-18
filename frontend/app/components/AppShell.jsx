@@ -384,8 +384,7 @@ function AppShellBody() {
   // NEW — mobile picker-drawer generalization: the hamburger used to be
   // Chat-only (showSidebarButton={activeTab === "chat"} below). Every
   // tab that has its own left-hand picker column on desktop (Notebooks'
-  // notebook list today; Research's/Build's project lists are the
-  // obvious next ones to wire up the same way) gets the same hamburger
+  // notebook list, Research's project list) gets the same hamburger
   // affordance on mobile instead of losing that picker entirely below
   // 768px. Chat keeps its own dedicated open path (setMobileSidebarOpen
   // — AppShell already owns that piece of state); every other listed
@@ -394,7 +393,15 @@ function AppShellBody() {
   // comment) that the tab body itself listens for and answers with its
   // own MobileDrawer, the same way WorkspaceChatPanel already answers
   // OPEN_WORKING_PANEL_EVENT for the panel toggle.
-  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks"]);
+  // BUGFIX — Research's own controller/MobileDrawer/OPEN_TAB_SIDEBAR_EVENT
+  // listener (components/mobile/ResearchTab.jsx, ../tabs/ResearchTab.jsx)
+  // were all built and wired up, but "research" was never added to this
+  // set, so the hamburger button silently didn't render at all on
+  // Research's tab body — the drawer wasn't broken, it was just never
+  // reachable. Build's project list has the same shape but hasn't had
+  // its own mobile pass yet (Phase 5 — still "not started" per
+  // MOBILE_PLAN.md), so it stays off this list until that lands for real.
+  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks", "research"]);
 
   function openMobileTabSidebar() {
     if (activeTab === "chat") {
@@ -451,7 +458,14 @@ function AppShellBody() {
           onSelectTab={setActiveTab}
           showSidebarButton={TABS_WITH_OWN_MOBILE_SIDEBAR.has(activeTab)}
           onOpenSidebar={openMobileTabSidebar}
-          sidebarLabel={activeTab === "notebooks" ? "Notebooks" : "Chats"}
+          sidebarLabel={
+            // NEW — Research fix: matches components/mobile/ResearchTab.jsx's
+            // own drawer header text ("Research projects"), same way
+            // "Notebooks" already matches mobile/NotebooksTab.jsx's.
+            activeTab === "notebooks" ? "Notebooks"
+              : activeTab === "research" ? "Research projects"
+              : "Chats"
+          }
           showWorkingPanelButton={activeTab === "chat"}
           onOpenWorkingPanel={openMobileWorkingPanel}
         />

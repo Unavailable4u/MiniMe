@@ -17,6 +17,7 @@ import {
   Search, Share2, Table2, GitCompare, FlaskConical,
   RefreshCw, ExternalLink, FolderOpen, Plus, X, Loader2, Sparkles, Trash2, MessageSquare,
   ArrowUpRight, Pencil, Check, ChevronRight, ChevronLeft,
+  GraduationCap, Globe, MessagesSquare, Newspaper, Terminal, // NEW — mobile Sources toolbar merge: per-scope icons for the icon-only trigger, same idea as WorkspaceChatPanel's MODES icons
 } from "lucide-react";
 
 // Part 3 §3.9 — Research as a dedicated top-level section, same shape as
@@ -456,7 +457,7 @@ export function useResearchTabController({ initialWorkspaceId, onConsumeInitialW
     SUB_TABS.filter((t) => visitedSubTabs.has(t.id)).map((t) => (
       <div key={t.id} style={{ display: subTab === t.id ? "contents" : "none" }}>
         {t.id === "sources" && (
-          <SourcesPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} deleteWorkspaceNode={deleteWorkspaceNode} onDispatched={maybeExpandChatDock} />
+          <SourcesPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} deleteWorkspaceNode={deleteWorkspaceNode} onDispatched={maybeExpandChatDock} isMobile={isMobile} />
         )}
         {t.id === "graph" && (
           <CitationGraphPanel wsId={activeWs.id} fetchWorkspaceNodes={fetchWorkspaceNodes} fetchGraphEdges={fetchGraphEdges} />
@@ -735,15 +736,20 @@ function ResearchTabDesktop({ controller: c }) {
 // academic_search. "Academic" is the one exception: it omits `scope`
 // entirely and keeps the original "Find recent papers about: X" phrasing
 // unchanged, so today's academic_search behavior is untouched.
+// NEW — `icon` added (was label-only): the desktop <select> never needed
+// one, but the mobile merged toolbar's scope trigger is icon-only (see
+// SourcesPanel's compact branch below), same "one source list, two
+// renderings" idea as WorkspaceChatPanel's MODES already uses for its
+// mode dropdown.
 const RESEARCH_SCOPE_OPTIONS = [
-  { value: "academic", label: "Academic", scope: null, phrase: (q) => `Find recent papers about: ${q}` },
-  { value: "general", label: "General web", scope: "general", phrase: (q) => `Search the web for: ${q}` },
-  { value: "forum", label: "Forums", scope: "forum", phrase: (q) => `Search Reddit and forums for: ${q}` },
-  { value: "news", label: "News", scope: "news", phrase: (q) => `Search news sources for: ${q}` },
-  { value: "hackernews", label: "Hacker News", scope: "hackernews", phrase: (q) => `Search Hacker News for: ${q}` },
+  { value: "academic", label: "Academic", icon: GraduationCap, scope: null, phrase: (q) => `Find recent papers about: ${q}` },
+  { value: "general", label: "General web", icon: Globe, scope: "general", phrase: (q) => `Search the web for: ${q}` },
+  { value: "forum", label: "Forums", icon: MessagesSquare, scope: "forum", phrase: (q) => `Search Reddit and forums for: ${q}` },
+  { value: "news", label: "News", icon: Newspaper, scope: "news", phrase: (q) => `Search news sources for: ${q}` },
+  { value: "hackernews", label: "Hacker News", icon: Terminal, scope: "hackernews", phrase: (q) => `Search Hacker News for: ${q}` },
 ];
 
-function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispatched }) {
+function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispatched, isMobile }) {
   // FIX — live-panel bug: this dock is the SAME `ws:${wsId}` slot the
   // embedded WorkspaceChatPanel/WorkingPanel below is already showing
   // for this project, so a search dispatched through it shows up there
@@ -761,6 +767,11 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
   const [searching, setSearching] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null); // NEW — §2 fix
   const [deleting, setDeleting] = useState(false);
+  // NEW — mobile toolbar merge: only meaningful in the compact branch
+  // below, same "icon button opens an absolutely-positioned option
+  // list" pattern as WorkspaceChatPanel's compact composer uses for its
+  // own mode picker (modeOpen there).
+  const [scopeOpen, setScopeOpen] = useState(false);
 
   // BUGFIX — stale cross-project response: load() had no guard against
   // out-of-order responses, unlike ContradictionsPanel/ExtractionPanel's
@@ -847,50 +858,146 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
     }
   }
 
+  const activeScope = RESEARCH_SCOPE_OPTIONS.find((o) => o.value === searchScope) || RESEARCH_SCOPE_OPTIONS[0];
+  const ActiveScopeIcon = activeScope.icon;
+
+  // NEW — mobile toolbar merge: the option list itself is identical in
+  // both layouts — only the trigger (labeled <select> vs icon-only
+  // button) and the panel's positioning differ — same split
+  // WorkspaceChatPanel's compact composer uses for its own mode picker
+  // (MODES/modeOptions there).
+  const scopeOptions = RESEARCH_SCOPE_OPTIONS.map((o) => {
+    const Icon = o.icon;
+    return (
+      <button
+        key={o.value}
+        type="button"
+        onClick={() => {
+          setSearchScope(o.value);
+          setScopeOpen(false);
+        }}
+        className={`w-full flex items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--neutral-800)] transition-colors ${
+          o.value === searchScope ? "bg-[var(--neutral-800-a70)]" : ""
+        }`}
+      >
+        <Icon size={14} className="shrink-0" />
+        <span className="text-[var(--neutral-200)]">{o.label}</span>
+      </button>
+    );
+  });
+
   return (
     <div className="space-y-4">
-      <div className="flex gap-2">
-        {/* NEW — task 13e: scope selector. Lives next to the query box
-            rather than replacing it — the query stays one free-text
-            field, this just picks which agent + domain preset it's
-            dispatched to. */}
-        <label className="sr-only" htmlFor="research-search-scope">Search scope</label>
-        <select
-          id="research-search-scope"
-          name="researchSearchScope"
-          value={searchScope}
-          onChange={(e) => setSearchScope(e.target.value)}
-          className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] shrink-0"
-        >
-          {RESEARCH_SCOPE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-        <input
-          id="research-query"
-          name="researchQuery"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && runSearch()}
-          aria-label="Research query"
-          placeholder="e.g. transformer attention mechanisms, systematic review of..."
-          className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)]"
-        />
-        <button
-          onClick={runSearch}
-          disabled={searching || !query.trim()}
-          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1"
-        >
-          <Search size={13} /> {searching ? "Dispatching…" : "Search"}
-        </button>
-        <button
-          onClick={load}
-          title="Refresh source list"
-          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] px-2"
-        >
-          <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
-        </button>
-      </div>
+      {isMobile ? (
+        // NEW — mobile Sources toolbar merge: the desktop row just below
+        // (a labeled <select> + free-text input + a worded "Search"
+        // button + a separate Refresh icon) is four separately-bordered
+        // controls competing for a phone's width — the exact problem
+        // WorkspaceChatPanel's composer had with its own
+        // attach/mode/textarea/Send row before its own compact branch.
+        // Same fix here: every control moves INSIDE one bordered box as
+        // icon-only buttons around a borderless input, so the query
+        // field gets most of the width instead of being squeezed to a
+        // sliver between four bordered siblings. Own idea, not a copy
+        // of the composer's exact control set — Search/Refresh are
+        // presented (rather than a submit + a fold-away icon), since
+        // both are things a person taps here often (Refresh especially,
+        // since search results write back asynchronously — see
+        // dockLoading effect above).
+        <div className="flex items-center gap-1 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg focus-within:border-[var(--neutral-600)] transition-colors">
+          <div className="relative shrink-0 pl-1">
+            <label className="sr-only" htmlFor="research-search-scope-mobile">Search scope</label>
+            <button
+              id="research-search-scope-mobile"
+              type="button"
+              onClick={() => setScopeOpen((o) => !o)}
+              title={`Scope: ${activeScope.label}`}
+              className="flex items-center justify-center p-1.5 rounded-md text-[var(--neutral-400)] outline-none hover:bg-[var(--neutral-800)] hover:text-[var(--neutral-200)] transition-colors"
+            >
+              <ActiveScopeIcon size={15} />
+            </button>
+            {scopeOpen && (
+              <div className="absolute top-full mt-2 left-0 w-48 max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--neutral-800)] bg-[var(--neutral-900)] shadow-xl overflow-hidden z-10">
+                {scopeOptions}
+              </div>
+            )}
+          </div>
+
+          <input
+            id="research-query"
+            name="researchQuery"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && runSearch()}
+            aria-label="Research query"
+            placeholder="Search papers, web, forums…"
+            className="flex-1 min-w-0 bg-transparent border-0 px-1 py-2.5 text-xs outline-none"
+          />
+
+          <button
+            type="button"
+            onClick={load}
+            title="Refresh source list"
+            className="shrink-0 flex items-center justify-center p-1.5 rounded-md text-[var(--neutral-400)] outline-none hover:bg-[var(--neutral-800)] hover:text-[var(--neutral-200)] transition-colors"
+          >
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+          </button>
+          <div className="pr-1 shrink-0">
+            <button
+              type="button"
+              onClick={runSearch}
+              disabled={searching || !query.trim()}
+              title={searching ? "Dispatching…" : "Search"}
+              className="flex items-center justify-center p-1.5 rounded-md bg-[var(--accent)] text-[var(--accent-text)] outline-none disabled:opacity-50 transition-colors"
+            >
+              {searching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          {/* NEW — task 13e: scope selector. Lives next to the query box
+              rather than replacing it — the query stays one free-text
+              field, this just picks which agent + domain preset it's
+              dispatched to. */}
+          <label className="sr-only" htmlFor="research-search-scope">Search scope</label>
+          <select
+            id="research-search-scope"
+            name="researchSearchScope"
+            value={searchScope}
+            onChange={(e) => setSearchScope(e.target.value)}
+            className="bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] shrink-0"
+          >
+            {RESEARCH_SCOPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          <input
+            id="research-query"
+            name="researchQuery"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && runSearch()}
+            aria-label="Research query"
+            placeholder="e.g. transformer attention mechanisms, systematic review of..."
+            className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+          />
+          <button
+            onClick={runSearch}
+            disabled={searching || !query.trim()}
+            className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1"
+          >
+            <Search size={13} /> {searching ? "Dispatching…" : "Search"}
+          </button>
+          <button
+            onClick={load}
+            title="Refresh source list"
+            className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)] px-2"
+          >
+            <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+          </button>
+        </div>
+      )}
       <p className="text-[11px] text-[var(--neutral-600)]">
         {searchScope === "academic"
           ? "Runs academic_search (Semantic Scholar, arXiv, CrossRef, OpenAlex) plus whatever writing/synthesis roles the task needs, in this project's own chat — sources found get written back here as they're indexed."
@@ -910,7 +1017,7 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
         {sources.map((s) => (
           <div key={s.node_id} className="group border border-[var(--neutral-800)] rounded-lg p-3">
             <div className="flex items-start justify-between gap-2">
-              <span className="text-xs font-medium text-[var(--neutral-100)]">{s.title}</span>
+              <span className="flex-1 min-w-0 text-xs font-medium text-[var(--neutral-100)] break-words">{s.title}</span>
               <div className="flex items-center gap-1.5 shrink-0">
                 {(s.tags || []).map((tag) => (
                   <span key={tag} className="text-[10px] uppercase tracking-wide text-[var(--cyber-violet)] bg-[var(--cyber-violet)]/10 rounded px-1.5 py-0.5">
@@ -920,7 +1027,14 @@ function SourcesPanel({ wsId, fetchWorkspaceNodes, deleteWorkspaceNode, onDispat
                 <button
                   onClick={() => setPendingDelete(s)}
                   title="Delete source"
-                  className="text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-red-400"
+                  className={`text-[var(--neutral-600)] hover:text-red-400 ${
+                    // NEW — mobile polish: opacity-0-until-hover has no
+                    // equivalent on a touch screen (there's no hover
+                    // state to reveal it), so the button would look like
+                    // it wasn't there at all. Always visible on mobile;
+                    // desktop keeps the original hover-to-reveal.
+                    isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  }`}
                 >
                   <Trash2 size={13} />
                 </button>
