@@ -162,7 +162,61 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
     caveat as everything else in this pass; the drawer fix in particular
     is worth a tap-through since it was invisible on mobile emulation
     too (a missing hamburger button doesn't throw, it just isn't there).
-- Plan, Test, Growth, Build: **not started.**
+- **Plan: done, following the Notebooks/Research reference pattern.**
+  `components/tabs/PlanTab.jsx` is now a `usePlanTabController` hook plus
+  a thin router (`PlanTab` calls the hook once, renders either
+  `PlanTabDesktop` or `components/mobile/PlanTab.jsx` off
+  `controller.viewport`), same split as Notebooks/Research. The mobile
+  file supplies the four things that actually differ by viewport —
+  project list as a `MobileDrawer` instead of a persistent column
+  (rename/delete kebab and nested-chat rows inside `projectRows` carry
+  over unchanged, since that markup was never desktop-only to begin
+  with), a vertical icon-only sub-tab rail, a one-line active-sub-tab
+  header replacing the desktop pill row, and a single combo `<select>`
+  collapsing promote-target+mode into one control — everything else
+  (`projectRows`, `subTabContent`, `dockAndModals`, `renderRoot`) stays
+  shared, unforked, in the controller.
+  - **Seven sub-tabs, not five.** Plan's `SUB_TABS` (PRD, Architecture,
+    Schema, API Contract, Devil's Advocate, Feasibility, Blueprint) is
+    two tabs longer than Notebooks/Research's own five-tab rail, so
+    `iconRail` in `mobile/PlanTab.jsx` adds `overflow-y-auto` that
+    Research's rail didn't need — otherwise a short/landscape phone
+    viewport can run out of vertical room before the last icon
+    (Blueprint) and silently clip it instead of scrolling to it.
+  - **`TABS_WITH_OWN_MOBILE_SIDEBAR` fix applied proactively this time.**
+    Research's own write-up above flagged a real bug: its drawer was
+    fully wired up but unreachable because `AppShell.jsx` never added
+    `"research"` to that set. Added `"plan"` (and the matching
+    `sidebarLabel` case, "Plan projects") in the same commit as the
+    drawer itself, rather than shipping the tab first and discovering
+    the same gap later.
+  - **Mobile chat-dock auto-open fix shipped as part of this pass, not
+    bolted on after.** Notebooks and Research each had (or picked up)
+    the same bug: selecting a chat from the project drawer called
+    `openInDock`, which unconditionally expanded the chat dock if it
+    was collapsed — on mobile that dock is a full-screen overlay
+    (`lg:hidden fixed inset-0` in `dockAndModals`), so picking a chat
+    slammed that overlay over the whole screen instantly, with no way
+    to just browse the drawer without being dropped into a chat. Plan's
+    `openInDock` was written with the `!isMobile &&` guard from the
+    start (`if (!isMobile && chatDockCollapsed) toggleChatDock()`) —
+    desktop keeps the original auto-expand behavior; mobile leaves the
+    decision to the person, who can still reach the chat via the
+    floating "Open chat" bubble.
+  - **Touch-usability fix (opacity-0-until-hover) also built in from the
+    start, not deferred.** The Phase 5 entry above for Research flagged
+    this same `opacity-0 group-hover:opacity-100` pattern as present in
+    `PlanTab` (among others) and left alone until each tab got its own
+    mobile pass. Plan's pass is that pass: every hover-only affordance
+    in `projectRows`/chat rows (the "+" new-chat button, the rename/
+    delete kebab, per-chat rename/delete) is now `isMobile ? "opacity-100"
+    : "opacity-0 group-hover:opacity-100"`, same fix Research already
+    applied to its own Sources cards. Still present, un-fixed, in
+    GrowthTab/TestTab/BuildTab/NotebooksTab/ChatSidebar — apply the same
+    fix when each of those gets its own mobile pass, not before.
+  - Not tested on a real phone yet — same caveat as Research's own
+    entry above.
+- Test, Growth, Build: **not started.**
 
 ## Phase 6 — Graphs/canvases
 **Ahead of schedule for the two tabs converted so far.**
@@ -206,6 +260,21 @@ anything else in this pass.
 none of these are used by Chat or Notebooks (the two tabs converted so
 far), so they're correctly out of scope until Research/Plan/Test/
 Growth/Build come up in Phase 5.
+
+**Now in scope, not yet done:** Plan's Phase 5 pass landed above, and
+its Blueprint sub-tab (`BlueprintView` in `tabs/PlanTab.jsx`) renders
+`WiringGraph` (a `ForceGraphBase` wrapper, same pan/zoom pointer-binding
+conflict `KnowledgeGraphView` has) and `MechView` (not yet inspected for
+its own pointer/touch conflict — likely a `@react-three/fiber` scene,
+which has the analogous problem with orbit-drag). Follow the same
+pattern as `NotebooksTab.jsx`'s own Phase-6 gap close once this is
+picked up: wrap the `WiringGraph`/`MechView` render sites in
+`BlueprintView` with `TouchCollapsibleGraph` (`label="wiring graph"` /
+`label="mechanical view"`), gated the same `isTouch || viewport ===
+"mobile"` way. Deliberately not bundled into Plan's own Phase 5 pass
+above — that pass was scoped to layout/structure parity (drawer, sub-tab
+rail, promote control, the chat-dock-auto-open fix), not the
+graph-canvas touch conflict, which is Phase 6's own concern.
 
 ## Phase 7 — Tablet
 **Not started.**
