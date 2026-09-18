@@ -2,11 +2,12 @@
 import { useState, useEffect, useCallback, useRef, memo } from "react";
 import { authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // same list-of-workspaces store every other project picker in this app reads from
+import { useViewport } from "../../hooks/useViewport";   // NEW — Phase 3 (mobile cheap wins), see the mobile master/detail branch below
 import PendingActionBar from "../PendingActionBar";   // NEW — Part 7
 import TerminalPanel from "../TerminalPanel";           // NEW — Part 7
 import {
   Folder, FolderOpen, File, Loader2, RefreshCw, WifiOff, ChevronRight,
-  HardDrive, AlertTriangle, FileText, TerminalSquare, Copy, Check,
+  HardDrive, AlertTriangle, FileText, TerminalSquare, Copy, Check, ArrowLeft,
 } from "lucide-react";
 
 /**
@@ -281,6 +282,21 @@ function FilePreview({ file }) {
 function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onActiveWorkspaceChange }) {
   const { workspaces } = useWorkspaces();
 
+  // NEW — Phase 3 (mobile cheap wins). Per useViewport.js's own file-header
+  // rule and components/mobile/README.md's cosmetic-vs-structural split:
+  // the tree/preview side-by-side split a few screens down IS a genuinely
+  // different navigation model on a phone width (a fixed 256px tree plus
+  // a squeezed preview pane doesn't fit next to it the way it does on
+  // desktop/tablet — this isn't just "hide a column"), so it calls the
+  // hook and branches in JS rather than leaning on CSS alone. Unlike
+  // NotebooksTab.jsx (Phase 5, ~10 branches, justified a dedicated
+  // components/mobile/NotebooksTab.jsx + controller-hook split), this is
+  // exactly one branch in a 550-line file — same "small enough to stay
+  // inline, revisit if it grows" call MOBILE_PLAN.md's Phase 2 entry
+  // already made for WorkspaceChatPanel.jsx's composer. No fork file.
+  const [viewport] = useViewport();
+  const isMobile = viewport === "mobile";
+
   const [selectedId, setSelectedId] = useState(null);
   const [live, setLive] = useState(false);
   const [statusChecked, setStatusChecked] = useState(false); // avoids a "not connected" flash before the first poll resolves
@@ -413,7 +429,12 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
 
   return (
     <div className="h-full flex flex-col min-h-0 text-sm">
-      <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--neutral-800)]">
+      {/* CHANGED — Phase 3: px-3 py-2 -> the shared content-padding token
+          (vertically only; py-2/0.5rem is already tighter than any
+          --viewport-touch-target value, so it stays fixed — this bar's
+          tap-friendliness comes from the buttons below, not the bar's own
+          padding), same cosmetic rationale as Settings/AuditLog. */}
+      <div className="shrink-0 flex items-center gap-2 px-[var(--viewport-content-padding)] py-2 border-b border-[var(--neutral-800)]">
         <HardDrive size={13} className="text-[var(--neutral-500)] shrink-0" />
         {workspaces.length > 0 ? (
           <select
@@ -421,7 +442,7 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
             name="localWorkspacePicker"
             value={selectedId || ""}
             onChange={(e) => setSelectedId(e.target.value)}
-            className="text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1 text-[var(--neutral-300)]"
+            className="text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 min-h-[var(--viewport-touch-target)] text-[var(--neutral-300)]"
           >
             {workspaces.map((ws) => (
               <option key={ws.id} value={ws.id}>{ws.name}</option>
@@ -445,7 +466,7 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
             <button
               type="button"
               onClick={() => setSubView("files")}
-              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md ${
+              className={`flex items-center gap-1 text-[11px] px-2 min-h-[var(--viewport-touch-target)] rounded-md ${
                 subView === "files" ? "bg-[var(--neutral-800)] text-[var(--neutral-200)]" : "text-[var(--neutral-500)]"
               }`}
             >
@@ -454,7 +475,7 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
             <button
               type="button"
               onClick={() => setSubView("terminal")}
-              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md ${
+              className={`flex items-center gap-1 text-[11px] px-2 min-h-[var(--viewport-touch-target)] rounded-md ${
                 subView === "terminal" ? "bg-[var(--neutral-800)] text-[var(--neutral-200)]" : "text-[var(--neutral-500)]"
               }`}
             >
@@ -468,7 +489,7 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
           onClick={handleRefresh}
           disabled={!live || rootLoading || subView !== "files"}
           title="Refresh"
-          className={`text-[var(--neutral-500)] hover:text-[var(--neutral-300)] disabled:opacity-40 disabled:cursor-not-allowed ${subView === "files" ? "ml-auto" : ""}`}
+          className={`flex items-center justify-center min-h-[var(--viewport-touch-target)] min-w-[var(--viewport-touch-target)] text-[var(--neutral-500)] hover:text-[var(--neutral-300)] disabled:opacity-40 disabled:cursor-not-allowed ${subView === "files" ? "ml-auto" : ""}`}
         >
           <RefreshCw size={13} className={rootLoading ? "animate-spin" : ""} />
         </button>
@@ -490,7 +511,15 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
         </div>
       ) : (
         <div className="flex-1 min-h-0 flex">
-          <div className="w-64 shrink-0 border-r border-[var(--neutral-800)] overflow-auto py-1.5">
+          {/* CHANGED — Phase 3: on mobile this pane and the preview pane
+              below are mutually exclusive (master/detail, tap a file to
+              drill in, Back to return) instead of side-by-side — see the
+              isMobile comment up by useViewport(). `hidden` rather than
+              unmounting: keeps FileTreeNode's per-node `expanded`/
+              `children` cache alive across a drill-in/Back round trip, so
+              flipping to a file and back doesn't silently re-collapse and
+              re-fetch a tree the user already opened. */}
+          <div className={`${isMobile ? (selectedFile ? "hidden" : "w-full") : "w-64 shrink-0 border-r border-[var(--neutral-800)]"} overflow-auto py-1.5`}>
             {!selectedId && (
               <p className="text-xs text-[var(--neutral-600)] px-3 py-2">Pick a workspace to get started.</p>
             )}
@@ -536,8 +565,19 @@ function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, on
             ))}
           </div>
 
-          <div className="flex-1 min-w-0">
-            <FilePreview file={selectedFile} />
+          <div className={`${isMobile ? (selectedFile ? "w-full flex flex-col min-h-0" : "hidden") : "flex-1 min-w-0"}`}>
+            {isMobile && selectedFile && (
+              <button
+                type="button"
+                onClick={() => setSelectedFile(null)}
+                className="shrink-0 flex items-center gap-1.5 text-xs text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-[var(--viewport-content-padding)] min-h-[var(--viewport-touch-target)] border-b border-[var(--neutral-800)]"
+              >
+                <ArrowLeft size={13} /> Back to files
+              </button>
+            )}
+            <div className={isMobile ? "flex-1 min-h-0" : "h-full"}>
+              <FilePreview file={selectedFile} />
+            </div>
           </div>
         </div>
       )}

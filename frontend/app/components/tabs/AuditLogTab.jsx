@@ -107,7 +107,11 @@ function AuditLogTab() {
   }, [subTab, selectedId]);
 
   return (
-    <div className="p-3 space-y-4 text-sm">
+    // CHANGED — Phase 3 (mobile cheap wins), same cosmetic-only rationale
+    // as SettingsTab.jsx (this tab only ever renders embedded inside it,
+    // single vertical column already, no structural fork warranted): swap
+    // hard-coded p-3 for the shared --viewport-content-padding token.
+    <div className="p-[var(--viewport-content-padding)] space-y-4 text-sm">
       <div className="flex items-center justify-end gap-2">
         {subTab === "workspace" && workspaces.length > 0 && (
           <select
@@ -115,7 +119,7 @@ function AuditLogTab() {
             name="auditLogWorkspace"
             value={selectedId || ""}
             onChange={(e) => setSelectedId(e.target.value)}
-            className="text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 py-1 text-[var(--neutral-300)]"
+            className="text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 min-h-[var(--viewport-touch-target)] text-[var(--neutral-300)]"
           >
             {workspaces.map((ws) => (
               <option key={ws.id} value={ws.id}>{ws.name}</option>
@@ -130,7 +134,7 @@ function AuditLogTab() {
             key={t.id}
             type="button"
             onClick={() => setSubTab(t.id)}
-            className={`text-xs rounded-md px-2.5 py-1 transition-colors flex items-center gap-1.5 ${
+            className={`text-xs rounded-md px-2.5 min-h-[var(--viewport-touch-target)] transition-colors flex items-center gap-1.5 ${
               subTab === t.id
                 ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                 : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"

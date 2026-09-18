@@ -16,11 +16,21 @@ function SettingsTab() {
   const [density, setDensity] = useDensity();
   const [proactiveSuggestions, setProactiveSuggestions] = useProactiveSuggestions();   // NEW — Phase 3 step 3.7
   return (
-    <div className="h-full overflow-y-auto px-4 py-6 max-w-xl mx-auto space-y-6 text-sm">
+    // CHANGED — Phase 3 (mobile cheap wins): px/py were hard-coded (1rem/
+    // 1.5rem). This is genuinely cosmetic-only (spacing, touch targets —
+    // no different component tree), so per useViewport.js's own file-header
+    // rule it stays inline in this file rather than forking into
+    // components/mobile/ — first real consumer of the `--viewport-*`
+    // tokens globals.css defined back in Phase 0 but nothing used yet.
+    // py-6 already equalled the desktop token (1.5rem) so this is a no-op
+    // there; px-4 (1rem) is slightly below it, so desktop gains ~8px of
+    // side padding to match py — deliberate, not a side effect. Mobile
+    // gets tighter padding (0.75rem) than either.
+    <div className="h-full overflow-y-auto px-[var(--viewport-content-padding)] py-[var(--viewport-content-padding)] max-w-xl mx-auto space-y-6 text-sm">
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Appearance</h2>
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
             <p className="text-xs text-[var(--neutral-300)]">Density</p>
             <p className="text-[var(--neutral-600)] text-xs mt-0.5">
               Compact tightens padding and line spacing across role
@@ -33,7 +43,7 @@ function SettingsTab() {
                 key={opt.id}
                 type="button"
                 onClick={() => setDensity(opt.id)}
-                className={`text-xs rounded-md px-2.5 py-1 transition-colors ${
+                className={`text-xs rounded-md px-2.5 min-h-[var(--viewport-touch-target)] flex items-center justify-center transition-colors ${
                   density === opt.id
                     ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                     : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
@@ -47,8 +57,8 @@ function SettingsTab() {
       </section>
       <section>
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Chat</h2>
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
             <p className="text-xs text-[var(--neutral-300)]">Proactive suggestions</p>
             <p className="text-[var(--neutral-600)] text-xs mt-0.5">
               Offer a follow-up generation after one finishes (e.g. a quiz
@@ -63,7 +73,7 @@ function SettingsTab() {
                 key={String(opt.id)}
                 type="button"
                 onClick={() => setProactiveSuggestions(opt.id)}
-                className={`text-xs rounded-md px-2.5 py-1 transition-colors ${
+                className={`text-xs rounded-md px-2.5 min-h-[var(--viewport-touch-target)] flex items-center justify-center transition-colors ${
                   proactiveSuggestions === opt.id
                     ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
                     : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
@@ -79,7 +89,7 @@ function SettingsTab() {
         <h2 className="text-[var(--neutral-400)] font-medium mb-2">Project</h2>
         <button
           onClick={registerProject}
-          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-300)] border border-[var(--neutral-800)] rounded-lg px-3 py-1.5"
+          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-300)] border border-[var(--neutral-800)] rounded-lg px-3 min-h-[var(--viewport-touch-target)] inline-flex items-center"
         >
           + Register external project
         </button>
