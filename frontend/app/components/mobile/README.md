@@ -44,7 +44,9 @@ put this on screen," that's a sign the shared logic needs to move up a level
   needed so the header button and `WorkspaceChatPanel.jsx` can talk without
   prop-drilling through every tab in between.
 
-Not yet forked: tab bodies, the ~8 shared modals (Phase 4's planned
-`ResponsiveSheet`), the big tabs (Phase 5), graph/canvas views (Phase 6),
-tablet (Phase 7). See the phased build order this repo's plan doc laid out —
-each later phase adds to this folder without touching what's already here.
+**Current status of everything past Phase 1 — including what's done out of
+order, what's inconsistent with the rule above, and known gaps — is tracked
+in `/MOBILE_PLAN.md` at the repo root, not here.** Update that file, not
+this list, when a phase's status changes; this section only describes
+Phase 1's own contents and shouldn't be re-purposed as a running tracker
+again (it already went stale once).
