@@ -7,6 +7,7 @@ import { useAuth } from "../context/AuthContext";
 import { Pencil, Check, X, FolderPlus, FolderMinus, Trash2, UserPlus, LogOut, ShieldAlert, Eye, EyeOff, Download, Upload } from "lucide-react";
 import ConfirmDialog from "./ConfirmDialog";
 import AddChatToWorkspaceModal from "./AddChatToWorkspaceModal";   // NEW — hosts "Add chat to project" here instead of its own sidebar icon (see ChatSidebar.jsx's project header row)
+import ResponsiveSheet from "./mobile/ResponsiveSheet"; // NEW — Phase 4 (mobile modal primitive, see MOBILE_PLAN.md)
 
 // Part 8.9: mirrors eo/chat_workspace.py's five-tier role model exactly —
 // viewer < editor < moderator < partner <= owner. Kept as a local const
@@ -285,12 +286,23 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div
-        className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] rounded-lg p-4 w-96 max-h-[80vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-1 mb-3">
+    // CHANGED — Phase 4 (mobile modal primitive): this and the
+    // hand-rolled pendingLeave box further down both now render
+    // through ResponsiveSheet — same visual box on desktop (colors/
+    // border/padding/width unchanged, now via className+maxWidth
+    // instead of this div's own classes), full-screen bottom sheet on
+    // mobile instead of a w-96 box with 5+ rows of member-management
+    // controls squeezed into a phone-width centered dialog. `open`
+    // is always true here since the caller (NotebooksTab.jsx and
+    // others) only ever mounts this component while it should be
+    // showing — same as before this retrofit, just explicit now that
+    // ResponsiveSheet expects an `open` prop. Wrapped in a fragment
+    // since the nested ConfirmDialogs/AddChatToWorkspaceModal/
+    // pendingLeave sheet below are their own independently-positioned
+    // overlays, not part of this dialog's own box.
+    <>
+    <ResponsiveSheet open onClose={onClose} maxWidth="max-w-sm" className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] p-4">
+      <div className="flex items-center gap-1 mb-3">
           {editingName ? (
             <>
               <input
@@ -584,7 +596,7 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
           </div>
           <button onClick={onClose} className="text-xs text-[var(--neutral-400)] px-3 py-1.5">Close</button>
         </div>
-      </div>
+      </ResponsiveSheet>
 
       {addingChat && (
         <AddChatToWorkspaceModal
@@ -636,45 +648,38 @@ export default function ManageWorkspaceModal({ workspace, allChats, onClose }) {
         onCancel={() => setPendingForceRemoveOwner(false)}
       />
 
-      {pendingLeave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setPendingLeave(false)}>
-          <div
-            className="w-80 rounded-lg p-4 bg-[var(--neutral-900)] border border-[var(--neutral-700)]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-2">Leave project</h3>
-            {isOwner ? (
-              <>
-                <p className="text-xs text-[var(--neutral-400)] mb-2">
-                  You&apos;re the owner. Hand ownership to a partner, or leave the project jointly owned.
-                </p>
-                {eligiblePartners.length > 0 && (
-                  <select
-                    id="leave-successor"
-                    name="leaveSuccessor"
-                    value={successorId}
-                    onChange={(e) => setSuccessorId(e.target.value)}
-                    className="w-full mb-2 text-xs bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-2 py-1.5 outline-none"
-                  >
-                    <option value="">Make joint (no successor)</option>
-                    {eligiblePartners.map((p) => (
-                      <option key={p.user_id} value={p.user_id}>Transfer to {displayName(p)}</option>
-                    ))}
-                  </select>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-[var(--neutral-400)] mb-3">
-                Leave &quot;{workspace.name}&quot;? You lose access to every chat in this project.
-              </p>
+      <ResponsiveSheet open={pendingLeave} onClose={() => setPendingLeave(false)} maxWidth="max-w-xs" className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] p-4">
+        <h3 className="text-sm font-medium text-[var(--neutral-200)] mb-2">Leave project</h3>
+        {isOwner ? (
+          <>
+            <p className="text-xs text-[var(--neutral-400)] mb-2">
+              You&apos;re the owner. Hand ownership to a partner, or leave the project jointly owned.
+            </p>
+            {eligiblePartners.length > 0 && (
+              <select
+                id="leave-successor"
+                name="leaveSuccessor"
+                value={successorId}
+                onChange={(e) => setSuccessorId(e.target.value)}
+                className="w-full mb-2 text-xs bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-2 py-1.5 outline-none"
+              >
+                <option value="">Make joint (no successor)</option>
+                {eligiblePartners.map((p) => (
+                  <option key={p.user_id} value={p.user_id}>Transfer to {displayName(p)}</option>
+                ))}
+              </select>
             )}
-            <div className="flex justify-end gap-2 mt-1">
-              <button onClick={() => setPendingLeave(false)} className="text-xs px-3 py-1.5 text-[var(--neutral-400)]">Cancel</button>
-              <button onClick={confirmLeave} className="text-xs px-3 py-1.5 rounded bg-red-500/90 text-white font-medium">Leave</button>
-            </div>
-          </div>
+          </>
+        ) : (
+          <p className="text-xs text-[var(--neutral-400)] mb-3">
+            Leave &quot;{workspace.name}&quot;? You lose access to every chat in this project.
+          </p>
+        )}
+        <div className="flex justify-end gap-2 mt-1">
+          <button onClick={() => setPendingLeave(false)} className="text-xs px-3 py-1.5 text-[var(--neutral-400)]">Cancel</button>
+          <button onClick={confirmLeave} className="text-xs px-3 py-1.5 rounded bg-red-500/90 text-white font-medium">Leave</button>
         </div>
-      )}
-    </div>
+      </ResponsiveSheet>
+    </>
   );
 }
