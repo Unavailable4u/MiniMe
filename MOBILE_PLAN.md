@@ -25,7 +25,34 @@ wasn't justified; revisit if that branch count grows). The drawer
 piece is properly forked into `mobile/WorkingPanelDrawer.jsx`.
 
 ## Phase 3 — Cheap wins
-**Not started.** SettingsTab, AuditLogTab, LocalWorkspaceTab.
+**Done.** SettingsTab, AuditLogTab, LocalWorkspaceTab. Applied the
+Phase 5 fork rule (structural differences get a JS branch; cosmetic
+ones don't) and confirmed it scales down, not just up:
+
+- `SettingsTab.jsx`, `AuditLogTab.jsx` — both already a single
+  vertical column with no sidebar/columns to hide, so per
+  `useViewport.js`'s own cosmetic-vs-structural split these needed no
+  branch and no `components/mobile/` fork. Cosmetic-only: swapped
+  hard-coded padding for `--viewport-content-padding` and gave every
+  tappable control a `--viewport-touch-target` min-height. First real
+  consumers of those tokens — Phase 0 defined them in `globals.css`
+  but nothing used them until now, so this also validates the token
+  plumbing itself, not just the fork rule.
+- `LocalWorkspaceTab.jsx` — the one genuine structural case in this
+  batch: its file-tree/preview pane are side-by-side on desktop, which
+  doesn't fit a phone width. Didn't get a `components/mobile/` fork
+  though — one `isMobile` branch (from `useViewport()`) toggling
+  master/detail (tree full-width, tap a file to swap to a full-width
+  preview with a Back button) in the same file, same "small enough to
+  stay inline, revisit if it grows" call already made for
+  `WorkspaceChatPanel.jsx`'s composer in Phase 2. No controller-hook
+  split — at one branch there's nothing shared to extract yet.
+
+Net: the rule holds at small scale without forcing every tab into
+`components/mobile/` just because the folder exists. Same three
+checks (real structural difference? branch count? shared-logic
+extraction actually needed?) should gate Research/Plan/Test/Growth/
+Build in Phase 5 too, not just "big tab -> automatic fork."
 
 ## Phase 4 — Modals (`ResponsiveSheet`)
 **Primitive built; 2 of ~8 modals retrofitted.**
@@ -65,7 +92,16 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
   cosmetic/structural rule.
   **Decision (locked in):** retrofit this into a real
   `mobile/NotebooksTab.jsx` fork rather than keep the inline branches.
-  Not yet done — tracked here until it is. Once retrofit, this is also
+  **Correction: this line was stale — the retrofit is actually done.**
+  `components/tabs/NotebooksTab.jsx` is now a `useNotebooksTabController`
+  hook plus a router (`NotebooksTab` calls the hook once and renders
+  either `NotebooksTabDesktop` or `components/mobile/NotebooksTab.jsx`
+  off `controller.viewport`); the mobile file takes the built
+  `controller` as a prop rather than calling the hook itself, since the
+  hook owns effects that must only run once per render. Found this
+  while working Phase 3 (step 5) below, since it's the reference
+  pattern that phase's fork-rule decisions lean on — fixing the status
+  here rather than leaving it to whoever reads this next. This is also
   the reference pattern for Research/Plan/Test/Growth/Build, since
   Notebooks' layout is close to identical to the rest.
 - Research, Plan, Test, Growth, Build: **not started.**
