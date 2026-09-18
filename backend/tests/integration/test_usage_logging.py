@@ -44,17 +44,33 @@ TODAY = date.today().isoformat()
 class _FakeBus:
     """In-memory stand-in for memory.bus's read/write, scoped to one test
     via monkeypatch -- avoids needing real Upstash credentials or network
-    access. Mirrors bus.read/write's own (key, default) / (key, value)
+    access. Mirrors bus.read/write's own (key, default) / (key, value, ex)
     signatures exactly, since log_usage() calls bus_read/bus_write with
-    those signatures."""
+    those signatures.
+
+    Bug fix (wiring audit): `write()` used to take only (key, value),
+    dropped since memory.bus.write() only had that shape when this
+    double was written. log_usage()'s TTL fix (_USAGE_RECORD_TTL_SECONDS,
+    utils/llm_client.py) now always calls bus_write(key, value,
+    ex=...) -- against the real bus that's a no-op-on-the-assertion
+    extra kwarg (write() there already accepts ex: int = None), but
+    against this stale double it raised
+    "write() got an unexpected keyword argument 'ex'" on every call,
+    so every test below was failing before it ever reached its
+    assertion. `ex` is accepted and stored for inspection (tests can
+    assert on it if they want to verify the TTL was actually passed
+    through) but otherwise ignored, since this in-memory store doesn't
+    expire keys."""
     def __init__(self):
         self.store = {}
+        self.ttls = {}  # key -> last `ex` value passed to write(), for tests that want to assert on it
 
     def read(self, key, default=None):
         return self.store.get(key, default)
 
-    def write(self, key, value):
+    def write(self, key, value, ex=None):
         self.store[key] = value
+        self.ttls[key] = ex
 
 
 class _FakeEmitter:
