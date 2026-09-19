@@ -320,7 +320,56 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
     keyboard up — same "confirm on real hardware" caveat as every other
     entry, and the two things most worth a tap-through are the
     Personas/History cards and the create-project sheet.
-- Growth, Build: **not started.**
+- **Sidebar/drawer row actions — cross-cutting pass across all six stage
+  tabs + the Chat sidebar (not a per-tab mobile fork).** Closes the
+  "`opacity-0 group-hover:opacity-100` … still present, un-fixed, in
+  GrowthTab/BuildTab/NotebooksTab/ChatSidebar" items called out in the
+  Research, Plan and Test entries above, and adds the one thing three of
+  the tabs were missing entirely. Four changes:
+  - **Hover-reveal → shared CSS classes** (`globals.css`: `row-reveal`,
+    `touch-target`, `touch-row`, `touch-input`). Deliberately CSS keyed to
+    touch input (`hover: none` / `pointer: coarse`) *and*
+    `data-viewport="mobile"`, not `isMobile` branches: a landscape tablet
+    is touch-only at a desktop width (the old `isMobile ? "opacity-100" :
+    "opacity-0 group-hover:opacity-100"` never revealed there), and
+    Build/Growth have no mobile fork to branch in. Mouse-driven desktop is
+    unchanged. `touch-target` = 40px hit area + 18px glyph (TestTab's
+    drawer header already used 40px; Plan/Research/Notebooks' were bare
+    `p-1`, ~24px, now 40px too). `touch-input` = 16px, for the same iOS
+    focus-zoom reason as Test's rename field.
+  - **One shared per-row "⋮" menu** (`components/RowMenu.jsx`), replacing
+    the Pencil+Trash2 pair in every stage tab's nested chat rows and the
+    Chat sidebar's private copy of the menu. Outside-tap closes on
+    `pointerdown`, not `mousedown` (iOS Safari doesn't send mouse events
+    to `document` for taps on non-interactive elements, so the old menu
+    could stay stuck open), and the panel flips upward when opening down
+    would clip it inside the scrolling list.
+  - **Project management added to Research, Build, Test and Growth**
+    (the "⋮" → `ManageWorkspaceModal` entry point Notebooks/Plan/Chat
+    already had). Deleting the selected project is safe in Research/
+    Build/Test (existing `stillExists` recovery). **Growth needed a real
+    fix to make that true:** it rendered off the raw `selectedWsId`, which
+    outlives a deleted workspace and 404s every view keyed on it; it now
+    renders off `liveWsId` (null once the workspace is gone).
+  - **Still not done:** Build and Growth have no mobile fork at all —
+    on a phone they still show the fixed-width project column, not a
+    drawer, and are not in `TABS_WITH_OWN_MOBILE_SIDEBAR`. The touch fixes
+    above make that column usable; they don't replace the Phase 5 work.
+    Also unchanged: `SourceRow`/`SourceGroup` in NotebooksTab's main pane
+    still use hover-only rename/delete buttons.
+  - **Verified:** `next lint` (no new warnings vs. baseline) and `next
+    build` clean; the new CSS confirmed present in the built stylesheet;
+    `RowMenu` exercised in jsdom (open/close, outside-pointerdown, Escape,
+    click isolation from the clickable parent row, single-open, flip-up)
+    with mutation checks that reintroduced three of those bugs and
+    confirmed each is caught. **Not verified:** any tab's full render
+    (the manage modal from a real drawer, Growth's delete-then-empty-state
+    path) and pixel layout — jsdom has no layout engine, so nothing above
+    proves the 40px rows actually fit at 360px. Same "confirm on real
+    hardware" caveat as every other entry; the two worth a tap-through are
+    the Chat drawer's last-row menu (flip-up) and Growth's delete flow.
+- Growth, Build: **mobile fork not started** (see the row-actions pass
+  above for what did ship for them).
 
 ## Phase 6 — Graphs/canvases
 **Ahead of schedule for the two tabs converted so far.**

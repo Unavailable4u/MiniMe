@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, memo } from "react";
 import {
   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
-  Pencil, X, Trash2, ChevronRight, ChevronLeft,
+  MoreVertical, X, ChevronRight, ChevronLeft,
 } from "lucide-react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
@@ -13,6 +13,8 @@ import { FactsView } from "./NotebooksTab";
 import WorkspaceChatPanel from "../../components/WorkspaceChatPanel";
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
+import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — project management (rename/delete/members/export), parity with Notebooks/Plan — was already built, just never wired into this tab
+import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
 import Markdown from "../Markdown";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 
@@ -65,9 +67,24 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
   const [editingChatId, setEditingChatId] = useState(null);
   const [editChatTitle, setEditChatTitle] = useState("");
   const [pendingDeleteChat, setPendingDeleteChat] = useState(null);
+  // NEW — project management: which workspace's manage modal (rename /
+  // delete / members / export) is open. Same shape as PlanTab's own
+  // managingWorkspace — ManageWorkspaceModal already existed fully
+  // built, this tab just never had an entry point into it.
+  const [managingWorkspace, setManagingWorkspace] = useState(null);
 
   const growthWorkspaces = (workspaces || []).filter((w) => (w.active_stages || [w.stage]).includes("growth"));
   const selectedGrowthWs = growthWorkspaces.find((w) => w.id === selectedWsId) || null;
+  // NEW — `selectedWsId` alone can outlive its workspace: it's restored
+  // from localStorage, and now that this tab can delete a workspace
+  // (ManageWorkspaceModal) it can also point at one that was just
+  // removed. Every view below fetches by this id, so a dead one 404s on
+  // each render. The other stage tabs avoid this by rendering off a
+  // derived `activeWs` (null once it's gone) — this is that, kept as an
+  // id because the views below only need the id. Row highlighting still
+  // reads `selectedWsId`, which is fine: it only ever matches a row that
+  // exists.
+  const liveWsId = selectedGrowthWs?.id || null;
 
   // NEW — item #1: the Data bubble now lives in AppShell's top nav, not
   // floating over this tab's own content, so this just reports which
@@ -175,7 +192,7 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
           (§0 of the design doc), just filtered to stage === "growth". */}
       {projectsCollapsed ? (
         <aside className="w-10 border-r border-[var(--neutral-800)] flex flex-col items-center shrink-0 py-3 gap-3">
-          <button onClick={toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show workspaces">
+          <button onClick={toggleProjects} className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show workspaces">
             <ChevronRight size={16} />
           </button>
         </aside>
@@ -191,13 +208,13 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
             <button
               onClick={() => setShowCreateModal(true)}
               title="New growth workspace"
-              className="normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+              className="touch-target normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
             >
               <Plus size={14} />
             </button>
             {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
                 own ChevronLeft toggle. */}
-            <button onClick={toggleProjects} title="Hide workspaces" className="normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+            <button onClick={toggleProjects} title="Hide workspaces" className="touch-target normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
               <ChevronLeft size={14} />
             </button>
           </div>
@@ -220,7 +237,7 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
             return (
               <div key={w.id}>
                 <div
-                  className={`group w-full flex items-center min-w-0 text-left px-3 py-2 text-sm transition-colors cursor-pointer ${
+                  className={`group touch-row w-full flex items-center min-w-0 text-left px-3 py-2 text-sm transition-colors cursor-pointer ${
                     isSelected
                       ? "bg-[var(--accent)] text-[var(--accent-text)]"
                       : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
@@ -234,11 +251,16 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
                   </span>
                   {/* NEW — issue #3: "+" creates a chat nested in this
                       workspace, same idea as starting a new chat under a
-                      group in the Chat sidebar. */}
+                      group in the Chat sidebar. CHANGED — `row-reveal`:
+                      hidden until hover with a mouse, always visible on
+                      touch; `touch-target`: 40px hit area on touch. This
+                      tab has no mobile fork to branch in, which is why
+                      this is CSS rather than `isMobile`. */}
                   <button
                     onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(w); }}
                     title="New chat in this workspace"
-                    className={`shrink-0 opacity-0 group-hover:opacity-100 ${
+                    aria-label="New chat in this workspace"
+                    className={`row-reveal touch-target shrink-0 ${
                       isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
                     }`}
                     disabled={creatingChatForWs === w.id}
@@ -249,12 +271,28 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
                       <Plus size={12} />
                     )}
                   </button>
+                  {/* NEW — workspace management, same "⋮" ->
+                      ManageWorkspaceModal entry point Notebooks and Plan
+                      have. stopPropagation: this row is itself clickable
+                      (select workspace). Colored like the "+" beside it
+                      so it stays legible on the selected row's accent
+                      background. */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setManagingWorkspace(w); }}
+                    title="Rename or delete workspace"
+                    aria-label="Manage workspace"
+                    className={`row-reveal touch-target shrink-0 ${
+                      isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-600)] hover:text-[var(--neutral-200)]"
+                    }`}
+                  >
+                    <MoreVertical size={13} />
+                  </button>
                 </div>
                 {memberChats.map((chat) => (
                   <div
                     key={chat.id}
                     onClick={() => editingChatId !== chat.id && openInDock(chat.id)}
-                    className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                    className={`group touch-row flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
                       chat.id === activeChatId
                         ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                         : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
@@ -270,25 +308,22 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
                           value={editChatTitle}
                           onChange={(e) => setEditChatTitle(e.target.value)}
                           onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                          className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
+                          className="touch-input flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
                         />
-                        <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
-                        <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
+                        <button onClick={() => commitRenameChat(chat.id)} aria-label="Save chat title" className="touch-target"><Check size={12} className="text-green-400" /></button>
+                        <button onClick={() => setEditingChatId(null)} aria-label="Cancel rename" className="touch-target"><X size={12} className="text-[var(--neutral-500)]" /></button>
                       </div>
                     ) : (
                       <>
                         <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
                         <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                        {/* NEW — issue #3: rename/delete, same controls
-                            ChatSidebar's own chat rows already offer. */}
-                        <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
-                          <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
-                            <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                          </button>
-                          <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
-                            <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                          </button>
-                        </div>
+                        {/* CHANGED — was a hover-only Pencil + Trash2 pair, which
+                            never appeared on a touch screen. Now the same
+                            single "..." menu the Chat sidebar's rows use. */}
+                        <ChatRowMenu
+                          onRename={() => startRenameChat(chat)}
+                          onDelete={() => askDeleteChat(chat)}
+                        />
                       </>
                     )}
                   </div>
@@ -325,20 +360,20 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
         </nav>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          {!selectedWsId && (
+          {!liveWsId && (
             <div className="text-sm text-[var(--neutral-500)]">
               Select a Growth workspace on the left to get started.
             </div>
           )}
-          {selectedWsId && activeSubTab === "voice" && (
-            <VoiceView wsId={selectedWsId} />
+          {liveWsId && activeSubTab === "voice" && (
+            <VoiceView wsId={liveWsId} />
           )}
-          {selectedWsId && activeSubTab === "content" && (
-            <ContentView wsId={selectedWsId} onDispatched={() => setDockCollapsed(false)} />
+          {liveWsId && activeSubTab === "content" && (
+            <ContentView wsId={liveWsId} onDispatched={() => setDockCollapsed(false)} />
           )}
-          {selectedWsId && activeSubTab === "calendar" && <CalendarView />}
-          {selectedWsId && activeSubTab === "audit" && <ContentAuditView wsId={selectedWsId} />}
-          {selectedWsId && activeSubTab !== "voice" && activeSubTab !== "content" && activeSubTab !== "calendar" && activeSubTab !== "audit" && (
+          {liveWsId && activeSubTab === "calendar" && <CalendarView />}
+          {liveWsId && activeSubTab === "audit" && <ContentAuditView wsId={liveWsId} />}
+          {liveWsId && activeSubTab !== "voice" && activeSubTab !== "content" && activeSubTab !== "calendar" && activeSubTab !== "audit" && (
             <ComingSoonPanel subTabId={activeSubTab} />
           )}
         </div>
@@ -360,12 +395,12 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
           the width back; the floating bubble below is the way back in,
           matching Research/Plan/Build/Test/Notebooks (this tab was the
           only one of the six that never had one). */}
-      {selectedWsId && !dockCollapsed && (
+      {liveWsId && !dockCollapsed && (
         <div className="shrink-0 border-l border-[var(--neutral-800)] w-[480px]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleDock} workspaceId={selectedWsId} stacked />
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleDock} workspaceId={liveWsId} stacked />
         </div>
       )}
-      {selectedWsId && dockCollapsed && (
+      {liveWsId && dockCollapsed && (
         <button
           onClick={toggleDock}
           title="Open chat"
@@ -373,6 +408,18 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
         >
           <MessageSquare size={18} />
         </button>
+      )}
+
+      {/* NEW — project management modal; see managingWorkspace above.
+          Deleting the selected workspace here is safe: liveWsId goes null
+          once it's gone, so the content pane and chat dock fall back to
+          their empty states instead of fetching a dead id. */}
+      {managingWorkspace && (
+        <ManageWorkspaceModal
+          workspace={managingWorkspace}
+          allChats={chats}
+          onClose={() => setManagingWorkspace(null)}
+        />
       )}
 
       {/* NEW — item #10 / B3: stage-aware create modal (B1). Auto-selects

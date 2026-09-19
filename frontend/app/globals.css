@@ -167,6 +167,101 @@
   display: none;
 }
 
+/* ---------------------------------------------------------------
+   Row actions in sidebars/drawers (project rows, chat rows) —
+   hover-reveal on a mouse, always visible and finger-sized on touch.
+
+   These rows carry small icon buttons ("+", the "⋮" menu) that used to
+   be `opacity-0 group-hover:opacity-100`. A touch screen has no hover
+   state, so on a phone or tablet those buttons never appeared at all.
+   They're CSS classes rather than per-component `isMobile` branches
+   because the fix is purely cosmetic (see components/mobile/README.md)
+   and because "touch" isn't the same axis as "narrow": a landscape
+   tablet is touch-only at a desktop width, and BuildTab/GrowthTab have
+   no mobile fork to branch in at all. Both signals count as touch here:
+     - the input itself: `hover: none` / `pointer: coarse` (real phones,
+       tablets, and devtools device emulation), and
+     - `data-viewport="mobile"` (a narrow desktop window, or
+       ?forceViewport=mobile) — same bar the existing `isMobile`
+       branches in PlanTab/ResearchTab/TestTab already use.
+   A touchscreen laptop whose primary input is still a mouse reports
+   `hover: hover`, so it correctly keeps the desktop behavior.
+
+   .row-reveal   — put on the button. Hidden until the parent `.group`
+                   row is hovered or focused (or the button's own menu
+                   is open); always visible on touch.
+   .touch-target — put on an icon-only button. On touch: 40px hit area
+                   (the size TestTab's drawer header already used) and
+                   an 18px glyph. The negative block margin lets the hit
+                   area reach into the row's own padding, so rows stay
+                   ~40px tall instead of growing by 16px per button.
+   .touch-row    — put on a row's main tap area / a menu item. On touch:
+                   at least 40px tall.
+   .touch-input  — put on small inline text inputs (rename fields). On
+                   touch: 16px, because iOS Safari zooms the whole page
+                   on focus of anything smaller.
+   None of these change anything on a mouse-driven desktop. */
+.row-reveal {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.group:hover .row-reveal,
+.group:focus-within .row-reveal,
+.row-reveal:focus-visible,
+.row-reveal[aria-expanded="true"] {
+  opacity: 1;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .row-reveal {
+    opacity: 1;
+  }
+  .touch-target {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+    margin-block: -0.5rem;
+  }
+  .touch-target > svg {
+    width: 1.125rem;
+    height: 1.125rem;
+  }
+  .touch-row {
+    min-height: 2.5rem;
+  }
+  .touch-input {
+    font-size: 1rem;
+  }
+}
+
+/* Same rules, keyed off the app's own viewport switch — kept as a
+   separate block (rather than folded into the media query above)
+   because a media query and an attribute selector can't share one
+   selector list. Keep the two blocks in sync. */
+[data-viewport="mobile"] .row-reveal {
+  opacity: 1;
+}
+[data-viewport="mobile"] .touch-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  margin-block: -0.5rem;
+}
+[data-viewport="mobile"] .touch-target > svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+[data-viewport="mobile"] .touch-row {
+  min-height: 2.5rem;
+}
+[data-viewport="mobile"] .touch-input {
+  font-size: 1rem;
+}
+
 /* NEW — mobile height fix: h-screen alone (height:100vh) is Tailwind's
    utility for a fixed-viewport-height shell (see AppShell.jsx's outer
    div), but 100vh on a mobile browser is measured against the LARGEST
