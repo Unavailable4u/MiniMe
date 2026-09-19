@@ -70,7 +70,20 @@ Retrofitted (the two identified as the known gap below):
   `ConfirmDialog` uses got mobile behavior automatically, no changes
   needed there.
 
-**Not yet retrofitted:** `CreateWorkspaceModal`, `ManageBatchModal`,
+**Also retrofitted, as part of Test's Phase 5 pass:** `CreateWorkspaceModal`
+(reached from every stage tab's "new project" button, so this one was
+always going to come up). Same visual box on desktop (`max-w-xs` is the
+same 20rem as the old `w-80`; only the backdrop moved from `black/50` to
+`ResponsiveSheet`'s `black/60`, same as `ConfirmDialog`/
+`ManageWorkspaceModal` already did), bottom sheet on mobile. One trap
+worth knowing about if you retrofit another modal whose `onClose` takes
+an argument: `ResponsiveSheet` hands its dismiss handler straight to a
+backdrop `onClick`, so passing the caller's `onClose` through directly
+leaks the click *event* in as that argument — `if (created)` is then
+truthy and `created.id` is `undefined`. `CreateWorkspaceModal` wraps it
+(`dismiss`) for that reason.
+
+**Not yet retrofitted:** `ManageBatchModal`,
 `AttachChatToWorkspaceModal`/`AddChatToWorkspaceModal`,
 `RolePickerOverlay`. Route each through `ResponsiveSheet` the same way
 as it comes up in Phase 3/5 — see `ResponsiveSheet.jsx`'s own header
@@ -216,7 +229,98 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
     fix when each of those gets its own mobile pass, not before.
   - Not tested on a real phone yet — same caveat as Research's own
     entry above.
-- Test, Growth, Build: **not started.**
+- **Test: done, following the Notebooks/Research/Plan reference pattern —
+  plus fixes for things Test specifically needed.**
+  `components/tabs/TestTab.jsx` is now a `useTestTabController` hook plus
+  a thin router (`TestTab` calls the hook once, renders either
+  `TestTabDesktop` or `components/mobile/TestTab.jsx` off
+  `controller.viewport`), same split as the other three. The mobile file
+  supplies the things that differ by viewport — project list as a
+  `MobileDrawer`, vertical icon-only sub-tab rail (five tabs, with
+  `overflow-y-auto` like Plan's so a landscape phone can't clip the last
+  one), one-line active-sub-tab header, single combo `<select>` for
+  promote — everything else (`projectRows`, `subTabContent`,
+  `dockAndModals`, `renderRoot`) stays shared in the controller. Chrome
+  geometry (rail width, button size, header heights) is deliberately
+  identical to Plan's so switching tabs doesn't shift anything.
+  - **`TABS_WITH_OWN_MOBILE_SIDEBAR` + `sidebarLabel`: `"test"` added in
+    the same change** (`AppShell.jsx`), per Research's write-up above.
+  - **The chat dock starts collapsed on mobile — this is the one that
+    mattered.** Test defaults its dock to *open* (design spec §1.3: the
+    live persona branches are the tab's main value), which is right
+    beside the sub-tabs on desktop but is a full-screen
+    `lg:hidden fixed inset-0` overlay on a phone — so the first visit to
+    the tab showed nothing but a chat panel. Fixes: (1) the initial state
+    is read off `<html data-viewport>` in a lazy `useState` initializer
+    rather than `useViewport()`, because that hook starts at `"desktop"`
+    on every first render for hydration safety, which would flash the
+    overlay for a frame (safe here because this tab is never in the
+    server-rendered HTML — `AppShell`'s `visitedTabs` starts as
+    `{"chat"}`); (2) mobile never restores or writes
+    `minime_test_chatdock_collapsed` — that key stays the *desktop*
+    preference, so a phone session can't flip what the desktop layout
+    restores. Tablet is untouched (still uses the persisted key).
+  - **Two "open chat" paths, not one.** `openInDock` keeps the mobile
+    guard Plan/Research/Notebooks have (drawer chat rows: don't slam the
+    overlay on browse). New `revealChatInDock` always expands, and is
+    what `RunSimulationPanel`'s "Run simulation" and `HistoryPanel`'s
+    "Open chat" use — with only the guarded one, tapping "Run
+    simulation" on a phone would dispatch the run and then show nothing.
+    "+ new chat" in the drawer also closes the drawer (it sits at z-50,
+    above the z-40 chat overlay it just opened); creating a project from
+    the drawer closes it too.
+  - **Chat overlay follows the keyboard-aware viewport.** It was
+    `fixed inset-0` (layout viewport — doesn't shrink for the iOS
+    keyboard, so the composer ended up underneath it); it now uses the
+    shell's own `app-shell-viewport` class. Also: the hidden desktop dock
+    instance (`hidden lg:flex`, display:none below `lg`) is no longer
+    mounted at all on mobile — it was a second full `WorkspaceChatPanel`
+    mounted for nothing. Floating chat bubble pads for the home
+    indicator; the content pane gets `pb-20` on mobile so the last card
+    can scroll clear of it.
+  - **Sub-panels.** All five take an `isMobile` prop (Research's
+    `SourcesPanel` convention) for the touch-only bits: 16px form
+    controls (iOS Safari zooms the page on focus of anything under
+    16px — `RunSimulationPanel`'s select/textarea, `PersonasPanel`'s
+    brief editor, the promote select, the rename input,
+    `CreateWorkspaceModal`'s name field), 40–44px hit areas on
+    icon-only buttons, full-width Run button, and mobile-accurate copy
+    (the footer said "dock on the right"). The two *layout* bugs —
+    `PersonasPanel`'s and `HistoryPanel`'s card headers, which put the
+    label and an action cluster in one non-wrapping row and crushed the
+    label into a sliver — are fixed with `flex-wrap` rather than an
+    `isMobile` branch, so they're container-driven: a desktop with the
+    560px dock open has the same ~240px pane, and gets the fix too. Wide
+    panes look exactly as before. Rendered markdown gets
+    `min-w-0 break-words` so a long URL can't push the pane sideways.
+  - **Actionable empty state** (`emptyState` slot, new vs. the other
+    three tabs, which reuse desktop's one-line "Pick or create a
+    project"): on a phone that sentence doesn't say the list is behind
+    the hamburger.
+  - **Same touch-usability fix Plan/Research made**
+    (`opacity-0 group-hover:opacity-100` / `hidden group-hover:flex`
+    never reveal on touch) applied to Test's project/chat rows. Still
+    present, un-fixed, in GrowthTab/BuildTab/NotebooksTab/ChatSidebar.
+  - **Copy fix:** the empty project list said "promote a built feature
+    from the Tasks tab" — that tab's label is "Build" now.
+  - **Worth carrying back to Plan/Research/Notebooks:** their
+    `promoteControl` `<select>` is still `text-xs`, so tapping it zooms
+    the page on iOS; Test's is `text-base`. One-word change in each.
+  - **Verified:** `next lint` and `next build` clean (no warnings in
+    touched files); every new Tailwind class confirmed present in the
+    built CSS; and a jsdom harness mounting the real `TestTab` +
+    mobile shell + `MobileDrawer` + `ResponsiveSheet` against mocked
+    contexts at 390/900/1280px (first paint, drawer open/close via the
+    real event, dock open/close/persistence, Run/History/Personas/
+    Reports/promote/create flows, desktop unchanged) — including
+    mutation checks that reintroduced three of the bugs above and
+    confirmed the harness catches each. **Not verified: pixel layout.**
+    jsdom has no layout engine, so nothing above proves the cards
+    actually *fit* at 360px, or how the sheet behaves with the iOS
+    keyboard up — same "confirm on real hardware" caveat as every other
+    entry, and the two things most worth a tap-through are the
+    Personas/History cards and the create-project sheet.
+- Growth, Build: **not started.**
 
 ## Phase 6 — Graphs/canvases
 **Ahead of schedule for the two tabs converted so far.**
