@@ -21,6 +21,7 @@ import KnowledgeGraphView from "../KnowledgeGraphView";
 import TouchCollapsibleGraph from "../TouchCollapsibleGraph"; // NEW — mobile UI retrofit (Phase 6 gap close): same touch-drag-vs-scroll fix WorkingPanel.jsx already uses for RoutingTraceGraph/DependencyGraph
 import MermaidDiagram from "../MermaidDiagram";
 import NotebooksGeneratePicker from "../notebooks/NotebooksGeneratePicker"; // NEW — Notebooks integration guide §4.1: picker/chip-confirmation "Generate" flow
+import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
 import ConfirmDialog from "../ConfirmDialog";           // NEW — §2/§3 fix: was already built, unused here
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — §3 fix: was already built (rename/delete/members), unused here
 import WorkspaceChatPanel from "../WorkspaceChatPanel";  // NEW — §6.2: embedded chat + WorkingPanel dock
@@ -3198,7 +3199,7 @@ export function useNotebooksTabController({ onPromoted, onActiveWorkspaceChange 
             >
               <button
                 onClick={() => setSelectedId(ws.id)}
-                className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
+                className="touch-row flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
               >
                 <span className="flex items-center min-w-0">
                   <WorkspaceStageIcons workspace={ws} />
@@ -3212,7 +3213,8 @@ export function useNotebooksTabController({ onPromoted, onActiveWorkspaceChange 
               <button
                 onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
                 title="New chat in this notebook"
-                className="shrink-0 opacity-0 group-hover:opacity-100 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+                aria-label="New chat in this notebook"
+                className="row-reveal touch-target shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
                 disabled={creatingChatForWs === ws.id}
               >
                 {creatingChatForWs === ws.id ? (
@@ -3224,7 +3226,8 @@ export function useNotebooksTabController({ onPromoted, onActiveWorkspaceChange 
               <button
                 onClick={() => setManagingWorkspace(ws)}
                 title="Rename or delete notebook"
-                className="shrink-0 pr-2 text-[var(--neutral-600)] opacity-0 group-hover:opacity-100 hover:text-[var(--neutral-200)]"
+                aria-label="Manage notebook"
+                className="row-reveal touch-target shrink-0 pr-2 text-[var(--neutral-600)] hover:text-[var(--neutral-200)]"
               >
                 <MoreVertical size={13} />
               </button>
@@ -3233,7 +3236,7 @@ export function useNotebooksTabController({ onPromoted, onActiveWorkspaceChange 
               <div
                 key={chat.id}
                 onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobileNotebooksDrawerOpen(false); } }}
-                className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                className={`group touch-row flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
                   chat.id === activeChatId
                     ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                     : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
@@ -3249,25 +3252,23 @@ export function useNotebooksTabController({ onPromoted, onActiveWorkspaceChange 
                       value={editChatTitle}
                       onChange={(e) => setEditChatTitle(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                      className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
+                      className="touch-input flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
                     />
-                    <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
-                    <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
+                    <button onClick={() => commitRenameChat(chat.id)} aria-label="Save chat title" className="touch-target"><Check size={12} className="text-green-400" /></button>
+                    <button onClick={() => setEditingChatId(null)} aria-label="Cancel rename" className="touch-target"><X size={12} className="text-[var(--neutral-500)]" /></button>
                   </div>
                 ) : (
                   <>
                     <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
                     <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                    {/* NEW — issue #3: rename/delete, same controls
-                        ChatSidebar's own chat rows already offer. */}
-                    <div className="hidden group-hover:flex items-center gap-1.5 shrink-0">
-                      <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
-                        <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                      </button>
-                      <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
-                        <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                      </button>
-                    </div>
+                    {/* CHANGED — was a hover-only Pencil + Trash2 pair, which
+                        never appeared on a touch screen (and has no mobile
+                        `isMobile` guard like Plan's). Now the same single
+                        "..." menu the Chat sidebar's rows use. */}
+                    <ChatRowMenu
+                      onRename={() => startRenameChat(chat)}
+                      onDelete={() => askDeleteChat(chat)}
+                    />
                   </>
                 )}
               </div>
@@ -3534,7 +3535,7 @@ export function useNotebooksTabController({ onPromoted, onActiveWorkspaceChange 
 function NotebooksTabDesktop({ controller: c }) {
   const notebookPicker = c.projectsCollapsed ? (
     <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
-      <button onClick={c.toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show notebooks">
+      <button onClick={c.toggleProjects} className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show notebooks">
         <ChevronRight size={16} />
       </button>
     </div>
@@ -3545,10 +3546,10 @@ function NotebooksTabDesktop({ controller: c }) {
           <NotebookText size={13} className={STAGE_THEME.note.color} /> Notebooks
         </span>
         <div className="flex items-center gap-2">
-          <button onClick={() => c.setCreating((v) => !v)} title="New notebook" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
+          <button onClick={() => c.setCreating((v) => !v)} title="New notebook" className="touch-target text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
             <Plus size={15} />
           </button>
-          <button onClick={c.toggleProjects} title="Hide notebooks" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+          <button onClick={c.toggleProjects} title="Hide notebooks" className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
             <ChevronLeft size={14} />
           </button>
         </div>

@@ -7,6 +7,8 @@ import WorkspaceChatPanel from "../WorkspaceChatPanel";
 import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e (+ follow-up fix below); useLastActiveChatId added for item #11 / C2
 import CreateWorkspaceModal from "../CreateWorkspaceModal"; // NEW — item #10 / B3: native "create project" for this tab, same as ResearchTab's B2
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
+import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — project management (rename/delete/members/export), parity with Notebooks/Plan — was already built, just never wired into this tab
+import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import { useViewport } from "../../hooks/useViewport";   // NEW — mobile UI retrofit (MOBILE_PLAN.md Phase 5), same reference pattern as PlanTab/ResearchTab/NotebooksTab
 import { OPEN_TAB_SIDEBAR_EVENT } from "../mobile/events"; // NEW — hamburger -> this tab's own project-picker drawer, same wiring as Notebooks/Research/Plan
@@ -14,7 +16,7 @@ import MobileTestTab from "../mobile/TestTab";             // NEW — real struc
 import {
   FlaskConical, Users, ClipboardList, ShieldAlert, History,
   Loader2, RefreshCw, MessageSquare, ArrowUpRight, Sparkles,
-  Pin, PinOff, Pencil, Check, X, Clock, AlertTriangle, Eye, Plus, Trash2, ChevronRight, ChevronLeft,
+  Pin, PinOff, Pencil, Check, X, Clock, AlertTriangle, Eye, Plus, MoreVertical, ChevronRight, ChevronLeft,
 } from "lucide-react";
 
 // Test tab design spec §1 — "Simulate & Test", same shell shape as
@@ -243,6 +245,11 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
   const [editingChatId, setEditingChatId] = useState(null);
   const [editChatTitle, setEditChatTitle] = useState("");
   const [pendingDeleteChat, setPendingDeleteChat] = useState(null);
+  // NEW — project management: which project's manage modal (rename /
+  // delete / members / export) is open. Same shape as PlanTab's own
+  // managingWorkspace — ManageWorkspaceModal already existed fully
+  // built, this tab just never had an entry point into it.
+  const [managingWorkspace, setManagingWorkspace] = useState(null);
 
   // NEW — mobile retrofit, same wiring as PlanTab.jsx/ResearchTab.jsx/
   // NotebooksTab.jsx: on mobile the project-picker column below never
@@ -476,10 +483,11 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
   // PlanTab.jsx's/ResearchTab.jsx's projectRows.
   //
   // The isMobile branches below are cosmetic, not structural (README's
-  // rule), so they stay inline: hover-only controls become always-visible
-  // (a touch screen has no hover to reveal them — same fix Plan/Research
-  // made), and every tappable piece gets a real hit area instead of a
-  // bare 10-12px glyph.
+  // rule), so they stay inline where they still apply (the rename field's
+  // 16px text, the row padding). The hover-only controls and their hit
+  // areas are now the shared `row-reveal`/`touch-target` classes
+  // (globals.css) — keyed to touch input rather than to `isMobile`, so a
+  // tablet wider than the mobile breakpoint gets them too.
   const projectRows = (
     <>
       {testProjects.length === 0 && (
@@ -499,7 +507,7 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
           <div key={ws.id} className="border-b border-[var(--neutral-900)]">
             <div
               onClick={() => setActiveWsId(ws.id)}
-              className={`group w-full flex items-center gap-1.5 min-w-0 text-left px-3 ${isMobile ? "py-3" : "py-2"} text-xs cursor-pointer ${
+              className={`group touch-row w-full flex items-center gap-1.5 min-w-0 text-left px-3 ${isMobile ? "py-3" : "py-2"} text-xs cursor-pointer ${
                 isActive
                   ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                   : "text-[var(--neutral-300)] hover:bg-[var(--neutral-900)]"
@@ -512,32 +520,40 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
               </span>
               {/* NEW — issue #3: "+" creates a chat nested in this
                   project, same idea as starting a new chat under a
-                  group in the Chat sidebar. CHANGED — mobile: always
-                  visible (opacity-0-until-hover never reveals on a touch
-                  screen) with a 36px hit area; -mr-2 lets that area
-                  reach into the row's own padding so the row doesn't
-                  grow to hold it. */}
+                  group in the Chat sidebar. CHANGED — `row-reveal`:
+                  hidden until hover with a mouse, always visible on
+                  touch (opacity-0-until-hover never reveals there);
+                  `touch-target`: 40px hit area on touch. */}
               <button
                 onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
                 title="New chat in this project"
                 aria-label="New chat in this project"
-                className={`shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)] ${
-                  isMobile ? "flex items-center justify-center w-9 h-9 -mr-2" : "opacity-0 group-hover:opacity-100"
-                }`}
+                className="row-reveal touch-target shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
                 disabled={creatingChatForWs === ws.id}
               >
                 {creatingChatForWs === ws.id ? (
                   <Loader2 size={12} className="animate-spin" />
                 ) : (
-                  <Plus size={isMobile ? 16 : 12} />
+                  <Plus size={12} />
                 )}
+              </button>
+              {/* NEW — project management, same "⋮" -> ManageWorkspaceModal
+                  entry point Notebooks and Plan have. stopPropagation:
+                  this row is itself clickable (select project). */}
+              <button
+                onClick={(e) => { e.stopPropagation(); setManagingWorkspace(ws); }}
+                title="Rename or delete project"
+                aria-label="Manage project"
+                className="row-reveal touch-target shrink-0 text-[var(--neutral-600)] hover:text-[var(--neutral-200)]"
+              >
+                <MoreVertical size={13} />
               </button>
             </div>
             {memberChats.map((chat) => (
               <div
                 key={chat.id}
                 onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobileTestDrawerOpen(false); } }}
-                className={`group flex items-center gap-1.5 text-left pl-7 pr-3 ${isMobile ? "py-2.5 text-xs" : "py-1.5 text-[11px]"} cursor-pointer ${
+                className={`group touch-row flex items-center gap-1.5 text-left pl-7 pr-3 ${isMobile ? "py-2.5 text-xs" : "py-1.5 text-[11px]"} cursor-pointer ${
                   chat.id === activeChatId
                     ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                     : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
@@ -578,32 +594,16 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
                   <>
                     <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
                     <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                    {/* NEW — issue #3: rename/delete, same controls
-                        ChatSidebar's own chat rows already offer.
-                        CHANGED — mobile: `hidden group-hover:flex` never
-                        reveals on a touch screen, so it's always `flex`
-                        there, with two 32px hit areas instead of bare
-                        10px glyphs (delete sits right next to rename —
-                        at 10px that's a one-thumb-slip data loss, guarded
-                        only by the confirm dialog). */}
-                    <div className={`items-center shrink-0 ${isMobile ? "flex -mr-2" : "hidden group-hover:flex gap-1.5"}`}>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }}
-                        title="Rename chat"
-                        aria-label="Rename chat"
-                        className={isMobile ? "flex items-center justify-center w-8 h-8" : ""}
-                      >
-                        <Pencil size={isMobile ? 13 : 10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }}
-                        title="Delete chat"
-                        aria-label="Delete chat"
-                        className={isMobile ? "flex items-center justify-center w-8 h-8" : ""}
-                      >
-                        <Trash2 size={isMobile ? 13 : 10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                      </button>
-                    </div>
+                    {/* CHANGED — was a Pencil + Trash2 pair (hover-only on
+                        desktop; two 32px buttons side by side on mobile,
+                        where a slip on Delete meant losing a chat, guarded
+                        only by the confirm dialog). Now the same single
+                        "..." menu the Chat sidebar's rows use — Delete is
+                        a deliberate second tap, not a neighbor of Rename. */}
+                    <ChatRowMenu
+                      onRename={() => startRenameChat(chat)}
+                      onDelete={() => askDeleteChat(chat)}
+                    />
                   </>
                 )}
               </div>
@@ -713,6 +713,17 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
         </button>
       )}
 
+      {/* NEW — project management modal; see managingWorkspace above.
+          Deleting the active project here is safe: the stillExists
+          effect near the top re-points the selection at the next one. */}
+      {managingWorkspace && (
+        <ManageWorkspaceModal
+          workspace={managingWorkspace}
+          allChats={chats}
+          onClose={() => setManagingWorkspace(null)}
+        />
+      )}
+
       {/* NEW — item #10 / B3: stage-aware create modal (B1). Auto-selects
           the created project so the user lands straight in it instead of
           having to find it in the list themselves — same as ResearchTab's B2. */}
@@ -815,7 +826,7 @@ export function useTestTabController({ initialWorkspaceId, onConsumeInitialWorks
 function TestTabDesktop({ controller: c }) {
   const projectPicker = c.projectsCollapsed ? (
     <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
-      <button onClick={c.toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
+      <button onClick={c.toggleProjects} className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
         <ChevronRight size={16} />
       </button>
     </div>
@@ -831,13 +842,13 @@ function TestTabDesktop({ controller: c }) {
           <button
             onClick={() => c.setShowCreateModal(true)}
             title="New test project"
-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
           >
             <Plus size={14} />
           </button>
           {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
               own ChevronLeft toggle. */}
-          <button onClick={c.toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+          <button onClick={c.toggleProjects} title="Hide projects" className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
             <ChevronLeft size={14} />
           </button>
         </div>

@@ -9,6 +9,7 @@ import MermaidDiagram from "../MermaidDiagram";
 // and WireframesPanel definition.
 import Markdown from "../Markdown";
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — parity fix: rename/delete kebab, same as NotebooksTab
+import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
 import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-confirmation affordance as ChatSidebar's own per-chat delete
 import WorkspaceChatPanel from "../WorkspaceChatPanel";      // NEW — parity fix: embedded chat + WorkingPanel dock, same as Notebooks/Research
 import { useWorkspaceDock, useWorkspaceDockActions, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — step 3e; useLastActiveChatId added for C1 nested-chat row highlight
@@ -27,8 +28,8 @@ import MobilePlanTab from "../mobile/PlanTab"; // NEW — Phase 5: real structur
 import {
   FileText, GitBranch, Database, Webhook, Skull, Calculator,
   FolderOpen, MoreVertical, ArrowUpRight,
-  Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Pencil, Check, X,
-  Trash2, Sparkles, ImageOff,
+  Loader2, ChevronRight, ChevronLeft, MessageSquare, Cpu, Plus, Check, X,
+  Sparkles, ImageOff,
 } from "lucide-react";
 
 // Part 5 — Plan as a dedicated top-level section, same shape as Notebooks
@@ -456,7 +457,7 @@ export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsume
             >
               <button
                 onClick={() => setActiveWsId(ws.id)}
-                className="flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
+                className="touch-row flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left text-xs"
               >
                 <span className="flex items-center min-w-0">
                   <WorkspaceStageIcons workspace={ws} />
@@ -467,17 +468,17 @@ export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsume
               {/* NEW — issue #3: "+" creates a chat nested in this
                   project, same idea as starting a new chat under a
                   group in the Chat sidebar. */}
+              {/* CHANGED — hover-reveal is now the shared `row-reveal` class
+                  (globals.css): hidden until hover with a mouse, always
+                  visible on touch. This used to be `isMobile ? "opacity-100"
+                  : "opacity-0 group-hover:opacity-100"`, which only counted
+                  a narrow window as touch, so a tablet at >=768px never
+                  saw it. `touch-target` gives it a 40px hit area on touch. */}
               <button
                 onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(ws); }}
                 title="New chat in this project"
-                className={`shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)] ${
-                  // NEW — mobile polish, same reasoning as ResearchTab.jsx's
-                  // Sources cards: opacity-0-until-hover has no equivalent
-                  // on a touch screen, so this would look like it wasn't
-                  // there at all. Always visible on mobile; desktop keeps
-                  // the original hover-to-reveal.
-                  isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                }`}
+                aria-label="New chat in this project"
+                className="row-reveal touch-target shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
                 disabled={creatingChatForWs === ws.id}
               >
                 {creatingChatForWs === ws.id ? (
@@ -489,9 +490,8 @@ export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsume
               <button
                 onClick={() => setManagingWorkspace(ws)}
                 title="Rename or delete project"
-                className={`shrink-0 pr-2 text-[var(--neutral-600)] hover:text-[var(--neutral-200)] ${
-                  isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                }`}
+                aria-label="Manage project"
+                className="row-reveal touch-target shrink-0 pr-2 text-[var(--neutral-600)] hover:text-[var(--neutral-200)]"
               >
                 <MoreVertical size={13} />
               </button>
@@ -500,7 +500,7 @@ export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsume
               <div
                 key={chat.id}
                 onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobilePlanDrawerOpen(false); } }}
-                className={`group flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
+                className={`group touch-row flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
                   chat.id === activeChatId
                     ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
                     : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
@@ -516,28 +516,23 @@ export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsume
                       value={editChatTitle}
                       onChange={(e) => setEditChatTitle(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                      className="flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
+                      className="touch-input flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
                     />
-                    <button onClick={() => commitRenameChat(chat.id)}><Check size={12} className="text-green-400" /></button>
-                    <button onClick={() => setEditingChatId(null)}><X size={12} className="text-[var(--neutral-500)]" /></button>
+                    <button onClick={() => commitRenameChat(chat.id)} aria-label="Save chat title" className="touch-target"><Check size={12} className="text-green-400" /></button>
+                    <button onClick={() => setEditingChatId(null)} aria-label="Cancel rename" className="touch-target"><X size={12} className="text-[var(--neutral-500)]" /></button>
                   </div>
                 ) : (
                   <>
                     <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
                     <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                    {/* NEW — issue #3: rename/delete, same controls
-                        ChatSidebar's own chat rows already offer.
-                        CHANGED — mobile polish: `hidden group-hover:flex`
-                        never reveals on a touch screen, same fix as the
-                        two buttons above — always `flex` on mobile. */}
-                    <div className={`items-center gap-1.5 shrink-0 ${isMobile ? "flex" : "hidden group-hover:flex"}`}>
-                      <button onClick={(e) => { e.stopPropagation(); startRenameChat(chat); }} title="Rename chat">
-                        <Pencil size={10} className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]" />
-                      </button>
-                      <button onClick={(e) => { e.stopPropagation(); askDeleteChat(chat); }} title="Delete chat">
-                        <Trash2 size={10} className="text-[var(--neutral-500)] hover:text-red-400" />
-                      </button>
-                    </div>
+                    {/* CHANGED — was a Pencil + Trash2 pair (hover-only on
+                        desktop, always-on on mobile, ~10px apart — a
+                        one-thumb-slip from deleting a chat). Now the same
+                        single "..." menu the Chat sidebar's rows use. */}
+                    <ChatRowMenu
+                      onRename={() => startRenameChat(chat)}
+                      onDelete={() => askDeleteChat(chat)}
+                    />
                   </>
                 )}
               </div>
@@ -762,7 +757,7 @@ export function usePlanTabController({ onOpenChat, initialWorkspaceId, onConsume
 function PlanTabDesktop({ controller: c }) {
   const projectPicker = c.projectsCollapsed ? (
     <div className="w-10 shrink-0 border-r border-[var(--neutral-800)] flex flex-col items-center py-3 gap-3">
-      <button onClick={c.toggleProjects} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
+      <button onClick={c.toggleProjects} className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show projects">
         <ChevronRight size={16} />
       </button>
     </div>
@@ -778,13 +773,13 @@ function PlanTabDesktop({ controller: c }) {
           <button
             onClick={() => c.setShowCreateModal(true)}
             title="New plan project"
-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+            className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
           >
             <Plus size={14} />
           </button>
           {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
               own ChevronLeft toggle. */}
-          <button onClick={c.toggleProjects} title="Hide projects" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+          <button onClick={c.toggleProjects} title="Hide projects" className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
             <ChevronLeft size={14} />
           </button>
         </div>

@@ -41,12 +41,12 @@ export default function ResearchTab({ controller: c }) {
           <span className="text-xs font-medium text-[var(--neutral-400)] flex items-center gap-1.5">
             <STAGE_THEME.research.Icon size={13} className={STAGE_THEME.research.color} /> Research projects
           </span>
-          <div className="flex items-center gap-3">
-            <button onClick={() => c.setShowCreateModal(true)} title="New research project" className="text-[var(--neutral-400)] hover:text-[var(--neutral-100)] p-1">
-              <Plus size={16} />
+          <div className="flex items-center">
+            <button onClick={() => c.setShowCreateModal(true)} title="New research project" aria-label="New research project" className="flex items-center justify-center w-10 h-10 text-[var(--neutral-400)] hover:text-[var(--neutral-100)]">
+              <Plus size={18} />
             </button>
-            <button onClick={() => c.setMobileProjectsDrawerOpen(false)} title="Close" className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)] p-1">
-              <X size={16} />
+            <button onClick={() => c.setMobileProjectsDrawerOpen(false)} title="Close" aria-label="Close project list" className="flex items-center justify-center w-10 h-10 -mr-2 text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+              <X size={18} />
             </button>
           </div>
         </div>
