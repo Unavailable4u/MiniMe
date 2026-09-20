@@ -1954,6 +1954,17 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  // NEW — mobile pass (first needed by GrowthTab's Brand Voice sub-tab,
+  // which renders this same component). Everything gated on isMobile
+  // below is cosmetic — 16px fields so iOS Safari doesn't zoom the page
+  // on focus, finger-sized buttons, and the custom-fact row restacked
+  // because a fixed w-28 key field + a value field + a remove button
+  // can't share one ~290px row. Desktop markup and sizes are unchanged.
+  const [viewport] = useViewport();
+  const isMobile = viewport === "mobile";
+  const fieldCls = `touch-input w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 outline-none focus:border-[var(--cyber-cyan)] ${
+    isMobile ? "text-base py-2" : "text-xs py-1.5"
+  }`;
 
   async function load() {
     setLoading(true);
@@ -2028,7 +2039,7 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
             onChange={(e) => setFacts((f) => ({ ...f, brand_voice: e.target.value }))}
             rows={2}
             placeholder="e.g. warm, direct, no corporate jargon"
-            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+            className={fieldCls}
           />
         </div>
         <div>
@@ -2040,7 +2051,7 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
             onChange={(e) => setFacts((f) => ({ ...f, target_user: e.target.value }))}
             rows={2}
             placeholder="e.g. solo devs shipping side projects"
-            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+            className={fieldCls}
           />
         </div>
         <div>
@@ -2050,7 +2061,7 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
             value={techStackText}
             onChange={(e) => setTechStackText(e.target.value)}
             placeholder="e.g. Next.js, FastAPI, Postgres"
-            className="w-full mt-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1.5 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+            className={fieldCls}
           />
         </div>
         <div>
@@ -2059,14 +2070,19 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
             <button
               type="button"
               onClick={() => setCustomEntries((entries) => [...entries, { key: "", value: "" }])}
-              className="text-[11px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+              className={`text-[11px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)] ${isMobile ? "touch-target px-2 -mr-2" : ""}`}
             >
               + Add
             </button>
           </div>
           <div className="space-y-1.5 mt-1">
             {customEntries.map((entry, i) => (
-              <div key={i} className="flex items-center gap-1.5">
+              <div
+                key={i}
+                className={isMobile
+                  ? "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded-lg border border-[var(--neutral-800)] p-2"
+                  : "flex items-center gap-1.5"}
+              >
                 <input
                   id={`notebook-custom-entry-key-${i}`}
                   name={`notebook-custom-entry-key-${i}`}
@@ -2074,7 +2090,9 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
                   onChange={(e) => setCustomEntries((entries) => entries.map((en, j) => (j === i ? { ...en, key: e.target.value } : en)))}
                   aria-label="Custom field key"
                   placeholder="key"
-                  className="w-28 shrink-0 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+                  className={`touch-input bg-black/30 border border-[var(--neutral-800)] rounded px-2 outline-none focus:border-[var(--cyber-cyan)] ${
+                    isMobile ? "min-w-0 text-base py-1.5" : "w-28 shrink-0 text-xs py-1"
+                  }`}
                 />
                 <input
                   id={`notebook-custom-entry-value-${i}`}
@@ -2083,9 +2101,16 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
                   onChange={(e) => setCustomEntries((entries) => entries.map((en, j) => (j === i ? { ...en, value: e.target.value } : en)))}
                   aria-label="Custom field value"
                   placeholder="value"
-                  className="flex-1 bg-black/30 border border-[var(--neutral-800)] rounded px-2 py-1 text-xs outline-none focus:border-[var(--cyber-cyan)]"
+                  className={`touch-input bg-black/30 border border-[var(--neutral-800)] rounded px-2 outline-none focus:border-[var(--cyber-cyan)] ${
+                    isMobile ? "col-span-2 min-w-0 text-base py-1.5" : "flex-1 text-xs py-1"
+                  }`}
                 />
-                <button type="button" onClick={() => setCustomEntries((entries) => entries.filter((_, j) => j !== i))}>
+                <button
+                  type="button"
+                  aria-label="Remove custom fact"
+                  className={isMobile ? "col-start-2 row-start-1 touch-target" : ""}
+                  onClick={() => setCustomEntries((entries) => entries.filter((_, j) => j !== i))}
+                >
                   <X size={12} className="text-[var(--neutral-600)] hover:text-red-400" />
                 </button>
               </div>
@@ -2099,7 +2124,9 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
           <button
             onClick={handleSave}
             disabled={saving}
-            className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            className={`text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg font-medium disabled:opacity-50 ${
+              isMobile ? "px-5 min-h-[var(--viewport-touch-target)] text-sm" : "px-3 py-1.5"
+            }`}
           >
             {saving ? "Saving…" : "Save facts"}
           </button>
@@ -2125,18 +2152,22 @@ export function FactsView({ workspaceId, fetchWorkspaceFacts, saveWorkspaceFacts
             {candidates.map((c, i) => (
               <div key={c.candidate_id ?? i} className="rounded-lg border border-[var(--neutral-800)] p-3">
                 <div className="text-xs font-medium text-[var(--neutral-200)]">{c.key}</div>
-                <p className="text-xs text-[var(--neutral-400)] mt-1 whitespace-pre-wrap">{String(c.value)}</p>
+                <p className="text-xs text-[var(--neutral-400)] mt-1 whitespace-pre-wrap break-words">{String(c.value)}</p>
                 {c.proposed_by && <p className="text-[10px] text-[var(--neutral-700)] mt-1">proposed by {c.proposed_by}</p>}
-                <div className="flex items-center gap-2 mt-2">
+                <div className={`flex items-center gap-2 ${isMobile ? "mt-3" : "mt-2"}`}>
                   <button
                     onClick={async () => { await acceptFactCandidate(workspaceId, c.candidate_id); await load(); }}
-                    className="flex items-center gap-1 text-[11px] text-green-400 hover:text-green-300"
+                    className={`flex items-center gap-1 text-green-400 hover:text-green-300 ${
+                      isMobile ? "flex-1 justify-center text-xs rounded-lg border border-green-900/60 min-h-[var(--viewport-touch-target)]" : "text-[11px]"
+                    }`}
                   >
                     <Check size={12} /> Accept
                   </button>
                   <button
                     onClick={async () => { await rejectFactCandidate(workspaceId, c.candidate_id); await load(); }}
-                    className="flex items-center gap-1 text-[11px] text-red-400 hover:text-red-300"
+                    className={`flex items-center gap-1 text-red-400 hover:text-red-300 ${
+                      isMobile ? "flex-1 justify-center text-xs rounded-lg border border-red-900/60 min-h-[var(--viewport-touch-target)]" : "text-[11px]"
+                    }`}
                   >
                     <X size={12} /> Discard
                   </button>

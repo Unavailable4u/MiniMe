@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, memo } from "react";
 import {
   Layers, BookMarked, CalendarDays, SearchCheck, BarChart3,
   Sparkles, Loader2, Copy, Check, AlertTriangle, ExternalLink, Plus, MessageSquare,
-  MoreVertical, X, ChevronRight, ChevronLeft,
+  MoreVertical, X, ChevronRight, ChevronLeft, RefreshCw,
 } from "lucide-react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
@@ -17,6 +17,9 @@ import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — project m
 import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
 import Markdown from "../Markdown";
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+import { useViewport } from "../../hooks/useViewport";   // NEW — mobile UI retrofit (MOBILE_PLAN.md Phase 5), same reference pattern as TestTab/PlanTab/ResearchTab/NotebooksTab
+import { OPEN_TAB_SIDEBAR_EVENT } from "../mobile/events"; // NEW — hamburger -> this tab's own workspace-picker drawer, same wiring as Notebooks/Research/Plan/Test
+import MobileGrowthTab from "../mobile/GrowthTab";         // NEW — real structural fork, see that file and MOBILE_PLAN.md
 
 // RESOLVED (was TODO(confirm)): design doc §2.2 "voice" — this sub-tab
 // directly reuses NotebooksTab.jsx's FactsView component instead of
@@ -36,15 +39,49 @@ const CHAT_DOCK_KEY = "minime_growth_chatdock_collapsed";
 // dock's own collapse above.
 const PROJECTS_KEY = "minime_growth_projects_collapsed";
 
-const SUB_TABS = [
-  { id: "content", label: "Content Fan-out", icon: Layers },
-  { id: "voice", label: "Brand Voice", icon: BookMarked },
-  { id: "calendar", label: "Calendar", icon: CalendarDays },
-  { id: "audit", label: "Content Audit", icon: SearchCheck },
-  { id: "analytics", label: "Analytics", icon: BarChart3 },
+// CHANGED — exported (was module-local) so components/mobile/GrowthTab.jsx
+// builds its icon rail off the same list instead of a forked copy that can
+// drift — same convention as TestTab.jsx's/PlanTab.jsx's own exports. The
+// per-entry `built` flag replaces the id-by-id "implemented so far" check
+// the desktop nav and the sub-tab switch below each used to spell out, so
+// both shells (and ComingSoonPanel) read one source of truth.
+export const SUB_TABS = [
+  { id: "content", label: "Content Fan-out", icon: Layers, built: true },
+  { id: "voice", label: "Brand Voice", icon: BookMarked, built: true },
+  { id: "calendar", label: "Calendar", icon: CalendarDays, built: true },
+  { id: "audit", label: "Content Audit", icon: SearchCheck, built: true },
+  { id: "analytics", label: "Analytics", icon: BarChart3, built: false },
 ];
 
-function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
+// Reads <html data-viewport> directly (applied at module load by
+// useViewport.js) instead of the hook's own state, which deliberately
+// starts at "desktop" on every first render for hydration safety and only
+// corrects after mount. Needed for exactly one decision: whether the mount
+// effect below may restore the saved desktop chat-dock preference. Safe to
+// read there: this tab is only ever mounted client-side after a tab click
+// (AppShell's visitedTabs starts as {"chat"}), never in the server-rendered
+// HTML. Same helper as TestTab.jsx's.
+function viewportIsMobileNow() {
+  return typeof document !== "undefined" && document.documentElement.dataset.viewport === "mobile";
+}
+
+// CHANGED — mobile UI retrofit (MOBILE_PLAN.md Phase 5): this used to be
+// the component itself (default-exported directly, one long return mixing
+// desktop-only and shared markup with no viewport branch at all — Growth
+// hadn't been touched for mobile yet). Same retrofit as TestTab.jsx/
+// PlanTab.jsx/ResearchTab.jsx/NotebooksTab.jsx: it's now a controller
+// hook — every bit of state, every effect, every handler, and the JSX
+// that's genuinely IDENTICAL on every viewport (projectRows,
+// subTabContent, dockAndModals) all still live here, unforked. Only the
+// workspace-picker column (drawer on mobile), the sub-tab nav (icon-only
+// rail on mobile), the workspace-name header (mobile only — desktop's
+// picker column already shows it) and the no-workspace empty state ever
+// differed by viewport, so those are the only things each shell builds
+// for itself, handed back in via `renderRoot`'s slots — see
+// GrowthTabDesktop below and components/mobile/GrowthTab.jsx for the two
+// callers. Unlike the other four there is no promote control: Growth is
+// the last stage, there is nothing to promote to.
+export function useGrowthTabController({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted, onActiveWorkspaceChange }) {
   const { chats } = useChatList();   // CHANGED — Item 2 concern split, slice 4: was useSession()
   const { workspaces, fetchWorkspaces } = useWorkspaces();   // CHANGED — was useSession()
   // NEW — item #11 / C2: same dock-driven "open chat" + row-highlight
@@ -73,6 +110,25 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
   // built, this tab just never had an entry point into it.
   const [managingWorkspace, setManagingWorkspace] = useState(null);
 
+  // NEW — mobile retrofit, same wiring as TestTab.jsx/PlanTab.jsx/
+  // ResearchTab.jsx/NotebooksTab.jsx: on mobile the workspace-picker
+  // column never renders inline (no width to spare next to sub-tab
+  // content) — it becomes a hamburger-triggered MobileDrawer instead.
+  // AppShell.jsx can't reach into this hook's state directly, so it
+  // dispatches OPEN_TAB_SIDEBAR_EVENT on hamburger tap and this just
+  // listens and flips its own drawer open (see AppShell.jsx's
+  // TABS_WITH_OWN_MOBILE_SIDEBAR, now including "growth").
+  const [viewport] = useViewport();
+  const isMobile = viewport === "mobile";
+  const [mobileGrowthDrawerOpen, setMobileGrowthDrawerOpen] = useState(false);
+  useEffect(() => {
+    function onOpenTabSidebar(e) {
+      if (e.detail?.tabId === "growth") setMobileGrowthDrawerOpen(true);
+    }
+    window.addEventListener(OPEN_TAB_SIDEBAR_EVENT, onOpenTabSidebar);
+    return () => window.removeEventListener(OPEN_TAB_SIDEBAR_EVENT, onOpenTabSidebar);
+  }, []);
+
   const growthWorkspaces = (workspaces || []).filter((w) => (w.active_stages || [w.stage]).includes("growth"));
   const selectedGrowthWs = growthWorkspaces.find((w) => w.id === selectedWsId) || null;
   // NEW — `selectedWsId` alone can outlive its workspace: it's restored
@@ -97,7 +153,13 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
     fetchWorkspaces();
     const saved = localStorage.getItem(SELECTED_GROWTH_WS_KEY);
     if (saved) setSelectedWsId(saved);
-    setDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) !== "0");
+    // CHANGED — CHAT_DOCK_KEY is the DESKTOP preference. On a phone an
+    // expanded dock is a full-screen overlay, so restoring "expanded"
+    // there would land the first visit on nothing but a chat panel.
+    // Mobile therefore keeps the collapsed default (chat one tap away
+    // via the floating bubble) and, see toggleDock below, never
+    // overwrites the saved value either.
+    if (!viewportIsMobileNow()) setDockCollapsed(localStorage.getItem(CHAT_DOCK_KEY) !== "0");
     setProjectsCollapsed(localStorage.getItem(PROJECTS_KEY) === "1"); // NEW — collapsible project sidebar
   }, []);
 
@@ -117,12 +179,15 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
 
   function toggleDock() {
     setDockCollapsed((prev) => {
+      // CHANGED — mobile's open/closed state is per-visit, not a saved
+      // preference: writing it here would let one phone session silently
+      // flip what the desktop layout restores next time.
       // Read side treats "0" as expanded, anything else as collapsed
       // (see the mount effect above), so the stored value must match
       // the *new* state, not `prev`: going collapsed(true)->expanded
       // means the new state is false, so store "0"; that only happens
       // when `prev` was true, i.e. store `prev ? "0" : "1"`.
-      localStorage.setItem(CHAT_DOCK_KEY, prev ? "0" : "1");
+      if (!isMobile) localStorage.setItem(CHAT_DOCK_KEY, prev ? "0" : "1");
       return !prev;
     });
   }
@@ -140,9 +205,16 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
   // ResearchTab/PlanTab/BuildTab/TestTab's openInDock. Note GrowthTab's
   // dock defaults collapsed (§2.3), unlike the others, so this still
   // expands it on demand the same way.
+  // FIX — mobile: picking a chat from the workspace drawer used to force
+  // the dock open whenever it was collapsed, which on mobile means the
+  // full-screen chat overlay slamming over the whole screen the instant
+  // you tap a chat. On mobile that's the person's call, not something
+  // selecting a chat should decide for them — the floating "Open chat"
+  // bubble is still there. Desktop keeps the original auto-expand. Same
+  // fix as TestTab.jsx's/PlanTab.jsx's/ResearchTab.jsx's own openInDock.
   async function openInDock(chatId) {
     await switchChat(chatId);
-    if (dockCollapsed) toggleDock();
+    if (!isMobile && dockCollapsed) toggleDock();
   }
 
   // NEW — issue #3: "+" beside a workspace's name. Creates a chat nested
@@ -154,6 +226,10 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
       if (selectedWsId !== ws.id) selectWorkspace(ws.id);
       await createWorkspaceChat(ws.id);
       if (dockCollapsed) toggleDock();
+      // NEW — the workspace drawer (z-50) sits above the chat overlay
+      // (z-40), so without this the chat that was just created and opened
+      // stays hidden behind the drawer that created it.
+      if (isMobile) setMobileGrowthDrawerOpen(false);
     } catch (err) {
       // Bug fix: no catch here previously -- a failed create-chat
       // request (backend unreachable, CORS, network drop, etc.)
@@ -186,225 +262,214 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
     setPendingDeleteChat(null);
   }
 
-  return (
-    <div className="flex h-full min-h-0">
-      {/* Left-hand project picker -- same contract as every other tab
-          (§0 of the design doc), just filtered to stage === "growth". */}
-      {projectsCollapsed ? (
-        <aside className="w-10 border-r border-[var(--neutral-800)] flex flex-col items-center shrink-0 py-3 gap-3">
-          <button onClick={toggleProjects} className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show workspaces">
-            <ChevronRight size={16} />
-          </button>
-        </aside>
-      ) : (
-      <aside className="w-56 border-r border-[var(--neutral-800)] flex flex-col shrink-0">
-        <div className="px-3 py-2 flex items-center justify-between text-xs font-medium text-[var(--neutral-500)] uppercase tracking-wide">
-          <span className="flex items-center gap-1.5">
-            <STAGE_THEME.growth.Icon size={13} className={STAGE_THEME.growth.color} /> Growth Workspaces
-          </span>
-          {/* NEW — item #10 / B3: native create, same stage-aware modal
-              ResearchTab's B2 wired up first. */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowCreateModal(true)}
-              title="New growth workspace"
-              className="touch-target normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-            >
-              <Plus size={14} />
-            </button>
-            {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
-                own ChevronLeft toggle. */}
-            <button onClick={toggleProjects} title="Hide workspaces" className="touch-target normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
-              <ChevronLeft size={14} />
-            </button>
-          </div>
+  // NEW — mobile retrofit: workspace-picker rows, shared between the
+  // desktop sidebar and the mobile drawer (components/mobile/GrowthTab.jsx)
+  // — identical markup either way, only the container around it differs
+  // by viewport. Same "build once, share via controller" idea as
+  // TestTab.jsx's/PlanTab.jsx's projectRows.
+  //
+  // The isMobile branches below are cosmetic, not structural (README's
+  // rule), so they stay inline: row padding and the rename field's 16px
+  // text. The hover-only controls and their hit areas are the shared
+  // `row-reveal`/`touch-target` classes (globals.css) — keyed to touch
+  // input rather than to `isMobile`, so a tablet wider than the mobile
+  // breakpoint gets them too.
+  const projectRows = (
+    <>
+      {growthWorkspaces.length === 0 && (
+        <div className="px-3 py-4 text-xs text-[var(--neutral-500)]">
+          No workspaces at the Growth stage yet. Create one above, or
+          promote one from Test to see it here.
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {growthWorkspaces.length === 0 && (
-            <div className="px-3 py-4 text-xs text-[var(--neutral-500)]">
-              No workspaces at the Growth stage yet. Create one above, or
-              promote one from Test to see it here.
-            </div>
-          )}
-          {growthWorkspaces.map((w) => {
-            // NEW — item #11 / C2: nested chat list, same pattern as
-            // ResearchTab/PlanTab/BuildTab/TestTab's C1/C2 — "expand"
-            // just means "is the selected workspace", no separate
-            // toggle state needed since this tab already has a
-            // single-selection model.
-            const isSelected = w.id === selectedWsId;
-            const memberChats = isSelected ? chats.filter((c) => w.chat_ids.includes(c.id)) : [];
-            return (
-              <div key={w.id}>
-                <div
-                  className={`group touch-row w-full flex items-center min-w-0 text-left px-3 py-2 text-sm transition-colors cursor-pointer ${
-                    isSelected
-                      ? "bg-[var(--accent)] text-[var(--accent-text)]"
-                      : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
-                  }`}
-                  onClick={() => selectWorkspace(w.id)}
-                >
-                  <WorkspaceStageIcons workspace={w} />
-                  <span className="truncate flex-1 min-w-0">
-                    {w.name}
-                    <span className={isSelected ? "text-[var(--accent-text)]/70" : "text-[var(--neutral-600)]"}> · {w.chat_ids.length}</span>
-                  </span>
-                  {/* NEW — issue #3: "+" creates a chat nested in this
-                      workspace, same idea as starting a new chat under a
-                      group in the Chat sidebar. CHANGED — `row-reveal`:
-                      hidden until hover with a mouse, always visible on
-                      touch; `touch-target`: 40px hit area on touch. This
-                      tab has no mobile fork to branch in, which is why
-                      this is CSS rather than `isMobile`. */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(w); }}
-                    title="New chat in this workspace"
-                    aria-label="New chat in this workspace"
-                    className={`row-reveal touch-target shrink-0 ${
-                      isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
-                    }`}
-                    disabled={creatingChatForWs === w.id}
-                  >
-                    {creatingChatForWs === w.id ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <Plus size={12} />
-                    )}
-                  </button>
-                  {/* NEW — workspace management, same "⋮" ->
-                      ManageWorkspaceModal entry point Notebooks and Plan
-                      have. stopPropagation: this row is itself clickable
-                      (select workspace). Colored like the "+" beside it
-                      so it stays legible on the selected row's accent
-                      background. */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setManagingWorkspace(w); }}
-                    title="Rename or delete workspace"
-                    aria-label="Manage workspace"
-                    className={`row-reveal touch-target shrink-0 ${
-                      isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-600)] hover:text-[var(--neutral-200)]"
-                    }`}
-                  >
-                    <MoreVertical size={13} />
-                  </button>
-                </div>
-                {memberChats.map((chat) => (
-                  <div
-                    key={chat.id}
-                    onClick={() => editingChatId !== chat.id && openInDock(chat.id)}
-                    className={`group touch-row flex items-center gap-1.5 text-left pl-7 pr-3 py-1.5 text-[11px] cursor-pointer ${
-                      chat.id === activeChatId
-                        ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
-                        : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
-                    }`}
-                  >
-                    {editingChatId === chat.id ? (
-                      <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          autoFocus
-                          id={`chat-title-${chat.id}`}
-                          name="chatTitle"
-                          aria-label="Chat title"
-                          value={editChatTitle}
-                          onChange={(e) => setEditChatTitle(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
-                          className="touch-input flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 py-0.5 text-[11px] outline-none"
-                        />
-                        <button onClick={() => commitRenameChat(chat.id)} aria-label="Save chat title" className="touch-target"><Check size={12} className="text-green-400" /></button>
-                        <button onClick={() => setEditingChatId(null)} aria-label="Cancel rename" className="touch-target"><X size={12} className="text-[var(--neutral-500)]" /></button>
-                      </div>
-                    ) : (
-                      <>
-                        <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
-                        <span className="truncate flex-1 min-w-0">{chat.title}</span>
-                        {/* CHANGED — was a hover-only Pencil + Trash2 pair, which
-                            never appeared on a touch screen. Now the same
-                            single "..." menu the Chat sidebar's rows use. */}
-                        <ChatRowMenu
-                          onRename={() => startRenameChat(chat)}
-                          onDelete={() => askDeleteChat(chat)}
-                        />
-                      </>
-                    )}
-                  </div>
-                ))}
-              </div>
-            );
-          })}
-        </div>
-      </aside>
       )}
-
-      {/* Right-hand content pane */}
-      <div className="flex-1 min-w-0 flex flex-col">
-        <nav className="h-10 flex items-center justify-center gap-1 px-3 border-b border-[var(--neutral-800)]">
-          {SUB_TABS.map((t) => {
-            const Icon = t.icon;
-            const built = t.id === "voice" || t.id === "content" || t.id === "calendar" || t.id === "audit"; // implemented so far
-            return (
+      {growthWorkspaces.map((w) => {
+        // NEW — item #11 / C2: nested chat list, same pattern as
+        // ResearchTab/PlanTab/BuildTab/TestTab's C1/C2 — "expand"
+        // just means "is the selected workspace", no separate
+        // toggle state needed since this tab already has a
+        // single-selection model.
+        const isSelected = w.id === selectedWsId;
+        const memberChats = isSelected ? chats.filter((c) => w.chat_ids.includes(c.id)) : [];
+        return (
+          <div key={w.id}>
+            <div
+              className={`group touch-row w-full flex items-center min-w-0 text-left px-3 ${isMobile ? "py-3" : "py-2"} text-sm transition-colors cursor-pointer ${
+                isSelected
+                  ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                  : "text-[var(--neutral-300)] hover:bg-[var(--neutral-800)]"
+              }`}
+              onClick={() => selectWorkspace(w.id)}
+            >
+              <WorkspaceStageIcons workspace={w} />
+              <span className="truncate flex-1 min-w-0">
+                {w.name}
+                <span className={isSelected ? "text-[var(--accent-text)]/70" : "text-[var(--neutral-600)]"}> · {w.chat_ids.length}</span>
+              </span>
+              {/* NEW — issue #3: "+" creates a chat nested in this
+                  workspace, same idea as starting a new chat under a
+                  group in the Chat sidebar. CHANGED — `row-reveal`:
+                  hidden until hover with a mouse, always visible on
+                  touch; `touch-target`: 40px hit area on touch. */}
               <button
-                key={t.id}
-                onClick={() => setActiveSubTab(t.id)}
-                className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 transition-colors ${
-                  activeSubTab === t.id
-                    ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
-                    : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
-                } ${!built ? "opacity-60" : ""}`}
+                onClick={(e) => { e.stopPropagation(); handleCreateChatInProject(w); }}
+                title="New chat in this workspace"
+                aria-label="New chat in this workspace"
+                className={`row-reveal touch-target shrink-0 ${
+                  isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+                }`}
+                disabled={creatingChatForWs === w.id}
               >
-                <Icon size={13} />
-                {t.label}
-                {!built && <span className="ml-1 text-[10px]">(soon)</span>}
+                {creatingChatForWs === w.id ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Plus size={12} />
+                )}
               </button>
-            );
-          })}
-        </nav>
-
-        <div className="flex-1 min-h-0 overflow-y-auto p-4 relative">
-          {!liveWsId && (
-            <div className="text-sm text-[var(--neutral-500)]">
-              Select a Growth workspace on the left to get started.
+              {/* NEW — workspace management, same "⋮" ->
+                  ManageWorkspaceModal entry point Notebooks and Plan
+                  have. stopPropagation: this row is itself clickable
+                  (select workspace). Colored like the "+" beside it
+                  so it stays legible on the selected row's accent
+                  background. */}
+              <button
+                onClick={(e) => { e.stopPropagation(); setManagingWorkspace(w); }}
+                title="Rename or delete workspace"
+                aria-label="Manage workspace"
+                className={`row-reveal touch-target shrink-0 ${
+                  isSelected ? "text-[var(--accent-text)]/70 hover:text-[var(--accent-text)]" : "text-[var(--neutral-600)] hover:text-[var(--neutral-200)]"
+                }`}
+              >
+                <MoreVertical size={13} />
+              </button>
             </div>
-          )}
-          {liveWsId && activeSubTab === "voice" && (
-            <VoiceView wsId={liveWsId} />
-          )}
-          {liveWsId && activeSubTab === "content" && (
-            <ContentView wsId={liveWsId} onDispatched={() => setDockCollapsed(false)} />
-          )}
-          {liveWsId && activeSubTab === "calendar" && <CalendarView />}
-          {liveWsId && activeSubTab === "audit" && <ContentAuditView wsId={liveWsId} />}
-          {liveWsId && activeSubTab !== "voice" && activeSubTab !== "content" && activeSubTab !== "calendar" && activeSubTab !== "audit" && (
-            <ComingSoonPanel subTabId={activeSubTab} />
-          )}
-        </div>
+            {memberChats.map((chat) => (
+              <div
+                key={chat.id}
+                onClick={() => { if (editingChatId !== chat.id) { openInDock(chat.id); setMobileGrowthDrawerOpen(false); } }}
+                className={`group touch-row flex items-center gap-1.5 text-left pl-7 pr-3 ${isMobile ? "py-2.5 text-xs" : "py-1.5 text-[11px]"} cursor-pointer ${
+                  chat.id === activeChatId
+                    ? "bg-[var(--neutral-800-a70)] text-[var(--neutral-100)]"
+                    : "text-[var(--neutral-500)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-300)]"
+                }`}
+              >
+                {editingChatId === chat.id ? (
+                  <div className="flex items-center gap-1 flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+                    {/* CHANGED — mobile: explicit 16px, or iOS Safari
+                        zooms the page the moment the rename field takes
+                        focus (touch-input covers touch tablets too). */}
+                    <input
+                      autoFocus
+                      id={`chat-title-${chat.id}`}
+                      name="chatTitle"
+                      aria-label="Chat title"
+                      value={editChatTitle}
+                      onChange={(e) => setEditChatTitle(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && commitRenameChat(chat.id)}
+                      className={`touch-input flex-1 min-w-0 bg-[var(--neutral-950)] border border-[var(--neutral-700)] rounded px-1.5 outline-none ${
+                        isMobile ? "py-1 text-base" : "py-0.5 text-[11px]"
+                      }`}
+                    />
+                    <button onClick={() => commitRenameChat(chat.id)} aria-label="Save chat title" className="touch-target"><Check size={12} className="text-green-400" /></button>
+                    <button onClick={() => setEditingChatId(null)} aria-label="Cancel rename" className="touch-target"><X size={12} className="text-[var(--neutral-500)]" /></button>
+                  </div>
+                ) : (
+                  <>
+                    <MessageSquare size={10} className="shrink-0 text-[var(--neutral-600)]" />
+                    <span className="truncate flex-1 min-w-0">{chat.title}</span>
+                    {/* CHANGED — was a hover-only Pencil + Trash2 pair, which
+                        never appeared on a touch screen. Now the same
+                        single "..." menu the Chat sidebar's rows use. */}
+                    <ChatRowMenu
+                      onRename={() => startRenameChat(chat)}
+                      onDelete={() => askDeleteChat(chat)}
+                    />
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
 
-      </div>
+  // Identical on every viewport — only the nav chrome around it
+  // (subTabNav, built per-shell) ever differed. `isMobile` reaches the
+  // panels the way TestTab's does, for the touch-only bits (16px form
+  // controls, full-width primary buttons, mobile-accurate copy).
+  // `liveWsId &&` because the no-workspace case is owned by renderRoot
+  // (desktop: the old one-line sentence; mobile: an actionable empty
+  // state).
+  const subTabContent = liveWsId && (
+    <>
+      {activeSubTab === "voice" && <VoiceView wsId={liveWsId} isMobile={isMobile} />}
+      {activeSubTab === "content" && (
+        <ContentView
+          wsId={liveWsId}
+          isMobile={isMobile}
+          // CHANGED — desktop still opens the dock beside the results to
+          // show the live trace. On a phone that same call would raise a
+          // full-screen overlay right over the cards the run just
+          // produced, so mobile leaves the dock alone (the bubble is
+          // there, and ContentView's copy says so).
+          onDispatched={isMobile ? undefined : () => setDockCollapsed(false)}
+        />
+      )}
+      {activeSubTab === "calendar" && <CalendarView isMobile={isMobile} />}
+      {activeSubTab === "audit" && <ContentAuditView wsId={liveWsId} isMobile={isMobile} />}
+      {!SUB_TABS.find((t) => t.id === activeSubTab)?.built && (
+        <ComingSoonPanel subTabId={activeSubTab} isMobile={isMobile} />
+      )}
+    </>
+  );
 
-      {/* Workspace chat dock -- real WorkspaceChatPanel.jsx, same
-          component NotebooksTab/ResearchTab embed (design doc §2.3:
-          "Yes, same pattern, default collapsed"). It manages its own
-          collapsed rendering internally based on the `collapsed` prop --
-          a narrow icon rail when true, Working Panel stacked on top of
-          the chat box when false (via the `stacked` prop below, so the
-          dock only ever needs the width this wrapper already gives it,
-          never more) -- and renders its own toggle button in both
-          states, so this wrapper only needs to size the container; no
-          chevron/toggle of our own like the old placeholder had.
-          CHANGED — a closed dock used to leave a w-10 rail reserved here
-          permanently. It now renders nothing and the tab content takes
-          the width back; the floating bubble below is the way back in,
-          matching Research/Plan/Build/Test/Notebooks (this tab was the
-          only one of the six that never had one). */}
-      {liveWsId && !dockCollapsed && (
+  // Workspace chat dock -- real WorkspaceChatPanel.jsx, same component
+  // NotebooksTab/ResearchTab embed (design doc §2.3: "Yes, same pattern,
+  // default collapsed"). It manages its own collapsed rendering
+  // internally based on the `collapsed` prop -- Working Panel stacked on
+  // top of the chat box when false (via the `stacked` prop below, so the
+  // dock only ever needs the width this wrapper already gives it, never
+  // more) -- and renders its own toggle button, so this wrapper only
+  // needs to size the container.
+  // CHANGED — a closed dock used to leave a w-10 rail reserved here
+  // permanently. It now renders nothing and the tab content takes the
+  // width back; the floating bubble below is the way back in, matching
+  // Research/Plan/Build/Test/Notebooks.
+  //
+  // CHANGED — was a hard `w-[480px]` at every width, which on a phone is
+  // wider than the screen. Below desktop the dock is now a full-screen
+  // overlay instead, same as the other docked tabs. Unlike TestTab's
+  // `hidden lg:flex` + `lg:hidden` pair, the two are picked off
+  // `viewport` (data-viewport) rather than a CSS breakpoint, so exactly
+  // one WorkspaceChatPanel is ever mounted (the CSS version mounts both
+  // on desktop and hides one), and ?forceViewport=mobile on a wide
+  // window still shows the overlay instead of hiding it.
+  const dockAndModals = (
+    <>
+      {liveWsId && !dockCollapsed && viewport === "desktop" && (
         <div className="shrink-0 border-l border-[var(--neutral-800)] w-[480px]">
           <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleDock} workspaceId={liveWsId} stacked />
         </div>
       )}
+      {/* `app-shell-viewport` (globals.css) is the shell's own answer to
+          the iOS keyboard not shrinking the layout viewport (100dvh,
+          refined by AppShell's visualViewport effect into --app-vvh), so
+          the composer at the bottom of this overlay isn't left under it. */}
+      {liveWsId && !dockCollapsed && viewport !== "desktop" && (
+        <div className="fixed inset-x-0 top-0 z-40 bg-[var(--neutral-950)] app-shell-viewport">
+          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleDock} workspaceId={liveWsId} stacked />
+        </div>
+      )}
+      {/* CHANGED — safe-area offsets keep the bubble clear of an
+          iPhone's home indicator (layout.js's viewportFit: "cover" is
+          what makes it draw there); both insets are 0 elsewhere, so
+          this is the same bottom-4/right-4 it always was. */}
       {liveWsId && dockCollapsed && (
         <button
           onClick={toggleDock}
           title="Open chat"
-          className="fixed bottom-4 right-4 z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
+          aria-label="Open chat"
+          className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-[calc(1rem+env(safe-area-inset-right))] z-40 bg-[var(--accent)] text-[var(--accent-text)] rounded-full p-3 shadow-lg"
         >
           <MessageSquare size={18} />
         </button>
@@ -433,7 +498,10 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
           stage="growth"
           onClose={(created) => {
             setShowCreateModal(false);
-            if (created) selectWorkspace(created.id);
+            if (created) {
+              selectWorkspace(created.id);
+              setMobileGrowthDrawerOpen(false); // land in the new workspace, not behind the drawer that made it
+            }
           }}
         />
       )}
@@ -450,8 +518,146 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
         onConfirm={confirmDeleteChat}
         onCancel={() => setPendingDeleteChat(null)}
       />
-    </div>
+    </>
   );
+
+  // The actual assembler. Both shells call this exactly once, supplying
+  // only the fragments that differ by viewport (workspace picker, icon
+  // rail, workspace header, sub-tab nav, empty state) — everything else
+  // (the outer flex row, the scroll pane, subTabContent, dockAndModals)
+  // is built here so neither shell can silently drift out of sync with
+  // the other on the parts that were never supposed to differ. Same idea
+  // as TestTab.jsx's/PlanTab.jsx's renderRoot.
+  function renderRoot({ projectPicker, iconRail, workspaceHeader, subTabNav, emptyState }) {
+    return (
+      <div className="flex h-full min-h-0">
+        {/* Left-hand project picker -- same contract as every other tab
+            (§0 of the design doc), just filtered to stage === "growth". */}
+        {projectPicker}
+        {iconRail}
+
+        {/* Right-hand content pane */}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {liveWsId && workspaceHeader}
+          {subTabNav}
+
+          {!liveWsId && emptyState ? (
+            emptyState
+          ) : (
+            // CHANGED — mobile: p-3 (the shared --viewport-content-padding
+            // value) instead of p-4, and pb-20 so the last card can
+            // scroll clear of the floating chat bubble instead of hiding
+            // under it.
+            <div className={`flex-1 min-h-0 overflow-y-auto relative ${isMobile ? "p-3 pb-20" : "p-4"}`}>
+              {!liveWsId ? (
+                <div className="text-sm text-[var(--neutral-500)]">
+                  Select a Growth workspace on the left to get started.
+                </div>
+              ) : (
+                subTabContent
+              )}
+            </div>
+          )}
+        </div>
+
+        {dockAndModals}
+      </div>
+    );
+  }
+
+  return {
+    viewport, isMobile,
+    growthWorkspaces, selectedGrowthWs, liveWsId,
+    projectRows,
+    projectsCollapsed, toggleProjects,
+    mobileGrowthDrawerOpen, setMobileGrowthDrawerOpen,
+    showCreateModal, setShowCreateModal,
+    subTab: activeSubTab, setSubTab: setActiveSubTab,
+    renderRoot,
+  };
+}
+
+// Desktop shell. Thin on purpose (same idea as TestTabDesktop/
+// PlanTabDesktop/ResearchTabDesktop/NotebooksTabDesktop) — takes the
+// already-built controller (see the router at the bottom of this file,
+// which calls the hook above exactly once) and supplies only the
+// workspace-picker column and the labeled pill-row sub-tab nav — the
+// things that only ever render on desktop/tablet. See
+// components/mobile/GrowthTab.jsx for the counterpart, which takes the
+// same controller shape. Markup here is moved verbatim from the old
+// inline JSX.
+function GrowthTabDesktop({ controller: c }) {
+  const projectPicker = c.projectsCollapsed ? (
+    <aside className="w-10 border-r border-[var(--neutral-800)] flex flex-col items-center shrink-0 py-3 gap-3">
+      <button onClick={c.toggleProjects} className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-300)]" title="Show workspaces">
+        <ChevronRight size={16} />
+      </button>
+    </aside>
+  ) : (
+    <aside className="w-56 border-r border-[var(--neutral-800)] flex flex-col shrink-0">
+      <div className="px-3 py-2 flex items-center justify-between text-xs font-medium text-[var(--neutral-500)] uppercase tracking-wide">
+        <span className="flex items-center gap-1.5">
+          <STAGE_THEME.growth.Icon size={13} className={STAGE_THEME.growth.color} /> Growth Workspaces
+        </span>
+        {/* NEW — item #10 / B3: native create, same stage-aware modal
+            ResearchTab's B2 wired up first. */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => c.setShowCreateModal(true)}
+            title="New growth workspace"
+            className="touch-target normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+          >
+            <Plus size={14} />
+          </button>
+          {/* NEW — collapsible sidebar, same affordance as ChatSidebar's
+              own ChevronLeft toggle. */}
+          <button onClick={c.toggleProjects} title="Hide workspaces" className="touch-target normal-case text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
+            <ChevronLeft size={14} />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto">{c.projectRows}</div>
+    </aside>
+  );
+
+  const subTabNav = (
+    <nav className="h-10 flex items-center justify-center gap-1 px-3 border-b border-[var(--neutral-800)]">
+      {SUB_TABS.map((t) => {
+        const Icon = t.icon;
+        return (
+          <button
+            key={t.id}
+            onClick={() => c.setSubTab(t.id)}
+            className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 transition-colors ${
+              c.subTab === t.id
+                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            } ${!t.built ? "opacity-60" : ""}`}
+          >
+            <Icon size={13} />
+            {t.label}
+            {!t.built && <span className="ml-1 text-[10px]">(soon)</span>}
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  return c.renderRoot({ projectPicker, subTabNav });
+}
+
+// NEW — mobile retrofit: the real router AppShell.jsx's dynamic import
+// actually renders, same shape as TestTab.jsx's/PlanTab.jsx's/
+// ResearchTab.jsx's/NotebooksTab.jsx's own router (and how mobile/
+// AppShell.jsx / mobile/ChatSidebar.jsx are picked at their own call
+// sites) rather than branching on isMobile inline. The controller hook
+// is called exactly once here — never independently by either shell —
+// since it owns effects (localStorage sync, the OPEN_TAB_SIDEBAR_EVENT
+// listener) that must not run twice per render.
+function GrowthTab(props) {
+  const controller = useGrowthTabController(props);
+  if (controller.viewport === "mobile") return <MobileGrowthTab controller={controller} />;
+  return <GrowthTabDesktop controller={controller} />;
 }
 
 // --- voice: Brand Voice ------------------------------------------------
@@ -460,7 +666,7 @@ function GrowthTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onPromoted
 // workspace gets brand voice for free -- zero new backend work, exactly
 // as the design doc claims.
 
-function VoiceView({ wsId }) {
+function VoiceView({ wsId, isMobile }) {
   const {
     fetchWorkspaceFacts, saveWorkspaceFacts, fetchFactCandidates,
     acceptFactCandidate, rejectFactCandidate,
@@ -546,13 +752,17 @@ function VoiceView({ wsId }) {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           rows={4}
-          className="w-full bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm text-[var(--neutral-200)]"
+          className={`w-full bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-[var(--neutral-200)] ${
+            isMobile ? "text-base" : "text-sm"
+          }`}
           placeholder="Paste a piece of content to check…"
         />
         <button
           onClick={handleCheckDraft}
           disabled={checking || !draft.trim()}
-          className="mt-2 text-xs font-medium border border-[var(--neutral-700)] text-[var(--neutral-300)] rounded-lg px-3 py-1.5 disabled:opacity-50"
+          className={`mt-2 font-medium border border-[var(--neutral-700)] text-[var(--neutral-300)] rounded-lg disabled:opacity-50 ${
+            isMobile ? "w-full text-sm min-h-[var(--viewport-touch-target)]" : "text-xs px-3 py-1.5"
+          }`}
         >
           {checking ? "Sending…" : "Check against brand voice"}
         </button>
@@ -567,7 +777,7 @@ function VoiceView({ wsId }) {
         {result?.kind === "error" && (
           <div className="mt-2 flex items-start gap-2 text-xs text-red-400 border border-red-900/50 bg-red-950/20 rounded-lg px-3 py-2">
             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-            <span>The check failed: {result.message}</span>
+            <span className="min-w-0 break-words">The check failed: {result.message}</span>
           </div>
         )}
 
@@ -577,6 +787,7 @@ function VoiceView({ wsId }) {
             text={result.text}
             copied={copied}
             onCopy={() => copyResult(result.text)}
+            isMobile={isMobile}
           />
         )}
       </div>
@@ -643,7 +854,7 @@ const CONTENT_PLATFORMS = [
   { id: "blog_intro", label: "Blog intro" },
 ];
 
-function ContentView({ wsId, onDispatched }) {
+function ContentView({ wsId, onDispatched, isMobile }) {
   // NEW — step 3e follow-up: same reasoning as VoiceView above — reads/
   // writes the ws:${wsId} dock slot instead of global SessionContext state.
   const dock = useWorkspaceDock(wsId);
@@ -658,6 +869,9 @@ function ContentView({ wsId, onDispatched }) {
   const [dispatchedChatId, setDispatchedChatId] = useState(null);
   const [dispatchedPlatforms, setDispatchedPlatforms] = useState([]);
   const [copiedId, setCopiedId] = useState(null);
+  // 40px pills on mobile (the app's own touch-target size); the desktop
+  // chip is a 26px pill, fine under a mouse and not under a thumb.
+  const chipSize = isMobile ? "min-h-10 px-3.5" : "px-3 py-1";
 
   function togglePlatform(id) {
     setSelectedPlatforms((prev) =>
@@ -719,12 +933,22 @@ function ContentView({ wsId, onDispatched }) {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <p className="text-xs text-[var(--neutral-500)]">
-        Write the core message once, pick the platforms to adapt it for, and
-        this dispatches to the platform-fan-out pool -- N platforms run as
-        genuinely parallel workers. Results land right here as copyable
-        cards once the run finishes; open the chat dock below if you want
-        to watch it happen live first.
+      <p className={`text-[var(--neutral-500)] ${isMobile ? "text-[13px] leading-relaxed" : "text-xs"}`}>
+        {isMobile ? (
+          <>
+            Write the core message once and pick the platforms — each one is
+            adapted in parallel. Results appear here as copyable cards; tap
+            the chat button if you want to watch a run live.
+          </>
+        ) : (
+          <>
+            Write the core message once, pick the platforms to adapt it for, and
+            this dispatches to the platform-fan-out pool -- N platforms run as
+            genuinely parallel workers. Results land right here as copyable
+            cards once the run finishes; open the chat dock below if you want
+            to watch it happen live first.
+          </>
+        )}
       </p>
 
       <div>
@@ -736,8 +960,10 @@ function ContentView({ wsId, onDispatched }) {
           name="growthCoreMessage"
           value={coreMessage}
           onChange={(e) => setCoreMessage(e.target.value)}
-          rows={4}
-          className="w-full bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-sm text-[var(--neutral-200)]"
+          rows={isMobile ? 5 : 4}
+          className={`w-full bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-[var(--neutral-200)] ${
+            isMobile ? "text-base" : "text-sm"
+          }`}
           placeholder="e.g. We're launching a redesigned onboarding flow next Tuesday..."
         />
       </div>
@@ -751,7 +977,7 @@ function ContentView({ wsId, onDispatched }) {
             <button
               key={p.id}
               onClick={() => togglePlatform(p.id)}
-              className={`text-xs rounded-full px-3 py-1 border transition-colors ${
+              className={`text-xs rounded-full ${chipSize} border transition-colors ${
                 selectedPlatforms.includes(p.id)
                   ? "bg-[var(--accent)] text-[var(--accent-text)] border-[var(--accent)]"
                   : "border-[var(--neutral-700)] text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
@@ -766,7 +992,7 @@ function ContentView({ wsId, onDispatched }) {
               <button
                 key={id}
                 onClick={() => togglePlatform(id)}
-                className="text-xs rounded-full px-3 py-1 border bg-[var(--accent)] text-[var(--accent-text)] border-[var(--accent)]"
+                className={`text-xs rounded-full ${chipSize} border bg-[var(--accent)] text-[var(--accent-text)] border-[var(--accent)]`}
               >
                 {id}
               </button>
@@ -780,18 +1006,22 @@ function ContentView({ wsId, onDispatched }) {
             onChange={(e) => setCustomPlatform(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addCustomPlatform()}
             aria-label="Custom platform"
-            placeholder="custom platform (e.g. reddit_post)"
-            className="flex-1 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1 text-xs text-[var(--neutral-200)]"
+            placeholder={isMobile ? "e.g. reddit_post" : "custom platform (e.g. reddit_post)"}
+            className={`flex-1 min-w-0 bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg text-[var(--neutral-200)] ${
+              isMobile ? "px-3 py-2 text-base min-h-[var(--viewport-touch-target)]" : "px-2 py-1 text-xs"
+            }`}
           />
           <button
             onClick={addCustomPlatform}
             disabled={!customPlatform.trim()}
-            className="text-xs border border-[var(--neutral-700)] text-[var(--neutral-400)] rounded-lg px-2 py-1 disabled:opacity-50"
+            className={`shrink-0 text-xs border border-[var(--neutral-700)] text-[var(--neutral-400)] rounded-lg disabled:opacity-50 ${
+              isMobile ? "px-4 min-h-[var(--viewport-touch-target)]" : "px-2 py-1"
+            }`}
           >
             Add
           </button>
         </div>
-        <p className="text-[10px] text-[var(--neutral-600)] mt-1">
+        <p className={`${isMobile ? "text-[11px]" : "text-[10px]"} text-[var(--neutral-600)] mt-1`}>
           Unrecognized platforms still work -- the pool falls back to a
           generic format if it doesn&apos;t have specific rules on file for one.
         </p>
@@ -800,25 +1030,29 @@ function ContentView({ wsId, onDispatched }) {
       <button
         onClick={handleDispatch}
         disabled={dispatching || !coreMessage.trim() || selectedPlatforms.length === 0}
-        className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-2 font-medium disabled:opacity-50 flex items-center gap-1.5"
+        className={`bg-[var(--accent)] text-[var(--accent-text)] rounded-lg font-medium disabled:opacity-50 flex items-center gap-1.5 ${
+          isMobile ? "w-full justify-center text-sm min-h-[var(--viewport-touch-target)]" : "text-xs px-3 py-2"
+        }`}
       >
         {dispatching ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
         {dispatching ? "Dispatching…" : `Adapt for ${selectedPlatforms.length} platform${selectedPlatforms.length === 1 ? "" : "s"}`}
       </button>
 
       {stillRunning && (
-        <div className="flex items-center gap-1.5 text-xs text-[var(--neutral-500)]">
-          <Loader2 size={12} className="animate-spin" />
-          Running the fan-out across {dispatchedPlatforms.length} platform
-          {dispatchedPlatforms.length === 1 ? "" : "s"}… open the chat dock
-          below to watch it live.
+        <div className={`flex gap-1.5 text-xs text-[var(--neutral-500)] ${isMobile ? "items-start" : "items-center"}`}>
+          <Loader2 size={12} className={`animate-spin ${isMobile ? "mt-0.5 shrink-0" : ""}`} />
+          <span className="min-w-0">
+            Running the fan-out across {dispatchedPlatforms.length} platform
+            {dispatchedPlatforms.length === 1 ? "" : "s"}…{" "}
+            {isMobile ? "tap the chat button to watch it live." : "open the chat dock below to watch it live."}
+          </span>
         </div>
       )}
 
       {result?.kind === "error" && (
         <div className="flex items-start gap-2 text-xs text-red-400 border border-red-900/50 bg-red-950/20 rounded-lg px-3 py-2">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-          <span>The run failed: {result.message}</span>
+          <span className="min-w-0 break-words">The run failed: {result.message}</span>
         </div>
       )}
 
@@ -831,6 +1065,7 @@ function ContentView({ wsId, onDispatched }) {
               text={card.text}
               copied={copiedId === `${card.platform}-${i}`}
               onCopy={() => copyText(`${card.platform}-${i}`, card.text)}
+              isMobile={isMobile}
             />
           ))}
         </div>
@@ -842,6 +1077,7 @@ function ContentView({ wsId, onDispatched }) {
           text={result.text}
           copied={copiedId === "raw"}
           onCopy={() => copyText("raw", result.text)}
+          isMobile={isMobile}
           note="Couldn't confidently split this into per-platform cards — showing the whole response. See the code comment above ContentView for why."
         />
       )}
@@ -853,22 +1089,31 @@ function ContentView({ wsId, onDispatched }) {
 // purpose so extractPlatformResults() (below) is the only place that
 // needs to change once the real content_adapter_pool.py response shape
 // is confirmed.
-function ResultCard({ platform, text, copied, onCopy, note }) {
+function ResultCard({ platform, text, copied, onCopy, note, isMobile }) {
   return (
-    <div className="border border-[var(--neutral-800)] rounded-lg p-3 bg-[var(--neutral-900)]">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs font-medium text-[var(--neutral-300)]">
+    <div className="border border-[var(--neutral-800)] rounded-lg p-3 bg-[var(--neutral-900)] min-w-0">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="text-xs font-medium text-[var(--neutral-300)] min-w-0 truncate">
           {platform}
         </span>
+        {/* CHANGED — mobile: `touch-target` (globals.css) gives the copy
+            button a 40px hit area without growing the header row (it
+            pulls into the card's own padding via a negative block
+            margin); -mr-2 does the same on the right edge. */}
         <button
           onClick={onCopy}
-          className="flex items-center gap-1 text-[10px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+          className={`shrink-0 flex items-center gap-1 text-[10px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)] ${
+            isMobile ? "touch-target px-2 -mr-2" : ""
+          }`}
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <p className="text-xs text-[var(--neutral-300)] whitespace-pre-wrap">
+      {/* CHANGED — break-words: whitespace-pre-wrap keeps line breaks but
+          won't split a long unbroken string (a URL, a hashtag chain), so
+          one of those used to push the card wider than its column. */}
+      <p className={`text-[var(--neutral-300)] whitespace-pre-wrap break-words ${isMobile ? "text-[13px] leading-relaxed" : "text-xs"}`}>
         {text || "(empty)"}
       </p>
       {note && (
@@ -1034,7 +1279,7 @@ function defaultRange() {
   return { timeMin: toLocalInputValue(now), timeMax: toLocalInputValue(monthOut) };
 }
 
-function CalendarView() {
+function CalendarView({ isMobile }) {
   const { API_URL } = useSession();
   const [range, setRange] = useState(defaultRange);
   const [events, setEvents] = useState(null); // null = not loaded yet
@@ -1097,11 +1342,13 @@ function CalendarView() {
     return (
       <div className="max-w-md text-sm text-[var(--neutral-400)] space-y-3">
         <p>Google Calendar isn&apos;t connected yet.</p>
-        {error && <p className="text-xs text-red-400">{error}</p>}
+        {error && <p className="text-xs text-red-400 break-words">{error}</p>}
         <button
           onClick={handleConnect}
           disabled={connecting}
-          className="flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+          className={`flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg font-medium disabled:opacity-50 ${
+            isMobile ? "w-full justify-center text-sm min-h-[var(--viewport-touch-target)]" : "text-xs px-3 py-1.5"
+          }`}
         >
           {connecting ? <Loader2 size={13} className="animate-spin" /> : <CalendarDays size={13} />}
           {connecting ? "Redirecting…" : "Connect Google Calendar"}
@@ -1124,39 +1371,80 @@ function CalendarView() {
         content-calendar view.
       </p>
 
-      <div className="flex items-center gap-2">
-        <input
-          type="datetime-local"
-          id="growth-range-start"
-          name="growthRangeStart"
-          value={range.timeMin}
-          onChange={(e) => setRange((r) => ({ ...r, timeMin: e.target.value }))}
-          aria-label="Range start"
-          className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
-        />
-        <span className="text-[10px] text-[var(--neutral-600)]">to</span>
-        <input
-          type="datetime-local"
-          id="growth-range-end"
-          name="growthRangeEnd"
-          value={range.timeMax}
-          onChange={(e) => setRange((r) => ({ ...r, timeMax: e.target.value }))}
-          aria-label="Range end"
-          className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
-        />
-        <button
-          onClick={loadEvents}
-          disabled={loading}
-          className="shrink-0 text-xs rounded-lg px-3 py-1.5 border border-[var(--neutral-700)] text-[var(--neutral-400)] hover:text-[var(--neutral-200)] disabled:opacity-50"
-        >
-          {loading ? <Loader2 size={12} className="animate-spin" /> : "Refresh"}
-        </button>
-      </div>
+      {isMobile ? (
+        // Two datetime-local inputs, a "to" and a Refresh button can't
+        // share one row at phone width: each input's intrinsic width
+        // alone (~200px at 16px) overflows a ~290px pane, so the row
+        // used to push the whole tab sideways. Stacked and labeled
+        // instead, full width; 16px text so iOS Safari doesn't zoom on
+        // focus.
+        <div className="space-y-2.5">
+          <div>
+            <label htmlFor="growth-range-start" className="block text-[11px] text-[var(--neutral-500)] mb-1">From</label>
+            <input
+              type="datetime-local"
+              id="growth-range-start"
+              name="growthRangeStart"
+              value={range.timeMin}
+              onChange={(e) => setRange((r) => ({ ...r, timeMin: e.target.value }))}
+              className="block w-full min-w-0 min-h-[var(--viewport-touch-target)] text-base bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-[var(--neutral-300)]"
+            />
+          </div>
+          <div>
+            <label htmlFor="growth-range-end" className="block text-[11px] text-[var(--neutral-500)] mb-1">To</label>
+            <input
+              type="datetime-local"
+              id="growth-range-end"
+              name="growthRangeEnd"
+              value={range.timeMax}
+              onChange={(e) => setRange((r) => ({ ...r, timeMax: e.target.value }))}
+              className="block w-full min-w-0 min-h-[var(--viewport-touch-target)] text-base bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-[var(--neutral-300)]"
+            />
+          </div>
+          <button
+            onClick={loadEvents}
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-1.5 min-h-[var(--viewport-touch-target)] text-sm rounded-lg border border-[var(--neutral-700)] text-[var(--neutral-300)] disabled:opacity-50"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            {loading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <input
+            type="datetime-local"
+            id="growth-range-start"
+            name="growthRangeStart"
+            value={range.timeMin}
+            onChange={(e) => setRange((r) => ({ ...r, timeMin: e.target.value }))}
+            aria-label="Range start"
+            className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
+          />
+          <span className="text-[10px] text-[var(--neutral-600)]">to</span>
+          <input
+            type="datetime-local"
+            id="growth-range-end"
+            name="growthRangeEnd"
+            value={range.timeMax}
+            onChange={(e) => setRange((r) => ({ ...r, timeMax: e.target.value }))}
+            aria-label="Range end"
+            className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
+          />
+          <button
+            onClick={loadEvents}
+            disabled={loading}
+            className="shrink-0 text-xs rounded-lg px-3 py-1.5 border border-[var(--neutral-700)] text-[var(--neutral-400)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+          >
+            {loading ? <Loader2 size={12} className="animate-spin" /> : "Refresh"}
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="flex items-start gap-2 text-xs text-red-400 border border-red-900/50 bg-red-950/20 rounded-lg px-3 py-2">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
+          <span className="min-w-0 break-words">{error}</span>
         </div>
       )}
 
@@ -1180,11 +1468,17 @@ function CalendarView() {
               {dayEvents.map((ev) => (
                 <div
                   key={ev.id}
-                  className="flex items-center justify-between gap-2 border border-[var(--neutral-800)] rounded-lg px-3 py-2 bg-[var(--neutral-900)]"
+                  className={`flex items-center justify-between gap-2 border border-[var(--neutral-800)] rounded-lg px-3 bg-[var(--neutral-900)] ${
+                    isMobile ? "py-2.5" : "py-2"
+                  }`}
                 >
+                  {/* CHANGED — mobile: titles and the time/location line
+                      wrap to two lines instead of truncating — a phone
+                      has no hover to reveal what "Q3 launch webin…"
+                      was, and the location is the part that got cut. */}
                   <div className="min-w-0">
-                    <p className="text-xs text-[var(--neutral-300)] truncate">{ev.summary}</p>
-                    <p className="text-[10px] text-[var(--neutral-600)] truncate">
+                    <p className={`text-[var(--neutral-300)] ${isMobile ? "text-[13px] line-clamp-2 break-words" : "text-xs truncate"}`}>{ev.summary}</p>
+                    <p className={`text-[var(--neutral-600)] ${isMobile ? "text-[11px] line-clamp-2 break-words" : "text-[10px] truncate"}`}>
                       {formatEventTime(ev.start)}
                       {ev.end ? ` – ${formatEventTime(ev.end)}` : ""}
                       {ev.location ? ` · ${ev.location}` : ""}
@@ -1195,8 +1489,9 @@ function CalendarView() {
                       href={ev.html_link}
                       target="_blank"
                       rel="noreferrer"
-                      className="p-1.5 text-[var(--neutral-600)] hover:text-[var(--neutral-300)] shrink-0"
+                      className="touch-target p-1.5 text-[var(--neutral-600)] hover:text-[var(--neutral-300)] shrink-0"
                       title="Open in Google Calendar"
+                      aria-label="Open in Google Calendar"
                     >
                       <ExternalLink size={12} />
                     </a>
@@ -1233,7 +1528,7 @@ function CalendarView() {
 // new cross-tab import -- per the design doc §2.4's own "near-identical to
 // PlanTab.MarkdownPastePanel, just relabeled" line item.
 
-function ContentAuditView({ wsId }) {
+function ContentAuditView({ wsId, isMobile }) {
   const { API_URL, fetchPanelContent, savePanelContent } = useSession();
 
   const [url, setUrl] = useState("");
@@ -1274,6 +1569,7 @@ function ContentAuditView({ wsId }) {
           workspaceId={wsId}
           fetchPanelContent={fetchPanelContent}
           savePanelContent={savePanelContent}
+          isMobile={isMobile}
         />
         {/* T5 audit note: agents/backlink_detector.py is NOT an external/SEO
             backlink checker -- it's the internal knowledge-graph
@@ -1297,7 +1593,12 @@ function ContentAuditView({ wsId }) {
           A real Lighthouse run against a live URL -- kept separate from the
           AI-estimated audit above, never blended into one score.
         </p>
-        <div className="flex items-center gap-2">
+        {/* CHANGED — mobile: URL field, strategy select and Run button
+            in one row left the URL ~100px to type into. Same three
+            controls as a 2-row grid instead: URL on its own full-width
+            row, then select + Run side by side. 16px text so iOS
+            Safari doesn't zoom on focus. */}
+        <div className={isMobile ? "grid grid-cols-[auto_minmax(0,1fr)] gap-2" : "flex items-center gap-2"}>
           <input
             type="url"
             id="growth-launch-url"
@@ -1306,14 +1607,22 @@ function ContentAuditView({ wsId }) {
             onChange={(e) => setUrl(e.target.value)}
             aria-label="Launch page URL"
             placeholder="https://your-launch-page.com"
-            className="flex-1 text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
+            inputMode="url"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            className={`bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg text-[var(--neutral-300)] ${
+              isMobile ? "col-span-2 min-w-0 min-h-[var(--viewport-touch-target)] text-base px-3 py-2" : "flex-1 text-xs px-2 py-1.5"
+            }`}
           />
           <select
             id="growth-lighthouse-strategy"
             name="growthLighthouseStrategy"
             value={strategy}
             onChange={(e) => setStrategy(e.target.value)}
-            className="text-xs bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg px-2 py-1.5 text-[var(--neutral-300)]"
+            className={`bg-[var(--neutral-900)] border border-[var(--neutral-800)] rounded-lg text-[var(--neutral-300)] ${
+              isMobile ? "min-h-[var(--viewport-touch-target)] text-base px-3 py-2" : "text-xs px-2 py-1.5"
+            }`}
           >
             <option value="mobile">Mobile</option>
             <option value="desktop">Desktop</option>
@@ -1321,7 +1630,9 @@ function ContentAuditView({ wsId }) {
           <button
             onClick={runPagespeed}
             disabled={psLoading || !url.trim()}
-            className="shrink-0 flex items-center gap-1.5 text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+            className={`shrink-0 flex items-center gap-1.5 bg-[var(--accent)] text-[var(--accent-text)] rounded-lg font-medium disabled:opacity-50 ${
+              isMobile ? "justify-center text-sm px-3 min-h-[var(--viewport-touch-target)]" : "text-xs px-3 py-1.5"
+            }`}
           >
             {psLoading ? <Loader2 size={12} className="animate-spin" /> : "Run check"}
           </button>
@@ -1330,15 +1641,20 @@ function ContentAuditView({ wsId }) {
         {psError && (
           <div className="flex items-start gap-2 text-xs text-red-400 border border-red-900/50 bg-red-950/20 rounded-lg px-3 py-2">
             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-            <span>{psError}</span>
+            <span className="min-w-0 break-words">{psError}</span>
           </div>
         )}
 
         {psResult && (
           <div className="space-y-3">
-            <div className="grid grid-cols-4 gap-2">
+            {/* CHANGED — 2x2 below the sm breakpoint. Four cells across a
+                ~290px phone pane left ~40px of content width each, and
+                "ACCESSIBILITY" in 10px tracked caps needs ~90px, so the
+                labels overprinted their neighbors. Desktop (>=640px) is
+                the same 4-up row as before. */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {["performance", "accessibility", "best_practices", "seo"].map((key) => (
-                <div key={key} className="border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-center">
+                <div key={key} className="border border-[var(--neutral-800)] rounded-lg px-3 py-2 text-center min-w-0">
                   <p className="text-[10px] uppercase tracking-wide text-[var(--neutral-600)]">
                     {key.replace("_", " ")}
                   </p>
@@ -1359,8 +1675,8 @@ function ContentAuditView({ wsId }) {
                     key={issue.id}
                     className="flex items-center justify-between gap-2 border border-[var(--neutral-800)] rounded-lg px-3 py-2 bg-[var(--neutral-900)]"
                   >
-                    <span className="text-xs text-[var(--neutral-300)]">{issue.title}</span>
-                    <span className={`text-xs font-medium ${scoreColor(issue.score)}`}>{issue.score}</span>
+                    <span className="text-xs text-[var(--neutral-300)] min-w-0 break-words">{issue.title}</span>
+                    <span className={`shrink-0 text-xs font-medium ${scoreColor(issue.score)}`}>{issue.score}</span>
                   </div>
                 ))}
               </div>
@@ -1392,7 +1708,7 @@ function scoreColor(score) {
 // there, hence the duplication -- see the comment above ContentAuditView).
 // panelKey is fixed to "audit" rather than a prop since this component has
 // exactly one caller and one purpose, unlike PlanTab's shared version.
-function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelContent }) {
+function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelContent, isMobile }) {
   const panelKey = "audit";
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1439,20 +1755,24 @@ function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelConte
         onChange={(e) => setRaw(e.target.value)}
         placeholder="Paste the role's markdown output here…"
         rows={8}
-        className="w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 text-xs outline-none focus:border-[var(--cyber-cyan)] font-mono"
+        className={`w-full bg-black/30 border border-[var(--neutral-800)] rounded px-3 py-2 outline-none focus:border-[var(--cyber-cyan)] font-mono ${
+          isMobile ? "text-base" : "text-xs"
+        }`}
       />
       <div className="flex items-center gap-2">
         <button
           onClick={handleSave}
           disabled={saving}
-          className="text-xs bg-[var(--accent)] text-[var(--accent-text)] rounded px-3 py-1.5 font-medium disabled:opacity-50"
+          className={`bg-[var(--accent)] text-[var(--accent-text)] font-medium disabled:opacity-50 ${
+            isMobile ? "text-sm rounded-lg px-5 min-h-[var(--viewport-touch-target)]" : "text-xs rounded px-3 py-1.5"
+          }`}
         >
           {saving ? "Saving…" : "Save"}
         </button>
         {savedAt && !saving && <span className="text-[11px] text-[var(--neutral-600)]">Saved</span>}
       </div>
       {raw.trim() && (
-        <div className="border border-[var(--cyber-amber)]/40 bg-[var(--cyber-amber)]/5 rounded-lg p-3">
+        <div className="border border-[var(--cyber-amber)]/40 bg-[var(--cyber-amber)]/5 rounded-lg p-3 min-w-0 break-words">
           <p className="text-[10px] uppercase tracking-wide text-[var(--cyber-amber)] mb-2">
             AI-estimated -- not verified against real ranking/search data
           </p>
@@ -1463,8 +1783,26 @@ function ContentAuditPastePanel({ workspaceId, fetchPanelContent, savePanelConte
   );
 }
 
-function ComingSoonPanel({ subTabId }) {
-  const label = SUB_TABS.find((t) => t.id === subTabId)?.label || subTabId;
+function ComingSoonPanel({ subTabId, isMobile }) {
+  const tab = SUB_TABS.find((t) => t.id === subTabId);
+  const label = tab?.label || subTabId;
+  // Mobile: the desktop sentence points at "build order §4 (design spec)"
+  // and lists which sub-tabs are done — internal build-log copy that reads
+  // as clutter on a phone. Same fact, said for the person using the app.
+  if (isMobile) {
+    const Icon = tab?.icon;
+    return (
+      <div className="flex flex-col items-center text-center gap-3 px-6 py-12">
+        {Icon && <Icon size={26} className="text-[var(--neutral-600)]" />}
+        <div className="space-y-1">
+          <p className="text-sm font-medium text-[var(--neutral-200)]">{label} is coming soon</p>
+          <p className="text-xs text-[var(--neutral-500)]">
+            Content Fan-out, Brand Voice, Calendar and Content Audit are ready to use now.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="text-sm text-[var(--neutral-500)]">
       {label} isn&apos;t built yet — see build order §4 (design spec). Brand
