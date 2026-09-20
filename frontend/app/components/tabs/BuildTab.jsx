@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, memo } from "react";
+import { useEffect, useState, useRef, memo } from "react";
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
@@ -13,6 +13,8 @@ import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "
 import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, MoreVertical, Check, X, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
+import { getPusherClient } from "../../lib/pusherClient"; // NEW — W0.1: live refresh on code_file_updated, same workspace-${id} channel + bind_global pattern PlanTab.jsx uses for panel_content_updated (see that file's assistantTurnSignal effect).
+import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggable chat-dock width, replacing the old fixed width: 560
 // Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -436,6 +438,15 @@ function CodeView({ workspaceId, apiUrl }) {
   const [saveError, setSaveError] = useState(null);
   const [downloading, setDownloading] = useState(false); // NEW — patch 11
   const [downloadError, setDownloadError] = useState(null); // NEW — patch 11
+  // NEW — W0.1: set when a code_file_updated event names the file
+  // that's currently open AND that file has unsaved local edits. We
+  // deliberately do NOT auto-refetch in that case (that would silently
+  // clobber the edit sitting in the textarea) -- this banner is the
+  // stop-gap until W1.1 gives Save a real base_version/409 conflict
+  // check. filePaths is kept only for a possible future "which files
+  // changed" detail; today the banner just offers Reload / Keep mine
+  // for the one open file.
+  const [staleBanner, setStaleBanner] = useState(null); // null | {filePaths: string[]}
 
   async function loadFileList({ preserveSelection = true } = {}) {
     setLoading(true);
@@ -480,6 +491,7 @@ function CodeView({ workspaceId, apiUrl }) {
     setFileLoading(true);
     setFileError(null);
     setSaveError(null);
+    setStaleBanner(null); // NEW — W0.1: opening/re-opening a file supersedes any pending stale-banner choice
     try {
       // {file_path:path} on the backend accepts the raw slashes as-is —
       // no encoding needed, file_path is already shape-validated server
@@ -510,6 +522,92 @@ function CodeView({ workspaceId, apiUrl }) {
   }
 
   const isDirty = fileContent != null && editedContent !== (fileContent.content || "");
+
+  // NEW — W0.1: "latest" refs so the Pusher handler below (subscribed
+  // once per workspaceId, not re-bound on every keystroke) always sees
+  // the current selection/dirty state and the current loadFileList/
+  // openFile closures, instead of the stale ones captured when the
+  // effect first ran. Assigning a ref during render (no effect) is the
+  // standard way to hand an event handler "the latest callback" without
+  // re-subscribing on every render.
+  const selectedPathRef = useRef(selectedPath);
+  selectedPathRef.current = selectedPath;
+  const isDirtyRef = useRef(isDirty);
+  isDirtyRef.current = isDirty;
+  const loadFileListRef = useRef(loadFileList);
+  loadFileListRef.current = loadFileList;
+  const openFileRef = useRef(openFile);
+  openFileRef.current = openFile;
+
+  // NEW — W0.1: live refresh. api/task_runner.py's _write_code_files()
+  // fires CODE_FILE_UPDATED on the workspace's Pusher channel
+  // (relay/emitter.py) after every chat-driven code write, but nothing
+  // in the frontend was listening for it (build plan §1.1) -- this sub
+  // tab only ever fetched once per workspaceId, so newly-generated
+  // files silently didn't show up without a reload, and an open file
+  // didn't pick up a chat-driven regen either. Same channel-naming +
+  // bind_global pattern as PlanTab.jsx's wsPanelPushSignal effect.
+  useEffect(() => {
+    if (!workspaceId) return undefined;
+    const pusher = getPusherClient();
+    if (!pusher) return undefined; // Pusher env vars not set — live refresh disabled, falls back to per-mount fetch
+
+    const channelName = `workspace-${workspaceId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
+    const channel = pusher.subscribe(channelName);
+    const handler = (eventType, data) => {
+      if (eventType !== "code_file_updated") return;
+      const filePaths = data?.file_paths?.length
+        ? data.file_paths
+        : data?.file_path
+        ? [data.file_path]
+        : [];
+      // Always refetch the tree/list -- this is what makes newly
+      // chat-generated files show up without a reload.
+      loadFileListRef.current();
+      const openPath = selectedPathRef.current;
+      if (!openPath || !filePaths.includes(openPath)) return;
+      if (isDirtyRef.current) {
+        // Don't clobber unsaved edits sitting in the textarea -- surface
+        // the choice instead. Real conflict resolution (base_version,
+        // 409, compare-diff) is W1.1; this is just "don't silently lose
+        // work" in the meantime.
+        setStaleBanner({ filePaths });
+      } else {
+        openFileRef.current(openPath);
+      }
+    };
+    channel.bind_global(handler);
+
+    return () => {
+      channel.unbind_global(handler);
+      pusher.unsubscribe(channelName);
+    };
+  }, [workspaceId]);
+
+  // NEW — W0.1: Pusher can drop a connection while a tab is backgrounded
+  // (mobile Safari in particular suspends websockets aggressively), so
+  // a regen that happened while this tab was hidden could otherwise
+  // never reach it. Cheap fallback: re-check on tab visibility regain.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState !== "visible") return;
+      loadFileListRef.current();
+      const openPath = selectedPathRef.current;
+      if (openPath && !isDirtyRef.current) openFileRef.current(openPath);
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
+
+  // NEW — W0.1: "Reload" side of the stale-banner choice -- discards the
+  // local edit and re-fetches the server's current content. "Keep mine"
+  // is just dismissing the banner (handled inline where it's rendered);
+  // the edit already sitting in editedContent needs no code path of its
+  // own to "keep".
+  function reloadFromServer() {
+    setStaleBanner(null);
+    if (selectedPath) openFile(selectedPath);
+  }
 
   async function saveFile() {
     if (!selectedPath || !isDirty) return;
@@ -583,9 +681,17 @@ function CodeView({ workspaceId, apiUrl }) {
   const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
 
   return (
-    <div className="grid grid-cols-[220px_1fr] gap-4 min-h-[360px]">
+    // CHANGED — W0.2: was `min-h-[360px]` (one of the four stacked limits
+    // on the editor's size, build plan §1.2). BuildTab's Editor-mode
+    // wrapper is now a flex column with real remaining height to give
+    // this, so this fills it instead of just guaranteeing a floor.
+    <div className="flex-1 min-h-0 grid grid-cols-[220px_1fr] gap-4">
       {/* File tree */}
-      <div className="border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto max-h-[560px]">
+      {/* CHANGED — W0.2: max-h-[560px] removed -- let it fill the grid
+          row's full (now flexible) height instead of capping at a fixed
+          pixel value; min-h-0 keeps overflow-y-auto able to actually
+          scroll instead of growing to fit all content. */}
+      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto">
         <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-[var(--neutral-800)]">
           <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
             Files{fileCount ? ` (${fileCount})` : ""}
@@ -639,7 +745,10 @@ function CodeView({ workspaceId, apiUrl }) {
       </div>
 
       {/* Editor */}
-      <div className="border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col min-h-[360px]">
+      {/* CHANGED — W0.2: min-h-[360px] dropped in favor of min-h-0, same
+          reasoning as the file tree above -- this pane now fills the
+          grid row's real height rather than just guaranteeing a floor. */}
+      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col">
         {!selectedPath ? (
           <p className="text-xs text-[var(--neutral-600)] m-auto">Select a file to view or edit it.</p>
         ) : (
@@ -666,6 +775,22 @@ function CodeView({ workspaceId, apiUrl }) {
                 {saving ? "Saving…" : isDirty ? "Save" : "Saved"}
               </button>
             </div>
+            {staleBanner && (
+              // NEW — W0.1: shown instead of silently refetching when the
+              // open file has unsaved edits and a code_file_updated event
+              // named it -- see the Pusher handler above.
+              <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 mb-2">
+                <span>Changed on server — this file was updated elsewhere while you had unsaved edits.</span>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button type="button" onClick={reloadFromServer} className="underline hover:text-amber-200">
+                    Reload
+                  </button>
+                  <button type="button" onClick={() => setStaleBanner(null)} className="underline hover:text-amber-200">
+                    Keep mine
+                  </button>
+                </div>
+              </div>
+            )}
             {saveError && <p className="text-xs text-red-400 pb-2">{saveError}</p>}
             {fileLoading ? (
               <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 m-auto">
@@ -674,12 +799,15 @@ function CodeView({ workspaceId, apiUrl }) {
             ) : fileError ? (
               <p className="text-xs text-red-400">{fileError}</p>
             ) : (
+              // CHANGED — W0.2: min-h-[300px] removed -- flex-1 + the
+              // editor pane's own min-h-0 (above) now let this fill
+              // whatever height Editor mode's layout actually has.
               <textarea
                 value={editedContent}
                 onChange={(e) => setEditedContent(e.target.value)}
                 spellCheck={false}
                 aria-label={`Editing ${selectedPath}`}
-                className="flex-1 w-full min-h-[300px] bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
+                className="flex-1 w-full min-h-0 bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
               />
             )}
           </>
@@ -1142,10 +1270,44 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
     });
   }
 
+  // NEW — W0.2: remembers the sidebar's collapsed/open state from just
+  // before Editor mode auto-collapsed it, so leaving Editor restores
+  // exactly that (not unconditionally "open") -- null means "nothing to
+  // restore", either because the sidebar was already collapsed when
+  // Editor mode was entered (nothing to do) or because the user made
+  // their own explicit choice while inside Editor mode (toggleProjects
+  // clears it, see below).
+  const sidebarStateBeforeAutoCollapseRef = useRef(null);
+
+  // NEW — W0.2: the Editor view wants every pixel of width it can get
+  // (build plan §1.2 -- the sidebar was one of four stacked limits on
+  // its size), so auto-collapse the project sidebar while buildView is
+  // "code" and restore it on the way out. Deliberately calls
+  // setProjectsCollapsed directly rather than toggleProjects() -- this is
+  // a transient, view-driven state change, not the user's own
+  // preference, so it must NOT overwrite PROJECTS_KEY the way an actual
+  // click on the collapse button does.
+  useEffect(() => {
+    if (buildView === "code") {
+      if (!projectsCollapsed) {
+        sidebarStateBeforeAutoCollapseRef.current = false;
+        setProjectsCollapsed(true);
+      }
+    } else if (sidebarStateBeforeAutoCollapseRef.current !== null) {
+      setProjectsCollapsed(sidebarStateBeforeAutoCollapseRef.current);
+      sidebarStateBeforeAutoCollapseRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildView]);
+
   // NEW — collapsible project-picker sidebar, same toggle pattern as
   // toggleChatDock above, its own localStorage key so the two collapse
   // independently.
   function toggleProjects() {
+    // NEW — W0.2: an explicit click here is the user's own choice, so it
+    // overrides whatever the Editor-mode auto-collapse effect below was
+    // planning to restore on the way out.
+    sidebarStateBeforeAutoCollapseRef.current = null;
     setProjectsCollapsed((prev) => {
       localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
       return !prev;
@@ -1298,6 +1460,99 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
     features: features.filter((f) => statusFor(featureStatus, f) === col.status),
   }));
 
+  // NEW — W0.2: extracted out of the board header's inline IIFE so
+  // Editor mode's compact header (below, in the return) can render the
+  // identical promote controls instead of a second copy of this ~60-line
+  // block. Only called once `selected` is known truthy.
+  function renderPromoteControls() {
+    // NEW — §2.2: exclude stages already active for this workspace —
+    // same rule as Notebooks/Research/Plan.
+    const activeHere = selected.active_stages || [selected.stage];
+    const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
+    const targetStage = availableTargets.includes(promoteTargetStage)
+      ? promoteTargetStage
+      : availableTargets[0];
+    if (!availableTargets.length) return null;
+    return (
+      <>
+        <label className="sr-only" htmlFor="build-promote-target">Promote to</label>
+        <select
+          id="build-promote-target"
+          value={targetStage}
+          onChange={(e) => setPromoteTargetStage(e.target.value)}
+          disabled={promoting}
+          className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+        >
+          {availableTargets.map((stage) => (
+            <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+          ))}
+        </select>
+        {/* NEW — §2.6 step 4: complete/partial toggle. */}
+        <div
+          role="radiogroup"
+          aria-label="Promote mode"
+          className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
+        >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={promoteMode === "complete"}
+            onClick={() => setPromoteMode("complete")}
+            disabled={promoting}
+            title="Move the project fully into the target stage"
+            className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+              promoteMode === "complete"
+                ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+            }`}
+          >
+            Complete
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={promoteMode === "partial"}
+            onClick={() => setPromoteMode("partial")}
+            disabled={promoting}
+            title="Keep the project active here too"
+            className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+              promoteMode === "partial"
+                ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+            }`}
+          >
+            Partial
+          </button>
+        </div>
+        <button
+          onClick={() => handlePromote(selected.id, targetStage)}
+          disabled={promoting}
+          className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+        >
+          {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+          {promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[targetStage]} →
+        </button>
+      </>
+    );
+  }
+
+  // NEW — W0.2: draggable chat-dock width, replacing the old fixed
+  // `style={{ width: 560 }}`. Default/min match the old fixed value and
+  // the build plan's spec; max is 60% of the viewport, recomputed live
+  // on each drag move rather than baked in, since (unlike
+  // WorkspaceChatPanel's own WORKING_PANEL_MAX_WIDTH) this bound depends
+  // on window size. Handle sits on the dock's left edge -- dragging left
+  // grows it -- same as WorkspaceChatPanel's own startWorkingPanelResize,
+  // hence reverse: true (see useSplitter.js).
+  const chatDockSplitter = useSplitter({
+    axis: "width",
+    defaultSize: 560,
+    min: 360,
+    max: () => (typeof window !== "undefined" ? window.innerWidth * 0.6 : 560),
+    storageKey: "minime_build_chatdock_width",
+    reverse: true,
+  });
+
   return (
     <div className="flex h-full">
       {/* Build-project picker -- same left column pattern as
@@ -1445,7 +1700,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
       )}
 
       {/* Selected project's board */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      {/* CHANGED — W0.2: Editor mode (buildView === "code") swaps this
+          from a scrolling max-w-4xl column to a flex column filling the
+          available height, so CodeView's own panes can stretch instead
+          of being capped at max-h-[560px]/min-h-[300px] (both removed
+          from CodeView itself, below) -- see the buildView === "code"
+          branch in the ternary just below. */}
+      <div className={buildView === "code" ? "flex-1 min-h-0 flex flex-col" : "flex-1 min-h-0 overflow-y-auto"}>
         {!selected ? (
           <div className="h-full flex items-center justify-center text-sm text-[var(--neutral-600)]">
             Select a build project to see its task board.
@@ -1462,83 +1723,48 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
               and that you&apos;re signed in with a valid session.
             </p>
           </div>
+        ) : buildView === "code" ? (
+          // NEW — W0.2: Editor mode's own compact header -- title,
+          // sub-nav and promote controls in one row, no max-w-4xl -- so
+          // CodeView below gets the rest of the available height instead
+          // of sharing the board's tall title block. Same
+          // renderPromoteControls() the board header below uses.
+          <>
+            <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-2.5 border-b border-[var(--neutral-800)]">
+              <div className="flex items-center gap-3 min-w-0">
+                <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{selected.name}</h2>
+                <nav className="flex gap-1 shrink-0">
+                  {BUILD_VIEWS.map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => setBuildView(v.id)}
+                      className={`text-xs rounded px-2.5 py-1 ${
+                        buildView === v.id
+                          ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+                          : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+                      }`}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </nav>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">{renderPromoteControls()}</div>
+            </div>
+            {promoteError && <p className="text-xs text-red-400 px-4 pt-2">{promoteError}</p>}
+            <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 pt-3">
+              {/* NEW — patch 10: Code sub-tab, file tree + inline editor,
+                  wired to patch 8's GET/PUT .../code/files endpoints.
+                  CHANGED — W0.2: now stretches to fill the flex column
+                  above instead of sitting inside the max-w-4xl board. */}
+              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
+            </div>
+          </>
         ) : (
           <div className="relative px-4 py-6 max-w-4xl mx-auto space-y-4">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
-              <div className="flex items-center gap-2 shrink-0">
-                {(() => {
-                  // NEW — §2.2: exclude stages already active for this
-                  // workspace — same rule as Notebooks/Research/Plan.
-                  const activeHere = selected.active_stages || [selected.stage];
-                  const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
-                  const targetStage = availableTargets.includes(promoteTargetStage)
-                    ? promoteTargetStage
-                    : availableTargets[0];
-                  if (!availableTargets.length) return null;
-                  return (
-                    <>
-                      <label className="sr-only" htmlFor="build-promote-target">Promote to</label>
-                      <select
-                        id="build-promote-target"
-                        value={targetStage}
-                        onChange={(e) => setPromoteTargetStage(e.target.value)}
-                        disabled={promoting}
-                        className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
-                      >
-                        {availableTargets.map((stage) => (
-                          <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
-                        ))}
-                      </select>
-                      {/* NEW — §2.6 step 4: complete/partial toggle. */}
-                      <div
-                        role="radiogroup"
-                        aria-label="Promote mode"
-                        className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
-                      >
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={promoteMode === "complete"}
-                          onClick={() => setPromoteMode("complete")}
-                          disabled={promoting}
-                          title="Move the project fully into the target stage"
-                          className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
-                            promoteMode === "complete"
-                              ? "bg-[var(--accent)] text-[var(--accent-text)]"
-                              : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
-                          }`}
-                        >
-                          Complete
-                        </button>
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={promoteMode === "partial"}
-                          onClick={() => setPromoteMode("partial")}
-                          disabled={promoting}
-                          title="Keep the project active here too"
-                          className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
-                            promoteMode === "partial"
-                              ? "bg-[var(--accent)] text-[var(--accent-text)]"
-                              : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
-                          }`}
-                        >
-                          Partial
-                        </button>
-                      </div>
-                      <button
-                        onClick={() => handlePromote(selected.id, targetStage)}
-                        disabled={promoting}
-                        className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
-                      >
-                        {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
-                        {promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[targetStage]} →
-                      </button>
-                    </>
-                  );
-                })()}
-              </div>
+              <div className="flex items-center gap-2 shrink-0">{renderPromoteControls()}</div>
             </div>
 
             {/* NEW — patch 7: Tasks / Instructions sub-nav, same small
@@ -1559,16 +1785,17 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
               ))}
             </nav>
 
+            {/* CHANGED — W0.2: the "code" branch that used to live here
+                is unreachable now -- the outer ternary above intercepts
+                buildView === "code" before this max-w-4xl block is ever
+                rendered, so it's handled up there instead (own compact
+                header, no max-w-4xl). */}
             {buildView === "instructions" ? (
               <InstructionsView
                 workspaceId={selected.id}
                 fetchDeviceSpec={fetchDeviceSpec}
                 toggleInstructionStep={toggleInstructionStep}
               />
-            ) : buildView === "code" ? (
-              // NEW — patch 10: Code sub-tab, file tree + inline editor,
-              // wired to patch 8's GET/PUT .../code/files endpoints.
-              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
             ) : buildView === "wireframes" ? (
               // NEW — patch 12 (Plan/Build wireframes split): relocated
               // from PlanTab.jsx's own Wireframes sub-tab. sessionId/
@@ -1648,7 +1875,19 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
           reserved rail; the floating bubble below is the way back in at
           every width now. Same change across all six docked tabs. */}
       {!chatDockCollapsed && (
-        <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: 560 }}>
+        <div
+          className="hidden lg:flex shrink-0 relative border-l border-[var(--neutral-800)]"
+          style={{ width: chatDockSplitter.size }}
+        >
+          {/* NEW — W0.2: drag handle replacing the old fixed
+              `style={{ width: 560 }}`. Same left-edge-grows-left pattern
+              WorkspaceChatPanel's own startWorkingPanelResize already
+              uses for its working panel, now shared via useSplitter.js. */}
+          <div
+            onMouseDown={chatDockSplitter.onHandleMouseDown}
+            title="Drag to resize"
+            className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-[var(--accent)]/40"
+          />
           <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
         </div>
       )}

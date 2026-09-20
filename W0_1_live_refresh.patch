@@ -1,0 +1,159 @@
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index db24511..0720948 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useEffect, useState, memo } from "react";
++import { useEffect, useState, useRef, memo } from "react";
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
+@@ -13,6 +13,7 @@ import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "
+ import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, MoreVertical, Check, X, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
+ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+ import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
++import { getPusherClient } from "../../lib/pusherClient"; // NEW — W0.1: live refresh on code_file_updated, same workspace-${id} channel + bind_global pattern PlanTab.jsx uses for panel_content_updated (see that file's assistantTurnSignal effect).
+ // Part 8.9: replaces the old static shared-secret x-api-key header
+ // -- every fetch() below now sends the real per-user Supabase JWT via
+ // authHeaders(), matching require_auth()'s Authorization: Bearer check.
+@@ -436,6 +437,15 @@ function CodeView({ workspaceId, apiUrl }) {
+   const [saveError, setSaveError] = useState(null);
+   const [downloading, setDownloading] = useState(false); // NEW — patch 11
+   const [downloadError, setDownloadError] = useState(null); // NEW — patch 11
++  // NEW — W0.1: set when a code_file_updated event names the file
++  // that's currently open AND that file has unsaved local edits. We
++  // deliberately do NOT auto-refetch in that case (that would silently
++  // clobber the edit sitting in the textarea) -- this banner is the
++  // stop-gap until W1.1 gives Save a real base_version/409 conflict
++  // check. filePaths is kept only for a possible future "which files
++  // changed" detail; today the banner just offers Reload / Keep mine
++  // for the one open file.
++  const [staleBanner, setStaleBanner] = useState(null); // null | {filePaths: string[]}
+ 
+   async function loadFileList({ preserveSelection = true } = {}) {
+     setLoading(true);
+@@ -480,6 +490,7 @@ function CodeView({ workspaceId, apiUrl }) {
+     setFileLoading(true);
+     setFileError(null);
+     setSaveError(null);
++    setStaleBanner(null); // NEW — W0.1: opening/re-opening a file supersedes any pending stale-banner choice
+     try {
+       // {file_path:path} on the backend accepts the raw slashes as-is —
+       // no encoding needed, file_path is already shape-validated server
+@@ -511,6 +522,92 @@ function CodeView({ workspaceId, apiUrl }) {
+ 
+   const isDirty = fileContent != null && editedContent !== (fileContent.content || "");
+ 
++  // NEW — W0.1: "latest" refs so the Pusher handler below (subscribed
++  // once per workspaceId, not re-bound on every keystroke) always sees
++  // the current selection/dirty state and the current loadFileList/
++  // openFile closures, instead of the stale ones captured when the
++  // effect first ran. Assigning a ref during render (no effect) is the
++  // standard way to hand an event handler "the latest callback" without
++  // re-subscribing on every render.
++  const selectedPathRef = useRef(selectedPath);
++  selectedPathRef.current = selectedPath;
++  const isDirtyRef = useRef(isDirty);
++  isDirtyRef.current = isDirty;
++  const loadFileListRef = useRef(loadFileList);
++  loadFileListRef.current = loadFileList;
++  const openFileRef = useRef(openFile);
++  openFileRef.current = openFile;
++
++  // NEW — W0.1: live refresh. api/task_runner.py's _write_code_files()
++  // fires CODE_FILE_UPDATED on the workspace's Pusher channel
++  // (relay/emitter.py) after every chat-driven code write, but nothing
++  // in the frontend was listening for it (build plan §1.1) -- this sub
++  // tab only ever fetched once per workspaceId, so newly-generated
++  // files silently didn't show up without a reload, and an open file
++  // didn't pick up a chat-driven regen either. Same channel-naming +
++  // bind_global pattern as PlanTab.jsx's wsPanelPushSignal effect.
++  useEffect(() => {
++    if (!workspaceId) return undefined;
++    const pusher = getPusherClient();
++    if (!pusher) return undefined; // Pusher env vars not set — live refresh disabled, falls back to per-mount fetch
++
++    const channelName = `workspace-${workspaceId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
++    const channel = pusher.subscribe(channelName);
++    const handler = (eventType, data) => {
++      if (eventType !== "code_file_updated") return;
++      const filePaths = data?.file_paths?.length
++        ? data.file_paths
++        : data?.file_path
++        ? [data.file_path]
++        : [];
++      // Always refetch the tree/list -- this is what makes newly
++      // chat-generated files show up without a reload.
++      loadFileListRef.current();
++      const openPath = selectedPathRef.current;
++      if (!openPath || !filePaths.includes(openPath)) return;
++      if (isDirtyRef.current) {
++        // Don't clobber unsaved edits sitting in the textarea -- surface
++        // the choice instead. Real conflict resolution (base_version,
++        // 409, compare-diff) is W1.1; this is just "don't silently lose
++        // work" in the meantime.
++        setStaleBanner({ filePaths });
++      } else {
++        openFileRef.current(openPath);
++      }
++    };
++    channel.bind_global(handler);
++
++    return () => {
++      channel.unbind_global(handler);
++      pusher.unsubscribe(channelName);
++    };
++  }, [workspaceId]);
++
++  // NEW — W0.1: Pusher can drop a connection while a tab is backgrounded
++  // (mobile Safari in particular suspends websockets aggressively), so
++  // a regen that happened while this tab was hidden could otherwise
++  // never reach it. Cheap fallback: re-check on tab visibility regain.
++  useEffect(() => {
++    function handleVisibility() {
++      if (document.visibilityState !== "visible") return;
++      loadFileListRef.current();
++      const openPath = selectedPathRef.current;
++      if (openPath && !isDirtyRef.current) openFileRef.current(openPath);
++    }
++    document.addEventListener("visibilitychange", handleVisibility);
++    return () => document.removeEventListener("visibilitychange", handleVisibility);
++  }, []);
++
++  // NEW — W0.1: "Reload" side of the stale-banner choice -- discards the
++  // local edit and re-fetches the server's current content. "Keep mine"
++  // is just dismissing the banner (handled inline where it's rendered);
++  // the edit already sitting in editedContent needs no code path of its
++  // own to "keep".
++  function reloadFromServer() {
++    setStaleBanner(null);
++    if (selectedPath) openFile(selectedPath);
++  }
++
+   async function saveFile() {
+     if (!selectedPath || !isDirty) return;
+     setSaving(true);
+@@ -666,6 +763,22 @@ function CodeView({ workspaceId, apiUrl }) {
+                 {saving ? "Saving…" : isDirty ? "Save" : "Saved"}
+               </button>
+             </div>
++            {staleBanner && (
++              // NEW — W0.1: shown instead of silently refetching when the
++              // open file has unsaved edits and a code_file_updated event
++              // named it -- see the Pusher handler above.
++              <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 mb-2">
++                <span>Changed on server — this file was updated elsewhere while you had unsaved edits.</span>
++                <div className="flex items-center gap-3 shrink-0">
++                  <button type="button" onClick={reloadFromServer} className="underline hover:text-amber-200">
++                    Reload
++                  </button>
++                  <button type="button" onClick={() => setStaleBanner(null)} className="underline hover:text-amber-200">
++                    Keep mine
++                  </button>
++                </div>
++              </div>
++            )}
+             {saveError && <p className="text-xs text-red-400 pb-2">{saveError}</p>}
+             {fileLoading ? (
+               <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 m-auto">

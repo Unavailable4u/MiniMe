@@ -1,0 +1,483 @@
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 0720948..090ec46 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -14,6 +14,7 @@ import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageS
+ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+ import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
+ import { getPusherClient } from "../../lib/pusherClient"; // NEW — W0.1: live refresh on code_file_updated, same workspace-${id} channel + bind_global pattern PlanTab.jsx uses for panel_content_updated (see that file's assistantTurnSignal effect).
++import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggable chat-dock width, replacing the old fixed width: 560
+ // Part 8.9: replaces the old static shared-secret x-api-key header
+ // -- every fetch() below now sends the real per-user Supabase JWT via
+ // authHeaders(), matching require_auth()'s Authorization: Bearer check.
+@@ -680,9 +681,17 @@ function CodeView({ workspaceId, apiUrl }) {
+   const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
+ 
+   return (
+-    <div className="grid grid-cols-[220px_1fr] gap-4 min-h-[360px]">
++    // CHANGED — W0.2: was `min-h-[360px]` (one of the four stacked limits
++    // on the editor's size, build plan §1.2). BuildTab's Editor-mode
++    // wrapper is now a flex column with real remaining height to give
++    // this, so this fills it instead of just guaranteeing a floor.
++    <div className="flex-1 min-h-0 grid grid-cols-[220px_1fr] gap-4">
+       {/* File tree */}
+-      <div className="border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto max-h-[560px]">
++      {/* CHANGED — W0.2: max-h-[560px] removed -- let it fill the grid
++          row's full (now flexible) height instead of capping at a fixed
++          pixel value; min-h-0 keeps overflow-y-auto able to actually
++          scroll instead of growing to fit all content. */}
++      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto">
+         <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-[var(--neutral-800)]">
+           <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
+             Files{fileCount ? ` (${fileCount})` : ""}
+@@ -736,7 +745,10 @@ function CodeView({ workspaceId, apiUrl }) {
+       </div>
+ 
+       {/* Editor */}
+-      <div className="border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col min-h-[360px]">
++      {/* CHANGED — W0.2: min-h-[360px] dropped in favor of min-h-0, same
++          reasoning as the file tree above -- this pane now fills the
++          grid row's real height rather than just guaranteeing a floor. */}
++      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col">
+         {!selectedPath ? (
+           <p className="text-xs text-[var(--neutral-600)] m-auto">Select a file to view or edit it.</p>
+         ) : (
+@@ -787,12 +799,15 @@ function CodeView({ workspaceId, apiUrl }) {
+             ) : fileError ? (
+               <p className="text-xs text-red-400">{fileError}</p>
+             ) : (
++              // CHANGED — W0.2: min-h-[300px] removed -- flex-1 + the
++              // editor pane's own min-h-0 (above) now let this fill
++              // whatever height Editor mode's layout actually has.
+               <textarea
+                 value={editedContent}
+                 onChange={(e) => setEditedContent(e.target.value)}
+                 spellCheck={false}
+                 aria-label={`Editing ${selectedPath}`}
+-                className="flex-1 w-full min-h-[300px] bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
++                className="flex-1 w-full min-h-0 bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
+               />
+             )}
+           </>
+@@ -1255,10 +1270,44 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+     });
+   }
+ 
++  // NEW — W0.2: remembers the sidebar's collapsed/open state from just
++  // before Editor mode auto-collapsed it, so leaving Editor restores
++  // exactly that (not unconditionally "open") -- null means "nothing to
++  // restore", either because the sidebar was already collapsed when
++  // Editor mode was entered (nothing to do) or because the user made
++  // their own explicit choice while inside Editor mode (toggleProjects
++  // clears it, see below).
++  const sidebarStateBeforeAutoCollapseRef = useRef(null);
++
++  // NEW — W0.2: the Editor view wants every pixel of width it can get
++  // (build plan §1.2 -- the sidebar was one of four stacked limits on
++  // its size), so auto-collapse the project sidebar while buildView is
++  // "code" and restore it on the way out. Deliberately calls
++  // setProjectsCollapsed directly rather than toggleProjects() -- this is
++  // a transient, view-driven state change, not the user's own
++  // preference, so it must NOT overwrite PROJECTS_KEY the way an actual
++  // click on the collapse button does.
++  useEffect(() => {
++    if (buildView === "code") {
++      if (!projectsCollapsed) {
++        sidebarStateBeforeAutoCollapseRef.current = false;
++        setProjectsCollapsed(true);
++      }
++    } else if (sidebarStateBeforeAutoCollapseRef.current !== null) {
++      setProjectsCollapsed(sidebarStateBeforeAutoCollapseRef.current);
++      sidebarStateBeforeAutoCollapseRef.current = null;
++    }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [buildView]);
++
+   // NEW — collapsible project-picker sidebar, same toggle pattern as
+   // toggleChatDock above, its own localStorage key so the two collapse
+   // independently.
+   function toggleProjects() {
++    // NEW — W0.2: an explicit click here is the user's own choice, so it
++    // overrides whatever the Editor-mode auto-collapse effect below was
++    // planning to restore on the way out.
++    sidebarStateBeforeAutoCollapseRef.current = null;
+     setProjectsCollapsed((prev) => {
+       localStorage.setItem(PROJECTS_KEY, !prev ? "1" : "0");
+       return !prev;
+@@ -1411,6 +1460,99 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+     features: features.filter((f) => statusFor(featureStatus, f) === col.status),
+   }));
+ 
++  // NEW — W0.2: extracted out of the board header's inline IIFE so
++  // Editor mode's compact header (below, in the return) can render the
++  // identical promote controls instead of a second copy of this ~60-line
++  // block. Only called once `selected` is known truthy.
++  function renderPromoteControls() {
++    // NEW — §2.2: exclude stages already active for this workspace —
++    // same rule as Notebooks/Research/Plan.
++    const activeHere = selected.active_stages || [selected.stage];
++    const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
++    const targetStage = availableTargets.includes(promoteTargetStage)
++      ? promoteTargetStage
++      : availableTargets[0];
++    if (!availableTargets.length) return null;
++    return (
++      <>
++        <label className="sr-only" htmlFor="build-promote-target">Promote to</label>
++        <select
++          id="build-promote-target"
++          value={targetStage}
++          onChange={(e) => setPromoteTargetStage(e.target.value)}
++          disabled={promoting}
++          className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
++        >
++          {availableTargets.map((stage) => (
++            <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
++          ))}
++        </select>
++        {/* NEW — §2.6 step 4: complete/partial toggle. */}
++        <div
++          role="radiogroup"
++          aria-label="Promote mode"
++          className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
++        >
++          <button
++            type="button"
++            role="radio"
++            aria-checked={promoteMode === "complete"}
++            onClick={() => setPromoteMode("complete")}
++            disabled={promoting}
++            title="Move the project fully into the target stage"
++            className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
++              promoteMode === "complete"
++                ? "bg-[var(--accent)] text-[var(--accent-text)]"
++                : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
++            }`}
++          >
++            Complete
++          </button>
++          <button
++            type="button"
++            role="radio"
++            aria-checked={promoteMode === "partial"}
++            onClick={() => setPromoteMode("partial")}
++            disabled={promoting}
++            title="Keep the project active here too"
++            className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
++              promoteMode === "partial"
++                ? "bg-[var(--accent)] text-[var(--accent-text)]"
++                : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
++            }`}
++          >
++            Partial
++          </button>
++        </div>
++        <button
++          onClick={() => handlePromote(selected.id, targetStage)}
++          disabled={promoting}
++          className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
++        >
++          {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
++          {promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[targetStage]} →
++        </button>
++      </>
++    );
++  }
++
++  // NEW — W0.2: draggable chat-dock width, replacing the old fixed
++  // `style={{ width: 560 }}`. Default/min match the old fixed value and
++  // the build plan's spec; max is 60% of the viewport, recomputed live
++  // on each drag move rather than baked in, since (unlike
++  // WorkspaceChatPanel's own WORKING_PANEL_MAX_WIDTH) this bound depends
++  // on window size. Handle sits on the dock's left edge -- dragging left
++  // grows it -- same as WorkspaceChatPanel's own startWorkingPanelResize,
++  // hence reverse: true (see useSplitter.js).
++  const chatDockSplitter = useSplitter({
++    axis: "width",
++    defaultSize: 560,
++    min: 360,
++    max: () => (typeof window !== "undefined" ? window.innerWidth * 0.6 : 560),
++    storageKey: "minime_build_chatdock_width",
++    reverse: true,
++  });
++
+   return (
+     <div className="flex h-full">
+       {/* Build-project picker -- same left column pattern as
+@@ -1558,7 +1700,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+       )}
+ 
+       {/* Selected project's board */}
+-      <div className="flex-1 min-h-0 overflow-y-auto">
++      {/* CHANGED — W0.2: Editor mode (buildView === "code") swaps this
++          from a scrolling max-w-4xl column to a flex column filling the
++          available height, so CodeView's own panes can stretch instead
++          of being capped at max-h-[560px]/min-h-[300px] (both removed
++          from CodeView itself, below) -- see the buildView === "code"
++          branch in the ternary just below. */}
++      <div className={buildView === "code" ? "flex-1 min-h-0 flex flex-col" : "flex-1 min-h-0 overflow-y-auto"}>
+         {!selected ? (
+           <div className="h-full flex items-center justify-center text-sm text-[var(--neutral-600)]">
+             Select a build project to see its task board.
+@@ -1575,83 +1723,48 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+               and that you&apos;re signed in with a valid session.
+             </p>
+           </div>
++        ) : buildView === "code" ? (
++          // NEW — W0.2: Editor mode's own compact header -- title,
++          // sub-nav and promote controls in one row, no max-w-4xl -- so
++          // CodeView below gets the rest of the available height instead
++          // of sharing the board's tall title block. Same
++          // renderPromoteControls() the board header below uses.
++          <>
++            <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-2.5 border-b border-[var(--neutral-800)]">
++              <div className="flex items-center gap-3 min-w-0">
++                <h2 className="text-sm font-medium text-[var(--neutral-100)] truncate">{selected.name}</h2>
++                <nav className="flex gap-1 shrink-0">
++                  {BUILD_VIEWS.map((v) => (
++                    <button
++                      key={v.id}
++                      onClick={() => setBuildView(v.id)}
++                      className={`text-xs rounded px-2.5 py-1 ${
++                        buildView === v.id
++                          ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
++                          : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
++                      }`}
++                    >
++                      {v.label}
++                    </button>
++                  ))}
++                </nav>
++              </div>
++              <div className="flex items-center gap-2 shrink-0">{renderPromoteControls()}</div>
++            </div>
++            {promoteError && <p className="text-xs text-red-400 px-4 pt-2">{promoteError}</p>}
++            <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 pt-3">
++              {/* NEW — patch 10: Code sub-tab, file tree + inline editor,
++                  wired to patch 8's GET/PUT .../code/files endpoints.
++                  CHANGED — W0.2: now stretches to fill the flex column
++                  above instead of sitting inside the max-w-4xl board. */}
++              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
++            </div>
++          </>
+         ) : (
+           <div className="relative px-4 py-6 max-w-4xl mx-auto space-y-4">
+             <div className="flex items-center justify-between gap-3">
+               <h2 className="text-base font-medium text-[var(--neutral-100)]">{selected.name}</h2>
+-              <div className="flex items-center gap-2 shrink-0">
+-                {(() => {
+-                  // NEW — §2.2: exclude stages already active for this
+-                  // workspace — same rule as Notebooks/Research/Plan.
+-                  const activeHere = selected.active_stages || [selected.stage];
+-                  const availableTargets = PROMOTE_TARGETS.filter((s) => !activeHere.includes(s));
+-                  const targetStage = availableTargets.includes(promoteTargetStage)
+-                    ? promoteTargetStage
+-                    : availableTargets[0];
+-                  if (!availableTargets.length) return null;
+-                  return (
+-                    <>
+-                      <label className="sr-only" htmlFor="build-promote-target">Promote to</label>
+-                      <select
+-                        id="build-promote-target"
+-                        value={targetStage}
+-                        onChange={(e) => setPromoteTargetStage(e.target.value)}
+-                        disabled={promoting}
+-                        className="bg-[var(--neutral-900)] border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2 py-1.5 text-xs outline-none disabled:opacity-50"
+-                      >
+-                        {availableTargets.map((stage) => (
+-                          <option key={stage} value={stage}>{PROMOTE_LABELS[stage]}</option>
+-                        ))}
+-                      </select>
+-                      {/* NEW — §2.6 step 4: complete/partial toggle. */}
+-                      <div
+-                        role="radiogroup"
+-                        aria-label="Promote mode"
+-                        className="flex items-center rounded-lg border border-[var(--neutral-700)] overflow-hidden text-xs shrink-0"
+-                      >
+-                        <button
+-                          type="button"
+-                          role="radio"
+-                          aria-checked={promoteMode === "complete"}
+-                          onClick={() => setPromoteMode("complete")}
+-                          disabled={promoting}
+-                          title="Move the project fully into the target stage"
+-                          className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+-                            promoteMode === "complete"
+-                              ? "bg-[var(--accent)] text-[var(--accent-text)]"
+-                              : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+-                          }`}
+-                        >
+-                          Complete
+-                        </button>
+-                        <button
+-                          type="button"
+-                          role="radio"
+-                          aria-checked={promoteMode === "partial"}
+-                          onClick={() => setPromoteMode("partial")}
+-                          disabled={promoting}
+-                          title="Keep the project active here too"
+-                          className={`px-2 py-1.5 font-medium disabled:opacity-50 ${
+-                            promoteMode === "partial"
+-                              ? "bg-[var(--accent)] text-[var(--accent-text)]"
+-                              : "bg-[var(--neutral-900)] text-[var(--neutral-400)]"
+-                          }`}
+-                        >
+-                          Partial
+-                        </button>
+-                      </div>
+-                      <button
+-                        onClick={() => handlePromote(selected.id, targetStage)}
+-                        disabled={promoting}
+-                        className="flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-3 py-1.5 font-medium disabled:opacity-50"
+-                      >
+-                        {promoting ? <Loader2 size={13} className="animate-spin" /> : <ArrowUpRight size={13} />}
+-                        {promoteMode === "partial" ? "Add to" : "Promote to"} {PROMOTE_LABELS[targetStage]} →
+-                      </button>
+-                    </>
+-                  );
+-                })()}
+-              </div>
++              <div className="flex items-center gap-2 shrink-0">{renderPromoteControls()}</div>
+             </div>
+ 
+             {/* NEW — patch 7: Tasks / Instructions sub-nav, same small
+@@ -1672,16 +1785,17 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+               ))}
+             </nav>
+ 
++            {/* CHANGED — W0.2: the "code" branch that used to live here
++                is unreachable now -- the outer ternary above intercepts
++                buildView === "code" before this max-w-4xl block is ever
++                rendered, so it's handled up there instead (own compact
++                header, no max-w-4xl). */}
+             {buildView === "instructions" ? (
+               <InstructionsView
+                 workspaceId={selected.id}
+                 fetchDeviceSpec={fetchDeviceSpec}
+                 toggleInstructionStep={toggleInstructionStep}
+               />
+-            ) : buildView === "code" ? (
+-              // NEW — patch 10: Code sub-tab, file tree + inline editor,
+-              // wired to patch 8's GET/PUT .../code/files endpoints.
+-              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
+             ) : buildView === "wireframes" ? (
+               // NEW — patch 12 (Plan/Build wireframes split): relocated
+               // from PlanTab.jsx's own Wireframes sub-tab. sessionId/
+@@ -1761,7 +1875,19 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+           reserved rail; the floating bubble below is the way back in at
+           every width now. Same change across all six docked tabs. */}
+       {!chatDockCollapsed && (
+-        <div className="hidden lg:flex shrink-0 border-l border-[var(--neutral-800)]" style={{ width: 560 }}>
++        <div
++          className="hidden lg:flex shrink-0 relative border-l border-[var(--neutral-800)]"
++          style={{ width: chatDockSplitter.size }}
++        >
++          {/* NEW — W0.2: drag handle replacing the old fixed
++              `style={{ width: 560 }}`. Same left-edge-grows-left pattern
++              WorkspaceChatPanel's own startWorkingPanelResize already
++              uses for its working panel, now shared via useSplitter.js. */}
++          <div
++            onMouseDown={chatDockSplitter.onHandleMouseDown}
++            title="Drag to resize"
++            className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-[var(--accent)]/40"
++          />
+           <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+         </div>
+       )}
+diff --git a/frontend/app/hooks/useSplitter.js b/frontend/app/hooks/useSplitter.js
+new file mode 100644
+index 0000000..c9ca76c
+--- /dev/null
++++ b/frontend/app/hooks/useSplitter.js
+@@ -0,0 +1,91 @@
++// frontend/app/hooks/useSplitter.js
++// NEW — W0.2 (build workbench plan): extracted from
++// WorkspaceChatPanel.jsx's hand-rolled startWorkingPanelResize /
++// startWorkingPanelResizeVertical (drag a panel's edge to resize its
++// width or height). Same behavior, generalized:
++//   - a window mousemove/mouseup pair is added only for the duration of
++//     the drag, and removed on release (or on unmount mid-drag, via the
++//     same cleanupRef-in-an-effect trick WorkspaceChatPanel uses);
++//   - the size is clamped to [min, max] on every move;
++//   - size is only written to localStorage once, on mouseup -- never on
++//     every mousemove, to avoid hammering it during the drag.
++// `min`/`max` accept either a plain number or a `() => number` -- the
++// function form is for bounds that depend on the viewport (BuildTab's
++// chat dock wants "max 60% of viewport width", which can't be a fixed
++// constant the way WorkspaceChatPanel's WORKING_PANEL_MAX_WIDTH is).
++"use client";
++import { useState, useRef, useEffect, useCallback } from "react";
++
++function resolveBound(bound) {
++  return typeof bound === "function" ? bound() : bound;
++}
++
++/**
++ * @param {object} opts
++ * @param {"width"|"height"} [opts.axis="width"] - which pointer delta to track
++ * @param {number} opts.defaultSize - used until a persisted value (if any) loads
++ * @param {number|() => number} opts.min
++ * @param {number|() => number} opts.max
++ * @param {string} [opts.storageKey] - if set, size persists across reloads
++ * @param {boolean} [opts.reverse=false] - true when the drag handle sits on
++ *   the panel's leading edge such that dragging TOWARD the panel's origin
++ *   should grow it (e.g. a handle on a right-docked panel's left edge --
++ *   dragging left grows it, same as WorkspaceChatPanel's own dock today)
++ * @returns {{size: number, setSize: Function, onHandleMouseDown: (e) => void}}
++ */
++export function useSplitter({ axis = "width", defaultSize, min, max, storageKey, reverse = false } = {}) {
++  const [size, setSize] = useState(defaultSize);
++  const cleanupRef = useRef(null);
++
++  useEffect(() => {
++    if (storageKey) {
++      const saved = parseInt(localStorage.getItem(storageKey), 10);
++      if (!Number.isNaN(saved)) {
++        setSize(Math.min(resolveBound(max), Math.max(resolveBound(min), saved)));
++      }
++    }
++    // If the panel unmounts mid-drag (switching tabs without releasing the
++    // mouse), make sure the window listeners below don't leak -- same
++    // guard WorkspaceChatPanel's own restore effect uses.
++    return () => cleanupRef.current?.();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [storageKey]);
++
++  const onHandleMouseDown = useCallback(
++    (e) => {
++      e.preventDefault();
++      const startPos = axis === "width" ? e.clientX : e.clientY;
++      const startSize = size;
++
++      function clamp(v) {
++        return Math.min(resolveBound(max), Math.max(resolveBound(min), v));
++      }
++
++      function onMouseMove(ev) {
++        const pos = axis === "width" ? ev.clientX : ev.clientY;
++        const delta = pos - startPos;
++        setSize(clamp(startSize + (reverse ? -delta : delta)));
++      }
++      function onMouseUp() {
++        cleanup();
++        setSize((s) => {
++          if (storageKey) localStorage.setItem(storageKey, String(s));
++          return s;
++        });
++      }
++      function cleanup() {
++        window.removeEventListener("mousemove", onMouseMove);
++        window.removeEventListener("mouseup", onMouseUp);
++        cleanupRef.current = null;
++      }
++
++      window.addEventListener("mousemove", onMouseMove);
++      window.addEventListener("mouseup", onMouseUp);
++      cleanupRef.current = cleanup;
++    },
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++    [axis, size, min, max, reverse, storageKey]
++  );
++
++  return { size, setSize, onHandleMouseDown };
++}
