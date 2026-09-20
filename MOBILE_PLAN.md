@@ -368,8 +368,114 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
     proves the 40px rows actually fit at 360px. Same "confirm on real
     hardware" caveat as every other entry; the two worth a tap-through are
     the Chat drawer's last-row menu (flip-up) and Growth's delete flow.
-- Growth, Build: **mobile fork not started** (see the row-actions pass
-  above for what did ship for them).
+- **Growth: done, following the Notebooks/Research/Plan/Test reference
+  pattern.** `components/tabs/GrowthTab.jsx` is now a
+  `useGrowthTabController` hook, a `GrowthTabDesktop` shell and a thin
+  router (`GrowthTab` calls the hook once, renders either the desktop
+  shell or `components/mobile/GrowthTab.jsx` off `controller.viewport`),
+  same split as the other four. The mobile file supplies the four things
+  that actually differ by viewport — workspace list as a `MobileDrawer`
+  instead of a persistent column, a vertical icon-only sub-tab rail (five
+  tabs, `overflow-y-auto` like Plan's/Test's), a two-line header (the
+  workspace name, then the active sub-tab), and an actionable empty
+  state. Chrome geometry is deliberately identical to Test's so switching
+  tabs doesn't shift anything. `SUB_TABS` is exported, with a per-entry
+  `built` flag replacing the id-by-id "implemented so far" checks, so the
+  desktop pills, the mobile rail and `ComingSoonPanel` read one list.
+  - **No promote control.** Growth is the last stage, so unlike the other
+    four the header has nothing on the right, and the controller has no
+    promote state.
+  - **Workspace name header is new on mobile only.** Desktop's picker
+    column is always on screen and highlights the selected row; on a phone
+    the list is behind the hamburger, so without the name in the header
+    nothing says which workspace you're in.
+  - **Two empty states, not one.** Growth — unlike Test/Plan/Research —
+    does not auto-select the first workspace, so "none exist" (primary:
+    create) and "some exist, none picked" (primary: open the list) need
+    different actions. Not changed to auto-select: that would alter
+    desktop behaviour and the saved-selection key.
+  - **`TABS_WITH_OWN_MOBILE_SIDEBAR` + `sidebarLabel`: `"growth"` added in
+    the same change** (`AppShell.jsx`, "Growth workspaces"), per
+    Research's write-up above. Build is now the only stage tab off that
+    list.
+  - **The dock was a hard `w-[480px]` at every width** — wider than a
+    phone, and at 820px it left ~116px for content. Below desktop it is
+    now the same full-screen overlay (`app-shell-viewport`, safe-area
+    bubble) the other docked tabs use. One deliberate difference: the
+    desktop dock and the overlay are picked off `viewport`
+    (`data-viewport`), not off `hidden lg:flex` / `lg:hidden`. From
+    reading TestTab's `dockAndModals` (Plan's and Research's are described
+    there as identical), the CSS pair mounts *both* panels on desktop and
+    hides one, and `?forceViewport=mobile` on a
+    window wider than 1024px hides the overlay too, so "Open chat" looks
+    dead. Growth mounts exactly one panel either way. **Worth carrying
+    back to Test/Plan/Research** — read from Test's code, not reproduced.
+  - **Dock state on mobile is per-visit.** The mount effect no longer
+    restores `minime_growth_chatdock_collapsed` on mobile (a saved
+    "expanded" desktop preference would otherwise open a full-screen
+    overlay on first paint), and `toggleDock` never writes it, same as
+    Test. `openInDock` gets Test's `!isMobile` guard; creating a chat from
+    the drawer closes the drawer (it's z-50, above the z-40 overlay).
+  - **Content Fan-out no longer opens the dock over its own results.**
+    `onDispatched` expanded the dock after a run so the desktop user can
+    watch the trace beside the cards. On a phone that is a full-screen
+    overlay over the cards the run just produced, so mobile skips it and
+    the copy says "tap the chat button".
+  - **Layout bugs fixed in the panels.** Calendar's two `datetime-local`
+    inputs + "to" + Refresh shared one row (each input alone is ~200px at
+    16px, so the row pushed the whole tab sideways) — now stacked and
+    labelled. PageSpeed's URL + select + button shared one row (~100px to
+    type a URL into) — now a URL row, then select + Run. The score grid was
+    `grid-cols-4`, leaving ~40px of content width per cell for
+    "ACCESSIBILITY" in 10px tracked caps — now `grid-cols-2 sm:grid-cols-4`
+    (desktop unchanged). Plus the usual pass: 16px form controls on mobile,
+    full-width primary buttons, 40px hit areas on Copy / open-in-Calendar,
+    platform chips 40px tall, two-line wrapping instead of truncation for
+    event titles, mobile-accurate copy, and a friendlier "coming soon"
+    panel (the desktop sentence cites "build order §4").
+  - **`FactsView` (in `NotebooksTab.jsx`) changed too**, because Brand
+    Voice renders it. All mobile-only, gated on `useViewport()`: 16px
+    fields, the custom-fact row restacked (a fixed `w-28` key field + value
+    + remove button can't share a ~290px row), 40px hit areas on
+    remove / "+ Add" / Save / Accept / Discard, `min-w-0 break-words` on
+    long values. **Notebooks' Insights → Facts gets these too.** Desktop
+    markup is unchanged. To drop it, exclude that file from the patch.
+  - **One desktop-visible change:** `break-words` on result cards and the
+    audit's AI-estimated markdown block, so a long unbroken URL wraps
+    inside the card instead of running out of it. Confirmed by pixel diff.
+  - **Found, not fixed:** all-day calendar events show "12:00 AM" —
+    `formatEventTime`'s "plain YYYY-MM-DD" fallback never fires because
+    `new Date("2026-09-22")` is valid. Not mobile-specific.
+  - **Verified:** `next lint` — the same 3 `exhaustive-deps` warnings on
+    GrowthTab as the original file (effects moved verbatim), nothing new;
+    `next build` clean; every new Tailwind class confirmed present in the
+    built CSS. **Real-browser layout** (headless Chromium, touch + mobile
+    emulation, real Inter/Sora font files since every `<button>` is Sora)
+    with the real `GrowthTab`, mobile fork, `MobileHeader`, `MobileDrawer`,
+    `ResponsiveSheet` and `FactsView`, at 390 / 360 / 320 / 740x360
+    landscape: every sub-tab (Voice with a draft check, Fan-out through to
+    results, Calendar connected and not, Audit through to results,
+    Analytics), the drawer with a row menu open, create-from-drawer
+    stacking, the chat overlay, both empty states. Automated checks for
+    horizontal overflow, form controls under 16px and tap targets under
+    36px (shared header excluded — its 28px tab buttons are on every tab)
+    found nothing. **The same checks against the original Growth tab found
+    the pill nav 185px off-screen, 8 sub-16px inputs and 13 small targets**,
+    so they do fail when they should. Desktop at 1280x800: 4 of 7 states
+    pixel-identical, the other 3 differ only by the URL wrapping above and
+    4 anti-aliased pixels. Tablet (820) keeps the desktop shell with no
+    overflow; `?forceViewport=mobile` at 1280 shows the overlay.
+  - **Not verified:** any real phone (iOS Safari focus-zoom and keyboard
+    behaviour especially), and in the harness `WorkspaceChatPanel`,
+    `CreateWorkspaceModal` and `ManageWorkspaceModal` were stand-ins, so
+    only their positioning/stacking was exercised, not their contents. The
+    hamburger -> drawer path used the real `MobileHeader` with the event
+    wired by hand, so the `AppShell.jsx` change is compile-checked, not run
+    end to end. Same "confirm on real hardware" caveat as every other
+    entry; the two worth a tap-through are Brand Voice's custom-fact cards
+    and the Calendar date pickers (iOS renders `datetime-local` its own way).
+- Build: **mobile fork not started** (see the row-actions pass above for
+  what did ship for it).
 
 ## Phase 6 — Graphs/canvases
 **Ahead of schedule for the two tabs converted so far.**

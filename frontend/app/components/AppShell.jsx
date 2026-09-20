@@ -401,12 +401,13 @@ function AppShellBody() {
   // reachable. Added "plan" up front this time (components/mobile/PlanTab.jsx,
   // ../tabs/PlanTab.jsx) so Plan doesn't repeat the same oversight, and
   // "test" the same way (components/mobile/TestTab.jsx, ../tabs/TestTab.jsx).
-  // Build's and Growth's project lists have the same shape but haven't had
-  // their own mobile pass yet (Phase 5 — still "not started" per
-  // MOBILE_PLAN.md), so they stay off this list until that lands for real —
+  // "growth" the same way (components/mobile/GrowthTab.jsx,
+  // ../tabs/GrowthTab.jsx). Build's project list has the same shape but
+  // hasn't had its own mobile pass yet (Phase 5 — still "not started" per
+  // MOBILE_PLAN.md), so it stays off this list until that lands for real —
   // same "add it deliberately, not as an afterthought" note Research's own
   // fix left behind.
-  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks", "research", "plan", "test"]);
+  const TABS_WITH_OWN_MOBILE_SIDEBAR = new Set(["chat", "notebooks", "research", "plan", "test", "growth"]);
 
   function openMobileTabSidebar() {
     if (activeTab === "chat") {
@@ -469,11 +470,13 @@ function AppShellBody() {
             // "Notebooks" already matches mobile/NotebooksTab.jsx's. Plan
             // added the same way — matches mobile/PlanTab.jsx's own drawer
             // header text ("Plan projects"), and Test too — matches
-            // mobile/TestTab.jsx's ("Test projects").
+            // mobile/TestTab.jsx's ("Test projects"), and Growth —
+            // matches mobile/GrowthTab.jsx's ("Growth workspaces").
             activeTab === "notebooks" ? "Notebooks"
               : activeTab === "research" ? "Research projects"
               : activeTab === "plan" ? "Plan projects"
               : activeTab === "test" ? "Test projects"
+              : activeTab === "growth" ? "Growth workspaces"
               : "Chats"
           }
           showWorkingPanelButton={activeTab === "chat"}
