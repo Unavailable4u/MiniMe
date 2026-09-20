@@ -219,6 +219,16 @@ function baseExtensions(onSaveRef) {
   ];
 }
 
+// 1-based line and column of the main selection's head — what every
+// editor's status bar shows. Column counts UTF-16 units from the start
+// of the line (a tab is one column), the same convention CM6 itself
+// uses for positions.
+function cursorPosition(state) {
+  const head = state.selection.main.head;
+  const line = state.doc.lineAt(head);
+  return { line: line.number, col: head - line.from + 1 };
+}
+
 async function loadLanguageExtension(filePath) {
   if (!filePath) return [];
   // matchFilename() tests some languages' patterns against the WHOLE
@@ -253,10 +263,11 @@ async function loadLanguageExtension(filePath) {
  * local to CodeEditor.jsx rather than exported — nothing else needs a
  * raw CM6 instance yet.
  */
-function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, autoFocus }) {
+function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, onCursorChange, autoFocus }) {
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
+  const onCursorChangeRef = useRef(onCursorChange);
   const languageCompartmentRef = useRef(null);
   const readOnlyCompartmentRef = useRef(null);
   const indentCompartmentRef = useRef(null);
@@ -264,6 +275,7 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
 
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
+  onCursorChangeRef.current = onCursorChange;
 
   // Mount once. `value`/`filePath`/`readOnly` at THIS instant seed the
   // initial state; every later change to any of them is handled by the
@@ -292,10 +304,18 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
           EditorView.editable.of(!readOnly),
         ]),
         EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
-          const isExternal = update.transactions.some((tr) => tr.annotation(External));
-          if (!isExternal) {
-            onChangeRef.current?.(update.state.doc.toString());
+          if (update.docChanged) {
+            const isExternal = update.transactions.some((tr) => tr.annotation(External));
+            if (!isExternal) {
+              onChangeRef.current?.(update.state.doc.toString());
+            }
+          }
+          // Caret position for a status bar's "Ln 12, Col 4". Reported
+          // for external updates too — a Reload can move the caret —
+          // but only when something that could have moved it happened,
+          // not on every viewport/focus update.
+          if (update.selectionSet || update.docChanged) {
+            onCursorChangeRef.current?.(cursorPosition(update.state));
           }
         }),
       ],
@@ -304,6 +324,9 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
     const view = new EditorView({ state, parent: containerRef.current });
     viewRef.current = view;
     if (autoFocus) view.focus();
+    // Report where the caret starts (line 1, col 1) so a status bar has
+    // something to show before the first click or keystroke.
+    onCursorChangeRef.current?.(cursorPosition(view.state));
 
     return () => {
       view.destroy();
@@ -397,15 +420,27 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
  *   @codemirror/language-data; omit for a plain-text editor.
  * @param {boolean} [props.readOnly=false]
  * @param {() => void} [props.onSave] - Cmd/Ctrl-S.
+ * @param {(pos: {line: number, col: number}) => void} [props.onCursorChange] -
+ *   the caret's 1-based position; fires once on mount and whenever the
+ *   selection or document changes (W2.3a's status bar).
  * @param {boolean} [props.autoFocus=false]
  * @param {string} [props.className]
  */
 function CodeEditor(
-  { value, onChange, filePath, readOnly = false, onSave, autoFocus = false, className },
+  { value, onChange, filePath, readOnly = false, onSave, onCursorChange, autoFocus = false, className },
   ref
 ) {
   const containerRef = useRef(null);
-  const viewRef = useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, autoFocus });
+  const viewRef = useCodeMirror({
+    containerRef,
+    value,
+    onChange,
+    filePath,
+    readOnly,
+    onSave,
+    onCursorChange,
+    autoFocus,
+  });
 
   useImperativeHandle(
     ref,

@@ -1,0 +1,3179 @@
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 2975b32..94bd474 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -1,5 +1,6 @@
+ "use client";
+-import { useEffect, useState, useRef, useMemo, memo } from "react"; // CHANGED — W2.2: added useMemo, for memoizing CodeView's CloudFileProvider instance
++import { useEffect, useState, useRef, memo } from "react";
++import dynamic from "next/dynamic"; // NEW — W2.3a: EditorWorkbench measures real DOM nodes (CodeMirror), so it has to load client-only, see the EditorWorkbench declaration below
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
+@@ -10,12 +11,10 @@ import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-c
+ import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — project management (rename/delete/members/export), parity with Notebooks/Plan — was already built, just never wired into this tab
+ import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
+ import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1. CHANGED — patch 12: useWorkspaceDock added, same hook PlanTab.jsx used to source WireframesPanel's sessionId/sendTask -- Build now owns that wiring instead.
+-import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, MoreVertical, Check, X, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
++import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, MessageSquare, Plus, MoreVertical, Check, X } from "lucide-react"; // CHANGED — W2.3a: the file-tree/editor/ZIP icons (ChevronDown, RefreshCw, Save, Folder, FolderOpen, FileCode, Download) moved out with the old CodeView, into components/workbench/
+ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+ import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
+ import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggable chat-dock width, replacing the old fixed width: 560
+-import { createCloudFileProvider } from "../../lib/workbench/fileProviders"; // NEW — W2.2: CodeView's file fetch/save/list calls now go through this provider instead of calling fetch() directly (plan D6 — "FileProvider interface with two implementations (Cloud, Local)"); also owns the workspace-${id} Pusher subscription that used to live inline here as W0.1's own effect (see getPusherClient's old import, removed).
+-import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore"; // NEW — W2.2: single source of truth for open-file buffers (saved/edited/version/dirty/stale) — same store Explorer/preview/chat chips will read once they exist (W2.3+), replacing CodeView's own fileContent/editedContent/staleBanner useState trio for that slice.
+ // Part 8.9: replaces the old static shared-secret x-api-key header
+ // -- every fetch() below now sends the real per-user Supabase JWT via
+ // authHeaders(), matching require_auth()'s Authorization: Bearer check.
+@@ -65,6 +64,8 @@ const COLUMNS = [
+ // nested-tab-bar pattern PlanTab.jsx's own BLUEPRINT_VIEWS uses.
+ // UPDATED — patch 10: third sub-view, Code, added alongside Tasks/
+ // Instructions. Same nav bar, no new pattern.
++// UPDATED — W2.3a: the Code sub-view is now the Editor workbench
++// (explorer + tabs + CodeMirror, components/workbench/EditorWorkbench.jsx).
+ // UPDATED — patch 12 (Plan/Build wireframes split): fourth sub-view,
+ // Wireframes, relocated here from PlanTab.jsx's SUB_TABS — decided this
+ // pass that wireframing is build-time UI work, not a plan-time spec
+@@ -72,10 +73,24 @@ const COLUMNS = [
+ const BUILD_VIEWS = [
+   { id: "tasks", label: "Tasks" },
+   { id: "instructions", label: "Instructions" },
+-  { id: "code", label: "Code" },
++  { id: "code", label: "Editor" }, // CHANGED — W2.3a: id stays "code" (the buildView checks below key off it); only the label changes to match what it now opens
+   { id: "wireframes", label: "Wireframes" },
+ ];
+ 
++// NEW — W2.3a: replaces the old inline CodeView (file tree + <textarea>).
++// `ssr: false` because CodeMirror measures real DOM nodes and has no
++// server-rendering story (see CodeEditor.jsx's header); it also keeps
++// the CodeMirror + language-data bundle out of this tab's own chunk
++// until someone actually opens the Editor sub-tab.
++const EditorWorkbench = dynamic(() => import("../workbench/EditorWorkbench"), {
++  ssr: false,
++  loading: () => (
++    <div className="flex-1 min-h-0 flex items-center justify-center text-xs text-[var(--neutral-500)]">
++      Loading editor…
++    </div>
++  ),
++});
++
+ function statusFor(featureStatus, featureName) {
+   return featureStatus[featureName] || "missing";
+ }
+@@ -333,495 +348,6 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep
+   return <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />;
+ }
+ 
+-// NEW — patch 10 (T3, step 16): Code sub-tab frontend. File-tree view +
+-// click-to-open + inline edit, wired to patch 8's GET/PUT
+-// .../code/files endpoints (api/routes/code.py). list_files() returns
+-// metadata only, keyed by flat file_path -- workspace_code_files.py's
+-// own docstring calls this the "flat map of paths, no separate
+-// directory rows" shape and says patch 10 should build its tree
+-// client-side from it, so that's what buildFileTree() does below.
+-// get_file() is only called on click-to-open, per that module's
+-// size/many-files reasoning for keeping list_files() content-free.
+-function buildFileTree(filesMeta) {
+-  const root = { type: "dir", name: "", path: "", children: {} };
+-  for (const path of Object.keys(filesMeta).sort()) {
+-    const parts = path.split("/");
+-    let node = root;
+-    let acc = "";
+-    parts.forEach((part, i) => {
+-      acc = acc ? `${acc}/${part}` : part;
+-      if (i === parts.length - 1) {
+-        node.children[part] = { type: "file", name: part, path: acc, meta: filesMeta[path] };
+-      } else {
+-        if (!node.children[part]) {
+-          node.children[part] = { type: "dir", name: part, path: acc, children: {} };
+-        }
+-        node = node.children[part];
+-      }
+-    });
+-  }
+-  return root;
+-}
+-
+-// Directories first (alphabetical), then files (alphabetical) -- same
+-// ordering convention as most file-tree UIs, so generated folders like
+-// `src/`/`tests/` don't get interleaved with loose root files.
+-function TreeNode({ node, depth, expandedDirs, onToggleDir, selectedPath, onSelectFile }) {
+-  const entries = Object.values(node.children).sort((a, b) => {
+-    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+-    return a.name.localeCompare(b.name);
+-  });
+-
+-  return (
+-    <>
+-      {entries.map((entry) => {
+-        if (entry.type === "dir") {
+-          const isOpen = expandedDirs.has(entry.path);
+-          return (
+-            <div key={entry.path}>
+-              <button
+-                type="button"
+-                onClick={() => onToggleDir(entry.path)}
+-                className="w-full flex items-center gap-1 text-xs text-[var(--neutral-300)] hover:text-[var(--neutral-100)] py-0.5 rounded"
+-                style={{ paddingLeft: `${depth * 14}px` }}
+-              >
+-                {isOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+-                {isOpen ? <FolderOpen size={12} className="shrink-0" /> : <Folder size={12} className="shrink-0" />}
+-                <span className="truncate">{entry.name}</span>
+-              </button>
+-              {isOpen && (
+-                <TreeNode
+-                  node={entry}
+-                  depth={depth + 1}
+-                  expandedDirs={expandedDirs}
+-                  onToggleDir={onToggleDir}
+-                  selectedPath={selectedPath}
+-                  onSelectFile={onSelectFile}
+-                />
+-              )}
+-            </div>
+-          );
+-        }
+-        const isSelected = entry.path === selectedPath;
+-        return (
+-          <button
+-            key={entry.path}
+-            type="button"
+-            onClick={() => onSelectFile(entry.path)}
+-            title={entry.path}
+-            className={`w-full flex items-center gap-1 text-xs py-0.5 rounded ${
+-              isSelected
+-                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+-                : "text-[var(--neutral-400)] hover:text-[var(--neutral-100)]"
+-            }`}
+-            style={{ paddingLeft: `${depth * 14 + 16}px` }}
+-          >
+-            <FileCode size={12} className="shrink-0" />
+-            <span className="truncate">{entry.name}</span>
+-          </button>
+-        );
+-      })}
+-    </>
+-  );
+-}
+-
+-// NEW — W2.2: CodeView is now just a thin mount point for the workbench
+-// store (plan §5, W2.2's own "Touches" line — "CodeView refactored to
+-// use them"). Everything that used to live directly in CodeView's own
+-// state/effects moved into CodeViewBody below, which reads/writes
+-// through useEditorStore() instead. Split into two components (rather
+-// than calling useEditorStore() from a component that ALSO renders
+-// <EditorStoreProvider>) because a context provider's own value isn't
+-// visible to hooks called in the same component that mounts it — same
+-// reason every provider/consumer pair in this codebase is already two
+-// components (see WorkspaceDockContext.jsx's own Provider + the hooks
+-// that read it).
+-function CodeView({ workspaceId, apiUrl }) {
+-  return (
+-    <EditorStoreProvider>
+-      <CodeViewBody workspaceId={workspaceId} apiUrl={apiUrl} />
+-    </EditorStoreProvider>
+-  );
+-}
+-
+-function CodeViewBody({ workspaceId, apiUrl }) {
+-  // One provider instance per (workspaceId, apiUrl) pair -- memoized so
+-  // switching projects gets a fresh provider (and, via the effect below,
+-  // a fresh Pusher subscription) without recreating one on every
+-  // unrelated re-render.
+-  const provider = useMemo(
+-    () => createCloudFileProvider({ workspaceId, apiUrl }),
+-    [workspaceId, apiUrl]
+-  );
+-  const { state: editorState, fileLoaded, editBuffer, saveSuccess, markStale, clearStale, setActivePath, closeTab } =
+-    useEditorStore();
+-
+-  const [filesMeta, setFilesMeta] = useState(null); // {file_path: meta}, from provider.list()
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState(null);
+-  const [expandedDirs, setExpandedDirs] = useState(() => new Set());
+-  const [fileLoading, setFileLoading] = useState(false);
+-  const [fileError, setFileError] = useState(null);
+-  const [saving, setSaving] = useState(false);
+-  const [saveError, setSaveError] = useState(null);
+-  const [downloading, setDownloading] = useState(false); // NEW — patch 11
+-  const [downloadError, setDownloadError] = useState(null); // NEW — patch 11
+-
+-  // CHANGED — W2.2: selectedPath/fileContent/editedContent/staleBanner
+-  // used to be their own useState calls; the open file's buffer now
+-  // lives in editorStore, keyed by path, so the editor/preview/chat
+-  // chips (once those exist) all read the exact same copy instead of
+-  // each having their own. `buffer` is undefined until FILE_LOADED
+-  // fires for this path (see openFile below) — briefly true right after
+-  // clicking a file that's never been opened this session, same window
+-  // `fileLoading` already covers in the render below.
+-  const selectedPath = editorState.activePath;
+-  const buffer = selectedPath ? editorState.buffers[selectedPath] : null;
+-  const editedContent = buffer?.edited ?? "";
+-  const isDirty = !!buffer?.dirty;
+-  const isStale = !!buffer?.stale;
+-
+-  async function loadFileList({ preserveSelection = true } = {}) {
+-    setLoading(true);
+-    setError(null);
+-    try {
+-      const meta = await provider.list();
+-      setFilesMeta(meta);
+-      // Auto-expand top-level directories the first time files show up,
+-      // so the tree isn't a single collapsed root on first load.
+-      setExpandedDirs((prev) => {
+-        if (prev.size > 0) return prev;
+-        const next = new Set();
+-        for (const path of Object.keys(meta)) {
+-          if (path.includes("/")) next.add(path.split("/")[0]);
+-        }
+-        return next;
+-      });
+-      if (!preserveSelection || (selectedPath && !(selectedPath in meta))) {
+-        if (selectedPath) closeTab(selectedPath);
+-        else setActivePath(null);
+-      }
+-    } catch (err) {
+-      setError(err.message);
+-    } finally {
+-      setLoading(false);
+-    }
+-  }
+-
+-  useEffect(() => {
+-    if (workspaceId) loadFileList({ preserveSelection: false });
+-    // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [workspaceId]);
+-
+-  async function openFile(path) {
+-    setActivePath(path); // highlights the tree row immediately + clears any pending stale flag for it, same timing setSelectedPath(path)+setStaleBanner(null) had
+-    setFileLoading(true);
+-    setFileError(null);
+-    setSaveError(null);
+-    try {
+-      const file = await provider.read(path);
+-      fileLoaded(path, file);
+-    } catch (err) {
+-      setFileError(err.message);
+-    } finally {
+-      setFileLoading(false);
+-    }
+-  }
+-
+-  function toggleDir(path) {
+-    setExpandedDirs((prev) => {
+-      const next = new Set(prev);
+-      if (next.has(path)) next.delete(path);
+-      else next.add(path);
+-      return next;
+-    });
+-  }
+-
+-  // NEW — W2.2: "latest" refs so the provider's Pusher handler below
+-  // (subscribed once per provider instance, not re-bound on every
+-  // keystroke) always sees the current selection/dirty state and the
+-  // current loadFileList/openFile closures, instead of the stale ones
+-  // captured when the effect first ran. Same pattern W0.1 introduced
+-  // for this exact reason, unchanged by moving the subscription itself
+-  // into the provider — `markStale`/`clearStale`/`setActivePath` don't
+-  // need refs since useEditorStore()'s action functions are stable
+-  // across re-renders (memoized on `dispatch`, which React itself never
+-  // changes the identity of).
+-  const selectedPathRef = useRef(selectedPath);
+-  selectedPathRef.current = selectedPath;
+-  const isDirtyRef = useRef(isDirty);
+-  isDirtyRef.current = isDirty;
+-  const loadFileListRef = useRef(loadFileList);
+-  loadFileListRef.current = loadFileList;
+-  const openFileRef = useRef(openFile);
+-  openFileRef.current = openFile;
+-
+-  // CHANGED — W2.2: was W0.1's own Pusher subscribe/bind_global effect,
+-  // inlined directly in this component. That transport-level plumbing
+-  // now lives in CloudFileProvider.subscribe() (fileProviders.js) —
+-  // this effect just supplies the "what do we do about it" policy,
+-  // unchanged from W0.1: always refetch the tree, and for the currently
+-  // open file, either silently refresh it (not dirty) or flag it stale
+-  // instead of clobbering unsaved edits (dirty).
+-  useEffect(() => {
+-    const unsubscribe = provider.subscribe(({ filePaths }) => {
+-      // Always refetch the tree/list -- this is what makes newly
+-      // chat-generated files show up without a reload.
+-      loadFileListRef.current();
+-      const openPath = selectedPathRef.current;
+-      if (!openPath || !filePaths.includes(openPath)) return;
+-      if (isDirtyRef.current) {
+-        // Don't clobber unsaved edits sitting in the textarea -- surface
+-        // the choice instead. Real conflict resolution (base_version,
+-        // 409, compare-diff) is W2.5; this is just "don't silently lose
+-        // work" in the meantime.
+-        markStale(openPath);
+-      } else {
+-        openFileRef.current(openPath);
+-      }
+-    });
+-    return unsubscribe;
+-  }, [provider, markStale]);
+-
+-  // NEW — W0.1: Pusher can drop a connection while a tab is backgrounded
+-  // (mobile Safari in particular suspends websockets aggressively), so
+-  // a regen that happened while this tab was hidden could otherwise
+-  // never reach it. Cheap fallback: re-check on tab visibility regain.
+-  useEffect(() => {
+-    function handleVisibility() {
+-      if (document.visibilityState !== "visible") return;
+-      loadFileListRef.current();
+-      const openPath = selectedPathRef.current;
+-      if (openPath && !isDirtyRef.current) openFileRef.current(openPath);
+-    }
+-    document.addEventListener("visibilitychange", handleVisibility);
+-    return () => document.removeEventListener("visibilitychange", handleVisibility);
+-  }, []);
+-
+-  // NEW — W0.1: "Reload" side of the stale-banner choice -- discards the
+-  // local edit and re-fetches the server's current content. "Keep mine"
+-  // is just dismissing the banner (handled inline where it's rendered);
+-  // the edit already sitting in editedContent needs no code path of its
+-  // own to "keep".
+-  function reloadFromServer() {
+-    if (selectedPath) openFile(selectedPath); // openFile's setActivePath() call clears the stale flag as a side effect
+-  }
+-
+-  async function saveFile() {
+-    if (!selectedPath || !isDirty) return;
+-    setSaving(true);
+-    setSaveError(null);
+-    try {
+-      // No baseVersion sent yet -- same blind-overwrite Save flow this
+-      // sub-tab always had (W2.5 is what starts sending one and
+-      // handling the resulting 409/FileConflictError for real).
+-      const saved = await provider.write(selectedPath, editedContent);
+-      saveSuccess(selectedPath, saved);
+-      // Swap just this file's tree metadata in-place rather than
+-      // re-fetching the whole list — same "swap the piece that changed"
+-      // approach InstructionsView takes with the toggle-step response.
+-      setFilesMeta((prev) => (prev ? {
+-        ...prev,
+-        [selectedPath]: {
+-          workspace_id: saved.workspace_id,
+-          file_path: saved.file_path,
+-          language: saved.language,
+-          size: saved.content ? saved.content.length : 0,
+-          updated_at: saved.updated_at,
+-          updated_by: saved.updated_by,
+-        },
+-      } : prev));
+-    } catch (err) {
+-      setSaveError(err.message);
+-    } finally {
+-      setSaving(false);
+-    }
+-  }
+-
+-  // NEW — patch 11: server-side ZIP of the current file set
+-  // (GET .../code/zip). Not part of the FileProvider contract (it's a
+-  // whole-workspace export, not a per-file op — see fileProviders.js's
+-  // own header comment), so this still calls the route directly. Needs
+-  // authHeaders() same as every other call here, so this can't be a
+-  // plain <a href> — fetch as a blob and trigger the download via a
+-  // throwaway object URL, same technique any auth-gated file download
+-  // needs in the browser.
+-  async function downloadZip() {
+-    setDownloading(true);
+-    setDownloadError(null);
+-    try {
+-      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/zip`, {
+-        headers: await authHeaders(),
+-      });
+-      if (!res.ok) {
+-        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+-      }
+-      const blob = await res.blob();
+-      const url = URL.createObjectURL(blob);
+-      const a = document.createElement("a");
+-      a.href = url;
+-      a.download = `${workspaceId}_code.zip`;
+-      document.body.appendChild(a);
+-      a.click();
+-      a.remove();
+-      URL.revokeObjectURL(url);
+-    } catch (err) {
+-      setDownloadError(err.message);
+-    } finally {
+-      setDownloading(false);
+-    }
+-  }
+-
+-  const tree = filesMeta ? buildFileTree(filesMeta) : null;
+-  const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
+-
+-  return (
+-    // CHANGED — W0.2: was `min-h-[360px]` (one of the four stacked limits
+-    // on the editor's size, build plan §1.2). BuildTab's Editor-mode
+-    // wrapper is now a flex column with real remaining height to give
+-    // this, so this fills it instead of just guaranteeing a floor.
+-    <div className="flex-1 min-h-0 grid grid-cols-[220px_1fr] gap-4">
+-      {/* File tree */}
+-      {/* CHANGED — W0.2: max-h-[560px] removed -- let it fill the grid
+-          row's full (now flexible) height instead of capping at a fixed
+-          pixel value; min-h-0 keeps overflow-y-auto able to actually
+-          scroll instead of growing to fit all content. */}
+-      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto">
+-        <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-[var(--neutral-800)]">
+-          <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
+-            Files{fileCount ? ` (${fileCount})` : ""}
+-          </span>
+-          <div className="flex items-center gap-2">
+-            {/* NEW — patch 11: server-side ZIP download button, disabled
+-                until there's at least one saved file. */}
+-            <button
+-              type="button"
+-              onClick={downloadZip}
+-              disabled={downloading || fileCount === 0}
+-              aria-label="Download all files as ZIP"
+-              title="Download as ZIP"
+-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+-            >
+-              {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+-            </button>
+-            <button
+-              type="button"
+-              onClick={() => loadFileList()}
+-              disabled={loading}
+-              aria-label="Refresh file list"
+-              title="Refresh"
+-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+-            >
+-              <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
+-            </button>
+-          </div>
+-        </div>
+-        {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
+-        {loading && !filesMeta ? (
+-          <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
+-            <Loader2 size={12} className="animate-spin" /> Loading…
+-          </div>
+-        ) : error ? (
+-          <p className="text-xs text-red-400 px-1">{error}</p>
+-        ) : fileCount === 0 ? (
+-          <p className="text-xs text-[var(--neutral-600)] px-1">
+-            No files yet — ask this project&apos;s chat to build something and generated files will show up here.
+-          </p>
+-        ) : (
+-          <TreeNode
+-            node={tree}
+-            depth={0}
+-            expandedDirs={expandedDirs}
+-            onToggleDir={toggleDir}
+-            selectedPath={selectedPath}
+-            onSelectFile={openFile}
+-          />
+-        )}
+-      </div>
+-
+-      {/* Editor */}
+-      {/* CHANGED — W0.2: min-h-[360px] dropped in favor of min-h-0, same
+-          reasoning as the file tree above -- this pane now fills the
+-          grid row's real height rather than just guaranteeing a floor. */}
+-      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col">
+-        {!selectedPath ? (
+-          <p className="text-xs text-[var(--neutral-600)] m-auto">Select a file to view or edit it.</p>
+-        ) : (
+-          <>
+-            <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--neutral-800)]">
+-              <div className="min-w-0">
+-                <p className="text-xs text-[var(--neutral-200)] font-medium truncate">{selectedPath}</p>
+-                {/* CHANGED — W2.2: reads the editorStore buffer instead of
+-                    the old local `fileContent` state. `buffer` is briefly
+-                    undefined the very first time a given path is opened
+-                    (between setActivePath() and FILE_LOADED landing) --
+-                    `fileLoading` below already covers that window with its
+-                    own spinner, so this line just stays blank rather than
+-                    showing the PREVIOUS file's language/timestamp during
+-                    the gap the way the pre-store version incidentally did. */}
+-                {buffer && (
+-                  <p className="text-[10px] text-[var(--neutral-600)]">
+-                    {buffer.language || "text"}
+-                    {buffer.updatedAt
+-                      ? ` · saved ${new Date(buffer.updatedAt).toLocaleString()}`
+-                      : " · not saved yet"}
+-                  </p>
+-                )}
+-              </div>
+-              <button
+-                type="button"
+-                onClick={saveFile}
+-                disabled={!isDirty || saving}
+-                className="shrink-0 flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2.5 py-1.5 font-medium disabled:opacity-50"
+-              >
+-                {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+-                {saving ? "Saving…" : isDirty ? "Save" : "Saved"}
+-              </button>
+-            </div>
+-            {isStale && (
+-              // NEW — W0.1: shown instead of silently refetching when the
+-              // open file has unsaved edits and a code_file_updated event
+-              // named it -- see the provider's subscribe() handler above.
+-              // CHANGED — W2.2: reads editorStore's per-buffer `stale`
+-              // flag instead of the old local `staleBanner` state.
+-              <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 mb-2">
+-                <span>Changed on server — this file was updated elsewhere while you had unsaved edits.</span>
+-                <div className="flex items-center gap-3 shrink-0">
+-                  <button type="button" onClick={reloadFromServer} className="underline hover:text-amber-200">
+-                    Reload
+-                  </button>
+-                  <button type="button" onClick={() => clearStale(selectedPath)} className="underline hover:text-amber-200">
+-                    Keep mine
+-                  </button>
+-                </div>
+-              </div>
+-            )}
+-            {saveError && <p className="text-xs text-red-400 pb-2">{saveError}</p>}
+-            {fileLoading ? (
+-              <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 m-auto">
+-                <Loader2 size={12} className="animate-spin" /> Loading…
+-              </div>
+-            ) : fileError ? (
+-              <p className="text-xs text-red-400">{fileError}</p>
+-            ) : (
+-              // CHANGED — W0.2: min-h-[300px] removed -- flex-1 + the
+-              // editor pane's own min-h-0 (above) now let this fill
+-              // whatever height Editor mode's layout actually has.
+-              <textarea
+-                value={editedContent}
+-                onChange={(e) => editBuffer(selectedPath, e.target.value)}
+-                spellCheck={false}
+-                aria-label={`Editing ${selectedPath}`}
+-                className="flex-1 w-full min-h-0 bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
+-              />
+-            )}
+-          </>
+-        )}
+-      </div>
+-    </div>
+-  );
+-}
+-
+ // Part 7 §7.6 -- deploy action button + status indicator, three separate
+ // calls matching the three separate-risk backend endpoints from §7.4
+ // (propose / write / go-live). "Go Live" is intentionally left
+@@ -1707,10 +1233,9 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+       {/* Selected project's board */}
+       {/* CHANGED — W0.2: Editor mode (buildView === "code") swaps this
+           from a scrolling max-w-4xl column to a flex column filling the
+-          available height, so CodeView's own panes can stretch instead
+-          of being capped at max-h-[560px]/min-h-[300px] (both removed
+-          from CodeView itself, below) -- see the buildView === "code"
+-          branch in the ternary just below. */}
++          available height, so the workbench's own panes can stretch
++          instead of being capped at a fixed pixel height -- see the
++          buildView === "code" branch in the ternary just below. */}
+       <div className={buildView === "code" ? "flex-1 min-h-0 flex flex-col" : "flex-1 min-h-0 overflow-y-auto"}>
+         {!selected ? (
+           <div className="h-full flex items-center justify-center text-sm text-[var(--neutral-600)]">
+@@ -1731,7 +1256,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+         ) : buildView === "code" ? (
+           // NEW — W0.2: Editor mode's own compact header -- title,
+           // sub-nav and promote controls in one row, no max-w-4xl -- so
+-          // CodeView below gets the rest of the available height instead
++          // EditorWorkbench below gets the rest of the available height instead
+           // of sharing the board's tall title block. Same
+           // renderPromoteControls() the board header below uses.
+           <>
+@@ -1758,11 +1283,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+             </div>
+             {promoteError && <p className="text-xs text-red-400 px-4 pt-2">{promoteError}</p>}
+             <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 pt-3">
+-              {/* NEW — patch 10: Code sub-tab, file tree + inline editor,
+-                  wired to patch 8's GET/PUT .../code/files endpoints.
+-                  CHANGED — W0.2: now stretches to fill the flex column
+-                  above instead of sitting inside the max-w-4xl board. */}
+-              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
++              {/* CHANGED — W2.3a: was patch 10's CodeView (file tree +
++                  <textarea>). The workbench owns its own tabs/buffers, so
++                  key={selected.id} remounts it per project -- otherwise
++                  one project's open tabs would carry into the next.
++                  (Until W2.5's unsaved-edits guard lands, switching
++                  projects discards unsaved edits.) */}
++              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} />
+             </div>
+           </>
+         ) : (
+diff --git a/frontend/app/components/workbench/CodeEditor.jsx b/frontend/app/components/workbench/CodeEditor.jsx
+index e9b0936..454de72 100644
+--- a/frontend/app/components/workbench/CodeEditor.jsx
++++ b/frontend/app/components/workbench/CodeEditor.jsx
+@@ -219,6 +219,16 @@ function baseExtensions(onSaveRef) {
+   ];
+ }
+ 
++// 1-based line and column of the main selection's head — what every
++// editor's status bar shows. Column counts UTF-16 units from the start
++// of the line (a tab is one column), the same convention CM6 itself
++// uses for positions.
++function cursorPosition(state) {
++  const head = state.selection.main.head;
++  const line = state.doc.lineAt(head);
++  return { line: line.number, col: head - line.from + 1 };
++}
++
+ async function loadLanguageExtension(filePath) {
+   if (!filePath) return [];
+   // matchFilename() tests some languages' patterns against the WHOLE
+@@ -253,10 +263,11 @@ async function loadLanguageExtension(filePath) {
+  * local to CodeEditor.jsx rather than exported — nothing else needs a
+  * raw CM6 instance yet.
+  */
+-function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, autoFocus }) {
++function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, onCursorChange, autoFocus }) {
+   const viewRef = useRef(null);
+   const onChangeRef = useRef(onChange);
+   const onSaveRef = useRef(onSave);
++  const onCursorChangeRef = useRef(onCursorChange);
+   const languageCompartmentRef = useRef(null);
+   const readOnlyCompartmentRef = useRef(null);
+   const indentCompartmentRef = useRef(null);
+@@ -264,6 +275,7 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
+ 
+   onChangeRef.current = onChange;
+   onSaveRef.current = onSave;
++  onCursorChangeRef.current = onCursorChange;
+ 
+   // Mount once. `value`/`filePath`/`readOnly` at THIS instant seed the
+   // initial state; every later change to any of them is handled by the
+@@ -292,10 +304,18 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
+           EditorView.editable.of(!readOnly),
+         ]),
+         EditorView.updateListener.of((update) => {
+-          if (!update.docChanged) return;
+-          const isExternal = update.transactions.some((tr) => tr.annotation(External));
+-          if (!isExternal) {
+-            onChangeRef.current?.(update.state.doc.toString());
++          if (update.docChanged) {
++            const isExternal = update.transactions.some((tr) => tr.annotation(External));
++            if (!isExternal) {
++              onChangeRef.current?.(update.state.doc.toString());
++            }
++          }
++          // Caret position for a status bar's "Ln 12, Col 4". Reported
++          // for external updates too — a Reload can move the caret —
++          // but only when something that could have moved it happened,
++          // not on every viewport/focus update.
++          if (update.selectionSet || update.docChanged) {
++            onCursorChangeRef.current?.(cursorPosition(update.state));
+           }
+         }),
+       ],
+@@ -304,6 +324,9 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
+     const view = new EditorView({ state, parent: containerRef.current });
+     viewRef.current = view;
+     if (autoFocus) view.focus();
++    // Report where the caret starts (line 1, col 1) so a status bar has
++    // something to show before the first click or keystroke.
++    onCursorChangeRef.current?.(cursorPosition(view.state));
+ 
+     return () => {
+       view.destroy();
+@@ -397,15 +420,27 @@ function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSa
+  *   @codemirror/language-data; omit for a plain-text editor.
+  * @param {boolean} [props.readOnly=false]
+  * @param {() => void} [props.onSave] - Cmd/Ctrl-S.
++ * @param {(pos: {line: number, col: number}) => void} [props.onCursorChange] -
++ *   the caret's 1-based position; fires once on mount and whenever the
++ *   selection or document changes (W2.3a's status bar).
+  * @param {boolean} [props.autoFocus=false]
+  * @param {string} [props.className]
+  */
+ function CodeEditor(
+-  { value, onChange, filePath, readOnly = false, onSave, autoFocus = false, className },
++  { value, onChange, filePath, readOnly = false, onSave, onCursorChange, autoFocus = false, className },
+   ref
+ ) {
+   const containerRef = useRef(null);
+-  const viewRef = useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, autoFocus });
++  const viewRef = useCodeMirror({
++    containerRef,
++    value,
++    onChange,
++    filePath,
++    readOnly,
++    onSave,
++    onCursorChange,
++    autoFocus,
++  });
+ 
+   useImperativeHandle(
+     ref,
+diff --git a/frontend/app/components/workbench/ContextMenu.jsx b/frontend/app/components/workbench/ContextMenu.jsx
+new file mode 100644
+index 0000000..a0e118f
+--- /dev/null
++++ b/frontend/app/components/workbench/ContextMenu.jsx
+@@ -0,0 +1,112 @@
++"use client";
++// frontend/app/components/workbench/ContextMenu.jsx — W2.3a (Build
++// Workbench plan). A right-click menu positioned at the pointer. The
++// tab strip uses it now ("Close others" etc.); W2.4's explorer menu
++// (New file / Rename / Delete / Add to chat…) is the second caller,
++// which is why it's its own component instead of markup inside
++// EditorTabs.jsx.
++//
++// Not RowMenu.jsx: that one is a "⋮" button that owns its own open
++// state and drops a panel under the button. This one has no trigger —
++// the caller decides WHERE (the contextmenu event's x/y) and WHEN, and
++// this only renders and dismisses.
++//
++// Rendered through a portal to <body> because the workbench sits in
++// overflow-hidden / flex containers, and a `position: fixed` element is
++// only viewport-relative if no ancestor creates a containing block
++// (transform, filter, contain…) — a portal makes that a non-question.
++//
++// `items`: `{ key, label, icon?, danger?, disabled?, onSelect }`; falsy
++// entries are skipped (so callers can write `cond && {...}` inline) and
++// `{ key, separator: true }` draws a divider. The menu closes itself
++// before calling `onSelect`. Dismissal: outside pointerdown (not
++// mousedown — iOS Safari doesn't send mouse events for taps on
++// non-interactive elements, same reason RowMenu uses pointerdown),
++// Escape, window resize/blur, or any scroll.
++import { useEffect, useLayoutEffect, useRef, useState } from "react";
++import { createPortal } from "react-dom";
++
++const EDGE_MARGIN = 6; // keep the menu this far inside the viewport
++
++export default function ContextMenu({ x, y, items, onClose }) {
++  const ref = useRef(null);
++  const [pos, setPos] = useState({ left: x, top: y });
++
++  // Measure once the real size is known, then pull the menu back inside
++  // the viewport if opening at (x, y) would run it off the right/bottom
++  // edge. useLayoutEffect so there's no frame at the wrong spot.
++  useLayoutEffect(() => {
++    const el = ref.current;
++    if (!el) return;
++    const { offsetWidth: w, offsetHeight: h } = el;
++    setPos({
++      left: Math.max(EDGE_MARGIN, Math.min(x, window.innerWidth - w - EDGE_MARGIN)),
++      top: Math.max(EDGE_MARGIN, Math.min(y, window.innerHeight - h - EDGE_MARGIN)),
++    });
++  }, [x, y]);
++
++  useEffect(() => {
++    function onPointerDown(e) {
++      if (!ref.current?.contains(e.target)) onClose();
++    }
++    function onKeyDown(e) {
++      if (e.key === "Escape") onClose();
++    }
++    document.addEventListener("pointerdown", onPointerDown);
++    document.addEventListener("keydown", onKeyDown);
++    window.addEventListener("resize", onClose);
++    window.addEventListener("blur", onClose);
++    // Capture, so a scroll inside any nested scroller (the tab strip,
++    // the explorer) dismisses it too — scroll events don't bubble.
++    window.addEventListener("scroll", onClose, true);
++    return () => {
++      document.removeEventListener("pointerdown", onPointerDown);
++      document.removeEventListener("keydown", onKeyDown);
++      window.removeEventListener("resize", onClose);
++      window.removeEventListener("blur", onClose);
++      window.removeEventListener("scroll", onClose, true);
++    };
++  }, [onClose]);
++
++  const visible = (items || []).filter(Boolean);
++  if (visible.length === 0 || typeof document === "undefined") return null;
++
++  return createPortal(
++    <div
++      ref={ref}
++      role="menu"
++      // A right-click ON the menu shouldn't open the browser's own.
++      onContextMenu={(e) => e.preventDefault()}
++      style={{ position: "fixed", left: pos.left, top: pos.top }}
++      className="z-50 min-w-[10rem] rounded-lg border border-[var(--neutral-700)] bg-[var(--neutral-900)] py-1 shadow-lg"
++    >
++      {visible.map((item) => {
++        if (item.separator) {
++          return <div key={item.key} role="separator" className="my-1 border-t border-[var(--neutral-800)]" />;
++        }
++        const Icon = item.icon;
++        return (
++          <button
++            key={item.key}
++            type="button"
++            role="menuitem"
++            disabled={item.disabled}
++            onClick={() => {
++              onClose();
++              item.onSelect?.();
++            }}
++            className={`touch-row flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-[var(--neutral-800)] disabled:opacity-40 disabled:hover:bg-transparent ${
++              item.danger
++                ? "text-[var(--neutral-400)] hover:text-red-400"
++                : "text-[var(--neutral-300)]"
++            }`}
++          >
++            {Icon && <Icon size={12} className="shrink-0" />}
++            {item.label}
++          </button>
++        );
++      })}
++    </div>,
++    document.body
++  );
++}
+diff --git a/frontend/app/components/workbench/EditorTabs.jsx b/frontend/app/components/workbench/EditorTabs.jsx
+new file mode 100644
+index 0000000..cdca6d1
+--- /dev/null
++++ b/frontend/app/components/workbench/EditorTabs.jsx
+@@ -0,0 +1,209 @@
++"use client";
++// frontend/app/components/workbench/EditorTabs.jsx — W2.3a (Build
++// Workbench plan). The open-file tab strip above the editor.
++//
++// Purely presentational: it renders what EditorWorkbench hands it and
++// reports intent through callbacks. It never touches the editor store
++// itself — closing a tab with unsaved edits needs a confirmation
++// dialog, and "which tab becomes active next" is the reducer's call
++// (see nextActiveAfterClose in lib/workbench/tabUtils.js), both of
++// which belong one level up.
++//
++// Per-tab flags arrive as ONE string (`flagsKey`, see
++// encodeTabFlags()) rather than as buffers/Sets, so this component —
++// wrapped in memo() — doesn't re-render on every keystroke, only when a
++// dirty/stale/loading flag actually flips. That's also why every
++// callback prop must be referentially stable (EditorWorkbench passes
++// useCallback-wrapped ones); an inline arrow there would defeat the
++// memo silently.
++import { memo, useEffect, useMemo, useRef, useState } from "react";
++import { AlertTriangle, FileCode, Files, Loader2, Save, X } from "lucide-react";
++import ContextMenu from "./ContextMenu";
++import { decodeTabFlags, tabLabels } from "../../lib/workbench/tabUtils";
++
++function EditorTabs({
++  tabs,
++  activePath,
++  flagsKey,
++  onActivate,
++  onClose,
++  onCloseOthers,
++  onCloseAll,
++  onSave,
++  canSave,
++  saving,
++  onToggleExplorer, // only passed on the single-pane (mobile) layout
++}) {
++  const stripRef = useRef(null);
++  const [menu, setMenu] = useState(null); // {x, y, path} | null
++  const flags = useMemo(() => decodeTabFlags(flagsKey), [flagsKey]);
++  const labels = useMemo(() => tabLabels(tabs), [tabs]);
++
++  // Keep the active tab in view: opening a file from the explorer can
++  // add a tab past the right edge of a strip that's already scrolling.
++  // Looked up by data attribute on the strip's own children instead of
++  // a querySelector so odd-but-valid path characters ([id], (group),
++  // spaces) never need selector escaping.
++  useEffect(() => {
++    const strip = stripRef.current;
++    if (!strip || !activePath) return;
++    const el = Array.from(strip.children).find((c) => c.dataset.tabPath === activePath);
++    el?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
++  }, [activePath, tabs.length]);
++
++  return (
++    <div className="shrink-0 flex items-stretch border-b border-[var(--neutral-800)] bg-[var(--neutral-950)]">
++      {onToggleExplorer && (
++        <button
++          type="button"
++          onClick={onToggleExplorer}
++          aria-label="Show files"
++          title="Files"
++          className="shrink-0 px-3 border-r border-[var(--neutral-800)] text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++        >
++          <Files size={14} />
++        </button>
++      )}
++
++      <div
++        ref={stripRef}
++        role="tablist"
++        aria-label="Open files"
++        // A mouse wheel only scrolls vertically; on a strip that can
++        // only scroll sideways that would do nothing, so translate it.
++        onWheel={(e) => {
++          if (e.deltaY && !e.deltaX && stripRef.current) stripRef.current.scrollLeft += e.deltaY;
++        }}
++        className="flex-1 min-w-0 flex overflow-x-auto overflow-y-hidden"
++      >
++        {labels.map(({ path, name, hint }) => {
++          const active = path === activePath;
++          const flag = flags[path] || {};
++          return (
++            <div
++              key={path}
++              role="tab"
++              tabIndex={0}
++              aria-selected={active}
++              data-tab-path={path}
++              title={path}
++              onClick={() => onActivate(path)}
++              onKeyDown={(e) => {
++                if (e.key === "Enter" || e.key === " ") {
++                  e.preventDefault();
++                  onActivate(path);
++                }
++              }}
++              // Middle-click closes. preventDefault on the mousedown
++              // stops the browser's autoscroll cursor from starting
++              // (it starts on mousedown, so the auxclick is too late);
++              // the actual close is on auxclick, once the button is
++              // released — the same moment every other editor does it.
++              onMouseDown={(e) => {
++                if (e.button === 1) e.preventDefault();
++              }}
++              onAuxClick={(e) => {
++                if (e.button === 1) {
++                  e.preventDefault();
++                  onClose(path);
++                }
++              }}
++              onContextMenu={(e) => {
++                e.preventDefault();
++                setMenu({ x: e.clientX, y: e.clientY, path });
++              }}
++              className={`group shrink-0 flex items-center gap-1.5 h-9 pl-3 pr-1.5 text-xs cursor-pointer select-none border-r border-[var(--neutral-800)] ${
++                active
++                  ? "bg-[var(--neutral-900)] text-[var(--neutral-100)] shadow-[inset_0_-2px_0_var(--accent)]"
++                  : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)] hover:bg-[var(--neutral-900)]"
++              }`}
++            >
++              {flag.loading ? (
++                <Loader2 size={12} className="shrink-0 animate-spin" />
++              ) : flag.stale ? (
++                <AlertTriangle
++                  size={12}
++                  className="shrink-0 text-amber-400"
++                  aria-label="Changed on the server"
++                />
++              ) : (
++                <FileCode size={12} className="shrink-0" />
++              )}
++              <span className="max-w-[10rem] truncate">{name}</span>
++              {hint && <span className="max-w-[6rem] truncate text-[10px] text-[var(--neutral-600)]">{hint}</span>}
++
++              {/* The dot and the × share one slot: a dirty tab shows the
++                  dot until hovered, then the ×. Clicking either closes —
++                  the parent confirms first if there are unsaved edits,
++                  which is exactly the case the dot is warning about. */}
++              <button
++                type="button"
++                onClick={(e) => {
++                  e.stopPropagation();
++                  onClose(path);
++                }}
++                aria-label={flag.dirty ? `Close ${name} (unsaved changes)` : `Close ${name}`}
++                title={flag.dirty ? "Unsaved changes — close" : "Close"}
++                className={`shrink-0 flex h-5 w-5 items-center justify-center rounded text-[var(--neutral-500)] hover:bg-[var(--neutral-700)] hover:text-[var(--neutral-100)] ${
++                  flag.dirty || active ? "" : "row-reveal"
++                }`}
++              >
++                {flag.dirty ? (
++                  <>
++                    <span className="h-2 w-2 rounded-full bg-amber-400 group-hover:hidden" />
++                    <X size={12} className="hidden group-hover:block" />
++                  </>
++                ) : (
++                  <X size={12} />
++                )}
++              </button>
++            </div>
++          );
++        })}
++      </div>
++
++      {activePath && (
++        // The old Code view's Save button, kept as a visible control:
++        // Cmd/Ctrl-S exists (CodeEditor's onSave) but a phone has no
++        // such key, and "where do I save?" shouldn't need a shortcut.
++        <div className="shrink-0 flex items-center px-2 border-l border-[var(--neutral-800)]">
++          <button
++            type="button"
++            onClick={onSave}
++            disabled={!canSave || saving}
++            className="flex items-center gap-1.5 rounded-lg border border-[var(--neutral-700)] px-2 py-1 text-xs font-medium text-[var(--neutral-200)] disabled:opacity-50"
++          >
++            {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
++            {saving ? "Saving…" : "Save"}
++          </button>
++        </div>
++      )}
++
++      {menu && (
++        <ContextMenu
++          x={menu.x}
++          y={menu.y}
++          onClose={() => setMenu(null)}
++          items={[
++            { key: "close", label: "Close", icon: X, onSelect: () => onClose(menu.path) },
++            {
++              key: "others",
++              label: "Close others",
++              disabled: tabs.length < 2,
++              onSelect: () => onCloseOthers(menu.path),
++            },
++            { key: "all", label: "Close all", onSelect: () => onCloseAll() },
++            { key: "sep", separator: true },
++            {
++              key: "copy",
++              label: "Copy path",
++              onSelect: () => navigator.clipboard?.writeText(menu.path).catch(() => {}),
++            },
++          ]}
++        />
++      )}
++    </div>
++  );
++}
++
++export default memo(EditorTabs);
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+new file mode 100644
+index 0000000..1938b0e
+--- /dev/null
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -0,0 +1,619 @@
++"use client";
++// frontend/app/components/workbench/EditorWorkbench.jsx — W2.3a (Build
++// Workbench plan). The Build tab's Editor sub-tab: explorer | tabs +
++// CodeMirror editor | status bar. It replaces BuildTab.jsx's old
++// CodeView, which is deleted in the same patch — this component takes
++// over everything CodeViewBody did (list/open/save, the W0.1 "changed on
++// the server" policy, ZIP download) and adds what a workbench needs on
++// top: several open files, per-file dirty state, resizable panes.
++//
++// Mount it through `next/dynamic` with `{ ssr: false }` (BuildTab.jsx
++// does) — CodeEditor measures real DOM nodes and has no server
++// rendering story, see that file's own header.
++//
++// Shape of the code, top to bottom:
++//   - EditorWorkbench: just wraps the store provider (a provider's own
++//     value isn't visible to hooks in the component that mounts it —
++//     same split CodeView / CodeViewBody had).
++//   - WorkbenchBody: the controller. Talks to the FileProvider, owns
++//     the little bit of UI state that isn't buffer state (file list,
++//     save-in-flight, notices), and passes plain props + stable
++//     callbacks to the presentational panes.
++//   - EditorPane: one mounted CodeEditor per open file (below).
++//
++// Not in this patch (W2.3b): the bottom panel (Problems / Console /
++// Terminal / History) and the preview column. The layout below is
++// arranged so both slot in without moving anything: a status bar
++// under a "main row" that they extend.
++import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
++import { X } from "lucide-react";
++import { authHeaders } from "../../context/SessionContext";
++import { useSplitter } from "../../hooks/useSplitter";
++import { useViewport } from "../../hooks/useViewport";
++import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
++import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
++import { basename } from "../../lib/workbench/fileTree";
++import { encodeTabFlags, planBufferSync } from "../../lib/workbench/tabUtils";
++import ConfirmDialog from "../ConfirmDialog";
++import CodeEditor from "./CodeEditor";
++import EditorTabs from "./EditorTabs";
++import Explorer from "./Explorer";
++import StatusBar from "./StatusBar";
++
++// Explorer width. Persisted per workspace (the key carries the id) so
++// two projects don't fight over one width. Default/min/max in px; the
++// max is also capped at 40% of the window so a wide saved value can't
++// swallow the editor on a smaller screen.
++const EXPLORER_DEFAULT_WIDTH = 240;
++const EXPLORER_MIN_WIDTH = 160;
++const EXPLORER_MAX_WIDTH = 480;
++
++/**
++ * One CodeMirror editor for one open file. Every open tab keeps its own
++ * mounted editor and just hides the inactive ones (`hidden` =
++ * display:none) instead of swapping a single editor between files. That
++ * is deliberate: a CodeMirror EditorView is one document's undo
++ * history, cursor, selection and scroll position (see CodeEditor.jsx's
++ * header on why a different file needs a different instance), and
++ * people expect all of that to still be there when they click back to a
++ * tab. Remounting on every tab switch would throw it away each time.
++ *
++ * A display:none editor can't measure itself, so when this pane becomes
++ * visible again it asks CM to re-measure — otherwise the gutter/scroll
++ * geometry can be stale until the next interaction.
++ *
++ * memo()'d: every keystroke replaces the store's `buffers` object, but
++ * only the edited file's `value` prop changes, so with stable callbacks
++ * from the parent the other open editors skip re-rendering.
++ */
++const EditorPane = memo(function EditorPane({ path, active, visible, value, onEdit, onSave, onCursor }) {
++  const editorRef = useRef(null);
++  const shown = active && visible;
++
++  useEffect(() => {
++    if (shown) editorRef.current?.getView()?.requestMeasure();
++  }, [shown]);
++
++  return (
++    <div className={active ? "absolute inset-0" : "hidden"}>
++      <CodeEditor
++        ref={editorRef}
++        filePath={path}
++        value={value}
++        onChange={(text) => onEdit(path, text)}
++        onSave={() => onSave(path)}
++        onCursorChange={(pos) => onCursor(path, pos)}
++      />
++    </div>
++  );
++});
++
++function WorkbenchBody({ workspaceId, apiUrl }) {
++  // One provider per (workspace, api) pair — memoized so re-renders
++  // don't create a new one (which would re-subscribe to Pusher).
++  const provider = useMemo(
++    () => createCloudFileProvider({ workspaceId, apiUrl }),
++    [workspaceId, apiUrl]
++  );
++  const {
++    state,
++    setActivePath,
++    activateTab,
++    fileLoaded,
++    editBuffer,
++    saveSuccess,
++    markStale,
++    clearStale,
++    closeTabs,
++  } = useEditorStore();
++
++  const [viewport] = useViewport();
++  const isMobile = viewport === "mobile";
++
++  const [filesMeta, setFilesMeta] = useState(null); // {file_path: meta} from provider.list(); null until the first load lands
++  const [listLoading, setListLoading] = useState(true);
++  const [listError, setListError] = useState(null);
++  const [notice, setNotice] = useState(null); // a dismissible error about opening/refreshing a file
++  const [saving, setSaving] = useState({}); // {path: true} while a save is in flight
++  const [saveErrors, setSaveErrors] = useState({}); // {path: message}
++  const [downloading, setDownloading] = useState(false);
++  const [downloadError, setDownloadError] = useState(null);
++  const [pendingClose, setPendingClose] = useState(null); // {paths, dirty} awaiting the discard confirmation
++  const [cursor, setCursor] = useState(null); // {line, col} of the active file's caret
++  const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true); // single-pane layout only
++
++  const explorerSplitter = useSplitter({
++    axis: "width",
++    defaultSize: EXPLORER_DEFAULT_WIDTH,
++    min: EXPLORER_MIN_WIDTH,
++    max: () =>
++      typeof window !== "undefined"
++        ? Math.min(EXPLORER_MAX_WIDTH, window.innerWidth * 0.4)
++        : EXPLORER_MAX_WIDTH,
++    storageKey: `minime_build_editor_explorer_w:${workspaceId}`,
++  });
++
++  // "Latest value" refs. Callbacks below are wrapped in useCallback with
++  // short dependency lists so the memoized panes don't re-render on every
++  // keystroke; they read anything that changes per keystroke (the store
++  // state) through these refs instead of closing over it.
++  const stateRef = useRef(state);
++  stateRef.current = state;
++  const filesMetaRef = useRef(null);
++  const listSeqRef = useRef(0); // guards against an older list response landing after a newer one
++  const openingRef = useRef(new Set()); // paths whose first read is in flight
++  const cancelledOpensRef = useRef(new Set()); // in-flight opens whose tab was closed before the read landed
++  const savingRef = useRef(new Set()); // same as `saving`, but readable from planBufferSync callers
++  const dismissedRef = useRef({}); // {path: server version the person waved off with "Keep mine"}
++  const cursorsRef = useRef({}); // {path: {line, col}} — every editor reports; only the active one is shown
++  const isMobileRef = useRef(isMobile);
++  isMobileRef.current = isMobile;
++
++  // ---- file list ----------------------------------------------------
++
++  const loadFileList = useCallback(async () => {
++    const seq = ++listSeqRef.current;
++    setListLoading(true);
++    setListError(null);
++    try {
++      const meta = await provider.list();
++      if (seq !== listSeqRef.current) return null; // superseded by a newer refresh
++      filesMetaRef.current = meta;
++      setFilesMeta(meta);
++      return meta;
++    } catch (err) {
++      if (seq === listSeqRef.current) setListError(err.message);
++      return null;
++    } finally {
++      if (seq === listSeqRef.current) setListLoading(false);
++    }
++  }, [provider]);
++
++  // Drops tabs and everything keyed to their paths.
++  const dropTabs = useCallback(
++    (paths) => {
++      closeTabs(paths);
++      for (const p of paths) {
++        delete dismissedRef.current[p];
++        delete cursorsRef.current[p];
++        // A close that lands while that file's first read is still in
++        // flight must win: openFile checks this once the read resolves.
++        if (openingRef.current.has(p)) cancelledOpensRef.current.add(p);
++      }
++      setSaveErrors((prev) => {
++        const next = { ...prev };
++        let changed = false;
++        for (const p of paths) {
++          if (p in next) {
++            delete next[p];
++            changed = true;
++          }
++        }
++        return changed ? next : prev;
++      });
++    },
++    [closeTabs]
++  );
++
++  // Re-reads a file that's already open. Not-forced (the automatic
++  // refresh): if the person started typing while the read was in
++  // flight, don't overwrite their keystrokes — flag it stale instead.
++  // Forced ("Reload" on the stale banner) is an explicit "discard mine".
++  const reloadFile = useCallback(
++    async (path, { force = false } = {}) => {
++      try {
++        const file = await provider.read(path);
++        const latest = stateRef.current.buffers[path];
++        if (!latest) return; // tab was closed while this was in flight — don't resurrect it
++        if (latest.dirty && !force) {
++          markStale(path);
++          return;
++        }
++        fileLoaded(path, file);
++        delete dismissedRef.current[path];
++      } catch (err) {
++        setNotice(`Couldn't refresh ${path}: ${err.message}`);
++      }
++    },
++    [provider, fileLoaded, markStale]
++  );
++
++  // The W0.1 policy (never silently clobber unsaved edits), now applied
++  // to EVERY open tab and driven by file versions rather than by which
++  // path a Pusher event named — see planBufferSync().
++  const syncOpenBuffers = useCallback(
++    (meta) => {
++      const s = stateRef.current;
++      const plan = planBufferSync({
++        tabs: s.tabs,
++        buffers: s.buffers,
++        meta,
++        dismissed: dismissedRef.current,
++        busy: savingRef.current,
++      });
++      if (plan.drop.length) dropTabs(plan.drop);
++      plan.stale.forEach((p) => markStale(p));
++      plan.reload.forEach((p) => reloadFile(p));
++    },
++    [dropTabs, markStale, reloadFile]
++  );
++
++  const refreshFromServer = useCallback(async () => {
++    const meta = await loadFileList();
++    if (meta) syncOpenBuffers(meta);
++  }, [loadFileList, syncOpenBuffers]);
++
++  const refreshRef = useRef(refreshFromServer);
++  refreshRef.current = refreshFromServer;
++
++  useEffect(() => {
++    loadFileList();
++  }, [loadFileList]);
++
++  // Live refresh (W0.1 / W2.2): the provider owns the Pusher plumbing;
++  // this is only "what to do when told something changed". The payload's
++  // file paths aren't even needed — a list refetch + version comparison
++  // finds what changed.
++  useEffect(() => provider.subscribe(() => refreshRef.current()), [provider]);
++
++  // W0.1: Pusher can drop a connection while a tab is backgrounded
++  // (mobile Safari suspends sockets aggressively), so a regen that
++  // happened while hidden would otherwise never arrive. Cheap fallback:
++  // re-check on visibility regain. Version comparison means this only
++  // re-reads files that actually moved.
++  useEffect(() => {
++    function onVisibility() {
++      if (document.visibilityState === "visible") refreshRef.current();
++    }
++    document.addEventListener("visibilitychange", onVisibility);
++    return () => document.removeEventListener("visibilitychange", onVisibility);
++  }, []);
++
++  // ---- open / close --------------------------------------------------
++
++  const openFile = useCallback(
++    async (path) => {
++      setNotice(null);
++      if (isMobileRef.current) setMobileExplorerOpen(false); // single-pane: jump to the editor
++      const s = stateRef.current;
++      if (s.buffers[path] || openingRef.current.has(path)) {
++        activateTab(path);
++        return;
++      }
++      openingRef.current.add(path);
++      cancelledOpensRef.current.delete(path);
++      setActivePath(path); // adds the tab and selects it right away; the editor appears once the read lands
++      try {
++        const file = await provider.read(path);
++        // Closed while loading. Tracked with a ref rather than by asking
++        // `stateRef.current.tabs`, which only reflects the last RENDER:
++        // a read that resolves before React has re-rendered the tab in
++        // (a cached or very fast response) would look "closed" and the
++        // file would never open.
++        if (cancelledOpensRef.current.delete(path)) return;
++        fileLoaded(path, file);
++      } catch (err) {
++        dropTabs([path]);
++        setNotice(`Couldn't open ${path}: ${err.message}`);
++      } finally {
++        openingRef.current.delete(path);
++        cancelledOpensRef.current.delete(path);
++      }
++    },
++    [provider, activateTab, setActivePath, fileLoaded, dropTabs]
++  );
++
++  // Every close path goes through here so unsaved edits are never
++  // discarded silently. (W2.5 adds the same guard for project switches
++  // and page unload; this covers what this patch introduces — a close
++  // button on a tab.)
++  const requestClose = useCallback(
++    (paths) => {
++      if (paths.length === 0) return;
++      const dirty = paths.filter((p) => stateRef.current.buffers[p]?.dirty);
++      if (dirty.length === 0) dropTabs(paths);
++      else setPendingClose({ paths, dirty });
++    },
++    [dropTabs]
++  );
++  const closeOne = useCallback((path) => requestClose([path]), [requestClose]);
++  const closeOthers = useCallback(
++    (path) => requestClose(stateRef.current.tabs.filter((p) => p !== path)),
++    [requestClose]
++  );
++  const closeAll = useCallback(() => requestClose([...stateRef.current.tabs]), [requestClose]);
++
++  // ---- editing / saving ----------------------------------------------
++
++  const handleEdit = useCallback((path, text) => editBuffer(path, text), [editBuffer]);
++
++  const handleCursor = useCallback((path, pos) => {
++    cursorsRef.current[path] = pos;
++    if (stateRef.current.activePath === path) setCursor(pos);
++  }, []);
++
++  // Switching tabs: show the caret position the newly active editor
++  // already has (each editor keeps reporting while hidden).
++  useEffect(() => {
++    setCursor(state.activePath ? cursorsRef.current[state.activePath] || null : null);
++  }, [state.activePath]);
++
++  const saveFile = useCallback(
++    async (path) => {
++      const buffer = path ? stateRef.current.buffers[path] : null;
++      if (!buffer || !buffer.dirty || savingRef.current.has(path)) return;
++      const sent = buffer.edited;
++      savingRef.current.add(path);
++      setSaving((prev) => ({ ...prev, [path]: true }));
++      setSaveErrors((prev) => {
++        if (!(path in prev)) return prev;
++        const { [path]: _cleared, ...rest } = prev;
++        return rest;
++      });
++      try {
++        // No baseVersion yet — same blind write the Code view always did;
++        // W2.5 is where Save starts sending one and handling the 409.
++        const saved = await provider.write(path, sent);
++        const latest = stateRef.current.buffers[path];
++        // Typing during the round trip is normal (and will be constant
++        // once autosave lands): if the buffer no longer matches what was
++        // sent, record the save but keep what's in the editor, instead
++        // of swapping the server's copy in over the newer keystrokes.
++        if (latest) saveSuccess(path, saved, { keepEdited: latest.edited !== sent });
++        // Swap just this file's tree entry in place rather than
++        // refetching the list. `version` is part of it now: the sync
++        // check compares it against the open buffer's.
++        const nextMeta = {
++          ...(filesMetaRef.current || {}),
++          [path]: {
++            workspace_id: saved.workspace_id,
++            file_path: saved.file_path,
++            language: saved.language,
++            size: saved.content ? saved.content.length : 0,
++            version: saved.version,
++            updated_at: saved.updated_at,
++            updated_by: saved.updated_by,
++          },
++        };
++        filesMetaRef.current = nextMeta;
++        setFilesMeta(nextMeta);
++      } catch (err) {
++        setSaveErrors((prev) => ({ ...prev, [path]: err.message }));
++      } finally {
++        savingRef.current.delete(path);
++        setSaving((prev) => {
++          const { [path]: _done, ...rest } = prev;
++          return rest;
++        });
++      }
++    },
++    [provider, saveSuccess]
++  );
++
++  const saveActive = useCallback(() => saveFile(stateRef.current.activePath), [saveFile]);
++
++  // "Keep mine" on the stale banner: hide it, and remember which server
++  // version was waved off so the next refresh doesn't put it straight
++  // back (only a NEWER server version will).
++  function keepMine(path) {
++    dismissedRef.current[path] = filesMetaRef.current?.[path]?.version ?? 0;
++    clearStale(path);
++  }
++
++  // ---- ZIP (moved here from the old CodeView; shown in the explorer header) ----
++
++  // Not part of the FileProvider contract (a whole-workspace export, not
++  // a per-file op — see fileProviders.js), so this still calls the route
++  // directly. Needs authHeaders(), so it can't be a plain <a href>:
++  // fetch a blob and click a throwaway object URL.
++  const downloadZip = useCallback(async () => {
++    setDownloading(true);
++    setDownloadError(null);
++    try {
++      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/zip`, {
++        headers: await authHeaders(),
++      });
++      if (!res.ok) {
++        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
++      }
++      const blob = await res.blob();
++      const url = URL.createObjectURL(blob);
++      const a = document.createElement("a");
++      a.href = url;
++      a.download = `${workspaceId}_code.zip`;
++      document.body.appendChild(a);
++      a.click();
++      a.remove();
++      URL.revokeObjectURL(url);
++    } catch (err) {
++      setDownloadError(err.message);
++    } finally {
++      setDownloading(false);
++    }
++  }, [apiUrl, workspaceId]);
++
++  const handleRefresh = useCallback(() => refreshRef.current(), []);
++
++  // ---- derived ---------------------------------------------------------
++
++  const { tabs, buffers, activePath } = state;
++  const activeBuffer = activePath ? buffers[activePath] : null;
++  const flagsKey = useMemo(() => encodeTabFlags(tabs, buffers), [tabs, buffers]);
++  const saveState = !activeBuffer
++    ? null
++    : saving[activePath]
++    ? "saving"
++    : saveErrors[activePath]
++    ? "error"
++    : activeBuffer.dirty
++    ? "dirty"
++    : "saved";
++
++  // Single-pane layout (phones): explorer and editor take turns filling
++  // the width, toggled by the "Files" button in the tab strip. Both stay
++  // MOUNTED and are hidden with display:none rather than unmounted, so
++  // opening the file list doesn't tear down every editor's undo history.
++  // A full mobile pass (bottom tabs etc.) is W8.7; this just keeps the
++  // three-pane layout from being crushed on a small screen meanwhile.
++  const explorerHidden = isMobile && !mobileExplorerOpen;
++  const editorColumnHidden = isMobile && mobileExplorerOpen;
++  const toggleExplorer = useCallback(() => setMobileExplorerOpen((v) => !v), []);
++
++  const pendingCloseMessage = pendingClose
++    ? pendingClose.dirty.length === 1
++      ? `${basename(pendingClose.dirty[0])} has unsaved changes. Closing it will discard them.`
++      : `${pendingClose.dirty.length} files have unsaved changes (${pendingClose.dirty
++          .map(basename)
++          .join(", ")}). Closing them will discard those changes.`
++    : "";
++
++  return (
++    <div className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden">
++      {/* Main row: explorer | splitter | editor column. W2.3b adds the
++          preview column to the right of the editor column and the bottom
++          panel between this row and the status bar. */}
++      <div className="flex-1 min-h-0 flex">
++        <div
++          className={explorerHidden ? "hidden" : isMobile ? "flex-1 min-w-0" : "shrink-0"}
++          style={isMobile ? undefined : { width: explorerSplitter.size }}
++        >
++          <Explorer
++            filesMeta={filesMeta}
++            loading={listLoading}
++            error={listError}
++            activePath={activePath}
++            flagsKey={flagsKey}
++            onOpenFile={openFile}
++            onRefresh={handleRefresh}
++            onDownloadZip={downloadZip}
++            downloading={downloading}
++            downloadError={downloadError}
++          />
++        </div>
++
++        {!isMobile && (
++          <div
++            role="separator"
++            aria-orientation="vertical"
++            aria-label="Resize file explorer"
++            onMouseDown={explorerSplitter.onHandleMouseDown}
++            className="w-1 shrink-0 cursor-col-resize bg-[var(--neutral-800)] hover:bg-[var(--accent)] transition-colors"
++          />
++        )}
++
++        <div className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}>
++          <EditorTabs
++            tabs={tabs}
++            activePath={activePath}
++            flagsKey={flagsKey}
++            onActivate={activateTab}
++            onClose={closeOne}
++            onCloseOthers={closeOthers}
++            onCloseAll={closeAll}
++            onSave={saveActive}
++            canSave={!!activeBuffer?.dirty}
++            saving={!!(activePath && saving[activePath])}
++            onToggleExplorer={isMobile ? toggleExplorer : undefined}
++          />
++
++          {notice && (
++            <div className="shrink-0 flex items-center justify-between gap-2 text-[11px] text-red-300 bg-red-500/10 border-b border-red-500/30 px-3 py-1.5">
++              <span className="min-w-0 truncate">{notice}</span>
++              <button
++                type="button"
++                onClick={() => setNotice(null)}
++                aria-label="Dismiss"
++                className="shrink-0 hover:text-red-100"
++              >
++                <X size={12} />
++              </button>
++            </div>
++          )}
++
++          {activeBuffer?.stale && (
++            // W0.1's banner, now per buffer (the store's `stale` flag):
++            // this file changed on the server while it had unsaved edits.
++            <div className="shrink-0 flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30 px-3 py-1.5">
++              <span>Changed on server — this file was updated elsewhere while you had unsaved edits.</span>
++              <div className="flex items-center gap-3 shrink-0">
++                <button
++                  type="button"
++                  onClick={() => reloadFile(activePath, { force: true })}
++                  className="underline hover:text-amber-200"
++                >
++                  Reload
++                </button>
++                <button type="button" onClick={() => keepMine(activePath)} className="underline hover:text-amber-200">
++                  Keep mine
++                </button>
++              </div>
++            </div>
++          )}
++
++          {activePath && saveErrors[activePath] && (
++            <p className="shrink-0 text-xs text-red-400 border-b border-[var(--neutral-800)] px-3 py-1.5">
++              {saveErrors[activePath]}
++            </p>
++          )}
++
++          <div className="relative flex-1 min-h-0">
++            {tabs.map((path) => {
++              const buffer = buffers[path];
++              if (!buffer) return null; // still loading — the placeholder below covers the active one
++              return (
++                <EditorPane
++                  key={path}
++                  path={path}
++                  active={path === activePath}
++                  visible={!editorColumnHidden}
++                  value={buffer.edited}
++                  onEdit={handleEdit}
++                  onSave={saveFile}
++                  onCursor={handleCursor}
++                />
++              );
++            })}
++            {!activePath ? (
++              <div className="absolute inset-0 flex items-center justify-center text-xs text-[var(--neutral-600)]">
++                Select a file to view or edit it.
++              </div>
++            ) : !activeBuffer ? (
++              <div className="absolute inset-0 flex items-center justify-center text-xs text-[var(--neutral-600)]">
++                Loading…
++              </div>
++            ) : null}
++          </div>
++        </div>
++      </div>
++
++      <StatusBar
++        providerId={provider.id}
++        saveState={saveState}
++        saveError={activePath ? saveErrors[activePath] : undefined}
++        version={activeBuffer?.version}
++        language={activeBuffer?.language}
++        cursor={cursor}
++      />
++
++      <ConfirmDialog
++        open={!!pendingClose}
++        title="Discard unsaved changes?"
++        message={pendingCloseMessage}
++        confirmLabel="Discard"
++        onConfirm={() => {
++          if (pendingClose) dropTabs(pendingClose.paths);
++          setPendingClose(null);
++        }}
++        onCancel={() => setPendingClose(null)}
++      />
++    </div>
++  );
++}
++
++export default function EditorWorkbench({ workspaceId, apiUrl }) {
++  return (
++    <EditorStoreProvider>
++      <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} />
++    </EditorStoreProvider>
++  );
++}
+diff --git a/frontend/app/components/workbench/Explorer.jsx b/frontend/app/components/workbench/Explorer.jsx
+new file mode 100644
+index 0000000..99a1d3c
+--- /dev/null
++++ b/frontend/app/components/workbench/Explorer.jsx
+@@ -0,0 +1,213 @@
++"use client";
++// frontend/app/components/workbench/Explorer.jsx — W2.3a (Build
++// Workbench plan). The file-tree pane. Replaces the old CodeView's
++// inline tree (TreeNode + the header with the ZIP/refresh buttons);
++// same look and same click-to-open behavior, now a component of its
++// own that W2.4 can grow (context menu, rename, drag-move, filter,
++// keyboard navigation, multi-select) without touching the shell.
++//
++// It knows nothing about providers, tabs or the editor store: it gets
++// the file list and the active path in and reports "open this file" /
++// "refresh" / "download ZIP" out. Which is the whole point of D6 —
++// this pane looks the same over Cloud files today and Local files
++// after W3.1.
++//
++// `flagsKey` is the same per-tab flag string EditorTabs takes (see
++// encodeTabFlags()), used here only to put an "unsaved" dot beside
++// files with edits; being a string it lets memo() skip re-rendering
++// this whole tree on every keystroke.
++import { memo, useEffect, useMemo, useRef, useState } from "react";
++import { ChevronDown, ChevronRight, Download, FileCode, Folder, FolderOpen, Loader2, RefreshCw } from "lucide-react";
++import { ancestorDirs, buildFileTree, sortedChildren, topLevelDirs } from "../../lib/workbench/fileTree";
++import { decodeTabFlags } from "../../lib/workbench/tabUtils";
++
++function TreeRows({ node, depth, expanded, onToggle, activePath, dirtyPaths, onOpen }) {
++  return (
++    <>
++      {sortedChildren(node).map((entry) => {
++        if (entry.type === "dir") {
++          const isOpen = expanded.has(entry.path);
++          return (
++            <div key={`d:${entry.path}`} role="none">
++              <button
++                type="button"
++                role="treeitem"
++                aria-expanded={isOpen}
++                aria-selected={false}
++                onClick={() => onToggle(entry.path)}
++                className="w-full flex items-center gap-1 text-xs text-[var(--neutral-300)] hover:text-[var(--neutral-100)] py-0.5 rounded"
++                style={{ paddingLeft: `${depth * 14}px` }}
++              >
++                {isOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
++                {isOpen ? <FolderOpen size={12} className="shrink-0" /> : <Folder size={12} className="shrink-0" />}
++                <span className="truncate">{entry.name}</span>
++              </button>
++              {isOpen && (
++                <div role="group">
++                  <TreeRows
++                    node={entry}
++                    depth={depth + 1}
++                    expanded={expanded}
++                    onToggle={onToggle}
++                    activePath={activePath}
++                    dirtyPaths={dirtyPaths}
++                    onOpen={onOpen}
++                  />
++                </div>
++              )}
++            </div>
++          );
++        }
++        const isActive = entry.path === activePath;
++        return (
++          <button
++            key={`f:${entry.path}`}
++            type="button"
++            role="treeitem"
++            aria-selected={isActive}
++            onClick={() => onOpen(entry.path)}
++            title={entry.path}
++            className={`w-full flex items-center gap-1 text-xs py-0.5 rounded ${
++              isActive
++                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
++                : "text-[var(--neutral-400)] hover:text-[var(--neutral-100)]"
++            }`}
++            style={{ paddingLeft: `${depth * 14 + 16}px` }}
++          >
++            <FileCode size={12} className="shrink-0" />
++            <span className="truncate">{entry.name}</span>
++            {dirtyPaths.has(entry.path) && (
++              <span
++                className="ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
++                role="img"
++                aria-label="Unsaved changes"
++              />
++            )}
++          </button>
++        );
++      })}
++    </>
++  );
++}
++
++function Explorer({
++  filesMeta, // {file_path: meta} | null (null = first load still running)
++  loading,
++  error,
++  activePath,
++  flagsKey,
++  onOpenFile,
++  onRefresh,
++  onDownloadZip,
++  downloading,
++  downloadError,
++}) {
++  const [expanded, setExpanded] = useState(() => new Set());
++  const autoExpandedRef = useRef(false);
++
++  const tree = useMemo(() => (filesMeta ? buildFileTree(filesMeta) : null), [filesMeta]);
++  const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
++  const dirtyPaths = useMemo(() => {
++    const set = new Set();
++    const decoded = decodeTabFlags(flagsKey);
++    for (const [path, f] of Object.entries(decoded)) if (f.dirty) set.add(path);
++    return set;
++  }, [flagsKey]);
++
++  // First time files show up: open the top-level folders so the tree
++  // isn't a single collapsed root. Once only — after that, what's open
++  // is the person's own choice and a refresh must not undo it.
++  useEffect(() => {
++    if (!filesMeta || autoExpandedRef.current) return;
++    const paths = Object.keys(filesMeta);
++    if (paths.length === 0) return;
++    autoExpandedRef.current = true;
++    setExpanded((prev) => new Set([...prev, ...topLevelDirs(paths)]));
++  }, [filesMeta]);
++
++  // Keep the active file visible: when it changes (opened from
++  // somewhere other than a click on its own row — a tab, and later a
++  // chat chip or the preview), open the folders above it. Only ever
++  // ADDS to the open set, and only when the active path changes, so
++  // collapsing the folder of the file you're editing sticks.
++  useEffect(() => {
++    if (!activePath) return;
++    setExpanded((prev) => {
++      const missing = ancestorDirs(activePath).filter((d) => !prev.has(d));
++      return missing.length ? new Set([...prev, ...missing]) : prev;
++    });
++  }, [activePath]);
++
++  function toggleDir(path) {
++    setExpanded((prev) => {
++      const next = new Set(prev);
++      if (next.has(path)) next.delete(path);
++      else next.add(path);
++      return next;
++    });
++  }
++
++  return (
++    <div className="h-full min-h-0 flex flex-col">
++      <div className="shrink-0 flex items-center justify-between px-3 h-9 border-b border-[var(--neutral-800)]">
++        <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
++          Files{fileCount ? ` (${fileCount})` : ""}
++        </span>
++        <div className="flex items-center gap-2">
++          {/* Moved here from the old CodeView's own header (patch 11's
++              ZIP download) — the plan puts it in the explorer header.
++              Disabled until there's at least one saved file. */}
++          <button
++            type="button"
++            onClick={onDownloadZip}
++            disabled={downloading || fileCount === 0}
++            aria-label="Download all files as ZIP"
++            title="Download as ZIP"
++            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++          >
++            {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
++          </button>
++          <button
++            type="button"
++            onClick={onRefresh}
++            disabled={loading}
++            aria-label="Refresh file list"
++            title="Refresh"
++            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++          >
++            <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
++          </button>
++        </div>
++      </div>
++
++      <div className="flex-1 min-h-0 overflow-y-auto p-2">
++        {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
++        {loading && !filesMeta ? (
++          <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
++            <Loader2 size={12} className="animate-spin" /> Loading…
++          </div>
++        ) : error ? (
++          <p className="text-xs text-red-400 px-1">{error}</p>
++        ) : fileCount === 0 ? (
++          <p className="text-xs text-[var(--neutral-600)] px-1">
++            No files yet — ask this project&apos;s chat to build something and generated files will show up here.
++          </p>
++        ) : (
++          <div role="tree" aria-label="Project files">
++            <TreeRows
++              node={tree}
++              depth={0}
++              expanded={expanded}
++              onToggle={toggleDir}
++              activePath={activePath}
++              dirtyPaths={dirtyPaths}
++              onOpen={onOpenFile}
++            />
++          </div>
++        )}
++      </div>
++    </div>
++  );
++}
++
++export default memo(Explorer);
+diff --git a/frontend/app/components/workbench/StatusBar.jsx b/frontend/app/components/workbench/StatusBar.jsx
+new file mode 100644
+index 0000000..e031bcb
+--- /dev/null
++++ b/frontend/app/components/workbench/StatusBar.jsx
+@@ -0,0 +1,66 @@
++"use client";
++// frontend/app/components/workbench/StatusBar.jsx — W2.3a (Build
++// Workbench plan). The thin strip along the bottom of the workbench:
++// which file source is showing (provider), the active file's save
++// state, its language and caret position, and a slot for the "Pending
++// changes (N)" tray W5.4 will fill in.
++//
++// Presentational only. Everything comes in as props so it stays
++// correct over Cloud files now and Local files after W3.1 — the local
++// provider will just pass a different `providerId` and a save state
++// that reads "Waiting for confirmation" once that exists.
++import { memo } from "react";
++import { Loader2 } from "lucide-react";
++
++const PROVIDER_LABELS = {
++  cloud: "Project files",
++  local: "Local folder",
++};
++
++/**
++ * @param {object} props
++ * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
++ * @param {"saved"|"dirty"|"saving"|"error"|null} props.saveState - null when no file is active
++ * @param {string} [props.saveError] - shown as the tooltip on "Save failed"
++ * @param {number} [props.version] - the active buffer's server version
++ * @param {string|null} [props.language]
++ * @param {{line: number, col: number}|null} [props.cursor]
++ * @param {import("react").ReactNode} [props.pendingSlot] - W5.4's "Pending changes" tray; nothing renders until then
++ */
++function StatusBar({ providerId, saveState, saveError, version, language, cursor, pendingSlot }) {
++  return (
++    <div className="shrink-0 flex items-center justify-between gap-3 h-6 px-3 text-[10px] text-[var(--neutral-500)] border-t border-[var(--neutral-800)] bg-[var(--neutral-950)]">
++      <div className="flex items-center gap-3 min-w-0">
++        <span title="Where these files live">{PROVIDER_LABELS[providerId] || providerId}</span>
++
++        <span role="status" aria-live="polite" className="flex items-center gap-1 truncate">
++          {saveState === "saving" && (
++            <>
++              <Loader2 size={10} className="animate-spin" /> Saving…
++            </>
++          )}
++          {saveState === "error" && (
++            <span className="text-red-400" title={saveError || undefined}>
++              Save failed
++            </span>
++          )}
++          {saveState === "dirty" && <span className="text-amber-300">Unsaved changes</span>}
++          {saveState === "saved" && <span>{version ? `Saved · v${version}` : "Saved"}</span>}
++        </span>
++
++        {pendingSlot}
++      </div>
++
++      <div className="flex items-center gap-3 shrink-0">
++        {cursor && (
++          <span>
++            Ln {cursor.line}, Col {cursor.col}
++          </span>
++        )}
++        {saveState && <span>{language || "plain text"}</span>}
++      </div>
++    </div>
++  );
++}
++
++export default memo(StatusBar);
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+index c705d0f..12585f9 100644
+--- a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -1,18 +1,29 @@
+-// W2.2 (Build Workbench plan) — reducer test for editorStore.js.
++// W2.2 (Build Workbench plan) — reducer test for editorStore.js;
++// extended in W2.3a for the tab-strip actions.
+ //
+-// No JS test runner (jest/vitest) exists in this repo yet (frontend/package.json
+-// has zero test deps, no jest.config/vitest.config anywhere), and
+-// editorStore.js's `EditorStoreProvider`/`useEditorStore` pull in
+-// `react`, which a dependency-free `node` invocation can't resolve
+-// without `node_modules` present — exactly the situation
+-// components/__tests__/wiringGraph.linkFilter.test.mjs's own header
+-// comment describes for the same reason (JSX there; a `react` import
+-// here). Same fix: `editorReducer` is kept byte-for-byte in sync below
+-// so this can run with plain `node` in CI with no install step. If a
+-// real JS test runner is ever added, this should be ported to import
+-// the actual reducer and this file deleted.
++// Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
++// copy of editorReducer() (editorStore.js pulls in `react`, which plain
++// `node` couldn't resolve without node_modules) and said the copy had to be
++// kept in sync by hand — which is how a test ends up green against code
++// that has moved on. loadSource.mjs now reads editorStore.js itself and
++// satisfies its two imports from the map below: a stub for `react` (only
++// its top-level createContext() call runs at load time; the provider and
++// hook aren't exercised here) and the real tabUtils.js.
+ //
+ // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const reactStub = {
++  createContext: () => ({}),
++  createElement: () => null,
++  useContext: () => null,
++  useMemo: (fn) => fn(),
++  useReducer: () => [],
++};
++const tabUtils = loadSource("../tabUtils.js");
++const { editorReducer } = loadSource("../editorStore.js", {
++  imports: { react: reactStub, "./tabUtils": tabUtils },
++});
+ 
+ const initialState = {
+   tabs: [],
+@@ -22,105 +33,6 @@ const initialState = {
+   proposals: [],
+ };
+ 
+-// Kept byte-for-byte in sync with editorReducer() in ../editorStore.js.
+-function editorReducer(state, action) {
+-  switch (action.type) {
+-    case "SET_ACTIVE_PATH": {
+-      const { path } = action;
+-      if (path == null) {
+-        return { ...state, activePath: null };
+-      }
+-      const tabs = state.tabs.includes(path) ? state.tabs : [...state.tabs, path];
+-      const existing = state.buffers[path];
+-      const buffers = existing && existing.stale
+-        ? { ...state.buffers, [path]: { ...existing, stale: false } }
+-        : state.buffers;
+-      return { ...state, activePath: path, tabs, buffers };
+-    }
+-
+-    case "FILE_LOADED": {
+-      const { path, file } = action;
+-      return {
+-        ...state,
+-        buffers: {
+-          ...state.buffers,
+-          [path]: {
+-            saved: file.content || "",
+-            edited: file.content || "",
+-            version: file.version ?? 0,
+-            dirty: false,
+-            stale: false,
+-            language: file.language || null,
+-            updatedAt: file.updated_at || null,
+-          },
+-        },
+-      };
+-    }
+-
+-    case "EDIT_BUFFER": {
+-      const { path, content } = action;
+-      const buffer = state.buffers[path];
+-      if (!buffer) return state;
+-      return {
+-        ...state,
+-        buffers: {
+-          ...state.buffers,
+-          [path]: { ...buffer, edited: content, dirty: content !== buffer.saved },
+-        },
+-      };
+-    }
+-
+-    case "SAVE_SUCCESS": {
+-      const { path, file } = action;
+-      const buffer = state.buffers[path];
+-      return {
+-        ...state,
+-        buffers: {
+-          ...state.buffers,
+-          [path]: {
+-            ...(buffer || {}),
+-            saved: file.content || "",
+-            edited: file.content || "",
+-            version: file.version ?? buffer?.version ?? 0,
+-            dirty: false,
+-            stale: false,
+-            language: file.language ?? buffer?.language ?? null,
+-            updatedAt: file.updated_at || null,
+-          },
+-        },
+-      };
+-    }
+-
+-    case "MARK_STALE": {
+-      const { path } = action;
+-      const buffer = state.buffers[path];
+-      if (!buffer) return state;
+-      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: true } } };
+-    }
+-
+-    case "CLEAR_STALE": {
+-      const { path } = action;
+-      const buffer = state.buffers[path];
+-      if (!buffer || !buffer.stale) return state;
+-      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: false } } };
+-    }
+-
+-    case "CLOSE_TAB": {
+-      const { path } = action;
+-      if (!(path in state.buffers) && !state.tabs.includes(path) && state.activePath !== path) {
+-        return state;
+-      }
+-      const { [path]: _removed, ...buffers } = state.buffers;
+-      const tabs = state.tabs.filter((p) => p !== path);
+-      const activePath = state.activePath === path ? null : state.activePath;
+-      return { ...state, tabs, buffers, activePath };
+-    }
+-
+-    default:
+-      return state;
+-  }
+-}
+-
+ let failures = 0;
+ function assertEqual(actual, expected, msg) {
+   const a = JSON.stringify(actual);
+@@ -227,6 +139,127 @@ assertEqual(
+   "an unrecognized action type returns state unchanged"
+ );
+ 
++// --- W2.3a: ACTIVATE_TAB -----------------------------------------------
++
++function openWith(paths, active = paths[paths.length - 1]) {
++  let st = initialState;
++  for (const path of paths) {
++    st = editorReducer(st, { type: "SET_ACTIVE_PATH", path });
++    st = editorReducer(st, {
++      type: "FILE_LOADED",
++      path,
++      file: { content: `// ${path}`, language: "javascript", version: 1, updated_at: null },
++    });
++  }
++  return editorReducer(st, { type: "ACTIVATE_TAB", path: active });
++}
++
++state = openWith(["a.js", "b.js", "c.js"], "a.js");
++assertEqual(state.activePath, "a.js", "ACTIVATE_TAB switches to an already-open tab");
++assertEqual(state.tabs, ["a.js", "b.js", "c.js"], "ACTIVATE_TAB never reorders tabs");
++
++assertEqual(
++  editorReducer(state, { type: "ACTIVATE_TAB", path: "nope.js" }),
++  state,
++  "ACTIVATE_TAB on a path that isn't open is ignored, not invented into a tab"
++);
++assertEqual(
++  editorReducer(state, { type: "ACTIVATE_TAB", path: "a.js" }),
++  state,
++  "ACTIVATE_TAB on the already-active tab returns the same state"
++);
++
++state = editorReducer(openWith(["a.js", "b.js"], "a.js"), { type: "EDIT_BUFFER", path: "a.js", content: "changed" });
++state = editorReducer(state, { type: "MARK_STALE", path: "a.js" });
++state = editorReducer(state, { type: "ACTIVATE_TAB", path: "b.js" });
++state = editorReducer(state, { type: "ACTIVATE_TAB", path: "a.js" });
++assertEqual(state.buffers["a.js"].stale, true, "switching away from a stale tab and back does NOT dismiss its warning");
++assertEqual(
++  editorReducer(state, { type: "SET_ACTIVE_PATH", path: "a.js" }).buffers["a.js"].stale,
++  false,
++  "...whereas SET_ACTIVE_PATH (opening it from the explorer) still does, as before"
++);
++
++// --- W2.3a: which tab becomes active when the active one closes --------
++
++state = openWith(["a.js", "b.js", "c.js"], "b.js");
++let closed = editorReducer(state, { type: "CLOSE_TAB", path: "b.js" });
++assertEqual(closed.activePath, "c.js", "closing the active tab activates its right neighbour");
++assertEqual(closed.tabs, ["a.js", "c.js"], "...and removes it from the strip");
++
++state = openWith(["a.js", "b.js", "c.js"], "c.js");
++closed = editorReducer(state, { type: "CLOSE_TAB", path: "c.js" });
++assertEqual(closed.activePath, "b.js", "closing the LAST active tab activates its left neighbour");
++
++state = openWith(["a.js", "b.js", "c.js"], "a.js");
++closed = editorReducer(state, { type: "CLOSE_TAB", path: "c.js" });
++assertEqual(closed.activePath, "a.js", "closing a background tab leaves the active tab alone");
++assertEqual(closed.buffers["c.js"], undefined, "...and still drops that tab's buffer");
++
++// --- W2.3a: CLOSE_TABS ---------------------------------------------------------
++
++state = openWith(["a.js", "b.js", "c.js", "d.js"], "b.js");
++closed = editorReducer(state, { type: "CLOSE_TABS", paths: ["a.js", "b.js"] });
++assertEqual(closed.tabs, ["c.js", "d.js"], "CLOSE_TABS removes every listed tab");
++assertEqual(Object.keys(closed.buffers), ["c.js", "d.js"], "...and every listed buffer");
++assertEqual(closed.activePath, "c.js", "when the active tab is among them, the nearest survivor to its right takes over");
++
++closed = editorReducer(state, { type: "CLOSE_TABS", paths: ["a.js", "c.js", "d.js"] });
++assertEqual(closed.activePath, "b.js", "'Close others' from b: b stays active");
++assertEqual(closed.tabs, ["b.js"], "'Close others' leaves just the one tab");
++
++closed = editorReducer(state, { type: "CLOSE_TABS", paths: [...state.tabs] });
++assertEqual([closed.tabs, closed.activePath, closed.buffers], [[], null, {}], "'Close all' leaves an empty workbench");
++
++assertEqual(
++  editorReducer(state, { type: "CLOSE_TABS", paths: ["never-open.js"] }),
++  state,
++  "CLOSE_TABS naming only tabs that aren't open is a no-op"
++);
++assertEqual(editorReducer(state, { type: "CLOSE_TABS", paths: [] }), state, "CLOSE_TABS with no paths is a no-op");
++
++state = editorReducer(openWith(["a.js", "b.js"], "a.js"), { type: "SET_ACTIVE_PATH", path: "loading.js" });
++closed = editorReducer(state, { type: "CLOSE_TABS", paths: ["loading.js"] });
++assertEqual(closed.tabs, ["a.js", "b.js"], "a tab whose file is still loading (tab but no buffer) can be closed");
++assertEqual(closed.activePath, "b.js", "...and the active tab moves to its left neighbour (nothing to its right)");
++
++// --- W2.3a: SAVE_SUCCESS keepEdited -------------------------------------
++
++state = openWith(["a.js"]);
++state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.js", content: "v2" });
++// the person keeps typing while the save of "v2" is in flight
++state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.js", content: "v2 and more" });
++let afterSave = editorReducer(state, {
++  type: "SAVE_SUCCESS",
++  path: "a.js",
++  file: { content: "v2", language: "javascript", version: 2, updated_at: "2026-01-03T00:00:00Z" },
++  keepEdited: true,
++});
++assertEqual(afterSave.buffers["a.js"].edited, "v2 and more", "keepEdited: keystrokes typed during the save survive it");
++assertEqual(afterSave.buffers["a.js"].saved, "v2", "keepEdited: `saved` records what the server confirmed");
++assertEqual(afterSave.buffers["a.js"].dirty, true, "keepEdited: the buffer is still dirty, because edited no longer matches saved");
++assertEqual(afterSave.buffers["a.js"].version, 2, "keepEdited: the server's new version is still adopted");
++
++afterSave = editorReducer(state, {
++  type: "SAVE_SUCCESS",
++  path: "a.js",
++  file: { content: "v2 and more", language: "javascript", version: 2, updated_at: null },
++});
++assertEqual(afterSave.buffers["a.js"].dirty, false, "without keepEdited, a save is the plain 'saved and clean' it always was");
++assertEqual(afterSave.buffers["a.js"].edited, "v2 and more", "...with edited swapped to the server's copy");
++
++afterSave = editorReducer(initialState, {
++  type: "SAVE_SUCCESS",
++  path: "x.js",
++  file: { content: "new", version: 1, updated_at: null },
++  keepEdited: true,
++});
++assertEqual(
++  [afterSave.buffers["x.js"].edited, afterSave.buffers["x.js"].dirty],
++  ["new", false],
++  "keepEdited with no existing buffer (tab closed mid-save) falls back to the server's copy, clean"
++);
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/__tests__/fileTree.test.mjs b/frontend/app/lib/workbench/__tests__/fileTree.test.mjs
+new file mode 100644
+index 0000000..b972408
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/fileTree.test.mjs
+@@ -0,0 +1,95 @@
++// W2.3a (Build Workbench plan) — tests for fileTree.js.
++//
++// Loads the REAL lib/workbench/fileTree.js through loadSource.mjs. No
++// `imports` are passed on purpose: fileTree.js must stay dependency-free,
++// and this load fails if someone adds an `import` to it.
++//
++// Run: node frontend/app/lib/workbench/__tests__/fileTree.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const { buildFileTree, sortedChildren, basename, dirname, ancestorDirs, topLevelDirs } = loadSource("../fileTree.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// Compact view of a tree: "dir/" and "file" names, recursively, in display order.
++function shape(node) {
++  return sortedChildren(node).map((c) => (c.type === "dir" ? { [c.name + "/"]: shape(c) } : c.name));
++}
++
++// --- buildFileTree / sortedChildren ---------------------------------------
++
++const meta = (...paths) => Object.fromEntries(paths.map((p) => [p, { size: 1 }]));
++
++assertEqual(shape(buildFileTree({})), [], "an empty file list is an empty tree");
++assertEqual(shape(buildFileTree(null)), [], "a null file list (first load) doesn't throw");
++
++assertEqual(
++  shape(buildFileTree(meta("README.md", "src/App.jsx", "src/lib/util.js", "package.json", "tests/a.test.js"))),
++  [{ "src/": [{ "lib/": ["util.js"] }, "App.jsx"] }, { "tests/": ["a.test.js"] }, "package.json", "README.md"],
++  "directories first, then files, each alphabetical (case-insensitive: package.json before README.md), nested folders from path prefixes"
++);
++
++// The crash the old tree had: a file `a` and a folder `a/`.
++let clash;
++let threw = false;
++try {
++  clash = buildFileTree(meta("a", "a/b.js"));
++} catch {
++  threw = true;
++}
++assertEqual(threw, false, "a file and a folder with the same name don't throw (the old white-screen bug)");
++assertEqual(shape(clash), [{ "a/": ["b.js"] }, "a"], "...and both are kept: the folder a/ and the file a");
++
++const tree = buildFileTree(meta("src/App.jsx"));
++const src = sortedChildren(tree)[0];
++assertEqual(
++  [src.type, src.name, src.path, sortedChildren(src)[0].path, sortedChildren(src)[0].type],
++  ["dir", "src", "src", "src/App.jsx", "file"],
++  "nodes carry full paths, so a click can open sortedChildren()'s file by path"
++);
++assertEqual(sortedChildren(src)[0].meta, { size: 1 }, "file nodes carry their meta entry through");
++
++assertEqual(
++  shape(buildFileTree(meta("app/[id]/page.js", "app/(auth)/login.tsx", "docs/my notes.md"))),
++  [{ "app/": [{ "(auth)/": ["login.tsx"] }, { "[id]/": ["page.js"] }] }, { "docs/": ["my notes.md"] }],
++  "route-folder names with brackets, parens and spaces build normal folders"
++);
++
++// --- basename / dirname -----------------------------------------------------
++
++assertEqual(basename("src/a/App.jsx"), "App.jsx", "basename takes the last segment");
++assertEqual(basename("README.md"), "README.md", "basename of a root file is itself");
++assertEqual(dirname("src/a/App.jsx"), "src/a", "dirname drops the last segment");
++assertEqual(dirname("README.md"), "", "dirname of a root file is empty");
++
++// --- ancestorDirs -------------------------------------------------------------
++
++assertEqual(ancestorDirs("src/a/App.jsx"), ["src", "src/a"], "ancestorDirs lists every containing folder, outermost first");
++assertEqual(ancestorDirs("src/App.jsx"), ["src"], "one level deep");
++assertEqual(ancestorDirs("README.md"), [], "a root file has no ancestors");
++
++// --- topLevelDirs -------------------------------------------------------------
++
++assertEqual(
++  [...topLevelDirs(["src/a.js", "src/lib/b.js", "tests/c.js", "README.md"])].sort(),
++  ["src", "tests"],
++  "topLevelDirs collects each first-level folder once, ignoring root files"
++);
++assertEqual([...topLevelDirs(["README.md"])], [], "no folders, nothing to expand");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/__tests__/loadSource.mjs b/frontend/app/lib/workbench/__tests__/loadSource.mjs
+new file mode 100644
+index 0000000..606ba3c
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/loadSource.mjs
+@@ -0,0 +1,100 @@
++// W2.3a (Build Workbench plan) — test helper: load a workbench source
++// file's REAL text and run it under plain `node`.
++//
++// Why this exists: the repo has no JS test runner and no bundler in the
++// test path (see editorStore.test.mjs's own history), so the source files
++// here are `.js` files using ES `import`/`export` with no `"type":
++// "module"` in package.json — plain `node` can't import them directly.
++// Until W2.2 the answer was to paste a byte-for-byte copy of the code
++// under test into each test file, which is exactly how a test ends up
++// passing against code that no longer exists. This instead reads the
++// actual file, rewrites its `import`/`export` lines into plain
++// JavaScript, and evaluates the result.
++//
++// What it supports (deliberately small — it has to be obviously
++// correct):
++//   - `export function|async function|const|let|class name` — the names
++//     come back on the returned object;
++//   - `import {a, b as c} from "spec"`, `import X from "spec"` and
++//     `import * as X from "spec"` — satisfied ONLY from the `imports`
++//     map you pass in ({ "spec": moduleObject }); any other import throws.
++//     That is also how the "no imports" rule for the pure modules
++//     (fileTree.js, tabUtils.js) is enforced: load them with no `imports`
++//     and an added `import` line makes their test fail loudly.
++//   - a leading "use client" directive is dropped.
++// Not supported (throws): `export default`, `export { … }` lists,
++// side-effect-only imports, dynamic `import()`.
++//
++// Usage:
++//   const tabUtils = loadSource("../tabUtils.js");
++//   const store = loadSource("../editorStore.js", {
++//     imports: { react: reactStub, "./tabUtils": tabUtils },
++//   });
++import { readFileSync } from "node:fs";
++import { dirname, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const here = dirname(fileURLToPath(import.meta.url));
++
++const IMPORT_RE = /^import\s+([\s\S]*?)\s+from\s+["']([^"']+)["'];?[ \t]*$/gm;
++
++function bindingsFor(clause, spec) {
++  const ref = `__imports[${JSON.stringify(spec)}]`;
++  const parts = [];
++  const named = clause.match(/\{([\s\S]*?)\}/);
++  let rest = clause.replace(/\{[\s\S]*?\}/, "").trim().replace(/,\s*$/, "").trim();
++  if (rest.startsWith("* as ")) {
++    parts.push(`const ${rest.slice(5).trim()} = ${ref};`);
++    rest = "";
++  }
++  if (rest) parts.push(`const ${rest} = ${ref}.default;`);
++  if (named) {
++    const names = named[1]
++      .split(",")
++      .map((n) => n.trim())
++      .filter(Boolean)
++      .map((n) => n.replace(/\s+as\s+/, ": "));
++    if (names.length) parts.push(`const { ${names.join(", ")} } = ${ref};`);
++  }
++  return parts.join(" ");
++}
++
++/**
++ * @param {string} relPath - path to the source file, relative to THIS file
++ * @param {{imports?: Record<string, object>}} [opts]
++ * @returns {Record<string, any>} the file's named exports
++ */
++export function loadSource(relPath, { imports = {} } = {}) {
++  const abs = resolve(here, relPath);
++  let src = readFileSync(abs, "utf8");
++
++  src = src.replace(/^\s*["']use client["'];?[ \t]*$/m, "");
++
++  src = src.replace(IMPORT_RE, (_all, clause, spec) => {
++    if (!(spec in imports)) {
++      throw new Error(
++        `${relPath} imports "${spec}", which this test didn't provide. ` +
++          `If the file is one of the dependency-free modules (fileTree.js, tabUtils.js) ` +
++          `that is the point: they must stay import-free.`
++      );
++    }
++    return bindingsFor(clause, spec);
++  });
++
++  if (/^\s*import[\s{*"']/m.test(src.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, ""))) {
++    throw new Error(`${relPath}: unsupported import form (only "import … from '…'" is handled)`);
++  }
++  if (/^\s*export\s+default\b/m.test(src) || /^\s*export\s*\{/m.test(src)) {
++    throw new Error(`${relPath}: loadSource() only supports named declaration exports`);
++  }
++
++  const names = [];
++  src = src.replace(/^(\s*)export\s+((?:async\s+)?function\s*\*?|const|let|class)\s+([A-Za-z_$][\w$]*)/gm, (_m, indent, kind, name) => {
++    names.push(name);
++    return `${indent}${kind} ${name}`;
++  });
++
++  const body = `"use strict";\n${src}\nreturn { ${names.join(", ")} };`;
++  // eslint-disable-next-line no-new-func
++  return new Function("__imports", body)(imports);
++}
+diff --git a/frontend/app/lib/workbench/__tests__/tabUtils.test.mjs b/frontend/app/lib/workbench/__tests__/tabUtils.test.mjs
+new file mode 100644
+index 0000000..380ff40
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/tabUtils.test.mjs
+@@ -0,0 +1,238 @@
++// W2.3a (Build Workbench plan) — tests for tabUtils.js.
++//
++// Loads the REAL lib/workbench/tabUtils.js through loadSource.mjs (no
++// pasted copy). No `imports` are passed on purpose: tabUtils.js must stay
++// dependency-free, and this load fails if someone adds an `import` to it.
++//
++// Run: node frontend/app/lib/workbench/__tests__/tabUtils.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const { tabLabels, nextActiveAfterClose, planBufferSync, encodeTabFlags, decodeTabFlags } = loadSource("../tabUtils.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// --- tabLabels -------------------------------------------------------
++
++assertEqual(
++  tabLabels(["src/App.jsx", "README.md"]),
++  [
++    { path: "src/App.jsx", name: "App.jsx", hint: null },
++    { path: "README.md", name: "README.md", hint: null },
++  ],
++  "unique file names get no folder hint"
++);
++
++assertEqual(
++  tabLabels(["src/index.js", "public/index.js", "other.js"]),
++  [
++    { path: "src/index.js", name: "index.js", hint: "src" },
++    { path: "public/index.js", name: "index.js", hint: "public" },
++    { path: "other.js", name: "other.js", hint: null },
++  ],
++  "two tabs with the same name each get their folder as a hint; the unique one doesn't"
++);
++
++assertEqual(
++  tabLabels(["index.js", "src/index.js"]),
++  [
++    { path: "index.js", name: "index.js", hint: "root" },
++    { path: "src/index.js", name: "index.js", hint: "src" },
++  ],
++  "a root-level file in a name clash is hinted 'root'"
++);
++
++assertEqual(tabLabels([]), [], "no tabs, no labels");
++
++// --- nextActiveAfterClose ---------------------------------------------
++
++const strip = ["a", "b", "c", "d"];
++
++assertEqual(nextActiveAfterClose(strip, "b", ["d"]), "b", "closing a non-active tab keeps the active one");
++assertEqual(nextActiveAfterClose(strip, null, ["a"]), null, "no active tab stays no active tab");
++assertEqual(nextActiveAfterClose(strip, "b", ["b"]), "c", "closing the active tab picks its right neighbour");
++assertEqual(nextActiveAfterClose(strip, "d", ["d"]), "c", "closing the last active tab falls back to its left neighbour");
++assertEqual(nextActiveAfterClose(strip, "b", ["b", "c"]), "d", "the right neighbour skips other tabs closing in the same batch");
++assertEqual(nextActiveAfterClose(strip, "c", ["c", "d"]), "b", "with nothing to the right, falls back left");
++assertEqual(nextActiveAfterClose(strip, "b", ["a", "b", "c", "d"]), null, "closing everything leaves no active tab");
++assertEqual(nextActiveAfterClose(strip, "b", new Set(["b"])), "c", "accepts any iterable of paths (a Set)");
++assertEqual(nextActiveAfterClose(["a", "b"], "ghost", ["ghost"]), "b", "an active path missing from the strip falls back to the last survivor");
++assertEqual(nextActiveAfterClose(["a"], "ghost", ["ghost", "a"]), null, "...or null when nothing survives");
++
++// --- planBufferSync ----------------------------------------------------
++
++const clean = (version) => ({ version, dirty: false, stale: false });
++const dirty = (version, extra = {}) => ({ version, dirty: true, stale: false, ...extra });
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a", "b"],
++    buffers: { a: clean(2), b: clean(5) },
++    meta: { a: { version: 2 }, b: { version: 5 } },
++  }),
++  { reload: [], stale: [], drop: [] },
++  "buffers already at the server's version need nothing"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: clean(2) },
++    meta: { a: { version: 3 } },
++  }),
++  { reload: ["a"], stale: [], drop: [] },
++  "a clean buffer behind the server is reloaded"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: dirty(2) },
++    meta: { a: { version: 3 } },
++  }),
++  { reload: [], stale: ["a"], drop: [] },
++  "a dirty buffer behind the server is flagged stale, never reloaded over"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: dirty(2, { stale: true }) },
++    meta: { a: { version: 3 } },
++  }),
++  { reload: [], stale: [], drop: [] },
++  "an already-stale buffer isn't flagged again"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: dirty(2) },
++    meta: { a: { version: 3 } },
++    dismissed: { a: 3 },
++  }),
++  { reload: [], stale: [], drop: [] },
++  "'Keep mine' for server version 3 suppresses the banner for version 3"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: dirty(2) },
++    meta: { a: { version: 4 } },
++    dismissed: { a: 3 },
++  }),
++  { reload: [], stale: ["a"], drop: [] },
++  "...but a NEWER server version brings the banner back"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: clean(2) },
++    meta: {},
++  }),
++  { reload: [], stale: [], drop: ["a"] },
++  "a clean tab whose file is gone from the server is dropped"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: dirty(2) },
++    meta: {},
++  }),
++  { reload: [], stale: [], drop: [] },
++  "a dirty tab whose file is gone is kept — unsaved edits are never thrown away"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a", "b"],
++    buffers: { a: clean(1) },
++    meta: { a: { version: 1 }, b: { version: 9 } },
++  }),
++  { reload: [], stale: [], drop: [] },
++  "a tab with no buffer yet (still loading) is left alone"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a", "b"],
++    buffers: { a: clean(1), b: clean(1) },
++    meta: { a: { version: 2 }, b: { version: 2 } },
++    busy: ["a"],
++  }),
++  { reload: ["b"], stale: [], drop: [] },
++  "a path with a save in flight is skipped; others still sync"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a", "b", "c", "d"],
++    buffers: { a: clean(1), b: dirty(1), c: clean(1), d: clean(4) },
++    meta: { a: { version: 2 }, b: { version: 2 }, d: { version: 4 } },
++  }),
++  { reload: ["a"], stale: ["b"], drop: ["c"] },
++  "each tab is judged on its own: reload one, flag one, drop one, leave one"
++);
++
++assertEqual(
++  planBufferSync({
++    tabs: ["a"],
++    buffers: { a: clean(1) },
++    meta: { a: {} },
++  }),
++  { reload: [], stale: [], drop: [] },
++  "a meta entry with no version counts as version 0 (never ahead)"
++);
++
++// --- encodeTabFlags / decodeTabFlags -----------------------------------
++
++const buffers = { a: { dirty: true }, b: { stale: true }, c: { dirty: true, stale: true }, d: {} };
++const key = encodeTabFlags(["a", "b", "c", "d", "e"], buffers);
++assertEqual(key, "a\td\nb\ts\nc\tds\nd\t\ne\tl", "flags encode one 'path<TAB>flags' line per tab; a missing buffer is 'l'");
++
++assertEqual(
++  decodeTabFlags(key),
++  {
++    a: { dirty: true, stale: false, loading: false },
++    b: { dirty: false, stale: true, loading: false },
++    c: { dirty: true, stale: true, loading: false },
++    d: { dirty: false, stale: false, loading: false },
++    e: { dirty: false, stale: false, loading: true },
++  },
++  "decode is the inverse of encode"
++);
++
++assertEqual(decodeTabFlags(""), {}, "an empty key decodes to no flags");
++assertEqual(decodeTabFlags(encodeTabFlags([], {})), {}, "no tabs round-trips to no flags");
++
++assertEqual(
++  encodeTabFlags(["a"], { a: { dirty: true } }) === encodeTabFlags(["a"], { a: { dirty: true, edited: "more" } }),
++  true,
++  "the key doesn't change when only the text changes — so memoized panes skip per-keystroke renders"
++);
++
++const oddPath = "app/[id]/(group)/my file.tsx";
++assertEqual(
++  decodeTabFlags(encodeTabFlags([oddPath], { [oddPath]: { dirty: true } })),
++  { [oddPath]: { dirty: true, stale: false, loading: false } },
++  "paths with brackets, parens and spaces survive the round trip"
++);
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+index 13b7dea..ebc87d0 100644
+--- a/frontend/app/lib/workbench/editorStore.js
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -9,10 +9,10 @@
+ // live").
+ //
+ // State shape (exactly the plan's own): `{tabs, activePath, buffers,
+-// layout, proposals}`. W2.2 only populates `tabs`/`activePath`/
+-// `buffers` — CodeView has no tab strip and nothing to propose yet, so
+-// `layout`/`proposals` stay as empty placeholders a future step fills
+-// in without another shape change.
++// layout, proposals}`. Only `tabs`/`activePath`/`buffers` are populated
++// so far (W2.3a's tab strip is what reads `tabs`); nothing lays out or
++// proposes anything yet, so `layout`/`proposals` stay as empty
++// placeholders a future step fills in without another shape change.
+ //
+ // `buffers[path]` = `{saved, edited, version, dirty, stale, language,
+ // updatedAt}` — `saved` is the last content the server confirmed
+@@ -22,6 +22,12 @@
+ // edits" flag, now per-buffer instead of the single component-wide
+ // staleBanner it used to be.
+ //
++// W2.3a additions (the tab strip needs them): ACTIVATE_TAB (switch to an
++// already-open tab WITHOUT touching its stale flag), CLOSE_TABS (drop
++// several tabs at once, "Close others"/"Close all"), CLOSE_TAB/CLOSE_TABS
++// picking the next active tab via tabUtils.nextActiveAfterClose(), and
++// SAVE_SUCCESS's `keepEdited` option (see that case).
++//
+ // No JSX here on purpose — every other file directly under `lib/`
+ // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
+ // so the provider component below is written with `createElement`
+@@ -29,6 +35,7 @@
+ // wrapper.
+ "use client";
+ import { createContext, createElement, useContext, useMemo, useReducer } from "react";
++import { nextActiveAfterClose } from "./tabUtils";
+ 
+ const EditorStoreContext = createContext(null);
+ 
+@@ -50,14 +57,14 @@ const initialState = {
+  */
+ export function editorReducer(state, action) {
+   switch (action.type) {
+-    // Opening (or re-clicking) a file. Adds it to `tabs` the first time
+-    // (harmless today — CodeView doesn't render a tab strip — but
+-    // W2.3's explorer/tabs read the exact same store, so this already
+-    // does the right thing for them). Re-selecting a file that has a
++    // Opening a file. Adds it to `tabs` the first time (the W2.3a tab
++    // strip renders `tabs` as-is). Re-selecting a file that has a
+     // buffer clears any pending `stale` flag on it — the previous
+     // component-wide staleBanner was dismissed by clicking the file
+     // again too (openFile() used to call setStaleBanner(null) up
+-    // front), so this preserves that timing per-buffer.
++    // front), so this preserves that timing per-buffer. Switching to
++    // an ALREADY-open tab goes through ACTIVATE_TAB instead, which
++    // leaves the flag alone.
+     case "SET_ACTIVE_PATH": {
+       const { path } = action;
+       if (path == null) {
+@@ -71,6 +78,18 @@ export function editorReducer(state, action) {
+       return { ...state, activePath: path, tabs, buffers };
+     }
+ 
++    // Switching to a tab that's already open (a click on the strip, or
++    // on an explorer row whose file is already open). Unlike
++    // SET_ACTIVE_PATH this never adds a tab and never clears `stale`:
++    // glancing at another tab and back must not silently dismiss a
++    // "Changed on server" warning the person hasn't answered. A path
++    // that isn't in `tabs` is ignored rather than invented.
++    case "ACTIVATE_TAB": {
++      const { path } = action;
++      if (!state.tabs.includes(path) || state.activePath === path) return state;
++      return { ...state, activePath: path };
++    }
++
+     // A provider.read(path) resolved. `file` is the FileProvider's
+     // file shape (content/language/version/updated_at). `saved` and
+     // `edited` start equal — nothing to save until the user types.
+@@ -94,8 +113,8 @@ export function editorReducer(state, action) {
+     }
+ 
+     // Every keystroke in the editor. No-ops on a path with no buffer
+-    // yet (can't happen from CodeView's own UI — the textarea only
+-    // exists once a file is loaded — but a reducer should never throw
++    // yet (can't happen from the workbench's own UI — an editor only
++    // mounts once its file is loaded — but a reducer should never throw
+     // on an ordering it doesn't expect).
+     case "EDIT_BUFFER": {
+       const { path, content } = action;
+@@ -111,23 +130,34 @@ export function editorReducer(state, action) {
+     }
+ 
+     // A provider.write(path, ...) resolved. `file` is the server's
+-    // confirmed shape post-save — swapped in as BOTH `saved` and
+-    // `edited` (matching the pre-W2.2 `setFileContent(saved);
+-    // setEditedContent(saved.content || "")` pair), so a save also
++    // confirmed shape post-save — swapped in as `saved`, and (matching
++    // the pre-W2.2 `setFileContent(saved); setEditedContent(
++    // saved.content || "")` pair) as `edited` too, so a save also
+     // clears `dirty`/`stale`.
++    //
++    // `keepEdited` (W2.3a): the person kept typing while the request
++    // was in flight, so `edited` is already ahead of what was sent.
++    // Swapping the server's copy in over it would delete those
++    // keystrokes — with a manual Save it's a rare nibble, with W2.5's
++    // autosave it would be constant. With `keepEdited` the save is
++    // recorded (`saved`, `version`) but `edited` stays, and `dirty` is
++    // recomputed against the new `saved`, so the tab correctly still
++    // shows unsaved changes.
+     case "SAVE_SUCCESS": {
+-      const { path, file } = action;
++      const { path, file, keepEdited = false } = action;
+       const buffer = state.buffers[path];
++      const saved = file.content || "";
++      const edited = keepEdited && buffer ? buffer.edited : saved;
+       return {
+         ...state,
+         buffers: {
+           ...state.buffers,
+           [path]: {
+             ...(buffer || {}),
+-            saved: file.content || "",
+-            edited: file.content || "",
++            saved,
++            edited,
+             version: file.version ?? buffer?.version ?? 0,
+-            dirty: false,
++            dirty: edited !== saved,
+             stale: false,
+             language: file.language ?? buffer?.language ?? null,
+             updatedAt: file.updated_at || null,
+@@ -156,18 +186,36 @@ export function editorReducer(state, action) {
+       return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: false } } };
+     }
+ 
+-    // The file list refreshed and this path is no longer in it (deleted
+-    // or renamed elsewhere) — drop its tab and buffer, and clear
+-    // activePath if it was the one showing.
+-    case "CLOSE_TAB": {
+-      const { path } = action;
+-      if (!(path in state.buffers) && !state.tabs.includes(path) && state.activePath !== path) {
+-        return state;
++    // Close one tab. Kept as its own action (the earlier stores and
++    // callers use it, and "the file list refreshed and this path is no
++    // longer in it" is one of them) but it's just CLOSE_TABS of one, so
++    // the next-active-tab rule lives in one place.
++    case "CLOSE_TAB":
++      return editorReducer(state, { type: "CLOSE_TABS", paths: [action.path] });
++
++    // Close several tabs at once ("Close others", "Close all", a
++    // refresh that finds several files gone). Their buffers go with
++    // them. If the active tab is among them, the new active tab is
++    // whichever survivor is nearest in the strip — right neighbour
++    // first, then left, else none (tabUtils.nextActiveAfterClose).
++    // Closing tabs that aren't open is a no-op, not an error.
++    case "CLOSE_TABS": {
++      const closing = new Set(action.paths || []);
++      const touches =
++        state.tabs.some((p) => closing.has(p)) ||
++        Object.keys(state.buffers).some((p) => closing.has(p)) ||
++        (state.activePath != null && closing.has(state.activePath));
++      if (!touches) return state;
++      const buffers = {};
++      for (const [p, b] of Object.entries(state.buffers)) {
++        if (!closing.has(p)) buffers[p] = b;
+       }
+-      const { [path]: _removed, ...buffers } = state.buffers;
+-      const tabs = state.tabs.filter((p) => p !== path);
+-      const activePath = state.activePath === path ? null : state.activePath;
+-      return { ...state, tabs, buffers, activePath };
++      return {
++        ...state,
++        tabs: state.tabs.filter((p) => !closing.has(p)),
++        buffers,
++        activePath: nextActiveAfterClose(state.tabs, state.activePath, closing),
++      };
+     }
+ 
+     default:
+@@ -181,18 +229,21 @@ export function EditorStoreProvider({ children }) {
+   // Action creators are memoized on `dispatch` alone — React guarantees
+   // `dispatch`'s identity never changes across a component's lifetime,
+   // so this object (and therefore every action function on it) is
+-  // stable across re-renders too. That's what lets CodeViewBody's own
+-  // Pusher-handler effect below list `markStale` in a dependency array
++  // stable across re-renders too. That's what lets the workbench's own
++  // Pusher-handler effect list `markStale` in a dependency array
+   // without re-subscribing on every keystroke.
+   const actions = useMemo(
+     () => ({
+       setActivePath: (path) => dispatch({ type: "SET_ACTIVE_PATH", path }),
++      activateTab: (path) => dispatch({ type: "ACTIVATE_TAB", path }),
+       fileLoaded: (path, file) => dispatch({ type: "FILE_LOADED", path, file }),
+       editBuffer: (path, content) => dispatch({ type: "EDIT_BUFFER", path, content }),
+-      saveSuccess: (path, file) => dispatch({ type: "SAVE_SUCCESS", path, file }),
++      saveSuccess: (path, file, opts) =>
++        dispatch({ type: "SAVE_SUCCESS", path, file, keepEdited: !!opts?.keepEdited }),
+       markStale: (path) => dispatch({ type: "MARK_STALE", path }),
+       clearStale: (path) => dispatch({ type: "CLEAR_STALE", path }),
+       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
++      closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
+     }),
+     [dispatch]
+   );
+diff --git a/frontend/app/lib/workbench/fileTree.js b/frontend/app/lib/workbench/fileTree.js
+new file mode 100644
+index 0000000..ad63a1a
+--- /dev/null
++++ b/frontend/app/lib/workbench/fileTree.js
+@@ -0,0 +1,110 @@
++// frontend/app/lib/workbench/fileTree.js — W2.3a (Build Workbench plan).
++// Pure functions behind Explorer.jsx's tree. `buildFileTree()` used to
++// live inline in BuildTab.jsx next to the old CodeView (patch 10, step
++// 16); the plan's own W2.3 line ("Explorer keeps `buildFileTree()`")
++// moves it here unchanged in behavior, alongside the few small helpers
++// the Explorer needs on top of it.
++//
++// No imports on purpose — same reasoning as editorUtils.js: everything
++// here is plain data in / plain data out, which is what lets
++// __tests__/fileTree.test.mjs load THIS file's real source and run it
++// with plain `node` (no browser, no bundler, no JS test runner — the
++// repo has none, see editorStore.test.mjs's own header). Adding an
++// `import` here would break that test's loader on purpose: it refuses
++// to run a file that has one.
++//
++// Data shape: workspace_code_files.list_files() returns a flat
++// `{file_path: meta}` map with no separate directory rows (that
++// module's own docstring calls this out and says the tree is built
++// client-side), so folders only exist implicitly, as prefixes of file
++// paths.
++
++/**
++ * @param {{[path: string]: object}} filesMeta - FileProvider.list()'s result
++ * @returns {{type: "dir", name: string, path: string, children: object}}
++ *   a root dir node. `children` is keyed by `"d:<name>"` / `"f:<name>"`
++ *   rather than the bare name: workspace paths are just strings, so
++ *   nothing stops a file `a` and a folder `a/` (from `a/b.js`) from
++ *   coexisting, and with bare-name keys the second one written would
++ *   either overwrite the first or — as the pre-W2.3a version did —
++ *   try to descend into a file node and throw, white-screening the
++ *   whole Build tab. Callers should iterate via sortedChildren(),
++ *   never index `children` directly.
++ */
++export function buildFileTree(filesMeta) {
++  const root = { type: "dir", name: "", path: "", children: {} };
++  for (const path of Object.keys(filesMeta || {}).sort()) {
++    const parts = path.split("/");
++    let node = root;
++    let acc = "";
++    parts.forEach((part, i) => {
++      acc = acc ? `${acc}/${part}` : part;
++      if (i === parts.length - 1) {
++        node.children[`f:${part}`] = { type: "file", name: part, path: acc, meta: filesMeta[path] };
++      } else {
++        const key = `d:${part}`;
++        if (!node.children[key]) {
++          node.children[key] = { type: "dir", name: part, path: acc, children: {} };
++        }
++        node = node.children[key];
++      }
++    });
++  }
++  return root;
++}
++
++/**
++ * A dir node's children in display order: directories first
++ * (alphabetical), then files (alphabetical) — the same convention as
++ * most file-tree UIs, so generated folders like `src/` / `tests/`
++ * don't get interleaved with loose root files. (This is the ordering
++ * the old inline TreeNode applied on every render.)
++ */
++export function sortedChildren(dirNode) {
++  return Object.values(dirNode.children).sort((a, b) => {
++    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
++    return a.name.localeCompare(b.name);
++  });
++}
++
++/** Last path segment: "src/App.jsx" -> "App.jsx". */
++export function basename(path) {
++  const i = path.lastIndexOf("/");
++  return i === -1 ? path : path.slice(i + 1);
++}
++
++/** Everything before the last "/": "src/a/App.jsx" -> "src/a"; "" for a root file. */
++export function dirname(path) {
++  const i = path.lastIndexOf("/");
++  return i === -1 ? "" : path.slice(0, i);
++}
++
++/**
++ * Every folder that contains `path`, outermost first:
++ * "src/a/App.jsx" -> ["src", "src/a"]. Used to expand the tree down to
++ * the active file.
++ */
++export function ancestorDirs(path) {
++  const parts = path.split("/");
++  const dirs = [];
++  let acc = "";
++  for (let i = 0; i < parts.length - 1; i += 1) {
++    acc = acc ? `${acc}/${parts[i]}` : parts[i];
++    dirs.push(acc);
++  }
++  return dirs;
++}
++
++/**
++ * The set of first-level folders across `paths` — what the tree
++ * auto-expands the first time files show up, so it isn't a single
++ * collapsed root on first load (the old loadFileList() did this
++ * inline).
++ */
++export function topLevelDirs(paths) {
++  const dirs = new Set();
++  for (const path of paths) {
++    if (path.includes("/")) dirs.add(path.split("/")[0]);
++  }
++  return dirs;
++}
+diff --git a/frontend/app/lib/workbench/tabUtils.js b/frontend/app/lib/workbench/tabUtils.js
+new file mode 100644
+index 0000000..5b15da8
+--- /dev/null
++++ b/frontend/app/lib/workbench/tabUtils.js
+@@ -0,0 +1,168 @@
++// frontend/app/lib/workbench/tabUtils.js — W2.3a (Build Workbench plan).
++// Pure decision logic for the workbench's tab strip and for keeping
++// open buffers in step with the server. Split out of the components
++// for the same reason editorUtils.js and fileTree.js are: the
++// interesting part of each of these is a "given this state, what
++// should happen" rule, and a rule is far easier to get right (and to
++// keep right) when it's a function with a test than when it's tangled
++// into an effect. No imports — see fileTree.js's header; the test
++// loader in __tests__/tabUtils.test.mjs enforces it.
++
++/**
++ * Display labels for a tab strip. Normally just the file name; when
++ * two open tabs share one (`src/index.js` and `public/index.js`), each
++ * of those also gets a `hint` — its folder — so they can be told
++ * apart. The hint for a root-level file is "root".
++ *
++ * @param {string[]} paths - open tabs, in strip order
++ * @returns {{path: string, name: string, hint: string|null}[]}
++ */
++export function tabLabels(paths) {
++  const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1);
++  const counts = new Map();
++  for (const p of paths) counts.set(nameOf(p), (counts.get(nameOf(p)) || 0) + 1);
++  return paths.map((path) => {
++    const name = nameOf(path);
++    if (counts.get(name) === 1) return { path, name, hint: null };
++    const i = path.lastIndexOf("/");
++    return { path, name, hint: i === -1 ? "root" : path.slice(0, i) };
++  });
++}
++
++/**
++ * Which tab should be active after `closing` (an iterable of paths) is
++ * removed from `tabs`. Anything other than the active tab being closed
++ * leaves the active tab alone. When it IS being closed: the nearest
++ * survivor to its right, else the nearest to its left, else null —
++ * "stay where you were in the strip", which is what people expect from
++ * every tabbed editor. (Most-recently-used ordering is the other
++ * common choice; it needs a history the store doesn't keep, and
++ * neighbour-picking is predictable enough.)
++ *
++ * @param {string[]} tabs - strip order, BEFORE the close
++ * @param {string|null} activePath
++ * @param {Iterable<string>} closing
++ * @returns {string|null}
++ */
++export function nextActiveAfterClose(tabs, activePath, closing) {
++  const closingSet = new Set(closing);
++  if (activePath == null || !closingSet.has(activePath)) return activePath;
++
++  const idx = tabs.indexOf(activePath);
++  if (idx === -1) {
++    // The active path isn't in the strip. Not a state the workbench
++    // produces (SET_ACTIVE_PATH always adds the tab), so this is a
++    // defensive branch: fall back to the last survivor rather than
++    // throwing on a state we didn't expect.
++    const survivors = tabs.filter((p) => !closingSet.has(p));
++    return survivors.length ? survivors[survivors.length - 1] : null;
++  }
++  for (let i = idx + 1; i < tabs.length; i += 1) {
++    if (!closingSet.has(tabs[i])) return tabs[i];
++  }
++  for (let i = idx - 1; i >= 0; i -= 1) {
++    if (!closingSet.has(tabs[i])) return tabs[i];
++  }
++  return null;
++}
++
++/**
++ * Compares every open buffer against the server's file list (each
++ * entry carries a monotonically increasing `version`, W1.1) and says
++ * what to do about the ones that fell behind. This replaces W0.1/W2.2's
++ * "the Pusher event named my ONE open file" check: with several tabs
++ * open, a refresh has to look at all of them, and comparing versions
++ * (instead of trusting an event payload) also covers a dropped Pusher
++ * connection or a backgrounded tab with the same code path — one list
++ * fetch, then only the files that actually changed get re-read.
++ *
++ * Rules, per open tab that has a loaded buffer:
++ *  - server no longer has the file -> `drop` the tab, unless it has
++ *    unsaved edits (then it stays; Save re-creates the file, and
++ *    silently throwing the edits away is the one thing this must not do);
++ *  - server version is ahead of the buffer's:
++ *      not dirty -> `reload` (nothing to lose);
++ *      dirty     -> `stale` (show the "Changed on server" banner) —
++ *                   but not if it's already stale, or if the person
++ *                   already chose "Keep mine" for this server version
++ *                   (`dismissed[path]`), which would otherwise nag
++ *                   again on every refresh until they save;
++ *  - a path in `busy` (a save is in flight) is skipped: its own write
++ *    is what put the server ahead, and saveSuccess reconciles it.
++ *
++ * @param {object} args
++ * @param {string[]} args.tabs
++ * @param {{[path: string]: {version?: number, dirty?: boolean, stale?: boolean}}} args.buffers
++ * @param {{[path: string]: {version?: number}}} args.meta - FileProvider.list()'s result
++ * @param {{[path: string]: number}} [args.dismissed] - server version the person waved off, per path
++ * @param {Iterable<string>} [args.busy]
++ * @returns {{reload: string[], stale: string[], drop: string[]}}
++ */
++export function planBufferSync({ tabs, buffers, meta, dismissed = {}, busy = [] }) {
++  const busySet = new Set(busy);
++  const plan = { reload: [], stale: [], drop: [] };
++
++  for (const path of tabs) {
++    const buffer = buffers[path];
++    if (!buffer || busySet.has(path)) continue;
++
++    const entry = meta[path];
++    if (!entry) {
++      if (!buffer.dirty) plan.drop.push(path);
++      continue;
++    }
++
++    const serverVersion = entry.version ?? 0;
++    if (serverVersion <= (buffer.version ?? 0)) continue;
++
++    if (!buffer.dirty) {
++      plan.reload.push(path);
++    } else if (!buffer.stale && serverVersion > (dismissed[path] ?? 0)) {
++      plan.stale.push(path);
++    }
++  }
++  return plan;
++}
++
++/**
++ * Collapses the per-tab flags the strip and explorer care about —
++ * dirty (unsaved edits), stale (changed on the server underneath
++ * them), loading (a tab whose file hasn't arrived yet) — into ONE
++ * string. Why a string: every keystroke replaces the whole `buffers`
++ * object in the editor store, so anything derived from it as an object
++ * or Set is a fresh identity every keystroke and would re-render
++ * memoized children (the explorer, the tab strip) on each one. A
++ * string compares by value, so those children only re-render when a
++ * flag actually flips (the dot appearing on the first keystroke, not
++ * on all the rest).
++ *
++ * Format: one `path\tflags` line per tab, `flags` being any of `d` `s`
++ * `l`. Workspace paths can't contain a tab or a newline (both fail
++ * workspace_code_files._validate_file_path), so this is unambiguous.
++ *
++ * @param {string[]} tabs
++ * @param {{[path: string]: {dirty?: boolean, stale?: boolean}}} buffers
++ * @returns {string}
++ */
++export function encodeTabFlags(tabs, buffers) {
++  return tabs
++    .map((path) => {
++      const b = buffers[path];
++      const flags = !b ? "l" : `${b.dirty ? "d" : ""}${b.stale ? "s" : ""}`;
++      return `${path}\t${flags}`;
++    })
++    .join("\n");
++}
++
++/** Inverse of encodeTabFlags(): `{[path]: {dirty, stale, loading}}`. */
++export function decodeTabFlags(key) {
++  const out = {};
++  if (!key) return out;
++  for (const line of key.split("\n")) {
++    const i = line.indexOf("\t");
++    const path = line.slice(0, i);
++    const flags = line.slice(i + 1);
++    out[path] = { dirty: flags.includes("d"), stale: flags.includes("s"), loading: flags.includes("l") };
++  }
++  return out;
++}

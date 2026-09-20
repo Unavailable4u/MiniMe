@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useState, useRef, useMemo, memo } from "react"; // CHANGED — W2.2: added useMemo, for memoizing CodeView's CloudFileProvider instance
+import { useEffect, useState, useRef, memo } from "react";
+import dynamic from "next/dynamic"; // NEW — W2.3a: EditorWorkbench measures real DOM nodes (CodeMirror), so it has to load client-only, see the EditorWorkbench declaration below
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
 import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
@@ -10,12 +11,10 @@ import ConfirmDialog from "../ConfirmDialog"; // NEW — issue #3: same delete-c
 import ManageWorkspaceModal from "../ManageWorkspaceModal"; // NEW — project management (rename/delete/members/export), parity with Notebooks/Plan — was already built, just never wired into this tab
 import { ChatRowMenu } from "../RowMenu"; // NEW — shared per-chat "⋮" menu (Rename/Delete), same one Chat sidebar + every other stage tab uses
 import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "../../context/WorkspaceDockContext"; // NEW — item #11 / C2: nested chat list, same as ResearchTab/PlanTab's C1. CHANGED — patch 12: useWorkspaceDock added, same hook PlanTab.jsx used to source WireframesPanel's sessionId/sendTask -- Build now owns that wiring instead.
-import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, MoreVertical, Check, X, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
+import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, MessageSquare, Plus, MoreVertical, Check, X } from "lucide-react"; // CHANGED — W2.3a: the file-tree/editor/ZIP icons (ChevronDown, RefreshCw, Save, Folder, FolderOpen, FileCode, Download) moved out with the old CodeView, into components/workbench/
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
 import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggable chat-dock width, replacing the old fixed width: 560
-import { createCloudFileProvider } from "../../lib/workbench/fileProviders"; // NEW — W2.2: CodeView's file fetch/save/list calls now go through this provider instead of calling fetch() directly (plan D6 — "FileProvider interface with two implementations (Cloud, Local)"); also owns the workspace-${id} Pusher subscription that used to live inline here as W0.1's own effect (see getPusherClient's old import, removed).
-import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore"; // NEW — W2.2: single source of truth for open-file buffers (saved/edited/version/dirty/stale) — same store Explorer/preview/chat chips will read once they exist (W2.3+), replacing CodeView's own fileContent/editedContent/staleBanner useState trio for that slice.
 // Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -65,6 +64,8 @@ const COLUMNS = [
 // nested-tab-bar pattern PlanTab.jsx's own BLUEPRINT_VIEWS uses.
 // UPDATED — patch 10: third sub-view, Code, added alongside Tasks/
 // Instructions. Same nav bar, no new pattern.
+// UPDATED — W2.3a: the Code sub-view is now the Editor workbench
+// (explorer + tabs + CodeMirror, components/workbench/EditorWorkbench.jsx).
 // UPDATED — patch 12 (Plan/Build wireframes split): fourth sub-view,
 // Wireframes, relocated here from PlanTab.jsx's SUB_TABS — decided this
 // pass that wireframing is build-time UI work, not a plan-time spec
@@ -72,9 +73,23 @@ const COLUMNS = [
 const BUILD_VIEWS = [
   { id: "tasks", label: "Tasks" },
   { id: "instructions", label: "Instructions" },
-  { id: "code", label: "Code" },
+  { id: "code", label: "Editor" }, // CHANGED — W2.3a: id stays "code" (the buildView checks below key off it); only the label changes to match what it now opens
   { id: "wireframes", label: "Wireframes" },
 ];
+
+// NEW — W2.3a: replaces the old inline CodeView (file tree + <textarea>).
+// `ssr: false` because CodeMirror measures real DOM nodes and has no
+// server-rendering story (see CodeEditor.jsx's header); it also keeps
+// the CodeMirror + language-data bundle out of this tab's own chunk
+// until someone actually opens the Editor sub-tab.
+const EditorWorkbench = dynamic(() => import("../workbench/EditorWorkbench"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex-1 min-h-0 flex items-center justify-center text-xs text-[var(--neutral-500)]">
+      Loading editor…
+    </div>
+  ),
+});
 
 function statusFor(featureStatus, featureName) {
   return featureStatus[featureName] || "missing";
@@ -331,495 +346,6 @@ function InstructionsView({ workspaceId, fetchDeviceSpec, toggleInstructionStep 
   }
 
   return <InstructionChecklist phases={spec.instructions.phases} onToggleStep={handleToggleStep} />;
-}
-
-// NEW — patch 10 (T3, step 16): Code sub-tab frontend. File-tree view +
-// click-to-open + inline edit, wired to patch 8's GET/PUT
-// .../code/files endpoints (api/routes/code.py). list_files() returns
-// metadata only, keyed by flat file_path -- workspace_code_files.py's
-// own docstring calls this the "flat map of paths, no separate
-// directory rows" shape and says patch 10 should build its tree
-// client-side from it, so that's what buildFileTree() does below.
-// get_file() is only called on click-to-open, per that module's
-// size/many-files reasoning for keeping list_files() content-free.
-function buildFileTree(filesMeta) {
-  const root = { type: "dir", name: "", path: "", children: {} };
-  for (const path of Object.keys(filesMeta).sort()) {
-    const parts = path.split("/");
-    let node = root;
-    let acc = "";
-    parts.forEach((part, i) => {
-      acc = acc ? `${acc}/${part}` : part;
-      if (i === parts.length - 1) {
-        node.children[part] = { type: "file", name: part, path: acc, meta: filesMeta[path] };
-      } else {
-        if (!node.children[part]) {
-          node.children[part] = { type: "dir", name: part, path: acc, children: {} };
-        }
-        node = node.children[part];
-      }
-    });
-  }
-  return root;
-}
-
-// Directories first (alphabetical), then files (alphabetical) -- same
-// ordering convention as most file-tree UIs, so generated folders like
-// `src/`/`tests/` don't get interleaved with loose root files.
-function TreeNode({ node, depth, expandedDirs, onToggleDir, selectedPath, onSelectFile }) {
-  const entries = Object.values(node.children).sort((a, b) => {
-    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  return (
-    <>
-      {entries.map((entry) => {
-        if (entry.type === "dir") {
-          const isOpen = expandedDirs.has(entry.path);
-          return (
-            <div key={entry.path}>
-              <button
-                type="button"
-                onClick={() => onToggleDir(entry.path)}
-                className="w-full flex items-center gap-1 text-xs text-[var(--neutral-300)] hover:text-[var(--neutral-100)] py-0.5 rounded"
-                style={{ paddingLeft: `${depth * 14}px` }}
-              >
-                {isOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
-                {isOpen ? <FolderOpen size={12} className="shrink-0" /> : <Folder size={12} className="shrink-0" />}
-                <span className="truncate">{entry.name}</span>
-              </button>
-              {isOpen && (
-                <TreeNode
-                  node={entry}
-                  depth={depth + 1}
-                  expandedDirs={expandedDirs}
-                  onToggleDir={onToggleDir}
-                  selectedPath={selectedPath}
-                  onSelectFile={onSelectFile}
-                />
-              )}
-            </div>
-          );
-        }
-        const isSelected = entry.path === selectedPath;
-        return (
-          <button
-            key={entry.path}
-            type="button"
-            onClick={() => onSelectFile(entry.path)}
-            title={entry.path}
-            className={`w-full flex items-center gap-1 text-xs py-0.5 rounded ${
-              isSelected
-                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
-                : "text-[var(--neutral-400)] hover:text-[var(--neutral-100)]"
-            }`}
-            style={{ paddingLeft: `${depth * 14 + 16}px` }}
-          >
-            <FileCode size={12} className="shrink-0" />
-            <span className="truncate">{entry.name}</span>
-          </button>
-        );
-      })}
-    </>
-  );
-}
-
-// NEW — W2.2: CodeView is now just a thin mount point for the workbench
-// store (plan §5, W2.2's own "Touches" line — "CodeView refactored to
-// use them"). Everything that used to live directly in CodeView's own
-// state/effects moved into CodeViewBody below, which reads/writes
-// through useEditorStore() instead. Split into two components (rather
-// than calling useEditorStore() from a component that ALSO renders
-// <EditorStoreProvider>) because a context provider's own value isn't
-// visible to hooks called in the same component that mounts it — same
-// reason every provider/consumer pair in this codebase is already two
-// components (see WorkspaceDockContext.jsx's own Provider + the hooks
-// that read it).
-function CodeView({ workspaceId, apiUrl }) {
-  return (
-    <EditorStoreProvider>
-      <CodeViewBody workspaceId={workspaceId} apiUrl={apiUrl} />
-    </EditorStoreProvider>
-  );
-}
-
-function CodeViewBody({ workspaceId, apiUrl }) {
-  // One provider instance per (workspaceId, apiUrl) pair -- memoized so
-  // switching projects gets a fresh provider (and, via the effect below,
-  // a fresh Pusher subscription) without recreating one on every
-  // unrelated re-render.
-  const provider = useMemo(
-    () => createCloudFileProvider({ workspaceId, apiUrl }),
-    [workspaceId, apiUrl]
-  );
-  const { state: editorState, fileLoaded, editBuffer, saveSuccess, markStale, clearStale, setActivePath, closeTab } =
-    useEditorStore();
-
-  const [filesMeta, setFilesMeta] = useState(null); // {file_path: meta}, from provider.list()
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [expandedDirs, setExpandedDirs] = useState(() => new Set());
-  const [fileLoading, setFileLoading] = useState(false);
-  const [fileError, setFileError] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState(null);
-  const [downloading, setDownloading] = useState(false); // NEW — patch 11
-  const [downloadError, setDownloadError] = useState(null); // NEW — patch 11
-
-  // CHANGED — W2.2: selectedPath/fileContent/editedContent/staleBanner
-  // used to be their own useState calls; the open file's buffer now
-  // lives in editorStore, keyed by path, so the editor/preview/chat
-  // chips (once those exist) all read the exact same copy instead of
-  // each having their own. `buffer` is undefined until FILE_LOADED
-  // fires for this path (see openFile below) — briefly true right after
-  // clicking a file that's never been opened this session, same window
-  // `fileLoading` already covers in the render below.
-  const selectedPath = editorState.activePath;
-  const buffer = selectedPath ? editorState.buffers[selectedPath] : null;
-  const editedContent = buffer?.edited ?? "";
-  const isDirty = !!buffer?.dirty;
-  const isStale = !!buffer?.stale;
-
-  async function loadFileList({ preserveSelection = true } = {}) {
-    setLoading(true);
-    setError(null);
-    try {
-      const meta = await provider.list();
-      setFilesMeta(meta);
-      // Auto-expand top-level directories the first time files show up,
-      // so the tree isn't a single collapsed root on first load.
-      setExpandedDirs((prev) => {
-        if (prev.size > 0) return prev;
-        const next = new Set();
-        for (const path of Object.keys(meta)) {
-          if (path.includes("/")) next.add(path.split("/")[0]);
-        }
-        return next;
-      });
-      if (!preserveSelection || (selectedPath && !(selectedPath in meta))) {
-        if (selectedPath) closeTab(selectedPath);
-        else setActivePath(null);
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (workspaceId) loadFileList({ preserveSelection: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
-
-  async function openFile(path) {
-    setActivePath(path); // highlights the tree row immediately + clears any pending stale flag for it, same timing setSelectedPath(path)+setStaleBanner(null) had
-    setFileLoading(true);
-    setFileError(null);
-    setSaveError(null);
-    try {
-      const file = await provider.read(path);
-      fileLoaded(path, file);
-    } catch (err) {
-      setFileError(err.message);
-    } finally {
-      setFileLoading(false);
-    }
-  }
-
-  function toggleDir(path) {
-    setExpandedDirs((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }
-
-  // NEW — W2.2: "latest" refs so the provider's Pusher handler below
-  // (subscribed once per provider instance, not re-bound on every
-  // keystroke) always sees the current selection/dirty state and the
-  // current loadFileList/openFile closures, instead of the stale ones
-  // captured when the effect first ran. Same pattern W0.1 introduced
-  // for this exact reason, unchanged by moving the subscription itself
-  // into the provider — `markStale`/`clearStale`/`setActivePath` don't
-  // need refs since useEditorStore()'s action functions are stable
-  // across re-renders (memoized on `dispatch`, which React itself never
-  // changes the identity of).
-  const selectedPathRef = useRef(selectedPath);
-  selectedPathRef.current = selectedPath;
-  const isDirtyRef = useRef(isDirty);
-  isDirtyRef.current = isDirty;
-  const loadFileListRef = useRef(loadFileList);
-  loadFileListRef.current = loadFileList;
-  const openFileRef = useRef(openFile);
-  openFileRef.current = openFile;
-
-  // CHANGED — W2.2: was W0.1's own Pusher subscribe/bind_global effect,
-  // inlined directly in this component. That transport-level plumbing
-  // now lives in CloudFileProvider.subscribe() (fileProviders.js) —
-  // this effect just supplies the "what do we do about it" policy,
-  // unchanged from W0.1: always refetch the tree, and for the currently
-  // open file, either silently refresh it (not dirty) or flag it stale
-  // instead of clobbering unsaved edits (dirty).
-  useEffect(() => {
-    const unsubscribe = provider.subscribe(({ filePaths }) => {
-      // Always refetch the tree/list -- this is what makes newly
-      // chat-generated files show up without a reload.
-      loadFileListRef.current();
-      const openPath = selectedPathRef.current;
-      if (!openPath || !filePaths.includes(openPath)) return;
-      if (isDirtyRef.current) {
-        // Don't clobber unsaved edits sitting in the textarea -- surface
-        // the choice instead. Real conflict resolution (base_version,
-        // 409, compare-diff) is W2.5; this is just "don't silently lose
-        // work" in the meantime.
-        markStale(openPath);
-      } else {
-        openFileRef.current(openPath);
-      }
-    });
-    return unsubscribe;
-  }, [provider, markStale]);
-
-  // NEW — W0.1: Pusher can drop a connection while a tab is backgrounded
-  // (mobile Safari in particular suspends websockets aggressively), so
-  // a regen that happened while this tab was hidden could otherwise
-  // never reach it. Cheap fallback: re-check on tab visibility regain.
-  useEffect(() => {
-    function handleVisibility() {
-      if (document.visibilityState !== "visible") return;
-      loadFileListRef.current();
-      const openPath = selectedPathRef.current;
-      if (openPath && !isDirtyRef.current) openFileRef.current(openPath);
-    }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, []);
-
-  // NEW — W0.1: "Reload" side of the stale-banner choice -- discards the
-  // local edit and re-fetches the server's current content. "Keep mine"
-  // is just dismissing the banner (handled inline where it's rendered);
-  // the edit already sitting in editedContent needs no code path of its
-  // own to "keep".
-  function reloadFromServer() {
-    if (selectedPath) openFile(selectedPath); // openFile's setActivePath() call clears the stale flag as a side effect
-  }
-
-  async function saveFile() {
-    if (!selectedPath || !isDirty) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      // No baseVersion sent yet -- same blind-overwrite Save flow this
-      // sub-tab always had (W2.5 is what starts sending one and
-      // handling the resulting 409/FileConflictError for real).
-      const saved = await provider.write(selectedPath, editedContent);
-      saveSuccess(selectedPath, saved);
-      // Swap just this file's tree metadata in-place rather than
-      // re-fetching the whole list — same "swap the piece that changed"
-      // approach InstructionsView takes with the toggle-step response.
-      setFilesMeta((prev) => (prev ? {
-        ...prev,
-        [selectedPath]: {
-          workspace_id: saved.workspace_id,
-          file_path: saved.file_path,
-          language: saved.language,
-          size: saved.content ? saved.content.length : 0,
-          updated_at: saved.updated_at,
-          updated_by: saved.updated_by,
-        },
-      } : prev));
-    } catch (err) {
-      setSaveError(err.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // NEW — patch 11: server-side ZIP of the current file set
-  // (GET .../code/zip). Not part of the FileProvider contract (it's a
-  // whole-workspace export, not a per-file op — see fileProviders.js's
-  // own header comment), so this still calls the route directly. Needs
-  // authHeaders() same as every other call here, so this can't be a
-  // plain <a href> — fetch as a blob and trigger the download via a
-  // throwaway object URL, same technique any auth-gated file download
-  // needs in the browser.
-  async function downloadZip() {
-    setDownloading(true);
-    setDownloadError(null);
-    try {
-      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/zip`, {
-        headers: await authHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${workspaceId}_code.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setDownloadError(err.message);
-    } finally {
-      setDownloading(false);
-    }
-  }
-
-  const tree = filesMeta ? buildFileTree(filesMeta) : null;
-  const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
-
-  return (
-    // CHANGED — W0.2: was `min-h-[360px]` (one of the four stacked limits
-    // on the editor's size, build plan §1.2). BuildTab's Editor-mode
-    // wrapper is now a flex column with real remaining height to give
-    // this, so this fills it instead of just guaranteeing a floor.
-    <div className="flex-1 min-h-0 grid grid-cols-[220px_1fr] gap-4">
-      {/* File tree */}
-      {/* CHANGED — W0.2: max-h-[560px] removed -- let it fill the grid
-          row's full (now flexible) height instead of capping at a fixed
-          pixel value; min-h-0 keeps overflow-y-auto able to actually
-          scroll instead of growing to fit all content. */}
-      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-2 overflow-y-auto">
-        <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b border-[var(--neutral-800)]">
-          <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
-            Files{fileCount ? ` (${fileCount})` : ""}
-          </span>
-          <div className="flex items-center gap-2">
-            {/* NEW — patch 11: server-side ZIP download button, disabled
-                until there's at least one saved file. */}
-            <button
-              type="button"
-              onClick={downloadZip}
-              disabled={downloading || fileCount === 0}
-              aria-label="Download all files as ZIP"
-              title="Download as ZIP"
-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
-            >
-              {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
-            </button>
-            <button
-              type="button"
-              onClick={() => loadFileList()}
-              disabled={loading}
-              aria-label="Refresh file list"
-              title="Refresh"
-              className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
-            >
-              <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
-            </button>
-          </div>
-        </div>
-        {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
-        {loading && !filesMeta ? (
-          <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
-            <Loader2 size={12} className="animate-spin" /> Loading…
-          </div>
-        ) : error ? (
-          <p className="text-xs text-red-400 px-1">{error}</p>
-        ) : fileCount === 0 ? (
-          <p className="text-xs text-[var(--neutral-600)] px-1">
-            No files yet — ask this project&apos;s chat to build something and generated files will show up here.
-          </p>
-        ) : (
-          <TreeNode
-            node={tree}
-            depth={0}
-            expandedDirs={expandedDirs}
-            onToggleDir={toggleDir}
-            selectedPath={selectedPath}
-            onSelectFile={openFile}
-          />
-        )}
-      </div>
-
-      {/* Editor */}
-      {/* CHANGED — W0.2: min-h-[360px] dropped in favor of min-h-0, same
-          reasoning as the file tree above -- this pane now fills the
-          grid row's real height rather than just guaranteeing a floor. */}
-      <div className="min-h-0 border border-[var(--neutral-800)] rounded-lg p-3 flex flex-col">
-        {!selectedPath ? (
-          <p className="text-xs text-[var(--neutral-600)] m-auto">Select a file to view or edit it.</p>
-        ) : (
-          <>
-            <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--neutral-800)]">
-              <div className="min-w-0">
-                <p className="text-xs text-[var(--neutral-200)] font-medium truncate">{selectedPath}</p>
-                {/* CHANGED — W2.2: reads the editorStore buffer instead of
-                    the old local `fileContent` state. `buffer` is briefly
-                    undefined the very first time a given path is opened
-                    (between setActivePath() and FILE_LOADED landing) --
-                    `fileLoading` below already covers that window with its
-                    own spinner, so this line just stays blank rather than
-                    showing the PREVIOUS file's language/timestamp during
-                    the gap the way the pre-store version incidentally did. */}
-                {buffer && (
-                  <p className="text-[10px] text-[var(--neutral-600)]">
-                    {buffer.language || "text"}
-                    {buffer.updatedAt
-                      ? ` · saved ${new Date(buffer.updatedAt).toLocaleString()}`
-                      : " · not saved yet"}
-                  </p>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={saveFile}
-                disabled={!isDirty || saving}
-                className="shrink-0 flex items-center gap-1.5 text-xs border border-[var(--neutral-700)] text-[var(--neutral-200)] rounded-lg px-2.5 py-1.5 font-medium disabled:opacity-50"
-              >
-                {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                {saving ? "Saving…" : isDirty ? "Save" : "Saved"}
-              </button>
-            </div>
-            {isStale && (
-              // NEW — W0.1: shown instead of silently refetching when the
-              // open file has unsaved edits and a code_file_updated event
-              // named it -- see the provider's subscribe() handler above.
-              // CHANGED — W2.2: reads editorStore's per-buffer `stale`
-              // flag instead of the old local `staleBanner` state.
-              <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 mb-2">
-                <span>Changed on server — this file was updated elsewhere while you had unsaved edits.</span>
-                <div className="flex items-center gap-3 shrink-0">
-                  <button type="button" onClick={reloadFromServer} className="underline hover:text-amber-200">
-                    Reload
-                  </button>
-                  <button type="button" onClick={() => clearStale(selectedPath)} className="underline hover:text-amber-200">
-                    Keep mine
-                  </button>
-                </div>
-              </div>
-            )}
-            {saveError && <p className="text-xs text-red-400 pb-2">{saveError}</p>}
-            {fileLoading ? (
-              <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 m-auto">
-                <Loader2 size={12} className="animate-spin" /> Loading…
-              </div>
-            ) : fileError ? (
-              <p className="text-xs text-red-400">{fileError}</p>
-            ) : (
-              // CHANGED — W0.2: min-h-[300px] removed -- flex-1 + the
-              // editor pane's own min-h-0 (above) now let this fill
-              // whatever height Editor mode's layout actually has.
-              <textarea
-                value={editedContent}
-                onChange={(e) => editBuffer(selectedPath, e.target.value)}
-                spellCheck={false}
-                aria-label={`Editing ${selectedPath}`}
-                className="flex-1 w-full min-h-0 bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
-              />
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
 }
 
 // Part 7 §7.6 -- deploy action button + status indicator, three separate
@@ -1707,10 +1233,9 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
       {/* Selected project's board */}
       {/* CHANGED — W0.2: Editor mode (buildView === "code") swaps this
           from a scrolling max-w-4xl column to a flex column filling the
-          available height, so CodeView's own panes can stretch instead
-          of being capped at max-h-[560px]/min-h-[300px] (both removed
-          from CodeView itself, below) -- see the buildView === "code"
-          branch in the ternary just below. */}
+          available height, so the workbench's own panes can stretch
+          instead of being capped at a fixed pixel height -- see the
+          buildView === "code" branch in the ternary just below. */}
       <div className={buildView === "code" ? "flex-1 min-h-0 flex flex-col" : "flex-1 min-h-0 overflow-y-auto"}>
         {!selected ? (
           <div className="h-full flex items-center justify-center text-sm text-[var(--neutral-600)]">
@@ -1731,7 +1256,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
         ) : buildView === "code" ? (
           // NEW — W0.2: Editor mode's own compact header -- title,
           // sub-nav and promote controls in one row, no max-w-4xl -- so
-          // CodeView below gets the rest of the available height instead
+          // EditorWorkbench below gets the rest of the available height instead
           // of sharing the board's tall title block. Same
           // renderPromoteControls() the board header below uses.
           <>
@@ -1758,11 +1283,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
             </div>
             {promoteError && <p className="text-xs text-red-400 px-4 pt-2">{promoteError}</p>}
             <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 pt-3">
-              {/* NEW — patch 10: Code sub-tab, file tree + inline editor,
-                  wired to patch 8's GET/PUT .../code/files endpoints.
-                  CHANGED — W0.2: now stretches to fill the flex column
-                  above instead of sitting inside the max-w-4xl board. */}
-              <CodeView workspaceId={selected.id} apiUrl={API_URL} />
+              {/* CHANGED — W2.3a: was patch 10's CodeView (file tree +
+                  <textarea>). The workbench owns its own tabs/buffers, so
+                  key={selected.id} remounts it per project -- otherwise
+                  one project's open tabs would carry into the next.
+                  (Until W2.5's unsaved-edits guard lands, switching
+                  projects discards unsaved edits.) */}
+              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} />
             </div>
           </>
         ) : (

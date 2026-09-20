@@ -1,18 +1,29 @@
-// W2.2 (Build Workbench plan) — reducer test for editorStore.js.
+// W2.2 (Build Workbench plan) — reducer test for editorStore.js;
+// extended in W2.3a for the tab-strip actions.
 //
-// No JS test runner (jest/vitest) exists in this repo yet (frontend/package.json
-// has zero test deps, no jest.config/vitest.config anywhere), and
-// editorStore.js's `EditorStoreProvider`/`useEditorStore` pull in
-// `react`, which a dependency-free `node` invocation can't resolve
-// without `node_modules` present — exactly the situation
-// components/__tests__/wiringGraph.linkFilter.test.mjs's own header
-// comment describes for the same reason (JSX there; a `react` import
-// here). Same fix: `editorReducer` is kept byte-for-byte in sync below
-// so this can run with plain `node` in CI with no install step. If a
-// real JS test runner is ever added, this should be ported to import
-// the actual reducer and this file deleted.
+// Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
+// copy of editorReducer() (editorStore.js pulls in `react`, which plain
+// `node` couldn't resolve without node_modules) and said the copy had to be
+// kept in sync by hand — which is how a test ends up green against code
+// that has moved on. loadSource.mjs now reads editorStore.js itself and
+// satisfies its two imports from the map below: a stub for `react` (only
+// its top-level createContext() call runs at load time; the provider and
+// hook aren't exercised here) and the real tabUtils.js.
 //
 // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+import { loadSource } from "./loadSource.mjs";
+
+const reactStub = {
+  createContext: () => ({}),
+  createElement: () => null,
+  useContext: () => null,
+  useMemo: (fn) => fn(),
+  useReducer: () => [],
+};
+const tabUtils = loadSource("../tabUtils.js");
+const { editorReducer } = loadSource("../editorStore.js", {
+  imports: { react: reactStub, "./tabUtils": tabUtils },
+});
 
 const initialState = {
   tabs: [],
@@ -21,105 +32,6 @@ const initialState = {
   layout: {},
   proposals: [],
 };
-
-// Kept byte-for-byte in sync with editorReducer() in ../editorStore.js.
-function editorReducer(state, action) {
-  switch (action.type) {
-    case "SET_ACTIVE_PATH": {
-      const { path } = action;
-      if (path == null) {
-        return { ...state, activePath: null };
-      }
-      const tabs = state.tabs.includes(path) ? state.tabs : [...state.tabs, path];
-      const existing = state.buffers[path];
-      const buffers = existing && existing.stale
-        ? { ...state.buffers, [path]: { ...existing, stale: false } }
-        : state.buffers;
-      return { ...state, activePath: path, tabs, buffers };
-    }
-
-    case "FILE_LOADED": {
-      const { path, file } = action;
-      return {
-        ...state,
-        buffers: {
-          ...state.buffers,
-          [path]: {
-            saved: file.content || "",
-            edited: file.content || "",
-            version: file.version ?? 0,
-            dirty: false,
-            stale: false,
-            language: file.language || null,
-            updatedAt: file.updated_at || null,
-          },
-        },
-      };
-    }
-
-    case "EDIT_BUFFER": {
-      const { path, content } = action;
-      const buffer = state.buffers[path];
-      if (!buffer) return state;
-      return {
-        ...state,
-        buffers: {
-          ...state.buffers,
-          [path]: { ...buffer, edited: content, dirty: content !== buffer.saved },
-        },
-      };
-    }
-
-    case "SAVE_SUCCESS": {
-      const { path, file } = action;
-      const buffer = state.buffers[path];
-      return {
-        ...state,
-        buffers: {
-          ...state.buffers,
-          [path]: {
-            ...(buffer || {}),
-            saved: file.content || "",
-            edited: file.content || "",
-            version: file.version ?? buffer?.version ?? 0,
-            dirty: false,
-            stale: false,
-            language: file.language ?? buffer?.language ?? null,
-            updatedAt: file.updated_at || null,
-          },
-        },
-      };
-    }
-
-    case "MARK_STALE": {
-      const { path } = action;
-      const buffer = state.buffers[path];
-      if (!buffer) return state;
-      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: true } } };
-    }
-
-    case "CLEAR_STALE": {
-      const { path } = action;
-      const buffer = state.buffers[path];
-      if (!buffer || !buffer.stale) return state;
-      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: false } } };
-    }
-
-    case "CLOSE_TAB": {
-      const { path } = action;
-      if (!(path in state.buffers) && !state.tabs.includes(path) && state.activePath !== path) {
-        return state;
-      }
-      const { [path]: _removed, ...buffers } = state.buffers;
-      const tabs = state.tabs.filter((p) => p !== path);
-      const activePath = state.activePath === path ? null : state.activePath;
-      return { ...state, tabs, buffers, activePath };
-    }
-
-    default:
-      return state;
-  }
-}
 
 let failures = 0;
 function assertEqual(actual, expected, msg) {
@@ -225,6 +137,127 @@ assertEqual(
   editorReducer(initialState, { type: "SOMETHING_UNKNOWN" }),
   initialState,
   "an unrecognized action type returns state unchanged"
+);
+
+// --- W2.3a: ACTIVATE_TAB -----------------------------------------------
+
+function openWith(paths, active = paths[paths.length - 1]) {
+  let st = initialState;
+  for (const path of paths) {
+    st = editorReducer(st, { type: "SET_ACTIVE_PATH", path });
+    st = editorReducer(st, {
+      type: "FILE_LOADED",
+      path,
+      file: { content: `// ${path}`, language: "javascript", version: 1, updated_at: null },
+    });
+  }
+  return editorReducer(st, { type: "ACTIVATE_TAB", path: active });
+}
+
+state = openWith(["a.js", "b.js", "c.js"], "a.js");
+assertEqual(state.activePath, "a.js", "ACTIVATE_TAB switches to an already-open tab");
+assertEqual(state.tabs, ["a.js", "b.js", "c.js"], "ACTIVATE_TAB never reorders tabs");
+
+assertEqual(
+  editorReducer(state, { type: "ACTIVATE_TAB", path: "nope.js" }),
+  state,
+  "ACTIVATE_TAB on a path that isn't open is ignored, not invented into a tab"
+);
+assertEqual(
+  editorReducer(state, { type: "ACTIVATE_TAB", path: "a.js" }),
+  state,
+  "ACTIVATE_TAB on the already-active tab returns the same state"
+);
+
+state = editorReducer(openWith(["a.js", "b.js"], "a.js"), { type: "EDIT_BUFFER", path: "a.js", content: "changed" });
+state = editorReducer(state, { type: "MARK_STALE", path: "a.js" });
+state = editorReducer(state, { type: "ACTIVATE_TAB", path: "b.js" });
+state = editorReducer(state, { type: "ACTIVATE_TAB", path: "a.js" });
+assertEqual(state.buffers["a.js"].stale, true, "switching away from a stale tab and back does NOT dismiss its warning");
+assertEqual(
+  editorReducer(state, { type: "SET_ACTIVE_PATH", path: "a.js" }).buffers["a.js"].stale,
+  false,
+  "...whereas SET_ACTIVE_PATH (opening it from the explorer) still does, as before"
+);
+
+// --- W2.3a: which tab becomes active when the active one closes --------
+
+state = openWith(["a.js", "b.js", "c.js"], "b.js");
+let closed = editorReducer(state, { type: "CLOSE_TAB", path: "b.js" });
+assertEqual(closed.activePath, "c.js", "closing the active tab activates its right neighbour");
+assertEqual(closed.tabs, ["a.js", "c.js"], "...and removes it from the strip");
+
+state = openWith(["a.js", "b.js", "c.js"], "c.js");
+closed = editorReducer(state, { type: "CLOSE_TAB", path: "c.js" });
+assertEqual(closed.activePath, "b.js", "closing the LAST active tab activates its left neighbour");
+
+state = openWith(["a.js", "b.js", "c.js"], "a.js");
+closed = editorReducer(state, { type: "CLOSE_TAB", path: "c.js" });
+assertEqual(closed.activePath, "a.js", "closing a background tab leaves the active tab alone");
+assertEqual(closed.buffers["c.js"], undefined, "...and still drops that tab's buffer");
+
+// --- W2.3a: CLOSE_TABS ---------------------------------------------------------
+
+state = openWith(["a.js", "b.js", "c.js", "d.js"], "b.js");
+closed = editorReducer(state, { type: "CLOSE_TABS", paths: ["a.js", "b.js"] });
+assertEqual(closed.tabs, ["c.js", "d.js"], "CLOSE_TABS removes every listed tab");
+assertEqual(Object.keys(closed.buffers), ["c.js", "d.js"], "...and every listed buffer");
+assertEqual(closed.activePath, "c.js", "when the active tab is among them, the nearest survivor to its right takes over");
+
+closed = editorReducer(state, { type: "CLOSE_TABS", paths: ["a.js", "c.js", "d.js"] });
+assertEqual(closed.activePath, "b.js", "'Close others' from b: b stays active");
+assertEqual(closed.tabs, ["b.js"], "'Close others' leaves just the one tab");
+
+closed = editorReducer(state, { type: "CLOSE_TABS", paths: [...state.tabs] });
+assertEqual([closed.tabs, closed.activePath, closed.buffers], [[], null, {}], "'Close all' leaves an empty workbench");
+
+assertEqual(
+  editorReducer(state, { type: "CLOSE_TABS", paths: ["never-open.js"] }),
+  state,
+  "CLOSE_TABS naming only tabs that aren't open is a no-op"
+);
+assertEqual(editorReducer(state, { type: "CLOSE_TABS", paths: [] }), state, "CLOSE_TABS with no paths is a no-op");
+
+state = editorReducer(openWith(["a.js", "b.js"], "a.js"), { type: "SET_ACTIVE_PATH", path: "loading.js" });
+closed = editorReducer(state, { type: "CLOSE_TABS", paths: ["loading.js"] });
+assertEqual(closed.tabs, ["a.js", "b.js"], "a tab whose file is still loading (tab but no buffer) can be closed");
+assertEqual(closed.activePath, "b.js", "...and the active tab moves to its left neighbour (nothing to its right)");
+
+// --- W2.3a: SAVE_SUCCESS keepEdited -------------------------------------
+
+state = openWith(["a.js"]);
+state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.js", content: "v2" });
+// the person keeps typing while the save of "v2" is in flight
+state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.js", content: "v2 and more" });
+let afterSave = editorReducer(state, {
+  type: "SAVE_SUCCESS",
+  path: "a.js",
+  file: { content: "v2", language: "javascript", version: 2, updated_at: "2026-01-03T00:00:00Z" },
+  keepEdited: true,
+});
+assertEqual(afterSave.buffers["a.js"].edited, "v2 and more", "keepEdited: keystrokes typed during the save survive it");
+assertEqual(afterSave.buffers["a.js"].saved, "v2", "keepEdited: `saved` records what the server confirmed");
+assertEqual(afterSave.buffers["a.js"].dirty, true, "keepEdited: the buffer is still dirty, because edited no longer matches saved");
+assertEqual(afterSave.buffers["a.js"].version, 2, "keepEdited: the server's new version is still adopted");
+
+afterSave = editorReducer(state, {
+  type: "SAVE_SUCCESS",
+  path: "a.js",
+  file: { content: "v2 and more", language: "javascript", version: 2, updated_at: null },
+});
+assertEqual(afterSave.buffers["a.js"].dirty, false, "without keepEdited, a save is the plain 'saved and clean' it always was");
+assertEqual(afterSave.buffers["a.js"].edited, "v2 and more", "...with edited swapped to the server's copy");
+
+afterSave = editorReducer(initialState, {
+  type: "SAVE_SUCCESS",
+  path: "x.js",
+  file: { content: "new", version: 1, updated_at: null },
+  keepEdited: true,
+});
+assertEqual(
+  [afterSave.buffers["x.js"].edited, afterSave.buffers["x.js"].dirty],
+  ["new", false],
+  "keepEdited with no existing buffer (tab closed mid-save) falls back to the server's copy, clean"
 );
 
 if (failures > 0) {

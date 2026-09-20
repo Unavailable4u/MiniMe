@@ -9,10 +9,10 @@
 // live").
 //
 // State shape (exactly the plan's own): `{tabs, activePath, buffers,
-// layout, proposals}`. W2.2 only populates `tabs`/`activePath`/
-// `buffers` — CodeView has no tab strip and nothing to propose yet, so
-// `layout`/`proposals` stay as empty placeholders a future step fills
-// in without another shape change.
+// layout, proposals}`. Only `tabs`/`activePath`/`buffers` are populated
+// so far (W2.3a's tab strip is what reads `tabs`); nothing lays out or
+// proposes anything yet, so `layout`/`proposals` stay as empty
+// placeholders a future step fills in without another shape change.
 //
 // `buffers[path]` = `{saved, edited, version, dirty, stale, language,
 // updatedAt}` — `saved` is the last content the server confirmed
@@ -22,6 +22,12 @@
 // edits" flag, now per-buffer instead of the single component-wide
 // staleBanner it used to be.
 //
+// W2.3a additions (the tab strip needs them): ACTIVATE_TAB (switch to an
+// already-open tab WITHOUT touching its stale flag), CLOSE_TABS (drop
+// several tabs at once, "Close others"/"Close all"), CLOSE_TAB/CLOSE_TABS
+// picking the next active tab via tabUtils.nextActiveAfterClose(), and
+// SAVE_SUCCESS's `keepEdited` option (see that case).
+//
 // No JSX here on purpose — every other file directly under `lib/`
 // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
 // so the provider component below is written with `createElement`
@@ -29,6 +35,7 @@
 // wrapper.
 "use client";
 import { createContext, createElement, useContext, useMemo, useReducer } from "react";
+import { nextActiveAfterClose } from "./tabUtils";
 
 const EditorStoreContext = createContext(null);
 
@@ -50,14 +57,14 @@ const initialState = {
  */
 export function editorReducer(state, action) {
   switch (action.type) {
-    // Opening (or re-clicking) a file. Adds it to `tabs` the first time
-    // (harmless today — CodeView doesn't render a tab strip — but
-    // W2.3's explorer/tabs read the exact same store, so this already
-    // does the right thing for them). Re-selecting a file that has a
+    // Opening a file. Adds it to `tabs` the first time (the W2.3a tab
+    // strip renders `tabs` as-is). Re-selecting a file that has a
     // buffer clears any pending `stale` flag on it — the previous
     // component-wide staleBanner was dismissed by clicking the file
     // again too (openFile() used to call setStaleBanner(null) up
-    // front), so this preserves that timing per-buffer.
+    // front), so this preserves that timing per-buffer. Switching to
+    // an ALREADY-open tab goes through ACTIVATE_TAB instead, which
+    // leaves the flag alone.
     case "SET_ACTIVE_PATH": {
       const { path } = action;
       if (path == null) {
@@ -69,6 +76,18 @@ export function editorReducer(state, action) {
         ? { ...state.buffers, [path]: { ...existing, stale: false } }
         : state.buffers;
       return { ...state, activePath: path, tabs, buffers };
+    }
+
+    // Switching to a tab that's already open (a click on the strip, or
+    // on an explorer row whose file is already open). Unlike
+    // SET_ACTIVE_PATH this never adds a tab and never clears `stale`:
+    // glancing at another tab and back must not silently dismiss a
+    // "Changed on server" warning the person hasn't answered. A path
+    // that isn't in `tabs` is ignored rather than invented.
+    case "ACTIVATE_TAB": {
+      const { path } = action;
+      if (!state.tabs.includes(path) || state.activePath === path) return state;
+      return { ...state, activePath: path };
     }
 
     // A provider.read(path) resolved. `file` is the FileProvider's
@@ -94,8 +113,8 @@ export function editorReducer(state, action) {
     }
 
     // Every keystroke in the editor. No-ops on a path with no buffer
-    // yet (can't happen from CodeView's own UI — the textarea only
-    // exists once a file is loaded — but a reducer should never throw
+    // yet (can't happen from the workbench's own UI — an editor only
+    // mounts once its file is loaded — but a reducer should never throw
     // on an ordering it doesn't expect).
     case "EDIT_BUFFER": {
       const { path, content } = action;
@@ -111,23 +130,34 @@ export function editorReducer(state, action) {
     }
 
     // A provider.write(path, ...) resolved. `file` is the server's
-    // confirmed shape post-save — swapped in as BOTH `saved` and
-    // `edited` (matching the pre-W2.2 `setFileContent(saved);
-    // setEditedContent(saved.content || "")` pair), so a save also
+    // confirmed shape post-save — swapped in as `saved`, and (matching
+    // the pre-W2.2 `setFileContent(saved); setEditedContent(
+    // saved.content || "")` pair) as `edited` too, so a save also
     // clears `dirty`/`stale`.
+    //
+    // `keepEdited` (W2.3a): the person kept typing while the request
+    // was in flight, so `edited` is already ahead of what was sent.
+    // Swapping the server's copy in over it would delete those
+    // keystrokes — with a manual Save it's a rare nibble, with W2.5's
+    // autosave it would be constant. With `keepEdited` the save is
+    // recorded (`saved`, `version`) but `edited` stays, and `dirty` is
+    // recomputed against the new `saved`, so the tab correctly still
+    // shows unsaved changes.
     case "SAVE_SUCCESS": {
-      const { path, file } = action;
+      const { path, file, keepEdited = false } = action;
       const buffer = state.buffers[path];
+      const saved = file.content || "";
+      const edited = keepEdited && buffer ? buffer.edited : saved;
       return {
         ...state,
         buffers: {
           ...state.buffers,
           [path]: {
             ...(buffer || {}),
-            saved: file.content || "",
-            edited: file.content || "",
+            saved,
+            edited,
             version: file.version ?? buffer?.version ?? 0,
-            dirty: false,
+            dirty: edited !== saved,
             stale: false,
             language: file.language ?? buffer?.language ?? null,
             updatedAt: file.updated_at || null,
@@ -156,18 +186,36 @@ export function editorReducer(state, action) {
       return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: false } } };
     }
 
-    // The file list refreshed and this path is no longer in it (deleted
-    // or renamed elsewhere) — drop its tab and buffer, and clear
-    // activePath if it was the one showing.
-    case "CLOSE_TAB": {
-      const { path } = action;
-      if (!(path in state.buffers) && !state.tabs.includes(path) && state.activePath !== path) {
-        return state;
+    // Close one tab. Kept as its own action (the earlier stores and
+    // callers use it, and "the file list refreshed and this path is no
+    // longer in it" is one of them) but it's just CLOSE_TABS of one, so
+    // the next-active-tab rule lives in one place.
+    case "CLOSE_TAB":
+      return editorReducer(state, { type: "CLOSE_TABS", paths: [action.path] });
+
+    // Close several tabs at once ("Close others", "Close all", a
+    // refresh that finds several files gone). Their buffers go with
+    // them. If the active tab is among them, the new active tab is
+    // whichever survivor is nearest in the strip — right neighbour
+    // first, then left, else none (tabUtils.nextActiveAfterClose).
+    // Closing tabs that aren't open is a no-op, not an error.
+    case "CLOSE_TABS": {
+      const closing = new Set(action.paths || []);
+      const touches =
+        state.tabs.some((p) => closing.has(p)) ||
+        Object.keys(state.buffers).some((p) => closing.has(p)) ||
+        (state.activePath != null && closing.has(state.activePath));
+      if (!touches) return state;
+      const buffers = {};
+      for (const [p, b] of Object.entries(state.buffers)) {
+        if (!closing.has(p)) buffers[p] = b;
       }
-      const { [path]: _removed, ...buffers } = state.buffers;
-      const tabs = state.tabs.filter((p) => p !== path);
-      const activePath = state.activePath === path ? null : state.activePath;
-      return { ...state, tabs, buffers, activePath };
+      return {
+        ...state,
+        tabs: state.tabs.filter((p) => !closing.has(p)),
+        buffers,
+        activePath: nextActiveAfterClose(state.tabs, state.activePath, closing),
+      };
     }
 
     default:
@@ -181,18 +229,21 @@ export function EditorStoreProvider({ children }) {
   // Action creators are memoized on `dispatch` alone — React guarantees
   // `dispatch`'s identity never changes across a component's lifetime,
   // so this object (and therefore every action function on it) is
-  // stable across re-renders too. That's what lets CodeViewBody's own
-  // Pusher-handler effect below list `markStale` in a dependency array
+  // stable across re-renders too. That's what lets the workbench's own
+  // Pusher-handler effect list `markStale` in a dependency array
   // without re-subscribing on every keystroke.
   const actions = useMemo(
     () => ({
       setActivePath: (path) => dispatch({ type: "SET_ACTIVE_PATH", path }),
+      activateTab: (path) => dispatch({ type: "ACTIVATE_TAB", path }),
       fileLoaded: (path, file) => dispatch({ type: "FILE_LOADED", path, file }),
       editBuffer: (path, content) => dispatch({ type: "EDIT_BUFFER", path, content }),
-      saveSuccess: (path, file) => dispatch({ type: "SAVE_SUCCESS", path, file }),
+      saveSuccess: (path, file, opts) =>
+        dispatch({ type: "SAVE_SUCCESS", path, file, keepEdited: !!opts?.keepEdited }),
       markStale: (path) => dispatch({ type: "MARK_STALE", path }),
       clearStale: (path) => dispatch({ type: "CLEAR_STALE", path }),
       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
+      closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
     }),
     [dispatch]
   );
