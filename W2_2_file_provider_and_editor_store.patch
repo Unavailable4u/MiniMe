@@ -1,0 +1,1015 @@
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 090ec46..2975b32 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useEffect, useState, useRef, memo } from "react";
++import { useEffect, useState, useRef, useMemo, memo } from "react"; // CHANGED — W2.2: added useMemo, for memoizing CodeView's CloudFileProvider instance
+ import { useSession, authHeaders } from "../../context/SessionContext";
+ import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
+ import { useChatList } from "../../context/ChatListContext";   // NEW — Item 2 concern split, slice 4
+@@ -13,8 +13,9 @@ import { useWorkspaceDockActions, useWorkspaceDock, useLastActiveChatId } from "
+ import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, ChevronDown, MessageSquare, Plus, MoreVertical, Check, X, RefreshCw, Save, Folder, FolderOpen, FileCode, Download } from "lucide-react"; // CHANGED — patch 10: added ChevronDown/RefreshCw/Save/Folder/FolderOpen/FileCode for the Code sub-tab's file tree + editor. CHANGED — patch 11: added Download for the ZIP button.
+ import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
+ import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
+-import { getPusherClient } from "../../lib/pusherClient"; // NEW — W0.1: live refresh on code_file_updated, same workspace-${id} channel + bind_global pattern PlanTab.jsx uses for panel_content_updated (see that file's assistantTurnSignal effect).
+ import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggable chat-dock width, replacing the old fixed width: 560
++import { createCloudFileProvider } from "../../lib/workbench/fileProviders"; // NEW — W2.2: CodeView's file fetch/save/list calls now go through this provider instead of calling fetch() directly (plan D6 — "FileProvider interface with two implementations (Cloud, Local)"); also owns the workspace-${id} Pusher subscription that used to live inline here as W0.1's own effect (see getPusherClient's old import, removed).
++import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore"; // NEW — W2.2: single source of truth for open-file buffers (saved/edited/version/dirty/stale) — same store Explorer/preview/chat chips will read once they exist (W2.3+), replacing CodeView's own fileContent/editedContent/staleBanner useState trio for that slice.
+ // Part 8.9: replaces the old static shared-secret x-api-key header
+ // -- every fetch() below now sends the real per-user Supabase JWT via
+ // authHeaders(), matching require_auth()'s Authorization: Bearer check.
+@@ -424,41 +425,67 @@ function TreeNode({ node, depth, expandedDirs, onToggleDir, selectedPath, onSele
+   );
+ }
+ 
++// NEW — W2.2: CodeView is now just a thin mount point for the workbench
++// store (plan §5, W2.2's own "Touches" line — "CodeView refactored to
++// use them"). Everything that used to live directly in CodeView's own
++// state/effects moved into CodeViewBody below, which reads/writes
++// through useEditorStore() instead. Split into two components (rather
++// than calling useEditorStore() from a component that ALSO renders
++// <EditorStoreProvider>) because a context provider's own value isn't
++// visible to hooks called in the same component that mounts it — same
++// reason every provider/consumer pair in this codebase is already two
++// components (see WorkspaceDockContext.jsx's own Provider + the hooks
++// that read it).
+ function CodeView({ workspaceId, apiUrl }) {
+-  const [filesMeta, setFilesMeta] = useState(null); // {file_path: meta}, from list_files()
++  return (
++    <EditorStoreProvider>
++      <CodeViewBody workspaceId={workspaceId} apiUrl={apiUrl} />
++    </EditorStoreProvider>
++  );
++}
++
++function CodeViewBody({ workspaceId, apiUrl }) {
++  // One provider instance per (workspaceId, apiUrl) pair -- memoized so
++  // switching projects gets a fresh provider (and, via the effect below,
++  // a fresh Pusher subscription) without recreating one on every
++  // unrelated re-render.
++  const provider = useMemo(
++    () => createCloudFileProvider({ workspaceId, apiUrl }),
++    [workspaceId, apiUrl]
++  );
++  const { state: editorState, fileLoaded, editBuffer, saveSuccess, markStale, clearStale, setActivePath, closeTab } =
++    useEditorStore();
++
++  const [filesMeta, setFilesMeta] = useState(null); // {file_path: meta}, from provider.list()
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState(null);
+   const [expandedDirs, setExpandedDirs] = useState(() => new Set());
+-  const [selectedPath, setSelectedPath] = useState(null);
+-  const [fileContent, setFileContent] = useState(null); // last-saved shape, from get_file()/write_file()
+-  const [editedContent, setEditedContent] = useState("");
+   const [fileLoading, setFileLoading] = useState(false);
+   const [fileError, setFileError] = useState(null);
+   const [saving, setSaving] = useState(false);
+   const [saveError, setSaveError] = useState(null);
+   const [downloading, setDownloading] = useState(false); // NEW — patch 11
+   const [downloadError, setDownloadError] = useState(null); // NEW — patch 11
+-  // NEW — W0.1: set when a code_file_updated event names the file
+-  // that's currently open AND that file has unsaved local edits. We
+-  // deliberately do NOT auto-refetch in that case (that would silently
+-  // clobber the edit sitting in the textarea) -- this banner is the
+-  // stop-gap until W1.1 gives Save a real base_version/409 conflict
+-  // check. filePaths is kept only for a possible future "which files
+-  // changed" detail; today the banner just offers Reload / Keep mine
+-  // for the one open file.
+-  const [staleBanner, setStaleBanner] = useState(null); // null | {filePaths: string[]}
++
++  // CHANGED — W2.2: selectedPath/fileContent/editedContent/staleBanner
++  // used to be their own useState calls; the open file's buffer now
++  // lives in editorStore, keyed by path, so the editor/preview/chat
++  // chips (once those exist) all read the exact same copy instead of
++  // each having their own. `buffer` is undefined until FILE_LOADED
++  // fires for this path (see openFile below) — briefly true right after
++  // clicking a file that's never been opened this session, same window
++  // `fileLoading` already covers in the render below.
++  const selectedPath = editorState.activePath;
++  const buffer = selectedPath ? editorState.buffers[selectedPath] : null;
++  const editedContent = buffer?.edited ?? "";
++  const isDirty = !!buffer?.dirty;
++  const isStale = !!buffer?.stale;
+ 
+   async function loadFileList({ preserveSelection = true } = {}) {
+     setLoading(true);
+     setError(null);
+     try {
+-      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/files`, {
+-        headers: await authHeaders(),
+-      });
+-      if (!res.ok) {
+-        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+-      }
+-      const meta = await res.json();
++      const meta = await provider.list();
+       setFilesMeta(meta);
+       // Auto-expand top-level directories the first time files show up,
+       // so the tree isn't a single collapsed root on first load.
+@@ -471,8 +498,8 @@ function CodeView({ workspaceId, apiUrl }) {
+         return next;
+       });
+       if (!preserveSelection || (selectedPath && !(selectedPath in meta))) {
+-        setSelectedPath(null);
+-        setFileContent(null);
++        if (selectedPath) closeTab(selectedPath);
++        else setActivePath(null);
+       }
+     } catch (err) {
+       setError(err.message);
+@@ -487,24 +514,13 @@ function CodeView({ workspaceId, apiUrl }) {
+   }, [workspaceId]);
+ 
+   async function openFile(path) {
+-    setSelectedPath(path);
++    setActivePath(path); // highlights the tree row immediately + clears any pending stale flag for it, same timing setSelectedPath(path)+setStaleBanner(null) had
+     setFileLoading(true);
+     setFileError(null);
+     setSaveError(null);
+-    setStaleBanner(null); // NEW — W0.1: opening/re-opening a file supersedes any pending stale-banner choice
+     try {
+-      // {file_path:path} on the backend accepts the raw slashes as-is —
+-      // no encoding needed, file_path is already shape-validated server
+-      // side (workspace_code_files._validate_file_path).
+-      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/files/${path}`, {
+-        headers: await authHeaders(),
+-      });
+-      if (!res.ok) {
+-        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+-      }
+-      const file = await res.json();
+-      setFileContent(file);
+-      setEditedContent(file.content || "");
++      const file = await provider.read(path);
++      fileLoaded(path, file);
+     } catch (err) {
+       setFileError(err.message);
+     } finally {
+@@ -521,15 +537,16 @@ function CodeView({ workspaceId, apiUrl }) {
+     });
+   }
+ 
+-  const isDirty = fileContent != null && editedContent !== (fileContent.content || "");
+-
+-  // NEW — W0.1: "latest" refs so the Pusher handler below (subscribed
+-  // once per workspaceId, not re-bound on every keystroke) always sees
+-  // the current selection/dirty state and the current loadFileList/
+-  // openFile closures, instead of the stale ones captured when the
+-  // effect first ran. Assigning a ref during render (no effect) is the
+-  // standard way to hand an event handler "the latest callback" without
+-  // re-subscribing on every render.
++  // NEW — W2.2: "latest" refs so the provider's Pusher handler below
++  // (subscribed once per provider instance, not re-bound on every
++  // keystroke) always sees the current selection/dirty state and the
++  // current loadFileList/openFile closures, instead of the stale ones
++  // captured when the effect first ran. Same pattern W0.1 introduced
++  // for this exact reason, unchanged by moving the subscription itself
++  // into the provider — `markStale`/`clearStale`/`setActivePath` don't
++  // need refs since useEditorStore()'s action functions are stable
++  // across re-renders (memoized on `dispatch`, which React itself never
++  // changes the identity of).
+   const selectedPathRef = useRef(selectedPath);
+   selectedPathRef.current = selectedPath;
+   const isDirtyRef = useRef(isDirty);
+@@ -539,28 +556,15 @@ function CodeView({ workspaceId, apiUrl }) {
+   const openFileRef = useRef(openFile);
+   openFileRef.current = openFile;
+ 
+-  // NEW — W0.1: live refresh. api/task_runner.py's _write_code_files()
+-  // fires CODE_FILE_UPDATED on the workspace's Pusher channel
+-  // (relay/emitter.py) after every chat-driven code write, but nothing
+-  // in the frontend was listening for it (build plan §1.1) -- this sub
+-  // tab only ever fetched once per workspaceId, so newly-generated
+-  // files silently didn't show up without a reload, and an open file
+-  // didn't pick up a chat-driven regen either. Same channel-naming +
+-  // bind_global pattern as PlanTab.jsx's wsPanelPushSignal effect.
++  // CHANGED — W2.2: was W0.1's own Pusher subscribe/bind_global effect,
++  // inlined directly in this component. That transport-level plumbing
++  // now lives in CloudFileProvider.subscribe() (fileProviders.js) —
++  // this effect just supplies the "what do we do about it" policy,
++  // unchanged from W0.1: always refetch the tree, and for the currently
++  // open file, either silently refresh it (not dirty) or flag it stale
++  // instead of clobbering unsaved edits (dirty).
+   useEffect(() => {
+-    if (!workspaceId) return undefined;
+-    const pusher = getPusherClient();
+-    if (!pusher) return undefined; // Pusher env vars not set — live refresh disabled, falls back to per-mount fetch
+-
+-    const channelName = `workspace-${workspaceId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
+-    const channel = pusher.subscribe(channelName);
+-    const handler = (eventType, data) => {
+-      if (eventType !== "code_file_updated") return;
+-      const filePaths = data?.file_paths?.length
+-        ? data.file_paths
+-        : data?.file_path
+-        ? [data.file_path]
+-        : [];
++    const unsubscribe = provider.subscribe(({ filePaths }) => {
+       // Always refetch the tree/list -- this is what makes newly
+       // chat-generated files show up without a reload.
+       loadFileListRef.current();
+@@ -569,20 +573,15 @@ function CodeView({ workspaceId, apiUrl }) {
+       if (isDirtyRef.current) {
+         // Don't clobber unsaved edits sitting in the textarea -- surface
+         // the choice instead. Real conflict resolution (base_version,
+-        // 409, compare-diff) is W1.1; this is just "don't silently lose
++        // 409, compare-diff) is W2.5; this is just "don't silently lose
+         // work" in the meantime.
+-        setStaleBanner({ filePaths });
++        markStale(openPath);
+       } else {
+         openFileRef.current(openPath);
+       }
+-    };
+-    channel.bind_global(handler);
+-
+-    return () => {
+-      channel.unbind_global(handler);
+-      pusher.unsubscribe(channelName);
+-    };
+-  }, [workspaceId]);
++    });
++    return unsubscribe;
++  }, [provider, markStale]);
+ 
+   // NEW — W0.1: Pusher can drop a connection while a tab is backgrounded
+   // (mobile Safari in particular suspends websockets aggressively), so
+@@ -605,8 +604,7 @@ function CodeView({ workspaceId, apiUrl }) {
+   // the edit already sitting in editedContent needs no code path of its
+   // own to "keep".
+   function reloadFromServer() {
+-    setStaleBanner(null);
+-    if (selectedPath) openFile(selectedPath);
++    if (selectedPath) openFile(selectedPath); // openFile's setActivePath() call clears the stale flag as a side effect
+   }
+ 
+   async function saveFile() {
+@@ -614,17 +612,11 @@ function CodeView({ workspaceId, apiUrl }) {
+     setSaving(true);
+     setSaveError(null);
+     try {
+-      const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/files/${selectedPath}`, {
+-        method: "PUT",
+-        headers: await authHeaders({ json: true }),
+-        body: JSON.stringify({ content: editedContent }),
+-      });
+-      if (!res.ok) {
+-        throw new Error((await res.json().catch(() => null))?.detail || `${res.status} ${res.statusText}`);
+-      }
+-      const saved = await res.json();
+-      setFileContent(saved);
+-      setEditedContent(saved.content || "");
++      // No baseVersion sent yet -- same blind-overwrite Save flow this
++      // sub-tab always had (W2.5 is what starts sending one and
++      // handling the resulting 409/FileConflictError for real).
++      const saved = await provider.write(selectedPath, editedContent);
++      saveSuccess(selectedPath, saved);
+       // Swap just this file's tree metadata in-place rather than
+       // re-fetching the whole list — same "swap the piece that changed"
+       // approach InstructionsView takes with the toggle-step response.
+@@ -647,10 +639,13 @@ function CodeView({ workspaceId, apiUrl }) {
+   }
+ 
+   // NEW — patch 11: server-side ZIP of the current file set
+-  // (GET .../code/zip). Needs authHeaders() same as every other call
+-  // here, so this can't be a plain <a href> — fetch as a blob and
+-  // trigger the download via a throwaway object URL, same technique
+-  // any auth-gated file download needs in the browser.
++  // (GET .../code/zip). Not part of the FileProvider contract (it's a
++  // whole-workspace export, not a per-file op — see fileProviders.js's
++  // own header comment), so this still calls the route directly. Needs
++  // authHeaders() same as every other call here, so this can't be a
++  // plain <a href> — fetch as a blob and trigger the download via a
++  // throwaway object URL, same technique any auth-gated file download
++  // needs in the browser.
+   async function downloadZip() {
+     setDownloading(true);
+     setDownloadError(null);
+@@ -756,11 +751,19 @@ function CodeView({ workspaceId, apiUrl }) {
+             <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--neutral-800)]">
+               <div className="min-w-0">
+                 <p className="text-xs text-[var(--neutral-200)] font-medium truncate">{selectedPath}</p>
+-                {fileContent && (
++                {/* CHANGED — W2.2: reads the editorStore buffer instead of
++                    the old local `fileContent` state. `buffer` is briefly
++                    undefined the very first time a given path is opened
++                    (between setActivePath() and FILE_LOADED landing) --
++                    `fileLoading` below already covers that window with its
++                    own spinner, so this line just stays blank rather than
++                    showing the PREVIOUS file's language/timestamp during
++                    the gap the way the pre-store version incidentally did. */}
++                {buffer && (
+                   <p className="text-[10px] text-[var(--neutral-600)]">
+-                    {fileContent.language || "text"}
+-                    {fileContent.updated_at
+-                      ? ` · saved ${new Date(fileContent.updated_at).toLocaleString()}`
++                    {buffer.language || "text"}
++                    {buffer.updatedAt
++                      ? ` · saved ${new Date(buffer.updatedAt).toLocaleString()}`
+                       : " · not saved yet"}
+                   </p>
+                 )}
+@@ -775,17 +778,19 @@ function CodeView({ workspaceId, apiUrl }) {
+                 {saving ? "Saving…" : isDirty ? "Save" : "Saved"}
+               </button>
+             </div>
+-            {staleBanner && (
++            {isStale && (
+               // NEW — W0.1: shown instead of silently refetching when the
+               // open file has unsaved edits and a code_file_updated event
+-              // named it -- see the Pusher handler above.
++              // named it -- see the provider's subscribe() handler above.
++              // CHANGED — W2.2: reads editorStore's per-buffer `stale`
++              // flag instead of the old local `staleBanner` state.
+               <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 mb-2">
+                 <span>Changed on server — this file was updated elsewhere while you had unsaved edits.</span>
+                 <div className="flex items-center gap-3 shrink-0">
+                   <button type="button" onClick={reloadFromServer} className="underline hover:text-amber-200">
+                     Reload
+                   </button>
+-                  <button type="button" onClick={() => setStaleBanner(null)} className="underline hover:text-amber-200">
++                  <button type="button" onClick={() => clearStale(selectedPath)} className="underline hover:text-amber-200">
+                     Keep mine
+                   </button>
+                 </div>
+@@ -804,7 +809,7 @@ function CodeView({ workspaceId, apiUrl }) {
+               // whatever height Editor mode's layout actually has.
+               <textarea
+                 value={editedContent}
+-                onChange={(e) => setEditedContent(e.target.value)}
++                onChange={(e) => editBuffer(selectedPath, e.target.value)}
+                 spellCheck={false}
+                 aria-label={`Editing ${selectedPath}`}
+                 className="flex-1 w-full min-h-0 bg-black/30 border border-[var(--neutral-800)] rounded-lg p-2.5 text-[11px] font-mono text-[var(--neutral-200)] outline-none focus:border-[var(--accent)] resize-none"
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+new file mode 100644
+index 0000000..c705d0f
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -0,0 +1,235 @@
++// W2.2 (Build Workbench plan) — reducer test for editorStore.js.
++//
++// No JS test runner (jest/vitest) exists in this repo yet (frontend/package.json
++// has zero test deps, no jest.config/vitest.config anywhere), and
++// editorStore.js's `EditorStoreProvider`/`useEditorStore` pull in
++// `react`, which a dependency-free `node` invocation can't resolve
++// without `node_modules` present — exactly the situation
++// components/__tests__/wiringGraph.linkFilter.test.mjs's own header
++// comment describes for the same reason (JSX there; a `react` import
++// here). Same fix: `editorReducer` is kept byte-for-byte in sync below
++// so this can run with plain `node` in CI with no install step. If a
++// real JS test runner is ever added, this should be ported to import
++// the actual reducer and this file deleted.
++//
++// Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++
++const initialState = {
++  tabs: [],
++  activePath: null,
++  buffers: {},
++  layout: {},
++  proposals: [],
++};
++
++// Kept byte-for-byte in sync with editorReducer() in ../editorStore.js.
++function editorReducer(state, action) {
++  switch (action.type) {
++    case "SET_ACTIVE_PATH": {
++      const { path } = action;
++      if (path == null) {
++        return { ...state, activePath: null };
++      }
++      const tabs = state.tabs.includes(path) ? state.tabs : [...state.tabs, path];
++      const existing = state.buffers[path];
++      const buffers = existing && existing.stale
++        ? { ...state.buffers, [path]: { ...existing, stale: false } }
++        : state.buffers;
++      return { ...state, activePath: path, tabs, buffers };
++    }
++
++    case "FILE_LOADED": {
++      const { path, file } = action;
++      return {
++        ...state,
++        buffers: {
++          ...state.buffers,
++          [path]: {
++            saved: file.content || "",
++            edited: file.content || "",
++            version: file.version ?? 0,
++            dirty: false,
++            stale: false,
++            language: file.language || null,
++            updatedAt: file.updated_at || null,
++          },
++        },
++      };
++    }
++
++    case "EDIT_BUFFER": {
++      const { path, content } = action;
++      const buffer = state.buffers[path];
++      if (!buffer) return state;
++      return {
++        ...state,
++        buffers: {
++          ...state.buffers,
++          [path]: { ...buffer, edited: content, dirty: content !== buffer.saved },
++        },
++      };
++    }
++
++    case "SAVE_SUCCESS": {
++      const { path, file } = action;
++      const buffer = state.buffers[path];
++      return {
++        ...state,
++        buffers: {
++          ...state.buffers,
++          [path]: {
++            ...(buffer || {}),
++            saved: file.content || "",
++            edited: file.content || "",
++            version: file.version ?? buffer?.version ?? 0,
++            dirty: false,
++            stale: false,
++            language: file.language ?? buffer?.language ?? null,
++            updatedAt: file.updated_at || null,
++          },
++        },
++      };
++    }
++
++    case "MARK_STALE": {
++      const { path } = action;
++      const buffer = state.buffers[path];
++      if (!buffer) return state;
++      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: true } } };
++    }
++
++    case "CLEAR_STALE": {
++      const { path } = action;
++      const buffer = state.buffers[path];
++      if (!buffer || !buffer.stale) return state;
++      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: false } } };
++    }
++
++    case "CLOSE_TAB": {
++      const { path } = action;
++      if (!(path in state.buffers) && !state.tabs.includes(path) && state.activePath !== path) {
++        return state;
++      }
++      const { [path]: _removed, ...buffers } = state.buffers;
++      const tabs = state.tabs.filter((p) => p !== path);
++      const activePath = state.activePath === path ? null : state.activePath;
++      return { ...state, tabs, buffers, activePath };
++    }
++
++    default:
++      return state;
++  }
++}
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// --- SET_ACTIVE_PATH -------------------------------------------------
++
++let state = editorReducer(initialState, { type: "SET_ACTIVE_PATH", path: "src/App.jsx" });
++assertEqual(state.activePath, "src/App.jsx", "opening a file sets activePath");
++assertEqual(state.tabs, ["src/App.jsx"], "opening a new file adds it to tabs");
++
++state = editorReducer(state, { type: "SET_ACTIVE_PATH", path: "src/App.jsx" });
++assertEqual(state.tabs, ["src/App.jsx"], "re-opening the same file doesn't duplicate its tab");
++
++state = editorReducer(state, { type: "SET_ACTIVE_PATH", path: null });
++assertEqual(state.activePath, null, "SET_ACTIVE_PATH(null) clears the active path without touching tabs");
++assertEqual(state.tabs, ["src/App.jsx"], "clearing activePath leaves tabs alone");
++
++// --- FILE_LOADED / EDIT_BUFFER / dirty tracking -----------------------
++
++state = editorReducer(initialState, { type: "SET_ACTIVE_PATH", path: "a.py" });
++state = editorReducer(state, {
++  type: "FILE_LOADED",
++  path: "a.py",
++  file: { content: "print(1)", language: "python", version: 3, updated_at: "2026-01-01T00:00:00Z" },
++});
++assertEqual(state.buffers["a.py"].dirty, false, "a freshly loaded file is not dirty");
++assertEqual(state.buffers["a.py"].saved, "print(1)", "FILE_LOADED sets saved to the server content");
++assertEqual(state.buffers["a.py"].edited, "print(1)", "FILE_LOADED sets edited equal to saved");
++
++state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.py", content: "print(2)" });
++assertEqual(state.buffers["a.py"].dirty, true, "editing away from saved content marks the buffer dirty");
++assertEqual(state.buffers["a.py"].saved, "print(1)", "editing never touches the saved copy");
++
++state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.py", content: "print(1)" });
++assertEqual(state.buffers["a.py"].dirty, false, "editing back to the saved content clears dirty");
++
++state = editorReducer(state, { type: "EDIT_BUFFER", path: "never-opened.py", content: "x" });
++assertEqual(state.buffers["never-opened.py"], undefined, "EDIT_BUFFER on a path with no buffer is a no-op");
++
++// --- SAVE_SUCCESS clears dirty and stale ------------------------------
++
++state = editorReducer(state, { type: "EDIT_BUFFER", path: "a.py", content: "print(3)" });
++state = editorReducer(state, { type: "MARK_STALE", path: "a.py" });
++assertEqual(state.buffers["a.py"].stale, true, "MARK_STALE flags the buffer");
++
++state = editorReducer(state, {
++  type: "SAVE_SUCCESS",
++  path: "a.py",
++  file: { content: "print(3)", language: "python", version: 4, updated_at: "2026-01-02T00:00:00Z" },
++});
++assertEqual(state.buffers["a.py"].dirty, false, "SAVE_SUCCESS clears dirty");
++assertEqual(state.buffers["a.py"].stale, false, "SAVE_SUCCESS also clears any stale flag");
++assertEqual(state.buffers["a.py"].version, 4, "SAVE_SUCCESS adopts the server's returned version");
++
++// --- MARK_STALE / CLEAR_STALE / re-activating clears stale ------------
++
++state = editorReducer(state, { type: "MARK_STALE", path: "a.py" });
++assertEqual(state.buffers["a.py"].stale, true, "MARK_STALE sets stale on an open buffer");
++
++let afterClear = editorReducer(state, { type: "CLEAR_STALE", path: "a.py" });
++assertEqual(afterClear.buffers["a.py"].stale, false, "CLEAR_STALE (Keep mine) unsets stale");
++
++let afterReopen = editorReducer(state, { type: "SET_ACTIVE_PATH", path: "a.py" });
++assertEqual(afterReopen.buffers["a.py"].stale, false, "re-selecting a stale file's tab also clears stale (Reload's path)");
++
++assertEqual(
++  editorReducer(state, { type: "MARK_STALE", path: "never-opened.py" }).buffers["never-opened.py"],
++  undefined,
++  "MARK_STALE on a path with no buffer is a no-op"
++);
++
++// --- CLOSE_TAB ---------------------------------------------------------
++
++state = editorReducer(initialState, { type: "SET_ACTIVE_PATH", path: "b.py" });
++state = editorReducer(state, {
++  type: "FILE_LOADED",
++  path: "b.py",
++  file: { content: "x = 1", language: "python", version: 1, updated_at: null },
++});
++state = editorReducer(state, { type: "CLOSE_TAB", path: "b.py" });
++assertEqual(state.tabs, [], "CLOSE_TAB removes the path from tabs");
++assertEqual(state.buffers["b.py"], undefined, "CLOSE_TAB removes the path's buffer");
++assertEqual(state.activePath, null, "CLOSE_TAB clears activePath when it was the closed file");
++
++assertEqual(
++  editorReducer(initialState, { type: "CLOSE_TAB", path: "never-opened.py" }),
++  initialState,
++  "CLOSE_TAB on a path that was never open is a no-op"
++);
++
++// --- unknown action ------------------------------------------------
++
++assertEqual(
++  editorReducer(initialState, { type: "SOMETHING_UNKNOWN" }),
++  initialState,
++  "an unrecognized action type returns state unchanged"
++);
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+new file mode 100644
+index 0000000..13b7dea
+--- /dev/null
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -0,0 +1,219 @@
++// frontend/app/lib/workbench/editorStore.js — W2.2 (Build Workbench
++// plan). A reducer in a context, scoped to wherever it's mounted (the
++// Build tab's Code sub-tab today; the W2.3 workbench shell tomorrow) —
++// the single source of truth an editor, a preview, and chat chips can
++// all read so they agree on what's actually in a buffer, including
++// edits that haven't been saved yet (plan §5, step W2.2's own "Touches"
++// line: "the single source of truth the editor, preview, and chat
++// chips all read... this is what lets the preview show unsaved edits
++// live").
++//
++// State shape (exactly the plan's own): `{tabs, activePath, buffers,
++// layout, proposals}`. W2.2 only populates `tabs`/`activePath`/
++// `buffers` — CodeView has no tab strip and nothing to propose yet, so
++// `layout`/`proposals` stay as empty placeholders a future step fills
++// in without another shape change.
++//
++// `buffers[path]` = `{saved, edited, version, dirty, stale, language,
++// updatedAt}` — `saved` is the last content the server confirmed
++// (either from a read or from a successful write); `edited` is what's
++// in the textarea/editor right now; `dirty` is `edited !== saved`;
++// `stale` is W0.1's "changed on the server while you had unsaved
++// edits" flag, now per-buffer instead of the single component-wide
++// staleBanner it used to be.
++//
++// No JSX here on purpose — every other file directly under `lib/`
++// (cmTheme.js, editorUtils.js) is plain functions/data, not components,
++// so the provider component below is written with `createElement`
++// rather than becoming this directory's first `.jsx` file for one
++// wrapper.
++"use client";
++import { createContext, createElement, useContext, useMemo, useReducer } from "react";
++
++const EditorStoreContext = createContext(null);
++
++const initialState = {
++  tabs: [],
++  activePath: null,
++  buffers: {},
++  layout: {},
++  proposals: [],
++};
++
++/**
++ * Pure reducer — no React, no fetch, nothing but state in/state out —
++ * so it can be exercised by a dependency-free `.mjs` test with plain
++ * `node` (repo convention, see
++ * components/__tests__/wiringGraph.linkFilter.test.mjs). Exported
++ * directly rather than only reachable through the hook below, which is
++ * what makes that test possible without mounting a provider.
++ */
++export function editorReducer(state, action) {
++  switch (action.type) {
++    // Opening (or re-clicking) a file. Adds it to `tabs` the first time
++    // (harmless today — CodeView doesn't render a tab strip — but
++    // W2.3's explorer/tabs read the exact same store, so this already
++    // does the right thing for them). Re-selecting a file that has a
++    // buffer clears any pending `stale` flag on it — the previous
++    // component-wide staleBanner was dismissed by clicking the file
++    // again too (openFile() used to call setStaleBanner(null) up
++    // front), so this preserves that timing per-buffer.
++    case "SET_ACTIVE_PATH": {
++      const { path } = action;
++      if (path == null) {
++        return { ...state, activePath: null };
++      }
++      const tabs = state.tabs.includes(path) ? state.tabs : [...state.tabs, path];
++      const existing = state.buffers[path];
++      const buffers = existing && existing.stale
++        ? { ...state.buffers, [path]: { ...existing, stale: false } }
++        : state.buffers;
++      return { ...state, activePath: path, tabs, buffers };
++    }
++
++    // A provider.read(path) resolved. `file` is the FileProvider's
++    // file shape (content/language/version/updated_at). `saved` and
++    // `edited` start equal — nothing to save until the user types.
++    case "FILE_LOADED": {
++      const { path, file } = action;
++      return {
++        ...state,
++        buffers: {
++          ...state.buffers,
++          [path]: {
++            saved: file.content || "",
++            edited: file.content || "",
++            version: file.version ?? 0,
++            dirty: false,
++            stale: false,
++            language: file.language || null,
++            updatedAt: file.updated_at || null,
++          },
++        },
++      };
++    }
++
++    // Every keystroke in the editor. No-ops on a path with no buffer
++    // yet (can't happen from CodeView's own UI — the textarea only
++    // exists once a file is loaded — but a reducer should never throw
++    // on an ordering it doesn't expect).
++    case "EDIT_BUFFER": {
++      const { path, content } = action;
++      const buffer = state.buffers[path];
++      if (!buffer) return state;
++      return {
++        ...state,
++        buffers: {
++          ...state.buffers,
++          [path]: { ...buffer, edited: content, dirty: content !== buffer.saved },
++        },
++      };
++    }
++
++    // A provider.write(path, ...) resolved. `file` is the server's
++    // confirmed shape post-save — swapped in as BOTH `saved` and
++    // `edited` (matching the pre-W2.2 `setFileContent(saved);
++    // setEditedContent(saved.content || "")` pair), so a save also
++    // clears `dirty`/`stale`.
++    case "SAVE_SUCCESS": {
++      const { path, file } = action;
++      const buffer = state.buffers[path];
++      return {
++        ...state,
++        buffers: {
++          ...state.buffers,
++          [path]: {
++            ...(buffer || {}),
++            saved: file.content || "",
++            edited: file.content || "",
++            version: file.version ?? buffer?.version ?? 0,
++            dirty: false,
++            stale: false,
++            language: file.language ?? buffer?.language ?? null,
++            updatedAt: file.updated_at || null,
++          },
++        },
++      };
++    }
++
++    // A subscribe() callback named this file while it had unsaved
++    // edits — the W0.1 "don't clobber the textarea, show a banner
++    // instead" case. No-ops if the buffer isn't open (nothing to flag).
++    case "MARK_STALE": {
++      const { path } = action;
++      const buffer = state.buffers[path];
++      if (!buffer) return state;
++      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: true } } };
++    }
++
++    // "Keep mine" — dismiss the banner without discarding the edit.
++    // ("Reload" doesn't need its own action: it just re-opens the file,
++    // which is SET_ACTIVE_PATH + FILE_LOADED, same as any other open.)
++    case "CLEAR_STALE": {
++      const { path } = action;
++      const buffer = state.buffers[path];
++      if (!buffer || !buffer.stale) return state;
++      return { ...state, buffers: { ...state.buffers, [path]: { ...buffer, stale: false } } };
++    }
++
++    // The file list refreshed and this path is no longer in it (deleted
++    // or renamed elsewhere) — drop its tab and buffer, and clear
++    // activePath if it was the one showing.
++    case "CLOSE_TAB": {
++      const { path } = action;
++      if (!(path in state.buffers) && !state.tabs.includes(path) && state.activePath !== path) {
++        return state;
++      }
++      const { [path]: _removed, ...buffers } = state.buffers;
++      const tabs = state.tabs.filter((p) => p !== path);
++      const activePath = state.activePath === path ? null : state.activePath;
++      return { ...state, tabs, buffers, activePath };
++    }
++
++    default:
++      return state;
++  }
++}
++
++export function EditorStoreProvider({ children }) {
++  const [state, dispatch] = useReducer(editorReducer, initialState);
++
++  // Action creators are memoized on `dispatch` alone — React guarantees
++  // `dispatch`'s identity never changes across a component's lifetime,
++  // so this object (and therefore every action function on it) is
++  // stable across re-renders too. That's what lets CodeViewBody's own
++  // Pusher-handler effect below list `markStale` in a dependency array
++  // without re-subscribing on every keystroke.
++  const actions = useMemo(
++    () => ({
++      setActivePath: (path) => dispatch({ type: "SET_ACTIVE_PATH", path }),
++      fileLoaded: (path, file) => dispatch({ type: "FILE_LOADED", path, file }),
++      editBuffer: (path, content) => dispatch({ type: "EDIT_BUFFER", path, content }),
++      saveSuccess: (path, file) => dispatch({ type: "SAVE_SUCCESS", path, file }),
++      markStale: (path) => dispatch({ type: "MARK_STALE", path }),
++      clearStale: (path) => dispatch({ type: "CLEAR_STALE", path }),
++      closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
++    }),
++    [dispatch]
++  );
++
++  const value = useMemo(() => ({ state, ...actions }), [state, actions]);
++
++  return createElement(EditorStoreContext.Provider, { value }, children);
++}
++
++/**
++ * Split from EditorStoreProvider into its own hook rather than having
++ * one component render the provider AND call this — a context
++ * provider's own value isn't visible to hooks called in the same
++ * component that mounts it. Same reason every provider/consumer pair
++ * in this codebase is already two components (see
++ * WorkspaceDockContext.jsx's own Provider + the hooks that read it).
++ */
++export function useEditorStore() {
++  const ctx = useContext(EditorStoreContext);
++  if (!ctx) {
++    throw new Error("useEditorStore must be used within an EditorStoreProvider");
++  }
++  return ctx;
++}
+diff --git a/frontend/app/lib/workbench/fileProviders.js b/frontend/app/lib/workbench/fileProviders.js
+new file mode 100644
+index 0000000..ca73965
+--- /dev/null
++++ b/frontend/app/lib/workbench/fileProviders.js
+@@ -0,0 +1,198 @@
++// frontend/app/lib/workbench/fileProviders.js — W2.2 (Build Workbench
++// plan, decision D6). `FileProvider` interface with one implementation
++// today (Cloud); `LocalFileProvider` follows in W3.1 once the daemon
++// side of things exists, behind this exact same shape. Explorer/tabs/
++// search/chips (W2.3+) talk to whichever provider is active through
++// this contract only, never to a route path directly — that's what
++// makes "merge Local Files into Build, daemon later" a real,
++// incremental change instead of a rewrite (plan §1.3/§2 D6).
++//
++// Contract (plan §5, step W2.2):
++//   id                          — "cloud" | "local"; for display/logging,
++//                                  never branched on by a caller
++//   capabilities                — { write, writeNeedsConfirm, history,
++//                                    search, terminal, watch }
++//   list()                      — Promise<{[path]: meta}>, content-free
++//   read(path)                  — Promise<file>, content included
++//   write(path, content, opts?) — Promise<file>; opts.baseVersion is
++//                                  optional optimistic-concurrency
++//                                  (W1.1); throws FileConflictError on
++//                                  a 409
++//   remove(path)                — Promise<{deleted_paths}>
++//   move(fromPath, toPath)      — Promise<file[]>
++//   mkdir(path)                 — Promise<file>
++//   subscribe(onChange)         — onChange({filePaths}) on every
++//                                  code_file_updated for this workspace;
++//                                  returns an unsubscribe function
++//
++// `history(path)` / `restore(path, version)` are included too, even
++// though W2.2's own CodeView doesn't call them yet — they're straight
++// wrappers around routes W1.1 already shipped
++// (GET/POST .../code/files/{path}/history|restore), and
++// `capabilities.history: true` should actually mean something rather
++// than being a flag nothing can act on until W2.6 gets here.
++//
++// CloudFileProvider wraps the existing `/api/workspaces/{id}/code/...`
++// routes (api/routes/code.py) exactly as CodeView's own fetch() calls
++// already did pre-W2.2, plus the W0.1 Pusher subscription — previously
++// inlined directly in BuildTab.jsx's CodeView (see that component's own
++// git history for the pre-W2.2 shape) — folded in here so every
++// consumer of this provider gets live refresh for free instead of each
++// reinventing the channel-name/bind_global/unbind_global dance.
++"use client";
++import { authHeaders } from "../../context/SessionContext";
++import { getPusherClient } from "../pusherClient";
++
++/**
++ * Thrown by write() when a `baseVersion` was supplied and the server's
++ * PUT rejected it with a 409 — see api/routes/code.py's put_code_file()
++ * docstring. `current` is the server's present file shape (content,
++ * version, updated_at/_by — the same shape every other method here
++ * resolves to), so a caller can offer Reload / Keep mine / Compare
++ * (W2.5) without a second round trip.
++ */
++export class FileConflictError extends Error {
++  constructor(current) {
++    super("File changed on the server since it was last read");
++    this.name = "FileConflictError";
++    this.current = current;
++  }
++}
++
++async function parseErrorDetail(res) {
++  const body = await res.json().catch(() => null);
++  return body?.detail || `${res.status} ${res.statusText}`;
++}
++
++/**
++ * @param {{workspaceId: string, apiUrl: string}} config
++ * @returns a FileProvider backed by workspace_code_files (cloud storage)
++ */
++export function createCloudFileProvider({ workspaceId, apiUrl }) {
++  const base = `${apiUrl}/api/workspaces/${workspaceId}/code`;
++
++  return {
++    id: "cloud",
++    capabilities: {
++      write: true,
++      writeNeedsConfirm: false,
++      history: true,
++      search: false, // W2.6
++      terminal: false, // local-only, see W3.1
++      watch: true,
++    },
++
++    async list() {
++      const res = await fetch(`${base}/files`, { headers: await authHeaders() });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async read(path) {
++      // `{file_path:path}` on the backend takes the raw slashes as-is —
++      // no encoding needed, file_path is already shape-validated
++      // server-side (workspace_code_files._validate_file_path), same
++      // as every pre-W2.2 call site.
++      const res = await fetch(`${base}/files/${path}`, { headers: await authHeaders() });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async write(path, content, { baseVersion, language } = {}) {
++      // No base_version sent unless the caller passes one — None keeps
++      // the pre-W1.1 blind-overwrite behavior (see
++      // workspace_code_files.write_file()'s own docstring). W2.2's
++      // CodeView doesn't pass one yet (W2.5 is what starts doing that);
++      // this provider is already ready for it.
++      const res = await fetch(`${base}/files/${path}`, {
++        method: "PUT",
++        headers: await authHeaders({ json: true }),
++        body: JSON.stringify({ content, language, base_version: baseVersion ?? null }),
++      });
++      if (res.status === 409) {
++        const body = await res.json().catch(() => null);
++        throw new FileConflictError(body?.detail || null);
++      }
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async remove(path) {
++      const res = await fetch(`${base}/files/${path}`, {
++        method: "DELETE",
++        headers: await authHeaders(),
++      });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async move(fromPath, toPath) {
++      const res = await fetch(`${base}/move`, {
++        method: "POST",
++        headers: await authHeaders({ json: true }),
++        body: JSON.stringify({ from: fromPath, to: toPath }),
++      });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async mkdir(path) {
++      const res = await fetch(`${base}/folders`, {
++        method: "POST",
++        headers: await authHeaders({ json: true }),
++        body: JSON.stringify({ path }),
++      });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async history(path) {
++      const res = await fetch(`${base}/files/${path}/history`, { headers: await authHeaders() });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    async restore(path, version) {
++      const res = await fetch(`${base}/files/${path}/restore`, {
++        method: "POST",
++        headers: await authHeaders({ json: true }),
++        body: JSON.stringify({ version }),
++      });
++      if (!res.ok) throw new Error(await parseErrorDetail(res));
++      return res.json();
++    },
++
++    /**
++     * W0.1's Pusher subscription, relocated here from BuildTab.jsx's
++     * CodeView so it lives with the provider whose data it invalidates
++     * rather than the one component that happened to render it first —
++     * whatever ends up showing the file tree in W2.3 gets live refresh
++     * for free. Channel name, event name and payload shape are all
++     * unchanged: `workspace-${id}` (sanitised the same way PlanTab.jsx's
++     * own subscription is), `code_file_updated`, `{file_path?,
++     * file_paths?}`.
++     */
++    subscribe(onChange) {
++      const pusher = getPusherClient();
++      if (!pusher) return () => {}; // Pusher env vars not set — live refresh disabled
++
++      const channelName = `workspace-${workspaceId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
++      const channel = pusher.subscribe(channelName);
++      const handler = (eventType, data) => {
++        if (eventType !== "code_file_updated") return;
++        const filePaths = data?.file_paths?.length
++          ? data.file_paths
++          : data?.file_path
++          ? [data.file_path]
++          : [];
++        onChange({ filePaths });
++      };
++      channel.bind_global(handler);
++
++      return () => {
++        channel.unbind_global(handler);
++        pusher.unsubscribe(channelName);
++      };
++    },
++  };
++}
