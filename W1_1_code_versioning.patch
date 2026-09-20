@@ -1,0 +1,874 @@
+diff --git a/backend/api/routes/code.py b/backend/api/routes/code.py
+index 20056e1..c836e60 100644
+--- a/backend/api/routes/code.py
++++ b/backend/api/routes/code.py
+@@ -10,6 +10,13 @@ route here), and workspace_data.py's own docstring already scopes itself
+ to the pre-existing facts/panels/progress/export family — code files are
+ a new, separate concern that reads more clearly with its own file.
+ 
++W1.1 (Build Workbench plan): PUT gains an optional base_version for
++optimistic conflict detection (409 with the current file on a stale
++write), and two new routes — GET .../history and POST .../restore —
++expose eo/workspace_code_files.py's new version-history layer. See
++that module's own docstring for the full "why" (W1.1 update section
++near the top).
++
+ Same ownership-gate-then-delegate shape every workspace-scoped route in
+ this repo already uses (see workspace_data.py's panel-content routes,
+ api/routes/tasks.py's get_tasks_for_workspace): confirm the caller can
+@@ -25,6 +32,7 @@ from pydantic import BaseModel
+ 
+ from api.deps import require_auth
+ from eo import chat_workspace, workspace_code_files
++from eo.workspace_code_files import VersionConflictError
+ 
+ router = APIRouter()
+ 
+@@ -32,6 +40,17 @@ router = APIRouter()
+ class CodeFileWriteRequest(BaseModel):
+     content: str
+     language: str | None = None  # optional -- write_file() infers from the extension when omitted
++    # W1.1: optional optimistic-concurrency check. None (the default)
++    # keeps the pre-W1.1 blind-overwrite behavior -- see
++    # workspace_code_files.write_file()'s own docstring for why that's
++    # still the right default for a caller with nothing to compare
++    # against. The editor (once W2.5's Save flow lands) always sends
++    # the version it last read.
++    base_version: int | None = None
++
++
++class RestoreVersionRequest(BaseModel):
++    version: int
+ 
+ 
+ def _require_workspace(ws_id: str, owner_id: str):
+@@ -52,6 +71,53 @@ def list_code_files(ws_id: str, owner_id: str = Depends(require_auth)):
+     return workspace_code_files.list_files(ws_id)
+ 
+ 
++# W1.1: registered BEFORE the generic GET/PUT `{file_path:path}` routes
++# below on purpose. FastAPI/Starlette matches routes in registration
++# order, and `{file_path:path}` is a greedy converter that swallows
++# every remaining `/`-separated segment -- if the generic GET route
++# came first, a request for `.../code/files/src/app.py/history` would
++# match IT, with file_path resolving to the nonsensical
++# "src/app.py/history", and this route would never be reached. Keep
++# any future `{file_path:path}`-suffixed route above the two generic
++# ones for the same reason.
++
++@router.get(
++    "/api/workspaces/{ws_id}/code/files/{file_path:path}/history",
++    dependencies=[Depends(require_auth)],
++)
++def get_code_file_history(ws_id: str, file_path: str, owner_id: str = Depends(require_auth)):
++    """Past versions only, most recent first — see
++    workspace_code_files.get_file_history()'s own docstring for why the
++    current/live version isn't included here (GET the file itself for
++    that). Patch W2.6's History panel is the intended caller."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return workspace_code_files.get_file_history(ws_id, file_path)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
++@router.post(
++    "/api/workspaces/{ws_id}/code/files/{file_path:path}/restore",
++    dependencies=[Depends(require_auth)],
++)
++def restore_code_file(
++    ws_id: str, file_path: str, req: RestoreVersionRequest, owner_id: str = Depends(require_auth)
++):
++    """Brings an old version back as a NEW version — see
++    workspace_code_files.restore_version()'s own docstring for why this
++    never conflicts and never rewrites history. 400 (not 404) when
++    `version` doesn't exist for this file, same "bad reference, not a
++    missing resource" treatment a bad file_path already gets from every
++    other route in this file — the workspace and the route both exist;
++    it's the referenced version that's invalid."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return workspace_code_files.restore_version(ws_id, file_path, req.version, owner_id)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
+ @router.get("/api/workspaces/{ws_id}/code/files/{file_path:path}", dependencies=[Depends(require_auth)])
+ def get_code_file(ws_id: str, file_path: str, owner_id: str = Depends(require_auth)):
+     """`{file_path:path}` (not the default `{file_path}`) so a nested
+@@ -67,9 +133,21 @@ def get_code_file(ws_id: str, file_path: str, owner_id: str = Depends(require_au
+ 
+ @router.put("/api/workspaces/{ws_id}/code/files/{file_path:path}", dependencies=[Depends(require_auth)])
+ def put_code_file(ws_id: str, file_path: str, req: CodeFileWriteRequest, owner_id: str = Depends(require_auth)):
++    """W1.1: `req.base_version` is optional optimistic-concurrency —
++    None keeps the old blind-overwrite behavior. When it's given and
++    stale, workspace_code_files.write_file() raises
++    VersionConflictError, caught below and turned into a 409 whose body
++    IS the current file (version included) — everything a client needs
++    to offer Reload / Keep mine / Compare (W2.5) without a second
++    round trip."""
+     _require_workspace(ws_id, owner_id)
+     try:
+-        return workspace_code_files.write_file(ws_id, file_path, req.content, owner_id, language=req.language)
++        return workspace_code_files.write_file(
++            ws_id, file_path, req.content, owner_id,
++            language=req.language, base_version=req.base_version,
++        )
++    except VersionConflictError as e:
++        raise HTTPException(status_code=409, detail=e.current)
+     except ValueError as e:
+         raise HTTPException(status_code=400, detail=str(e))
+ 
+diff --git a/backend/eo/workspace_code_files.py b/backend/eo/workspace_code_files.py
+index 0bd5e6f..437f20f 100644
+--- a/backend/eo/workspace_code_files.py
++++ b/backend/eo/workspace_code_files.py
+@@ -30,16 +30,44 @@ a codebase is a different kind of data than one pasted blob per panel:
+      is the per-file call that returns content, fetched on click-to-open
+      — see that function's own docstring.
+ 
+-Schema (see migrations/0006_add_workspace_code_files.sql):
++W1.1 update (versioning/history/conflict detection): this module used
++to be pure last-write-wins with no history at all (same posture
++panel_content.set_content() still documents for itself). That was a
++real gap — chat regenerating a file while it's open in the editor
++silently clobbered a hand edit, and the reverse (Save landing while a
++regen was mid-flight) silently clobbered the newer AI output, with no
++way to recover either side. Every row now carries a `version`;
++write_file() takes an optional `base_version` and raises
++VersionConflictError (api/routes/code.py turns that into a 409 with
++the current file) when it's given and stale; every write that
++replaces existing content snapshots what it's about to overwrite into
++workspace_code_file_versions first, pruned to the most recent
++_MAX_HISTORY_VERSIONS rows per file. See write_file(), write_files(),
++get_file_history(), and restore_version()'s own docstrings below, and
++migrations/0009_code_file_versions.sql's header for the full picture.
++
++Schema (see migrations/0006_add_workspace_code_files.sql and
++migrations/0009_code_file_versions.sql):
+     workspace_code_files(
+         workspace_id  text references workspaces(id) on delete cascade,
+         file_path     text,
+         content       text,
+         language      text,
++        version       int not null default 1,
+         updated_at    timestamptz,
+         updated_by    text,
+         primary key (workspace_id, file_path)
+     )
++    workspace_code_file_versions(
++        workspace_id  text references workspaces(id) on delete cascade,
++        file_path     text,
++        version       int,
++        content       text,
++        updated_at    timestamptz,
++        updated_by    text,
++        source        text,   -- 'user' | 'pipeline' | 'proposal' | 'restore'
++        primary key (workspace_id, file_path, version)
++    )
+ """
+ import io
+ import os
+@@ -59,6 +87,40 @@ from eo.audit_log import write_audit
+ _MAX_PATH_LENGTH = 512
+ _VALID_PATH_CHARS = re.compile(r"^[A-Za-z0-9_./-]+$")
+ 
++# W1.1: how many past versions workspace_code_file_versions keeps per
++# (workspace_id, file_path) — see _prune_history()'s own docstring for
++# why this runs after every write instead of as a separate cleanup job.
++_MAX_HISTORY_VERSIONS = 30
++
++# W1.1: the closed set of "who/what produced the version being
++# replaced" values workspace_code_file_versions.source accepts — kept
++# in lockstep with migrations/0009_code_file_versions.sql's CHECK
++# constraint by hand (small, stable set; not worth an Enum + DB-side
++# derivation the way relay/emitter.py's EventType is, since nothing
++# outside this module ever needs to enumerate these).
++_VALID_VERSION_SOURCES = {"user", "pipeline", "proposal", "restore"}
++
++
++class VersionConflictError(Exception):
++    """Raised by write_file() when a caller-supplied base_version
++    doesn't match the row's current version — same role
++    eo/chat_workspace.py's WorkspaceAccessError plays for ownership
++    checks: a typed exception the route layer catches specifically,
++    rather than a bare ValueError that would be indistinguishable from
++    a bad file_path. Carries `current` (the full current-file shape,
++    _row_to_file()'s or _empty_file()'s) so api/routes/code.py's PUT
++    handler can return it as-is in a 409 body — exactly "the current
++    file" the W1.1 spec's Done-when criteria asks for, so the client
++    can offer Reload / Keep mine / Compare without a second round trip
++    just to find out what it's conflicting with."""
++
++    def __init__(self, current: dict):
++        self.current = current
++        super().__init__(
++            f"version conflict on {current.get('file_path')!r}: base_version "
++            f"does not match the current version ({current.get('version')})"
++        )
++
+ 
+ def _validate_file_path(file_path: str) -> None:
+     if not file_path or not file_path.strip():
+@@ -124,41 +186,67 @@ def _iso(value):
+ 
+ def _row_to_meta(row: dict) -> dict:
+     """Metadata shape — no `content` key. See list_files()'s docstring
+-    for why the list endpoint deliberately omits it."""
++    for why the list endpoint deliberately omits it. W1.1: gains
++    `version` like every other shape in this module — cheap (already
++    on the row) and lets the file-tree view flag "this file has
++    history" without a second call."""
+     return {
+         "workspace_id": row["workspace_id"],
+         "file_path": row["file_path"],
+         "language": row.get("language"),
+         "size": len(row["content"]) if row.get("content") is not None else 0,
++        "version": row.get("version", 1),
+         "updated_at": _iso(row["updated_at"]),
+         "updated_by": row.get("updated_by"),
+     }
+ 
+ 
+ def _row_to_file(row: dict) -> dict:
+-    """Full shape, content included — what get_file()/write_file()
+-    return."""
++    """Full shape, content included — what get_file()/write_file()/
++    write_files()/restore_version() return. W1.1: gains `version`."""
+     return {
+         "workspace_id": row["workspace_id"],
+         "file_path": row["file_path"],
+         "content": row["content"],
+         "language": row.get("language"),
++        "version": row.get("version", 1),
+         "updated_at": _iso(row["updated_at"]),
+         "updated_by": row.get("updated_by"),
+     }
+ 
+ 
+ def _empty_file(ws_id: str, file_path: str) -> dict:
++    """W1.1: version 0 — deliberately not 1, so it reads distinctly
++    from "a real saved file at version 1" and so a caller that passes
++    base_version=0 to write_file() on a path that's never been saved is
++    treated as "I know this doesn't exist yet" (matches current) rather
++    than a conflict; base_version=None (the default) still skips the
++    check entirely regardless of whether the file exists."""
+     return {
+         "workspace_id": ws_id,
+         "file_path": file_path,
+         "content": "",
+         "language": None,
++        "version": 0,
+         "updated_at": None,
+         "updated_by": None,
+     }
+ 
+ 
++def _row_to_version_entry(row: dict) -> dict:
++    """One workspace_code_file_versions row, as returned by
++    get_file_history() — no workspace_id/file_path keys (the caller
++    already knows which file it asked about; every entry in the list is
++    the same file), unlike _row_to_file()'s shape."""
++    return {
++        "version": row["version"],
++        "content": row["content"],
++        "source": row.get("source"),
++        "updated_at": _iso(row["updated_at"]),
++        "updated_by": row.get("updated_by"),
++    }
++
++
+ def list_files(ws_id: str) -> dict:
+     """Every saved file's metadata for a workspace, keyed by file_path —
+     content deliberately omitted, see this module's own docstring.
+@@ -168,7 +256,7 @@ def list_files(ws_id: str) -> dict:
+     then calls get_file() per click-to-open."""
+     with db.cursor(trusted=True) as cur:
+         cur.execute(
+-            "select workspace_id, file_path, content, language, updated_at, updated_by "
++            "select workspace_id, file_path, content, language, version, updated_at, updated_by "
+             "from workspace_code_files where workspace_id = %s",
+             (ws_id,),
+         )
+@@ -183,7 +271,7 @@ def get_file(ws_id: str, file_path: str) -> dict:
+     _validate_file_path(file_path)
+     with db.cursor(trusted=True) as cur:
+         cur.execute(
+-            "select workspace_id, file_path, content, language, updated_at, updated_by "
++            "select workspace_id, file_path, content, language, version, updated_at, updated_by "
+             "from workspace_code_files where workspace_id = %s and file_path = %s",
+             (ws_id, file_path),
+         )
+@@ -191,34 +279,152 @@ def get_file(ws_id: str, file_path: str) -> dict:
+     return _row_to_file(row) if row else _empty_file(ws_id, file_path)
+ 
+ 
+-def write_file(ws_id: str, file_path: str, content: str, user_id: str, language: str | None = None) -> dict:
+-    """Upsert, last-write-wins — same posture panel_content.set_content()
+-    documents (no version history; a bigger feature, deliberately out of
+-    scope for this pass, same as it was for panel_content). `language`
+-    defaults to an extension-based guess (_infer_language) when the
+-    caller doesn't already know it — patch 9's task_runner.py hook will
+-    have code_writers.py's own declared language and can pass it
+-    explicitly instead of relying on the guess."""
++def _prune_history(cur, ws_id: str, file_path: str) -> None:
++    """Keeps at most _MAX_HISTORY_VERSIONS rows in
++    workspace_code_file_versions for one (workspace_id, file_path),
++    deleting the oldest beyond that. Runs inside the SAME transaction
++    as the write that just added a row, right after it — not a
++    separate cleanup job/cron — so the table never actually grows
++    past _MAX_HISTORY_VERSIONS + 0 rows for any one file between
++    writes; there's no window where an unbounded history sits waiting
++    to be swept. Cheap because it's a per-file operation triggered
++    exactly once per write to that file, not a table-wide scan."""
++    cur.execute(
++        """
++        delete from workspace_code_file_versions
++        where workspace_id = %s and file_path = %s
++          and version not in (
++              select version from workspace_code_file_versions
++              where workspace_id = %s and file_path = %s
++              order by version desc
++              limit %s
++          )
++        """,
++        (ws_id, file_path, ws_id, file_path, _MAX_HISTORY_VERSIONS),
++    )
++
++
++def _snapshot_and_upsert(cur, ws_id: str, file_path: str, content: str,
++                          resolved_language: str | None, user_id: str,
++                          source: str, current_row: dict | None) -> dict:
++    """The write half every versioned write in this module shares —
++    write_file(), write_files() (per-file inside its own batch
++    statements, see that function for why it doesn't call this
++    directly), and restore_version() all reduce to "snapshot whatever
++    is live right now (if anything), then upsert the new content in as
++    the next version." Must run inside a transaction that already holds
++    a row lock on (ws_id, file_path) via `... for update` (write_file()/
++    restore_version() take it themselves before calling this; the
++    caller is trusted to have done so) — otherwise two concurrent
++    callers could both read the same current_row and race to insert the
++    same next version number.
++
++    `current_row` is the row this write is about to replace, already
++    fetched by the caller (None for a brand-new file — nothing to
++    snapshot, version starts at 1, no prune needed since there's
++    nothing yet to prune). `source` must be one of
++    _VALID_VERSION_SOURCES; a bad value is a caller bug, not a runtime
++    condition, so it fails loud rather than silently defaulting."""
++    if source not in _VALID_VERSION_SOURCES:
++        raise ValueError(f"source must be one of {sorted(_VALID_VERSION_SOURCES)}, got {source!r}")
++
++    now = _now()
++    if current_row is not None:
++        cur.execute(
++            """
++            insert into workspace_code_file_versions
++                (workspace_id, file_path, version, content, updated_at, updated_by, source)
++            values (%s, %s, %s, %s, %s, %s, %s)
++            """,
++            (ws_id, file_path, current_row["version"], current_row["content"],
++             current_row["updated_at"], current_row["updated_by"], source),
++        )
++    new_version = (current_row["version"] if current_row is not None else 0) + 1
++
++    cur.execute(
++        """
++        insert into workspace_code_files (workspace_id, file_path, content, language, version, updated_at, updated_by)
++        values (%s, %s, %s, %s, %s, %s, %s)
++        on conflict (workspace_id, file_path)
++        do update set content = excluded.content, language = excluded.language,
++                      version = excluded.version, updated_at = excluded.updated_at,
++                      updated_by = excluded.updated_by
++        returning workspace_id, file_path, content, language, version, updated_at, updated_by
++        """,
++        (ws_id, file_path, content, resolved_language, new_version, now, user_id),
++    )
++    new_row = cur.fetchone()
++
++    if current_row is not None:
++        _prune_history(cur, ws_id, file_path)
++
++    return new_row
++
++
++def write_file(ws_id: str, file_path: str, content: str, user_id: str,
++                language: str | None = None, base_version: int | None = None,
++                source: str = "user") -> dict:
++    """Upsert, with W1.1's optimistic conflict check and version
++    history layered in. `language` defaults to an extension-based guess
++    (_infer_language) when the caller doesn't already know it, same as
++    before this patch.
++
++    base_version: when given (not None), the caller is asserting "I
++    last read this file at version N — only write if it's still at
++    version N." A brand-new, never-saved file has version 0 (see
++    _empty_file()), so base_version=0 correctly matches "I know this
++    doesn't exist yet." If the assertion doesn't hold, raises
++    VersionConflictError carrying the row's actual current state (the
++    route layer turns this into a 409 with the current file — see that
++    exception's own docstring) and writes NOTHING. Leave base_version
++    unset (the default, None) to skip the check entirely and always
++    win, same blind-overwrite behavior this function had before W1.1 —
++    that's still the right call for a caller with no "base" to compare
++    against (e.g. a first-time create flow that already knows the path
++    is new).
++
++    The `select ... for update` below takes a real row lock for the
++    rest of this transaction — same reasoning and same pattern
++    eo/chat_store.py's append_message() already uses for its own
++    read-then-write race — so two rapid concurrent write_file() calls
++    against the SAME (ws_id, file_path) are serialized: the second one
++    to acquire the lock sees the first one's already-committed version,
++    and either proceeds (no base_version given, or it still matches) or
++    conflicts correctly instead of both reading stale state and one
++    silently clobbering the other.
++
++    source: who/what this write is attributed to in
++    workspace_code_file_versions.source for the row this write
++    replaces (not for the new row itself — the new row's provenance
++    only lives in updated_by until IT is later replaced). Defaults to
++    "user" since api/routes/code.py's PUT route (a person's own Save)
++    is this function's only direct caller today; restore_version()
++    below passes "restore" explicitly. write_files() does not call this
++    function (see its own docstring for why) but keeps the same
++    contract."""
+     _validate_file_path(file_path)
+     resolved_language = language or _infer_language(file_path)
+     with db.cursor(user_id=user_id) as cur:
+         cur.execute(
+-            """
+-            insert into workspace_code_files (workspace_id, file_path, content, language, updated_at, updated_by)
+-            values (%s, %s, %s, %s, %s, %s)
+-            on conflict (workspace_id, file_path)
+-            do update set content = excluded.content, language = excluded.language,
+-                          updated_at = excluded.updated_at, updated_by = excluded.updated_by
+-            returning workspace_id, file_path, content, language, updated_at, updated_by
+-            """,
+-            (ws_id, file_path, content, resolved_language, _now(), user_id),
++            "select workspace_id, file_path, content, language, version, updated_at, updated_by "
++            "from workspace_code_files where workspace_id = %s and file_path = %s for update",
++            (ws_id, file_path),
+         )
+-        row = cur.fetchone()
+-    write_audit(user_id, "code_file.write", "workspace", ws_id, {"file_path": file_path})
+-    return _row_to_file(row)
++        current_row = cur.fetchone()
++        current_version = current_row["version"] if current_row is not None else 0
++
++        if base_version is not None and base_version != current_version:
++            conflict_shape = _row_to_file(current_row) if current_row is not None else _empty_file(ws_id, file_path)
++            raise VersionConflictError(conflict_shape)
++
++        new_row = _snapshot_and_upsert(cur, ws_id, file_path, content, resolved_language,
++                                        user_id, source, current_row)
++    write_audit(user_id, "code_file.write", "workspace", ws_id,
++                {"file_path": file_path, "version": new_row["version"]})
++    return _row_to_file(new_row)
+ 
+ 
+-def write_files(ws_id: str, files: list[dict], user_id: str) -> list[dict]:
++def write_files(ws_id: str, files: list[dict], user_id: str, source: str = "pipeline") -> list[dict]:
+     """Bulk counterpart to write_file() above — perf audit follow-up
+     (registry.py N+1, part 3): api/task_runner.py's _write_code_files()
+     used to call write_file() once per generated file after every
+@@ -234,7 +440,32 @@ def write_files(ws_id: str, files: list[dict], user_id: str) -> list[dict]:
+     checkout, not N) instead of one audit row per file -- same "a
+     written fact, not a blow-by-blow log" tradeoff export_chats()
+     already documents elsewhere in this codebase for its own bulk path.
+-    2 pool checkouts total for N files, down from 2N.
++
++    W1.1 update: still 2 pool checkouts total for N files (not counting
++    the history/prune statements below, which run inside that SAME
++    checkout's transaction, not a new one) -- versioning didn't reopen
++    the N+1 this function exists to close. What changed: the SELECT
++    that used to not exist now reads every file_path's CURRENT row (if
++    any) up front, `for update`, in the SAME transaction as the writes
++    below it -- same row-locking reasoning write_file()'s own docstring
++    explains, extended to the whole batch in one statement instead of
++    one lock per file. Any file that already existed gets its
++    pre-overwrite content snapshotted into workspace_code_file_versions
++    (source="pipeline" by default -- this is what makes a tier-3 regen
++    recoverable instead of silently destructive, the other half of the
++    W1.1 gap described in this module's own header docstring) and its
++    version bumped; a brand-new file starts at version 1 with nothing
++    to snapshot, same as write_file()'s own current_row=None case.
++    Unlike write_file(), this never conflict-checks against a
++    base_version -- a tier-3 regen has no "base version" a person
++    edited against and, same as before this patch, is meant to always
++    win; W1.1 only makes what it overwrites recoverable, not
++    conditional. Pruning past _MAX_HISTORY_VERSIONS per file is done as
++    ONE statement across every file in the batch that got a snapshot
++    (a window-function delete, see below) rather than looping
++    _prune_history() once per file -- looping there would put an extra
++    round trip back on exactly the N-round-trips-per-file path this
++    function exists to avoid.
+ 
+     `files`: list of {"file_path": str, "content": str,
+     "language": str | None} dicts. Every file_path is validated with
+@@ -264,32 +495,99 @@ def write_files(ws_id: str, files: list[dict], user_id: str) -> list[dict]:
+     uses for an empty hire list."""
+     if not files:
+         return []
++    if source not in _VALID_VERSION_SOURCES:
++        raise ValueError(f"source must be one of {sorted(_VALID_VERSION_SOURCES)}, got {source!r}")
+ 
+     now = _now()
+-    rows_params = []
++    paths = []
++    resolved_files = []  # (file_path, content, resolved_language)
+     for f in files:
+         file_path = f["file_path"]
+         _validate_file_path(file_path)
+         resolved_language = f.get("language") or _infer_language(file_path)
+-        rows_params.append((ws_id, file_path, f["content"], resolved_language, now, user_id))
+-
+-    placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(rows_params))
+-    flat_params = [p for row in rows_params for p in row]
++        paths.append(file_path)
++        resolved_files.append((file_path, f["content"], resolved_language))
+ 
+     with db.cursor(user_id=user_id) as cur:
++        # Lock every row this batch is about to touch up front, in one
++        # statement -- see this function's own docstring for why `for
++        # update` here mirrors write_file()'s single-row lock instead
++        # of leaving the batch write to race a concurrent single Save.
++        cur.execute(
++            "select file_path, content, version, updated_at, updated_by "
++            "from workspace_code_files where workspace_id = %s and file_path = any(%s) for update",
++            (ws_id, paths),
++        )
++        existing_by_path = {r["file_path"]: r for r in cur.fetchall()}
++
++        history_params = []
++        upsert_params = []
++        for file_path, content, resolved_language in resolved_files:
++            prior = existing_by_path.get(file_path)
++            if prior is not None:
++                history_params.append((
++                    ws_id, file_path, prior["version"], prior["content"],
++                    prior["updated_at"], prior["updated_by"], source,
++                ))
++            new_version = (prior["version"] if prior is not None else 0) + 1
++            upsert_params.append((ws_id, file_path, content, resolved_language, new_version, now, user_id))
++
++        if history_params:
++            history_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(history_params))
++            flat_history_params = [p for row in history_params for p in row]
++            cur.execute(
++                f"""
++                insert into workspace_code_file_versions
++                    (workspace_id, file_path, version, content, updated_at, updated_by, source)
++                values {history_placeholders}
++                """,
++                flat_history_params,
++            )
++
++        upsert_placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(upsert_params))
++        flat_upsert_params = [p for row in upsert_params for p in row]
+         cur.execute(
+             f"""
+-            insert into workspace_code_files (workspace_id, file_path, content, language, updated_at, updated_by)
+-            values {placeholders}
++            insert into workspace_code_files (workspace_id, file_path, content, language, version, updated_at, updated_by)
++            values {upsert_placeholders}
+             on conflict (workspace_id, file_path)
+             do update set content = excluded.content, language = excluded.language,
+-                          updated_at = excluded.updated_at, updated_by = excluded.updated_by
+-            returning workspace_id, file_path, content, language, updated_at, updated_by
++                          version = excluded.version, updated_at = excluded.updated_at,
++                          updated_by = excluded.updated_by
++            returning workspace_id, file_path, content, language, version, updated_at, updated_by
+             """,
+-            flat_params,
++            flat_upsert_params,
+         )
+         rows = cur.fetchall()
+ 
++        if history_params:
++            # One prune statement for the WHOLE batch, not one per
++            # file -- see this function's own docstring. A window
++            # function ranks each touched file's own versions newest
++            # first; anything past _MAX_HISTORY_VERSIONS for its own
++            # (workspace_id, file_path) partition gets deleted, same
++            # end state _prune_history()'s per-file NOT IN/LIMIT query
++            # leaves write_file()'s single-file callers in.
++            touched_paths = [row[1] for row in history_params]
++            cur.execute(
++                """
++                delete from workspace_code_file_versions
++                where (workspace_id, file_path, version) in (
++                    select workspace_id, file_path, version from (
++                        select workspace_id, file_path, version,
++                               row_number() over (
++                                   partition by workspace_id, file_path
++                                   order by version desc
++                               ) as rn
++                        from workspace_code_file_versions
++                        where workspace_id = %s and file_path = any(%s)
++                    ) ranked
++                    where rn > %s
++                )
++                """,
++                (ws_id, touched_paths, _MAX_HISTORY_VERSIONS),
++            )
++
+     # Best-effort, same "never let audit logging break the real
+     # operation it's attached to" contract write_audit() itself
+     # documents -- a failure here must not undo or fail the file writes
+@@ -301,6 +599,101 @@ def write_files(ws_id: str, files: list[dict], user_id: str) -> list[dict]:
+     return [_row_to_file(r) for r in rows]
+ 
+ 
++def get_file_history(ws_id: str, file_path: str) -> list[dict]:
++    """Past versions of one file, most recent first — exactly what's
++    stored in workspace_code_file_versions, capped at
++    _MAX_HISTORY_VERSIONS rows by the prune step every versioned write
++    runs. Deliberately does NOT include the current/live version (that
++    row lives in workspace_code_files, not here — get_file() is the
++    call for it); Patch W2.6's History panel is the intended caller,
++    and is expected to combine "get_file() for the current side" with
++    "get_file_history() for the past-versions list" the same way
++    list_files() + get_file() already split metadata from content.
++
++    Same `trusted=True` reasoning as list_files()/get_file() above —
++    this reads by (workspace_id, file_path) only, no per-call acting
++    user, so the RLS policy's trusted_internal branch is what lets a
++    normal read through; the route layer (api/routes/code.py) is what
++    actually gates on the caller being a member/owner of ws_id before
++    this function is ever reached."""
++    _validate_file_path(file_path)
++    with db.cursor(trusted=True) as cur:
++        cur.execute(
++            "select version, content, updated_at, updated_by, source "
++            "from workspace_code_file_versions "
++            "where workspace_id = %s and file_path = %s "
++            "order by version desc",
++            (ws_id, file_path),
++        )
++        rows = cur.fetchall()
++    return [_row_to_version_entry(r) for r in rows]
++
++
++def restore_version(ws_id: str, file_path: str, version: int, user_id: str) -> dict:
++    """Brings an old version's content back as a NEW version, rather
++    than deleting the versions in between or rewriting the past — same
++    "history is append-only" posture every write in this module already
++    takes with workspace_code_file_versions (see write_file()'s own
++    docstring, and migrations/0009_code_file_versions.sql's header for
++    why). Concretely: restoring version 3 when the file is currently at
++    version 7 does NOT delete versions 4-7 or turn the live row back
++    into "version 3" — it snapshots version 7 (like any other write
++    would) and writes version 3's content in as the new version 8, so
++    "what actually happened" stays a straight-line, undo-able story:
++    nothing is ever lost, including the restore itself.
++
++    Looks for `version` in two places, in order: the CURRENT live row
++    (restoring "the version you're already on" is a legitimate,
++    harmless no-op-content write, not a special case worth rejecting),
++    then workspace_code_file_versions. Raises ValueError — the route
++    layer turns this into a 400, same as a bad file_path — when
++    `version` isn't the current version and isn't in history either
++    (already pruned past _MAX_HISTORY_VERSIONS, or never existed).
++
++    A file's `language` isn't tracked per-version (see
++    migrations/0009_code_file_versions.sql's schema — deliberately
++    lean, no language column in the history table, since it's
++    overwhelmingly a pure function of file_path anyway via
++    _infer_language()), so a restore keeps the CURRENT row's language
++    when there is one, and falls back to re-inferring from file_path
++    when the file doesn't currently exist (e.g. restoring something
++    delete_file() removed — that path still works: this module's
++    delete_file() only removes the workspace_code_files row, never the
++    history, on purpose, so a deleted file's past stays restorable)."""
++    _validate_file_path(file_path)
++    with db.cursor(user_id=user_id) as cur:
++        cur.execute(
++            "select workspace_id, file_path, content, language, version, updated_at, updated_by "
++            "from workspace_code_files where workspace_id = %s and file_path = %s for update",
++            (ws_id, file_path),
++        )
++        current_row = cur.fetchone()
++
++        if current_row is not None and current_row["version"] == version:
++            target_content = current_row["content"]
++            target_language = current_row["language"]
++        else:
++            cur.execute(
++                "select content from workspace_code_file_versions "
++                "where workspace_id = %s and file_path = %s and version = %s",
++                (ws_id, file_path, version),
++            )
++            snapshot = cur.fetchone()
++            if snapshot is None:
++                raise ValueError(
++                    f"version {version} not found for {file_path!r} — it may have "
++                    f"already been pruned, or never existed"
++                )
++            target_content = snapshot["content"]
++            target_language = current_row["language"] if current_row is not None else _infer_language(file_path)
++
++        new_row = _snapshot_and_upsert(cur, ws_id, file_path, target_content, target_language,
++                                        user_id, "restore", current_row)
++    write_audit(user_id, "code_file.restore", "workspace", ws_id,
++                {"file_path": file_path, "restored_version": version, "new_version": new_row["version"]})
++    return _row_to_file(new_row)
++
++
+ def build_zip_archive(ws_id: str) -> bytes | None:
+     """Patch 11: zips the current file set for a workspace, in memory —
+     returns None when there are zero saved files (route layer turns that
+diff --git a/backend/migrations/0009_code_file_versions.sql b/backend/migrations/0009_code_file_versions.sql
+new file mode 100644
+index 0000000..791a510
+--- /dev/null
++++ b/backend/migrations/0009_code_file_versions.sql
+@@ -0,0 +1,147 @@
++-- 0009_code_file_versions.sql
++--
++-- W1.1 (MiniMe Build Workbench plan, step 16 follow-up): version
++-- history + optimistic conflict detection for workspace_code_files
++-- (migration 0006). Today every write -- a person's own Save via
++-- api/routes/code.py's PUT, and the tier-3 pipeline's batch regen via
++-- api/task_runner.py's _write_code_files() -- is a blind last-write-
++-- wins upsert with zero history: chat regenerating a file while it's
++-- open in the editor silently clobbers a hand edit, and the reverse
++-- (Save landing while a regen is mid-flight) silently clobbers the
++-- newer AI output, with no way to recover either side. See
++-- eo/workspace_code_files.py's write_file()/write_files() docstrings
++-- (as of migration 0006/patch 8) for the "no version history,
++-- deliberately out of scope" note this migration removes.
++--
++-- Two changes:
++--
++--   1. workspace_code_files gets a `version` integer column, default 1
++--      (so every already-saved file becomes "version 1, no history"
++--      the moment this runs -- there's nothing to backfill into
++--      workspace_code_file_versions for content that predates this
++--      migration). write_file() now accepts an optional base_version;
++--      when it's given and doesn't match the row's current version, it
++--      raises VersionConflictError and api/routes/code.py's PUT route
++--      turns that into a 409 carrying the current file, instead of
++--      silently overwriting. write_files() (the pipeline's batch path)
++--      is unchanged in that respect -- it still always wins, same as
++--      before this migration, since a tier-3 regen has no "base
++--      version" a person edited against -- but it now bumps `version`
++--      and snapshots the content it's about to overwrite first, so
++--      what used to be lost forever is at least recoverable from
++--      history.
++--
++--   2. New table workspace_code_file_versions: one row per PAST
++--      version of a file. The live/current version is never duplicated
++--      in here -- it only ever lives in workspace_code_files itself --
++--      a row lands here at the moment it's about to be superseded by a
++--      new write. `source` records what produced the version being
++--      replaced: `user` (a direct Save), `pipeline` (a tier-3 regen),
++--      `proposal` (reserved for W5.x's code_editor agent, once a
++--      reviewed edit's `resolve` writes through this same path), or
++--      `restore` (a History-panel restore -- see
++--      eo/workspace_code_files.py's restore_version() docstring for
++--      why that creates a NEW version instead of rewriting the past,
++--      same "history is append-only" posture audit_log and
++--      llm_call_log (migration 0008) already take elsewhere in this
++--      schema). Pruned to the most recent 30 rows per (workspace_id,
++--      file_path) after every write that adds one -- see
++--      _MAX_HISTORY_VERSIONS in eo/workspace_code_files.py -- so this
++--      table stays bounded per file regardless of how long a workspace
++--      has been iterated on.
++--
++-- Same "one row per key, RLS policy copied from the sibling table,
++-- RLS + GRANT in the SAME migration" shape workspace_code_files itself
++-- used in migration 0006 -- see migration 0007's own header comment
++-- for exactly the bug that splitting a new table's RLS policy from its
++-- GRANT across two separate migrations caused last time (0006 -> 0007:
++-- every query rejected at the privilege check, before RLS was ever
++-- evaluated). Not repeating that here.
++--
++-- HOW TO APPLY: run as the `postgres` role (same as every migration
++-- before this one, and required to GRANT on a table `minime_app`
++-- doesn't own) -- `psql "$DATABASE_URL" -f
++-- migrations/0009_code_file_versions.sql`. Uses ADD COLUMN IF NOT
++-- EXISTS / CREATE TABLE IF NOT EXISTS throughout, so it's safe to run
++-- more than once. No app restart needed -- same "Postgres checks
++-- privileges/RLS per-query, not per-connection" note migration 0007
++-- already makes.
++
++alter table workspace_code_files
++    add column if not exists version integer not null default 1;
++
++comment on column workspace_code_files.version is
++    'Current live version number for this file. Bumped by every '
++    'successful write (write_file()/write_files()/restore_version() in '
++    'eo/workspace_code_files.py), never reset, never reused. The '
++    'content that was live AT a past version lives in '
++    'workspace_code_file_versions, not here -- this row is always the '
++    'latest, by definition.';
++
++create table if not exists workspace_code_file_versions (
++    workspace_id  text not null references workspaces(id) on delete cascade,
++    file_path     text not null,
++    version       integer not null,
++    content       text not null default '',
++    updated_at    timestamptz,
++    updated_by    text,
++    source        text not null default 'user'
++                  check (source in ('user', 'pipeline', 'proposal', 'restore')),
++    primary key (workspace_id, file_path, version)
++);
++
++comment on table workspace_code_file_versions is
++    'One row per PAST version of a workspace_code_files row -- the '
++    'live/current version is never duplicated in here, only in '
++    'workspace_code_files itself. Written by '
++    'eo/workspace_code_files.py''s write_file()/write_files()/'
++    'restore_version() right before they overwrite a row that already '
++    'existed (a brand-new file has no prior version to snapshot, so it '
++    'never gets a row here). Read by get_file_history() (Patch W2.6''s '
++    'History panel) and restore_version(). Pruned to the most recent '
++    '30 rows per (workspace_id, file_path) after every insert -- see '
++    '_MAX_HISTORY_VERSIONS in that module -- so this table stays '
++    'bounded per file no matter how long a workspace has been edited.';
++
++-- Primary key (workspace_id, file_path, version) already gives an
++-- efficient index for both this table's own queries -- get_file_history()'s
++-- "order by version desc" for one (workspace_id, file_path), and the
++-- prune step's "keep the top 30 versions for this file" -- a B-tree
++-- index scans just as cheaply in either direction, so no separate
++-- index is needed on top of the PK.
++
++alter table workspace_code_file_versions enable row level security;
++alter table workspace_code_file_versions force row level security;
++
++-- Straight copy of workspace_code_files_scope (migration 0006) with
++-- the table name swapped, same reasoning as that policy's own header
++-- comment: get_file_history() runs with trusted=True (no per-call
++-- user_id) so the trusted branch is what lets normal reads through;
++-- the membership/ownership branches cover write_file()/write_files()/
++-- restore_version(), which do have a real user_id.
++drop policy if exists workspace_code_file_versions_scope on workspace_code_file_versions;
++create policy workspace_code_file_versions_scope on workspace_code_file_versions
++    for all
++    using (
++        workspace_id in (
++            select workspace_id from workspace_members
++            where user_id::text = current_setting('app.current_user_id', true)
++        )
++        or workspace_id in (
++            select id from workspaces
++            where owner_id::text = current_setting('app.current_user_id', true)
++        )
++        or current_setting('app.trusted_internal', true) = 'true'
++    );
++
++-- select/insert for normal snapshot writes and history reads; delete
++-- for the prune step (this table is NOT append-only the way audit_log/
++-- llm_call_log are -- pruning the oldest rows past 30 is an expected,
++-- routine part of every write, not an exceptional admin action). No
++-- update, ever -- once a version row is written its content is a fact
++-- about the past and nothing in this codebase should ever rewrite it;
++-- same "insurance against a future bug silently rewriting history"
++-- reasoning migration 0008 documents for llm_call_log, minus the
++-- delete restriction that table doesn't need and this one does.
++grant select, insert, delete on workspace_code_file_versions to minime_app;
++revoke update on workspace_code_file_versions from minime_app;

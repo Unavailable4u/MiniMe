@@ -1,0 +1,633 @@
+diff --git a/backend/api/routes/code.py b/backend/api/routes/code.py
+index c836e60..1a35b15 100644
+--- a/backend/api/routes/code.py
++++ b/backend/api/routes/code.py
+@@ -17,6 +17,16 @@ expose eo/workspace_code_files.py's new version-history layer. See
+ that module's own docstring for the full "why" (W1.1 update section
+ near the top).
+ 
++W1.2 (Build Workbench plan): DELETE .../code/files/{path} now covers a
++whole folder subtree, not just one file, and two new fixed-path
++routes — POST .../code/move and POST .../code/folders — expose
++eo/workspace_code_files.py's move_path() and create_folder(). Neither
++new route uses the `{file_path:path}` converter (their paths are the
++literal segments "move"/"folders", not a captured file path), so
++unlike GET .../history and POST .../restore above, they don't need any
++particular registration order relative to the generic
++`{file_path:path}` routes.
++
+ Same ownership-gate-then-delegate shape every workspace-scoped route in
+ this repo already uses (see workspace_data.py's panel-content routes,
+ api/routes/tasks.py's get_tasks_for_workspace): confirm the caller can
+@@ -28,7 +38,7 @@ import io
+ 
+ from fastapi import APIRouter, Depends, HTTPException
+ from fastapi.responses import StreamingResponse
+-from pydantic import BaseModel
++from pydantic import BaseModel, ConfigDict, Field
+ 
+ from api.deps import require_auth
+ from eo import chat_workspace, workspace_code_files
+@@ -53,6 +63,22 @@ class RestoreVersionRequest(BaseModel):
+     version: int
+ 
+ 
++class MovePathRequest(BaseModel):
++    """W1.2: field names match the plan's `{from, to}` shape on the
++    wire via `alias` — `from` alone can't be a Python attribute name,
++    it's a reserved keyword. `populate_by_name=True` lets tests/other
++    Python callers construct this with `from_path=`/`to_path=` too,
++    not just the aliased JSON keys."""
++    model_config = ConfigDict(populate_by_name=True)
++
++    from_path: str = Field(alias="from")
++    to_path: str = Field(alias="to")
++
++
++class CreateFolderRequest(BaseModel):
++    path: str
++
++
+ def _require_workspace(ws_id: str, owner_id: str):
+     try:
+         chat_workspace.get_workspace(ws_id, owner_id)
+@@ -152,6 +178,56 @@ def put_code_file(ws_id: str, file_path: str, req: CodeFileWriteRequest, owner_i
+         raise HTTPException(status_code=400, detail=str(e))
+ 
+ 
++@router.delete("/api/workspaces/{ws_id}/code/files/{file_path:path}", dependencies=[Depends(require_auth)])
++def delete_code_file(ws_id: str, file_path: str, owner_id: str = Depends(require_auth)):
++    """W1.2: `file_path` is matched as an exact file OR, by prefix, a
++    whole folder subtree — see workspace_code_files.delete_file()'s
++    own docstring for exactly what "prefix" means here (the same rule
++    move_path() uses below). Idempotent: a path with nothing under it
++    is 200 with an empty `deleted_paths`, not a 404 — deleting
++    something that's already gone is still success."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        deleted_paths = workspace_code_files.delete_file(ws_id, file_path, owner_id)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++    return {"deleted_paths": deleted_paths}
++
++
++# --- W1.2: folder/subtree operations (fixed paths — no `{file_path:path}`,
++# see this file's own docstring for why registration order doesn't matter
++# for these two) --------------------------------------------------------
++
++@router.post("/api/workspaces/{ws_id}/code/move", dependencies=[Depends(require_auth)])
++def move_code_path(ws_id: str, req: MovePathRequest, owner_id: str = Depends(require_auth)):
++    """W1.2: renames/moves a file or, by prefix, a folder subtree — see
++    workspace_code_files.move_path()'s own docstring for the full
++    "one transaction, history follows the file, refuses clobbering an
++    existing target" contract. A 400 here covers every one of that
++    function's refusal cases (same path twice, moving into your own
++    subtree, nothing at the source, a destination collision) — they're
++    all bad-request shape, not a missing-resource 404."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return workspace_code_files.move_path(ws_id, req.from_path, req.to_path, owner_id)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
++@router.post("/api/workspaces/{ws_id}/code/folders", dependencies=[Depends(require_auth)])
++def create_code_folder(ws_id: str, req: CreateFolderRequest, owner_id: str = Depends(require_auth)):
++    """W1.2: creates an (otherwise-invisible, see
++    workspace_code_files.create_folder()'s own docstring) empty folder
++    by writing a `.gitkeep` placeholder under it. Returns that
++    placeholder file's shape — same response shape PUT's write_file()
++    already returns."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return workspace_code_files.create_folder(ws_id, req.path, owner_id)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
+ # --- Patch 11: server-side ZIP of the current file set --------------------
+ 
+ @router.get("/api/workspaces/{ws_id}/code/zip", dependencies=[Depends(require_auth)])
+diff --git a/backend/eo/workspace_code_files.py b/backend/eo/workspace_code_files.py
+index 437f20f..14a5799 100644
+--- a/backend/eo/workspace_code_files.py
++++ b/backend/eo/workspace_code_files.py
+@@ -46,6 +46,24 @@ _MAX_HISTORY_VERSIONS rows per file. See write_file(), write_files(),
+ get_file_history(), and restore_version()'s own docstrings below, and
+ migrations/0009_code_file_versions.sql's header for the full picture.
+ 
++W1.2 update (path rules + file/folder operations): _VALID_PATH_CHARS
++used to reject every Next.js/SvelteKit route-folder convention --
++`[id]/page.js`, `(auth)/login.tsx`, `@modal`, `+page.svelte`, and any
++path with a space in it -- which meant write_files() would fail its
++WHOLE batch the first time code_writers.py generated a real Next.js
++app. Widened below to allow the specific extra punctuation those
++conventions use, while every traversal/absolute/length/charset-floor
++check stays exactly as strict as before. This update also wires up
++real file/folder operations: delete_file() now deletes a single file
++OR, by path prefix, an entire folder subtree (folders have no row of
++their own -- see create_folder()'s docstring); move_path() renames or
++moves a file or folder subtree, carrying its version history forward
++under the new path rather than starting over; create_folder() gives
++an otherwise-empty directory a `.gitkeep` row so it has something to
++render in the file tree. See each function's own docstring below, and
++api/routes/code.py for the new DELETE/.../move/.../folders routes that
++expose them.
++
+ Schema (see migrations/0006_add_workspace_code_files.sql and
+ migrations/0009_code_file_versions.sql):
+     workspace_code_files(
+@@ -85,7 +103,22 @@ from eo.audit_log import write_audit
+ # instead of allowlist-based since file paths can't be enumerated ahead
+ # of time.
+ _MAX_PATH_LENGTH = 512
+-_VALID_PATH_CHARS = re.compile(r"^[A-Za-z0-9_./-]+$")
++# W1.2: widened from `[A-Za-z0-9_./-]` to also allow `[ ] ( ) @ + ~ = ,`
++# and a literal space -- the exact extra punctuation Next.js/SvelteKit
++# route-folder conventions need (`[id]/page.js`, `(auth)/login.tsx`,
++# `@modal`, `+page.svelte`) plus filenames with spaces in them. Every
++# other check in _validate_file_path() below (leading `/` or `\`, `..`
++# segments, normpath escaping the root, max length) is unaffected and
++# still runs first -- this only widens which individual CHARACTERS are
++# legal, not what a path is allowed to resolve to. `%` and backslash are
++# deliberately still excluded: `%` has no legitimate use in a source
++# file path and this module's own move_path()/delete_file() build SQL
++# LIKE patterns from validated paths below (see _escape_like_prefix()),
++# so keeping it out of the allowlist entirely is one less thing that
++# escaping needs to defend against; backslash staying out keeps a
++# Windows-style path shape rejected by the charset itself, on top of
++# the explicit `startswith("\\")` check below.
++_VALID_PATH_CHARS = re.compile(r"^[A-Za-z0-9_./\[\]()@+~=, -]+$")
+ 
+ # W1.1: how many past versions workspace_code_file_versions keeps per
+ # (workspace_id, file_path) — see _prune_history()'s own docstring for
+@@ -141,10 +174,28 @@ def _validate_file_path(file_path: str) -> None:
+         raise ValueError("file_path resolves outside the workspace root")
+     if not _VALID_PATH_CHARS.match(file_path):
+         raise ValueError(
+-            "file_path may only contain letters, numbers, '.', '_', '-', and '/'"
++            "file_path may only contain letters, numbers, spaces, and "
++            "'.', '_', '-', '/', '[', ']', '(', ')', '@', '+', '~', '=', ','"
+         )
+ 
+ 
++# W1.2: delete_file() and move_path() below both need "this file, OR
++# everything under this folder" -- since folders have no row of their
++# own (see create_folder()'s docstring), "everything under this
++# folder" is expressed as a SQL `file_path LIKE 'prefix/%'` match
++# against the flat file_path column. `_VALID_PATH_CHARS` allows a
++# literal underscore in a real file path (e.g. `my_component.jsx`),
++# and `_` is a LIKE single-character wildcard -- without escaping it,
++# a prefix like `src/my_file` would also match an unrelated
++# `src/myXfile`. `%` can't actually appear in a validated file_path
++# (excluded from the charset above), and neither can a literal
++# backslash, but both are escaped anyway on the same "defend the
++# invariant at the point of use, don't just trust it was checked
++# upstream" principle _validate_file_path() itself follows.
++def _escape_like_prefix(prefix: str) -> str:
++    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++
++
+ # Extension -> language, for the file-tree view's syntax highlighting and
+ # for stamping a default when the caller doesn't pass one explicitly
+ # (e.g. a write coming from patch 9's task_runner.py hook, which has
+@@ -729,15 +780,227 @@ def build_zip_archive(ws_id: str) -> bytes | None:
+     return buf.getvalue()
+ 
+ 
+-def delete_file(ws_id: str, file_path: str, user_id: str) -> None:
+-    """Not currently wired to any UI affordance — included for parity
+-    with panel_content.delete_content() so a future "delete this file"
+-    action in patch 10's file-tree view doesn't need a new module
+-    function."""
+-    _validate_file_path(file_path)
++def delete_file(ws_id: str, path: str, user_id: str) -> list[str]:
++    """W1.2: deletes a single file OR, when `path` is a folder rather
++    than an exact file_path, every file under it — folders have no row
++    of their own in this schema (see create_folder()'s docstring), so
++    "delete this folder" can only ever mean "delete every file whose
++    path starts with this prefix." Matches `path` itself (an exact
++    file) OR anything starting with `path + "/"` (its subtree),
++    mirroring move_path()'s own discovery query below — the two
++    functions define "a file or the folder at this path" identically
++    on purpose, so a person can't move a subtree that DELETE would
++    have treated as empty, or vice versa.
++
++    Idempotent, same as this function's pre-W1.2 single-row DELETE
++    always was: a path with nothing under it deletes zero rows and
++    still returns (an empty list), rather than raising — same
++    "DELETE on something that's already gone is still success" REST
++    convention, now just also true for a folder that was already
++    empty or never existed. api/routes/code.py's DELETE route relies
++    on this to stay a plain 200/204, not a 404, on a repeat call.
++
++    Does NOT snapshot the deleted content into workspace_code_file_versions
++    before removing it — same "delete only touches the live row, never
++    history" posture this function had before W1.2. That's still the
++    right call here: every version PRIOR to the one live at delete time
++    is already in history from its own earlier write (nothing new to
++    capture there), and restore_version() already handles "the file
++    doesn't currently exist" by falling back to
++    workspace_code_file_versions (see that function's own docstring) —
++    so everything except the exact instant-of-deletion content stays
++    recoverable without this function needing to do anything extra.
++
++    Returns the list of file_paths actually deleted (empty for a
++    no-op), which api/routes/code.py's DELETE route echoes back so the
++    caller can confirm a folder delete's blast radius instead of
++    guessing from a bare 200."""
++    _validate_file_path(path)
++    escaped_prefix = _escape_like_prefix(path)
+     with db.cursor(user_id=user_id) as cur:
+         cur.execute(
+-            "delete from workspace_code_files where workspace_id = %s and file_path = %s",
+-            (ws_id, file_path),
++            "select file_path from workspace_code_files "
++            "where workspace_id = %s and (file_path = %s or file_path like %s escape '\\') "
++            "for update",
++            (ws_id, path, escaped_prefix + "/%"),
+         )
+-    write_audit(user_id, "code_file.delete", "workspace", ws_id, {"file_path": file_path})
++        deleted_paths = [r["file_path"] for r in cur.fetchall()]
++        if deleted_paths:
++            cur.execute(
++                "delete from workspace_code_files where workspace_id = %s and file_path = any(%s)",
++                (ws_id, deleted_paths),
++            )
++    write_audit(
++        user_id, "code_file.delete", "workspace", ws_id,
++        {"path": path, "deleted_paths": deleted_paths, "count": len(deleted_paths)},
++    )
++    return deleted_paths
++
++
++def create_folder(ws_id: str, folder_path: str, user_id: str) -> dict:
++    """W1.2: folders are implicit in this schema — there's no
++    directory row, only file rows, so a folder with nothing in it yet
++    has no way to "exist" at all (patch 10's file-tree view builds its
++    tree from list_files()'s flat file_path keys; a folder that owns
++    zero of those keys simply never appears). This writes a
++    `.gitkeep` placeholder file at `{folder_path}/.gitkeep` — the same
++    convention git itself uses for "track this otherwise-empty
++    directory" — so the tree has one real row to hang the folder off
++    of. The folder stops being empty (and this placeholder becomes
++    irrelevant clutter, same as in a git repo) the moment a real file
++    is saved under it; nothing here ever needs to clean it up.
++
++    Goes through write_file() rather than a hand-rolled insert, so a
++    created folder's `.gitkeep` gets the exact same path validation,
++    versioning and audit trail (`code_file.write`) as any other write.
++    That also makes this idempotent for free: creating a folder that
++    already has its `.gitkeep` (e.g. a double-click, or a folder that
++    already contains real files someone put a `.gitkeep` in on
++    purpose) is just an ordinary no-op rewrite of the same empty
++    content, not a case this function needs to special-case."""
++    if not folder_path or not folder_path.strip():
++        raise ValueError("folder_path cannot be empty")
++    placeholder_path = folder_path.rstrip("/") + "/.gitkeep"
++    return write_file(ws_id, placeholder_path, "", user_id, language="text", source="user")
++
++
++def move_path(ws_id: str, from_path: str, to_path: str, user_id: str) -> list[dict]:
++    """W1.2: renames or moves a single file OR, by prefix (see
++    delete_file()'s docstring for the identical "exact path or its
++    subtree" matching rule), an entire folder — in ONE transaction, so
++    a folder move either lands completely or not at all, never half
++    the files at the new path and half stuck at the old one.
++
++    Unlike a plain overwrite, a move carries the file's identity
++    forward rather than treating the new path as a brand-new file:
++    every existing row in workspace_code_file_versions for the old
++    path is re-keyed to the new path FIRST, then the content that was
++    live at the old path is snapshotted into history at the new path
++    (source="user" — there's no dedicated "move" source value; this
++    doesn't touch migrations/0009_code_file_versions.sql's CHECK
++    constraint, and a move is a person-initiated write-like action the
++    same way a Save is), and finally the live row is re-inserted under
++    the new path one version higher. End state: `get_file_history()`
++    on the NEW path returns the file's complete history, old versions
++    included, with no gap at the point of the move — same "nothing is
++    ever lost, including this operation itself" posture
++    restore_version() already documents for itself.
++
++    Refuses (raises ValueError, which the route layer turns into a
++    400) rather than silently overwriting when:
++      - `from_path == to_path` — not a move.
++      - `to_path` is `from_path` itself or lies inside `from_path`'s
++        own subtree (`to_path == from_path` or
++        `to_path.startswith(from_path + "/")`) — moving a folder into
++        one of its own descendants, which this function can't express
++        as a single consistent rewrite.
++      - nothing exists at `from_path` (no exact file, no subtree).
++      - the prefix rewrite would produce two different source files
++        landing on the same destination path (shouldn't happen with a
++        straightforward prefix swap, but checked rather than assumed).
++      - any computed destination path already has a LIVE row that
++        ISN'T one of the paths being moved in this same batch — i.e.
++        the actual "refuses overwriting an existing target" the W1.2
++        spec asks for. A destination that collides with another row
++        in the SAME batch (only possible if that row is also moving
++        away from under `from_path`) is not a real collision and is
++        allowed.
++
++    The initial discovery SELECT takes `for update` on every row this
++    move will touch, in one statement — same row-locking reasoning
++    write_file()'s and write_files()'s own docstrings give for their
++    own `for update` selects — so a concurrent write to a file mid-move
++    blocks until the move's transaction commits or rolls back, instead
++    of racing it.
++
++    Returns the moved files' new (post-move) shapes, one per file,
++    same `_row_to_file()` shape write_file() itself returns."""
++    _validate_file_path(from_path)
++    _validate_file_path(to_path)
++    if from_path == to_path:
++        raise ValueError("from and to must be different paths")
++    if to_path == from_path or to_path.startswith(from_path + "/"):
++        raise ValueError(f"cannot move {from_path!r} into its own subtree ({to_path!r})")
++
++    escaped_prefix = _escape_like_prefix(from_path)
++    with db.cursor(user_id=user_id) as cur:
++        cur.execute(
++            "select workspace_id, file_path, content, language, version, updated_at, updated_by "
++            "from workspace_code_files "
++            "where workspace_id = %s and (file_path = %s or file_path like %s escape '\\') "
++            "for update",
++            (ws_id, from_path, escaped_prefix + "/%"),
++        )
++        rows = cur.fetchall()
++        if not rows:
++            raise ValueError(f"nothing found at {from_path!r}")
++
++        moves = []  # [(row, new_path), ...]
++        new_paths = []
++        for row in rows:
++            old_path = row["file_path"]
++            new_path = to_path if old_path == from_path else to_path + old_path[len(from_path):]
++            _validate_file_path(new_path)
++            moves.append((row, new_path))
++            new_paths.append(new_path)
++
++        if len(set(new_paths)) != len(new_paths):
++            raise ValueError("move would land two different files on the same destination path")
++
++        cur.execute(
++            "select file_path from workspace_code_files where workspace_id = %s and file_path = any(%s)",
++            (ws_id, new_paths),
++        )
++        # A destination path that only "collides" because it's ALSO one
++        # of the rows this same move is carrying away from under
++        # from_path isn't really occupied -- by the time this move
++        # finishes, that row won't be there anymore. Only a hit outside
++        # that set is a genuine pre-existing file this move would
++        # otherwise clobber.
++        moved_from_paths = {row["file_path"] for row, _ in moves}
++        real_collisions = {r["file_path"] for r in cur.fetchall()} - moved_from_paths
++        if real_collisions:
++            raise ValueError(f"refusing to overwrite existing path(s): {sorted(real_collisions)}")
++
++        now = _now()
++        moved_shapes = []
++        for row, new_path in moves:
++            old_path = row["file_path"]
++            cur.execute(
++                "update workspace_code_file_versions set file_path = %s "
++                "where workspace_id = %s and file_path = %s",
++                (new_path, ws_id, old_path),
++            )
++            cur.execute(
++                """
++                insert into workspace_code_file_versions
++                    (workspace_id, file_path, version, content, updated_at, updated_by, source)
++                values (%s, %s, %s, %s, %s, %s, %s)
++                """,
++                (ws_id, new_path, row["version"], row["content"],
++                 row["updated_at"], row["updated_by"], "user"),
++            )
++            cur.execute(
++                "delete from workspace_code_files where workspace_id = %s and file_path = %s",
++                (ws_id, old_path),
++            )
++            new_version = row["version"] + 1
++            cur.execute(
++                """
++                insert into workspace_code_files
++                    (workspace_id, file_path, content, language, version, updated_at, updated_by)
++                values (%s, %s, %s, %s, %s, %s, %s)
++                returning workspace_id, file_path, content, language, version, updated_at, updated_by
++                """,
++                (ws_id, new_path, row["content"], row["language"], new_version, now, user_id),
++            )
++            new_row = cur.fetchone()
++            _prune_history(cur, ws_id, new_path)
++            moved_shapes.append(_row_to_file(new_row))
++
++    write_audit(
++        user_id, "code_files.move", "workspace", ws_id,
++        {"from": from_path, "to": to_path, "count": len(moved_shapes),
++         "paths": [m["file_path"] for m in moved_shapes]},
++    )
++    return moved_shapes
+diff --git a/backend/tests/unit/test_eo_workspace_code_files.py b/backend/tests/unit/test_eo_workspace_code_files.py
+index e1384a2..7725723 100644
+--- a/backend/tests/unit/test_eo_workspace_code_files.py
++++ b/backend/tests/unit/test_eo_workspace_code_files.py
+@@ -148,6 +148,57 @@ def test_validate_file_path_accepts_a_bare_filename():
+     workspace_code_files._validate_file_path("README.md")  # no raise
+ 
+ 
++# W1.2: widened _VALID_PATH_CHARS -- Next.js/SvelteKit route-folder
++# conventions and filenames with spaces must now be accepted, while
++# every traversal/absolute/length check from above must keep rejecting
++# exactly what it always did.
++
++@pytest.mark.parametrize("path", [
++    "app/[id]/page.js",
++    "app/(auth)/login.tsx",
++    "app/@modal/(.)photo.tsx",
++    "src/routes/+page.svelte",
++    "src/my component.jsx",
++])
++def test_validate_file_path_accepts_nextjs_sveltekit_route_conventions(path):
++    workspace_code_files._validate_file_path(path)  # no raise
++
++
++def test_validate_file_path_still_rejects_dotdot_traversal_with_widened_charset():
++    with pytest.raises(ValueError):
++        workspace_code_files._validate_file_path("app/(auth)/../../etc/passwd")
++
++
++def test_validate_file_path_still_rejects_embedded_dotdot_with_widened_charset():
++    with pytest.raises(ValueError):
++        workspace_code_files._validate_file_path("a/../../b")
++
++
++def test_validate_file_path_rejects_null_byte():
++    with pytest.raises(ValueError):
++        workspace_code_files._validate_file_path("src/\x00evil.py")
++
++
++def test_validate_file_path_still_rejects_percent_sign():
++    # % stays out of the allowlist even after widening -- see
++    # _VALID_PATH_CHARS's own comment for why (it's meaningful to the
++    # LIKE patterns delete_file()/move_path() build from validated paths).
++    with pytest.raises(ValueError):
++        workspace_code_files._validate_file_path("src/100%done.py")
++
++
++# ---------------------------------------------------------------------
++# _escape_like_prefix
++# ---------------------------------------------------------------------
++
++def test_escape_like_prefix_escapes_underscore_wildcard():
++    assert workspace_code_files._escape_like_prefix("src/my_file") == "src/my\\_file"
++
++
++def test_escape_like_prefix_escapes_percent_and_backslash():
++    assert workspace_code_files._escape_like_prefix("100%\\done") == "100\\%\\\\done"
++
++
+ # ---------------------------------------------------------------------
+ # _infer_language
+ # ---------------------------------------------------------------------
+@@ -335,3 +386,140 @@ def test_delete_file_writes_audit(monkeypatch):
+     _install_fake_cursor(monkeypatch, cursor)
+     workspace_code_files.delete_file("ws_1", "src/app.py", "user_1")
+     workspace_code_files.write_audit.assert_called_once()
++
++
++# W1.2: delete_file() now also deletes an entire folder subtree by
++# prefix, and is idempotent (no error, empty result) when nothing
++# matches.
++
++def test_delete_file_no_match_returns_empty_list_and_still_audits(monkeypatch):
++    cursor = FakeCursor(fetchall_results=[[]])
++    _install_fake_cursor(monkeypatch, cursor)
++    result = workspace_code_files.delete_file("ws_1", "nothing/here.py", "user_1")
++    assert result == []
++    workspace_code_files.write_audit.assert_called_once()
++
++
++def test_delete_file_deletes_every_row_under_a_folder_prefix(monkeypatch):
++    cursor = FakeCursor(fetchall_results=[[
++        {"file_path": "src/comp/a.js"}, {"file_path": "src/comp/b.js"},
++    ]])
++    _install_fake_cursor(monkeypatch, cursor)
++    result = workspace_code_files.delete_file("ws_1", "src/comp", "user_1")
++    assert result == ["src/comp/a.js", "src/comp/b.js"]
++
++
++# ---------------------------------------------------------------------
++# create_folder (W1.2)
++# ---------------------------------------------------------------------
++
++def test_create_folder_rejects_empty_path():
++    with pytest.raises(ValueError):
++        workspace_code_files.create_folder("ws_1", "", "user_1")
++
++
++def test_create_folder_writes_a_gitkeep_placeholder(monkeypatch):
++    # create_folder() -> write_file(): fetchone() #1 = current_row (None,
++    # nothing saved yet), fetchone() #2 = the upserted row write_file()
++    # returns.
++    new_row = _file_row(file_path="src/newdir/.gitkeep", content="", language="text")
++    new_row["version"] = 1
++    cursor = FakeCursor(fetchone_results=[None, new_row])
++    _install_fake_cursor(monkeypatch, cursor)
++
++    result = workspace_code_files.create_folder("ws_1", "src/newdir", "user_1")
++
++    assert result["file_path"] == "src/newdir/.gitkeep"
++
++
++def test_create_folder_strips_a_trailing_slash_before_appending_gitkeep(monkeypatch):
++    new_row = _file_row(file_path="src/newdir/.gitkeep", content="", language="text")
++    new_row["version"] = 1
++    cursor = FakeCursor(fetchone_results=[None, new_row])
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.create_folder("ws_1", "src/newdir/", "user_1")
++
++    # write_file()'s FOR UPDATE select is the first statement executed;
++    # its file_path param is the placeholder path this function built.
++    _, params = cursor.executed[0]
++    assert params[1] == "src/newdir/.gitkeep"
++
++
++# ---------------------------------------------------------------------
++# move_path (W1.2)
++# ---------------------------------------------------------------------
++
++def test_move_path_rejects_identical_source_and_destination():
++    with pytest.raises(ValueError):
++        workspace_code_files.move_path("ws_1", "src/a.js", "src/a.js", "user_1")
++
++
++def test_move_path_rejects_moving_a_folder_into_its_own_subtree():
++    with pytest.raises(ValueError):
++        workspace_code_files.move_path("ws_1", "src", "src/sub", "user_1")
++
++
++def test_move_path_rejects_when_nothing_exists_at_the_source(monkeypatch):
++    cursor = FakeCursor(fetchall_results=[[]])
++    _install_fake_cursor(monkeypatch, cursor)
++    with pytest.raises(ValueError):
++        workspace_code_files.move_path("ws_1", "nowhere.js", "elsewhere.js", "user_1")
++
++
++def test_move_path_refuses_to_overwrite_an_existing_destination(monkeypatch):
++    cursor = FakeCursor(fetchall_results=[
++        [_file_row(file_path="src/old.js")],       # discovery
++        [{"file_path": "src/new.js"}],             # collision check: occupied
++    ])
++    _install_fake_cursor(monkeypatch, cursor)
++    with pytest.raises(ValueError):
++        workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
++
++
++def test_move_path_single_file_lands_at_the_new_path_one_version_higher(monkeypatch):
++    old_row = _file_row(file_path="src/old.js", content="x")
++    old_row["version"] = 3
++    new_row = _file_row(file_path="src/new.js", content="x")
++    new_row["version"] = 4
++    cursor = FakeCursor(
++        fetchall_results=[[old_row], []],  # discovery, then no collision
++        fetchone_results=[new_row],        # the re-inserted live row
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    result = workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
++
++    assert len(result) == 1
++    assert result[0]["file_path"] == "src/new.js"
++    assert result[0]["version"] == 4
++
++
++def test_move_path_folder_moves_every_file_under_the_new_prefix(monkeypatch):
++    r1 = _file_row(file_path="src/comp/a.js", content="a")
++    r1["version"] = 1
++    r2 = _file_row(file_path="src/comp/b.js", content="b")
++    r2["version"] = 2
++    new1 = dict(r1, file_path="lib/comp/a.js", version=2)
++    new2 = dict(r2, file_path="lib/comp/b.js", version=3)
++    cursor = FakeCursor(
++        fetchall_results=[[r1, r2], []],
++        fetchone_results=[new1, new2],
++    )
++    _install_fake_cursor(monkeypatch, cursor)
++
++    result = workspace_code_files.move_path("ws_1", "src/comp", "lib/comp", "user_1")
++
++    assert [f["file_path"] for f in result] == ["lib/comp/a.js", "lib/comp/b.js"]
++
++
++def test_move_path_writes_a_single_summary_audit_entry(monkeypatch):
++    old_row = _file_row(file_path="src/old.js", content="x")
++    old_row["version"] = 1
++    new_row = dict(old_row, file_path="src/new.js", version=2)
++    cursor = FakeCursor(fetchall_results=[[old_row], []], fetchone_results=[new_row])
++    _install_fake_cursor(monkeypatch, cursor)
++
++    workspace_code_files.move_path("ws_1", "src/old.js", "src/new.js", "user_1")
++
++    workspace_code_files.write_audit.assert_called_once()
