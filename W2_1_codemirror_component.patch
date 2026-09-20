@@ -1,0 +1,1476 @@
+diff --git a/frontend/app/components/workbench/CodeEditor.jsx b/frontend/app/components/workbench/CodeEditor.jsx
+new file mode 100644
+index 0000000..e9b0936
+--- /dev/null
++++ b/frontend/app/components/workbench/CodeEditor.jsx
+@@ -0,0 +1,435 @@
++"use client";
++// frontend/app/components/workbench/CodeEditor.jsx — W2.1 (Build
++// Workbench plan): the raw CodeMirror 6 editor the merged Build-tab
++// workbench is built on top of (see MiniMe_Build_Workbench_Plan.md's
++// D1 — CM6 over Monaco, chosen specifically because Monaco doesn't
++// support mobile browsers and CM6 ships @codemirror/merge's
++// unifiedMergeView, the per-hunk Keep/Undo review-mode UI a later
++// patch (W5.x) builds directly on top of this same component).
++//
++// This is a THIN hand-rolled wrapper around CM6, not a wrapper library
++// (react-codemirror2, @uiw/react-codemirror, etc.) — the plan calls for
++// imperative control over selection/decorations/merge later (W4.1's
++// selection chips, W5.x's review mode), which a wrapper library's
++// props-only API tends to fight rather than help. `useCodeMirror`
++// below is that raw-CM6-through-a-hook shape, kept local to this file
++// since nothing else needs it yet.
++//
++// CLIENT-ONLY: CodeMirror measures real DOM nodes (line heights, gutter
++// widths) and has no server-side rendering story. This file itself is
++// "use client", but that alone isn't enough — whatever mounts
++// <CodeEditor> for real (W2.3's EditorWorkbench) must ALSO wrap it in
++// `dynamic(() => import(...), { ssr: false })` from "next/dynamic",
++// same as this app already does anywhere else it renders something
++// DOM-measurement-dependent. Skipping that dynamic() wrapper makes Next
++// try to prerender this on the server, which throws immediately (no
++// `document`).
++//
++// Controlled component contract:
++//   - `value`/`onChange` behave like a controlled <textarea>: typing
++//     fires onChange(newText); setting a new `value` prop from outside
++//     (the file-history Restore button, a live "Reload" from W0.1's
++//     "Changed on server" banner) updates the doc WITHOUT throwing away
++//     undo history or moving the cursor — see the `External` annotation
++//     and minimalChange() below, the real CM6-specific plumbing a plain
++//     controlled <textarea> doesn't need. Recreating the EditorState
++//     from scratch on every external `value` change (the naive
++//     approach) would reset undo history every time, which defeats the
++//     entire point of building this on an editor that HAS undo history.
++//   - An external update is itself ONE undo step, on purpose: Cmd-Z
++//     after "Reload" or "Restore" brings back the text you had before,
++//     which is the forgiving behaviour for both. The flip side is that
++//     one EditorView is one document's undo history. To show a
++//     DIFFERENT file, mount a separate <CodeEditor key={path}> instead
++//     of feeding a new file's text through `value` — otherwise Cmd-Z
++//     would undo "back" into the previous file. (Changing only
++//     `filePath` on the same instance — a rename, a.js -> a.ts — is
++//     fine and just re-selects the syntax mode.)
++//   - `filePath` selects the syntax mode via @codemirror/language-data
++//     (lazy-loaded per file, per the plan — most files never pay for
++//     most languages' parser bundles) rather than a `language` enum
++//     prop the caller would have to keep in sync with the file itself.
++//   - Line endings: CM6 always splits on \r\n, \r and \n alike and
++//     always reports "\n" back, so `onChange` text is LF-normalised
++//     even for a CRLF file. `value` may contain CRLF (it's normalised
++//     before comparing, so it never causes a spurious update), but
++//     preserving CRLF on save is the caller's job — it matters for
++//     W3.1's local files, not for the cloud files this is first used on.
++//   - Indentation follows the file: the indent unit (2 spaces, 4
++//     spaces, tab) is detected from the file's own text on mount and on
++//     each external update (see detectIndentUnit() in editorUtils.js).
++//     A fixed unit would make auto-indent insert 2 spaces into a
++//     4-space Python file.
++
++import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
++import { Annotation, Compartment, EditorState, RangeSetBuilder } from "@codemirror/state";
++import {
++  Decoration,
++  EditorView,
++  ViewPlugin,
++  crosshairCursor,
++  drawSelection,
++  dropCursor,
++  highlightActiveLine,
++  highlightActiveLineGutter,
++  highlightSpecialChars,
++  keymap,
++  lineNumbers,
++  rectangularSelection,
++} from "@codemirror/view";
++import {
++  LanguageDescription,
++  bracketMatching,
++  foldGutter,
++  foldKeymap,
++  indentOnInput,
++  indentUnit,
++} from "@codemirror/language";
++import { languages } from "@codemirror/language-data";
++import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
++import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
++import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
++import { buildEditorTheme } from "../../lib/workbench/cmTheme";
++import {
++  detectIndentUnit,
++  indentGuideOffsets,
++  minimalChange,
++  normalizeLineBreaks,
++} from "../../lib/workbench/editorUtils";
++
++// Tags a transaction as coming from THIS component's own `value`-prop
++// effect (an external update), not from the person typing — read back
++// in the updateListener below so an external update doesn't bounce
++// straight back out through onChange as if the user had typed it. That
++// would both be factually wrong (the user didn't type it) and, worse,
++// could re-enter whatever caller code just set `value` in the first
++// place.
++const External = Annotation.define();
++
++// One vertical guide per completed indent level, drawn by giving the
++// FIRST character of each indent-unit-sized chunk of a line's leading
++// whitespace a left rule (see cmTheme.js's `.cm-mm-indent-guide` rule
++// for the actual color/width). No core CM6 extension does this —
++// @codemirror/language ships the indent LOGIC (getIndentUnit,
++// indentOnInput), not a visual guide — and the community package that
++// draws one isn't in this patch's install list, so this is our own
++// small plugin rather than a new dependency.
++//
++// Which characters get a mark (spaces for a space-indented file, tabs
++// for a tab-indented one, nothing on blank lines) is decided by
++// indentGuideOffsets() in editorUtils.js so it can be unit-tested
++// without a browser.
++const INDENT_GUIDE_MARK = Decoration.mark({ class: "cm-mm-indent-guide" });
++
++function computeIndentGuideDecorations(view) {
++  const builder = new RangeSetBuilder();
++  const unit = view.state.facet(indentUnit);
++  const doc = view.state.doc;
++  let lastLineNumber = 0;
++
++  for (const { from, to } of view.visibleRanges) {
++    let pos = from;
++    while (pos <= to) {
++      const line = doc.lineAt(pos);
++      pos = line.to + 1;
++      // Two visible ranges can touch the same line (a fold that starts
++      // or ends mid-line). RangeSetBuilder throws if a range is added
++      // out of order, and re-adding a line's marks would do exactly
++      // that — so each line is only ever marked once.
++      if (line.number <= lastLineNumber) continue;
++      lastLineNumber = line.number;
++
++      for (const offset of indentGuideOffsets(line.text, unit)) {
++        const at = line.from + offset;
++        builder.add(at, at + 1, INDENT_GUIDE_MARK);
++      }
++    }
++  }
++  return builder.finish();
++}
++
++function indentGuides() {
++  return ViewPlugin.fromClass(
++    class {
++      constructor(view) {
++        this.decorations = computeIndentGuideDecorations(view);
++      }
++
++      update(update) {
++        // viewportChanged also covers the visible ranges changing (a
++        // fold or unfold), not just scrolling.
++        if (
++          update.docChanged ||
++          update.viewportChanged ||
++          update.startState.facet(indentUnit) !== update.state.facet(indentUnit)
++        ) {
++          this.decorations = computeIndentGuideDecorations(update.view);
++        }
++      }
++    },
++    { decorations: (plugin) => plugin.decorations }
++  );
++}
++
++// Extensions every editor instance shares regardless of file — syntax
++// highlighting/language support and the indent unit are layered in
++// separately (see the compartments in useCodeMirror below) since they
++// depend on the file and, for language support, have to lazy-load
++// asynchronously while this bundle doesn't.
++function baseExtensions(onSaveRef) {
++  return [
++    lineNumbers(),
++    highlightActiveLineGutter(),
++    highlightActiveLine(),
++    highlightSpecialChars(),
++    history(),
++    foldGutter(),
++    drawSelection(),
++    dropCursor(),
++    crosshairCursor(),
++    rectangularSelection(),
++    // Multi-cursor: Alt-click / Alt-drag work via allowMultipleSelections
++    // + drawSelection above, and Cmd/Ctrl-D ("select next occurrence")
++    // comes with searchKeymap below — no keymap entry of our own needed.
++    EditorState.allowMultipleSelections.of(true),
++    indentOnInput(),
++    bracketMatching(),
++    closeBrackets(),
++    autocompletion(),
++    search({ top: true }),
++    highlightSelectionMatches(),
++    indentGuides(),
++    keymap.of([
++      {
++        key: "Mod-s",
++        preventDefault: true,
++        run: () => {
++          onSaveRef.current?.();
++          return true;
++        },
++      },
++      ...closeBracketsKeymap,
++      ...defaultKeymap,
++      ...searchKeymap,
++      ...historyKeymap,
++      ...foldKeymap,
++      ...completionKeymap,
++      indentWithTab,
++    ]),
++  ];
++}
++
++async function loadLanguageExtension(filePath) {
++  if (!filePath) return [];
++  // matchFilename() tests some languages' patterns against the WHOLE
++  // string it's given, and those patterns are anchored to it —
++  // /^Dockerfile$/, /^CMakeLists\.txt$/, /^Jenkinsfile$/, /^Gemfile$/.
++  // Handed "docker/Dockerfile" or "services/api/CMakeLists.txt" they
++  // silently match nothing and the file opens as plain text, so reduce
++  // the path to its file name first. (Extension matches don't care,
++  // which is why this only bites those special-named files.)
++  const fileName = filePath.split(/[\\/]/).pop();
++  const desc = LanguageDescription.matchFilename(languages, fileName);
++  if (!desc) return [];
++  try {
++    const support = await desc.load();
++    return [support];
++  } catch (err) {
++    // A parser bundle failing to load (a network hiccup on a lazy
++    // chunk, an unusual extension slipping past matchFilename) should
++    // degrade to plain-text editing, not break the editor — same
++    // "under-highlighted, never wrong" posture lib/highlightCode.js's
++    // own regex tokenizer already documents for itself.
++    console.error(`[CodeEditor] failed to load language support for ${filePath}`, err);
++    return [];
++  }
++}
++
++/**
++ * Owns the actual EditorView lifecycle: creates it once against
++ * `containerRef`, tears it down on unmount, and wires the prop-driven
++ * effects (external value changes, read-only toggling, per-file
++ * language loading) described in this file's own header comment. Kept
++ * local to CodeEditor.jsx rather than exported — nothing else needs a
++ * raw CM6 instance yet.
++ */
++function useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, autoFocus }) {
++  const viewRef = useRef(null);
++  const onChangeRef = useRef(onChange);
++  const onSaveRef = useRef(onSave);
++  const languageCompartmentRef = useRef(null);
++  const readOnlyCompartmentRef = useRef(null);
++  const indentCompartmentRef = useRef(null);
++  const loadTokenRef = useRef(0);
++
++  onChangeRef.current = onChange;
++  onSaveRef.current = onSave;
++
++  // Mount once. `value`/`filePath`/`readOnly` at THIS instant seed the
++  // initial state; every later change to any of them is handled by the
++  // effects below via compartment reconfiguration or an External
++  // transaction, never by tearing this EditorView down and rebuilding
++  // it — rebuilding would drop undo history and the current selection
++  // on every prop change, which is exactly what a controlled component
++  // built on an editor that HAS undo history must not do.
++  useEffect(() => {
++    const languageCompartment = new Compartment();
++    const readOnlyCompartment = new Compartment();
++    const indentCompartment = new Compartment();
++    languageCompartmentRef.current = languageCompartment;
++    readOnlyCompartmentRef.current = readOnlyCompartment;
++    indentCompartmentRef.current = indentCompartment;
++
++    const state = EditorState.create({
++      doc: value ?? "",
++      extensions: [
++        baseExtensions(onSaveRef),
++        buildEditorTheme(),
++        indentCompartment.of(indentUnit.of(detectIndentUnit(value ?? ""))),
++        languageCompartment.of([]),
++        readOnlyCompartment.of([
++          EditorState.readOnly.of(!!readOnly),
++          EditorView.editable.of(!readOnly),
++        ]),
++        EditorView.updateListener.of((update) => {
++          if (!update.docChanged) return;
++          const isExternal = update.transactions.some((tr) => tr.annotation(External));
++          if (!isExternal) {
++            onChangeRef.current?.(update.state.doc.toString());
++          }
++        }),
++      ],
++    });
++
++    const view = new EditorView({ state, parent: containerRef.current });
++    viewRef.current = view;
++    if (autoFocus) view.focus();
++
++    return () => {
++      view.destroy();
++      viewRef.current = null;
++    };
++    // Intentionally mount-once — see comment above. `containerRef` and
++    // `autoFocus` are only ever read at mount time by design.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
++  // External value changes — dispatched as an ordinary transaction
++  // against the SAME state/history, tagged `External` so the
++  // updateListener above doesn't mistake it for a keystroke.
++  //
++  // Two details that a plain "replace the whole doc" would get wrong:
++  //   - Only the span that actually differs is replaced (see
++  //     minimalChange()), so the cursor/selection and folds outside it
++  //     stay put. A whole-document replace maps every position inside
++  //     it to the start, which would throw the person back to line 1
++  //     whenever the server changed one line.
++  //   - `value` is line-break-normalised before comparing/diffing,
++  //     because CM6's own text never contains "\r" (see
++  //     normalizeLineBreaks()). Compared raw, a CRLF file would look
++  //     "changed" at every line end.
++  // The indent unit is re-detected here too, since new text may follow
++  // a different convention than what was loaded before.
++  useEffect(() => {
++    const view = viewRef.current;
++    if (!view) return;
++    const current = view.state.doc.toString();
++    const next = normalizeLineBreaks(value ?? "");
++    if (next === current) return;
++
++    const unit = detectIndentUnit(next);
++    const unitChanged = unit !== view.state.facet(indentUnit);
++    view.dispatch({
++      changes: minimalChange(current, next),
++      annotations: [External.of(true)],
++      effects: unitChanged ? [indentCompartmentRef.current.reconfigure(indentUnit.of(unit))] : [],
++    });
++  }, [value]);
++
++  useEffect(() => {
++    const view = viewRef.current;
++    if (!view || !readOnlyCompartmentRef.current) return;
++    view.dispatch({
++      effects: readOnlyCompartmentRef.current.reconfigure([
++        EditorState.readOnly.of(!!readOnly),
++        EditorView.editable.of(!readOnly),
++      ]),
++    });
++  }, [readOnly]);
++
++  // Lazy per-file language loading. `loadTokenRef` guards against a
++  // fast tab switch resolving out of order — e.g. open app.py (slow
++  // Python parser chunk), then immediately switch to style.css (fast
++  // CSS chunk): without this guard, app.py's load could resolve AFTER
++  // style.css's and stomp the language back to Python on the wrong
++  // file.
++  useEffect(() => {
++    const view = viewRef.current;
++    if (!view || !languageCompartmentRef.current) return;
++    const myToken = ++loadTokenRef.current;
++
++    loadLanguageExtension(filePath).then((extension) => {
++      if (myToken !== loadTokenRef.current || !viewRef.current) return;
++      viewRef.current.dispatch({
++        effects: languageCompartmentRef.current.reconfigure(extension),
++      });
++    });
++  }, [filePath]);
++
++  return viewRef;
++}
++
++/**
++ * Raw CodeMirror 6 editor. Controlled `value`/`onChange`, like a
++ * `<textarea>`. See this file's own header comment for the fuller
++ * contract, and useCodeMirror() above for the lifecycle this wraps.
++ *
++ * Imperative handle exposes the underlying EditorView plus a couple of
++ * selection helpers — not used by anything yet, but this is exactly
++ * the "imperative control over selection... later" the plan's D1
++ * decision calls out as CM6's advantage over a wrapper library; W4.1's
++ * selection chips are the first real caller.
++ *
++ * @param {object} props
++ * @param {string} props.value
++ * @param {(next: string) => void} props.onChange
++ * @param {string} [props.filePath] - selects syntax highlighting via
++ *   @codemirror/language-data; omit for a plain-text editor.
++ * @param {boolean} [props.readOnly=false]
++ * @param {() => void} [props.onSave] - Cmd/Ctrl-S.
++ * @param {boolean} [props.autoFocus=false]
++ * @param {string} [props.className]
++ */
++function CodeEditor(
++  { value, onChange, filePath, readOnly = false, onSave, autoFocus = false, className },
++  ref
++) {
++  const containerRef = useRef(null);
++  const viewRef = useCodeMirror({ containerRef, value, onChange, filePath, readOnly, onSave, autoFocus });
++
++  useImperativeHandle(
++    ref,
++    () => ({
++      getView: () => viewRef.current,
++      focus: () => viewRef.current?.focus(),
++      getSelectedText: () => {
++        const view = viewRef.current;
++        if (!view) return "";
++        const { from, to } = view.state.selection.main;
++        return view.state.sliceDoc(from, to);
++      },
++      getSelectionRange: () => {
++        const view = viewRef.current;
++        if (!view) return null;
++        const { from, to } = view.state.selection.main;
++        const doc = view.state.doc;
++        return { from, to, fromLine: doc.lineAt(from).number, toLine: doc.lineAt(to).number };
++      },
++    }),
++    [viewRef]
++  );
++
++  return <div ref={containerRef} className={className} style={{ height: "100%", overflow: "auto" }} />;
++}
++
++export default forwardRef(CodeEditor);
+diff --git a/frontend/app/lib/workbench/cmTheme.js b/frontend/app/lib/workbench/cmTheme.js
+new file mode 100644
+index 0000000..f2ae6d0
+--- /dev/null
++++ b/frontend/app/lib/workbench/cmTheme.js
+@@ -0,0 +1,210 @@
++// frontend/app/lib/workbench/cmTheme.js — W2.1 (Build Workbench plan).
++//
++// CodeMirror 6 theme for components/workbench/CodeEditor.jsx, built from
++// this app's own CSS custom properties (--neutral-*, --accent,
++// --cyber-*, JetBrains Mono) rather than one of CM6's example themes
++// (@codemirror/theme-one-dark and friends aren't even in this patch's
++// install list). This is the same "reskin everywhere from one place"
++// posture globals.css's own --neutral-*/--accent tokens already give
++// every other component in this app (see that file's header comments):
++// retargeting a value in globals.css reskins the editor along with
++// everything else, without touching this file. That includes the
++// translucent overlays (selection, active line, search matches) —
++// those are derived from the same tokens via withAlpha() rather than
++// hand-copied as rgba() literals that would silently go stale.
++//
++// Values are read from the custom properties via getComputedStyle() at
++// theme-CONSTRUCTION time (once, when buildEditorTheme() runs — not on
++// every render), with a literal fallback for the handful of contexts
++// where there's no live <html> to read from yet (a future SSR pass, a
++// unit test running under jsdom with no stylesheet attached). The
++// fallback values are a plain copy of globals.css's current literals —
++// if those ever drift, this file's fallback goes stale until someone
++// notices, which is an acceptable failure mode for a value that's only
++// ever used when there's no real theme to read in the first place.
++// (The read-once snapshot is also why this is safe today: globals.css
++// documents a single dark theme with no [data-theme] switching. If a
++// second theme is ever added, buildEditorTheme() has to be re-run on
++// the switch — CodeEditor.jsx currently builds it once per editor.)
++
++import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
++import { EditorView } from "@codemirror/view";
++import { tags as t } from "@lezer/highlight";
++import { withAlpha } from "./editorUtils";
++
++const FALLBACK = {
++  "--neutral-100": "#f5f5f5",
++  "--neutral-500": "#737373",
++  "--neutral-600": "#525252",
++  "--neutral-800": "#262626",
++  "--neutral-900": "#171717",
++  "--neutral-950": "#0a0a0a",
++  "--accent": "#FF2052",
++  "--accent-text": "#ffffff",
++  "--cyber-amber": "#f59e0b",
++  "--cyber-violet": "#a78bfa",
++  "--cyber-lime": "#34d399",
++};
++
++function cssVar(name) {
++  if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
++    const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
++    if (value) return value;
++  }
++  return FALLBACK[name];
++}
++
++/**
++ * Returns the pair of CM6 extensions (dark UI theme + syntax
++ * highlighting) components/workbench/CodeEditor.jsx installs once per
++ * editor instance. Not memoized here — CodeEditor.jsx only calls this
++ * once, inside the effect that creates its single long-lived
++ * EditorView (see that file's own comment on why the view is never
++ * torn down and rebuilt on prop changes).
++ */
++export function buildEditorTheme() {
++  const colors = {
++    bg: cssVar("--neutral-950"),
++    panel: cssVar("--neutral-900"),
++    border: cssVar("--neutral-800"),
++    text: cssVar("--neutral-100"),
++    dim: cssVar("--neutral-500"),
++    gutterFg: cssVar("--neutral-600"),
++    accent: cssVar("--accent"),
++    accentText: cssVar("--accent-text"),
++    amber: cssVar("--cyber-amber"),
++    violet: cssVar("--cyber-violet"),
++    lime: cssVar("--cyber-lime"),
++  };
++
++  // A faint wash of the text colour — the same "lift this row slightly"
++  // overlay CM6's own dark themes use for the active line.
++  const activeLine = withAlpha(colors.text, 0.04);
++
++  const theme = EditorView.theme(
++    {
++      "&": {
++        color: colors.text,
++        backgroundColor: colors.bg,
++        fontFamily: "'JetBrains Mono', monospace",
++        fontSize: "13px",
++        height: "100%",
++      },
++      ".cm-scroller": {
++        fontFamily: "inherit",
++        lineHeight: "1.6",
++      },
++      ".cm-content": {
++        padding: "0.5rem 0",
++      },
++      // The visible caret is the one drawSelection() paints as a
++      // .cm-cursor element — it also forces the native caret
++      // transparent (!important), so a `caretColor` rule here would
++      // never show. This is the rule that actually colours it.
++      "&.cm-focused .cm-cursor, .cm-dropCursor": {
++        borderLeftColor: colors.accent,
++      },
++      "&.cm-focused .cm-selectionBackground, ::selection": {
++        // !important: CM6's own base theme styles the focused selection
++        // layer with a higher-specificity selector than a plain theme
++        // rule can beat.
++        backgroundColor: `${withAlpha(colors.accent, 0.25)} !important`,
++      },
++      ".cm-gutters": {
++        backgroundColor: colors.panel,
++        color: colors.gutterFg,
++        border: "none",
++        borderRight: `1px solid ${colors.border}`,
++      },
++      ".cm-activeLineGutter": {
++        backgroundColor: activeLine,
++        color: colors.text,
++      },
++      ".cm-activeLine": {
++        backgroundColor: activeLine,
++      },
++      ".cm-matchingBracket, .cm-nonmatchingBracket": {
++        backgroundColor: withAlpha(colors.accent, 0.35),
++        outline: "none",
++      },
++      ".cm-searchMatch": {
++        backgroundColor: withAlpha(colors.amber, 0.25),
++        outline: `1px solid ${colors.dim}`,
++      },
++      ".cm-searchMatch.cm-searchMatch-selected": {
++        backgroundColor: withAlpha(colors.amber, 0.45),
++      },
++      ".cm-panels": {
++        backgroundColor: colors.panel,
++        color: colors.text,
++      },
++      ".cm-panels.cm-panels-top": {
++        borderBottom: `1px solid ${colors.border}`,
++      },
++      ".cm-panels.cm-panels-bottom": {
++        borderTop: `1px solid ${colors.border}`,
++      },
++      ".cm-panel input, .cm-panel button": {
++        backgroundColor: colors.bg,
++        color: colors.text,
++        border: `1px solid ${colors.border}`,
++        borderRadius: "4px",
++      },
++      ".cm-panel button:hover": {
++        borderColor: colors.dim,
++      },
++      ".cm-tooltip": {
++        backgroundColor: colors.panel,
++        border: `1px solid ${colors.border}`,
++        color: colors.text,
++      },
++      ".cm-tooltip-autocomplete ul li[aria-selected]": {
++        backgroundColor: colors.accent,
++        color: colors.accentText,
++      },
++      ".cm-foldPlaceholder": {
++        backgroundColor: "transparent",
++        border: `1px solid ${colors.border}`,
++        color: colors.dim,
++      },
++      // components/workbench/CodeEditor.jsx's own indentGuides()
++      // extension paints one span per indent level with this class —
++      // no core CM6 extension does this (see that file's comment).
++      // An inset box-shadow, not border-left: a border adds its own
++      // width to the one-character span it's on, which pushes the rest
++      // of the line right by 1px per guide and leaves code at different
++      // indent depths visibly out of column with each other. A shadow
++      // paints inside the box and changes no layout.
++      ".cm-mm-indent-guide": {
++        boxShadow: `inset 1px 0 0 0 ${colors.border}`,
++      },
++    },
++    { dark: true }
++  );
++
++  const highlightStyle = HighlightStyle.define([
++    { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], color: colors.dim, fontStyle: "italic" },
++    { tag: [t.keyword, t.controlKeyword, t.moduleKeyword, t.operatorKeyword], color: colors.accent },
++    { tag: [t.string, t.docString, t.special(t.string)], color: colors.lime },
++    { tag: [t.number, t.integer, t.float, t.bool, t.null, t.atom], color: colors.amber },
++    { tag: [t.function(t.variableName), t.function(t.propertyName)], color: colors.violet },
++    { tag: [t.className, t.typeName, t.namespace], color: colors.violet },
++    { tag: t.definition(t.variableName), color: colors.text, fontWeight: "600" },
++    { tag: [t.propertyName, t.attributeName], color: colors.violet },
++    { tag: [t.tagName], color: colors.accent },
++    { tag: [t.operator, t.derefOperator, t.compareOperator, t.updateOperator, t.arithmeticOperator], color: colors.text },
++    { tag: [t.punctuation, t.separator, t.bracket, t.paren, t.brace, t.squareBracket, t.angleBracket], color: colors.dim },
++    { tag: [t.heading], color: colors.accent, fontWeight: "bold" },
++    { tag: [t.link], color: colors.violet, textDecoration: "underline" },
++    { tag: [t.emphasis], fontStyle: "italic" },
++    { tag: [t.strong], fontWeight: "bold" },
++    { tag: [t.url, t.color], color: colors.lime },
++    // No token in globals.css is a distinct "error red" (--cyber-magenta
++    // is the same brand crimson as --accent, which keywords already
++    // use), so this one stays a literal: an invalid token has to be
++    // told apart from a keyword at a glance.
++    { tag: [t.invalid], color: "#ef4444" },
++  ]);
++
++  return [theme, syntaxHighlighting(highlightStyle)];
++}
+diff --git a/frontend/app/lib/workbench/editorUtils.js b/frontend/app/lib/workbench/editorUtils.js
+new file mode 100644
+index 0000000..b941d97
+--- /dev/null
++++ b/frontend/app/lib/workbench/editorUtils.js
+@@ -0,0 +1,203 @@
++// frontend/app/lib/workbench/editorUtils.js — W2.1 (Build Workbench
++// plan). Pure functions shared by CodeEditor.jsx and cmTheme.js. Kept
++// free of CM6/React/DOM imports on purpose: everything here is a
++// plain string/number in, string/number/array out function, which is
++// what lets it be covered by a dependency-free `.mjs` test run with
++// plain `node` — this repo's own convention for frontend tests (see
++// `components/__tests__/wiringGraph.linkFilter.test.mjs`), rather than
++// needing a browser or a JS test runner neither of which this repo
++// currently has.
++
++/**
++ * Collapses "\r\n" and lone "\r" to "\n". CM6's own Text implementation
++ * always does this internally and only ever hands back "\n" — see
++ * https://codemirror.net/docs/ref/#state.Text (Text.lineBreak) — so a
++ * value from outside CodeEditor.jsx (a CRLF file straight off disk,
++ * for instance) has to be normalised before it's compared against or
++ * diffed with `view.state.doc.toString()`, or every line ending would
++ * look like a change. CodeEditor.jsx normalises `value`; it does NOT
++ * normalise on the way out through `onChange`, since CM6 already
++ * guarantees LF-only text there.
++ */
++export function normalizeLineBreaks(text) {
++  return text.replace(/\r\n|\r/g, "\n");
++}
++
++/**
++ * The minimal single-range replace that turns `current` into `next`,
++ * as a CM6 `{from, to, insert}` change spec. Diffing the FULL document
++ * on every external update (the naive `{from: 0, to: current.length,
++ * insert: next}`) would map every existing position to the start of
++ * the change, which is what actually throws the cursor/selection/folds
++ * to line 1 on every server refresh — see CodeEditor.jsx's own header
++ * comment on why an external update has to be a normal, minimal
++ * transaction rather than a full-doc replace.
++ *
++ * This is intentionally NOT a general-purpose diff (no LCS, no
++ * mid-document hunks) — just the common-prefix / common-suffix trim
++ * around the one span that changed. That's sufficient for this
++ * component's actual external-update sources (a server reload, a
++ * history Restore, a CRLF normalisation pass): they replace "the
++ * document" wholesale, but the part that's actually different from
++ * what's on screen is usually a single contiguous edit (one line
++ * changed, one line appended/prepended). A real multi-hunk diff would
++ * serve external updates with several unrelated changes scattered
++ * through the file slightly better (each hunk could keep its own
++ * nearby selection untouched), but nothing in this component's own
++ * call sites produces that shape today, so it isn't worth the extra
++ * complexity/dependency (e.g. `diff-match-patch`) until it is.
++ */
++export function minimalChange(current, next) {
++  const minLen = Math.min(current.length, next.length);
++
++  let start = 0;
++  while (start < minLen && current[start] === next[start]) start += 1;
++
++  let endCurrent = current.length;
++  let endNext = next.length;
++  while (
++    endCurrent > start &&
++    endNext > start &&
++    current[endCurrent - 1] === next[endNext - 1]
++  ) {
++    endCurrent -= 1;
++    endNext -= 1;
++  }
++
++  return { from: start, to: endCurrent, insert: next.slice(start, endNext) };
++}
++
++// Fallback when a file has no indentation evidence at all (an empty
++// file, or one with only top-level statements) — 2 spaces, the most
++// common default across editors/languages.
++const DEFAULT_INDENT_UNIT = "  ";
++
++/**
++ * Guesses a file's indent unit (N spaces, or a tab) from its own text,
++ * so `indentUnit` (and therefore Tab / auto-indent-on-Enter) matches
++ * what's already in the file instead of forcing every file to the
++ * same width — see CodeEditor.jsx's header comment ("a fixed unit
++ * would make auto-indent insert 2 spaces into a 4-space Python file").
++ *
++ * Heuristic: a tab anywhere at the start of a line wins outright (a
++ * file either uses tabs for indentation or it doesn't — there's no
++ * "how many tabs is one level" question the way there is for spaces).
++ * Otherwise, look at every place indentation increases from one
++ * non-blank line to the next and take the most common step size; most
++ * hand-written and formatter-produced code indents by a constant
++ * number of spaces per nesting level, so the most frequent increase
++ * IS that constant. Ties favour the smaller step, which is the safer
++ * side to be wrong on (an 8-space file mis-detected as 4 still nests
++ * consistently; a 2-space file mis-detected as 8 puts a whole
++ * indent-unit-sized gap under a single level).
++ */
++export function detectIndentUnit(text) {
++  if (!text) return DEFAULT_INDENT_UNIT;
++
++  const lines = text.split("\n");
++  for (const line of lines) {
++    if (line[0] === "\t") return "\t";
++  }
++
++  let prevIndent = 0;
++  const stepCounts = new Map();
++  for (const line of lines) {
++    if (line.trim().length === 0) {
++      // A blank line carries no indentation evidence and, unlike a
++      // dedent, shouldn't reset `prevIndent` — the next real line's
++      // indent is still compared against the last non-blank one.
++      continue;
++    }
++    const leading = line.match(/^ */)[0].length;
++    if (leading > prevIndent) {
++      const step = leading - prevIndent;
++      stepCounts.set(step, (stepCounts.get(step) || 0) + 1);
++    }
++    prevIndent = leading;
++  }
++
++  if (stepCounts.size === 0) return DEFAULT_INDENT_UNIT;
++
++  let bestStep = null;
++  let bestCount = -1;
++  for (const [step, count] of stepCounts) {
++    if (count > bestCount || (count === bestCount && step < bestStep)) {
++      bestStep = step;
++      bestCount = count;
++    }
++  }
++  return " ".repeat(bestStep);
++}
++
++/**
++ * Character offsets, within one line's text, that should carry an
++ * indent-guide mark — one offset per COMPLETED indent level, at the
++ * first character of that level's chunk of leading whitespace. Split
++ * out from the ViewPlugin in CodeEditor.jsx (see `computeIndentGuideDecorations`
++ * there) purely so this — the actual "which columns get a line"
++ * decision — can be unit-tested with plain strings, no EditorView
++ * required.
++ *
++ * A line only gets guides if it has content after its indentation:
++ * blank/whitespace-only lines are visual noise for this (nothing to
++ * the right of a guide on an empty line), and — a level only counts
++ * once it's *complete* — a line indented 3 spaces under a 2-space unit
++ * gets exactly one guide (at offset 0), not a partial second one at
++ * offset 2, since there's no full second unit's worth of whitespace to
++ * draw it under.
++ */
++export function indentGuideOffsets(lineText, unit) {
++  const unitLen = unit ? unit.length : 0;
++  if (unitLen === 0) return [];
++
++  const leading = lineText.match(/^[ \t]*/)[0].length;
++  if (leading < unitLen) return [];
++  if (lineText.slice(leading).trim().length === 0) return [];
++
++  const levels = Math.floor(leading / unitLen);
++  const offsets = [];
++  for (let level = 1; level <= levels; level += 1) {
++    offsets.push((level - 1) * unitLen);
++  }
++  return offsets;
++}
++
++function parseColor(color) {
++  const value = (color || "").trim();
++
++  const hex = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
++  if (hex) {
++    let h = hex[1];
++    if (h.length === 3) h = [...h].map((c) => c + c).join("");
++    const num = parseInt(h, 16);
++    return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
++  }
++
++  // getComputedStyle() on a *real* CSS property (as opposed to reading
++  // a custom property's raw string, which is what cssVar() in
++  // cmTheme.js does) would report rgb()/rgba() — not something either
++  // cssVar() or FALLBACK ever hands this function today, but handled
++  // here rather than silently producing black if that ever changes.
++  const rgb = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
++  if (rgb) {
++    return { r: Number(rgb[1]), g: Number(rgb[2]), b: Number(rgb[3]) };
++  }
++
++  return { r: 0, g: 0, b: 0 };
++}
++
++/**
++ * Returns `color` (a "#rgb"/"#rrggbb" hex string — what every
++ * `--neutral-*`/`--accent`/`--cyber-*` token in globals.css is
++ * authored as) blended to the given alpha, as an `rgba(...)` string
++ * CM6's `EditorView.theme()` can use directly. This is what lets
++ * cmTheme.js's translucent overlays (selection, active line, search
++ * matches) derive from the SAME tokens every solid color does, instead
++ * of a second set of hand-copied `rgba(...)` literals that would
++ * silently drift out of sync if a token's hex value ever changed —
++ * see cmTheme.js's own header comment.
++ */
++export function withAlpha(color, alpha) {
++  const { r, g, b } = parseColor(color);
++  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
++}
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index aa4c144..27c2589 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -9,7 +9,17 @@
+       "version": "0.1.0",
+       "hasInstallScript": true,
+       "dependencies": {
++        "@codemirror/autocomplete": "^6.20.3",
++        "@codemirror/commands": "^6.11.1",
++        "@codemirror/language": "^6.12.4",
++        "@codemirror/language-data": "^6.5.2",
++        "@codemirror/lint": "^6.9.7",
++        "@codemirror/merge": "^6.12.2",
++        "@codemirror/search": "^6.7.2",
++        "@codemirror/state": "^6.7.5",
++        "@codemirror/view": "^6.43.12",
+         "@codesandbox/sandpack-react": "^2.20.0",
++        "@lezer/highlight": "^1.2.3",
+         "@react-three/drei": "^9.122.0",
+         "@react-three/fiber": "^8.18.0",
+         "@sentry/nextjs": "^10.69.0",
+@@ -17,6 +27,7 @@
+         "@supabase/supabase-js": "^2.45.4",
+         "@xterm/addon-fit": "^0.10.0",
+         "@xterm/xterm": "^5.5.0",
++        "codemirror": "^6.0.2",
+         "lucide-react": "^1.23.0",
+         "mermaid": "^11.16.0",
+         "next": "14.2.35",
+@@ -367,9 +378,9 @@
+       }
+     },
+     "node_modules/@codemirror/commands": {
+-      "version": "6.10.4",
+-      "resolved": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.10.4.tgz",
+-      "integrity": "sha512-Ryk9y9T0FFVF0cUGhAknveAyUOl/A1qReTFi+qPKtOh2Z9F4AUBz3XOrYD4ZEgZirdugVzHvd/2/Wcwy5OliTg==",
++      "version": "6.11.1",
++      "resolved": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.11.1.tgz",
++      "integrity": "sha512-O/4hG3SC1YwcmQ0d2UVNDs+AsaNWd1iHVxbTeEBuqH+6bExAiPK3iS/BvpY6rZGURALv4ZD3sIgcCmRvw3ehBg==",
+       "license": "MIT",
+       "dependencies": {
+         "@codemirror/language": "^6.0.0",
+@@ -378,6 +389,30 @@
+         "@lezer/common": "^1.1.0"
+       }
+     },
++    "node_modules/@codemirror/lang-angular": {
++      "version": "0.1.4",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-angular/-/lang-angular-0.1.4.tgz",
++      "integrity": "sha512-oap+gsltb/fzdlTQWD6BFF4bSLKcDnlxDsLdePiJpCVNKWXSTAbiiQeYI3UmES+BLAdkmIC1WjyztC1pi/bX4g==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/lang-javascript": "^6.1.2",
++        "@codemirror/language": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.3.3"
++      }
++    },
++    "node_modules/@codemirror/lang-cpp": {
++      "version": "6.0.3",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-cpp/-/lang-cpp-6.0.3.tgz",
++      "integrity": "sha512-URM26M3vunFFn9/sm6rzqrBzDgfWuDixp85uTY49wKudToc2jTHUrKIGGKs+QWND+YLofNNZpxcNGRynFJfvgA==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0",
++        "@lezer/cpp": "^1.0.0"
++      }
++    },
+     "node_modules/@codemirror/lang-css": {
+       "version": "6.3.1",
+       "resolved": "https://registry.npmjs.org/@codemirror/lang-css/-/lang-css-6.3.1.tgz",
+@@ -391,6 +426,19 @@
+         "@lezer/css": "^1.1.7"
+       }
+     },
++    "node_modules/@codemirror/lang-go": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-go/-/lang-go-6.0.1.tgz",
++      "integrity": "sha512-7fNvbyNylvqCphW9HD6WFnRpcDjr+KXX/FgqXy5H5ZS0eC5edDljukm/yNgYkwTsgp2busdod50AOTIy6Jikfg==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/language": "^6.6.0",
++        "@codemirror/state": "^6.0.0",
++        "@lezer/common": "^1.0.0",
++        "@lezer/go": "^1.0.0"
++      }
++    },
+     "node_modules/@codemirror/lang-html": {
+       "version": "6.4.12",
+       "resolved": "https://registry.npmjs.org/@codemirror/lang-html/-/lang-html-6.4.12.tgz",
+@@ -408,6 +456,16 @@
+         "@lezer/html": "^1.3.12"
+       }
+     },
++    "node_modules/@codemirror/lang-java": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-java/-/lang-java-6.0.2.tgz",
++      "integrity": "sha512-m5Nt1mQ/cznJY7tMfQTJchmrjdjQ71IDs+55d1GAa8DGaB8JXWsVCkVT284C3RTASaY43YknrK2X3hPO/J3MOQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0",
++        "@lezer/java": "^1.0.0"
++      }
++    },
+     "node_modules/@codemirror/lang-javascript": {
+       "version": "6.2.5",
+       "resolved": "https://registry.npmjs.org/@codemirror/lang-javascript/-/lang-javascript-6.2.5.tgz",
+@@ -423,6 +481,194 @@
+         "@lezer/javascript": "^1.0.0"
+       }
+     },
++    "node_modules/@codemirror/lang-jinja": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-jinja/-/lang-jinja-6.0.1.tgz",
++      "integrity": "sha512-P5kyHLObzjtbGj16h+hyvZTxJhSjBEeSx4wMjbnAf3b0uwTy2+F0zGjMZL4PQOm/mh2eGZ5xUDVZXgwP783Nsw==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.2.0",
++        "@lezer/lr": "^1.4.0"
++      }
++    },
++    "node_modules/@codemirror/lang-json": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-json/-/lang-json-6.0.2.tgz",
++      "integrity": "sha512-x2OtO+AvwEHrEwR0FyyPtfDUiloG3rnVTSZV1W8UteaLL8/MajQd8DpvUb2YVzC+/T18aSDv0H9mu+xw0EStoQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0",
++        "@lezer/json": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-less": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-less/-/lang-less-6.0.2.tgz",
++      "integrity": "sha512-EYdQTG22V+KUUk8Qq582g7FMnCZeEHsyuOJisHRft/mQ+ZSZ2w51NupvDUHiqtsOy7It5cHLPGfHQLpMh9bqpQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/lang-css": "^6.2.0",
++        "@codemirror/language": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-liquid": {
++      "version": "6.3.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-liquid/-/lang-liquid-6.3.2.tgz",
++      "integrity": "sha512-6PDVU3ZnfeYyz1at1E/ttorErZvZFXXt1OPhtfe1EZJ2V2iDFa0CwPqPgG5F7NXN0yONGoBogKmFAafKTqlwIw==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.0.0",
++        "@lezer/common": "^1.0.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.3.1"
++      }
++    },
++    "node_modules/@codemirror/lang-markdown": {
++      "version": "6.5.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-markdown/-/lang-markdown-6.5.2.tgz",
++      "integrity": "sha512-AwBOdkWYuA//WcM0xO5PfHPUcmz/O2i5o0Nsg1U69SII/loCJlFI1Romd9xp2HYb1kYJRGZotyqRghuHH5n8Kw==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.7.1",
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/language": "^6.3.0",
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.0.0",
++        "@lezer/common": "^1.2.1",
++        "@lezer/markdown": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-php": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-php/-/lang-php-6.0.2.tgz",
++      "integrity": "sha512-ZKy2v1n8Fc8oEXj0Th0PUMXzQJ0AIR6TaZU+PbDHExFwdu+guzOA4jmCHS1Nz4vbFezwD7LyBdDnddSJeScMCA==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@lezer/common": "^1.0.0",
++        "@lezer/php": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-python": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-python/-/lang-python-6.2.1.tgz",
++      "integrity": "sha512-IRjC8RUBhn9mGR9ywecNhB51yePWCGgvHfY1lWN/Mrp3cKuHr0isDKia+9HnvhiWNnMpbGhWrkhuWOc09exRyw==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.3.2",
++        "@codemirror/language": "^6.8.0",
++        "@codemirror/state": "^6.0.0",
++        "@lezer/common": "^1.2.1",
++        "@lezer/python": "^1.1.4"
++      }
++    },
++    "node_modules/@codemirror/lang-rust": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-rust/-/lang-rust-6.0.2.tgz",
++      "integrity": "sha512-EZaGjCUegtiU7kSMvOfEZpaCReowEf3yNidYu7+vfuGTm9ow4mthAparY5hisJqOHmJowVH3Upu+eJlUji6qqA==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0",
++        "@lezer/rust": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-sass": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-sass/-/lang-sass-6.0.2.tgz",
++      "integrity": "sha512-l/bdzIABvnTo1nzdY6U+kPAC51czYQcOErfzQ9zSm9D8GmNPD0WTW8st/CJwBTPLO8jlrbyvlSEcN20dc4iL0Q==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/lang-css": "^6.2.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@lezer/common": "^1.0.2",
++        "@lezer/sass": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-sql": {
++      "version": "6.10.0",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-sql/-/lang-sql-6.10.0.tgz",
++      "integrity": "sha512-6ayPkEd/yRw0XKBx5uAiToSgGECo/GY2NoJIHXIIQh1EVwLuKoU8BP/qK0qH5NLXAbtJRLuT73hx7P9X34iO4w==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-vue": {
++      "version": "0.1.3",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-vue/-/lang-vue-0.1.3.tgz",
++      "integrity": "sha512-QSKdtYTDRhEHCfo5zOShzxCmqKJvgGrZwDQSdbvCRJ5pRLWBS7pD/8e/tH44aVQT6FKm0t6RVNoSUWHOI5vNug==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/lang-javascript": "^6.1.2",
++        "@codemirror/language": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.3.1"
++      }
++    },
++    "node_modules/@codemirror/lang-wast": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-wast/-/lang-wast-6.0.2.tgz",
++      "integrity": "sha512-Imi2KTpVGm7TKuUkqyJ5NRmeFWF7aMpNiwHnLQe0x9kmrxElndyH0K6H/gXtWwY6UshMRAhpENsgfpSwsgmC6Q==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-xml": {
++      "version": "6.1.0",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-xml/-/lang-xml-6.1.0.tgz",
++      "integrity": "sha512-3z0blhicHLfwi2UgkZYRPioSgVTo9PV5GP5ducFH6FaHy0IAJRg+ixj5gTR1gnT/glAIC8xv4w2VL1LoZfs+Jg==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/language": "^6.4.0",
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.0.0",
++        "@lezer/common": "^1.0.0",
++        "@lezer/xml": "^1.0.0"
++      }
++    },
++    "node_modules/@codemirror/lang-yaml": {
++      "version": "6.1.3",
++      "resolved": "https://registry.npmjs.org/@codemirror/lang-yaml/-/lang-yaml-6.1.3.tgz",
++      "integrity": "sha512-AZ8DJBuXGVHybpBQhmZtgew5//4hv3tdkXnr3vDmOUMJRuB6vn/uuwtmTOTlqEaQFg3hQSVeA90NmvIQyUV6FQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.2.0",
++        "@lezer/lr": "^1.0.0",
++        "@lezer/yaml": "^1.0.0"
++      }
++    },
+     "node_modules/@codemirror/language": {
+       "version": "6.12.4",
+       "resolved": "https://registry.npmjs.org/@codemirror/language/-/language-6.12.4.tgz",
+@@ -437,6 +683,46 @@
+         "style-mod": "^4.0.0"
+       }
+     },
++    "node_modules/@codemirror/language-data": {
++      "version": "6.5.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/language-data/-/language-data-6.5.2.tgz",
++      "integrity": "sha512-CPkWBKrNS8stYbEU5kwBwTf3JB1kghlbh4FSAwzGW2TEscdeHHH4FGysREW86Mqnj3Qn09s0/6Ea/TutmoTobg==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/lang-angular": "^0.1.0",
++        "@codemirror/lang-cpp": "^6.0.0",
++        "@codemirror/lang-css": "^6.0.0",
++        "@codemirror/lang-go": "^6.0.0",
++        "@codemirror/lang-html": "^6.0.0",
++        "@codemirror/lang-java": "^6.0.0",
++        "@codemirror/lang-javascript": "^6.0.0",
++        "@codemirror/lang-jinja": "^6.0.0",
++        "@codemirror/lang-json": "^6.0.0",
++        "@codemirror/lang-less": "^6.0.0",
++        "@codemirror/lang-liquid": "^6.0.0",
++        "@codemirror/lang-markdown": "^6.0.0",
++        "@codemirror/lang-php": "^6.0.0",
++        "@codemirror/lang-python": "^6.0.0",
++        "@codemirror/lang-rust": "^6.0.0",
++        "@codemirror/lang-sass": "^6.0.0",
++        "@codemirror/lang-sql": "^6.0.0",
++        "@codemirror/lang-vue": "^0.1.1",
++        "@codemirror/lang-wast": "^6.0.0",
++        "@codemirror/lang-xml": "^6.0.0",
++        "@codemirror/lang-yaml": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/legacy-modes": "^6.4.0"
++      }
++    },
++    "node_modules/@codemirror/legacy-modes": {
++      "version": "6.5.4",
++      "resolved": "https://registry.npmjs.org/@codemirror/legacy-modes/-/legacy-modes-6.5.4.tgz",
++      "integrity": "sha512-/cZr6qZyl08iYNLGsJ862CXXNI51LryRFRE40ejgoIjXZz0C1rGkD3/Ek5jM/8w1ceRjqtt4qx/KLMh4zBTgew==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0"
++      }
++    },
+     "node_modules/@codemirror/lint": {
+       "version": "6.9.7",
+       "resolved": "https://registry.npmjs.org/@codemirror/lint/-/lint-6.9.7.tgz",
+@@ -448,19 +734,43 @@
+         "crelt": "^1.0.5"
+       }
+     },
++    "node_modules/@codemirror/merge": {
++      "version": "6.12.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/merge/-/merge-6.12.2.tgz",
++      "integrity": "sha512-V8JvyAPjHbPupqP7BeMcsdsYCbyPij74jxIbaIJDORI+VZzW44zFmon8bF+oxGWvOKhcRmkiUMXd8MxHr3YA2w==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.17.0",
++        "@lezer/highlight": "^1.0.0",
++        "style-mod": "^4.1.0"
++      }
++    },
++    "node_modules/@codemirror/search": {
++      "version": "6.7.2",
++      "resolved": "https://registry.npmjs.org/@codemirror/search/-/search-6.7.2.tgz",
++      "integrity": "sha512-gUYkYhT2+n/+VGZ+8EzE5WFkYZUZYm1VOKDudIsNqh42uRVQJ0a6Yss9sdKT3MeOYfuL1N6AZA57oza0Oyr0LA==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.37.0",
++        "crelt": "^1.0.5"
++      }
++    },
+     "node_modules/@codemirror/state": {
+-      "version": "6.7.1",
+-      "resolved": "https://registry.npmjs.org/@codemirror/state/-/state-6.7.1.tgz",
+-      "integrity": "sha512-9QzNDgE4EYDnAHfrTlR2lwiPciiOymLtwKK+8yHQzCc7GXhAP9xdEbEJFy2IWB1j9UGUl9BsgMmTo/ImA02T7A==",
++      "version": "6.7.5",
++      "resolved": "https://registry.npmjs.org/@codemirror/state/-/state-6.7.5.tgz",
++      "integrity": "sha512-QjLbZmY1Au3JiRrDVYFLRD0BZ3SOKS9pR3yjIkd7u27YY8TFD9/Q9fhPnLV5l1mHFSo3hHU/N31vpwEJOx4owQ==",
+       "license": "MIT",
+       "dependencies": {
+         "@marijn/find-cluster-break": "^1.0.0"
+       }
+     },
+     "node_modules/@codemirror/view": {
+-      "version": "6.43.8",
+-      "resolved": "https://registry.npmjs.org/@codemirror/view/-/view-6.43.8.tgz",
+-      "integrity": "sha512-qtItTDssZ/5GFfi94hrILu9j/VUeFPDPkhovEfmWFj2ipTxnzPB8DdHgfbb8HYTzLTYhrndKmyQxXUz/PDLenw==",
++      "version": "6.43.12",
++      "resolved": "https://registry.npmjs.org/@codemirror/view/-/view-6.43.12.tgz",
++      "integrity": "sha512-Nv0vxQ19NAqvB/c2pFzjIzFlzzJl7jmdtNkwOwGbn0Ks9mFAzibvumz7cQem5cRsFA2cEw2fg+uHZGbcHupLQQ==",
+       "license": "MIT",
+       "dependencies": {
+         "@codemirror/state": "^6.7.0",
+@@ -883,6 +1193,17 @@
+       "integrity": "sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ==",
+       "license": "MIT"
+     },
++    "node_modules/@lezer/cpp": {
++      "version": "1.1.6",
++      "resolved": "https://registry.npmjs.org/@lezer/cpp/-/cpp-1.1.6.tgz",
++      "integrity": "sha512-vh9gWWJOXFVY8HBHK3Twzq8MgwG2iN4GSyzBP9sCGTe37P15x2R14VaBQk0VA0ezTRN1KHYBBsHhvpGZ2Xy/pA==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
+     "node_modules/@lezer/css": {
+       "version": "1.3.6",
+       "resolved": "https://registry.npmjs.org/@lezer/css/-/css-1.3.6.tgz",
+@@ -894,6 +1215,17 @@
+         "@lezer/lr": "^1.3.0"
+       }
+     },
++    "node_modules/@lezer/go": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@lezer/go/-/go-1.0.1.tgz",
++      "integrity": "sha512-xToRsYxwsgJNHTgNdStpcvmbVuKxTapV0dM0wey1geMMRc9aggoVyKgzYp41D2/vVOx+Ii4hmE206kvxIXBVXQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.3.0"
++      }
++    },
+     "node_modules/@lezer/highlight": {
+       "version": "1.2.3",
+       "resolved": "https://registry.npmjs.org/@lezer/highlight/-/highlight-1.2.3.tgz",
+@@ -914,6 +1246,17 @@
+         "@lezer/lr": "^1.0.0"
+       }
+     },
++    "node_modules/@lezer/java": {
++      "version": "1.1.4",
++      "resolved": "https://registry.npmjs.org/@lezer/java/-/java-1.1.4.tgz",
++      "integrity": "sha512-gQylJ2xHV2xXsVqtnAcJrcROvLZJaQiC0tR//+q0k961BxqvyYttusPkJ8d9T1fPDJKHJW2etUH8XbIn9jhVUg==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
+     "node_modules/@lezer/javascript": {
+       "version": "1.5.4",
+       "resolved": "https://registry.npmjs.org/@lezer/javascript/-/javascript-1.5.4.tgz",
+@@ -925,6 +1268,17 @@
+         "@lezer/lr": "^1.3.0"
+       }
+     },
++    "node_modules/@lezer/json": {
++      "version": "1.0.3",
++      "resolved": "https://registry.npmjs.org/@lezer/json/-/json-1.0.3.tgz",
++      "integrity": "sha512-BP9KzdF9Y35PDpv04r0VeSTKDeox5vVr3efE7eBbx3r4s3oNLfunchejZhjArmeieBH+nVOpgIiBJpEAv8ilqQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
+     "node_modules/@lezer/lr": {
+       "version": "1.4.10",
+       "resolved": "https://registry.npmjs.org/@lezer/lr/-/lr-1.4.10.tgz",
+@@ -934,6 +1288,82 @@
+         "@lezer/common": "^1.0.0"
+       }
+     },
++    "node_modules/@lezer/markdown": {
++      "version": "1.7.2",
++      "resolved": "https://registry.npmjs.org/@lezer/markdown/-/markdown-1.7.2.tgz",
++      "integrity": "sha512-iTkYvoVcKt3WkeL7qUDyXHONZEwLio4wj8KTNi2dnjQEXBZKMV63BpQrPqfsM+OkvuRbiSTAcycYAsQzLhRNoQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.5.0",
++        "@lezer/highlight": "^1.0.0"
++      }
++    },
++    "node_modules/@lezer/php": {
++      "version": "1.0.6",
++      "resolved": "https://registry.npmjs.org/@lezer/php/-/php-1.0.6.tgz",
++      "integrity": "sha512-QJ2xNXPmsm/Z3IpThq8fnJrEIVpxhsIoj6GZBW0JYEd/l9zxpJZW216X4fzqQY4vgpdGIumypvI4uQjd4tnYtw==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.1.0"
++      }
++    },
++    "node_modules/@lezer/python": {
++      "version": "1.1.19",
++      "resolved": "https://registry.npmjs.org/@lezer/python/-/python-1.1.19.tgz",
++      "integrity": "sha512-MhQIURHRytsNzP/YXnqpYKW6la6voAH3kyplTOOiCdjyFY6cWWGFVmYVdHIPrElqSDf4iCDktQCockB9FxuhzQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@lezer/rust": {
++      "version": "1.0.3",
++      "resolved": "https://registry.npmjs.org/@lezer/rust/-/rust-1.0.3.tgz",
++      "integrity": "sha512-XxErOjZzQ7yJt1agUT4fu9qQvESZ3acgoxpPaPTPOiUx+duCjaVAtZGFIgphkHxlN05djdVAIOy/wItShMEjqQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@lezer/sass": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/@lezer/sass/-/sass-1.1.0.tgz",
++      "integrity": "sha512-3mMGdCTUZ/84ArHOuXWQr37pnf7f+Nw9ycPUeKX+wu19b7pSMcZGLbaXwvD2APMBDOGxPmpK/O6S1v1EvLoqgQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@lezer/xml": {
++      "version": "1.0.6",
++      "resolved": "https://registry.npmjs.org/@lezer/xml/-/xml-1.0.6.tgz",
++      "integrity": "sha512-CdDwirL0OEaStFue/66ZmFSeppuL6Dwjlk8qk153mSQwiSH/Dlri4GNymrNWnUmPl2Um7QfV1FO9KFUyX3Twww==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.0.0"
++      }
++    },
++    "node_modules/@lezer/yaml": {
++      "version": "1.0.4",
++      "resolved": "https://registry.npmjs.org/@lezer/yaml/-/yaml-1.0.4.tgz",
++      "integrity": "sha512-2lrrHqxalACEbxIbsjhqGpSW8kWpUKuY6RHgnSAFZa6qK62wvnPxA8hGOwOoDbwHcOFs5M4o27mjGu+P7TvBmw==",
++      "license": "MIT",
++      "dependencies": {
++        "@lezer/common": "^1.2.0",
++        "@lezer/highlight": "^1.0.0",
++        "@lezer/lr": "^1.4.0"
++      }
++    },
+     "node_modules/@marijn/find-cluster-break": {
+       "version": "1.0.3",
+       "resolved": "https://registry.npmjs.org/@marijn/find-cluster-break/-/find-cluster-break-1.0.3.tgz",
+@@ -4930,6 +5360,21 @@
+         "node": ">=6"
+       }
+     },
++    "node_modules/codemirror": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/codemirror/-/codemirror-6.0.2.tgz",
++      "integrity": "sha512-VhydHotNW5w1UGK0Qj96BwSk/Zqbp9WbnyK2W/eVMv4QyF41INRGpjUhFJY7/uDNuudSc33a/PKr4iDqRduvHw==",
++      "license": "MIT",
++      "dependencies": {
++        "@codemirror/autocomplete": "^6.0.0",
++        "@codemirror/commands": "^6.0.0",
++        "@codemirror/language": "^6.0.0",
++        "@codemirror/lint": "^6.0.0",
++        "@codemirror/search": "^6.0.0",
++        "@codemirror/state": "^6.0.0",
++        "@codemirror/view": "^6.0.0"
++      }
++    },
+     "node_modules/color-convert": {
+       "version": "2.0.1",
+       "resolved": "https://registry.npmjs.org/color-convert/-/color-convert-2.0.1.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index f96d6d7..ea65541 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -10,7 +10,17 @@
+     "postinstall": "patch-package"
+   },
+   "dependencies": {
++    "@codemirror/autocomplete": "^6.20.3",
++    "@codemirror/commands": "^6.11.1",
++    "@codemirror/language": "^6.12.4",
++    "@codemirror/language-data": "^6.5.2",
++    "@codemirror/lint": "^6.9.7",
++    "@codemirror/merge": "^6.12.2",
++    "@codemirror/search": "^6.7.2",
++    "@codemirror/state": "^6.7.5",
++    "@codemirror/view": "^6.43.12",
+     "@codesandbox/sandpack-react": "^2.20.0",
++    "@lezer/highlight": "^1.2.3",
+     "@react-three/drei": "^9.122.0",
+     "@react-three/fiber": "^8.18.0",
+     "@sentry/nextjs": "^10.69.0",
+@@ -18,6 +28,7 @@
+     "@supabase/supabase-js": "^2.45.4",
+     "@xterm/addon-fit": "^0.10.0",
+     "@xterm/xterm": "^5.5.0",
++    "codemirror": "^6.0.2",
+     "lucide-react": "^1.23.0",
+     "mermaid": "^11.16.0",
+     "next": "14.2.35",
