@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useRef, memo } from "react";
+import { useCallback, useEffect, useState, useRef, memo } from "react";
 import dynamic from "next/dynamic"; // NEW — W2.3a: EditorWorkbench measures real DOM nodes (CodeMirror), so it has to load client-only, see the EditorWorkbench declaration below
 import { useSession, authHeaders } from "../../context/SessionContext";
 import { useWorkspaces } from "../../context/WorkspacesContext";   // NEW — Item 2 concern split, slice 3
@@ -762,6 +762,17 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // NEW — patch 7: which of BUILD_VIEWS is showing for the selected
   // project. Same pattern as PlanTab's BlueprintView `view` state.
   const [buildView, setBuildView] = useState("tasks");
+  // NEW — W2.5: unsaved-edits guard. EditorWorkbench reports whether any
+  // open file has unsaved edits through `onDirtyChange`. It lands in a
+  // ref, not state: it's only ever read inside event handlers, and
+  // flipping it shouldn't re-render this whole tab. (And it's a callback
+  // rather than a `ref` on EditorWorkbench because that component is
+  // mounted through next/dynamic, whose wrapper doesn't forward refs.)
+  const editorDirtyRef = useRef(false);
+  const handleEditorDirty = useCallback((dirty) => {
+    editorDirtyRef.current = dirty;
+  }, []);
+  const [pendingNav, setPendingNav] = useState(null); // {run} — a navigation held behind the "Discard unsaved changes?" confirm
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState(null);
   const [promoteTargetStage, setPromoteTargetStage] = useState("test");
@@ -851,10 +862,47 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
     if (chatDockCollapsed) toggleChatDock();
   }
 
+  // NEW — W2.5: switching project, or leaving the Editor sub-view,
+  // unmounts EditorWorkbench and drops whatever it hadn't saved.
+  // guardUnsaved() runs a navigation straight away when nothing is
+  // dirty; otherwise it holds it behind a confirmation.
+  function guardUnsaved(run) {
+    if (editorDirtyRef.current) setPendingNav({ run });
+    else run();
+  }
+
+  function confirmPendingNav() {
+    const nav = pendingNav;
+    setPendingNav(null);
+    // The confirmed navigation unmounts the editor, which reports "clean"
+    // on its way out anyway; clearing it first also stops a guarded
+    // handler that re-runs itself (handleCreateChatInProject) from
+    // asking a second time.
+    editorDirtyRef.current = false;
+    nav?.run();
+  }
+
+  function requestSelectWs(id) {
+    if (id === selectedWsId) return;
+    guardUnsaved(() => setSelectedWsId(id));
+  }
+
+  function requestBuildView(id) {
+    if (id === buildView) return;
+    guardUnsaved(() => setBuildView(id));
+  }
+
   // NEW — issue #3: "+" beside a project name. Creates a chat nested
   // directly inside that project and opens it, same mechanic the Chat
   // sidebar uses for "new chat in this group".
   async function handleCreateChatInProject(ws) {
+    // NEW — W2.5: this selects `ws` first, which drops the Editor's unsaved
+    // edits if `ws` isn't the project already open — ask before doing
+    // any of it (a "Cancel" shouldn't leave a new empty chat behind).
+    if (selectedWsId !== ws.id && editorDirtyRef.current) {
+      setPendingNav({ run: () => handleCreateChatInProject(ws) });
+      return;
+    }
     setCreatingChatForWs(ws.id);
     try {
       if (selectedWsId !== ws.id) setSelectedWsId(ws.id);
@@ -1134,7 +1182,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                   }`}
                 >
                   <button
-                    onClick={() => setSelectedWsId(ws.id)}
+                    onClick={() => requestSelectWs(ws.id)}
                     className="touch-row flex-1 min-w-0 flex items-center justify-between gap-1 px-3 py-2 text-left"
                   >
                     <span className="flex items-center min-w-0">
@@ -1267,7 +1315,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                   {BUILD_VIEWS.map((v) => (
                     <button
                       key={v.id}
-                      onClick={() => setBuildView(v.id)}
+                      onClick={() => requestBuildView(v.id)}
                       className={`text-xs rounded px-2.5 py-1 ${
                         buildView === v.id
                           ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
@@ -1287,9 +1335,18 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                   <textarea>). The workbench owns its own tabs/buffers, so
                   key={selected.id} remounts it per project -- otherwise
                   one project's open tabs would carry into the next.
-                  (Until W2.5's unsaved-edits guard lands, switching
-                  projects discards unsaved edits.) */}
-              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} reserveCorner={chatDockCollapsed} />
+                  CHANGED — W2.5: that remount would discard unsaved
+                  edits, so every navigation that causes it (project
+                  click, "+" chat, create-project, the sub-view buttons
+                  above) goes through guardUnsaved(); `onDirtyChange` is
+                  how the workbench tells us there's anything to guard. */}
+              <EditorWorkbench
+                key={selected.id}
+                workspaceId={selected.id}
+                apiUrl={API_URL}
+                reserveCorner={chatDockCollapsed}
+                onDirtyChange={handleEditorDirty}
+              />
             </div>
           </>
         ) : (
@@ -1457,10 +1514,21 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
           stage="build"
           onClose={(created) => {
             setShowCreateModal(false);
-            if (created) setSelectedWsId(created.id);
+            if (created) requestSelectWs(created.id);
           }}
         />
       )}
+
+      {/* NEW — W2.5: see guardUnsaved(). Same wording as the editor's own
+          tab-close confirmation. */}
+      <ConfirmDialog
+        open={!!pendingNav}
+        title="Discard unsaved changes?"
+        message="You have unsaved changes in the Editor. Leaving now will discard them."
+        confirmLabel="Discard"
+        onConfirm={confirmPendingNav}
+        onCancel={() => setPendingNav(null)}
+      />
 
       {/* NEW — issue #3: same delete-confirmation affordance as
           ChatSidebar's own per-chat delete, just scoped to a nested

@@ -17,8 +17,10 @@
 // (transform, filter, contain…) — a portal makes that a non-question.
 //
 // `items`: `{ key, label, icon?, hint?, danger?, disabled?, title?,
-// onSelect }` (`hint` = a keyboard shortcut shown at the right, W2.4);
-// falsy
+// checked?, onSelect }` (`hint` = a keyboard shortcut shown at the right,
+// W2.4; `checked` = W2.5's on/off toggles — a boolean makes the row a
+// `menuitemcheckbox` with a tick slot where the icon would be, while
+// leaving it undefined keeps an ordinary `menuitem`); falsy
 // entries are skipped (so callers can write `cond && {...}` inline) and
 // `{ key, separator: true }` draws a divider. The menu closes itself
 // before calling `onSelect`. Dismissal: outside pointerdown (not
@@ -27,6 +29,7 @@
 // Escape, window resize/blur, or any scroll.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Check } from "lucide-react";
 
 const EDGE_MARGIN = 6; // keep the menu this far inside the viewport
 
@@ -87,11 +90,13 @@ export default function ContextMenu({ x, y, items, onClose }) {
           return <div key={item.key} role="separator" className="my-1 border-t border-[var(--neutral-800)]" />;
         }
         const Icon = item.icon;
+        const checkable = typeof item.checked === "boolean";
         return (
           <button
             key={item.key}
             type="button"
-            role="menuitem"
+            role={checkable ? "menuitemcheckbox" : "menuitem"}
+            aria-checked={checkable ? item.checked : undefined}
             disabled={item.disabled}
             title={item.title}
             onClick={() => {
@@ -104,7 +109,13 @@ export default function ContextMenu({ x, y, items, onClose }) {
                 : "text-[var(--neutral-300)]"
             }`}
           >
-            {Icon && <Icon size={12} className="shrink-0" />}
+            {checkable ? (
+              <span className="flex h-3 w-3 shrink-0 items-center justify-center text-[var(--accent)]">
+                {item.checked && <Check size={12} />}
+              </span>
+            ) : (
+              Icon && <Icon size={12} className="shrink-0" />
+            )}
             {item.label}
             {item.hint && <span className="ml-auto pl-6 text-[10px] text-[var(--neutral-500)]">{item.hint}</span>}
           </button>

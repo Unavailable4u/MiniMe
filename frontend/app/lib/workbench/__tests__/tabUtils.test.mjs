@@ -7,7 +7,7 @@
 // Run: node frontend/app/lib/workbench/__tests__/tabUtils.test.mjs
 import { loadSource } from "./loadSource.mjs";
 
-const { tabLabels, nextActiveAfterClose, planBufferSync, encodeTabFlags, decodeTabFlags } = loadSource("../tabUtils.js");
+const { tabLabels, nextActiveAfterClose, planBufferSync, planAutosave, encodeTabFlags, decodeTabFlags } = loadSource("../tabUtils.js");
 
 let failures = 0;
 function assertEqual(actual, expected, msg) {
@@ -195,6 +195,86 @@ assertEqual(
   { reload: [], stale: [], drop: [] },
   "a meta entry with no version counts as version 0 (never ahead)"
 );
+
+// --- planAutosave (W2.5) -----------------------------------------------
+
+{
+  const dirty = (edited, extra = {}) => ({ dirty: true, edited, ...extra });
+  const clean = { dirty: false, edited: "x" };
+
+  assertEqual(
+    planAutosave({ tabs: ["a", "b"], buffers: { a: dirty("A1"), b: clean } }),
+    [{ path: "a", edited: "A1" }],
+    "only dirty buffers are due, each with the text to debounce on"
+  );
+
+  assertEqual(
+    planAutosave({ tabs: ["a", "b"], buffers: { a: dirty("A1"), b: dirty("B1") } }),
+    [
+      { path: "a", edited: "A1" },
+      { path: "b", edited: "B1" },
+    ],
+    "every dirty file is due — not just the active one — so switching tabs inside the delay strands nothing"
+  );
+
+  assertEqual(planAutosave({ tabs: [], buffers: {} }), [], "no tabs, nothing due");
+  assertEqual(planAutosave({ tabs: ["gone"], buffers: {} }), [], "a tab whose file hasn't loaded yet has no buffer and isn't due");
+
+  assertEqual(
+    planAutosave({ tabs: ["a"], buffers: { a: dirty("A1", { stale: true }) } }),
+    [],
+    "a stale buffer (server moved on) is never autosaved — the banner asks the person first"
+  );
+
+  assertEqual(
+    planAutosave({ tabs: ["a"], buffers: { a: dirty("A1") }, busy: new Set(["a"]) }),
+    [],
+    "a file whose save is in flight isn't due (busy accepts a Set)"
+  );
+  assertEqual(
+    planAutosave({ tabs: ["a"], buffers: { a: dirty("A1") }, busy: ["a"] }),
+    [],
+    "...or an array"
+  );
+  assertEqual(
+    planAutosave({ tabs: ["a", "b"], buffers: { a: dirty("A1"), b: dirty("B1") }, busy: ["a"] }),
+    [{ path: "b", edited: "B1" }],
+    "busy only holds back its own file"
+  );
+
+  assertEqual(
+    planAutosave({ tabs: ["a"], buffers: { a: dirty("A1") }, conflicts: { a: { current: {} } } }),
+    [],
+    "a file with an unresolved save conflict is never autosaved — that's the person's call"
+  );
+
+  assertEqual(
+    planAutosave({ tabs: ["a"], buffers: { a: dirty("A1") }, failed: { a: "A1" } }),
+    [],
+    "a file whose last save FAILED for exactly this text isn't retried (no hammering while offline)"
+  );
+  assertEqual(
+    planAutosave({ tabs: ["a"], buffers: { a: dirty("A2") }, failed: { a: "A1" } }),
+    [{ path: "a", edited: "A2" }],
+    "...but a keystroke since then (different text) earns the next retry"
+  );
+
+  // Paths are user-chosen file names, so inherited Object.prototype keys must not read as "has a conflict / failure".
+  assertEqual(
+    planAutosave({ tabs: ["constructor", "toString"], buffers: { constructor: dirty("c"), toString: dirty("t") } }),
+    [
+      { path: "constructor", edited: "c" },
+      { path: "toString", edited: "t" },
+    ],
+    "files named like Object.prototype members aren't mistaken for conflicted/failed ones"
+  );
+
+  assertEqual(
+    planAutosave({ tabs: ["b", "a"], buffers: { a: dirty("A1"), b: dirty("B1") } }).map((d) => d.path),
+    ["b", "a"],
+    "results follow tab order"
+  );
+}
 
 // --- encodeTabFlags / decodeTabFlags -----------------------------------
 

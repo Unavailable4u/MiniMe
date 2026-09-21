@@ -1,6 +1,6 @@
 // W2.2 (Build Workbench plan) — reducer test for editorStore.js;
-// extended in W2.3a for the tab-strip actions, in W2.3b for SET_LAYOUT and
-// in W2.4 for RENAME_PATHS.
+// extended in W2.3a for the tab-strip actions, in W2.3b for SET_LAYOUT, in
+// W2.4 for RENAME_PATHS and in W2.5 for the save-conflict resolutions.
 //
 // Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
 // copy of editorReducer() (editorStore.js pulls in `react`, which plain
@@ -359,6 +359,57 @@ assertEqual(laid.layout.bottomTab, "problems", "...and the missing fields are fi
 
 const opened = editorReducer(withLayout, { type: "SET_ACTIVE_PATH", path: "a.js" });
 assertEqual(opened.layout, withLayout.layout, "unrelated actions leave layout untouched");
+
+// --- W2.5: resolving a save conflict (409) ---------------------------------
+//
+// EditorWorkbench.jsx adds NO reducer action for these: "Reload theirs" is
+// FILE_LOADED with the 409 body's `current`, and "Keep mine" is SAVE_SUCCESS
+// with keepEdited over that same body. These pin down that the two existing
+// actions really give the plan's Done-when — the W1.1 conflict is
+// recoverable without losing either side.
+{
+  // I opened a.js at v3, then typed. Meanwhile someone else saved v5, so my Save (base_version 3) got a 409 whose body is v5.
+  let st = editorReducer(initialState, { type: "SET_ACTIVE_PATH", path: "a.js" });
+  st = editorReducer(st, {
+    type: "FILE_LOADED",
+    path: "a.js",
+    file: { content: "base\n", version: 3, language: "javascript", updated_at: "t3" },
+  });
+  st = editorReducer(st, { type: "EDIT_BUFFER", path: "a.js", content: "mine\n" });
+  const theirs = { content: "theirs\n", version: 5, language: "javascript", updated_at: "t5", updated_by: "someone" };
+
+  // Keep mine
+  const kept = editorReducer(st, { type: "SAVE_SUCCESS", path: "a.js", file: theirs, keepEdited: true });
+  const k = kept.buffers["a.js"];
+  assertEqual(k.edited, "mine\n", "Keep mine: the person's text is untouched — nothing of theirs is lost");
+  assertEqual(k.saved, "theirs\n", "Keep mine: `saved` becomes the server's current content");
+  assertEqual(k.version, 5, "Keep mine: adopts the server's version, so the next Save's base_version matches and goes through");
+  assertEqual(k.dirty, true, "Keep mine: still dirty — the next Save is the deliberate overwrite");
+  assertEqual(k.stale, false, "Keep mine: clears any stale flag");
+
+  // ...and if their text and mine turn out identical, there is nothing left to save.
+  let same = editorReducer(st, { type: "EDIT_BUFFER", path: "a.js", content: "theirs\n" });
+  same = editorReducer(same, { type: "SAVE_SUCCESS", path: "a.js", file: theirs, keepEdited: true });
+  assertEqual(same.buffers["a.js"].dirty, false, "Keep mine with text equal to the server's isn't dirty");
+
+  // Reload theirs
+  const reloaded = editorReducer(st, { type: "FILE_LOADED", path: "a.js", file: theirs });
+  const r = reloaded.buffers["a.js"];
+  assertEqual([r.edited, r.saved, r.version, r.dirty], ["theirs\n", "theirs\n", 5, false], "Reload theirs: buffer becomes the server's file, clean, at its version");
+
+  // A file deleted on the server comes back as version 0 / empty; Keep mine then targets base_version 0, which the server treats as "create it".
+  const gone = { content: "", version: 0, language: null, updated_at: null, updated_by: null };
+  const recreate = editorReducer(st, { type: "SAVE_SUCCESS", path: "a.js", file: gone, keepEdited: true });
+  assertEqual(
+    [recreate.buffers["a.js"].edited, recreate.buffers["a.js"].version, recreate.buffers["a.js"].dirty],
+    ["mine\n", 0, true],
+    "Keep mine over a deleted file: my text stays, version 0, dirty — the next Save re-creates the file"
+  );
+  assertEqual(recreate.buffers["a.js"].language, "javascript", "...and the buffer keeps its own language when the empty file has none");
+
+  // Neither resolution touches the tab strip.
+  assertEqual([kept.tabs, kept.activePath], [st.tabs, st.activePath], "resolving a conflict doesn't change tabs or the active file");
+}
 
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);

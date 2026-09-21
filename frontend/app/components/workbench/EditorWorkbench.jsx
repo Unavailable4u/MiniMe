@@ -40,16 +40,34 @@
 // re-keying per-path bookkeeping on a rename — kept here. `reserveCorner`
 // is BuildTab telling us its floating "open chat" bubble is showing, so
 // the bottom edge leaves room for it.
+//
+// W2.5: the save flow. Save now sends the buffer's `version` as
+// base_version, so a save that lost a race comes back as a
+// FileConflictError (409) carrying the server's current file. That
+// surfaces as a three-choice bar — Reload theirs / Keep mine / Compare
+// (ConflictCompareView) — instead of the blind overwrite the Code view
+// always did; both resolutions reuse existing store actions (FILE_LOADED,
+// SAVE_SUCCESS+keepEdited), so the reducer didn't change. Also here:
+// optional autosave (one debounce timer per dirty file; the "which
+// files" rule is tabUtils.planAutosave), optional Prettier
+// format-on-save (formatOnSave.js, lazy-loaded; manual saves only), and
+// the unsaved-edits guards — a `beforeunload` prompt, plus an
+// `onDirtyChange` report that BuildTab uses to confirm before a project
+// or sub-tab switch unmounts this component. That's a callback prop
+// rather than a `ref` handle on purpose: BuildTab mounts this through
+// next/dynamic, and next@14's dynamic() wrapper is a plain function
+// component that never forwards `ref` to what it loads.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { authHeaders } from "../../context/SessionContext";
 import { useExplorerOps } from "../../hooks/useExplorerOps";
 import { useSplitter } from "../../hooks/useSplitter";
 import { useViewport } from "../../hooks/useViewport";
-import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
+import { createCloudFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, remapPath } from "../../lib/workbench/fileTree";
 import { deleteSummary } from "../../lib/workbench/explorerOps";
+import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
 import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
   BOTTOM_PANEL_MIN_HEIGHT,
@@ -63,14 +81,20 @@ import {
   previewMaxWidth,
   saveLayout,
 } from "../../lib/workbench/layoutPrefs";
-import { encodeTabFlags, planBufferSync } from "../../lib/workbench/tabUtils";
+import { loadSavePrefs, saveSavePrefs } from "../../lib/workbench/savePrefs";
+import { encodeTabFlags, planAutosave, planBufferSync } from "../../lib/workbench/tabUtils";
 import ConfirmDialog from "../ConfirmDialog";
 import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
+import ConflictCompareView from "./ConflictCompareView";
 import EditorTabs from "./EditorTabs";
 import Explorer from "./Explorer";
 import PreviewColumn from "./PreviewColumn";
 import StatusBar from "./StatusBar";
+
+// W2.5: how long a dirty file has to sit untouched before autosave (when
+// the toggle in savePrefs.js is on) saves it.
+const AUTOSAVE_DELAY_MS = 1500;
 
 // Explorer width. Persisted per workspace (the key carries the id) so
 // two projects don't fight over one width. Default/min/max in px; the
@@ -120,7 +144,7 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
   );
 });
 
-function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
+function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
   // One provider per (workspace, api) pair — memoized so re-renders
   // don't create a new one (which would re-subscribe to Pusher).
   const provider = useMemo(
@@ -156,6 +180,19 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
   const [pendingDelete, setPendingDelete] = useState(null); // {roots, title, message} awaiting the delete confirmation (W2.4)
   const [cursor, setCursor] = useState(null); // {line, col} of the active file's caret
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true); // single-pane layout only
+  // W2.5: {path: {current, mine}} — a save 409 for this path, awaiting
+  // Reload theirs / Keep mine / Compare. `current` is
+  // FileConflictError.current (the server's file shape); `mine` is the
+  // text that specific save attempt sent. Kept out of the editor store on
+  // purpose — unlike `stale` (which several later steps read from
+  // elsewhere), this is UI state about one Save call, the same tier
+  // `saving`/`saveErrors` already live at.
+  const [conflicts, setConflicts] = useState({});
+  const [compareConflict, setCompareConflict] = useState(null); // path shown in ConflictCompareView, or null
+  // W2.5: read once per mount — workbench-wide, not per-workspace (see
+  // savePrefs.js's own header), so unlike `layout` there's no
+  // workspaceId-keyed re-read to do on a project switch.
+  const [savePrefs, setSavePrefs] = useState(() => loadSavePrefs(browserStorage()));
 
   const explorerSplitter = useSplitter({
     axis: "width",
@@ -217,6 +254,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
   const cursorsRef = useRef({}); // {path: {line, col}} — every editor reports; only the active one is shown
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
+  // W2.5: saveFile reads the format-on-save flag through this, so flipping
+  // the toggle doesn't rebuild saveFile (and re-render every open pane).
+  const savePrefsRef = useRef(savePrefs);
+  savePrefsRef.current = savePrefs;
+  const failedSavesRef = useRef({}); // {path: the exact text whose last save FAILED} — autosave won't retry that same text (planAutosave)
+  const autosaveTimersRef = useRef(new Map()); // path -> {edited, timer}
 
   // ---- file list ----------------------------------------------------
 
@@ -245,6 +288,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
       for (const p of paths) {
         delete dismissedRef.current[p];
         delete cursorsRef.current[p];
+        delete failedSavesRef.current[p];
         // A close that lands while that file's first read is still in
         // flight must win: openFile checks this once the read resolves.
         if (openingRef.current.has(p)) cancelledOpensRef.current.add(p);
@@ -260,6 +304,22 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
         }
         return changed ? next : prev;
       });
+      // W2.5: a save conflict is about a path that's about to stop
+      // being open — closing the tab (with the discard confirmation
+      // that already guards a dirty buffer) resolves it as surely as
+      // Reload theirs / Keep mine would.
+      setConflicts((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const p of paths) {
+          if (p in next) {
+            delete next[p];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      setCompareConflict((prev) => (prev && paths.includes(prev) ? null : prev));
     },
     [closeTabs]
   );
@@ -373,9 +433,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
   );
 
   // Every close path goes through here so unsaved edits are never
-  // discarded silently. (W2.5 adds the same guard for project switches
-  // and page unload; this covers what this patch introduces — a close
-  // button on a tab.)
+  // discarded silently. (The other ways to lose them — a page unload and
+  // a project/sub-tab switch — are guarded by W2.5's beforeunload
+  // listener and onDirtyChange report further down.)
   const requestClose = useCallback(
     (paths) => {
       if (paths.length === 0) return;
@@ -399,8 +459,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
 
   // A rename/move re-paths the store's tabs (RENAME_PATHS); this does
   // the same for the per-path bookkeeping kept OUTSIDE the store. The
-  // caret position follows the file; a "Keep mine" choice and a save
-  // error were about the old path's server state, so they're dropped.
+  // caret position follows the file; a "Keep mine" choice, a save error
+  // and a save conflict (W2.5) were about the old path's server state, so
+  // they're dropped.
   const rekeyPathState = useCallback((renames) => {
     const remap = (p) => {
       for (const r of renames) if (isSameOrDescendant(p, r.from)) return remapPath(p, r.from, r.to);
@@ -416,6 +477,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
     for (const p of Object.keys(dismissedRef.current)) {
       if (remap(p) !== p) delete dismissedRef.current[p];
     }
+    for (const p of Object.keys(failedSavesRef.current)) {
+      if (remap(p) !== p) delete failedSavesRef.current[p];
+    }
     setSaveErrors((prev) => {
       const stale = Object.keys(prev).filter((p) => remap(p) !== p);
       if (stale.length === 0) return prev;
@@ -423,6 +487,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
       for (const p of stale) delete next[p];
       return next;
     });
+    setConflicts((prev) => {
+      const stale = Object.keys(prev).filter((p) => remap(p) !== p);
+      if (stale.length === 0) return prev;
+      const next = { ...prev };
+      for (const p of stale) delete next[p];
+      return next;
+    });
+    setCompareConflict((prev) => (prev && remap(prev) !== prev ? null : prev));
   }, []);
 
   const explorerOps = useExplorerOps({
@@ -463,11 +535,18 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
     setCursor(state.activePath ? cursorsRef.current[state.activePath] || null : null);
   }, [state.activePath]);
 
+  // `auto` = called by the autosave timer rather than by a person pressing
+  // Save / Ctrl-S. The only difference is format-on-save: it runs for a
+  // deliberate save, never for an autosave — reformatting a file while
+  // someone is between thoughts (and any code that happens to parse
+  // mid-edit) would shuffle text under their caret, which is why editors
+  // that offer both leave formatting out of the timer-driven one.
   const saveFile = useCallback(
-    async (path) => {
+    async (path, { auto = false } = {}) => {
       const buffer = path ? stateRef.current.buffers[path] : null;
       if (!buffer || !buffer.dirty || savingRef.current.has(path)) return;
-      const sent = buffer.edited;
+      let sent = buffer.edited;
+      const baseVersion = buffer.version;
       savingRef.current.add(path);
       setSaving((prev) => ({ ...prev, [path]: true }));
       setSaveErrors((prev) => {
@@ -475,13 +554,45 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
         const { [path]: _cleared, ...rest } = prev;
         return rest;
       });
+      // A fresh Save attempt supersedes whatever the last one
+      // conflicted on — if this one also conflicts, a new entry lands
+      // below with the up-to-date `current`/`mine` pair.
+      setConflicts((prev) => {
+        if (!(path in prev)) return prev;
+        const { [path]: _cleared, ...rest } = prev;
+        return rest;
+      });
       try {
-        // No baseVersion yet — same blind write the Code view always did;
-        // W2.5 is where Save starts sending one and handling the 409.
-        const saved = await provider.write(path, sent);
+        // W2.5: format-on-save, only for a deliberate save, only when the
+        // toggle is on, and only for extensions formatOnSave.js has a
+        // parser for. A syntax error mid-edit is normal — skip formatting
+        // and save what's actually in the buffer rather than blocking the
+        // save on it.
+        if (!auto && savePrefsRef.current.formatOnSave && isFormattable(path)) {
+          try {
+            const formatted = await formatContent(path, sent);
+            if (formatted !== sent) {
+              sent = formatted;
+              // Reflect the formatting in the editor too, so a save never
+              // silently rewrites content the buffer doesn't show — but
+              // only if nothing was typed while formatting ran (async: it
+              // has to load prettier's chunks the first time).
+              const preFormat = stateRef.current.buffers[path];
+              if (preFormat && preFormat.edited === buffer.edited) editBuffer(path, formatted);
+            }
+          } catch (err) {
+            console.warn(`[EditorWorkbench] format-on-save skipped for ${path}`, err);
+          }
+        }
+        // W1.1/W2.5: base_version turns this into an optimistic-
+        // concurrency write — a 409 (FileConflictError) means someone
+        // else's save landed first; see the catch below instead of the
+        // old blind overwrite.
+        const saved = await provider.write(path, sent, { baseVersion });
+        delete failedSavesRef.current[path];
         const latest = stateRef.current.buffers[path];
-        // Typing during the round trip is normal (and will be constant
-        // once autosave lands): if the buffer no longer matches what was
+        // Typing during the round trip is normal (and constant once
+        // autosave is on): if the buffer no longer matches what was
         // sent, record the save but keep what's in the editor, instead
         // of swapping the server's copy in over the newer keystrokes.
         if (latest) saveSuccess(path, saved, { keepEdited: latest.edited !== sent });
@@ -503,7 +614,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
         filesMetaRef.current = nextMeta;
         setFilesMeta(nextMeta);
       } catch (err) {
-        setSaveErrors((prev) => ({ ...prev, [path]: err.message }));
+        if (err instanceof FileConflictError && err.current) {
+          setConflicts((prev) => ({ ...prev, [path]: { current: err.current, mine: sent } }));
+        } else {
+          failedSavesRef.current[path] = sent;
+          setSaveErrors((prev) => ({ ...prev, [path]: err.message }));
+        }
       } finally {
         savingRef.current.delete(path);
         setSaving((prev) => {
@@ -512,10 +628,54 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
         });
       }
     },
-    [provider, saveSuccess]
+    [provider, saveSuccess, editBuffer]
   );
 
   const saveActive = useCallback(() => saveFile(stateRef.current.activePath), [saveFile]);
+
+  // ---- save conflicts (W2.5) ------------------------------------------
+  // "Reload theirs": discard the local edits, adopt the server's current
+  // content wholesale — the same shape as any other open (fileLoaded),
+  // since err.current IS a fresh read of the file.
+  const reloadConflictTheirs = useCallback(
+    (path) => {
+      const conflict = conflicts[path];
+      if (!conflict) return;
+      fileLoaded(path, conflict.current);
+      delete dismissedRef.current[path];
+      delete failedSavesRef.current[path];
+      setConflicts((prev) => {
+        const { [path]: _cleared, ...rest } = prev;
+        return rest;
+      });
+      setCompareConflict((prev) => (prev === path ? null : prev));
+    },
+    [conflicts, fileLoaded]
+  );
+
+  // "Keep mine": adopt the server's VERSION NUMBER (so the next Save's
+  // base_version matches and goes through) while leaving the buffer's
+  // `edited` text exactly as the person had it. SAVE_SUCCESS with
+  // keepEdited does exactly that: `saved` becomes the server's current
+  // content, `edited` stays put, and `dirty` is recomputed against it
+  // (true, since overwriting what's on the server is the whole point of
+  // the next Save). It's an explicit, informed overwrite the person just
+  // chose from the conflict bar, unlike the blind PUT W1.1 replaced.
+  const keepMineOnConflict = useCallback(
+    (path) => {
+      const conflict = conflicts[path];
+      if (!conflict) return;
+      saveSuccess(path, conflict.current, { keepEdited: true });
+      dismissedRef.current[path] = conflict.current.version ?? 0;
+      delete failedSavesRef.current[path];
+      setConflicts((prev) => {
+        const { [path]: _cleared, ...rest } = prev;
+        return rest;
+      });
+      setCompareConflict((prev) => (prev === path ? null : prev));
+    },
+    [conflicts, saveSuccess]
+  );
 
   // "Keep mine" on the stale banner: hide it, and remember which server
   // version was waved off so the next refresh doesn't put it straight
@@ -571,6 +731,22 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
     saveLayout(browserStorage(), workspaceId, layout);
   }, [workspaceId, layout]);
 
+  // W2.5: persist the autosave / format-on-save toggles. One shared key
+  // (see savePrefs.js), so — unlike the layout effect just above — this
+  // doesn't key off `workspaceId` at all.
+  useEffect(() => {
+    saveSavePrefs(browserStorage(), savePrefs);
+  }, [savePrefs]);
+
+  const toggleAutosave = useCallback(
+    () => setSavePrefs((prev) => ({ ...prev, autosave: !prev.autosave })),
+    []
+  );
+  const toggleFormatOnSave = useCallback(
+    () => setSavePrefs((prev) => ({ ...prev, formatOnSave: !prev.formatOnSave })),
+    []
+  );
+
   // Read the flag through stateRef (like the callbacks above) so a
   // toggle's identity doesn't change with the layout it toggles.
   const toggleBottom = useCallback(
@@ -605,11 +781,91 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
     ? null
     : saving[activePath]
     ? "saving"
+    : conflicts[activePath]
+    ? "conflict"
     : saveErrors[activePath]
     ? "error"
     : activeBuffer.dirty
     ? "dirty"
     : "saved";
+  const conflict = activePath ? conflicts[activePath] : null;
+  const compare = compareConflict ? conflicts[compareConflict] : null;
+
+  // ---- autosave + unsaved-edits guards (W2.5) --------------------------
+
+  // Autosave: one debounce timer per file that planAutosave() says is due.
+  // Re-planned after every render (cheap: it walks the open tabs), and a
+  // path's timer is only restarted when ITS text changed — so typing in
+  // one file never postpones another file's pending save, and switching
+  // tabs inside the delay doesn't strand the file you just left.
+  // Anything no longer due (saved, conflicted, mid-save, toggle turned
+  // off) has its timer cancelled. When an in-flight save finishes, `saving`
+  // changes, which re-plans and picks up whatever was typed meanwhile.
+  const saveFileRef = useRef(saveFile);
+  saveFileRef.current = saveFile;
+  useEffect(() => {
+    const timers = autosaveTimersRef.current;
+    const due = savePrefs.autosave
+      ? planAutosave({ tabs, buffers, busy: Object.keys(saving), conflicts, failed: failedSavesRef.current })
+      : [];
+    const dueText = new Map(due.map((d) => [d.path, d.edited]));
+    for (const [path, t] of timers) {
+      if (dueText.get(path) !== t.edited) {
+        clearTimeout(t.timer);
+        timers.delete(path);
+      }
+    }
+    for (const { path, edited } of due) {
+      if (timers.has(path)) continue;
+      const timer = setTimeout(() => {
+        timers.delete(path);
+        saveFileRef.current(path, { auto: true });
+      }, AUTOSAVE_DELAY_MS);
+      timers.set(path, { edited, timer });
+    }
+  }, [savePrefs.autosave, tabs, buffers, saving, conflicts]);
+
+  useEffect(() => {
+    const timers = autosaveTimersRef.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t.timer);
+      timers.clear();
+    };
+  }, []);
+
+  // Anything unsaved? A boolean, so the two effects below only re-run
+  // when it flips (first keystroke / last save), not on every keystroke.
+  const anyDirty = useMemo(() => Object.values(buffers).some((b) => b.dirty), [buffers]);
+
+  // Page unload / reload / closing the browser tab: the browser's own
+  // "Leave site?" prompt. The listener only exists while something is
+  // dirty — a page with an always-on beforeunload handler can be kept out
+  // of the back/forward cache by some browsers.
+  useEffect(() => {
+    if (!anyDirty) return undefined;
+    function onBeforeUnload(e) {
+      e.preventDefault();
+      e.returnValue = ""; // Chrome and Safari only show the prompt when this is set
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [anyDirty]);
+
+  // In-app navigation that unmounts this component (BuildTab switching
+  // projects, or leaving the Editor sub-tab) never fires beforeunload, so
+  // BuildTab asks for the answer instead and confirms before navigating.
+  // It's reported here rather than pulled through a ref — see the header.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+  useEffect(() => {
+    onDirtyChangeRef.current?.(anyDirty);
+  }, [anyDirty]);
+  useEffect(() => {
+    // Unmounting means whatever was unsaved is gone (or was just
+    // confirmed away); don't leave the parent believing otherwise.
+    const report = onDirtyChangeRef;
+    return () => report.current?.(false);
+  }, []);
 
   // Single-pane layout (phones): explorer and editor take turns filling
   // the width, toggled by the "Files" button in the tab strip. Both stay
@@ -701,6 +957,9 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
             onToggleBottom={toggleBottom}
             previewOpen={showPreview}
             onTogglePreview={isMobile ? undefined : togglePreview}
+            savePrefs={savePrefs}
+            onToggleAutosave={toggleAutosave}
+            onToggleFormatOnSave={toggleFormatOnSave}
           />
 
           {notice && (
@@ -717,7 +976,51 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
             </div>
           )}
 
-          {activeBuffer?.stale && (
+          {conflict && (
+            // W2.5: this file's Save was rejected — someone else saved a
+            // newer version first. Nothing was written and nothing is
+            // lost: the person's text is still in the editor, the
+            // server's is in `conflict.current`. Says what happened,
+            // then names each way out (the buttons echo the plan's
+            // Reload theirs / Keep mine / Compare wording).
+            <div
+              role="alert"
+              className="shrink-0 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30 px-3 py-1.5"
+            >
+              <span className="min-w-0">
+                Not saved — this file changed on the server
+                {conflict.current.version != null ? ` (now v${conflict.current.version})` : ""} after you opened it.
+              </span>
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setCompareConflict(activePath)}
+                  title="See the server's version next to yours"
+                  className="underline hover:text-amber-200"
+                >
+                  Compare
+                </button>
+                <button
+                  type="button"
+                  onClick={() => reloadConflictTheirs(activePath)}
+                  title="Discard your edits and load the server's version"
+                  className="underline hover:text-amber-200"
+                >
+                  Reload theirs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => keepMineOnConflict(activePath)}
+                  title="Keep your edits — the next Save replaces the server's version"
+                  className="underline hover:text-amber-200"
+                >
+                  Keep mine
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeBuffer?.stale && !conflict && (
             // W0.1's banner, now per buffer (the store's `stale` flag):
             // this file changed on the server while it had unsaved edits.
             <div className="shrink-0 flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30 px-3 py-1.5">
@@ -837,11 +1140,33 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
         }}
         onCancel={() => setPendingDelete(null)}
       />
+
+      {/* W2.5: "Compare" on the conflict bar. The right-hand side is the
+          buffer as it is NOW (what "Keep mine" would keep), falling back
+          to what the failed save sent. Both decisions are echoed here so
+          the person doesn't have to close it to act. */}
+      <ConflictCompareView
+        open={!!compare}
+        path={compareConflict || undefined}
+        theirs={compare?.current?.content}
+        theirsVersion={compare?.current?.version}
+        mine={(compareConflict && buffers[compareConflict]?.edited) ?? compare?.mine}
+        onClose={() => setCompareConflict(null)}
+        onReloadTheirs={() => reloadConflictTheirs(compareConflict)}
+        onKeepMine={() => keepMineOnConflict(compareConflict)}
+      />
     </div>
   );
 }
 
-export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = false }) {
+/**
+ * @param {object} props
+ * @param {string} props.workspaceId
+ * @param {string} props.apiUrl
+ * @param {boolean} [props.reserveCorner]
+ * @param {(dirty: boolean) => void} [props.onDirtyChange] - W2.5: true while any open file has unsaved edits, false again when saved or unmounted; BuildTab guards project / sub-tab switches with it
+ */
+export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = false, onDirtyChange }) {
   // The saved panel layout, read once when the workbench mounts — the
   // store's initializer ignores later changes to it. That's fine for the
   // same reason the tabs are: BuildTab remounts this component per
@@ -852,7 +1177,12 @@ export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = f
   const initialLayout = useMemo(() => loadLayout(browserStorage(), workspaceId), [workspaceId]);
   return (
     <EditorStoreProvider initialLayout={initialLayout}>
-      <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} reserveCorner={reserveCorner} />
+      <WorkbenchBody
+        workspaceId={workspaceId}
+        apiUrl={apiUrl}
+        reserveCorner={reserveCorner}
+        onDirtyChange={onDirtyChange}
+      />
     </EditorStoreProvider>
   );
 }

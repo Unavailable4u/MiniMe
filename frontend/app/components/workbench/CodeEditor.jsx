@@ -229,7 +229,9 @@ function cursorPosition(state) {
   return { line: line.number, col: head - line.from + 1 };
 }
 
-async function loadLanguageExtension(filePath) {
+// Exported (W2.5) so ConflictCompareView's two read-only MergeView sides
+// highlight with the same lazy per-file loader instead of a second copy.
+export async function loadLanguageExtension(filePath) {
   if (!filePath) return [];
   // matchFilename() tests some languages' patterns against the WHOLE
   // string it's given, and those patterns are anchored to it —
