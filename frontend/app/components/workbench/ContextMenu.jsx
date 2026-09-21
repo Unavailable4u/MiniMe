@@ -16,7 +16,9 @@
 // only viewport-relative if no ancestor creates a containing block
 // (transform, filter, contain…) — a portal makes that a non-question.
 //
-// `items`: `{ key, label, icon?, danger?, disabled?, onSelect }`; falsy
+// `items`: `{ key, label, icon?, hint?, danger?, disabled?, title?,
+// onSelect }` (`hint` = a keyboard shortcut shown at the right, W2.4);
+// falsy
 // entries are skipped (so callers can write `cond && {...}` inline) and
 // `{ key, separator: true }` draws a divider. The menu closes itself
 // before calling `onSelect`. Dismissal: outside pointerdown (not
@@ -91,6 +93,7 @@ export default function ContextMenu({ x, y, items, onClose }) {
             type="button"
             role="menuitem"
             disabled={item.disabled}
+            title={item.title}
             onClick={() => {
               onClose();
               item.onSelect?.();
@@ -103,6 +106,7 @@ export default function ContextMenu({ x, y, items, onClose }) {
           >
             {Icon && <Icon size={12} className="shrink-0" />}
             {item.label}
+            {item.hint && <span className="ml-auto pl-6 text-[10px] text-[var(--neutral-500)]">{item.hint}</span>}
           </button>
         );
       })}

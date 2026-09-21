@@ -16,10 +16,34 @@
 // callback prop must be referentially stable (EditorWorkbench passes
 // useCallback-wrapped ones); an inline arrow there would defeat the
 // memo silently.
+//
+// W2.4: also hosts the two panel toggles (bottom panel, preview) at the
+// strip's right end. They were in the status bar at first, but the
+// app's floating "open chat" bubble sits fixed at the bottom-right of
+// the screen whenever the chat dock is closed — right on top of them.
+// The top-right corner is never under it.
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, FileCode, Files, Loader2, Save, X } from "lucide-react";
+import { AlertTriangle, FileCode, Files, Loader2, PanelBottom, PanelRight, Save, X } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { decodeTabFlags, tabLabels } from "../../lib/workbench/tabUtils";
+
+// An icon button that says whether its panel is showing (lit + aria-pressed).
+function PanelToggle({ pressed, onClick, label, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={pressed}
+      aria-label={label}
+      title={label}
+      className={`touch-target flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--neutral-800)] ${
+        pressed ? "text-[var(--accent)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
 
 function EditorTabs({
   tabs,
@@ -33,6 +57,10 @@ function EditorTabs({
   canSave,
   saving,
   onToggleExplorer, // only passed on the single-pane (mobile) layout
+  bottomOpen = false,
+  onToggleBottom,
+  previewOpen = false,
+  onTogglePreview, // omitted on the single-pane layout: no room for a third pane
 }) {
   const stripRef = useRef(null);
   const [menu, setMenu] = useState(null); // {x, y, path} | null
@@ -176,6 +204,21 @@ function EditorTabs({
             {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
             {saving ? "Saving…" : "Save"}
           </button>
+        </div>
+      )}
+
+      {(onToggleBottom || onTogglePreview) && (
+        <div className="shrink-0 flex items-center gap-1 px-2 border-l border-[var(--neutral-800)]">
+          {onToggleBottom && (
+            <PanelToggle pressed={bottomOpen} onClick={onToggleBottom} label="Toggle bottom panel">
+              <PanelBottom size={14} />
+            </PanelToggle>
+          )}
+          {onTogglePreview && (
+            <PanelToggle pressed={previewOpen} onClick={onTogglePreview} label="Toggle preview">
+              <PanelRight size={14} />
+            </PanelToggle>
+          )}
         </div>
       )}
 

@@ -2,8 +2,8 @@
 // frontend/app/components/workbench/StatusBar.jsx — W2.3a (Build
 // Workbench plan). The thin strip along the bottom of the workbench:
 // which file source is showing (provider), the active file's save
-// state, its language and caret position, and a slot for the "Pending
-// changes (N)" tray W5.4 will fill in.
+// state, its language and caret position, and the "Pending changes (N)"
+// chip (W5.4 feeds it).
 //
 // Presentational only. Everything comes in as props so it stays
 // correct over Cloud files now and Local files after W3.1 — the local
@@ -17,6 +17,35 @@ const PROVIDER_LABELS = {
   local: "Local folder",
 };
 
+// The "Pending changes" slot (W2.3b). Pending changes = AI-proposed
+// edits waiting for the person's review (plan D4) — not to be confused
+// with unsaved edits, which the save state next to it covers. Always
+// rendered so the slot is visible before there's anything in it; it
+// only becomes a button once there's a count AND something to do on
+// click (W5.4 passes both).
+function PendingChanges({ count, onClick }) {
+  if (count > 0 && onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        title="AI-proposed edits waiting for your review"
+        className="text-amber-300 hover:text-amber-200 hover:underline underline-offset-2"
+      >
+        Pending changes ({count})
+      </button>
+    );
+  }
+  return (
+    <span
+      title="AI-proposed edits waiting for your review will be listed here"
+      className={count > 0 ? "text-amber-300" : undefined}
+    >
+      Pending changes ({count})
+    </span>
+  );
+}
+
 /**
  * @param {object} props
  * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
@@ -25,11 +54,31 @@ const PROVIDER_LABELS = {
  * @param {number} [props.version] - the active buffer's server version
  * @param {string|null} [props.language]
  * @param {{line: number, col: number}|null} [props.cursor]
- * @param {import("react").ReactNode} [props.pendingSlot] - W5.4's "Pending changes" tray; nothing renders until then
+ * @param {number} [props.pendingCount=0] - proposals waiting for review
+ * @param {() => void} [props.onPendingClick] - opens the review tray (W5.4); without it the chip is inert
+ * @param {boolean} [props.reserveRight] - keep the bar's right end clear for the app's floating "open chat" bubble
  */
-function StatusBar({ providerId, saveState, saveError, version, language, cursor, pendingSlot }) {
+function StatusBar({
+  providerId,
+  saveState,
+  saveError,
+  version,
+  language,
+  cursor,
+  pendingCount = 0,
+  onPendingClick,
+  reserveRight = false,
+}) {
   return (
-    <div className="shrink-0 flex items-center justify-between gap-3 h-6 px-3 text-[10px] text-[var(--neutral-500)] border-t border-[var(--neutral-800)] bg-[var(--neutral-950)]">
+    // While the chat dock is closed the app draws a round "open chat"
+    // button fixed at the screen's bottom-right corner — over this bar's
+    // right end, where the caret position and language are. `reserveRight`
+    // (BuildTab passes it while the dock is closed) leaves room for it
+    // (42px button + a gap) so nothing here is hidden behind it.
+    <div
+      className="shrink-0 flex items-center justify-between gap-3 h-6 pl-3 text-[10px] text-[var(--neutral-500)] border-t border-[var(--neutral-800)] bg-[var(--neutral-950)]"
+      style={{ paddingRight: reserveRight ? 56 : 12 }}
+    >
       <div className="flex items-center gap-3 min-w-0">
         <span title="Where these files live">{PROVIDER_LABELS[providerId] || providerId}</span>
 
@@ -48,7 +97,7 @@ function StatusBar({ providerId, saveState, saveError, version, language, cursor
           {saveState === "saved" && <span>{version ? `Saved · v${version}` : "Saved"}</span>}
         </span>
 
-        {pendingSlot}
+        <PendingChanges count={pendingCount} onClick={onPendingClick} />
       </div>
 
       <div className="flex items-center gap-3 shrink-0">

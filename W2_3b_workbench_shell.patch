@@ -1,0 +1,1130 @@
+diff --git a/frontend/app/components/workbench/BottomPanel.jsx b/frontend/app/components/workbench/BottomPanel.jsx
+new file mode 100644
+index 0000000..d342379
+--- /dev/null
++++ b/frontend/app/components/workbench/BottomPanel.jsx
+@@ -0,0 +1,135 @@
++"use client";
++// frontend/app/components/workbench/BottomPanel.jsx — W2.3b (Build
++// Workbench plan). The panel under the editor row: Problems · Console ·
++// Terminal · History. It is the CONTAINER only — every tab shows an
++// empty state for now, and each later step fills in its own:
++//   Problems  → W8.x (lint / diagnostics)      Console → W6.2 (preview bridge)
++//   Terminal  → W3.1 (local daemon)            History → W2.6 (file versions)
++//
++// The tab strip is always rendered, even collapsed: a closed panel is
++// just that 32px strip, which keeps the panel discoverable without
++// costing the editor its height until someone asks for it.
++//
++// Presentational, like the other panes: EditorWorkbench owns the state
++// (open / which tab live in the editor store's `layout`, the height in
++// a useSplitter) and hands it in. That is also why the resize handle is
++// a plain `onResizeStart` prop — this file doesn't know about splitters,
++// only where the handle goes (its top edge).
++import { memo, useId } from "react";
++import { ChevronDown, ChevronUp } from "lucide-react";
++import { BOTTOM_TABS } from "../../lib/workbench/layoutPrefs";
++
++// What each tab says while it has nothing to show. User-facing copy:
++// says what the tab is for, not which patch will build it.
++const EMPTY_STATES = {
++  problems: {
++    title: "No problems",
++    body: "Errors and warnings found in this project's files will be listed here.",
++  },
++  console: {
++    title: "Console is empty",
++    body: "Output and errors from the live preview will appear here.",
++  },
++  terminal: {
++    title: "Terminal is for local folders",
++    body: "It opens when a local folder is connected through the local daemon. Project files stored in the cloud have no terminal.",
++  },
++  history: {
++    title: "File history",
++    body: "Each save keeps the previous version of a file on the server. Browsing and restoring those versions will happen here.",
++  },
++};
++
++/**
++ * @param {object} props
++ * @param {boolean} props.open - false = only the tab strip shows
++ * @param {string} props.activeTab - one of BOTTOM_TABS' ids
++ * @param {(tabId: string) => void} props.onSelectTab - also opens the panel
++ * @param {() => void} props.onToggle - collapse / expand
++ * @param {number} props.height - px, the whole panel when open (strip included)
++ * @param {boolean} [props.resizable=true] - false on the single-pane (phone) layout, where the handle is mouse-only
++ * @param {(e: import("react").MouseEvent) => void} [props.onResizeStart] - useSplitter's onHandleMouseDown
++ */
++function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, resizable = true, onResizeStart }) {
++  const uid = useId();
++  const bodyId = `${uid}-body`;
++  const empty = EMPTY_STATES[activeTab] || EMPTY_STATES.problems;
++
++  return (
++    <div
++      // `shrink` (flex-shrink: 1) on purpose: when the window is too
++      // short for the saved height AND the editor row's minimum, the
++      // panel gives way instead of the editor collapsing to nothing.
++      className={`shrink min-h-0 flex flex-col bg-[var(--neutral-950)] ${
++        open ? "" : "border-t border-[var(--neutral-800)]"
++      }`}
++      style={open ? { height } : undefined}
++    >
++      {open && resizable && (
++        <div
++          role="separator"
++          aria-orientation="horizontal"
++          aria-label="Resize bottom panel"
++          onMouseDown={onResizeStart}
++          className="h-1 shrink-0 cursor-row-resize bg-[var(--neutral-800)] hover:bg-[var(--accent)] transition-colors"
++        />
++      )}
++      {open && !resizable && <div className="h-px shrink-0 bg-[var(--neutral-800)]" />}
++
++      <div className="shrink-0 flex items-stretch justify-between h-8 border-b border-[var(--neutral-800)]">
++        <div role="tablist" aria-label="Bottom panel" className="flex items-stretch min-w-0 overflow-x-auto">
++          {BOTTOM_TABS.map((tab) => {
++            // Nothing is "selected" while collapsed — there's no panel
++            // showing for the tab to be the label of.
++            const selected = open && tab.id === activeTab;
++            return (
++              <button
++                key={tab.id}
++                type="button"
++                role="tab"
++                id={`${uid}-tab-${tab.id}`}
++                aria-selected={selected}
++                aria-controls={open ? bodyId : undefined}
++                onClick={() => onSelectTab(tab.id)}
++                className={`shrink-0 px-3 text-[11px] uppercase tracking-wide select-none ${
++                  selected
++                    ? "text-[var(--neutral-100)] shadow-[inset_0_-2px_0_var(--accent)]"
++                    : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++                }`}
++              >
++                {tab.label}
++              </button>
++            );
++          })}
++        </div>
++
++        <button
++          type="button"
++          onClick={onToggle}
++          aria-expanded={open}
++          aria-label={open ? "Collapse bottom panel" : "Expand bottom panel"}
++          title={open ? "Collapse panel" : "Expand panel"}
++          className="touch-target shrink-0 px-3 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++        >
++          {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
++        </button>
++      </div>
++
++      {open && (
++        <div
++          id={bodyId}
++          role="tabpanel"
++          aria-labelledby={`${uid}-tab-${activeTab}`}
++          className="flex-1 min-h-0 overflow-auto px-4 py-3"
++        >
++          <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
++            <p className="text-xs text-[var(--neutral-400)]">{empty.title}</p>
++            <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">{empty.body}</p>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
++
++export default memo(BottomPanel);
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 1938b0e..6eb94a1 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -21,10 +21,17 @@
+ //     callbacks to the presentational panes.
+ //   - EditorPane: one mounted CodeEditor per open file (below).
+ //
+-// Not in this patch (W2.3b): the bottom panel (Problems / Console /
+-// Terminal / History) and the preview column. The layout below is
+-// arranged so both slot in without moving anything: a status bar
+-// under a "main row" that they extend.
++// W2.3b completes the shell: a preview column at the right of the
++// editor (empty until W6.1 mounts a PreviewPane in it), a bottom panel
++// (Problems / Console / Terminal / History — containers only, each
++// filled by its own later step), a drag splitter for each, and the
++// persisted layout. Top to bottom the shell is now: a "main row"
++// (explorer | editor | preview), the bottom panel, the status bar.
++//
++// Layout persistence is split in two (layoutPrefs.js has the why):
++// pixel sizes go through useSplitter's own `storageKey`, exactly like
++// the explorer width; the on/off/which-tab flags live in the editor
++// store's `layout` and are written to one json key on change.
+ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { X } from "lucide-react";
+ import { authHeaders } from "../../context/SessionContext";
+@@ -33,11 +40,26 @@ import { useViewport } from "../../hooks/useViewport";
+ import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
+ import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
+ import { basename } from "../../lib/workbench/fileTree";
++import {
++  BOTTOM_PANEL_DEFAULT_HEIGHT,
++  BOTTOM_PANEL_MIN_HEIGHT,
++  EDITOR_MIN_WIDTH,
++  MAIN_ROW_MIN_HEIGHT,
++  PREVIEW_DEFAULT_WIDTH,
++  PREVIEW_MIN_WIDTH,
++  bottomPanelMaxHeight,
++  browserStorage,
++  loadLayout,
++  previewMaxWidth,
++  saveLayout,
++} from "../../lib/workbench/layoutPrefs";
+ import { encodeTabFlags, planBufferSync } from "../../lib/workbench/tabUtils";
+ import ConfirmDialog from "../ConfirmDialog";
++import BottomPanel from "./BottomPanel";
+ import CodeEditor from "./CodeEditor";
+ import EditorTabs from "./EditorTabs";
+ import Explorer from "./Explorer";
++import PreviewColumn from "./PreviewColumn";
+ import StatusBar from "./StatusBar";
+ 
+ // Explorer width. Persisted per workspace (the key carries the id) so
+@@ -105,6 +127,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+     markStale,
+     clearStale,
+     closeTabs,
++    setLayout,
+   } = useEditorStore();
+ 
+   const [viewport] = useViewport();
+@@ -133,6 +156,40 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+     storageKey: `minime_build_editor_explorer_w:${workspaceId}`,
+   });
+ 
++  // The two W2.3b splitters. Their bounds depend on how big the
++  // workbench currently is, so the `max` functions read it from the
++  // container ref at drag time (useSplitter accepts `() => number` for
++  // exactly this) and are wrapped in useCallback: that keeps each
++  // splitter's mouse-down handler — and with it the memoized
++  // BottomPanel — from being rebuilt on every keystroke.
++  //   preview: the handle is on the column's LEFT edge, so dragging left
++  //            grows it → `reverse`.
++  //   bottom:  the handle is on the panel's TOP edge, so dragging up
++  //            grows it → `reverse`.
++  const containerRef = useRef(null);
++  const explorerWidth = explorerSplitter.size;
++  const previewMax = useCallback(
++    () => previewMaxWidth(containerRef.current?.clientWidth, explorerWidth),
++    [explorerWidth]
++  );
++  const bottomMax = useCallback(() => bottomPanelMaxHeight(containerRef.current?.clientHeight), []);
++  const previewSplitter = useSplitter({
++    axis: "width",
++    defaultSize: PREVIEW_DEFAULT_WIDTH,
++    min: PREVIEW_MIN_WIDTH,
++    max: previewMax,
++    reverse: true,
++    storageKey: `minime_build_editor_preview_w:${workspaceId}`,
++  });
++  const bottomSplitter = useSplitter({
++    axis: "height",
++    defaultSize: BOTTOM_PANEL_DEFAULT_HEIGHT,
++    min: BOTTOM_PANEL_MIN_HEIGHT,
++    max: bottomMax,
++    reverse: true,
++    storageKey: `minime_build_editor_bottom_h:${workspaceId}`,
++  });
++
+   // "Latest value" refs. Callbacks below are wrapped in useCallback with
+   // short dependency lists so the memoized panes don't re-render on every
+   // keystroke; they read anything that changes per keystroke (the store
+@@ -434,6 +491,43 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+ 
+   const handleRefresh = useCallback(() => refreshRef.current(), []);
+ 
++  // ---- panel layout (W2.3b) --------------------------------------------
++
++  const { layout } = state;
++
++  // Persist the flags whenever they change (and once on mount, which
++  // writes back what was just loaded — or removes the key when it's the
++  // default; see saveLayout). SET_LAYOUT returns the same state for a
++  // no-op, so `layout` only changes identity when a flag really flipped.
++  useEffect(() => {
++    saveLayout(browserStorage(), workspaceId, layout);
++  }, [workspaceId, layout]);
++
++  // Read the flag through stateRef (like the callbacks above) so a
++  // toggle's identity doesn't change with the layout it toggles.
++  const toggleBottom = useCallback(
++    () => setLayout({ bottomOpen: !stateRef.current.layout.bottomOpen }),
++    [setLayout]
++  );
++  const selectBottomTab = useCallback(
++    (bottomTab) => setLayout({ bottomTab, bottomOpen: true }),
++    [setLayout]
++  );
++  const togglePreview = useCallback(
++    () => setLayout({ previewOpen: !stateRef.current.layout.previewOpen }),
++    [setLayout]
++  );
++  const closePreview = useCallback(() => setLayout({ previewOpen: false }), [setLayout]);
++
++  // "Pending changes (N)": AI-proposed edits waiting for review. The
++  // store's `proposals` stays empty until W5.4 loads them, so this is 0
++  // for now; only `pending` ones count (resolved ones may live in the
++  // list too — plan §5 W5.1's status column).
++  const pendingCount = useMemo(
++    () => state.proposals.filter((p) => p?.status === "pending").length,
++    [state.proposals]
++  );
++
+   // ---- derived ---------------------------------------------------------
+ 
+   const { tabs, buffers, activePath } = state;
+@@ -457,6 +551,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+   // three-pane layout from being crushed on a small screen meanwhile.
+   const explorerHidden = isMobile && !mobileExplorerOpen;
+   const editorColumnHidden = isMobile && mobileExplorerOpen;
++  const showPreview = !isMobile && layout.previewOpen;
+   const toggleExplorer = useCallback(() => setMobileExplorerOpen((v) => !v), []);
+ 
+   const pendingCloseMessage = pendingClose
+@@ -468,11 +563,16 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+     : "";
+ 
+   return (
+-    <div className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden">
+-      {/* Main row: explorer | splitter | editor column. W2.3b adds the
+-          preview column to the right of the editor column and the bottom
+-          panel between this row and the status bar. */}
+-      <div className="flex-1 min-h-0 flex">
++    <div
++      ref={containerRef}
++      className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
++    >
++      {/* Main row: explorer | splitter | editor column | splitter |
++          preview column. The bottom panel and the status bar sit below
++          it. The row keeps a minimum height so a tall bottom panel
++          (which is allowed to shrink, see BottomPanel) can never crush
++          the editor to nothing. */}
++      <div className="flex-1 flex" style={{ minHeight: MAIN_ROW_MIN_HEIGHT }}>
+         <div
+           className={explorerHidden ? "hidden" : isMobile ? "flex-1 min-w-0" : "shrink-0"}
+           style={isMobile ? undefined : { width: explorerSplitter.size }}
+@@ -501,7 +601,14 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+           />
+         )}
+ 
+-        <div className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}>
++        {/* On desktop the editor column has a real minimum width: with a
++            flex-basis of 0 it would otherwise just take whatever is left,
++            and an over-wide preview would squeeze it instead of being
++            squeezed itself (the preview column is the one that shrinks). */}
++        <div
++          className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}
++          style={isMobile ? undefined : { minWidth: EDITOR_MIN_WIDTH }}
++        >
+           <EditorTabs
+             tabs={tabs}
+             activePath={activePath}
+@@ -584,8 +691,36 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+             ) : null}
+           </div>
+         </div>
++
++        {/* Preview column (W2.3b): empty frame for now — W6.1 mounts the
++            PreviewPane inside it. Not on the single-pane (phone) layout,
++            which has no room for a third pane. */}
++        {showPreview && (
++          <>
++            <div
++              role="separator"
++              aria-orientation="vertical"
++              aria-label="Resize preview"
++              onMouseDown={previewSplitter.onHandleMouseDown}
++              className="w-1 shrink-0 cursor-col-resize bg-[var(--neutral-800)] hover:bg-[var(--accent)] transition-colors"
++            />
++            <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
++              <PreviewColumn onClose={closePreview} />
++            </div>
++          </>
++        )}
+       </div>
+ 
++      <BottomPanel
++        open={layout.bottomOpen}
++        activeTab={layout.bottomTab}
++        onSelectTab={selectBottomTab}
++        onToggle={toggleBottom}
++        height={isMobile ? BOTTOM_PANEL_DEFAULT_HEIGHT : bottomSplitter.size}
++        resizable={!isMobile}
++        onResizeStart={bottomSplitter.onHandleMouseDown}
++      />
++
+       <StatusBar
+         providerId={provider.id}
+         saveState={saveState}
+@@ -593,6 +728,11 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+         version={activeBuffer?.version}
+         language={activeBuffer?.language}
+         cursor={cursor}
++        pendingCount={pendingCount}
++        bottomOpen={layout.bottomOpen}
++        onToggleBottom={toggleBottom}
++        previewOpen={showPreview}
++        onTogglePreview={isMobile ? undefined : togglePreview}
+       />
+ 
+       <ConfirmDialog
+@@ -611,8 +751,16 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+ }
+ 
+ export default function EditorWorkbench({ workspaceId, apiUrl }) {
++  // The saved panel layout, read once when the workbench mounts — the
++  // store's initializer ignores later changes to it. That's fine for the
++  // same reason the tabs are: BuildTab remounts this component per
++  // project (key={selected.id}), so one workspace's layout never has to
++  // be swapped for another's in place. (`workspaceId` is a dependency
++  // only so the read is correct if that ever stops being true for the
++  // first render.)
++  const initialLayout = useMemo(() => loadLayout(browserStorage(), workspaceId), [workspaceId]);
+   return (
+-    <EditorStoreProvider>
++    <EditorStoreProvider initialLayout={initialLayout}>
+       <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} />
+     </EditorStoreProvider>
+   );
+diff --git a/frontend/app/components/workbench/PreviewColumn.jsx b/frontend/app/components/workbench/PreviewColumn.jsx
+new file mode 100644
+index 0000000..5d77f01
+--- /dev/null
++++ b/frontend/app/components/workbench/PreviewColumn.jsx
+@@ -0,0 +1,51 @@
++"use client";
++// frontend/app/components/workbench/PreviewColumn.jsx — W2.3b (Build
++// Workbench plan). The column at the right of the editor: a titled
++// frame with a close button around whatever preview is showing. Empty
++// for now — W6.1's PreviewPane is passed in as `children` and replaces
++// the placeholder, without this frame or the splitter/toggle/persisted
++// width around it changing.
++//
++// Presentational, like the other panes. Whether it's open, and its
++// width, are the workbench's business (editor store `layout` +
++// useSplitter); this only draws the frame.
++import { memo } from "react";
++import { X } from "lucide-react";
++
++/**
++ * @param {object} props
++ * @param {() => void} props.onClose
++ * @param {import("react").ReactNode} [props.children] - the preview itself; a placeholder shows when omitted
++ */
++function PreviewColumn({ onClose, children }) {
++  return (
++    <aside aria-label="Preview" className="h-full min-h-0 flex flex-col bg-[var(--neutral-950)]">
++      {/* h-9 to line up with the explorer header and the editor tab strip */}
++      <div className="shrink-0 flex items-center justify-between px-3 h-9 border-b border-[var(--neutral-800)]">
++        <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">Preview</span>
++        <button
++          type="button"
++          onClick={onClose}
++          aria-label="Close preview"
++          title="Close preview"
++          className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++        >
++          <X size={12} />
++        </button>
++      </div>
++
++      <div className="flex-1 min-h-0 overflow-auto">
++        {children ?? (
++          <div className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center">
++            <p className="text-xs text-[var(--neutral-400)]">Nothing to preview yet</p>
++            <p className="max-w-xs text-[11px] leading-relaxed text-[var(--neutral-600)]">
++              A live preview of this project will appear here.
++            </p>
++          </div>
++        )}
++      </div>
++    </aside>
++  );
++}
++
++export default memo(PreviewColumn);
+diff --git a/frontend/app/components/workbench/StatusBar.jsx b/frontend/app/components/workbench/StatusBar.jsx
+index e031bcb..d78c667 100644
+--- a/frontend/app/components/workbench/StatusBar.jsx
++++ b/frontend/app/components/workbench/StatusBar.jsx
+@@ -2,21 +2,67 @@
+ // frontend/app/components/workbench/StatusBar.jsx — W2.3a (Build
+ // Workbench plan). The thin strip along the bottom of the workbench:
+ // which file source is showing (provider), the active file's save
+-// state, its language and caret position, and a slot for the "Pending
+-// changes (N)" tray W5.4 will fill in.
++// state, its language and caret position, the "Pending changes (N)"
++// chip (W5.4 feeds it), and — W2.3b — the two panel toggles.
+ //
+ // Presentational only. Everything comes in as props so it stays
+ // correct over Cloud files now and Local files after W3.1 — the local
+ // provider will just pass a different `providerId` and a save state
+ // that reads "Waiting for confirmation" once that exists.
+ import { memo } from "react";
+-import { Loader2 } from "lucide-react";
++import { Loader2, PanelBottom, PanelRight } from "lucide-react";
+ 
+ const PROVIDER_LABELS = {
+   cloud: "Project files",
+   local: "Local folder",
+ };
+ 
++// The "Pending changes" slot (W2.3b). Pending changes = AI-proposed
++// edits waiting for the person's review (plan D4) — not to be confused
++// with unsaved edits, which the save state next to it covers. Always
++// rendered so the slot is visible before there's anything in it; it
++// only becomes a button once there's a count AND something to do on
++// click (W5.4 passes both).
++function PendingChanges({ count, onClick }) {
++  if (count > 0 && onClick) {
++    return (
++      <button
++        type="button"
++        onClick={onClick}
++        title="AI-proposed edits waiting for your review"
++        className="text-amber-300 hover:text-amber-200 hover:underline underline-offset-2"
++      >
++        Pending changes ({count})
++      </button>
++    );
++  }
++  return (
++    <span
++      title="AI-proposed edits waiting for your review will be listed here"
++      className={count > 0 ? "text-amber-300" : undefined}
++    >
++      Pending changes ({count})
++    </span>
++  );
++}
++
++function PanelToggle({ pressed, onClick, label, children }) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      aria-pressed={pressed}
++      aria-label={label}
++      title={label}
++      className={`touch-target flex items-center ${
++        pressed ? "text-[var(--accent)]" : "hover:text-[var(--neutral-200)]"
++      }`}
++    >
++      {children}
++    </button>
++  );
++}
++
+ /**
+  * @param {object} props
+  * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
+@@ -25,9 +71,27 @@ const PROVIDER_LABELS = {
+  * @param {number} [props.version] - the active buffer's server version
+  * @param {string|null} [props.language]
+  * @param {{line: number, col: number}|null} [props.cursor]
+- * @param {import("react").ReactNode} [props.pendingSlot] - W5.4's "Pending changes" tray; nothing renders until then
++ * @param {number} [props.pendingCount=0] - proposals waiting for review
++ * @param {() => void} [props.onPendingClick] - opens the review tray (W5.4); without it the chip is inert
++ * @param {boolean} [props.bottomOpen]
++ * @param {() => void} [props.onToggleBottom] - omit to hide the bottom-panel toggle
++ * @param {boolean} [props.previewOpen]
++ * @param {() => void} [props.onTogglePreview] - omit to hide the preview toggle (the single-pane layout has no room for one)
+  */
+-function StatusBar({ providerId, saveState, saveError, version, language, cursor, pendingSlot }) {
++function StatusBar({
++  providerId,
++  saveState,
++  saveError,
++  version,
++  language,
++  cursor,
++  pendingCount = 0,
++  onPendingClick,
++  bottomOpen = false,
++  onToggleBottom,
++  previewOpen = false,
++  onTogglePreview,
++}) {
+   return (
+     <div className="shrink-0 flex items-center justify-between gap-3 h-6 px-3 text-[10px] text-[var(--neutral-500)] border-t border-[var(--neutral-800)] bg-[var(--neutral-950)]">
+       <div className="flex items-center gap-3 min-w-0">
+@@ -48,7 +112,7 @@ function StatusBar({ providerId, saveState, saveError, version, language, cursor
+           {saveState === "saved" && <span>{version ? `Saved · v${version}` : "Saved"}</span>}
+         </span>
+ 
+-        {pendingSlot}
++        <PendingChanges count={pendingCount} onClick={onPendingClick} />
+       </div>
+ 
+       <div className="flex items-center gap-3 shrink-0">
+@@ -58,6 +122,21 @@ function StatusBar({ providerId, saveState, saveError, version, language, cursor
+           </span>
+         )}
+         {saveState && <span>{language || "plain text"}</span>}
++
++        {(onToggleBottom || onTogglePreview) && (
++          <div className="flex items-center gap-2">
++            {onToggleBottom && (
++              <PanelToggle pressed={bottomOpen} onClick={onToggleBottom} label="Toggle bottom panel">
++                <PanelBottom size={12} />
++              </PanelToggle>
++            )}
++            {onTogglePreview && (
++              <PanelToggle pressed={previewOpen} onClick={onTogglePreview} label="Toggle preview">
++                <PanelRight size={12} />
++              </PanelToggle>
++            )}
++          </div>
++        )}
+       </div>
+     </div>
+   );
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+index 12585f9..4c98932 100644
+--- a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -1,5 +1,5 @@
+ // W2.2 (Build Workbench plan) — reducer test for editorStore.js;
+-// extended in W2.3a for the tab-strip actions.
++// extended in W2.3a for the tab-strip actions and in W2.3b for SET_LAYOUT.
+ //
+ // Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
+ // copy of editorReducer() (editorStore.js pulls in `react`, which plain
+@@ -8,7 +8,7 @@
+ // that has moved on. loadSource.mjs now reads editorStore.js itself and
+ // satisfies its two imports from the map below: a stub for `react` (only
+ // its top-level createContext() call runs at load time; the provider and
+-// hook aren't exercised here) and the real tabUtils.js.
++// hook aren't exercised here) and the real tabUtils.js / layoutPrefs.js.
+ //
+ // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+ import { loadSource } from "./loadSource.mjs";
+@@ -21,8 +21,9 @@ const reactStub = {
+   useReducer: () => [],
+ };
+ const tabUtils = loadSource("../tabUtils.js");
++const layoutPrefs = loadSource("../layoutPrefs.js");
+ const { editorReducer } = loadSource("../editorStore.js", {
+-  imports: { react: reactStub, "./tabUtils": tabUtils },
++  imports: { react: reactStub, "./tabUtils": tabUtils, "./layoutPrefs": layoutPrefs },
+ });
+ 
+ const initialState = {
+@@ -260,6 +261,45 @@ assertEqual(
+   "keepEdited with no existing buffer (tab closed mid-save) falls back to the server's copy, clean"
+ );
+ 
++// --- SET_LAYOUT (W2.3b) ----------------------------------------------
++
++const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false };
++const withLayout = { ...initialState, layout: { ...defaultLayout } };
++
++let laid = editorReducer(withLayout, { type: "SET_LAYOUT", layout: { bottomOpen: true } });
++assertEqual(laid.layout, { bottomOpen: true, bottomTab: "problems", previewOpen: false }, "SET_LAYOUT merges a partial over the current layout");
++
++laid = editorReducer(laid, { type: "SET_LAYOUT", layout: { bottomTab: "history", previewOpen: true } });
++assertEqual(laid.layout, { bottomOpen: true, bottomTab: "history", previewOpen: true }, "SET_LAYOUT can change several fields at once, leaving the rest alone");
++
++const before = laid;
++assertEqual(
++  editorReducer(before, { type: "SET_LAYOUT", layout: { bottomOpen: true, bottomTab: "history" } }) === before,
++  true,
++  "SET_LAYOUT that changes nothing returns the SAME state object (no re-render, no persist)"
++);
++
++laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", previewOpen: "yes" } });
++assertEqual(laid.layout, before.layout, "SET_LAYOUT re-validates: an unknown tab id and a non-boolean are ignored, the current values stay");
++assertEqual(laid === before, true, "...and an update made only of invalid fields is a no-op (same state object)");
++
++laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", bottomOpen: false } });
++assertEqual(
++  laid.layout,
++  { bottomOpen: false, bottomTab: "history", previewOpen: true },
++  "...while the valid fields in the same update still apply"
++);
++
++laid = editorReducer(before, { type: "SET_LAYOUT", layout: { somethingElse: 1 } });
++assertEqual(Object.keys(laid.layout).sort(), ["bottomOpen", "bottomTab", "previewOpen"], "SET_LAYOUT drops keys that aren't layout fields");
++
++laid = editorReducer(initialState, { type: "SET_LAYOUT", layout: { previewOpen: true } });
++assertEqual(laid.layout.previewOpen, true, "SET_LAYOUT works from an empty `layout: {}` (fields default, not undefined)");
++assertEqual(laid.layout.bottomTab, "problems", "...and the missing fields are filled from the defaults");
++
++const opened = editorReducer(withLayout, { type: "SET_ACTIVE_PATH", path: "a.js" });
++assertEqual(opened.layout, withLayout.layout, "unrelated actions leave layout untouched");
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs b/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs
+new file mode 100644
+index 0000000..5d22a5f
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs
+@@ -0,0 +1,195 @@
++// W2.3b (Build Workbench plan) — tests for layoutPrefs.js.
++//
++// Loads the REAL lib/workbench/layoutPrefs.js through loadSource.mjs (no
++// pasted copy). No `imports` are passed on purpose: layoutPrefs.js must
++// stay dependency-free, and this load fails if someone adds an `import`.
++//
++// Run: node frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const {
++  BOTTOM_TABS,
++  DEFAULT_LAYOUT,
++  normalizeLayout,
++  sameLayout,
++  layoutStorageKey,
++  browserStorage,
++  loadLayout,
++  saveLayout,
++  bottomPanelMaxHeight,
++  previewMaxWidth,
++  BOTTOM_PANEL_MIN_HEIGHT,
++  BOTTOM_PANEL_DEFAULT_HEIGHT,
++  PREVIEW_MIN_WIDTH,
++  PREVIEW_DEFAULT_WIDTH,
++  EDITOR_MIN_WIDTH,
++  MAIN_ROW_MIN_HEIGHT,
++  STATUS_BAR_HEIGHT,
++} = loadSource("../layoutPrefs.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// A minimal in-memory localStorage.
++function fakeStorage(initial = {}) {
++  const data = { ...initial };
++  return {
++    data,
++    getItem: (k) => (k in data ? data[k] : null),
++    setItem: (k, v) => {
++      data[k] = String(v);
++    },
++    removeItem: (k) => {
++      delete data[k];
++    },
++  };
++}
++
++// --- constants --------------------------------------------------------
++
++assertEqual(
++  BOTTOM_TABS.map((t) => t.id),
++  ["problems", "console", "terminal", "history"],
++  "the bottom panel has the four planned tabs, in order"
++);
++assertEqual(DEFAULT_LAYOUT, { bottomOpen: false, bottomTab: "problems", previewOpen: false }, "defaults: panel and preview closed, Problems selected");
++
++// --- normalizeLayout --------------------------------------------------
++
++assertEqual(normalizeLayout(undefined), DEFAULT_LAYOUT, "undefined normalizes to the defaults");
++assertEqual(normalizeLayout(null), DEFAULT_LAYOUT, "null normalizes to the defaults");
++assertEqual(normalizeLayout("open"), DEFAULT_LAYOUT, "a string normalizes to the defaults");
++assertEqual(normalizeLayout([true, "history"]), DEFAULT_LAYOUT, "an array normalizes to the defaults");
++assertEqual(normalizeLayout({}), DEFAULT_LAYOUT, "an empty object normalizes to the defaults");
++
++assertEqual(
++  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true }),
++  { bottomOpen: true, bottomTab: "console", previewOpen: true },
++  "a valid layout passes through unchanged"
++);
++assertEqual(
++  normalizeLayout({ bottomOpen: "true", bottomTab: "search", previewOpen: 1 }),
++  DEFAULT_LAYOUT,
++  "wrong types and an unknown tab id each fall back to their default"
++);
++assertEqual(
++  normalizeLayout({ bottomOpen: true, bottomTab: "nope", previewOpen: true }),
++  { bottomOpen: true, bottomTab: "problems", previewOpen: true },
++  "one bad field doesn't discard the good ones"
++);
++assertEqual(
++  Object.keys(normalizeLayout({ bottomOpen: true, extra: 1, __proto__: { x: 1 } })).sort(),
++  ["bottomOpen", "bottomTab", "previewOpen"],
++  "unknown keys are dropped"
++);
++assertEqual(
++  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true }),
++  { bottomOpen: true, bottomTab: "history", previewOpen: true },
++  "with a fallback, invalid/missing fields take the fallback's values instead of the defaults"
++);
++assertEqual(
++  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true }),
++  { bottomOpen: false, bottomTab: "history", previewOpen: true },
++  "...and valid fields still win over the fallback"
++);
++assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(null)), true, "DEFAULT_LAYOUT is frozen, but normalizeLayout returns a fresh object callers may own");
++
++assertEqual(sameLayout(normalizeLayout(null), DEFAULT_LAYOUT), true, "sameLayout: equal layouts");
++assertEqual(sameLayout({ ...DEFAULT_LAYOUT, bottomTab: "history" }, DEFAULT_LAYOUT), false, "sameLayout: a different tab");
++assertEqual(sameLayout({ ...DEFAULT_LAYOUT, previewOpen: true }, DEFAULT_LAYOUT), false, "sameLayout: a different flag");
++
++// --- storage ----------------------------------------------------------
++
++assertEqual(layoutStorageKey("ws-1"), "minime_build_editor_layout:ws-1", "the storage key carries the workspace id");
++assertEqual(layoutStorageKey("ws-1") === layoutStorageKey("ws-2"), false, "two workspaces don't share a layout");
++
++let store = fakeStorage();
++saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true });
++assertEqual(
++  loadLayout(store, "ws-1"),
++  { bottomOpen: true, bottomTab: "history", previewOpen: true },
++  "a saved layout loads back identically"
++);
++assertEqual(loadLayout(store, "ws-2"), DEFAULT_LAYOUT, "another workspace still gets the defaults");
++
++saveLayout(store, "ws-1", DEFAULT_LAYOUT);
++assertEqual(Object.keys(store.data), [], "saving the defaults removes the key instead of writing it");
++
++store = fakeStorage();
++saveLayout(store, "ws-1", { bottomOpen: true, junk: "x" });
++assertEqual(
++  JSON.parse(store.data[layoutStorageKey("ws-1")]),
++  { bottomOpen: true, bottomTab: "problems", previewOpen: false },
++  "what's written is the normalized layout, never the caller's raw object"
++);
++
++store = fakeStorage({ [layoutStorageKey("ws-1")]: "{not json" });
++assertEqual(loadLayout(store, "ws-1"), DEFAULT_LAYOUT, "an unparseable saved value loads as the defaults");
++store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ bottomOpen: true, bottomTab: "gone" }) });
++assertEqual(
++  loadLayout(store, "ws-1"),
++  { bottomOpen: true, bottomTab: "problems", previewOpen: false },
++  "a saved value naming a tab that no longer exists keeps the rest and defaults the tab"
++);
++store = fakeStorage({ [layoutStorageKey("ws-1")]: "null" });
++assertEqual(loadLayout(store, "ws-1"), DEFAULT_LAYOUT, "a saved JSON null loads as the defaults");
++
++assertEqual(loadLayout(null, "ws-1"), DEFAULT_LAYOUT, "no storage available: load returns the defaults");
++saveLayout(null, "ws-1", { bottomOpen: true }); // must not throw
++assertEqual(true, true, "no storage available: save is a silent no-op");
++
++const throwing = {
++  getItem: () => {
++    throw new Error("blocked");
++  },
++  setItem: () => {
++    throw new Error("quota");
++  },
++  removeItem: () => {
++    throw new Error("blocked");
++  },
++};
++assertEqual(loadLayout(throwing, "ws-1"), DEFAULT_LAYOUT, "storage that throws on read: load returns the defaults");
++saveLayout(throwing, "ws-1", { bottomOpen: true }); // must not throw
++saveLayout(throwing, "ws-1", DEFAULT_LAYOUT); // must not throw
++assertEqual(true, true, "storage that throws on write/remove: save is swallowed");
++
++assertEqual(browserStorage(), null, "browserStorage() is null outside a browser (no `window` under node)");
++
++// --- size bounds ------------------------------------------------------
++
++// A comfortable 800px-tall workbench: 70% (560) vs. room (800 - 24 - 160 = 616) → 560.
++assertEqual(bottomPanelMaxHeight(800), 560, "bottom panel: capped at 70% of a tall container");
++// A 400px-tall one: 70% = 280, room = 400 - 24 - 160 = 216 → the room limit wins.
++assertEqual(bottomPanelMaxHeight(400), 216, "bottom panel: the main row keeps its minimum height in a short container");
++assertEqual(400 - STATUS_BAR_HEIGHT - bottomPanelMaxHeight(400) >= MAIN_ROW_MIN_HEIGHT, true, "...checked against the constants, not just the number above");
++assertEqual(bottomPanelMaxHeight(150), BOTTOM_PANEL_MIN_HEIGHT, "bottom panel: a container too short for both never yields max < min");
++assertEqual(bottomPanelMaxHeight(0), BOTTOM_PANEL_DEFAULT_HEIGHT * 3, "bottom panel: unmeasured (0) container → generous fixed bound");
++assertEqual(bottomPanelMaxHeight(NaN), BOTTOM_PANEL_DEFAULT_HEIGHT * 3, "bottom panel: NaN container → generous fixed bound");
++assertEqual(bottomPanelMaxHeight(undefined), BOTTOM_PANEL_DEFAULT_HEIGHT * 3, "bottom panel: undefined container → generous fixed bound");
++
++// 1400 wide, explorer 240: 60% = 840, room = 1400 - 240 - 280 = 880 → 840.
++assertEqual(previewMaxWidth(1400, 240), 840, "preview: capped at 60% of a wide container");
++// 900 wide, explorer 240: 60% = 540, room = 900 - 240 - 280 = 380 → 380.
++assertEqual(previewMaxWidth(900, 240), 380, "preview: the editor keeps its minimum width next to the explorer");
++assertEqual(900 - 240 - previewMaxWidth(900, 240) >= EDITOR_MIN_WIDTH, true, "...checked against the constant");
++assertEqual(previewMaxWidth(500, 240), PREVIEW_MIN_WIDTH, "preview: a container too narrow for both never yields max < min");
++assertEqual(previewMaxWidth(1400, 480) < previewMaxWidth(1400, 240), true, "preview: a wider explorer leaves less room for the preview");
++assertEqual(previewMaxWidth(0, 240), PREVIEW_DEFAULT_WIDTH * 2, "preview: unmeasured container → generous fixed bound");
++assertEqual(previewMaxWidth(1400, undefined), 840, "preview: an unknown explorer width counts as 0");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+index ebc87d0..85dfec8 100644
+--- a/frontend/app/lib/workbench/editorStore.js
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -28,6 +28,13 @@
+ // picking the next active tab via tabUtils.nextActiveAfterClose(), and
+ // SAVE_SUCCESS's `keepEdited` option (see that case).
+ //
++// W2.3b addition: `layout` is now populated — `{bottomOpen, bottomTab,
++// previewOpen}` (see layoutPrefs.js), changed through SET_LAYOUT. It's
++// here rather than in component state so anything in the Build tab can
++// open a bottom-panel tab or the preview later (search results, "Fix
++// with AI") without prop-drilling. Panel SIZES are not part of it; they
++// stay with useSplitter (layoutPrefs.js's header has the split).
++//
+ // No JSX here on purpose — every other file directly under `lib/`
+ // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
+ // so the provider component below is written with `createElement`
+@@ -36,6 +43,7 @@
+ "use client";
+ import { createContext, createElement, useContext, useMemo, useReducer } from "react";
+ import { nextActiveAfterClose } from "./tabUtils";
++import { normalizeLayout, sameLayout } from "./layoutPrefs";
+ 
+ const EditorStoreContext = createContext(null);
+ 
+@@ -43,7 +51,7 @@ const initialState = {
+   tabs: [],
+   activePath: null,
+   buffers: {},
+-  layout: {},
++  layout: normalizeLayout(null), // W2.3b: the defaults; EditorStoreProvider's `initialLayout` overrides
+   proposals: [],
+ };
+ 
+@@ -218,13 +226,39 @@ export function editorReducer(state, action) {
+       };
+     }
+ 
++    // W2.3b: change part of the panel layout. `layout` is a PARTIAL
++    // ({bottomOpen: true}, {bottomTab: "console", bottomOpen: true}) —
++    // it's merged over the current one and re-validated, so a caller
++    // can't put an unknown tab id or a non-boolean into the store (an
++    // invalid field is ignored, the current value stays). A change that
++    // leaves every field as it was returns the SAME state object: the
++    // workbench persists on `state.layout` identity, and a no-op
++    // shouldn't cause a re-render or a write.
++    case "SET_LAYOUT": {
++      const current = normalizeLayout(state.layout);
++      const next = normalizeLayout({ ...current, ...action.layout }, current);
++      if (sameLayout(next, current)) return state;
++      return { ...state, layout: next };
++    }
++
+     default:
+       return state;
+   }
+ }
+ 
+-export function EditorStoreProvider({ children }) {
+-  const [state, dispatch] = useReducer(editorReducer, initialState);
++function createInitialState(layout) {
++  return { ...initialState, layout: normalizeLayout(layout) };
++}
++
++/**
++ * @param {object} props
++ * @param {object} [props.initialLayout] - persisted layout to start
++ *   from (loadLayout()). Read once, on first render — like the tabs it
++ *   is per-mount state, and BuildTab remounts the workbench per project
++ *   (key={selected.id}), so it never needs to react to a change.
++ */
++export function EditorStoreProvider({ children, initialLayout }) {
++  const [state, dispatch] = useReducer(editorReducer, initialLayout, createInitialState);
+ 
+   // Action creators are memoized on `dispatch` alone — React guarantees
+   // `dispatch`'s identity never changes across a component's lifetime,
+@@ -244,6 +278,7 @@ export function EditorStoreProvider({ children }) {
+       clearStale: (path) => dispatch({ type: "CLEAR_STALE", path }),
+       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
+       closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
++      setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
+     }),
+     [dispatch]
+   );
+diff --git a/frontend/app/lib/workbench/layoutPrefs.js b/frontend/app/lib/workbench/layoutPrefs.js
+new file mode 100644
+index 0000000..8dab232
+--- /dev/null
++++ b/frontend/app/lib/workbench/layoutPrefs.js
+@@ -0,0 +1,168 @@
++// frontend/app/lib/workbench/layoutPrefs.js — W2.3b (Build Workbench
++// plan). The workbench's persisted layout: which bottom-panel tab is
++// showing, whether the panel and the preview column are open, and the
++// pixel bounds the two new splitters clamp to.
++//
++// Split out of the components for the same reason tabUtils.js is: the
++// interesting parts are rules ("what does a garbage saved value turn
++// into?", "how tall may the panel get in a container this size?"), and
++// a rule is easier to keep right as a function with a test than as an
++// effect. No imports, and nothing here touches `window` at load time —
++// see fileTree.js's header; __tests__/layoutPrefs.test.mjs loads this
++// file with no `imports` map, so an added `import` line fails it.
++//
++// What is persisted where (per workspace, in localStorage):
++//   - the flags below            → ONE json key (layoutStorageKey)
++//   - explorer / preview widths,
++//     bottom panel height        → one number each, written by
++//                                  useSplitter's own `storageKey`, same
++//                                  as the explorer width since W2.3a
++// Sizes stay with useSplitter (it already clamps and saves on mouseup);
++// only the on/off/which-tab flags live in the editor store's `layout`,
++// because those are the ones other parts of the workbench will want to
++// change from elsewhere (search results opening a panel tab in W2.6,
++// "Fix with AI" opening Console in W6.2, the preview toggle in W6.1).
++
++/** Bottom panel tabs, in display order. Ids are what gets persisted. */
++export const BOTTOM_TABS = [
++  { id: "problems", label: "Problems" },
++  { id: "console", label: "Console" },
++  { id: "terminal", label: "Terminal" },
++  { id: "history", label: "History" },
++];
++
++const BOTTOM_TAB_IDS = new Set(BOTTOM_TABS.map((t) => t.id));
++
++// Closed by default: until the panel has real content (W2.6 History,
++// W6.2 Console, W3.1 Terminal) an open-by-default empty panel would
++// only take height away from the editor. The tab strip is still
++// visible when closed, so it stays discoverable.
++export const DEFAULT_LAYOUT = Object.freeze({
++  bottomOpen: false,
++  bottomTab: "problems",
++  previewOpen: false,
++});
++
++// Sizes (px). Defaults/minimums for the splitters; the maximums depend
++// on the container, see the two *Max* functions below.
++export const BOTTOM_PANEL_DEFAULT_HEIGHT = 208;
++export const BOTTOM_PANEL_MIN_HEIGHT = 96;
++export const PREVIEW_DEFAULT_WIDTH = 420;
++export const PREVIEW_MIN_WIDTH = 240;
++
++// What the editor column must keep, whatever the panels are dragged to.
++export const EDITOR_MIN_WIDTH = 280;
++export const MAIN_ROW_MIN_HEIGHT = 160; // tab strip + a few lines of editor
++export const STATUS_BAR_HEIGHT = 24; // StatusBar's `h-6`
++
++/**
++ * Turns anything into a valid layout. Total: never throws, never
++ * returns a partial object. Unknown keys are dropped and wrong types
++ * fall back, for THAT key only — a saved value from an older/newer
++ * build (say, a tab id that no longer exists) degrades to one default
++ * instead of discarding the whole layout.
++ *
++ * `fallback` is what a wrong-typed field falls back TO: the defaults
++ * when omitted (loading a saved value), or the current layout when
++ * applying an update (SET_LAYOUT), where an invalid value should mean
++ * "ignored", not "reset".
++ *
++ * @param {unknown} raw
++ * @param {unknown} [fallback]
++ * @returns {{bottomOpen: boolean, bottomTab: string, previewOpen: boolean}}
++ */
++export function normalizeLayout(raw, fallback) {
++  const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
++  const base = fallback === undefined ? DEFAULT_LAYOUT : normalizeLayout(fallback);
++  return {
++    bottomOpen: typeof src.bottomOpen === "boolean" ? src.bottomOpen : base.bottomOpen,
++    bottomTab: BOTTOM_TAB_IDS.has(src.bottomTab) ? src.bottomTab : base.bottomTab,
++    previewOpen: typeof src.previewOpen === "boolean" ? src.previewOpen : base.previewOpen,
++  };
++}
++
++/** Field-by-field equality of two normalized layouts. */
++export function sameLayout(a, b) {
++  return a.bottomOpen === b.bottomOpen && a.bottomTab === b.bottomTab && a.previewOpen === b.previewOpen;
++}
++
++/** Per-workspace key, same `minime_build_editor_*:${id}` family as the splitters'. */
++export function layoutStorageKey(workspaceId) {
++  return `minime_build_editor_layout:${workspaceId}`;
++}
++
++/**
++ * localStorage, or null where it isn't usable. Merely READING
++ * `window.localStorage` throws a SecurityError when storage is blocked
++ * (some private-browsing modes, cookies disabled), so the try/catch is
++ * around the property access, not just around getItem.
++ */
++export function browserStorage() {
++  try {
++    return typeof window !== "undefined" ? window.localStorage : null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * @param {{getItem: (k: string) => string|null}|null} storage
++ * @param {string} workspaceId
++ */
++export function loadLayout(storage, workspaceId) {
++  try {
++    const raw = storage ? storage.getItem(layoutStorageKey(workspaceId)) : null;
++    return normalizeLayout(raw ? JSON.parse(raw) : null);
++  } catch {
++    return normalizeLayout(null); // unreadable / not JSON — start from the defaults
++  }
++}
++
++/**
++ * Saves `layout`. A layout equal to the defaults removes the key
++ * instead of writing it, so a workspace nobody customised leaves
++ * nothing behind. Storage failures (quota, blocked) are swallowed: the
++ * layout just won't survive a reload, which is not worth an error.
++ *
++ * @param {{setItem: Function, removeItem: Function}|null} storage
++ * @param {string} workspaceId
++ * @param {object} layout
++ */
++export function saveLayout(storage, workspaceId, layout) {
++  if (!storage) return;
++  try {
++    const clean = normalizeLayout(layout);
++    const key = layoutStorageKey(workspaceId);
++    if (sameLayout(clean, DEFAULT_LAYOUT)) storage.removeItem(key);
++    else storage.setItem(key, JSON.stringify(clean));
++  } catch {
++    // ignore — see above
++  }
++}
++
++/**
++ * Tallest the bottom panel may be dragged, given the workbench's
++ * height: at most 70% of it, and never so tall that the main row
++ * (tabs + editor) drops below MAIN_ROW_MIN_HEIGHT. Never below the
++ * panel's own minimum, so the splitter's [min, max] range is always
++ * valid even in a container too short for both. Before the container
++ * has been measured (0/NaN) it returns a generous fixed bound rather
++ * than clamping a saved height to nothing.
++ */
++export function bottomPanelMaxHeight(containerHeight) {
++  if (!(containerHeight > 0)) return BOTTOM_PANEL_DEFAULT_HEIGHT * 3;
++  const room = containerHeight - STATUS_BAR_HEIGHT - MAIN_ROW_MIN_HEIGHT;
++  return Math.max(BOTTOM_PANEL_MIN_HEIGHT, Math.min(containerHeight * 0.7, room));
++}
++
++/**
++ * Widest the preview column may be dragged: at most 60% of the
++ * workbench's width, and never so wide that the editor column drops
++ * below EDITOR_MIN_WIDTH next to the explorer. Same floor/unmeasured
++ * rules as bottomPanelMaxHeight.
++ */
++export function previewMaxWidth(containerWidth, explorerWidth) {
++  if (!(containerWidth > 0)) return PREVIEW_DEFAULT_WIDTH * 2;
++  const room = containerWidth - (explorerWidth > 0 ? explorerWidth : 0) - EDITOR_MIN_WIDTH;
++  return Math.max(PREVIEW_MIN_WIDTH, Math.min(containerWidth * 0.6, room));
++}

@@ -1,5 +1,6 @@
 // W2.2 (Build Workbench plan) — reducer test for editorStore.js;
-// extended in W2.3a for the tab-strip actions.
+// extended in W2.3a for the tab-strip actions, in W2.3b for SET_LAYOUT and
+// in W2.4 for RENAME_PATHS.
 //
 // Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
 // copy of editorReducer() (editorStore.js pulls in `react`, which plain
@@ -8,7 +9,8 @@
 // that has moved on. loadSource.mjs now reads editorStore.js itself and
 // satisfies its two imports from the map below: a stub for `react` (only
 // its top-level createContext() call runs at load time; the provider and
-// hook aren't exercised here) and the real tabUtils.js.
+// hook aren't exercised here) and the real tabUtils.js / layoutPrefs.js /
+// fileTree.js.
 //
 // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
 import { loadSource } from "./loadSource.mjs";
@@ -21,8 +23,10 @@ const reactStub = {
   useReducer: () => [],
 };
 const tabUtils = loadSource("../tabUtils.js");
+const layoutPrefs = loadSource("../layoutPrefs.js");
+const fileTree = loadSource("../fileTree.js");
 const { editorReducer } = loadSource("../editorStore.js", {
-  imports: { react: reactStub, "./tabUtils": tabUtils },
+  imports: { react: reactStub, "./tabUtils": tabUtils, "./layoutPrefs": layoutPrefs, "./fileTree": fileTree },
 });
 
 const initialState = {
@@ -259,6 +263,102 @@ assertEqual(
   ["new", false],
   "keepEdited with no existing buffer (tab closed mid-save) falls back to the server's copy, clean"
 );
+
+// --- RENAME_PATHS (W2.4) -----------------------------------------------
+
+const buf = (over = {}) => ({ saved: "x", edited: "x", dirty: false, stale: false, version: 3, language: "javascript", ...over });
+const openState = {
+  ...initialState,
+  tabs: ["src/App.jsx", "src/lib/util.js", "README.md"],
+  activePath: "src/lib/util.js",
+  buffers: {
+    "src/App.jsx": buf({ version: 3 }),
+    "src/lib/util.js": buf({ version: 5, saved: "a", edited: "a + unsaved", dirty: true }),
+    "README.md": buf({ version: 1 }),
+  },
+};
+
+let ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }] });
+assertEqual(ren.tabs, ["src/Main.jsx", "src/lib/util.js", "README.md"], "renaming a file re-paths its tab in place (order kept)");
+assertEqual(ren.activePath, "src/lib/util.js", "...and leaves the active tab alone when it wasn't the renamed one");
+assertEqual(Object.keys(ren.buffers).sort(), ["README.md", "src/Main.jsx", "src/lib/util.js"], "the buffer moves to the new path; none is left behind at the old one");
+
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/lib/util.js", to: "src/lib/helpers.js" }] });
+assertEqual(ren.activePath, "src/lib/helpers.js", "renaming the ACTIVE file keeps it active under its new path");
+assertEqual(ren.buffers["src/lib/helpers.js"].edited, "a + unsaved", "unsaved edits travel with a rename");
+assertEqual(ren.buffers["src/lib/helpers.js"].dirty, true, "...and it is still dirty");
+assertEqual(ren.buffers["src/lib/helpers.js"].saved, "a", "...with the same saved baseline");
+
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src", to: "app" }] });
+assertEqual(ren.tabs, ["app/App.jsx", "app/lib/util.js", "README.md"], "renaming a FOLDER re-paths every open tab under it");
+assertEqual(ren.activePath, "app/lib/util.js", "...including the active one");
+assertEqual(Object.keys(ren.buffers).sort(), ["README.md", "app/App.jsx", "app/lib/util.js"], "...and their buffers");
+
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "README.md", to: "docs/README.md" }, { from: "src/App.jsx", to: "App.jsx" }] });
+assertEqual(ren.tabs, ["App.jsx", "src/lib/util.js", "docs/README.md"], "several renames in one action (a multi-item drop) all apply");
+
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "srcx", to: "y" }, { from: "other/a.js", to: "b.js" }] });
+assertEqual(ren === openState, true, "renames that touch no open tab return the SAME state object");
+assertEqual(editorReducer(openState, { type: "RENAME_PATHS", renames: [] }) === openState, true, "an empty rename list is a no-op");
+assertEqual(editorReducer(openState, { type: "RENAME_PATHS" }) === openState, true, "a missing rename list is a no-op");
+assertEqual(editorReducer(initialState, { type: "RENAME_PATHS", renames: [{ from: "a", to: "b" }] }) === initialState, true, "nothing open: no-op");
+
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }], versions: { "src/Main.jsx": 4 } });
+assertEqual(ren.buffers["src/Main.jsx"].version, 4, "a buffer exactly one version behind the move adopts the new version");
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }], versions: { "src/Main.jsx": 9 } });
+assertEqual(ren.buffers["src/Main.jsx"].version, 3, "a buffer further behind keeps its own version, so the next sync sees the server is ahead");
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }] });
+assertEqual(ren.buffers["src/Main.jsx"].version, 3, "no versions given: buffer versions are untouched");
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src", to: "app" }], versions: { "app/App.jsx": 4, "app/lib/util.js": 6 } });
+assertEqual([ren.buffers["app/App.jsx"].version, ren.buffers["app/lib/util.js"].version], [4, 6], "a folder move takes each file's own new version");
+ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }], versions: { "README.md": 2 } });
+assertEqual(ren.buffers["README.md"].version, 1, "a version for a path that wasn't renamed is ignored");
+
+const loadingTab = { ...initialState, tabs: ["a.js"], activePath: "a.js", buffers: {} };
+ren = editorReducer(loadingTab, { type: "RENAME_PATHS", renames: [{ from: "a.js", to: "b.js" }] });
+assertEqual([ren.tabs, ren.activePath, ren.buffers], [["b.js"], "b.js", {}], "a tab whose file hasn't loaded yet is re-pathed too");
+
+ren = editorReducer({ ...openState, tabs: ["a.js", "b.js"], activePath: "a.js", buffers: { "a.js": buf(), "b.js": buf() } }, { type: "RENAME_PATHS", renames: [{ from: "a.js", to: "b.js" }] });
+assertEqual(ren.tabs, ["b.js"], "two tabs that end up on one path collapse to a single tab");
+
+// --- SET_LAYOUT (W2.3b) ----------------------------------------------
+
+const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false };
+const withLayout = { ...initialState, layout: { ...defaultLayout } };
+
+let laid = editorReducer(withLayout, { type: "SET_LAYOUT", layout: { bottomOpen: true } });
+assertEqual(laid.layout, { bottomOpen: true, bottomTab: "problems", previewOpen: false }, "SET_LAYOUT merges a partial over the current layout");
+
+laid = editorReducer(laid, { type: "SET_LAYOUT", layout: { bottomTab: "history", previewOpen: true } });
+assertEqual(laid.layout, { bottomOpen: true, bottomTab: "history", previewOpen: true }, "SET_LAYOUT can change several fields at once, leaving the rest alone");
+
+const before = laid;
+assertEqual(
+  editorReducer(before, { type: "SET_LAYOUT", layout: { bottomOpen: true, bottomTab: "history" } }) === before,
+  true,
+  "SET_LAYOUT that changes nothing returns the SAME state object (no re-render, no persist)"
+);
+
+laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", previewOpen: "yes" } });
+assertEqual(laid.layout, before.layout, "SET_LAYOUT re-validates: an unknown tab id and a non-boolean are ignored, the current values stay");
+assertEqual(laid === before, true, "...and an update made only of invalid fields is a no-op (same state object)");
+
+laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", bottomOpen: false } });
+assertEqual(
+  laid.layout,
+  { bottomOpen: false, bottomTab: "history", previewOpen: true },
+  "...while the valid fields in the same update still apply"
+);
+
+laid = editorReducer(before, { type: "SET_LAYOUT", layout: { somethingElse: 1 } });
+assertEqual(Object.keys(laid.layout).sort(), ["bottomOpen", "bottomTab", "previewOpen"], "SET_LAYOUT drops keys that aren't layout fields");
+
+laid = editorReducer(initialState, { type: "SET_LAYOUT", layout: { previewOpen: true } });
+assertEqual(laid.layout.previewOpen, true, "SET_LAYOUT works from an empty `layout: {}` (fields default, not undefined)");
+assertEqual(laid.layout.bottomTab, "problems", "...and the missing fields are filled from the defaults");
+
+const opened = editorReducer(withLayout, { type: "SET_ACTIVE_PATH", path: "a.js" });
+assertEqual(opened.layout, withLayout.layout, "unrelated actions leave layout untouched");
 
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
