@@ -21,23 +21,55 @@
 //     callbacks to the presentational panes.
 //   - EditorPane: one mounted CodeEditor per open file (below).
 //
-// Not in this patch (W2.3b): the bottom panel (Problems / Console /
-// Terminal / History) and the preview column. The layout below is
-// arranged so both slot in without moving anything: a status bar
-// under a "main row" that they extend.
+// W2.3b completes the shell: a preview column at the right of the
+// editor (empty until W6.1 mounts a PreviewPane in it), a bottom panel
+// (Problems / Console / Terminal / History — containers only, each
+// filled by its own later step), a drag splitter for each, and the
+// persisted layout. Top to bottom the shell is now: a "main row"
+// (explorer | editor | preview), the bottom panel, the status bar.
+//
+// Layout persistence is split in two (layoutPrefs.js has the why):
+// pixel sizes go through useSplitter's own `storageKey`, exactly like
+// the explorer width; the on/off/which-tab flags live in the editor
+// store's `layout` and are written to one json key on change.
+//
+// W2.4: the explorer's file operations (new / rename / delete /
+// duplicate / drag-move). The pane only reports intent; the async work
+// is hooks/useExplorerOps.js, wired in below, with the two pieces that
+// need this component's own state — the delete confirmation and
+// re-keying per-path bookkeeping on a rename — kept here. `reserveCorner`
+// is BuildTab telling us its floating "open chat" bubble is showing, so
+// the bottom edge leaves room for it.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { authHeaders } from "../../context/SessionContext";
+import { useExplorerOps } from "../../hooks/useExplorerOps";
 import { useSplitter } from "../../hooks/useSplitter";
 import { useViewport } from "../../hooks/useViewport";
 import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
-import { basename } from "../../lib/workbench/fileTree";
+import { basename, isSameOrDescendant, remapPath } from "../../lib/workbench/fileTree";
+import { deleteSummary } from "../../lib/workbench/explorerOps";
+import {
+  BOTTOM_PANEL_DEFAULT_HEIGHT,
+  BOTTOM_PANEL_MIN_HEIGHT,
+  EDITOR_MIN_WIDTH,
+  MAIN_ROW_MIN_HEIGHT,
+  PREVIEW_DEFAULT_WIDTH,
+  PREVIEW_MIN_WIDTH,
+  bottomPanelMaxHeight,
+  browserStorage,
+  loadLayout,
+  previewMaxWidth,
+  saveLayout,
+} from "../../lib/workbench/layoutPrefs";
 import { encodeTabFlags, planBufferSync } from "../../lib/workbench/tabUtils";
 import ConfirmDialog from "../ConfirmDialog";
+import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
 import EditorTabs from "./EditorTabs";
 import Explorer from "./Explorer";
+import PreviewColumn from "./PreviewColumn";
 import StatusBar from "./StatusBar";
 
 // Explorer width. Persisted per workspace (the key carries the id) so
@@ -88,7 +120,7 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
   );
 });
 
-function WorkbenchBody({ workspaceId, apiUrl }) {
+function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
   // One provider per (workspace, api) pair — memoized so re-renders
   // don't create a new one (which would re-subscribe to Pusher).
   const provider = useMemo(
@@ -105,6 +137,8 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
     markStale,
     clearStale,
     closeTabs,
+    setLayout,
+    renamePaths,
   } = useEditorStore();
 
   const [viewport] = useViewport();
@@ -119,6 +153,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState(null);
   const [pendingClose, setPendingClose] = useState(null); // {paths, dirty} awaiting the discard confirmation
+  const [pendingDelete, setPendingDelete] = useState(null); // {roots, title, message} awaiting the delete confirmation (W2.4)
   const [cursor, setCursor] = useState(null); // {line, col} of the active file's caret
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true); // single-pane layout only
 
@@ -131,6 +166,40 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
         ? Math.min(EXPLORER_MAX_WIDTH, window.innerWidth * 0.4)
         : EXPLORER_MAX_WIDTH,
     storageKey: `minime_build_editor_explorer_w:${workspaceId}`,
+  });
+
+  // The two W2.3b splitters. Their bounds depend on how big the
+  // workbench currently is, so the `max` functions read it from the
+  // container ref at drag time (useSplitter accepts `() => number` for
+  // exactly this) and are wrapped in useCallback: that keeps each
+  // splitter's mouse-down handler — and with it the memoized
+  // BottomPanel — from being rebuilt on every keystroke.
+  //   preview: the handle is on the column's LEFT edge, so dragging left
+  //            grows it → `reverse`.
+  //   bottom:  the handle is on the panel's TOP edge, so dragging up
+  //            grows it → `reverse`.
+  const containerRef = useRef(null);
+  const explorerWidth = explorerSplitter.size;
+  const previewMax = useCallback(
+    () => previewMaxWidth(containerRef.current?.clientWidth, explorerWidth),
+    [explorerWidth]
+  );
+  const bottomMax = useCallback(() => bottomPanelMaxHeight(containerRef.current?.clientHeight), []);
+  const previewSplitter = useSplitter({
+    axis: "width",
+    defaultSize: PREVIEW_DEFAULT_WIDTH,
+    min: PREVIEW_MIN_WIDTH,
+    max: previewMax,
+    reverse: true,
+    storageKey: `minime_build_editor_preview_w:${workspaceId}`,
+  });
+  const bottomSplitter = useSplitter({
+    axis: "height",
+    defaultSize: BOTTOM_PANEL_DEFAULT_HEIGHT,
+    min: BOTTOM_PANEL_MIN_HEIGHT,
+    max: bottomMax,
+    reverse: true,
+    storageKey: `minime_build_editor_bottom_h:${workspaceId}`,
   });
 
   // "Latest value" refs. Callbacks below are wrapped in useCallback with
@@ -323,6 +392,62 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
   );
   const closeAll = useCallback(() => requestClose([...stateRef.current.tabs]), [requestClose]);
 
+  // ---- explorer operations (W2.4) -------------------------------------
+  // The explorer only asks; hooks/useExplorerOps.js does the provider
+  // calls and keeps tabs in step. These two are the bits of that which
+  // need this component's own refs and state.
+
+  // A rename/move re-paths the store's tabs (RENAME_PATHS); this does
+  // the same for the per-path bookkeeping kept OUTSIDE the store. The
+  // caret position follows the file; a "Keep mine" choice and a save
+  // error were about the old path's server state, so they're dropped.
+  const rekeyPathState = useCallback((renames) => {
+    const remap = (p) => {
+      for (const r of renames) if (isSameOrDescendant(p, r.from)) return remapPath(p, r.from, r.to);
+      return p;
+    };
+    for (const p of Object.keys(cursorsRef.current)) {
+      const q = remap(p);
+      if (q !== p) {
+        cursorsRef.current[q] = cursorsRef.current[p];
+        delete cursorsRef.current[p];
+      }
+    }
+    for (const p of Object.keys(dismissedRef.current)) {
+      if (remap(p) !== p) delete dismissedRef.current[p];
+    }
+    setSaveErrors((prev) => {
+      const stale = Object.keys(prev).filter((p) => remap(p) !== p);
+      if (stale.length === 0) return prev;
+      const next = { ...prev };
+      for (const p of stale) delete next[p];
+      return next;
+    });
+  }, []);
+
+  const explorerOps = useExplorerOps({
+    provider,
+    filesMetaRef,
+    stateRef,
+    savingRef,
+    refresh: refreshFromServer,
+    openFile,
+    dropTabs,
+    renamePaths,
+    onRenamed: rekeyPathState,
+    notify: setNotice,
+  });
+
+  // Delete asks first; what the dialog says (and how many files it
+  // touches) is explorerOps.js's deleteSummary().
+  const requestDelete = useCallback((paths) => {
+    if (paths.length === 0) return;
+    const dirtyPaths = Object.entries(stateRef.current.buffers)
+      .filter(([, b]) => b.dirty)
+      .map(([p]) => p);
+    setPendingDelete(deleteSummary({ paths, filePaths: Object.keys(filesMetaRef.current || {}), dirtyPaths }));
+  }, []);
+
   // ---- editing / saving ----------------------------------------------
 
   const handleEdit = useCallback((path, text) => editBuffer(path, text), [editBuffer]);
@@ -434,6 +559,43 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
 
   const handleRefresh = useCallback(() => refreshRef.current(), []);
 
+  // ---- panel layout (W2.3b) --------------------------------------------
+
+  const { layout } = state;
+
+  // Persist the flags whenever they change (and once on mount, which
+  // writes back what was just loaded — or removes the key when it's the
+  // default; see saveLayout). SET_LAYOUT returns the same state for a
+  // no-op, so `layout` only changes identity when a flag really flipped.
+  useEffect(() => {
+    saveLayout(browserStorage(), workspaceId, layout);
+  }, [workspaceId, layout]);
+
+  // Read the flag through stateRef (like the callbacks above) so a
+  // toggle's identity doesn't change with the layout it toggles.
+  const toggleBottom = useCallback(
+    () => setLayout({ bottomOpen: !stateRef.current.layout.bottomOpen }),
+    [setLayout]
+  );
+  const selectBottomTab = useCallback(
+    (bottomTab) => setLayout({ bottomTab, bottomOpen: true }),
+    [setLayout]
+  );
+  const togglePreview = useCallback(
+    () => setLayout({ previewOpen: !stateRef.current.layout.previewOpen }),
+    [setLayout]
+  );
+  const closePreview = useCallback(() => setLayout({ previewOpen: false }), [setLayout]);
+
+  // "Pending changes (N)": AI-proposed edits waiting for review. The
+  // store's `proposals` stays empty until W5.4 loads them, so this is 0
+  // for now; only `pending` ones count (resolved ones may live in the
+  // list too — plan §5 W5.1's status column).
+  const pendingCount = useMemo(
+    () => state.proposals.filter((p) => p?.status === "pending").length,
+    [state.proposals]
+  );
+
   // ---- derived ---------------------------------------------------------
 
   const { tabs, buffers, activePath } = state;
@@ -457,6 +619,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
   // three-pane layout from being crushed on a small screen meanwhile.
   const explorerHidden = isMobile && !mobileExplorerOpen;
   const editorColumnHidden = isMobile && mobileExplorerOpen;
+  const showPreview = !isMobile && layout.previewOpen;
   const toggleExplorer = useCallback(() => setMobileExplorerOpen((v) => !v), []);
 
   const pendingCloseMessage = pendingClose
@@ -468,11 +631,16 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
     : "";
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden">
-      {/* Main row: explorer | splitter | editor column. W2.3b adds the
-          preview column to the right of the editor column and the bottom
-          panel between this row and the status bar. */}
-      <div className="flex-1 min-h-0 flex">
+    <div
+      ref={containerRef}
+      className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
+    >
+      {/* Main row: explorer | splitter | editor column | splitter |
+          preview column. The bottom panel and the status bar sit below
+          it. The row keeps a minimum height so a tall bottom panel
+          (which is allowed to shrink, see BottomPanel) can never crush
+          the editor to nothing. */}
+      <div className="flex-1 flex" style={{ minHeight: MAIN_ROW_MIN_HEIGHT }}>
         <div
           className={explorerHidden ? "hidden" : isMobile ? "flex-1 min-w-0" : "shrink-0"}
           style={isMobile ? undefined : { width: explorerSplitter.size }}
@@ -488,6 +656,14 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
             onDownloadZip={downloadZip}
             downloading={downloading}
             downloadError={downloadError}
+            canModify={provider.capabilities.write}
+            busy={explorerOps.busy}
+            onCreateFile={explorerOps.createFile}
+            onCreateFolder={explorerOps.createFolder}
+            onRename={explorerOps.rename}
+            onRequestDelete={requestDelete}
+            onDuplicate={explorerOps.duplicate}
+            onMove={explorerOps.move}
           />
         </div>
 
@@ -501,7 +677,14 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
           />
         )}
 
-        <div className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}>
+        {/* On desktop the editor column has a real minimum width: with a
+            flex-basis of 0 it would otherwise just take whatever is left,
+            and an over-wide preview would squeeze it instead of being
+            squeezed itself (the preview column is the one that shrinks). */}
+        <div
+          className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}
+          style={isMobile ? undefined : { minWidth: EDITOR_MIN_WIDTH }}
+        >
           <EditorTabs
             tabs={tabs}
             activePath={activePath}
@@ -514,6 +697,10 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
             canSave={!!activeBuffer?.dirty}
             saving={!!(activePath && saving[activePath])}
             onToggleExplorer={isMobile ? toggleExplorer : undefined}
+            bottomOpen={layout.bottomOpen}
+            onToggleBottom={toggleBottom}
+            previewOpen={showPreview}
+            onTogglePreview={isMobile ? undefined : togglePreview}
           />
 
           {notice && (
@@ -584,7 +771,36 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
             ) : null}
           </div>
         </div>
+
+        {/* Preview column (W2.3b): empty frame for now — W6.1 mounts the
+            PreviewPane inside it. Not on the single-pane (phone) layout,
+            which has no room for a third pane. */}
+        {showPreview && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize preview"
+              onMouseDown={previewSplitter.onHandleMouseDown}
+              className="w-1 shrink-0 cursor-col-resize bg-[var(--neutral-800)] hover:bg-[var(--accent)] transition-colors"
+            />
+            <div className="shrink min-w-0" style={{ width: previewSplitter.size }}>
+              <PreviewColumn onClose={closePreview} />
+            </div>
+          </>
+        )}
       </div>
+
+      <BottomPanel
+        open={layout.bottomOpen}
+        activeTab={layout.bottomTab}
+        onSelectTab={selectBottomTab}
+        onToggle={toggleBottom}
+        height={isMobile ? BOTTOM_PANEL_DEFAULT_HEIGHT : bottomSplitter.size}
+        reserveRight={reserveCorner}
+        resizable={!isMobile}
+        onResizeStart={bottomSplitter.onHandleMouseDown}
+      />
 
       <StatusBar
         providerId={provider.id}
@@ -593,6 +809,8 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
         version={activeBuffer?.version}
         language={activeBuffer?.language}
         cursor={cursor}
+        pendingCount={pendingCount}
+        reserveRight={reserveCorner}
       />
 
       <ConfirmDialog
@@ -606,14 +824,35 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
         }}
         onCancel={() => setPendingClose(null)}
       />
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={pendingDelete?.title ?? ""}
+        message={pendingDelete?.message ?? ""}
+        confirmLabel="Delete"
+        onConfirm={() => {
+          const roots = pendingDelete?.roots;
+          setPendingDelete(null);
+          if (roots) explorerOps.remove(roots);
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
 
-export default function EditorWorkbench({ workspaceId, apiUrl }) {
+export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = false }) {
+  // The saved panel layout, read once when the workbench mounts — the
+  // store's initializer ignores later changes to it. That's fine for the
+  // same reason the tabs are: BuildTab remounts this component per
+  // project (key={selected.id}), so one workspace's layout never has to
+  // be swapped for another's in place. (`workspaceId` is a dependency
+  // only so the read is correct if that ever stops being true for the
+  // first render.)
+  const initialLayout = useMemo(() => loadLayout(browserStorage(), workspaceId), [workspaceId]);
   return (
-    <EditorStoreProvider>
-      <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} />
+    <EditorStoreProvider initialLayout={initialLayout}>
+      <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} reserveCorner={reserveCorner} />
     </EditorStoreProvider>
   );
 }

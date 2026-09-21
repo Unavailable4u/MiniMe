@@ -1289,7 +1289,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                   one project's open tabs would carry into the next.
                   (Until W2.5's unsaved-edits guard lands, switching
                   projects discards unsaved edits.) */}
-              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} />
+              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} reserveCorner={chatDockCollapsed} />
             </div>
           </>
         ) : (

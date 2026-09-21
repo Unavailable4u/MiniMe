@@ -1,0 +1,3155 @@
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 94bd474..b13d580 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -1289,7 +1289,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+                   one project's open tabs would carry into the next.
+                   (Until W2.5's unsaved-edits guard lands, switching
+                   projects discards unsaved edits.) */}
+-              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} />
++              <EditorWorkbench key={selected.id} workspaceId={selected.id} apiUrl={API_URL} reserveCorner={chatDockCollapsed} />
+             </div>
+           </>
+         ) : (
+diff --git a/frontend/app/components/workbench/BottomPanel.jsx b/frontend/app/components/workbench/BottomPanel.jsx
+index d342379..a1aa2ce 100644
+--- a/frontend/app/components/workbench/BottomPanel.jsx
++++ b/frontend/app/components/workbench/BottomPanel.jsx
+@@ -47,10 +47,11 @@ const EMPTY_STATES = {
+  * @param {(tabId: string) => void} props.onSelectTab - also opens the panel
+  * @param {() => void} props.onToggle - collapse / expand
+  * @param {number} props.height - px, the whole panel when open (strip included)
++ * @param {boolean} [props.reserveRight] - keep the strip's right end clear for the app's floating "open chat" bubble (matters on narrow screens, where the tabs reach that far)
+  * @param {boolean} [props.resizable=true] - false on the single-pane (phone) layout, where the handle is mouse-only
+  * @param {(e: import("react").MouseEvent) => void} [props.onResizeStart] - useSplitter's onHandleMouseDown
+  */
+-function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, resizable = true, onResizeStart }) {
++function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, reserveRight = false, resizable = true, onResizeStart }) {
+   const uid = useId();
+   const bodyId = `${uid}-body`;
+   const empty = EMPTY_STATES[activeTab] || EMPTY_STATES.problems;
+@@ -76,7 +77,25 @@ function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, resizable
+       )}
+       {open && !resizable && <div className="h-px shrink-0 bg-[var(--neutral-800)]" />}
+ 
+-      <div className="shrink-0 flex items-stretch justify-between h-8 border-b border-[var(--neutral-800)]">
++      {/* The collapse control is at the LEFT of the strip, ahead of the
++          tabs. At the right it sat under the app's floating "open chat"
++          bubble (fixed at the screen's bottom-right corner while the
++          chat dock is closed), which made it unclickable. */}
++      <div
++        className="shrink-0 flex items-stretch h-8 border-b border-[var(--neutral-800)]"
++        style={reserveRight ? { paddingRight: 56 } : undefined}
++      >
++        <button
++          type="button"
++          onClick={onToggle}
++          aria-expanded={open}
++          aria-label={open ? "Collapse bottom panel" : "Expand bottom panel"}
++          title={open ? "Collapse panel" : "Expand panel"}
++          className="touch-target shrink-0 px-2.5 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++        >
++          {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
++        </button>
++
+         <div role="tablist" aria-label="Bottom panel" className="flex items-stretch min-w-0 overflow-x-auto">
+           {BOTTOM_TABS.map((tab) => {
+             // Nothing is "selected" while collapsed — there's no panel
+@@ -102,17 +121,6 @@ function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, resizable
+             );
+           })}
+         </div>
+-
+-        <button
+-          type="button"
+-          onClick={onToggle}
+-          aria-expanded={open}
+-          aria-label={open ? "Collapse bottom panel" : "Expand bottom panel"}
+-          title={open ? "Collapse panel" : "Expand panel"}
+-          className="touch-target shrink-0 px-3 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+-        >
+-          {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+-        </button>
+       </div>
+ 
+       {open && (
+diff --git a/frontend/app/components/workbench/ContextMenu.jsx b/frontend/app/components/workbench/ContextMenu.jsx
+index a0e118f..36df743 100644
+--- a/frontend/app/components/workbench/ContextMenu.jsx
++++ b/frontend/app/components/workbench/ContextMenu.jsx
+@@ -16,7 +16,9 @@
+ // only viewport-relative if no ancestor creates a containing block
+ // (transform, filter, contain…) — a portal makes that a non-question.
+ //
+-// `items`: `{ key, label, icon?, danger?, disabled?, onSelect }`; falsy
++// `items`: `{ key, label, icon?, hint?, danger?, disabled?, title?,
++// onSelect }` (`hint` = a keyboard shortcut shown at the right, W2.4);
++// falsy
+ // entries are skipped (so callers can write `cond && {...}` inline) and
+ // `{ key, separator: true }` draws a divider. The menu closes itself
+ // before calling `onSelect`. Dismissal: outside pointerdown (not
+@@ -91,6 +93,7 @@ export default function ContextMenu({ x, y, items, onClose }) {
+             type="button"
+             role="menuitem"
+             disabled={item.disabled}
++            title={item.title}
+             onClick={() => {
+               onClose();
+               item.onSelect?.();
+@@ -103,6 +106,7 @@ export default function ContextMenu({ x, y, items, onClose }) {
+           >
+             {Icon && <Icon size={12} className="shrink-0" />}
+             {item.label}
++            {item.hint && <span className="ml-auto pl-6 text-[10px] text-[var(--neutral-500)]">{item.hint}</span>}
+           </button>
+         );
+       })}
+diff --git a/frontend/app/components/workbench/EditorTabs.jsx b/frontend/app/components/workbench/EditorTabs.jsx
+index cdca6d1..75685dd 100644
+--- a/frontend/app/components/workbench/EditorTabs.jsx
++++ b/frontend/app/components/workbench/EditorTabs.jsx
+@@ -16,11 +16,35 @@
+ // callback prop must be referentially stable (EditorWorkbench passes
+ // useCallback-wrapped ones); an inline arrow there would defeat the
+ // memo silently.
++//
++// W2.4: also hosts the two panel toggles (bottom panel, preview) at the
++// strip's right end. They were in the status bar at first, but the
++// app's floating "open chat" bubble sits fixed at the bottom-right of
++// the screen whenever the chat dock is closed — right on top of them.
++// The top-right corner is never under it.
+ import { memo, useEffect, useMemo, useRef, useState } from "react";
+-import { AlertTriangle, FileCode, Files, Loader2, Save, X } from "lucide-react";
++import { AlertTriangle, FileCode, Files, Loader2, PanelBottom, PanelRight, Save, X } from "lucide-react";
+ import ContextMenu from "./ContextMenu";
+ import { decodeTabFlags, tabLabels } from "../../lib/workbench/tabUtils";
+ 
++// An icon button that says whether its panel is showing (lit + aria-pressed).
++function PanelToggle({ pressed, onClick, label, children }) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      aria-pressed={pressed}
++      aria-label={label}
++      title={label}
++      className={`touch-target flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--neutral-800)] ${
++        pressed ? "text-[var(--accent)]" : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++      }`}
++    >
++      {children}
++    </button>
++  );
++}
++
+ function EditorTabs({
+   tabs,
+   activePath,
+@@ -33,6 +57,10 @@ function EditorTabs({
+   canSave,
+   saving,
+   onToggleExplorer, // only passed on the single-pane (mobile) layout
++  bottomOpen = false,
++  onToggleBottom,
++  previewOpen = false,
++  onTogglePreview, // omitted on the single-pane layout: no room for a third pane
+ }) {
+   const stripRef = useRef(null);
+   const [menu, setMenu] = useState(null); // {x, y, path} | null
+@@ -179,6 +207,21 @@ function EditorTabs({
+         </div>
+       )}
+ 
++      {(onToggleBottom || onTogglePreview) && (
++        <div className="shrink-0 flex items-center gap-1 px-2 border-l border-[var(--neutral-800)]">
++          {onToggleBottom && (
++            <PanelToggle pressed={bottomOpen} onClick={onToggleBottom} label="Toggle bottom panel">
++              <PanelBottom size={14} />
++            </PanelToggle>
++          )}
++          {onTogglePreview && (
++            <PanelToggle pressed={previewOpen} onClick={onTogglePreview} label="Toggle preview">
++              <PanelRight size={14} />
++            </PanelToggle>
++          )}
++        </div>
++      )}
++
+       {menu && (
+         <ContextMenu
+           x={menu.x}
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 6eb94a1..7ed7b10 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -32,14 +32,24 @@
+ // pixel sizes go through useSplitter's own `storageKey`, exactly like
+ // the explorer width; the on/off/which-tab flags live in the editor
+ // store's `layout` and are written to one json key on change.
++//
++// W2.4: the explorer's file operations (new / rename / delete /
++// duplicate / drag-move). The pane only reports intent; the async work
++// is hooks/useExplorerOps.js, wired in below, with the two pieces that
++// need this component's own state — the delete confirmation and
++// re-keying per-path bookkeeping on a rename — kept here. `reserveCorner`
++// is BuildTab telling us its floating "open chat" bubble is showing, so
++// the bottom edge leaves room for it.
+ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { X } from "lucide-react";
+ import { authHeaders } from "../../context/SessionContext";
++import { useExplorerOps } from "../../hooks/useExplorerOps";
+ import { useSplitter } from "../../hooks/useSplitter";
+ import { useViewport } from "../../hooks/useViewport";
+ import { createCloudFileProvider } from "../../lib/workbench/fileProviders";
+ import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
+-import { basename } from "../../lib/workbench/fileTree";
++import { basename, isSameOrDescendant, remapPath } from "../../lib/workbench/fileTree";
++import { deleteSummary } from "../../lib/workbench/explorerOps";
+ import {
+   BOTTOM_PANEL_DEFAULT_HEIGHT,
+   BOTTOM_PANEL_MIN_HEIGHT,
+@@ -110,7 +120,7 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
+   );
+ });
+ 
+-function WorkbenchBody({ workspaceId, apiUrl }) {
++function WorkbenchBody({ workspaceId, apiUrl, reserveCorner }) {
+   // One provider per (workspace, api) pair — memoized so re-renders
+   // don't create a new one (which would re-subscribe to Pusher).
+   const provider = useMemo(
+@@ -128,6 +138,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+     clearStale,
+     closeTabs,
+     setLayout,
++    renamePaths,
+   } = useEditorStore();
+ 
+   const [viewport] = useViewport();
+@@ -142,6 +153,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+   const [downloading, setDownloading] = useState(false);
+   const [downloadError, setDownloadError] = useState(null);
+   const [pendingClose, setPendingClose] = useState(null); // {paths, dirty} awaiting the discard confirmation
++  const [pendingDelete, setPendingDelete] = useState(null); // {roots, title, message} awaiting the delete confirmation (W2.4)
+   const [cursor, setCursor] = useState(null); // {line, col} of the active file's caret
+   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true); // single-pane layout only
+ 
+@@ -380,6 +392,62 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+   );
+   const closeAll = useCallback(() => requestClose([...stateRef.current.tabs]), [requestClose]);
+ 
++  // ---- explorer operations (W2.4) -------------------------------------
++  // The explorer only asks; hooks/useExplorerOps.js does the provider
++  // calls and keeps tabs in step. These two are the bits of that which
++  // need this component's own refs and state.
++
++  // A rename/move re-paths the store's tabs (RENAME_PATHS); this does
++  // the same for the per-path bookkeeping kept OUTSIDE the store. The
++  // caret position follows the file; a "Keep mine" choice and a save
++  // error were about the old path's server state, so they're dropped.
++  const rekeyPathState = useCallback((renames) => {
++    const remap = (p) => {
++      for (const r of renames) if (isSameOrDescendant(p, r.from)) return remapPath(p, r.from, r.to);
++      return p;
++    };
++    for (const p of Object.keys(cursorsRef.current)) {
++      const q = remap(p);
++      if (q !== p) {
++        cursorsRef.current[q] = cursorsRef.current[p];
++        delete cursorsRef.current[p];
++      }
++    }
++    for (const p of Object.keys(dismissedRef.current)) {
++      if (remap(p) !== p) delete dismissedRef.current[p];
++    }
++    setSaveErrors((prev) => {
++      const stale = Object.keys(prev).filter((p) => remap(p) !== p);
++      if (stale.length === 0) return prev;
++      const next = { ...prev };
++      for (const p of stale) delete next[p];
++      return next;
++    });
++  }, []);
++
++  const explorerOps = useExplorerOps({
++    provider,
++    filesMetaRef,
++    stateRef,
++    savingRef,
++    refresh: refreshFromServer,
++    openFile,
++    dropTabs,
++    renamePaths,
++    onRenamed: rekeyPathState,
++    notify: setNotice,
++  });
++
++  // Delete asks first; what the dialog says (and how many files it
++  // touches) is explorerOps.js's deleteSummary().
++  const requestDelete = useCallback((paths) => {
++    if (paths.length === 0) return;
++    const dirtyPaths = Object.entries(stateRef.current.buffers)
++      .filter(([, b]) => b.dirty)
++      .map(([p]) => p);
++    setPendingDelete(deleteSummary({ paths, filePaths: Object.keys(filesMetaRef.current || {}), dirtyPaths }));
++  }, []);
++
+   // ---- editing / saving ----------------------------------------------
+ 
+   const handleEdit = useCallback((path, text) => editBuffer(path, text), [editBuffer]);
+@@ -588,6 +656,14 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+             onDownloadZip={downloadZip}
+             downloading={downloading}
+             downloadError={downloadError}
++            canModify={provider.capabilities.write}
++            busy={explorerOps.busy}
++            onCreateFile={explorerOps.createFile}
++            onCreateFolder={explorerOps.createFolder}
++            onRename={explorerOps.rename}
++            onRequestDelete={requestDelete}
++            onDuplicate={explorerOps.duplicate}
++            onMove={explorerOps.move}
+           />
+         </div>
+ 
+@@ -621,6 +697,10 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+             canSave={!!activeBuffer?.dirty}
+             saving={!!(activePath && saving[activePath])}
+             onToggleExplorer={isMobile ? toggleExplorer : undefined}
++            bottomOpen={layout.bottomOpen}
++            onToggleBottom={toggleBottom}
++            previewOpen={showPreview}
++            onTogglePreview={isMobile ? undefined : togglePreview}
+           />
+ 
+           {notice && (
+@@ -717,6 +797,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+         onSelectTab={selectBottomTab}
+         onToggle={toggleBottom}
+         height={isMobile ? BOTTOM_PANEL_DEFAULT_HEIGHT : bottomSplitter.size}
++        reserveRight={reserveCorner}
+         resizable={!isMobile}
+         onResizeStart={bottomSplitter.onHandleMouseDown}
+       />
+@@ -729,10 +810,7 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+         language={activeBuffer?.language}
+         cursor={cursor}
+         pendingCount={pendingCount}
+-        bottomOpen={layout.bottomOpen}
+-        onToggleBottom={toggleBottom}
+-        previewOpen={showPreview}
+-        onTogglePreview={isMobile ? undefined : togglePreview}
++        reserveRight={reserveCorner}
+       />
+ 
+       <ConfirmDialog
+@@ -746,11 +824,24 @@ function WorkbenchBody({ workspaceId, apiUrl }) {
+         }}
+         onCancel={() => setPendingClose(null)}
+       />
++
++      <ConfirmDialog
++        open={!!pendingDelete}
++        title={pendingDelete?.title ?? ""}
++        message={pendingDelete?.message ?? ""}
++        confirmLabel="Delete"
++        onConfirm={() => {
++          const roots = pendingDelete?.roots;
++          setPendingDelete(null);
++          if (roots) explorerOps.remove(roots);
++        }}
++        onCancel={() => setPendingDelete(null)}
++      />
+     </div>
+   );
+ }
+ 
+-export default function EditorWorkbench({ workspaceId, apiUrl }) {
++export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = false }) {
+   // The saved panel layout, read once when the workbench mounts — the
+   // store's initializer ignores later changes to it. That's fine for the
+   // same reason the tabs are: BuildTab remounts this component per
+@@ -761,7 +852,7 @@ export default function EditorWorkbench({ workspaceId, apiUrl }) {
+   const initialLayout = useMemo(() => loadLayout(browserStorage(), workspaceId), [workspaceId]);
+   return (
+     <EditorStoreProvider initialLayout={initialLayout}>
+-      <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} />
++      <WorkbenchBody workspaceId={workspaceId} apiUrl={apiUrl} reserveCorner={reserveCorner} />
+     </EditorStoreProvider>
+   );
+ }
+diff --git a/frontend/app/components/workbench/Explorer.jsx b/frontend/app/components/workbench/Explorer.jsx
+index 99a1d3c..58d5ecf 100644
+--- a/frontend/app/components/workbench/Explorer.jsx
++++ b/frontend/app/components/workbench/Explorer.jsx
+@@ -1,93 +1,101 @@
+ "use client";
+ // frontend/app/components/workbench/Explorer.jsx — W2.3a (Build
+-// Workbench plan). The file-tree pane. Replaces the old CodeView's
+-// inline tree (TreeNode + the header with the ZIP/refresh buttons);
+-// same look and same click-to-open behavior, now a component of its
+-// own that W2.4 can grow (context menu, rename, drag-move, filter,
+-// keyboard navigation, multi-select) without touching the shell.
++// Workbench plan), grown in W2.4 into the explorer with operations.
+ //
+-// It knows nothing about providers, tabs or the editor store: it gets
+-// the file list and the active path in and reports "open this file" /
+-// "refresh" / "download ZIP" out. Which is the whole point of D6 —
+-// this pane looks the same over Cloud files today and Local files
+-// after W3.1.
++// W2.4 adds, on top of the W2.3a tree: multi-select (Ctrl/Cmd-click
++// toggles, Shift-click ranges), keyboard navigation (arrows, Home/End,
++// Enter, F2 rename, Delete), a right-click menu that a long-press opens
++// on touch screens, inline rename and "New file / New folder", drag and
++// drop to move, a filter box, and per-type file icons.
++//
++// Still presentational in the sense that matters (decision D6): it
++// knows nothing about providers, tabs or the editor store. It is given
++// the file list, which file is open, and a set of callbacks —
++// onCreateFile / onCreateFolder / onRename (each resolves to an error
++// message or null, shown inline), onMove (resolves to the moves done),
++// onDuplicate, onRequestDelete (the workbench owns the confirmation),
++// onOpenFile, onRefresh, onDownloadZip — and reports intent through
++// them. What those DO is the workbench's business
++// (hooks/useExplorerOps.js), which is why this pane looks the same
++// over Cloud files today and Local files after W3.1.
++//
++// The tree is rendered as ONE flat list of rows (flattenVisible() in
++// fileTree.js) with aria-level, not as nested components. That is what
++// makes "next row", shift-click ranges and drop targets a matter of
++// array indices.
+ //
+ // `flagsKey` is the same per-tab flag string EditorTabs takes (see
+ // encodeTabFlags()), used here only to put an "unsaved" dot beside
+ // files with edits; being a string it lets memo() skip re-rendering
+ // this whole tree on every keystroke.
+-import { memo, useEffect, useMemo, useRef, useState } from "react";
+-import { ChevronDown, ChevronRight, Download, FileCode, Folder, FolderOpen, Loader2, RefreshCw } from "lucide-react";
+-import { ancestorDirs, buildFileTree, sortedChildren, topLevelDirs } from "../../lib/workbench/fileTree";
++import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
++import {
++  Copy,
++  CopyPlus,
++  Download,
++  FilePlus,
++  FolderPlus,
++  Loader2,
++  MessageSquarePlus,
++  Pencil,
++  RefreshCw,
++  Search,
++  Trash2,
++  X,
++} from "lucide-react";
++import {
++  ancestorDirs,
++  buildFileTree,
++  dirname,
++  filterPaths,
++  flattenVisible,
++  isPlaceholderPath,
++  isSameOrDescendant,
++  rangeBetween,
++  remapPath,
++  topLevelDirs,
++} from "../../lib/workbench/fileTree";
++import { checkEntryName, collapseNested, entryPaths, joinPath, planDrop } from "../../lib/workbench/explorerOps";
+ import { decodeTabFlags } from "../../lib/workbench/tabUtils";
++import { useIsTouchDevice } from "../../hooks/useIsTouchDevice";
++import { useLongPress } from "../../hooks/useLongPress";
++import ContextMenu from "./ContextMenu";
++import { NewEntryRow, TreeRow } from "./ExplorerRow";
+ 
+-function TreeRows({ node, depth, expanded, onToggle, activePath, dirtyPaths, onOpen }) {
+-  return (
+-    <>
+-      {sortedChildren(node).map((entry) => {
+-        if (entry.type === "dir") {
+-          const isOpen = expanded.has(entry.path);
+-          return (
+-            <div key={`d:${entry.path}`} role="none">
+-              <button
+-                type="button"
+-                role="treeitem"
+-                aria-expanded={isOpen}
+-                aria-selected={false}
+-                onClick={() => onToggle(entry.path)}
+-                className="w-full flex items-center gap-1 text-xs text-[var(--neutral-300)] hover:text-[var(--neutral-100)] py-0.5 rounded"
+-                style={{ paddingLeft: `${depth * 14}px` }}
+-              >
+-                {isOpen ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+-                {isOpen ? <FolderOpen size={12} className="shrink-0" /> : <Folder size={12} className="shrink-0" />}
+-                <span className="truncate">{entry.name}</span>
+-              </button>
+-              {isOpen && (
+-                <div role="group">
+-                  <TreeRows
+-                    node={entry}
+-                    depth={depth + 1}
+-                    expanded={expanded}
+-                    onToggle={onToggle}
+-                    activePath={activePath}
+-                    dirtyPaths={dirtyPaths}
+-                    onOpen={onOpen}
+-                  />
+-                </div>
+-              )}
+-            </div>
+-          );
+-        }
+-        const isActive = entry.path === activePath;
+-        return (
+-          <button
+-            key={`f:${entry.path}`}
+-            type="button"
+-            role="treeitem"
+-            aria-selected={isActive}
+-            onClick={() => onOpen(entry.path)}
+-            title={entry.path}
+-            className={`w-full flex items-center gap-1 text-xs py-0.5 rounded ${
+-              isActive
+-                ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium"
+-                : "text-[var(--neutral-400)] hover:text-[var(--neutral-100)]"
+-            }`}
+-            style={{ paddingLeft: `${depth * 14 + 16}px` }}
+-          >
+-            <FileCode size={12} className="shrink-0" />
+-            <span className="truncate">{entry.name}</span>
+-            {dirtyPaths.has(entry.path) && (
+-              <span
+-                className="ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
+-                role="img"
+-                aria-label="Unsaved changes"
+-              />
+-            )}
+-          </button>
+-        );
+-      })}
+-    </>
+-  );
++// What a drag from this tree carries. Checked on dragover so an
++// unrelated drag (a file from the desktop, selected text) is ignored.
++const DRAG_MIME = "application/x-minime-paths";
++
++// Only drags that started in this tree count; anything else (a file
++// dragged in from the desktop, selected text) is left to the browser.
++function isOurDrag(e) {
++  return Array.from(e.dataTransfer?.types || []).includes(DRAG_MIME);
++}
++
++function legacyCopy(text) {
++  const area = document.createElement("textarea");
++  area.value = text;
++  area.setAttribute("readonly", "");
++  area.style.position = "fixed";
++  area.style.opacity = "0";
++  document.body.appendChild(area);
++  area.select();
++  try {
++    document.execCommand("copy");
++  } catch {
++    // nothing left to try — the paste will just be empty
++  }
++  document.body.removeChild(area);
++}
++
++// navigator.clipboard needs a secure context and a user gesture; the
++// textarea route covers plain-http dev setups and older browsers.
++function copyText(text) {
++  if (navigator.clipboard?.writeText) {
++    navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
++  } else {
++    legacyCopy(text);
++  }
+ }
+ 
+ function Explorer({
+@@ -101,12 +109,39 @@ function Explorer({
+   onDownloadZip,
+   downloading,
+   downloadError,
++  canModify = true, // FileProvider.capabilities.write
++  busy = false, // a file operation is in flight (useExplorerOps)
++  onCreateFile,
++  onCreateFolder,
++  onRename,
++  onRequestDelete,
++  onDuplicate,
++  onMove,
+ }) {
+   const [expanded, setExpanded] = useState(() => new Set());
++  const [selection, setSelection] = useState(() => new Set()); // paths, files and folders
++  const [focusPath, setFocusPath] = useState(null); // the tree's one tab stop
++  const [menu, setMenu] = useState(null); // {x, y, paths, root}
++  const [editing, setEditing] = useState(null); // {kind: "rename", path} | {kind: "new", dir, isDir}
++  const [filter, setFilter] = useState("");
++  const [dropTarget, setDropTarget] = useState(null); // folder path, "" = project root, null = none
++  const [focusTick, setFocusTick] = useState(0);
+   const autoExpandedRef = useRef(false);
++  const anchorRef = useRef(null); // where a Shift-range starts
++  const shouldFocusRef = useRef(false); // DOM focus follows focusPath only after a keyboard move
++  const dragSourcesRef = useRef([]);
++  const areaRef = useRef(null);
++  const touch = useIsTouchDevice();
+ 
++  // ---- derived ---------------------------------------------------------
++
++  const filePaths = useMemo(() => (filesMeta ? Object.keys(filesMeta) : []), [filesMeta]);
++  const fileSet = useMemo(() => new Set(filePaths), [filePaths]);
++  const taken = useMemo(() => entryPaths(filePaths), [filePaths]);
++  const fileCount = useMemo(() => filePaths.filter((p) => !isPlaceholderPath(p)).length, [filePaths]);
+   const tree = useMemo(() => (filesMeta ? buildFileTree(filesMeta) : null), [filesMeta]);
+-  const fileCount = filesMeta ? Object.keys(filesMeta).length : 0;
++  const visible = useMemo(() => filterPaths(filePaths, filter), [filePaths, filter]);
++  const rows = useMemo(() => (tree ? flattenVisible(tree, expanded, visible) : []), [tree, expanded, visible]);
+   const dirtyPaths = useMemo(() => {
+     const set = new Set();
+     const decoded = decodeTabFlags(flagsKey);
+@@ -114,6 +149,25 @@ function Explorer({
+     return set;
+   }, [flagsKey]);
+ 
++  // The latest of these, for the stable callbacks below (so a row's
++  // handlers don't change identity — and re-render every row — each
++  // time the selection or the list does).
++  const rowsRef = useRef(rows);
++  rowsRef.current = rows;
++  const selectionRef = useRef(selection);
++  selectionRef.current = selection;
++  const takenRef = useRef(taken);
++  takenRef.current = taken;
++  const fileSetRef = useRef(fileSet);
++  fileSetRef.current = fileSet;
++  const filteringRef = useRef(false);
++  filteringRef.current = visible !== null;
++
++  const typeOf = (path) => (fileSetRef.current.has(path) ? "file" : "dir");
++  const editable = canModify && !busy;
++
++  // ---- effects -----------------------------------------------------------
++
+   // First time files show up: open the top-level folders so the tree
+   // isn't a single collapsed root. Once only — after that, what's open
+   // is the person's own choice and a refresh must not undo it.
+@@ -127,33 +181,578 @@ function Explorer({
+ 
+   // Keep the active file visible: when it changes (opened from
+   // somewhere other than a click on its own row — a tab, and later a
+-  // chat chip or the preview), open the folders above it. Only ever
+-  // ADDS to the open set, and only when the active path changes, so
+-  // collapsing the folder of the file you're editing sticks.
++  // chat chip or the preview), open the folders above it, select it and
++  // make it the tree's tab stop. Only ever ADDS to the open set, and
++  // only when the active path changes, so collapsing the folder of the
++  // file you're editing sticks.
+   useEffect(() => {
+     if (!activePath) return;
+     setExpanded((prev) => {
+       const missing = ancestorDirs(activePath).filter((d) => !prev.has(d));
+       return missing.length ? new Set([...prev, ...missing]) : prev;
+     });
++    setSelection(new Set([activePath]));
++    anchorRef.current = activePath;
++    setFocusPath(activePath);
+   }, [activePath]);
+ 
+-  function toggleDir(path) {
++  // Forget selected paths that no longer exist (deleted, or renamed
++  // from elsewhere), so a later Delete/Drag can't act on a ghost.
++  useEffect(() => {
++    if (!filesMeta) return;
++    setSelection((prev) => {
++      const next = new Set([...prev].filter((p) => taken.has(p)));
++      return next.size === prev.size ? prev : next;
++    });
++  }, [filesMeta, taken]);
++
++  // DOM focus follows the tab stop only after a keyboard move — never
++  // when the active file changes for some other reason, which would
++  // steal focus from the editor.
++  useEffect(() => {
++    if (!shouldFocusRef.current) return;
++    shouldFocusRef.current = false;
++    const el = [...(areaRef.current?.querySelectorAll("[data-row-path]") || [])].find(
++      (node) => node.dataset.rowPath === focusPath
++    );
++    el?.focus();
++  }, [focusTick, focusPath]);
++
++  // ---- selection / expansion helpers ---------------------------------------
++
++  const requestFocus = useCallback((path) => {
++    shouldFocusRef.current = true;
++    setFocusPath(path);
++    setFocusTick((t) => t + 1);
++  }, []);
++
++  const selectOnly = useCallback((path) => {
++    setSelection(new Set([path]));
++    anchorRef.current = path;
++    setFocusPath(path);
++  }, []);
++
++  const toggleDir = useCallback((path) => {
+     setExpanded((prev) => {
+       const next = new Set(prev);
+       if (next.has(path)) next.delete(path);
+       else next.add(path);
+       return next;
+     });
++  }, []);
++
++  const expandDirs = useCallback((dirs) => {
++    setExpanded((prev) => {
++      const missing = dirs.filter((d) => d && !prev.has(d));
++      return missing.length ? new Set([...prev, ...missing]) : prev;
++    });
++  }, []);
++
++  // After a rename/move succeeded: the same folders stay open, the
++  // same things stay selected — under their new paths.
++  const followRenames = useCallback((renames) => {
++    const remap = (p) => {
++      for (const r of renames) if (isSameOrDescendant(p, r.from)) return remapPath(p, r.from, r.to);
++      return p;
++    };
++    setExpanded((prev) => new Set([...prev].map(remap)));
++    setSelection((prev) => new Set([...prev].map(remap)));
++    if (anchorRef.current) anchorRef.current = remap(anchorRef.current);
++    setFocusPath((p) => (p ? remap(p) : p));
++  }, []);
++
++  // ---- clicking ---------------------------------------------------------------
++
++  const handleRowClick = useCallback(
++    (e, path, type) => {
++      setFocusPath(path);
++      if (e.metaKey || e.ctrlKey) {
++        // Toggle this row in or out of the selection; opens nothing.
++        setSelection((prev) => {
++          const next = new Set(prev);
++          if (next.has(path)) next.delete(path);
++          else next.add(path);
++          return next;
++        });
++        anchorRef.current = path;
++        return;
++      }
++      if (e.shiftKey && anchorRef.current) {
++        setSelection(new Set(rangeBetween(rowsRef.current, anchorRef.current, path)));
++        return;
++      }
++      selectOnly(path);
++      if (type === "dir") toggleDir(path);
++      else onOpenFile(path);
++    },
++    [onOpenFile, selectOnly, toggleDir]
++  );
++
++  // A click on the empty space below the rows deselects (and makes
++  // "New file" mean "at the top level", like every file explorer).
++  const handleAreaClick = useCallback((e) => {
++    if (e.target !== e.currentTarget) return;
++    setSelection(new Set());
++    anchorRef.current = null;
++  }, []);
++
++  // ---- the context menu ----------------------------------------------------------
++
++  const openRowMenu = useCallback(
++    (path, x, y) => {
++      const current = selectionRef.current;
++      let paths;
++      if (current.has(path)) {
++        paths = [...current];
++      } else {
++        paths = [path];
++        selectOnly(path);
++      }
++      setFocusPath(path);
++      setMenu({ x, y, paths, root: false });
++    },
++    [selectOnly]
++  );
++
++  const handleRowContextMenu = useCallback(
++    (e, path) => {
++      e.preventDefault();
++      e.stopPropagation();
++      let { clientX: x, clientY: y } = e;
++      if (!x && !y) {
++        // Fired from the keyboard (the Menu key): no pointer position —
++        // open it just under the row.
++        const rect = e.currentTarget.getBoundingClientRect();
++        x = rect.left + 24;
++        y = rect.bottom;
++      }
++      openRowMenu(path, x, y);
++    },
++    [openRowMenu]
++  );
++
++  const handleAreaContextMenu = useCallback((e) => {
++    e.preventDefault();
++    setMenu({ x: e.clientX, y: e.clientY, paths: [], root: true });
++  }, []);
++
++  const longPress = useLongPress(({ x, y, target }) => {
++    if (!(target instanceof Element) || target.closest("input")) return;
++    const rowEl = target.closest("[data-row-path]");
++    if (rowEl) openRowMenu(rowEl.dataset.rowPath, x, y);
++    else setMenu({ x, y, paths: [], root: true });
++  });
++
++  const closeMenu = useCallback(() => setMenu(null), []);
++
++  // ---- creating / renaming (inline) ----------------------------------------------------
++
++  // Where "New file" goes when nothing says otherwise: the selected
++  // folder, the folder of the selected file, else the top level.
++  const defaultNewDir = () => {
++    const anchor = anchorRef.current;
++    if (!anchor || !takenRef.current.has(anchor)) return "";
++    return typeOf(anchor) === "dir" ? anchor : dirname(anchor);
++  };
++
++  const startNew = useCallback(
++    (isDir, dir) => {
++      if (!editable) return;
++      setMenu(null);
++      setFilter(""); // a filtered-out folder couldn't host the input
++      if (dir) expandDirs([...ancestorDirs(`${dir}/x`), dir]);
++      setEditing({ kind: "new", dir, isDir });
++    },
++    [editable, expandDirs]
++  );
++
++  const startRename = useCallback(
++    (path) => {
++      if (!editable) return;
++      setMenu(null);
++      setEditing({ kind: "rename", path });
++    },
++    [editable]
++  );
++
++  const cancelEdit = useCallback(() => setEditing(null), []);
++
++  const newEntry = editing?.kind === "new" ? editing : null;
++  const renamePath = editing?.kind === "rename" ? editing.path : null;
++
++  const validateNew = useCallback(
++    (value) => (newEntry ? checkEntryName(value, { dir: newEntry.dir, taken }).error : null),
++    [newEntry, taken]
++  );
++  const submitNew = useCallback(
++    async (name, { blurred }) => {
++      const dir = newEntry.dir;
++      const isDir = newEntry.isDir;
++      const clean = checkEntryName(name, { dir, taken: takenRef.current }).name;
++      const refusal = await (isDir ? onCreateFolder : onCreateFile)(dir, clean);
++      if (refusal) return refusal;
++      setEditing(null);
++      if (isDir) {
++        // A new folder is empty, so it wouldn't open on its own — select
++        // it. (A new FILE opens in the editor, and the active-path
++        // effect above selects and reveals it.)
++        const path = joinPath(dir, clean);
++        selectOnly(path);
++        if (!blurred) requestFocus(path);
++      }
++      return null;
++    },
++    [newEntry, onCreateFile, onCreateFolder, selectOnly, requestFocus]
++  );
++
++  const validateRename = useCallback(
++    (value) =>
++      renamePath ? checkEntryName(value, { dir: dirname(renamePath), taken, selfPath: renamePath }).error : null,
++    [renamePath, taken]
++  );
++  const submitRename = useCallback(
++    async (name, { blurred }) => {
++      const dir = dirname(renamePath);
++      const clean = checkEntryName(name, { dir, taken: takenRef.current, selfPath: renamePath }).name;
++      const refusal = await onRename(renamePath, clean);
++      if (refusal) return refusal;
++      const to = joinPath(dir, clean);
++      setEditing(null);
++      followRenames([{ from: renamePath, to }]);
++      if (!blurred) requestFocus(to);
++      return null;
++    },
++    [renamePath, onRename, followRenames, requestFocus]
++  );
++
++  // ---- the keyboard ---------------------------------------------------------------------------
++
++  const handleKeyDown = useCallback(
++    (e) => {
++      const target = e.target;
++      if (!(target instanceof Element) || target.closest("input, textarea")) return;
++      const rowEl = target.closest("[data-row-path]");
++      if (!rowEl) return;
++      const path = rowEl.dataset.rowPath;
++      const list = rowsRef.current;
++      const index = list.findIndex((r) => r.path === path);
++      if (index === -1) return;
++      const row = list[index];
++      const mod = e.metaKey || e.ctrlKey;
++
++      const focusRow = (nextIndex, extend) => {
++        const next = list[Math.max(0, Math.min(list.length - 1, nextIndex))];
++        if (!next) return;
++        requestFocus(next.path);
++        if (extend) {
++          anchorRef.current = anchorRef.current ?? path;
++          setSelection(new Set(rangeBetween(list, anchorRef.current, next.path)));
++        } else {
++          setSelection(new Set([next.path]));
++          anchorRef.current = next.path;
++        }
++      };
++      const deleteTargets = () => {
++        const current = selectionRef.current;
++        return collapseNested(current.has(path) ? [...current] : [path]);
++      };
++
++      switch (e.key) {
++        case "ArrowDown":
++          e.preventDefault();
++          focusRow(index + 1, e.shiftKey);
++          break;
++        case "ArrowUp":
++          e.preventDefault();
++          focusRow(index - 1, e.shiftKey);
++          break;
++        case "Home":
++          e.preventDefault();
++          focusRow(0, e.shiftKey);
++          break;
++        case "End":
++          e.preventDefault();
++          focusRow(list.length - 1, e.shiftKey);
++          break;
++        case "ArrowRight":
++          e.preventDefault();
++          if (row.type === "dir") {
++            if (!row.open) toggleDir(path);
++            else if (list[index + 1]?.parent === path) focusRow(index + 1, false); // into its first child
++          }
++          break;
++        case "ArrowLeft":
++          e.preventDefault();
++          if (row.type === "dir" && row.open && !filteringRef.current) {
++            toggleDir(path);
++          } else if (row.parent) {
++            const parentIndex = list.findIndex((r) => r.type === "dir" && r.path === row.parent);
++            if (parentIndex !== -1) focusRow(parentIndex, false);
++          }
++          break;
++        case "Enter":
++        case " ":
++          e.preventDefault();
++          selectOnly(path);
++          if (row.type === "dir") toggleDir(path);
++          else onOpenFile(path);
++          break;
++        case "F2":
++          e.preventDefault();
++          if (selectionRef.current.size <= 1) startRename(path);
++          break;
++        case "Delete":
++        case "Backspace":
++          // Plain Backspace is too easy to hit by accident on a row; Cmd/Ctrl+Backspace (the Mac "Delete") is deliberate.
++          if (e.key === "Backspace" && !mod) break;
++          e.preventDefault();
++          if (editable) onRequestDelete(deleteTargets());
++          break;
++        case "a":
++        case "A":
++          if (!mod) break;
++          e.preventDefault();
++          setSelection(new Set(list.map((r) => r.path)));
++          break;
++        case "Escape":
++          setSelection(new Set([path]));
++          anchorRef.current = path;
++          break;
++        case "ContextMenu":
++        case "F10": {
++          if (e.key === "F10" && !e.shiftKey) break;
++          e.preventDefault();
++          const rect = rowEl.getBoundingClientRect();
++          openRowMenu(path, rect.left + 24, rect.bottom);
++          break;
++        }
++        default:
++          break;
++      }
++    },
++    [requestFocus, selectOnly, toggleDir, onOpenFile, startRename, editable, onRequestDelete, openRowMenu]
++  );
++
++  // ---- drag and drop -------------------------------------------------------------------------------
++
++  const draggable = editable && !touch && !editing;
++
++  // Would dropping what's being dragged onto `targetDir` move anything
++  // legally? Decides the highlight and the cursor. (An illegal drop —
++  // into itself, onto a name clash — just isn't offered.)
++  const canDropOn = useCallback((targetDir) => {
++    const sources = dragSourcesRef.current;
++    if (sources.length === 0) return false;
++    const { moves, error: planError } = planDrop({ sources, targetDir, taken: takenRef.current });
++    return !planError && moves.length > 0;
++  }, []);
++
++  const handleRowDragStart = useCallback(
++    (e, path) => {
++      const current = selectionRef.current;
++      if (!current.has(path)) selectOnly(path);
++      const sources = collapseNested(current.has(path) ? [...current] : [path]);
++      dragSourcesRef.current = sources;
++      e.dataTransfer.effectAllowed = "move";
++      e.dataTransfer.setData(DRAG_MIME, JSON.stringify(sources));
++      e.dataTransfer.setData("text/plain", sources.join("\n"));
++    },
++    [selectOnly]
++  );
++
++  const clearDrag = useCallback(() => {
++    dragSourcesRef.current = [];
++    setDropTarget(null);
++  }, []);
++
++  const performDrop = useCallback(
++    async (targetDir) => {
++      const sources = dragSourcesRef.current;
++      clearDrag();
++      if (sources.length === 0) return;
++      const applied = await onMove(sources, targetDir);
++      if (applied && applied.length > 0) {
++        followRenames(applied);
++        if (targetDir) expandDirs([targetDir]);
++      }
++    },
++    [onMove, clearDrag, followRenames, expandDirs]
++  );
++
++  // A row is the authority for drags over it (stopPropagation), so the
++  // area behind only ever sees drags over the empty space = "the root".
++  const handleRowDragOver = useCallback(
++    (e, path, type) => {
++      if (!isOurDrag(e)) return;
++      e.stopPropagation();
++      const targetDir = type === "dir" ? path : dirname(path);
++      if (canDropOn(targetDir)) {
++        e.preventDefault();
++        e.dataTransfer.dropEffect = "move";
++        setDropTarget(targetDir);
++      } else {
++        e.dataTransfer.dropEffect = "none";
++        setDropTarget(null);
++      }
++    },
++    [canDropOn]
++  );
++
++  const handleRowDrop = useCallback(
++    (e, path, type) => {
++      if (!isOurDrag(e)) return;
++      e.preventDefault();
++      e.stopPropagation();
++      performDrop(type === "dir" ? path : dirname(path));
++    },
++    [performDrop]
++  );
++
++  const handleAreaDragOver = useCallback(
++    (e) => {
++      if (!isOurDrag(e)) return;
++      if (canDropOn("")) {
++        e.preventDefault();
++        e.dataTransfer.dropEffect = "move";
++        setDropTarget("");
++      } else {
++        e.dataTransfer.dropEffect = "none";
++        setDropTarget(null);
++      }
++    },
++    [canDropOn]
++  );
++
++  const handleAreaDrop = useCallback(
++    (e) => {
++      if (!isOurDrag(e)) return;
++      e.preventDefault();
++      performDrop("");
++    },
++    [performDrop]
++  );
++
++  // Leaving the whole pane (not just moving between two rows inside it).
++  const handleAreaDragLeave = useCallback((e) => {
++    if (!e.currentTarget.contains(e.relatedTarget)) setDropTarget(null);
++  }, []);
++
++  // ---- menu contents ---------------------------------------------------------------------------------
++
++  function buildMenuItems({ paths, root }) {
++    const many = paths.length > 1;
++    const single = paths[0];
++    const newDir = root ? "" : typeOf(single) === "dir" ? single : dirname(single);
++    const items = [];
++
++    if (canModify && !many) {
++      items.push(
++        { key: "new-file", label: "New file", icon: FilePlus, disabled: busy, onSelect: () => startNew(false, newDir) },
++        { key: "new-folder", label: "New folder", icon: FolderPlus, disabled: busy, onSelect: () => startNew(true, newDir) }
++      );
++    }
++    if (root) return items;
++
++    if (canModify && !many) {
++      items.push(
++        { key: "sep-edit", separator: true },
++        { key: "rename", label: "Rename", icon: Pencil, hint: "F2", disabled: busy, onSelect: () => startRename(single) },
++        { key: "duplicate", label: "Duplicate", icon: CopyPlus, disabled: busy, onSelect: () => onDuplicate(single) }
++      );
++    }
++    items.push(
++      { key: "sep-copy", separator: true },
++      { key: "copy-path", label: many ? "Copy paths" : "Copy path", icon: Copy, onSelect: () => copyText(paths.join("\n")) },
++      // Wired up in W4.1, when code chips exist for it to add to.
++      { key: "add-to-chat", label: "Add to chat", icon: MessageSquarePlus, disabled: true, title: "Coming soon" }
++    );
++    if (canModify) {
++      items.push(
++        { key: "sep-delete", separator: true },
++        {
++          key: "delete",
++          label: many ? `Delete ${paths.length} items` : "Delete",
++          icon: Trash2,
++          hint: "Del",
++          danger: true,
++          disabled: busy,
++          onSelect: () => onRequestDelete(collapseNested(paths)),
++        }
++      );
++    }
++    return items;
+   }
+ 
++  // ---- render --------------------------------------------------------------------------------------------
++
++  const tabStopPath = rows.some((r) => r.path === focusPath)
++    ? focusPath
++    : rows.some((r) => r.path === activePath)
++    ? activePath
++    : rows[0]?.path ?? null;
++
++  // Where the inline "new" row sits: right under its folder (top of
++  // that folder's children), or first at the root.
++  let newRowIndex = -1;
++  let newRowDepth = 0;
++  if (newEntry) {
++    if (newEntry.dir === "") {
++      newRowIndex = 0;
++    } else {
++      const at = rows.findIndex((r) => r.type === "dir" && r.path === newEntry.dir);
++      if (at !== -1) {
++        newRowIndex = at + 1;
++        newRowDepth = rows[at].depth + 1;
++      } else {
++        newRowIndex = rows.length; // its folder isn't listed (yet): don't lose the input
++      }
++    }
++  }
++  const newEntryRow = newEntry ? (
++    <div role="none" key="new-entry">
++      <NewEntryRow
++        depth={newRowDepth}
++        isDir={newEntry.isDir}
++        validate={validateNew}
++        onSubmit={submitNew}
++        onCancel={cancelEdit}
++      />
++    </div>
++  ) : null;
++
++  const showTree = rows.length > 0 || newEntry;
++
+   return (
+     <div className="h-full min-h-0 flex flex-col">
+-      <div className="shrink-0 flex items-center justify-between px-3 h-9 border-b border-[var(--neutral-800)]">
+-        <span className="text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
++      <div className="shrink-0 flex items-center justify-between gap-2 px-3 h-9 border-b border-[var(--neutral-800)]">
++        <span className="min-w-0 truncate text-[10px] uppercase tracking-wide text-[var(--neutral-500)]">
+           Files{fileCount ? ` (${fileCount})` : ""}
+         </span>
+-        <div className="flex items-center gap-2">
++        <div className="shrink-0 flex items-center gap-2">
++          {canModify && (
++            <>
++              <button
++                type="button"
++                onClick={() => startNew(false, defaultNewDir())}
++                disabled={busy}
++                aria-label="New file"
++                title="New file"
++                className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++              >
++                <FilePlus size={12} />
++              </button>
++              <button
++                type="button"
++                onClick={() => startNew(true, defaultNewDir())}
++                disabled={busy}
++                aria-label="New folder"
++                title="New folder"
++                className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++              >
++                <FolderPlus size={12} />
++              </button>
++            </>
++          )}
+           {/* Moved here from the old CodeView's own header (patch 11's
+               ZIP download) — the plan puts it in the explorer header.
+               Disabled until there's at least one saved file. */}
+@@ -163,7 +762,7 @@ function Explorer({
+             disabled={downloading || fileCount === 0}
+             aria-label="Download all files as ZIP"
+             title="Download as ZIP"
+-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++            className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+           >
+             {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+           </button>
+@@ -173,14 +772,64 @@ function Explorer({
+             disabled={loading}
+             aria-label="Refresh file list"
+             title="Refresh"
+-            className="text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++            className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+           >
+             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
+           </button>
+         </div>
+       </div>
+ 
+-      <div className="flex-1 min-h-0 overflow-y-auto p-2">
++      {fileCount > 0 && (
++        <div className="shrink-0 px-2 py-1.5 border-b border-[var(--neutral-800)]">
++          <div className="flex items-center gap-1.5 rounded border border-[var(--neutral-800)] bg-[var(--neutral-950)] px-1.5 focus-within:border-[var(--neutral-600)]">
++            <Search size={11} className="shrink-0 text-[var(--neutral-600)]" />
++            <input
++              value={filter}
++              onChange={(e) => setFilter(e.target.value)}
++              onKeyDown={(e) => {
++                if (e.key === "Escape" && filter) {
++                  e.preventDefault();
++                  setFilter("");
++                } else if (e.key === "ArrowDown" && rows.length > 0) {
++                  e.preventDefault();
++                  requestFocus(rows[0].path);
++                }
++              }}
++              placeholder="Filter files"
++              aria-label="Filter files"
++              spellCheck={false}
++              autoComplete="off"
++              className="touch-input min-w-0 flex-1 bg-transparent py-1 text-xs text-[var(--neutral-200)] placeholder:text-[var(--neutral-600)] outline-none"
++            />
++            {filter && (
++              <button
++                type="button"
++                onClick={() => setFilter("")}
++                aria-label="Clear filter"
++                title="Clear filter"
++                className="touch-target shrink-0 text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++              >
++                <X size={11} />
++              </button>
++            )}
++          </div>
++        </div>
++      )}
++
++      <div
++        ref={areaRef}
++        onClick={handleAreaClick}
++        onContextMenu={handleAreaContextMenu}
++        onKeyDown={handleKeyDown}
++        onDragOver={handleAreaDragOver}
++        onDragLeave={handleAreaDragLeave}
++        onDrop={handleAreaDrop}
++        onDragEnd={clearDrag}
++        {...longPress}
++        className={`flex-1 min-h-0 overflow-y-auto p-2 ${
++          dropTarget === "" ? "ring-1 ring-inset ring-[var(--accent)]/60" : ""
++        }`}
++      >
+         {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
+         {loading && !filesMeta ? (
+           <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
+@@ -188,24 +837,50 @@ function Explorer({
+           </div>
+         ) : error ? (
+           <p className="text-xs text-red-400 px-1">{error}</p>
+-        ) : fileCount === 0 ? (
+-          <p className="text-xs text-[var(--neutral-600)] px-1">
+-            No files yet — ask this project&apos;s chat to build something and generated files will show up here.
++        ) : !showTree ? (
++          <p className="text-xs text-[var(--neutral-600)] px-1 pointer-events-none">
++            {visible
++              ? `No files match "${filter.trim()}".`
++              : canModify
++              ? "No files yet — create one with the buttons above, or ask this project's chat to build something and generated files will show up here."
++              : "No files yet — ask this project's chat to build something and generated files will show up here."}
+           </p>
+         ) : (
+-          <div role="tree" aria-label="Project files">
+-            <TreeRows
+-              node={tree}
+-              depth={0}
+-              expanded={expanded}
+-              onToggle={toggleDir}
+-              activePath={activePath}
+-              dirtyPaths={dirtyPaths}
+-              onOpen={onOpenFile}
+-            />
++          <div role="tree" aria-label="Project files" aria-multiselectable="true">
++            {rows.map((row, i) => (
++              <Fragment key={`${row.type}:${row.path}`}>
++                {i === newRowIndex && newEntryRow}
++                <TreeRow
++                  path={row.path}
++                  name={row.name}
++                  type={row.type}
++                  depth={row.depth}
++                  open={row.open}
++                  selected={selection.has(row.path)}
++                  active={row.type === "file" && row.path === activePath}
++                  focusable={row.path === tabStopPath}
++                  dirty={row.type === "file" && dirtyPaths.has(row.path)}
++                  dropTarget={row.type === "dir" && dropTarget === row.path}
++                  draggable={draggable}
++                  renaming={row.path === renamePath}
++                  validateName={row.path === renamePath ? validateRename : undefined}
++                  onSubmitName={row.path === renamePath ? submitRename : undefined}
++                  onCancelEdit={row.path === renamePath ? cancelEdit : undefined}
++                  onRowClick={handleRowClick}
++                  onRowContextMenu={handleRowContextMenu}
++                  onRowDragStart={handleRowDragStart}
++                  onRowDragOver={handleRowDragOver}
++                  onRowDrop={handleRowDrop}
++                  onRowDragEnd={clearDrag}
++                />
++              </Fragment>
++            ))}
++            {newRowIndex >= rows.length && newEntryRow}
+           </div>
+         )}
+       </div>
++
++      {menu && <ContextMenu x={menu.x} y={menu.y} items={buildMenuItems(menu)} onClose={closeMenu} />}
+     </div>
+   );
+ }
+diff --git a/frontend/app/components/workbench/ExplorerRow.jsx b/frontend/app/components/workbench/ExplorerRow.jsx
+new file mode 100644
+index 0000000..98ba35f
+--- /dev/null
++++ b/frontend/app/components/workbench/ExplorerRow.jsx
+@@ -0,0 +1,311 @@
++"use client";
++// frontend/app/components/workbench/ExplorerRow.jsx — W2.4 (Build
++// Workbench plan). The pieces Explorer.jsx draws the tree from: one
++// row (a file or a folder), the inline name input that a rename and a
++// "New file/folder" both use, and the row that hosts that input for a
++// new entry. Split out so Explorer.jsx can be about selection,
++// keyboard, drag and the menu, and this file about how a row LOOKS.
++//
++// Everything here is presentational. A row reports what happened to it
++// (`onRowClick(event, path, type)`, `onRowDragStart(...)`, …) and never
++// decides anything; handlers are passed in as stable callbacks and
++// every other prop is a primitive, so `memo` really does skip the rows
++// that didn't change (there can be hundreds).
++import { memo, useEffect, useRef, useState } from "react";
++import {
++  ChevronDown,
++  ChevronRight,
++  Database,
++  File,
++  FileCode,
++  FileCog,
++  FileImage,
++  FileJson,
++  FileTerminal,
++  FileText,
++  Folder,
++  FolderOpen,
++  Globe,
++  Lock,
++  Package,
++  Palette,
++} from "lucide-react";
++import { fileIconKey } from "../../lib/workbench/fileIcons";
++
++// fileIconKey() result -> [icon, color]. Muted on purpose: the colors
++// only say "what kind of file", they shouldn't compete with the active
++// row or the unsaved-changes dot.
++const FILE_ICONS = {
++  code: [FileCode, "text-sky-400"],
++  markup: [Globe, "text-orange-400"],
++  style: [Palette, "text-violet-400"],
++  json: [FileJson, "text-yellow-400"],
++  data: [Database, "text-emerald-400"],
++  config: [FileCog, "text-[var(--neutral-500)]"],
++  doc: [FileText, "text-[var(--neutral-400)]"],
++  image: [FileImage, "text-pink-400"],
++  shell: [FileTerminal, "text-green-400"],
++  lock: [Lock, "text-[var(--neutral-600)]"],
++  package: [Package, "text-red-400"],
++  file: [File, "text-[var(--neutral-500)]"],
++};
++
++// Indentation. A folder's chevron sits at its depth; a file has no
++// chevron, so it's pushed in by the chevron's width to line up with its
++// folder's NAME (same numbers the pre-W2.4 tree used).
++const INDENT = 14;
++const CHEVRON_WIDTH = 16;
++const rowIndent = (depth, isDir) => depth * INDENT + (isDir ? 0 : CHEVRON_WIDTH);
++
++function EntryIcon({ type, name, open, plain }) {
++  if (type === "dir") {
++    const Icon = open ? FolderOpen : Folder;
++    return <Icon size={12} className="shrink-0" />;
++  }
++  const [Icon, tone] = FILE_ICONS[fileIconKey(name)] || FILE_ICONS.file;
++  // `plain`: on the accent-colored active row the icon inherits the
++  // row's text color instead of adding its own.
++  return <Icon size={12} className={`shrink-0 ${plain ? "" : tone}`} />;
++}
++
++/**
++ * The inline input a rename and "New file/folder" share.
++ *
++ * Enter commits, Escape cancels, and clicking away commits if there's
++ * a valid, changed name and cancels otherwise (an empty or invalid box
++ * you walk away from just goes away — no error to dismiss). A name the
++ * client-side rules reject shows the reason in a popover under the box
++ * and stays put; so does a refusal from the server, which arrives as
++ * the resolved value of `onSubmit`.
++ *
++ * @param {object} props
++ * @param {string} [props.initial] - starting text (the current name, when renaming)
++ * @param {boolean} [props.isDir] - folders have no extension to keep out of the initial selection
++ * @param {string} props.label - aria-label
++ * @param {(value: string) => string|null} props.validate - reason it's not OK, or null
++ * @param {(name: string, meta: {blurred: boolean}) => Promise<string|null>} props.onSubmit - null = done, string = server's refusal
++ * @param {() => void} props.onCancel
++ */
++export function NameInput({ initial = "", isDir = false, label, validate, onSubmit, onCancel }) {
++  const [value, setValue] = useState(initial);
++  const [submitError, setSubmitError] = useState(null);
++  const [pending, setPending] = useState(false);
++  const inputRef = useRef(null);
++  const doneRef = useRef(false); // committed or cancelled: ignore anything that fires while unmounting
++  const pendingRef = useRef(false);
++
++  // Focus on mount, and when renaming pre-select the name but not its
++  // extension — renaming is usually "change the name, keep .jsx".
++  useEffect(() => {
++    const el = inputRef.current;
++    if (!el) return;
++    el.focus();
++    const dot = isDir ? -1 : initial.lastIndexOf(".");
++    el.setSelectionRange(0, dot > 0 ? dot : initial.length);
++  }, [initial, isDir]);
++
++  const trimmed = value.trim();
++  // Live feedback only once there's something to judge, and not for the
++  // untouched initial text (an unchanged rename isn't an error).
++  const liveError = trimmed && value !== initial ? validate(value) : null;
++  const error = submitError || liveError;
++
++  function cancel() {
++    if (doneRef.current) return;
++    doneRef.current = true;
++    onCancel();
++  }
++
++  async function submit(blurred) {
++    if (doneRef.current || pendingRef.current) return;
++    if (!trimmed || trimmed === initial) {
++      cancel();
++      return;
++    }
++    const invalid = validate(value);
++    if (invalid) {
++      setSubmitError(invalid);
++      return;
++    }
++    pendingRef.current = true;
++    setPending(true);
++    const refusal = await onSubmit(trimmed, { blurred });
++    pendingRef.current = false;
++    if (refusal) {
++      setPending(false);
++      setSubmitError(refusal);
++      inputRef.current?.focus();
++      return;
++    }
++    doneRef.current = true; // the parent unmounts this next
++  }
++
++  function onKeyDown(e) {
++    // Keep typing away from the tree's own keyboard handling.
++    e.stopPropagation();
++    if (e.key === "Enter") {
++      e.preventDefault();
++      submit(false);
++    } else if (e.key === "Escape") {
++      e.preventDefault();
++      cancel();
++    }
++  }
++
++  function onBlur() {
++    if (doneRef.current || pendingRef.current) return;
++    if (!trimmed || trimmed === initial || validate(value)) cancel();
++    else submit(true);
++  }
++
++  return (
++    <div className="relative min-w-0 flex-1">
++      <input
++        ref={inputRef}
++        value={value}
++        disabled={pending}
++        onChange={(e) => {
++          setValue(e.target.value);
++          setSubmitError(null);
++        }}
++        onKeyDown={onKeyDown}
++        onBlur={onBlur}
++        // A click in the box mustn't reach the row (it would re-select
++        // it, or open/toggle it).
++        onClick={(e) => e.stopPropagation()}
++        onDoubleClick={(e) => e.stopPropagation()}
++        onContextMenu={(e) => e.stopPropagation()}
++        aria-label={label}
++        aria-invalid={error ? true : undefined}
++        spellCheck={false}
++        autoComplete="off"
++        autoCorrect="off"
++        autoCapitalize="off"
++        className={`touch-input w-full rounded border bg-[var(--neutral-950)] px-1 py-0 text-xs text-[var(--neutral-100)] outline-none disabled:opacity-60 ${
++          error ? "border-red-500/70" : "border-[var(--accent)]"
++        }`}
++      />
++      {error && (
++        <div
++          role="alert"
++          className="absolute left-0 top-full z-20 mt-0.5 w-max max-w-[16rem] rounded border border-red-800 bg-red-950 px-2 py-1 text-[10px] leading-snug text-red-200 shadow-lg"
++        >
++          {error}
++        </div>
++      )}
++    </div>
++  );
++}
++
++/** The row that hosts the input while creating a file or folder: an icon, no name yet. */
++export function NewEntryRow({ depth, isDir, validate, onSubmit, onCancel }) {
++  return (
++    <div
++      className="flex w-full items-center gap-1 rounded py-0.5 text-xs text-[var(--neutral-300)]"
++      style={{ paddingLeft: rowIndent(depth, isDir) }}
++    >
++      {isDir && <span className="w-3 shrink-0" />}
++      <EntryIcon type={isDir ? "dir" : "file"} name="" open={false} />
++      <NameInput
++        isDir={isDir}
++        label={isDir ? "New folder name" : "New file name"}
++        validate={validate}
++        onSubmit={onSubmit}
++        onCancel={onCancel}
++      />
++    </div>
++  );
++}
++
++/**
++ * One row of the tree. `focusable` marks the tree's single tab stop
++ * (roving tabindex: arrow keys move focus between rows, Tab leaves the
++ * tree instead of walking every row). `selected` is the explorer's own
++ * multi-selection; `active` is "this file is the one open in the
++ * editor" — both can be true, and active wins visually.
++ */
++export const TreeRow = memo(function TreeRow({
++  path,
++  name,
++  type,
++  depth,
++  open,
++  selected,
++  active,
++  focusable,
++  dirty,
++  dropTarget,
++  draggable,
++  renaming,
++  validateName,
++  onSubmitName,
++  onCancelEdit,
++  onRowClick,
++  onRowContextMenu,
++  onRowDragStart,
++  onRowDragOver,
++  onRowDrop,
++  onRowDragEnd,
++}) {
++  const isDir = type === "dir";
++  const tone = dropTarget
++    ? "bg-[var(--accent)]/25 ring-1 ring-inset ring-[var(--accent)] text-[var(--neutral-100)]"
++    : active
++    ? "bg-[var(--accent)] text-[var(--accent-text)] font-medium focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--accent-text)]"
++    : selected
++    ? "bg-[var(--neutral-800)] text-[var(--neutral-100)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--accent)]"
++    : `${
++        isDir ? "text-[var(--neutral-300)]" : "text-[var(--neutral-400)]"
++      } hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-100)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--accent)]`;
++
++  return (
++    <div
++      role="treeitem"
++      aria-level={depth + 1}
++      aria-selected={selected || active}
++      aria-expanded={isDir ? open : undefined}
++      data-row-path={path}
++      data-row-type={type}
++      tabIndex={focusable ? 0 : -1}
++      draggable={draggable && !renaming}
++      title={isDir ? undefined : path}
++      onClick={renaming ? undefined : (e) => onRowClick(e, path, type)}
++      onContextMenu={(e) => onRowContextMenu(e, path, type)}
++      onDragStart={(e) => onRowDragStart(e, path)}
++      onDragOver={(e) => onRowDragOver(e, path, type)}
++      onDrop={(e) => onRowDrop(e, path, type)}
++      onDragEnd={onRowDragEnd}
++      // select-none + no iOS callout: a long-press should open the
++      // menu, not select the filename or show Safari's own sheet.
++      className={`touch-row flex w-full cursor-pointer select-none items-center gap-1 rounded py-0.5 text-xs outline-none [-webkit-touch-callout:none] ${tone}`}
++      style={{ paddingLeft: rowIndent(depth, isDir) }}
++    >
++      {isDir &&
++        (open ? (
++          <ChevronDown size={12} className="shrink-0" />
++        ) : (
++          <ChevronRight size={12} className="shrink-0" />
++        ))}
++      <EntryIcon type={type} name={name} open={open} plain={active} />
++      {renaming ? (
++        <NameInput
++          initial={name}
++          isDir={isDir}
++          label={isDir ? "Folder name" : "File name"}
++          validate={validateName}
++          onSubmit={onSubmitName}
++          onCancel={onCancelEdit}
++        />
++      ) : (
++        <span className="truncate">{name}</span>
++      )}
++      {dirty && !renaming && (
++        <span
++          className="ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
++          role="img"
++          aria-label="Unsaved changes"
++        />
++      )}
++    </div>
++  );
++});
+diff --git a/frontend/app/components/workbench/StatusBar.jsx b/frontend/app/components/workbench/StatusBar.jsx
+index d78c667..bd03924 100644
+--- a/frontend/app/components/workbench/StatusBar.jsx
++++ b/frontend/app/components/workbench/StatusBar.jsx
+@@ -2,15 +2,15 @@
+ // frontend/app/components/workbench/StatusBar.jsx — W2.3a (Build
+ // Workbench plan). The thin strip along the bottom of the workbench:
+ // which file source is showing (provider), the active file's save
+-// state, its language and caret position, the "Pending changes (N)"
+-// chip (W5.4 feeds it), and — W2.3b — the two panel toggles.
++// state, its language and caret position, and the "Pending changes (N)"
++// chip (W5.4 feeds it).
+ //
+ // Presentational only. Everything comes in as props so it stays
+ // correct over Cloud files now and Local files after W3.1 — the local
+ // provider will just pass a different `providerId` and a save state
+ // that reads "Waiting for confirmation" once that exists.
+ import { memo } from "react";
+-import { Loader2, PanelBottom, PanelRight } from "lucide-react";
++import { Loader2 } from "lucide-react";
+ 
+ const PROVIDER_LABELS = {
+   cloud: "Project files",
+@@ -46,23 +46,6 @@ function PendingChanges({ count, onClick }) {
+   );
+ }
+ 
+-function PanelToggle({ pressed, onClick, label, children }) {
+-  return (
+-    <button
+-      type="button"
+-      onClick={onClick}
+-      aria-pressed={pressed}
+-      aria-label={label}
+-      title={label}
+-      className={`touch-target flex items-center ${
+-        pressed ? "text-[var(--accent)]" : "hover:text-[var(--neutral-200)]"
+-      }`}
+-    >
+-      {children}
+-    </button>
+-  );
+-}
+-
+ /**
+  * @param {object} props
+  * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
+@@ -73,10 +56,7 @@ function PanelToggle({ pressed, onClick, label, children }) {
+  * @param {{line: number, col: number}|null} [props.cursor]
+  * @param {number} [props.pendingCount=0] - proposals waiting for review
+  * @param {() => void} [props.onPendingClick] - opens the review tray (W5.4); without it the chip is inert
+- * @param {boolean} [props.bottomOpen]
+- * @param {() => void} [props.onToggleBottom] - omit to hide the bottom-panel toggle
+- * @param {boolean} [props.previewOpen]
+- * @param {() => void} [props.onTogglePreview] - omit to hide the preview toggle (the single-pane layout has no room for one)
++ * @param {boolean} [props.reserveRight] - keep the bar's right end clear for the app's floating "open chat" bubble
+  */
+ function StatusBar({
+   providerId,
+@@ -87,13 +67,18 @@ function StatusBar({
+   cursor,
+   pendingCount = 0,
+   onPendingClick,
+-  bottomOpen = false,
+-  onToggleBottom,
+-  previewOpen = false,
+-  onTogglePreview,
++  reserveRight = false,
+ }) {
+   return (
+-    <div className="shrink-0 flex items-center justify-between gap-3 h-6 px-3 text-[10px] text-[var(--neutral-500)] border-t border-[var(--neutral-800)] bg-[var(--neutral-950)]">
++    // While the chat dock is closed the app draws a round "open chat"
++    // button fixed at the screen's bottom-right corner — over this bar's
++    // right end, where the caret position and language are. `reserveRight`
++    // (BuildTab passes it while the dock is closed) leaves room for it
++    // (42px button + a gap) so nothing here is hidden behind it.
++    <div
++      className="shrink-0 flex items-center justify-between gap-3 h-6 pl-3 text-[10px] text-[var(--neutral-500)] border-t border-[var(--neutral-800)] bg-[var(--neutral-950)]"
++      style={{ paddingRight: reserveRight ? 56 : 12 }}
++    >
+       <div className="flex items-center gap-3 min-w-0">
+         <span title="Where these files live">{PROVIDER_LABELS[providerId] || providerId}</span>
+ 
+@@ -122,21 +107,6 @@ function StatusBar({
+           </span>
+         )}
+         {saveState && <span>{language || "plain text"}</span>}
+-
+-        {(onToggleBottom || onTogglePreview) && (
+-          <div className="flex items-center gap-2">
+-            {onToggleBottom && (
+-              <PanelToggle pressed={bottomOpen} onClick={onToggleBottom} label="Toggle bottom panel">
+-                <PanelBottom size={12} />
+-              </PanelToggle>
+-            )}
+-            {onTogglePreview && (
+-              <PanelToggle pressed={previewOpen} onClick={onTogglePreview} label="Toggle preview">
+-                <PanelRight size={12} />
+-              </PanelToggle>
+-            )}
+-          </div>
+-        )}
+       </div>
+     </div>
+   );
+diff --git a/frontend/app/hooks/useExplorerOps.js b/frontend/app/hooks/useExplorerOps.js
+new file mode 100644
+index 0000000..213024b
+--- /dev/null
++++ b/frontend/app/hooks/useExplorerOps.js
+@@ -0,0 +1,246 @@
++"use client";
++// frontend/app/hooks/useExplorerOps.js — W2.4 (Build Workbench plan).
++// The async half of the explorer's file operations: create, rename,
++// move, duplicate, delete. Each one talks to the FileProvider (never to
++// a route directly — see fileProviders.js), then makes the rest of the
++// workbench catch up: open tabs follow a rename or move, tabs of
++// deleted files close, and the file list is refetched. The decisions —
++// what's a legal name, what a drop amounts to, what the copy is called —
++// are lib/workbench/explorerOps.js's; this file is only "do it, in
++// order, and clean up".
++//
++// Two error conventions, matching where the person is looking:
++//  - createFile / createFolder / rename come from an INLINE input in the
++//    tree, so they resolve to an error MESSAGE (or null on success) and
++//    the input shows it in place and stays open;
++//  - remove / duplicate / move have no input to hang an error on, so
++//    they report through `notify` (the workbench's dismissible notice).
++// Neither ever rejects: a network failure is a message like any other.
++//
++// One operation runs at a time. Two overlapping ones (a drop while a
++// rename is still in flight) would each plan against a file list the
++// other is about to change; refusing the second with a "try again" is
++// simpler than reconciling them, and these are sub-second calls.
++import { useCallback, useMemo, useRef, useState } from "react";
++import { basename, dirname, isSameOrDescendant, remapPath } from "../lib/workbench/fileTree";
++import { collapseNested, entryPaths, joinPath, pathsUnder, planDrop, uniqueCopyPath } from "../lib/workbench/explorerOps";
++
++const MAX_DUPLICATE_FILES = 200; // sequential read+write per file — keep a "duplicate folder" bounded
++const BUSY_MESSAGE = "Another file operation is still running. Try again in a moment.";
++const SAVING_MESSAGE = "A file in there is still saving. Try again in a moment.";
++
++function messageFor(err) {
++  return err?.message || "Something went wrong.";
++}
++
++/**
++ * @param {object} deps
++ * @param {object} deps.provider - the active FileProvider
++ * @param {{current: object|null}} deps.filesMetaRef - latest provider.list() result
++ * @param {{current: object}} deps.stateRef - latest editor store state (for which tabs are open)
++ * @param {{current: Set<string>}} deps.savingRef - paths with a save in flight
++ * @param {() => Promise<void>} deps.refresh - refetch the list and sync open buffers
++ * @param {(path: string) => void} deps.openFile
++ * @param {(paths: string[]) => void} deps.dropTabs - close tabs and forget their per-path state
++ * @param {(renames: {from: string, to: string}[], versions?: object) => void} deps.renamePaths - store action
++ * @param {(renames: {from: string, to: string}[]) => void} deps.onRenamed - re-key per-path state kept outside the store
++ * @param {(message: string) => void} deps.notify - show the workbench notice
++ */
++export function useExplorerOps({
++  provider,
++  filesMetaRef,
++  stateRef,
++  savingRef,
++  refresh,
++  openFile,
++  dropTabs,
++  renamePaths,
++  onRenamed,
++  notify,
++}) {
++  const busyRef = useRef(false);
++  const [busy, setBusy] = useState(false);
++
++  // Runs `task` as THE operation in flight. Resolves to the task's own
++  // result (an error message or null), or a message if it threw.
++  const exclusive = useCallback(async (task) => {
++    if (busyRef.current) return BUSY_MESSAGE;
++    busyRef.current = true;
++    setBusy(true);
++    try {
++      return (await task()) ?? null;
++    } catch (err) {
++      return messageFor(err);
++    } finally {
++      busyRef.current = false;
++      setBusy(false);
++    }
++  }, []);
++
++  const currentFiles = useCallback(() => Object.keys(filesMetaRef.current || {}), [filesMetaRef]);
++  const anySaving = useCallback(
++    (paths) => [...savingRef.current].some((saving) => paths.some((p) => isSameOrDescendant(saving, p))),
++    [savingRef]
++  );
++
++  // The server has moved these; bring the tabs (and per-path state)
++  // along. `moved` is the provider's list of moved-file shapes — their
++  // new versions let the store keep a just-moved buffer "in sync".
++  const applyRenames = useCallback(
++    (renames, moved) => {
++      const versions = {};
++      for (const file of moved || []) {
++        if (file && file.file_path) versions[file.file_path] = file.version;
++      }
++      renamePaths(renames, versions);
++      onRenamed(renames);
++    },
++    [renamePaths, onRenamed]
++  );
++
++  const createFile = useCallback(
++    (dir, name) =>
++      exclusive(async () => {
++        const path = joinPath(dir, name);
++        try {
++          // baseVersion 0 = "only if nothing is there yet": without it a
++          // stale file list could let "New file" silently blank an
++          // existing file of the same name.
++          await provider.write(path, "", { baseVersion: 0 });
++        } catch (err) {
++          if (err?.name === "FileConflictError") return `"${name}" already exists here.`;
++          throw err;
++        }
++        await refresh();
++        openFile(path);
++        return null;
++      }),
++    [exclusive, provider, refresh, openFile]
++  );
++
++  const createFolder = useCallback(
++    (dir, name) =>
++      exclusive(async () => {
++        await provider.mkdir(joinPath(dir, name));
++        await refresh();
++        return null;
++      }),
++    [exclusive, provider, refresh]
++  );
++
++  const rename = useCallback(
++    (path, newName) =>
++      exclusive(async () => {
++        const to = joinPath(dirname(path), newName);
++        if (to === path) return null;
++        if (anySaving([path])) return SAVING_MESSAGE;
++        const moved = await provider.move(path, to);
++        applyRenames([{ from: path, to }], moved);
++        await refresh();
++        return null;
++      }),
++    [exclusive, anySaving, provider, applyRenames, refresh]
++  );
++
++  const remove = useCallback(
++    async (paths) => {
++      const error = await exclusive(async () => {
++        const roots = collapseNested(paths);
++        if (anySaving(roots)) return SAVING_MESSAGE;
++        const deleted = [];
++        let failure = null;
++        // Independent deletes: one failing shouldn't strand the others.
++        for (const root of roots) {
++          try {
++            await provider.remove(root);
++            deleted.push(root);
++          } catch (err) {
++            failure = failure || `Couldn't delete "${basename(root)}": ${messageFor(err)}`;
++          }
++        }
++        const openTabs = stateRef.current.tabs.filter((p) => deleted.some((r) => isSameOrDescendant(p, r)));
++        if (openTabs.length > 0) dropTabs(openTabs);
++        await refresh();
++        return failure;
++      });
++      if (error) notify(error);
++    },
++    [exclusive, anySaving, provider, stateRef, dropTabs, refresh, notify]
++  );
++
++  const duplicate = useCallback(
++    async (path) => {
++      const error = await exclusive(async () => {
++        const files = currentFiles();
++        const under = pathsUnder(files, path);
++        if (under.length === 0) return `"${basename(path)}" no longer exists.`;
++        if (under.length > MAX_DUPLICATE_FILES) {
++          return `That folder has ${under.length} files — more than the ${MAX_DUPLICATE_FILES} that can be duplicated at once.`;
++        }
++        const isDir = under.some((p) => p !== path);
++        const target = uniqueCopyPath(path, entryPaths(files), { isDir });
++        let copied = 0;
++        try {
++          for (const source of under) {
++            const file = await provider.read(source);
++            await provider.write(remapPath(source, path, target), file.content ?? "", {
++              baseVersion: 0,
++              language: file.language ?? undefined,
++            });
++            copied += 1;
++          }
++        } catch (err) {
++          await refresh();
++          return `Duplicate stopped after ${copied} of ${under.length} files: ${messageFor(err)}`;
++        }
++        await refresh();
++        if (!isDir) openFile(target);
++        return null;
++      });
++      if (error) notify(error);
++    },
++    [exclusive, currentFiles, provider, refresh, openFile, notify]
++  );
++
++  // Resolves to the moves that actually happened ([{from, to}], possibly
++  // fewer than asked for, possibly none) so the explorer can carry its
++  // selection and open folders along to the new paths.
++  const move = useCallback(
++    async (sources, targetDir) => {
++      const applied = [];
++      const error = await exclusive(async () => {
++        const { moves, error: planError } = planDrop({
++          sources,
++          targetDir,
++          taken: entryPaths(currentFiles()),
++        });
++        if (planError) return planError;
++        if (moves.length === 0) return null;
++        if (anySaving(moves.map((m) => m.from))) return SAVING_MESSAGE;
++
++        let failure = null;
++        for (const m of moves) {
++          try {
++            const moved = await provider.move(m.from, m.to);
++            applyRenames([m], moved);
++            applied.push(m);
++          } catch (err) {
++            failure = `Couldn't move "${basename(m.from)}": ${messageFor(err)}`;
++            if (applied.length > 0) failure += ` (${applied.length} of ${moves.length} moved.)`;
++            break;
++          }
++        }
++        await refresh();
++        return failure;
++      });
++      if (error) notify(error);
++      return applied;
++    },
++    [exclusive, currentFiles, anySaving, provider, applyRenames, refresh, notify]
++  );
++
++  return useMemo(
++    () => ({ busy, createFile, createFolder, rename, remove, duplicate, move }),
++    [busy, createFile, createFolder, rename, remove, duplicate, move]
++  );
++}
+diff --git a/frontend/app/hooks/useLongPress.js b/frontend/app/hooks/useLongPress.js
+new file mode 100644
+index 0000000..4df4d62
+--- /dev/null
++++ b/frontend/app/hooks/useLongPress.js
+@@ -0,0 +1,93 @@
++"use client";
++// frontend/app/hooks/useLongPress.js — W2.4 (Build Workbench plan).
++// Touch long-press for a container whose children are many similar rows
++// (the explorer's tree): put the returned handlers on the CONTAINER and
++// read `event.target` in the callback to see which row was pressed —
++// one timer per container, not one hook per row.
++//
++// Why this exists instead of relying on the browser's own
++// `contextmenu` event: Android Chrome fires that on a long-press, but
++// iOS Safari doesn't for anything that isn't a link or image, and the
++// plan's mobile requirement is "long-press opens the same menu".
++// Where both fire (Android) the caller just gets its menu opened twice
++// at the same spot, which is harmless.
++//
++// A press that moves more than MOVE_TOLERANCE px is a scroll or a
++// swipe, not a hold, and cancels. After a long-press fires, the click
++// the browser then synthesizes on release is swallowed (via
++// onClickCapture) — otherwise releasing your finger would also OPEN
++// the file or toggle the folder you just asked a menu for.
++import { useCallback, useEffect, useRef } from "react";
++
++const MOVE_TOLERANCE = 10; // px
++
++/**
++ * @param {(press: {x: number, y: number, target: EventTarget}) => void} onLongPress
++ * @param {{delay?: number}} [opts] - hold time in ms
++ */
++export function useLongPress(onLongPress, { delay = 500 } = {}) {
++  const timer = useRef(null);
++  const origin = useRef({ x: 0, y: 0 });
++  const fired = useRef(false);
++  const callback = useRef(onLongPress);
++  callback.current = onLongPress;
++
++  const cancel = useCallback(() => {
++    if (timer.current) {
++      clearTimeout(timer.current);
++      timer.current = null;
++    }
++  }, []);
++  useEffect(() => cancel, [cancel]); // never fire into an unmounted tree
++
++  const onTouchStart = useCallback(
++    (e) => {
++      cancel();
++      fired.current = false;
++      if (e.touches.length !== 1) return; // a pinch / two-finger scroll isn't a hold
++      const touch = e.touches[0];
++      const target = e.target;
++      origin.current = { x: touch.clientX, y: touch.clientY };
++      timer.current = setTimeout(() => {
++        timer.current = null;
++        fired.current = true;
++        callback.current({ x: origin.current.x, y: origin.current.y, target });
++      }, delay);
++    },
++    [cancel, delay]
++  );
++
++  const onTouchMove = useCallback(
++    (e) => {
++      if (!timer.current) return;
++      const touch = e.touches[0];
++      if (
++        Math.abs(touch.clientX - origin.current.x) > MOVE_TOLERANCE ||
++        Math.abs(touch.clientY - origin.current.y) > MOVE_TOLERANCE
++      ) {
++        cancel();
++      }
++    },
++    [cancel]
++  );
++
++  const onTouchEnd = useCallback(() => {
++    cancel();
++    // The synthesized click (if any) follows immediately; if the browser
++    // sends none, don't leave the flag set to eat some later, real click.
++    if (fired.current) {
++      setTimeout(() => {
++        fired.current = false;
++      }, 400);
++    }
++  }, [cancel]);
++
++  const onClickCapture = useCallback((e) => {
++    if (!fired.current) return;
++    fired.current = false;
++    e.preventDefault();
++    e.stopPropagation();
++  }, []);
++
++  return { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel: onTouchEnd, onClickCapture };
++}
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+index 4c98932..07f7d4b 100644
+--- a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -1,5 +1,6 @@
+ // W2.2 (Build Workbench plan) — reducer test for editorStore.js;
+-// extended in W2.3a for the tab-strip actions and in W2.3b for SET_LAYOUT.
++// extended in W2.3a for the tab-strip actions, in W2.3b for SET_LAYOUT and
++// in W2.4 for RENAME_PATHS.
+ //
+ // Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
+ // copy of editorReducer() (editorStore.js pulls in `react`, which plain
+@@ -8,7 +9,8 @@
+ // that has moved on. loadSource.mjs now reads editorStore.js itself and
+ // satisfies its two imports from the map below: a stub for `react` (only
+ // its top-level createContext() call runs at load time; the provider and
+-// hook aren't exercised here) and the real tabUtils.js / layoutPrefs.js.
++// hook aren't exercised here) and the real tabUtils.js / layoutPrefs.js /
++// fileTree.js.
+ //
+ // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+ import { loadSource } from "./loadSource.mjs";
+@@ -22,8 +24,9 @@ const reactStub = {
+ };
+ const tabUtils = loadSource("../tabUtils.js");
+ const layoutPrefs = loadSource("../layoutPrefs.js");
++const fileTree = loadSource("../fileTree.js");
+ const { editorReducer } = loadSource("../editorStore.js", {
+-  imports: { react: reactStub, "./tabUtils": tabUtils, "./layoutPrefs": layoutPrefs },
++  imports: { react: reactStub, "./tabUtils": tabUtils, "./layoutPrefs": layoutPrefs, "./fileTree": fileTree },
+ });
+ 
+ const initialState = {
+@@ -261,6 +264,63 @@ assertEqual(
+   "keepEdited with no existing buffer (tab closed mid-save) falls back to the server's copy, clean"
+ );
+ 
++// --- RENAME_PATHS (W2.4) -----------------------------------------------
++
++const buf = (over = {}) => ({ saved: "x", edited: "x", dirty: false, stale: false, version: 3, language: "javascript", ...over });
++const openState = {
++  ...initialState,
++  tabs: ["src/App.jsx", "src/lib/util.js", "README.md"],
++  activePath: "src/lib/util.js",
++  buffers: {
++    "src/App.jsx": buf({ version: 3 }),
++    "src/lib/util.js": buf({ version: 5, saved: "a", edited: "a + unsaved", dirty: true }),
++    "README.md": buf({ version: 1 }),
++  },
++};
++
++let ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }] });
++assertEqual(ren.tabs, ["src/Main.jsx", "src/lib/util.js", "README.md"], "renaming a file re-paths its tab in place (order kept)");
++assertEqual(ren.activePath, "src/lib/util.js", "...and leaves the active tab alone when it wasn't the renamed one");
++assertEqual(Object.keys(ren.buffers).sort(), ["README.md", "src/Main.jsx", "src/lib/util.js"], "the buffer moves to the new path; none is left behind at the old one");
++
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/lib/util.js", to: "src/lib/helpers.js" }] });
++assertEqual(ren.activePath, "src/lib/helpers.js", "renaming the ACTIVE file keeps it active under its new path");
++assertEqual(ren.buffers["src/lib/helpers.js"].edited, "a + unsaved", "unsaved edits travel with a rename");
++assertEqual(ren.buffers["src/lib/helpers.js"].dirty, true, "...and it is still dirty");
++assertEqual(ren.buffers["src/lib/helpers.js"].saved, "a", "...with the same saved baseline");
++
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src", to: "app" }] });
++assertEqual(ren.tabs, ["app/App.jsx", "app/lib/util.js", "README.md"], "renaming a FOLDER re-paths every open tab under it");
++assertEqual(ren.activePath, "app/lib/util.js", "...including the active one");
++assertEqual(Object.keys(ren.buffers).sort(), ["README.md", "app/App.jsx", "app/lib/util.js"], "...and their buffers");
++
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "README.md", to: "docs/README.md" }, { from: "src/App.jsx", to: "App.jsx" }] });
++assertEqual(ren.tabs, ["App.jsx", "src/lib/util.js", "docs/README.md"], "several renames in one action (a multi-item drop) all apply");
++
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "srcx", to: "y" }, { from: "other/a.js", to: "b.js" }] });
++assertEqual(ren === openState, true, "renames that touch no open tab return the SAME state object");
++assertEqual(editorReducer(openState, { type: "RENAME_PATHS", renames: [] }) === openState, true, "an empty rename list is a no-op");
++assertEqual(editorReducer(openState, { type: "RENAME_PATHS" }) === openState, true, "a missing rename list is a no-op");
++assertEqual(editorReducer(initialState, { type: "RENAME_PATHS", renames: [{ from: "a", to: "b" }] }) === initialState, true, "nothing open: no-op");
++
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }], versions: { "src/Main.jsx": 4 } });
++assertEqual(ren.buffers["src/Main.jsx"].version, 4, "a buffer exactly one version behind the move adopts the new version");
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }], versions: { "src/Main.jsx": 9 } });
++assertEqual(ren.buffers["src/Main.jsx"].version, 3, "a buffer further behind keeps its own version, so the next sync sees the server is ahead");
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }] });
++assertEqual(ren.buffers["src/Main.jsx"].version, 3, "no versions given: buffer versions are untouched");
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src", to: "app" }], versions: { "app/App.jsx": 4, "app/lib/util.js": 6 } });
++assertEqual([ren.buffers["app/App.jsx"].version, ren.buffers["app/lib/util.js"].version], [4, 6], "a folder move takes each file's own new version");
++ren = editorReducer(openState, { type: "RENAME_PATHS", renames: [{ from: "src/App.jsx", to: "src/Main.jsx" }], versions: { "README.md": 2 } });
++assertEqual(ren.buffers["README.md"].version, 1, "a version for a path that wasn't renamed is ignored");
++
++const loadingTab = { ...initialState, tabs: ["a.js"], activePath: "a.js", buffers: {} };
++ren = editorReducer(loadingTab, { type: "RENAME_PATHS", renames: [{ from: "a.js", to: "b.js" }] });
++assertEqual([ren.tabs, ren.activePath, ren.buffers], [["b.js"], "b.js", {}], "a tab whose file hasn't loaded yet is re-pathed too");
++
++ren = editorReducer({ ...openState, tabs: ["a.js", "b.js"], activePath: "a.js", buffers: { "a.js": buf(), "b.js": buf() } }, { type: "RENAME_PATHS", renames: [{ from: "a.js", to: "b.js" }] });
++assertEqual(ren.tabs, ["b.js"], "two tabs that end up on one path collapse to a single tab");
++
+ // --- SET_LAYOUT (W2.3b) ----------------------------------------------
+ 
+ const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false };
+diff --git a/frontend/app/lib/workbench/__tests__/explorerOps.test.mjs b/frontend/app/lib/workbench/__tests__/explorerOps.test.mjs
+new file mode 100644
+index 0000000..c27e5aa
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/explorerOps.test.mjs
+@@ -0,0 +1,189 @@
++// W2.4 (Build Workbench plan) — tests for explorerOps.js.
++//
++// Loads the REAL lib/workbench/explorerOps.js through loadSource.mjs (no
++// pasted copy). Its one import, ./fileTree, is satisfied with the real
++// fileTree.js — so these tests also fail if the two drift apart.
++//
++// Run: node frontend/app/lib/workbench/__tests__/explorerOps.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const fileTree = loadSource("../fileTree.js");
++const {
++  MAX_PATH_LENGTH,
++  joinPath,
++  entryPaths,
++  checkEntryName,
++  collapseNested,
++  pathsUnder,
++  uniqueCopyPath,
++  planDrop,
++  deleteSummary,
++} = loadSource("../explorerOps.js", { imports: { "./fileTree": fileTree } });
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++const FILES = ["README.md", "src/App.jsx", "src/lib/util.js", "src/empty/.gitkeep", "tests/a.test.js", "notes"];
++const taken = entryPaths(FILES);
++
++// --- joinPath / entryPaths ------------------------------------------------
++
++assertEqual(joinPath("", "a.js"), "a.js", "joinPath: root");
++assertEqual(joinPath("src/lib", "a.js"), "src/lib/a.js", "joinPath: nested folder");
++assertEqual(
++  [...taken].sort(),
++  ["README.md", "notes", "src", "src/App.jsx", "src/empty", "src/empty/.gitkeep", "src/lib", "src/lib/util.js", "tests", "tests/a.test.js"],
++  "entryPaths: every file plus every folder above it, each once"
++);
++assertEqual([...entryPaths([])], [], "entryPaths: empty project");
++
++// --- checkEntryName -------------------------------------------------------
++
++const ok = (name, ctx = {}) => checkEntryName(name, { dir: "src", taken, ...ctx });
++
++assertEqual(ok("New.jsx"), { name: "New.jsx", error: null }, "a plain new name is fine");
++assertEqual(ok("  New.jsx  "), { name: "New.jsx", error: null }, "surrounding spaces are trimmed, not rejected");
++assertEqual(ok("").error, "Enter a name.", "empty is refused");
++assertEqual(ok("   ").error, "Enter a name.", "whitespace-only is refused");
++assertEqual(ok("a/b.js").error, "A name can't contain / or \\.", "a slash is refused (a name is one path segment)");
++assertEqual(ok("a\\b.js").error, "A name can't contain / or \\.", "so is a backslash");
++assertEqual(ok(".").error, "\".\" isn't allowed as a name.", '"." is refused');
++assertEqual(ok("..").error, "\"..\" isn't allowed as a name.", '".." is refused');
++assertEqual(ok("bad*name").error, "Use letters, numbers, spaces and . _ - [ ] ( ) @ + ~ = , only.", "a character the server would refuse is refused up front");
++assertEqual(ok("tab\there").error !== null, true, "a tab is refused");
++assertEqual(ok("nul\u0000").error !== null, true, "a NUL is refused");
++assertEqual(ok("émoji.js").error !== null, true, "non-ASCII letters are refused (the server's charset is ASCII)");
++
++for (const good of ["[id].js", "(auth)", "@modal", "+page.svelte", "my file.js", "a~b=c,d.js", ".env", "a-b_c.d"]) {
++  assertEqual(ok(good).error, null, `framework-style / odd-but-legal name "${good}" is accepted`);
++}
++
++assertEqual(ok("App.jsx").error, "\"App.jsx\" already exists here.", "a name already used by a file in that folder is refused");
++assertEqual(ok("lib").error, "\"lib\" already exists here.", "so is one used by a folder");
++assertEqual(checkEntryName("src", { dir: "", taken }).error, "\"src\" already exists here.", "at the root too");
++assertEqual(checkEntryName("App.jsx", { dir: "tests", taken }).error, null, "the same name in a different folder is fine");
++assertEqual(ok("App.jsx", { selfPath: "src/App.jsx" }).error, null, "renaming an entry to its own name isn't a clash");
++assertEqual(ok("app.jsx", { selfPath: "src/App.jsx" }).error, null, "changing only the letter case is allowed");
++assertEqual(ok("lib", { selfPath: "src/App.jsx" }).error, "\"lib\" already exists here.", "renaming onto a DIFFERENT existing entry is still a clash");
++
++const longDir = "d".repeat(MAX_PATH_LENGTH - 5);
++assertEqual(checkEntryName("abcdef", { dir: longDir, taken: new Set() }).error, "That path is too long.", "a path over the server's limit is refused");
++assertEqual(checkEntryName("abcd", { dir: longDir, taken: new Set() }).error, null, "...and exactly at the limit is fine");
++
++// --- collapseNested / pathsUnder ------------------------------------------
++
++assertEqual(collapseNested(["src", "src/App.jsx", "tests/a.test.js"]), ["src", "tests/a.test.js"], "collapseNested: a file inside a selected folder is covered by it");
++assertEqual(collapseNested(["src/App.jsx", "src"]), ["src"], "...whatever order they came in");
++assertEqual(collapseNested(["src", "srcx"]), ["src", "srcx"], "...but a shared prefix isn't nesting");
++assertEqual(collapseNested(["a.js", "a.js", "b.js"]), ["a.js", "b.js"], "collapseNested: duplicates removed, order kept");
++assertEqual(collapseNested([]), [], "collapseNested: nothing");
++assertEqual(pathsUnder(FILES, "src"), ["src/App.jsx", "src/lib/util.js", "src/empty/.gitkeep"], "pathsUnder: a folder's files (placeholders included — they move/delete with it)");
++assertEqual(pathsUnder(FILES, "README.md"), ["README.md"], "pathsUnder: a file is itself");
++assertEqual(pathsUnder(FILES, "sr"), [], "pathsUnder: a name prefix isn't a folder");
++
++// --- uniqueCopyPath -------------------------------------------------------
++
++assertEqual(uniqueCopyPath("src/App.jsx", taken), "src/App copy.jsx", "duplicate: 'name copy.ext', extension kept last");
++assertEqual(uniqueCopyPath("README.md", taken), "README copy.md", "duplicate: at the root");
++assertEqual(
++  uniqueCopyPath("src/App.jsx", entryPaths([...FILES, "src/App copy.jsx"])),
++  "src/App copy 2.jsx",
++  "duplicate: the next free number when 'copy' is taken"
++);
++assertEqual(
++  uniqueCopyPath("src/App.jsx", entryPaths([...FILES, "src/App copy.jsx", "src/App copy 2.jsx"])),
++  "src/App copy 3.jsx",
++  "duplicate: keeps counting"
++);
++assertEqual(uniqueCopyPath("notes", taken), "notes copy", "duplicate: a file with no extension");
++assertEqual(uniqueCopyPath(".env", entryPaths([".env"])), ".env copy", "duplicate: a dotfile has no extension to keep last");
++assertEqual(uniqueCopyPath("a.test.js", entryPaths(["a.test.js"])), "a.test copy.js", "duplicate: only the LAST extension is treated as one");
++assertEqual(uniqueCopyPath("src/lib", taken, { isDir: true }), "src/lib copy", "duplicate: a folder");
++assertEqual(uniqueCopyPath("v1.2", entryPaths(["v1.2"]), { isDir: true }), "v1.2 copy", "duplicate: a folder name with a dot gets no extension treatment");
++
++// --- planDrop --------------------------------------------------------------
++
++let plan = planDrop({ sources: ["README.md"], targetDir: "src", taken });
++assertEqual(plan, { moves: [{ from: "README.md", to: "src/README.md" }], error: null }, "drop a file onto a folder: one move into it");
++
++plan = planDrop({ sources: ["src/App.jsx"], targetDir: "", taken });
++assertEqual(plan, { moves: [{ from: "src/App.jsx", to: "App.jsx" }], error: null }, "drop onto the root: moves it out to the top level");
++
++plan = planDrop({ sources: ["src/App.jsx"], targetDir: "src", taken });
++assertEqual(plan, { moves: [], error: null }, "drop a file onto the folder it's already in: nothing to do, not an error");
++
++plan = planDrop({ sources: ["tests", "tests/a.test.js"], targetDir: "src", taken });
++assertEqual(plan.moves, [{ from: "tests", to: "src/tests" }], "a folder and a file inside it: just the folder moves");
++
++plan = planDrop({ sources: ["src"], targetDir: "src/lib", taken });
++assertEqual(plan, { moves: [], error: "Can't move \"src\" into itself." }, "a folder can't go into its own subfolder");
++plan = planDrop({ sources: ["src/lib"], targetDir: "src/lib", taken });
++assertEqual(plan.error, "Can't move \"lib\" into itself.", "a folder dropped onto itself is refused");
++
++plan = planDrop({ sources: ["README.md"], targetDir: "src", taken: entryPaths([...FILES, "src/README.md"]) });
++assertEqual(plan, { moves: [], error: "\"README.md\" already exists in \"src\"." }, "a name clash in the target is refused, naming the folder");
++plan = planDrop({ sources: ["src/lib/util.js"], targetDir: "", taken: entryPaths([...FILES, "util.js"]) });
++assertEqual(plan.error, "\"util.js\" already exists in the project root.", "...and 'the project root' for the top level");
++plan = planDrop({ sources: ["notes"], targetDir: "", taken });
++assertEqual(plan.moves, [], "moving a root file to the root is already there");
++
++plan = planDrop({ sources: ["README.md", "src/README.md"], targetDir: "tests", taken: entryPaths([...FILES, "src/README.md"]) });
++assertEqual(plan, { moves: [], error: "Two items named \"README.md\" can't go in the same folder." }, "two sources with the same name can't land together");
++
++plan = planDrop({ sources: ["README.md", "src/App.jsx", "src/lib/util.js"], targetDir: "tests", taken });
++assertEqual(plan.moves.length, 3, "a multi-selection makes one move per item");
++plan = planDrop({ sources: ["README.md", "src/App.jsx"], targetDir: "src", taken: entryPaths([...FILES]) });
++assertEqual(plan.moves, [{ from: "README.md", to: "src/README.md" }], "items already in the target are skipped while the rest still move");
++plan = planDrop({ sources: ["README.md", "src"], targetDir: "src", taken });
++assertEqual(plan.error, "Can't move \"src\" into itself.", "one illegal item aborts the whole drop — nothing half-moves");
++
++const deep = "f".repeat(MAX_PATH_LENGTH - 3);
++plan = planDrop({ sources: ["a.js"], targetDir: deep, taken: new Set(["a.js"]) });
++assertEqual(plan.error, "The new path for \"a.js\" would be too long.", "a move that would exceed the path limit is refused");
++
++// --- deleteSummary ----------------------------------------------------------
++
++let d = deleteSummary({ paths: ["src/App.jsx"], filePaths: FILES });
++assertEqual(d.title, "Delete \"App.jsx\"?", "delete one file: title");
++assertEqual(d.message, "This removes the file from the project. You can't undo this.", "delete one file: message");
++assertEqual(d.roots, ["src/App.jsx"], "delete one file: roots");
++
++d = deleteSummary({ paths: ["src"], filePaths: FILES });
++assertEqual(d.title, "Delete folder \"src\"?", "delete a folder: title");
++assertEqual(d.fileCount, 2, "delete a folder: the .gitkeep placeholder isn't counted");
++assertEqual(d.message, "This removes the folder and the 2 files in it. You can't undo this.", "delete a folder: message with the count");
++
++d = deleteSummary({ paths: ["src/empty"], filePaths: FILES });
++assertEqual(d.message, "This removes the empty folder. You can't undo this.", "delete an empty folder (only its placeholder)");
++
++d = deleteSummary({ paths: ["tests"], filePaths: FILES });
++assertEqual(d.message, "This removes the folder and the 1 file in it. You can't undo this.", "delete a folder: singular");
++
++d = deleteSummary({ paths: ["src", "src/App.jsx", "README.md"], filePaths: FILES });
++assertEqual(d.roots, ["src", "README.md"], "delete several: nested selections collapse to their folder");
++assertEqual(d.title, "Delete 2 items?", "delete several: title counts the collapsed items");
++assertEqual(d.fileCount, 3, "delete several: file total counts each file once");
++assertEqual(d.message, "This removes 2 items (3 files in total). You can't undo this.", "delete several: message");
++
++d = deleteSummary({ paths: ["src/App.jsx"], filePaths: FILES, dirtyPaths: ["src/App.jsx"] });
++assertEqual(d.message, "This removes the file from the project. You can't undo this. Unsaved changes in App.jsx will be lost.", "unsaved edits in one deleted file are named");
++d = deleteSummary({ paths: ["src"], filePaths: FILES, dirtyPaths: ["src/App.jsx", "src/lib/util.js", "tests/a.test.js"] });
++assertEqual(d.message.endsWith("Unsaved changes in 2 open files will be lost."), true, "unsaved edits: only files under the deleted paths count");
++d = deleteSummary({ paths: ["src"], filePaths: FILES, dirtyPaths: ["tests/a.test.js"] });
++assertEqual(d.message.includes("Unsaved"), false, "unsaved edits elsewhere aren't mentioned");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/__tests__/fileIcons.test.mjs b/frontend/app/lib/workbench/__tests__/fileIcons.test.mjs
+new file mode 100644
+index 0000000..b369e48
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/fileIcons.test.mjs
+@@ -0,0 +1,69 @@
++// W2.4 (Build Workbench plan) — tests for fileIcons.js.
++//
++// Loads the REAL lib/workbench/fileIcons.js through loadSource.mjs. No
++// `imports` are passed on purpose: it must stay dependency-free.
++//
++// Run: node frontend/app/lib/workbench/__tests__/fileIcons.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const { fileIconKey } = loadSource("../fileIcons.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++const cases = {
++  "App.jsx": "code",
++  "index.ts": "code",
++  "main.py": "code",
++  "page.svelte": "code",
++  "index.html": "markup",
++  "style.css": "style",
++  "theme.scss": "style",
++  "tsconfig.json": "json",
++  "data.csv": "data",
++  "config.yaml": "config",
++  "pyproject.toml": "config",
++  "README.md": "doc",
++  "notes.txt": "doc",
++  "logo.png": "image",
++  "icon.SVG": "image",
++  "build.sh": "shell",
++  "package.json": "package",
++  "package-lock.json": "lock",
++  "yarn.lock": "lock",
++  Dockerfile: "config",
++  ".gitignore": "config",
++  ".env": "config",
++  ".env.local": "config",
++  README: "doc",
++  "readme.rst": "doc",
++  LICENSE: "doc",
++  "archive.zip": "file",
++  notes: "file",
++};
++for (const [name, key] of Object.entries(cases)) {
++  assertEqual(fileIconKey(name), key, `${name} → ${key}`);
++}
++
++assertEqual(fileIconKey("APP.JS"), "code", "extensions are case-insensitive");
++assertEqual(fileIconKey("a.test.js"), "code", "only the last extension counts");
++assertEqual(fileIconKey("Makefile"), "config", "whole-name matches are case-insensitive");
++assertEqual(fileIconKey(""), "file", "an empty name falls back");
++assertEqual(fileIconKey(undefined), "file", "undefined falls back");
++assertEqual(fileIconKey("trailingdot."), "file", "a trailing dot has no extension");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/__tests__/fileTree.test.mjs b/frontend/app/lib/workbench/__tests__/fileTree.test.mjs
+index b972408..3296e74 100644
+--- a/frontend/app/lib/workbench/__tests__/fileTree.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/fileTree.test.mjs
+@@ -1,4 +1,5 @@
+-// W2.3a (Build Workbench plan) — tests for fileTree.js.
++// W2.3a (Build Workbench plan) — tests for fileTree.js; extended in W2.4
++// for the flat-row / filter / path-arithmetic helpers.
+ //
+ // Loads the REAL lib/workbench/fileTree.js through loadSource.mjs. No
+ // `imports` are passed on purpose: fileTree.js must stay dependency-free,
+@@ -7,7 +8,22 @@
+ // Run: node frontend/app/lib/workbench/__tests__/fileTree.test.mjs
+ import { loadSource } from "./loadSource.mjs";
+ 
+-const { buildFileTree, sortedChildren, basename, dirname, ancestorDirs, topLevelDirs } = loadSource("../fileTree.js");
++const {
++  buildFileTree,
++  sortedChildren,
++  basename,
++  dirname,
++  ancestorDirs,
++  topLevelDirs,
++  PLACEHOLDER_NAME,
++  isPlaceholderPath,
++  realFilePaths,
++  isSameOrDescendant,
++  remapPath,
++  flattenVisible,
++  filterPaths,
++  rangeBetween,
++} = loadSource("../fileTree.js");
+ 
+ let failures = 0;
+ function assertEqual(actual, expected, msg) {
+@@ -87,6 +103,116 @@ assertEqual(
+ );
+ assertEqual([...topLevelDirs(["README.md"])], [], "no folders, nothing to expand");
+ 
++
++// --- W2.4: placeholders ------------------------------------------------
++
++assertEqual(PLACEHOLDER_NAME, ".gitkeep", "the empty-folder placeholder is .gitkeep");
++assertEqual(isPlaceholderPath("src/empty/.gitkeep"), true, "a .gitkeep in a folder is a placeholder");
++assertEqual(isPlaceholderPath(".gitkeep"), true, "...and one at the root");
++assertEqual(isPlaceholderPath("src/.gitkeep.bak"), false, "a longer name isn't");
++assertEqual(isPlaceholderPath("src/gitkeep"), false, "...nor one without the dot");
++assertEqual(
++  realFilePaths({ "src/a.js": {}, "src/empty/.gitkeep": {}, ".gitkeep": {} }),
++  ["src/a.js"],
++  "realFilePaths drops the placeholders"
++);
++assertEqual(realFilePaths(null), [], "realFilePaths(null) (first load) is empty");
++
++// --- W2.4: path arithmetic ----------------------------------------------
++
++assertEqual(isSameOrDescendant("src", "src"), true, "a path is 'same or under' itself");
++assertEqual(isSameOrDescendant("src/a/b.js", "src"), true, "a file under a folder is under it");
++assertEqual(isSameOrDescendant("srcx/a.js", "src"), false, "a sibling that merely shares a prefix is not under it");
++assertEqual(isSameOrDescendant("src", "src/a"), false, "a folder isn't under its own child");
++
++assertEqual(remapPath("src", "src", "lib"), "lib", "remapPath: the moved path itself");
++assertEqual(remapPath("src/a/b.js", "src", "lib"), "lib/a/b.js", "remapPath: a file inside the moved folder");
++assertEqual(remapPath("src/a.js", "src/a.js", "src/b.js"), "src/b.js", "remapPath: a renamed file");
++assertEqual(remapPath("srcx/a.js", "src", "lib"), "srcx/a.js", "remapPath: a shared-prefix sibling is untouched");
++assertEqual(remapPath("other/a.js", "src", "lib"), "other/a.js", "remapPath: an unrelated path is untouched");
++assertEqual(remapPath("a/b.js", "a", "x/y"), "x/y/b.js", "remapPath: moving into a nested destination");
++assertEqual(remapPath("a/b.js", "a", "a2"), "a2/b.js", "remapPath: destination that extends the old name");
++
++// --- W2.4: flattenVisible ------------------------------------------------
++
++const w24rows = (rows) => rows.map((r) => `${"  ".repeat(r.depth)}${r.name}${r.type === "dir" ? "/" : ""}`);
++const w24tree = buildFileTree(meta("README.md", "src/App.jsx", "src/lib/util.js", "src/empty/.gitkeep", "tests/a.test.js"));
++
++assertEqual(
++  w24rows(flattenVisible(w24tree, new Set())),
++  ["src/", "tests/", "README.md"],
++  "nothing expanded: just the top level"
++);
++assertEqual(
++  w24rows(flattenVisible(w24tree, new Set(["src"]))),
++  ["src/", "  empty/", "  lib/", "  App.jsx", "tests/", "README.md"],
++  "an expanded folder lists its children (folders first) right under it; the empty folder shows, its .gitkeep doesn't"
++);
++assertEqual(
++  w24rows(flattenVisible(w24tree, new Set(["src", "src/lib", "src/empty"]))),
++  ["src/", "  empty/", "  lib/", "    util.js", "  App.jsx", "tests/", "README.md"],
++  "nested expansion nests depth"
++);
++assertEqual(
++  w24rows(flattenVisible(w24tree, new Set(["src/lib"]))),
++  ["src/", "tests/", "README.md"],
++  "an expanded folder under a collapsed one stays hidden"
++);
++const someRows = flattenVisible(w24tree, new Set(["src"]));
++assertEqual(
++  someRows.map((r) => [r.path, r.parent, r.open]),
++  [
++    ["src", "", true],
++    ["src/empty", "src", false],
++    ["src/lib", "src", false],
++    ["src/App.jsx", "src", undefined],
++    ["tests", "", false],
++    ["README.md", "", undefined],
++  ],
++  "rows carry their full path, parent folder and (for folders) open state"
++);
++assertEqual(flattenVisible(buildFileTree({}), new Set()), [], "an empty w24tree flattens to no rows");
++
++// --- W2.4: filterPaths -----------------------------------------------------
++
++const allPaths = ["README.md", "src/App.jsx", "src/lib/util.js", "src/empty/.gitkeep", "tests/a.test.js"];
++assertEqual(filterPaths(allPaths, ""), null, "a blank query means no filter");
++assertEqual(filterPaths(allPaths, "   "), null, "so does whitespace");
++assertEqual(filterPaths(allPaths, null), null, "...and null");
++
++let f = filterPaths(allPaths, "app");
++assertEqual([[...f.files], [...f.dirs]], [["src/App.jsx"], ["src"]], "matching is case-insensitive and keeps the folders above a match");
++f = filterPaths(allPaths, "src util");
++assertEqual([...f.files], ["src/lib/util.js"], "every term must match somewhere in the path");
++assertEqual([...f.dirs].sort(), ["src", "src/lib"], "...and all the folders above it come along");
++f = filterPaths(allPaths, "test");
++assertEqual([...f.files], ["tests/a.test.js"], "a term can match a folder name");
++f = filterPaths(allPaths, "gitkeep");
++assertEqual([...f.files], [], "placeholders never match");
++f = filterPaths(allPaths, "zzz");
++assertEqual([[...f.files], [...f.dirs]], [[], []], "no match: an empty (not null) result, so the UI can say 'nothing matches'");
++
++const filtered = filterPaths(allPaths, "util");
++assertEqual(
++  w24rows(flattenVisible(w24tree, new Set(), filtered)),
++  ["src/", "  lib/", "    util.js"],
++  "filtering shows only matches and their folders, opened up regardless of `expanded`"
++);
++assertEqual(
++  w24rows(flattenVisible(w24tree, new Set(), filterPaths(allPaths, "zzz"))),
++  [],
++  "a filter with no matches flattens to no rows"
++);
++
++// --- W2.4: rangeBetween ----------------------------------------------------
++
++const rr = flattenVisible(w24tree, new Set(["src"]));
++assertEqual(rangeBetween(rr, "src/lib", "src/App.jsx"), ["src/lib", "src/App.jsx"], "range, top to bottom");
++assertEqual(rangeBetween(rr, "src/App.jsx", "src"), ["src", "src/empty", "src/lib", "src/App.jsx"], "range, bottom to top comes back in list order");
++assertEqual(rangeBetween(rr, "src", "src"), ["src"], "a range of one");
++assertEqual(rangeBetween(rr, "gone/x.js", "tests"), ["tests"], "an anchor that's no longer listed: just the target");
++assertEqual(rangeBetween(rr, "src", "gone/x.js"), [], "a target that isn't listed: nothing");
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+index 85dfec8..b1d92b1 100644
+--- a/frontend/app/lib/workbench/editorStore.js
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -42,6 +42,7 @@
+ // wrapper.
+ "use client";
+ import { createContext, createElement, useContext, useMemo, useReducer } from "react";
++import { isSameOrDescendant, remapPath } from "./fileTree";
+ import { nextActiveAfterClose } from "./tabUtils";
+ import { normalizeLayout, sameLayout } from "./layoutPrefs";
+ 
+@@ -241,6 +242,58 @@ export function editorReducer(state, action) {
+       return { ...state, layout: next };
+     }
+ 
++    // W2.4: files/folders were renamed or moved on the server, so the
++    // open tabs follow them. `renames` is [{from, to}] — `from` may be a
++    // FOLDER, in which case every tab/buffer under it is re-pathed (the
++    // same prefix rule the server's move applies). Tab order, the active
++    // tab and each buffer's contents (including unsaved edits) carry
++    // over untouched; only the path changes.
++    //
++    // `versions` is {[newPath]: version} straight from the move
++    // response. A move re-versions the file (old + 1) without changing
++    // its content, so a buffer that was exactly one version behind that
++    // adopts the new number — otherwise the next list refresh would
++    // think the server moved ahead and reload it or flag it "changed on
++    // server". A buffer that was further behind keeps its own number:
++    // then the server really is ahead and the ordinary sync should say so.
++    case "RENAME_PATHS": {
++      const renames = action.renames || [];
++      const versions = action.versions || {};
++      const remap = (p) => {
++        for (const r of renames) {
++          if (isSameOrDescendant(p, r.from)) return remapPath(p, r.from, r.to);
++        }
++        return p;
++      };
++      const touched =
++        state.tabs.some((p) => remap(p) !== p) ||
++        Object.keys(state.buffers).some((p) => remap(p) !== p) ||
++        (state.activePath != null && remap(state.activePath) !== state.activePath);
++      if (!touched) return state;
++
++      const seen = new Set();
++      const tabs = [];
++      for (const p of state.tabs) {
++        const q = remap(p);
++        if (!seen.has(q)) {
++          seen.add(q);
++          tabs.push(q);
++        }
++      }
++      const buffers = {};
++      for (const [p, b] of Object.entries(state.buffers)) {
++        const q = remap(p);
++        const next = versions[q];
++        buffers[q] = q !== p && next != null && (b.version ?? 0) === next - 1 ? { ...b, version: next } : b;
++      }
++      return {
++        ...state,
++        tabs,
++        buffers,
++        activePath: state.activePath == null ? null : remap(state.activePath),
++      };
++    }
++
+     default:
+       return state;
+   }
+@@ -279,6 +332,7 @@ export function EditorStoreProvider({ children, initialLayout }) {
+       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
+       closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
+       setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
++      renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
+     }),
+     [dispatch]
+   );
+diff --git a/frontend/app/lib/workbench/explorerOps.js b/frontend/app/lib/workbench/explorerOps.js
+new file mode 100644
+index 0000000..318da1c
+--- /dev/null
++++ b/frontend/app/lib/workbench/explorerOps.js
+@@ -0,0 +1,208 @@
++// frontend/app/lib/workbench/explorerOps.js — W2.4 (Build Workbench
++// plan). The rules behind the explorer's file operations, as plain
++// functions: is this a legal name, what does "Duplicate" call the copy,
++// which moves does a drop amount to (and is any of them illegal), what
++// does the delete confirmation say. Split out of the components for the
++// same reason tabUtils.js is — each of these is a "given this state,
++// what should happen" rule, and a rule is far easier to keep right as a
++// tested function than as a branch inside an event handler. The async
++// half (talking to the provider, keeping open tabs in step) is
++// hooks/useExplorerOps.js; this file never touches either.
++//
++// Only import: ./fileTree, for the path helpers (the test passes it in
++// through loadSource's `imports` map).
++//
++// Names checked here mirror the server's own rules
++// (eo/workspace_code_files._validate_file_path: the character set, the
++// 512-char path limit, no `..`), so a bad name is refused in the input,
++// instantly and with a reason, instead of as a 400 after a round trip.
++// The server stays the authority — everything below is a courtesy in
++// front of it, and every server refusal is still surfaced.
++import { basename, dirname, isPlaceholderPath, isSameOrDescendant } from "./fileTree";
++
++/** workspace_code_files._MAX_PATH_LENGTH. */
++export const MAX_PATH_LENGTH = 512;
++
++// workspace_code_files._VALID_PATH_CHARS, minus "/" (this is one name,
++// not a path).
++const NAME_CHARS = /^[A-Za-z0-9_.[\]()@+~=, -]+$/;
++
++/** `dir` + `name` as a workspace path; `dir` is "" for the project root. */
++export function joinPath(dir, name) {
++  return dir ? `${dir}/${name}` : name;
++}
++
++/**
++ * Every path that "exists" in a project: each file plus every folder
++ * above it. Folders have no rows of their own (see fileTree.js), so a
++ * name check has to look at both — a new file can't be called `src`
++ * if a `src/` folder is there.
++ *
++ * @param {Iterable<string>} filePaths
++ * @returns {Set<string>}
++ */
++export function entryPaths(filePaths) {
++  const all = new Set();
++  for (const path of filePaths) {
++    all.add(path);
++    let dir = dirname(path);
++    while (dir && !all.has(dir)) {
++      all.add(dir);
++      dir = dirname(dir);
++    }
++  }
++  return all;
++}
++
++/**
++ * Checks a name typed into the explorer's inline input.
++ *
++ * @param {string} rawName
++ * @param {object} ctx
++ * @param {string} ctx.dir - the folder it will live in ("" = root)
++ * @param {Set<string>} ctx.taken - entryPaths() of the project
++ * @param {string} [ctx.selfPath] - when renaming: the entry's own
++ *   current path, which is allowed to "collide" with itself (renaming
++ *   `a.js` to `a.js`, or fixing only its letter case, isn't a clash)
++ * @returns {{name: string, error: string|null}} the trimmed name to use, and why not (null = fine)
++ */
++export function checkEntryName(rawName, { dir, taken, selfPath }) {
++  const name = String(rawName ?? "").trim();
++  const fail = (error) => ({ name, error });
++  if (!name) return fail("Enter a name.");
++  if (name.includes("/") || name.includes("\\")) return fail("A name can't contain / or \\.");
++  if (name === "." || name === "..") return fail(`"${name}" isn't allowed as a name.`);
++  if (!NAME_CHARS.test(name)) {
++    return fail("Use letters, numbers, spaces and . _ - [ ] ( ) @ + ~ = , only.");
++  }
++  const path = joinPath(dir, name);
++  if (path.length > MAX_PATH_LENGTH) return fail("That path is too long.");
++  if (path !== selfPath && taken.has(path)) return fail(`"${name}" already exists here.`);
++  return { name, error: null };
++}
++
++/**
++ * Drops path segments that are already covered by an ancestor in the
++ * same list — selecting a folder AND a file inside it to delete or move
++ * means "the folder", and acting on both would delete/move the file
++ * twice (the second time failing). Also removes duplicates; keeps the
++ * order of what survives.
++ *
++ * @param {string[]} paths
++ * @returns {string[]}
++ */
++export function collapseNested(paths) {
++  const unique = [...new Set(paths)];
++  return unique.filter((p) => !unique.some((other) => other !== p && isSameOrDescendant(p, other)));
++}
++
++/** The file paths that are `target` or under it. */
++export function pathsUnder(filePaths, target) {
++  return filePaths.filter((p) => isSameOrDescendant(p, target));
++}
++
++/**
++ * The path "Duplicate" gives the copy: `App copy.jsx`, then
++ * `App copy 2.jsx`, `App copy 3.jsx`… next to the original, the first
++ * one nothing else is using. The extension stays last (a leading-dot
++ * name like `.env` has none: `.env copy`); folders get no extension
++ * treatment at all.
++ *
++ * @param {string} path
++ * @param {Set<string>} taken - entryPaths() of the project
++ * @param {{isDir?: boolean}} [opts]
++ */
++export function uniqueCopyPath(path, taken, { isDir = false } = {}) {
++  const dir = dirname(path);
++  const name = basename(path);
++  const dot = isDir ? -1 : name.lastIndexOf(".");
++  const stem = dot > 0 ? name.slice(0, dot) : name;
++  const ext = dot > 0 ? name.slice(dot) : "";
++  let candidate = joinPath(dir, `${stem} copy${ext}`);
++  for (let n = 2; taken.has(candidate); n += 1) {
++    candidate = joinPath(dir, `${stem} copy ${n}${ext}`);
++  }
++  return candidate;
++}
++
++/**
++ * What dropping `sources` onto the folder `targetDir` means: the list
++ * of moves to make, or the reason it can't be done. All-or-nothing —
++ * one illegal item and nothing moves, so a drop never leaves a
++ * half-moved selection to untangle.
++ *
++ * Skipped silently (not errors): items already directly inside the
++ * target, since dragging a file onto its own folder is a slip, not a
++ * request.
++ *
++ * @param {object} args
++ * @param {string[]} args.sources - paths being dragged (files and/or folders)
++ * @param {string} args.targetDir - "" = project root
++ * @param {Set<string>} args.taken - entryPaths() of the project
++ * @returns {{moves: {from: string, to: string}[], error: string|null}}
++ */
++export function planDrop({ sources, targetDir, taken }) {
++  const where = targetDir ? `"${basename(targetDir)}"` : "the project root";
++  const moves = [];
++  const landing = new Set();
++  for (const from of collapseNested(sources)) {
++    const name = basename(from);
++    if (dirname(from) === targetDir) continue; // already there
++    if (isSameOrDescendant(targetDir, from)) {
++      return { moves: [], error: `Can't move "${name}" into itself.` };
++    }
++    const to = joinPath(targetDir, name);
++    if (taken.has(to)) return { moves: [], error: `"${name}" already exists in ${where}.` };
++    if (landing.has(to)) return { moves: [], error: `Two items named "${name}" can't go in the same folder.` };
++    if (to.length > MAX_PATH_LENGTH) return { moves: [], error: `The new path for "${name}" would be too long.` };
++    landing.add(to);
++    moves.push({ from, to });
++  }
++  return { moves, error: null };
++}
++
++/**
++ * The wording of the delete confirmation. Counts real files only (the
++ * `.gitkeep` an empty folder is stored as isn't one) and names any
++ * open files whose unsaved edits would go with them.
++ *
++ * @param {object} args
++ * @param {string[]} args.paths - what was selected
++ * @param {string[]} args.filePaths - every file path in the project
++ * @param {string[]} [args.dirtyPaths] - open files with unsaved edits
++ * @returns {{roots: string[], fileCount: number, title: string, message: string}}
++ */
++export function deleteSummary({ paths, filePaths, dirtyPaths = [] }) {
++  const roots = collapseNested(paths);
++  const real = filePaths.filter((p) => !isPlaceholderPath(p));
++  const under = (root) => real.filter((p) => isSameOrDescendant(p, root));
++  const fileCount = new Set(roots.flatMap(under)).size;
++  const isFolder = (root) => filePaths.some((p) => p.startsWith(`${root}/`));
++
++  let title;
++  let message;
++  if (roots.length === 1) {
++    const root = roots[0];
++    const name = basename(root);
++    if (isFolder(root)) {
++      title = `Delete folder "${name}"?`;
++      message =
++        fileCount === 0
++          ? "This removes the empty folder."
++          : `This removes the folder and ${fileCount === 1 ? "the 1 file" : `the ${fileCount} files`} in it.`;
++    } else {
++      title = `Delete "${name}"?`;
++      message = "This removes the file from the project.";
++    }
++  } else {
++    title = `Delete ${roots.length} items?`;
++    message = `This removes ${roots.length} items${fileCount ? ` (${fileCount} ${fileCount === 1 ? "file" : "files"} in total)` : ""}.`;
++  }
++  message += " You can't undo this.";
++
++  const unsaved = dirtyPaths.filter((p) => roots.some((r) => isSameOrDescendant(p, r)));
++  if (unsaved.length === 1) message += ` Unsaved changes in ${basename(unsaved[0])} will be lost.`;
++  else if (unsaved.length > 1) message += ` Unsaved changes in ${unsaved.length} open files will be lost.`;
++
++  return { roots, fileCount, title, message };
++}
+diff --git a/frontend/app/lib/workbench/fileIcons.js b/frontend/app/lib/workbench/fileIcons.js
+new file mode 100644
+index 0000000..865306a
+--- /dev/null
++++ b/frontend/app/lib/workbench/fileIcons.js
+@@ -0,0 +1,62 @@
++// frontend/app/lib/workbench/fileIcons.js — W2.4 (Build Workbench plan).
++// Which icon a file gets in the explorer, decided by its name. Returns
++// a KEY, not a component: this file stays plain data-in/data-out (no
++// imports, so its test can load the real source under plain `node`),
++// and Explorer's own key -> lucide icon + color table does the
++// rendering. Adding a file type is one line in a list here plus, if it
++// needs a new look, one entry there.
++//
++// Keys: code · markup · style · json · data · config · doc · image ·
++// shell · lock · package · file (the fallback).
++
++// Whole-name matches win over the extension (`package.json` is a
++// package, not just json).
++const BY_NAME = {
++  "package.json": "package",
++  "package-lock.json": "lock",
++  "yarn.lock": "lock",
++  "pnpm-lock.yaml": "lock",
++  "poetry.lock": "lock",
++  "cargo.lock": "lock",
++  dockerfile: "config",
++  makefile: "config",
++  license: "doc",
++  "license.md": "doc",
++};
++
++const BY_EXTENSION = {
++  // code
++  js: "code", jsx: "code", mjs: "code", cjs: "code", ts: "code", tsx: "code",
++  py: "code", rb: "code", go: "code", rs: "code", java: "code", kt: "code",
++  swift: "code", c: "code", h: "code", cpp: "code", hpp: "code", cs: "code",
++  php: "code", lua: "code", dart: "code", vue: "code", svelte: "code",
++  sql: "code", r: "code", scala: "code",
++  // markup / style
++  html: "markup", htm: "markup", xml: "markup",
++  css: "style", scss: "style", sass: "style", less: "style",
++  // data / config
++  json: "json", jsonc: "json",
++  csv: "data", tsv: "data",
++  yaml: "config", yml: "config", toml: "config", ini: "config", cfg: "config", conf: "config",
++  lock: "lock",
++  // docs / media / scripts
++  md: "doc", mdx: "doc", txt: "doc", rst: "doc",
++  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image",
++  ico: "image", bmp: "image", avif: "image", svg: "image",
++  sh: "shell", bash: "shell", zsh: "shell", ps1: "shell", bat: "shell", cmd: "shell",
++};
++
++/**
++ * @param {string} name - a file NAME (last path segment), not a path
++ * @returns {string} one of the keys listed at the top of this file
++ */
++export function fileIconKey(name) {
++  const lower = String(name || "").toLowerCase();
++  if (BY_NAME[lower]) return BY_NAME[lower];
++  if (lower.startsWith("readme")) return "doc";
++  // .gitignore, .env, .eslintrc, .prettierrc… — dotfiles are configuration.
++  if (lower.startsWith(".")) return "config";
++  const dot = lower.lastIndexOf(".");
++  const ext = dot > 0 ? lower.slice(dot + 1) : "";
++  return BY_EXTENSION[ext] || "file";
++}
+diff --git a/frontend/app/lib/workbench/fileTree.js b/frontend/app/lib/workbench/fileTree.js
+index ad63a1a..01829c6 100644
+--- a/frontend/app/lib/workbench/fileTree.js
++++ b/frontend/app/lib/workbench/fileTree.js
+@@ -13,6 +13,14 @@
+ // `import` here would break that test's loader on purpose: it refuses
+ // to run a file that has one.
+ //
++// W2.4 additions (the explorer's operations need them): PLACEHOLDER_NAME /
++// isPlaceholderPath / realFilePaths (the `.gitkeep` an empty folder is
++// stored as stays out of sight), flattenVisible + filterPaths +
++// rangeBetween (the explorer renders, filters, keyboard-navigates and
++// range-selects one flat list of rows), and isSameOrDescendant /
++// remapPath (path-prefix arithmetic shared by rename, move and the tab
++// store). Still no imports.
++//
+ // Data shape: workspace_code_files.list_files() returns a flat
+ // `{file_path: meta}` map with no separate directory rows (that
+ // module's own docstring calls this out and says the tree is built
+@@ -108,3 +116,124 @@ export function topLevelDirs(paths) {
+   }
+   return dirs;
+ }
++
++// ---- W2.4 --------------------------------------------------------------
++
++/**
++ * What an "empty folder" is stored as: workspace_code_files has no
++ * directory rows, so POST .../code/folders writes an empty
++ * `<folder>/.gitkeep` to give the folder something to exist as (see
++ * eo/workspace_code_files.create_folder()). It's plumbing, not a file
++ * anyone made: the explorer keeps it out of the row list, the file
++ * count and the filter, while the folder it props up still shows.
++ */
++export const PLACEHOLDER_NAME = ".gitkeep";
++
++export function isPlaceholderPath(path) {
++  return basename(path) === PLACEHOLDER_NAME;
++}
++
++/** `filesMeta`'s paths minus the folder placeholders. */
++export function realFilePaths(filesMeta) {
++  return Object.keys(filesMeta || {}).filter((p) => !isPlaceholderPath(p));
++}
++
++/** `path` is `ancestor` itself or lies somewhere under it ("a/b" is under "a"; "ab" is not). */
++export function isSameOrDescendant(path, ancestor) {
++  return path === ancestor || path.startsWith(`${ancestor}/`);
++}
++
++/**
++ * Where `path` ends up after `from` is renamed/moved to `to`: `to`
++ * itself, or `to` plus the rest of the path when `path` is inside the
++ * moved folder. Anything not under `from` comes back unchanged.
++ */
++export function remapPath(path, from, to) {
++  if (path === from) return to;
++  if (path.startsWith(`${from}/`)) return to + path.slice(from.length);
++  return path;
++}
++
++/**
++ * The tree as the flat list of rows the explorer draws, in display
++ * order. One list is what makes keyboard navigation (next/previous
++ * row), shift-click ranges and drag targets simple — they're all
++ * "index in this array".
++ *
++ * `visible` is null normally: a folder shows its children only if it's
++ * in `expanded`. When a filter is active (`visible` = filterPaths()'s
++ * result) only the matching files and their folders are listed, and
++ * those folders count as open whatever `expanded` says — hiding a match
++ * behind a collapsed folder would defeat the filter.
++ *
++ * @param {object} root - buildFileTree()'s root
++ * @param {Set<string>} expanded - open folder paths
++ * @param {{files: Set<string>, dirs: Set<string>}|null} [visible]
++ * @returns {{path: string, name: string, type: "dir"|"file", depth: number, parent: string, open?: boolean}[]}
++ *   `parent` is the containing folder's path ("" at the root)
++ */
++export function flattenVisible(root, expanded, visible = null) {
++  const rows = [];
++  function walk(node, depth, parent) {
++    for (const entry of sortedChildren(node)) {
++      if (entry.type === "dir") {
++        if (visible && !visible.dirs.has(entry.path)) continue;
++        const open = visible ? true : expanded.has(entry.path);
++        rows.push({ path: entry.path, name: entry.name, type: "dir", depth, parent, open });
++        if (open) walk(entry, depth + 1, entry.path);
++      } else {
++        if (entry.name === PLACEHOLDER_NAME) continue;
++        if (visible && !visible.files.has(entry.path)) continue;
++        rows.push({ path: entry.path, name: entry.name, type: "file", depth, parent });
++      }
++    }
++  }
++  walk(root, 0, "");
++  return rows;
++}
++
++/**
++ * The explorer's filter box. A file matches when its whole path
++ * contains every whitespace-separated term, case-insensitively — so
++ * "src app" finds `src/App.jsx`, and a bare "test" finds everything in
++ * a `tests/` folder. Returns null for a blank query (= no filtering),
++ * else the matching files plus every folder above them.
++ *
++ * @param {string[]} paths
++ * @param {string} query
++ * @returns {{files: Set<string>, dirs: Set<string>}|null}
++ */
++export function filterPaths(paths, query) {
++  const terms = String(query || "")
++    .toLowerCase()
++    .split(/\s+/)
++    .filter(Boolean);
++  if (terms.length === 0) return null;
++  const files = new Set();
++  const dirs = new Set();
++  for (const path of paths) {
++    if (isPlaceholderPath(path)) continue;
++    const lower = path.toLowerCase();
++    if (terms.every((t) => lower.includes(t))) {
++      files.add(path);
++      for (const d of ancestorDirs(path)) dirs.add(d);
++    }
++  }
++  return { files, dirs };
++}
++
++/**
++ * Paths of every row from `fromPath` to `toPath` inclusive, in list
++ * order, whichever way round they are — a shift-click range. If the
++ * anchor isn't in the list any more (its folder was collapsed) the
++ * range is just the target.
++ */
++export function rangeBetween(rows, fromPath, toPath) {
++  const j = rows.findIndex((r) => r.path === toPath);
++  if (j === -1) return [];
++  const i = rows.findIndex((r) => r.path === fromPath);
++  if (i === -1) return [toPath];
++  const lo = Math.min(i, j);
++  const hi = Math.max(i, j);
++  return rows.slice(lo, hi + 1).map((r) => r.path);
++}

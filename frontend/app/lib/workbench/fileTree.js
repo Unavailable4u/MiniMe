@@ -13,6 +13,14 @@
 // `import` here would break that test's loader on purpose: it refuses
 // to run a file that has one.
 //
+// W2.4 additions (the explorer's operations need them): PLACEHOLDER_NAME /
+// isPlaceholderPath / realFilePaths (the `.gitkeep` an empty folder is
+// stored as stays out of sight), flattenVisible + filterPaths +
+// rangeBetween (the explorer renders, filters, keyboard-navigates and
+// range-selects one flat list of rows), and isSameOrDescendant /
+// remapPath (path-prefix arithmetic shared by rename, move and the tab
+// store). Still no imports.
+//
 // Data shape: workspace_code_files.list_files() returns a flat
 // `{file_path: meta}` map with no separate directory rows (that
 // module's own docstring calls this out and says the tree is built
@@ -107,4 +115,125 @@ export function topLevelDirs(paths) {
     if (path.includes("/")) dirs.add(path.split("/")[0]);
   }
   return dirs;
+}
+
+// ---- W2.4 --------------------------------------------------------------
+
+/**
+ * What an "empty folder" is stored as: workspace_code_files has no
+ * directory rows, so POST .../code/folders writes an empty
+ * `<folder>/.gitkeep` to give the folder something to exist as (see
+ * eo/workspace_code_files.create_folder()). It's plumbing, not a file
+ * anyone made: the explorer keeps it out of the row list, the file
+ * count and the filter, while the folder it props up still shows.
+ */
+export const PLACEHOLDER_NAME = ".gitkeep";
+
+export function isPlaceholderPath(path) {
+  return basename(path) === PLACEHOLDER_NAME;
+}
+
+/** `filesMeta`'s paths minus the folder placeholders. */
+export function realFilePaths(filesMeta) {
+  return Object.keys(filesMeta || {}).filter((p) => !isPlaceholderPath(p));
+}
+
+/** `path` is `ancestor` itself or lies somewhere under it ("a/b" is under "a"; "ab" is not). */
+export function isSameOrDescendant(path, ancestor) {
+  return path === ancestor || path.startsWith(`${ancestor}/`);
+}
+
+/**
+ * Where `path` ends up after `from` is renamed/moved to `to`: `to`
+ * itself, or `to` plus the rest of the path when `path` is inside the
+ * moved folder. Anything not under `from` comes back unchanged.
+ */
+export function remapPath(path, from, to) {
+  if (path === from) return to;
+  if (path.startsWith(`${from}/`)) return to + path.slice(from.length);
+  return path;
+}
+
+/**
+ * The tree as the flat list of rows the explorer draws, in display
+ * order. One list is what makes keyboard navigation (next/previous
+ * row), shift-click ranges and drag targets simple — they're all
+ * "index in this array".
+ *
+ * `visible` is null normally: a folder shows its children only if it's
+ * in `expanded`. When a filter is active (`visible` = filterPaths()'s
+ * result) only the matching files and their folders are listed, and
+ * those folders count as open whatever `expanded` says — hiding a match
+ * behind a collapsed folder would defeat the filter.
+ *
+ * @param {object} root - buildFileTree()'s root
+ * @param {Set<string>} expanded - open folder paths
+ * @param {{files: Set<string>, dirs: Set<string>}|null} [visible]
+ * @returns {{path: string, name: string, type: "dir"|"file", depth: number, parent: string, open?: boolean}[]}
+ *   `parent` is the containing folder's path ("" at the root)
+ */
+export function flattenVisible(root, expanded, visible = null) {
+  const rows = [];
+  function walk(node, depth, parent) {
+    for (const entry of sortedChildren(node)) {
+      if (entry.type === "dir") {
+        if (visible && !visible.dirs.has(entry.path)) continue;
+        const open = visible ? true : expanded.has(entry.path);
+        rows.push({ path: entry.path, name: entry.name, type: "dir", depth, parent, open });
+        if (open) walk(entry, depth + 1, entry.path);
+      } else {
+        if (entry.name === PLACEHOLDER_NAME) continue;
+        if (visible && !visible.files.has(entry.path)) continue;
+        rows.push({ path: entry.path, name: entry.name, type: "file", depth, parent });
+      }
+    }
+  }
+  walk(root, 0, "");
+  return rows;
+}
+
+/**
+ * The explorer's filter box. A file matches when its whole path
+ * contains every whitespace-separated term, case-insensitively — so
+ * "src app" finds `src/App.jsx`, and a bare "test" finds everything in
+ * a `tests/` folder. Returns null for a blank query (= no filtering),
+ * else the matching files plus every folder above them.
+ *
+ * @param {string[]} paths
+ * @param {string} query
+ * @returns {{files: Set<string>, dirs: Set<string>}|null}
+ */
+export function filterPaths(paths, query) {
+  const terms = String(query || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (terms.length === 0) return null;
+  const files = new Set();
+  const dirs = new Set();
+  for (const path of paths) {
+    if (isPlaceholderPath(path)) continue;
+    const lower = path.toLowerCase();
+    if (terms.every((t) => lower.includes(t))) {
+      files.add(path);
+      for (const d of ancestorDirs(path)) dirs.add(d);
+    }
+  }
+  return { files, dirs };
+}
+
+/**
+ * Paths of every row from `fromPath` to `toPath` inclusive, in list
+ * order, whichever way round they are — a shift-click range. If the
+ * anchor isn't in the list any more (its folder was collapsed) the
+ * range is just the target.
+ */
+export function rangeBetween(rows, fromPath, toPath) {
+  const j = rows.findIndex((r) => r.path === toPath);
+  if (j === -1) return [];
+  const i = rows.findIndex((r) => r.path === fromPath);
+  if (i === -1) return [toPath];
+  const lo = Math.min(i, j);
+  const hi = Math.max(i, j);
+  return rows.slice(lo, hi + 1).map((r) => r.path);
 }

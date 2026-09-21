@@ -28,6 +28,13 @@
 // picking the next active tab via tabUtils.nextActiveAfterClose(), and
 // SAVE_SUCCESS's `keepEdited` option (see that case).
 //
+// W2.3b addition: `layout` is now populated — `{bottomOpen, bottomTab,
+// previewOpen}` (see layoutPrefs.js), changed through SET_LAYOUT. It's
+// here rather than in component state so anything in the Build tab can
+// open a bottom-panel tab or the preview later (search results, "Fix
+// with AI") without prop-drilling. Panel SIZES are not part of it; they
+// stay with useSplitter (layoutPrefs.js's header has the split).
+//
 // No JSX here on purpose — every other file directly under `lib/`
 // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
 // so the provider component below is written with `createElement`
@@ -35,7 +42,9 @@
 // wrapper.
 "use client";
 import { createContext, createElement, useContext, useMemo, useReducer } from "react";
+import { isSameOrDescendant, remapPath } from "./fileTree";
 import { nextActiveAfterClose } from "./tabUtils";
+import { normalizeLayout, sameLayout } from "./layoutPrefs";
 
 const EditorStoreContext = createContext(null);
 
@@ -43,7 +52,7 @@ const initialState = {
   tabs: [],
   activePath: null,
   buffers: {},
-  layout: {},
+  layout: normalizeLayout(null), // W2.3b: the defaults; EditorStoreProvider's `initialLayout` overrides
   proposals: [],
 };
 
@@ -218,13 +227,91 @@ export function editorReducer(state, action) {
       };
     }
 
+    // W2.3b: change part of the panel layout. `layout` is a PARTIAL
+    // ({bottomOpen: true}, {bottomTab: "console", bottomOpen: true}) —
+    // it's merged over the current one and re-validated, so a caller
+    // can't put an unknown tab id or a non-boolean into the store (an
+    // invalid field is ignored, the current value stays). A change that
+    // leaves every field as it was returns the SAME state object: the
+    // workbench persists on `state.layout` identity, and a no-op
+    // shouldn't cause a re-render or a write.
+    case "SET_LAYOUT": {
+      const current = normalizeLayout(state.layout);
+      const next = normalizeLayout({ ...current, ...action.layout }, current);
+      if (sameLayout(next, current)) return state;
+      return { ...state, layout: next };
+    }
+
+    // W2.4: files/folders were renamed or moved on the server, so the
+    // open tabs follow them. `renames` is [{from, to}] — `from` may be a
+    // FOLDER, in which case every tab/buffer under it is re-pathed (the
+    // same prefix rule the server's move applies). Tab order, the active
+    // tab and each buffer's contents (including unsaved edits) carry
+    // over untouched; only the path changes.
+    //
+    // `versions` is {[newPath]: version} straight from the move
+    // response. A move re-versions the file (old + 1) without changing
+    // its content, so a buffer that was exactly one version behind that
+    // adopts the new number — otherwise the next list refresh would
+    // think the server moved ahead and reload it or flag it "changed on
+    // server". A buffer that was further behind keeps its own number:
+    // then the server really is ahead and the ordinary sync should say so.
+    case "RENAME_PATHS": {
+      const renames = action.renames || [];
+      const versions = action.versions || {};
+      const remap = (p) => {
+        for (const r of renames) {
+          if (isSameOrDescendant(p, r.from)) return remapPath(p, r.from, r.to);
+        }
+        return p;
+      };
+      const touched =
+        state.tabs.some((p) => remap(p) !== p) ||
+        Object.keys(state.buffers).some((p) => remap(p) !== p) ||
+        (state.activePath != null && remap(state.activePath) !== state.activePath);
+      if (!touched) return state;
+
+      const seen = new Set();
+      const tabs = [];
+      for (const p of state.tabs) {
+        const q = remap(p);
+        if (!seen.has(q)) {
+          seen.add(q);
+          tabs.push(q);
+        }
+      }
+      const buffers = {};
+      for (const [p, b] of Object.entries(state.buffers)) {
+        const q = remap(p);
+        const next = versions[q];
+        buffers[q] = q !== p && next != null && (b.version ?? 0) === next - 1 ? { ...b, version: next } : b;
+      }
+      return {
+        ...state,
+        tabs,
+        buffers,
+        activePath: state.activePath == null ? null : remap(state.activePath),
+      };
+    }
+
     default:
       return state;
   }
 }
 
-export function EditorStoreProvider({ children }) {
-  const [state, dispatch] = useReducer(editorReducer, initialState);
+function createInitialState(layout) {
+  return { ...initialState, layout: normalizeLayout(layout) };
+}
+
+/**
+ * @param {object} props
+ * @param {object} [props.initialLayout] - persisted layout to start
+ *   from (loadLayout()). Read once, on first render — like the tabs it
+ *   is per-mount state, and BuildTab remounts the workbench per project
+ *   (key={selected.id}), so it never needs to react to a change.
+ */
+export function EditorStoreProvider({ children, initialLayout }) {
+  const [state, dispatch] = useReducer(editorReducer, initialLayout, createInitialState);
 
   // Action creators are memoized on `dispatch` alone — React guarantees
   // `dispatch`'s identity never changes across a component's lifetime,
@@ -244,6 +331,8 @@ export function EditorStoreProvider({ children }) {
       clearStale: (path) => dispatch({ type: "CLEAR_STALE", path }),
       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
       closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
+      setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
+      renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
     }),
     [dispatch]
   );
