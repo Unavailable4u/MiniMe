@@ -1,0 +1,833 @@
+diff --git a/frontend/app/lib/workbench/__tests__/projectSearch.test.mjs b/frontend/app/lib/workbench/__tests__/projectSearch.test.mjs
+new file mode 100644
+index 0000000..51f9d04
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/projectSearch.test.mjs
+@@ -0,0 +1,221 @@
++// frontend/app/lib/workbench/__tests__/projectSearch.test.mjs — W2.6
++// (Build Workbench plan) — tests for projectSearch.js.
++//
++// Loads the REAL lib/workbench/projectSearch.js through loadSource.mjs
++// (no pasted copy). Its one import, ./fileTree, is satisfied with the
++// real fileTree.js — so these tests also fail if the two drift apart,
++// same convention as explorerOps.test.mjs.
++//
++// Run: node frontend/app/lib/workbench/__tests__/projectSearch.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const fileTree = loadSource("../fileTree.js");
++const {
++  isSearchableFilePath,
++  searchableFilePaths,
++  matchesInLine,
++  trimLineForDisplay,
++  searchFileContent,
++  searchProject,
++} = loadSource("../projectSearch.js", { imports: { "./fileTree": fileTree } });
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++function assertTrue(cond, msg) {
++  assertEqual(!!cond, true, msg);
++}
++
++// --- isSearchableFilePath / searchableFilePaths --------------------------
++
++assertTrue(isSearchableFilePath("src/App.jsx"), "an ordinary code file is searchable");
++assertTrue(isSearchableFilePath("README.md"), "a doc file is searchable");
++assertTrue(isSearchableFilePath("assets/logo.svg"), "SVG is text (XML) and stays searchable, unlike fileIcons' 'image' category");
++assertEqual(isSearchableFilePath("assets/photo.png"), false, "a binary image extension is not searchable");
++assertEqual(isSearchableFilePath("vendor/lib.wasm"), false, "a wasm binary is not searchable");
++assertEqual(isSearchableFilePath("src/.gitkeep"), false, "a folder placeholder is never searchable — it isn't a real file");
++
++{
++  const filesMeta = {
++    "src/App.jsx": { size: 10 },
++    "assets/photo.png": { size: 20 },
++    "src/lib/.gitkeep": { size: 0 },
++    "README.md": { size: 5 },
++  };
++  assertEqual(
++    searchableFilePaths(filesMeta).sort(),
++    ["README.md", "src/App.jsx"],
++    "searchableFilePaths drops both placeholders and binary extensions"
++  );
++}
++assertEqual(searchableFilePaths({}), [], "no files at all is an empty list, not an error");
++assertEqual(searchableFilePaths(null), [], "a null filesMeta doesn't throw");
++
++// --- matchesInLine ---------------------------------------------------------
++
++assertEqual(matchesInLine("hello world", "world"), [[6, 11]], "a single match returns its [start, end) range");
++assertEqual(matchesInLine("Hello World", "world"), [[6, 11]], "matching is case-insensitive");
++assertEqual(matchesInLine("no match here", "xyz"), [], "no occurrence is an empty list, not null");
++assertEqual(
++  matchesInLine("foo foo foo", "foo"),
++  [[0, 3], [4, 7], [8, 11]],
++  "every non-overlapping occurrence is returned, in order"
++);
++assertEqual(matchesInLine("aaaa", "aa"), [[0, 2], [2, 4]], "matches don't overlap — the scan resumes AFTER each one");
++assertEqual(matchesInLine("", "x"), [], "an empty line never matches");
++
++// --- trimLineForDisplay -----------------------------------------------------
++
++{
++  const short = "const x = 1;";
++  const ranges = matchesInLine(short, "x");
++  assertEqual(trimLineForDisplay(short, ranges), { text: short, ranges }, "a short line passes through untouched");
++}
++
++{
++  // A line far longer than the display cap, with plenty of text on
++  // BOTH sides of the match so the window is cut short of the real
++  // line end in both directions.
++  const long = "a".repeat(1000) + "NEEDLE" + "b".repeat(1000);
++  const ranges = matchesInLine(long, "needle");
++  const { text, ranges: trimmed } = trimLineForDisplay(long, ranges);
++  assertTrue(text.length <= 302, "a long line is windowed down near MAX_LINE_DISPLAY (plus ellipses)");
++  assertTrue(text.startsWith("…"), "cutting the front of the line leaves a leading ellipsis");
++  assertTrue(text.endsWith("…"), "cutting the tail of the line leaves a trailing ellipsis");
++  assertEqual(trimmed.length, 1, "the match itself survives the window");
++  const [s, e] = trimmed[0];
++  assertEqual(text.slice(s, e).toLowerCase(), "needle", "the re-mapped range still points at the actual match text");
++}
++
++{
++  // A match near the very START of a long line — the window shouldn't
++  // try to center itself past the line's own start.
++  const long = "NEEDLE" + "b".repeat(1000);
++  const ranges = matchesInLine(long, "needle");
++  const { text, ranges: trimmed } = trimLineForDisplay(long, ranges);
++  assertTrue(!text.startsWith("…"), "a match at the very start needs no leading ellipsis");
++  assertTrue(text.endsWith("…"), "the tail is still cut");
++  const [s, e] = trimmed[0];
++  assertEqual(text.slice(s, e).toLowerCase(), "needle", "the range still points at the match after a start-anchored window");
++}
++
++// --- searchFileContent -----------------------------------------------------
++
++assertEqual(searchFileContent("no matches at all", "zzz"), [], "no matches in the whole file is an empty list");
++
++{
++  const content = "line one\nline TWO has a match\nline three";
++  const results = searchFileContent(content, "match");
++  assertEqual(results.length, 1, "only the matching line comes back");
++  assertEqual(results[0].line, 2, "line numbers are 1-based");
++  assertEqual(results[0].column, 16, "column is the 1-based start of the first match");
++  assertEqual(results[0].text, "line TWO has a match", "the full (short) line text is kept");
++}
++
++{
++  // CRLF content shouldn't shift line numbers vs. what CodeEditor shows.
++  const content = "one\r\ntwo needle\r\nthree";
++  const results = searchFileContent(content, "needle");
++  assertEqual(results.length, 1, "CRLF line endings are normalised before splitting");
++  assertEqual(results[0].line, 2, "line numbers match what the LF-normalised editor buffer would show");
++}
++
++{
++  const content = ["match"].concat(Array.from({ length: 10 }, () => "match")).join("\n");
++  const results = searchFileContent(content, "match", { maxMatches: 3 });
++  assertEqual(results.length, 3, "maxMatches caps the number of matching LINES returned for one file");
++}
++
++{
++  // A line with several occurrences is still one result row, with the
++  // total count carried separately from the display ranges.
++  const results = searchFileContent("foo foo foo", "foo");
++  assertEqual(results.length, 1, "multiple matches on one line are still a single result row");
++  assertEqual(results[0].matchCount, 3, "matchCount reports every occurrence on that line");
++  assertEqual(results[0].ranges.length, 3, "a short line keeps every match range for highlighting");
++}
++
++// --- searchProject -----------------------------------------------------------
++
++assertEqual(searchProject({ "a.js": "hello" }, ""), { results: [], truncated: false, matchCount: 0 }, "an empty query returns nothing");
++assertEqual(searchProject({ "a.js": "hello" }, "   "), { results: [], truncated: false, matchCount: 0 }, "a whitespace-only query is treated as empty");
++assertEqual(searchProject({}, "x"), { results: [], truncated: false, matchCount: 0 }, "no files at all is an empty (not truncated) result");
++assertEqual(searchProject(null, "x"), { results: [], truncated: false, matchCount: 0 }, "a null fileTexts map doesn't throw");
++
++{
++  const fileTexts = {
++    "z.js": "no match",
++    "a.js": "has a needle here",
++    "m.js": "another needle over here",
++  };
++  const { results, truncated, matchCount } = searchProject(fileTexts, "needle");
++  assertEqual(truncated, false, "well under either cap isn't truncated");
++  assertEqual(matchCount, 2, "matchCount sums matches across every file");
++  assertEqual(results.map((r) => r.path), ["a.js", "m.js"], "results are sorted by path, not by fileTexts' own key order");
++  assertTrue(results.every((r) => r.truncated === false), "no single file hit its own cap either");
++}
++
++{
++  // Project-wide cap: stop collecting once the total is reached, and
++  // say so. matchCount/maxTotalMatches budget result ROWS (matching
++  // lines) — five lines with one "x" each is 5 rows, unlike the
++  // "multiple matches on one line" case above, which is still 1 row.
++  const fiveLines = "x\nx\nx\nx\nx";
++  const fileTexts = { "a.js": fiveLines, "b.js": fiveLines };
++  const { results, truncated, matchCount } = searchProject(fileTexts, "x", { maxTotalMatches: 6 });
++  assertEqual(matchCount, 6, "the project-wide row cap is respected across files, not just within one");
++  assertTrue(truncated, "hitting the project-wide cap is reported as truncated");
++  assertEqual(results.length, 2, "a.js still contributes its full share before the budget runs out mid-b.js");
++  const a = results.find((r) => r.path === "a.js");
++  const b = results.find((r) => r.path === "b.js");
++  assertEqual(a.matches.length, 5, "a.js (sorted first) gets its full 5 rows before the budget is touched");
++  assertEqual(b.matches.length, 1, "b.js only gets whatever's left of the budget (1 row)");
++  assertTrue(!a.truncated, "a.js wasn't itself cut short — the project-wide cut happened in b.js");
++  assertTrue(b.truncated, "b.js is flagged as the file that got cut short by the remaining budget");
++}
++
++// --- caseSensitive option ---------------------------------------------------
++
++assertEqual(matchesInLine("Hello World", "world"), [[6, 11]], "default matchesInLine is case-insensitive");
++assertEqual(matchesInLine("Hello World", "world", { caseSensitive: true }), [], "caseSensitive: true respects exact case");
++assertEqual(matchesInLine("Hello World", "World", { caseSensitive: true }), [[6, 11]], "caseSensitive: true still matches exact case");
++
++{
++  const fileTexts = { "a.js": "Needle\nneedle" };
++  const insensitive = searchProject(fileTexts, "needle");
++  const sensitive = searchProject(fileTexts, "needle", { caseSensitive: true });
++  assertEqual(insensitive.matchCount, 2, "case-insensitive (the default) matches both lines");
++  assertEqual(sensitive.matchCount, 1, "caseSensitive: true only matches the exact-case line");
++}
++
++{
++  // Per-file cap: one very matchy file doesn't crowd out a smaller
++  // signal in another file that comes later alphabetically.
++  const fileTexts = {
++    "a-noisy.js": Array.from({ length: 500 }, () => "x").join("\n"),
++    "b-quiet.js": "x",
++  };
++  const { results } = searchProject(fileTexts, "x", { maxMatchesPerFile: 5 });
++  const noisy = results.find((r) => r.path === "a-noisy.js");
++  const quiet = results.find((r) => r.path === "b-quiet.js");
++  assertEqual(noisy.matches.length, 5, "the per-file cap limits one noisy file's own contribution");
++  assertTrue(noisy.truncated, "a file cut off by its own per-file cap is flagged truncated");
++  assertTrue(quiet && quiet.matches.length === 1, "a per-file cap on one file doesn't starve a later file's own budget");
++}
++
++// -------------------------------------------------------------------------
++
++if (failures > 0) {
++  console.error(`\n${failures} failure(s)`);
++  process.exit(1);
++} else {
++  console.log("\nAll projectSearch.js tests passed.");
++}
+diff --git a/frontend/app/lib/workbench/__tests__/quickOpen.test.mjs b/frontend/app/lib/workbench/__tests__/quickOpen.test.mjs
+new file mode 100644
+index 0000000..801b2a1
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/quickOpen.test.mjs
+@@ -0,0 +1,193 @@
++// frontend/app/lib/workbench/__tests__/quickOpen.test.mjs — W2.6
++// (Build Workbench plan). Tests for quickOpen.js.
++//
++// Loads the REAL lib/workbench/quickOpen.js through loadSource.mjs. No
++// `imports` are passed on purpose: quickOpen.js must stay
++// dependency-free, and this load fails if someone adds an `import` to
++// it — same convention as fileTree.test.mjs / tabUtils.test.mjs.
++//
++// Run: node frontend/app/lib/workbench/__tests__/quickOpen.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const { scorePath, rankQuickOpen, defaultQuickOpenList, basenameMatchIndices } = loadSource("../quickOpen.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++function assertTrue(cond, msg) {
++  assertEqual(!!cond, true, msg);
++}
++
++// --- scorePath --------------------------------------------------------
++
++assertEqual(scorePath("xyz", "app.js"), null, "a character missing from the path entirely is no match");
++assertEqual(scorePath("app", "app.js"), scorePath("app", "app.js"), "scorePath is deterministic");
++
++assertTrue(scorePath("app", "app.js").score > 0, "a real match scores above zero");
++
++{
++  const m = scorePath("appjs", "app.js");
++  assertEqual(m.indices, [0, 1, 2, 4, 5], "indices land on the matched characters, in order, skipping the dot");
++}
++
++// A match in the basename outweighs the same characters, at the same
++// relative position and boundary, landing only in a folder segment.
++// ("wb" starts right after a "/" in both — the comparison isolates the
++// basename bonus itself, not the separate boundary bonus below.)
++{
++  const inName = scorePath("wb", "x/wb.js"); // wb IS the basename
++  const inFolder = scorePath("wb", "y/wb/x.js"); // wb is a folder segment, not the basename
++  assertTrue(inName.score > 0 && inFolder.score > 0, "both are real matches");
++  assertTrue(inName.score > inFolder.score, "a match landing in the basename outscores the same match in a folder segment");
++}
++
++// A realistic Quick Open scenario: typing part of a file's own name
++// finds it.
++{
++  const paths = ["frontend/app/lib/workbench/fileTree.js", "frontend/app/lib/workbench/quickOpen.js"];
++  const ranked = rankQuickOpen(paths, "quick");
++  assertEqual(ranked[0].path, "frontend/app/lib/workbench/quickOpen.js", "typing part of a file's name finds it first");
++}
++
++// Boundary bonus: a match starting right after a "/" scores higher than
++// the same character matched mid-word (neither at absolute position 0,
++// which has its own scoring quirk tested separately by the tie-breaker
++// case below).
++{
++  const atBoundary = scorePath("s", "a/sz.js"); // s right after "/"
++  const midWord = scorePath("s", "asz.js"); // s is the 2nd char of "asz", not at a boundary
++  assertTrue(atBoundary.score > midWord.score, "a match right at a path/word boundary scores higher");
++}
++
++// Consecutive-run bonus: a query matched as one unbroken run scores
++// higher than the same characters scattered apart (neither starting at
++// absolute position 0).
++{
++  const run = scorePath("abc", "-abcxyz");
++  const scattered = scorePath("abc", "-axbxcx");
++  assertTrue(run.score > scattered.score, "an unbroken run of matched characters scores higher than scattered ones");
++}
++
++// Tie-breakers: shorter path and earlier first match both read as closer.
++{
++  const short = scorePath("app", "app.js");
++  const long = scorePath("app", "application/legacy/app.js");
++  assertTrue(short.score > long.score, "a shorter path with an equally-good match ranks higher");
++}
++
++// --- rankQuickOpen ------------------------------------------------------
++
++assertEqual(rankQuickOpen(["a.js", "b.js"], ""), [], "an empty (or whitespace-only) query returns no results");
++assertEqual(rankQuickOpen(["a.js", "b.js"], "   "), [], "a whitespace-only query is treated as empty");
++assertEqual(rankQuickOpen(null, "a"), [], "a null paths list doesn't throw");
++assertEqual(rankQuickOpen(["a.js", "b.js"], "zzz"), [], "no matches at all is an empty list, not an error");
++
++{
++  const paths = ["src/App.jsx", "src/lib/app.js", "readme.md"];
++  const ranked = rankQuickOpen(paths, "app");
++  assertEqual(ranked.map((r) => r.path).sort(), ["src/App.jsx", "src/lib/app.js"].sort(), "case-insensitive match");
++}
++
++{
++  // Path separators typed into the query line up with real "/"s.
++  const paths = ["frontend/app/lib/workbench/quickOpen.js", "frontend/app/lib/workbench/fileTree.js"];
++  const ranked = rankQuickOpen(paths, "lib/work");
++  assertEqual(ranked.length, 2, "a '/' in the query matches an ordinary path separator character");
++}
++
++{
++  const paths = Array.from({ length: 5 }, (_, i) => `file${i}.js`);
++  const ranked = rankQuickOpen(paths, "file", { limit: 2 });
++  assertEqual(ranked.length, 2, "limit caps the number of results returned");
++}
++
++{
++  // Stable, deterministic ordering for equal scores: shorter path, then
++  // alphabetical.
++  const paths = ["zzz/a.js", "a.js", "aa.js"];
++  const ranked = rankQuickOpen(paths, "a");
++  assertEqual(ranked.map((r) => r.path), ["a.js", "aa.js", "zzz/a.js"], "equal-ish scores break ties by length then name");
++}
++
++// --- defaultQuickOpenList -----------------------------------------------
++
++assertEqual(defaultQuickOpenList([], []), [], "no files at all is an empty list, not an error");
++assertEqual(
++  defaultQuickOpenList(null, null),
++  [],
++  "null paths/recentPaths (first load, nothing opened yet) doesn't throw"
++);
++
++{
++  const paths = ["a.js", "b.js", "c.js"];
++  const recent = ["c.js", "a.js"];
++  const list = defaultQuickOpenList(paths, recent);
++  assertEqual(
++    list.map((r) => r.path),
++    ["c.js", "a.js", "b.js"],
++    "recent files come first, most-recent first, then the rest in project order"
++  );
++  assertTrue(
++    list.every((r) => r.score === 0 && Array.isArray(r.indices) && r.indices.length === 0),
++    "entries carry score 0 and empty indices — nothing typed yet to highlight"
++  );
++}
++
++{
++  // A recent path for a file that's since been deleted/renamed is
++  // dropped rather than shown as a dangling entry.
++  const paths = ["a.js", "b.js"];
++  const recent = ["deleted.js", "a.js"];
++  const list = defaultQuickOpenList(paths, recent);
++  assertEqual(list.map((r) => r.path), ["a.js", "b.js"], "a recent path no longer in the project is filtered out");
++}
++
++{
++  // A path appearing twice in recentPaths (opened, closed, reopened)
++  // only appears once, at its first (most recent) position.
++  const paths = ["a.js", "b.js"];
++  const recent = ["a.js", "b.js", "a.js"];
++  const list = defaultQuickOpenList(paths, recent);
++  assertEqual(list.map((r) => r.path), ["a.js", "b.js"], "a duplicated recent path is de-duplicated at its first position");
++}
++
++{
++  const paths = Array.from({ length: 5 }, (_, i) => `file${i}.js`);
++  const list = defaultQuickOpenList(paths, [], { limit: 2 });
++  assertEqual(list.length, 2, "limit caps the default list too");
++}
++
++// --- basenameMatchIndices -----------------------------------------------
++
++// "src/lib/App.jsx" — the basename "App.jsx" starts at index 8 (right
++// after the second "/").
++assertEqual(
++  basenameMatchIndices("src/lib/App.jsx", [4, 8, 9]),
++  [0, 1],
++  "indices inside the basename are remapped relative to its own start"
++);
++assertEqual(
++  basenameMatchIndices("src/lib/App.jsx", [0, 4, 9]),
++  [1],
++  "indices that fall inside a FOLDER segment are dropped, not remapped"
++);
++assertEqual(basenameMatchIndices("App.jsx", [0, 1, 2]), [0, 1, 2], "a path with no '/' is its own basename");
++assertEqual(basenameMatchIndices("src/App.jsx", []), [], "no indices in is no indices out");
++assertEqual(basenameMatchIndices("src/App.jsx", null), [], "a null indices list doesn't throw");
++
++// -------------------------------------------------------------------------
++
++if (failures > 0) {
++  console.error(`\n${failures} failure(s)`);
++  process.exit(1);
++} else {
++  console.log("\nAll quickOpen.js tests passed.");
++}
+diff --git a/frontend/app/lib/workbench/projectSearch.js b/frontend/app/lib/workbench/projectSearch.js
+new file mode 100644
+index 0000000..0758129
+--- /dev/null
++++ b/frontend/app/lib/workbench/projectSearch.js
+@@ -0,0 +1,248 @@
++// frontend/app/lib/workbench/projectSearch.js — W2.6 (Build Workbench
++// plan). Pure line-matching behind the Project Search panel
++// (components/workbench/ProjectSearchPanel.jsx): given one file's TEXT
++// and a query, which lines match and where.
++//
++// Unlike quickOpen.js's subsequence match on PATHS, this is a plain
++// case-insensitive substring match on file CONTENT — the ordinary
++// "find in files" contract a search-across-a-project box always
++// delivers, no fuzzy scoring involved.
++//
++// Fetching content is NOT this file's job. There's no backend search
++// route — fileProviders.js's `capabilities.search: false` is a real
++// flag the whole way through W2.5, not a stale TODO (see that file's
++// own header) — so Project Search is a CLIENT-SIDE content search:
++// hooks/useProjectSearch.js is what reads every open buffer's `edited`
++// text plus a provider.read() per closed file and hands the results to
++// searchProject() below. This module only answers "given text I
++// already have, and a query, what matches" — same file/content split
++// as fileTree's buildFileTree() (paths only) vs Explorer's own
++// provider.read() per open.
++//
++// Only import: ./fileTree, for realFilePaths()/isPlaceholderPath() —
++// searchableFilePaths() reuses those instead of re-deriving the same
++// "skip the folder placeholders" rule a second way (same one-import
++// shape explorerOps.js already uses for the same reason).
++import { isPlaceholderPath, realFilePaths } from "./fileTree";
++
++// Extensions Project Search skips even though they're real, non-
++// placeholder files: fetching and line-scanning a PNG's raw bytes
++// finds nothing a person is looking for and just spends a request. Not
++// the same list as fileIcons.js's "image" icon category on purpose —
++// that one is about which PICTURE to show in the tree (an .svg gets
++// the image icon there) and this one is about which files are text
++// worth searching (an .svg IS text and stays searchable here; a
++// genuinely binary format doesn't).
++const SKIP_EXTENSIONS = new Set([
++  "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "avif",
++  "woff", "woff2", "ttf", "eot", "otf",
++  "zip", "gz", "tar", "rar", "7z",
++  "pdf",
++  "mp3", "mp4", "mov", "wav", "ogg", "webm",
++  "wasm",
++]);
++
++function extensionOf(path) {
++  const name = path.slice(path.lastIndexOf("/") + 1);
++  const dot = name.lastIndexOf(".");
++  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
++}
++
++/** @param {string} path @returns {boolean} */
++export function isSearchableFilePath(path) {
++  return !isPlaceholderPath(path) && !SKIP_EXTENSIONS.has(extensionOf(path));
++}
++
++/**
++ * `filesMeta`'s paths, minus the folder placeholders and the
++ * extensions above — what useProjectSearch.js loops over to decide
++ * which paths need a provider.read() (or an already-open buffer) at
++ * all.
++ *
++ * @param {Record<string, object>} filesMeta - provider.list()'s shape
++ * @returns {string[]}
++ */
++export function searchableFilePaths(filesMeta) {
++  return realFilePaths(filesMeta).filter(isSearchableFilePath);
++}
++
++// Caps, applied while a single file's content is being scanned and
++// again across the whole project — a query like "e" against a large
++// minified bundle (one file) or a big project (many files) must still
++// return SOMETHING useful and fast rather than either hanging or
++// handing the panel thousands of rows to render. Both are generous for
++// an editor-adjacent panel: real matches for a real query rarely come
++// close.
++const DEFAULT_MAX_MATCHES_PER_FILE = 200;
++const DEFAULT_MAX_TOTAL_MATCHES = 2000;
++// A minified/generated line can run to tens of thousands of columns;
++// nothing about "find in files" needs the WHOLE line rendered, only
++// enough around the match to read it. Longer lines are windowed around
++// their first match (see trimLineForDisplay below) rather than shown
++// in full.
++const MAX_LINE_DISPLAY = 300;
++
++/**
++ * Every non-overlapping occurrence of `needle` in `line`, as
++ * `[start, end)` pairs. Case-insensitive by default (the ordinary
++ * "find in files" default, same as Explorer's own filename filter);
++ * pass `caseSensitive: true` to match exactly as typed. Same
++ * indexOf-loop shape as quickOpen.js's scorePath(), for the same
++ * reason: obviously correct beats clever for a palette-sized problem.
++ *
++ * @param {string} line
++ * @param {string} needle - non-empty
++ * @param {{caseSensitive?: boolean}} [opts]
++ * @returns {[number, number][]}
++ */
++export function matchesInLine(line, needle, { caseSensitive = false } = {}) {
++  const hay = caseSensitive ? line : line.toLowerCase();
++  const n = caseSensitive ? needle : needle.toLowerCase();
++  const ranges = [];
++  let from = 0;
++  while (from <= hay.length - n.length) {
++    const found = hay.indexOf(n, from);
++    if (found === -1) break;
++    ranges.push([found, found + n.length]);
++    from = found + n.length; // non-overlapping: resume AFTER this match
++  }
++  return ranges;
++}
++
++/**
++ * Windows a long line down to MAX_LINE_DISPLAY characters centered on
++ * its first match, with an ellipsis on whichever side got cut, and
++ * re-maps every match range to the trimmed text's own coordinates.
++ * Matches that fall entirely outside the window are dropped from the
++ * returned list (still counted by the caller's own matchCount, so nothing
++ * about "how many matches" is lost — only how many of them can be
++ * highlighted in this one display line).
++ *
++ * @param {string} line
++ * @param {[number, number][]} ranges - non-empty
++ * @returns {{text: string, ranges: [number, number][]}}
++ */
++export function trimLineForDisplay(line, ranges) {
++  if (line.length <= MAX_LINE_DISPLAY) return { text: line, ranges };
++
++  const [firstStart, firstEnd] = ranges[0];
++  const pad = Math.floor((MAX_LINE_DISPLAY - (firstEnd - firstStart)) / 2);
++  let start = Math.max(0, firstStart - pad);
++  let end = Math.min(line.length, start + MAX_LINE_DISPLAY);
++  start = Math.max(0, end - MAX_LINE_DISPLAY); // slide the window back if `end` hit the line's end first
++
++  const prefix = start > 0 ? "…" : "";
++  const suffix = end < line.length ? "…" : "";
++  const text = prefix + line.slice(start, end) + suffix;
++  const shift = start - prefix.length;
++
++  const trimmedRanges = [];
++  for (const [s, e] of ranges) {
++    if (s < start || e > end) continue; // outside the window — dropped, not mis-highlighted
++    trimmedRanges.push([s - shift, e - shift]);
++  }
++  return { text, ranges: trimmedRanges };
++}
++
++/**
++ * One file's matching lines, most-matching-first order untouched (file
++ * order, top to bottom — that's what "find in files" results read as).
++ * `\r\n`/`\r` are normalised to `\n` first (same reasoning as
++ * editorUtils.normalizeLineBreaks: a CRLF file shouldn't change the
++ * line numbers a person sees here vs. in the editor).
++ *
++ * @param {string} content
++ * @param {string} query - already trimmed and non-empty; the caller
++ *   (searchProject) handles an empty query
++ * @param {{maxMatches?: number, caseSensitive?: boolean}} [opts]
++ * @returns {{line: number, column: number, text: string, ranges: [number, number][], matchCount: number}[]}
++ */
++export function searchFileContent(
++  content,
++  query,
++  { maxMatches = DEFAULT_MAX_MATCHES_PER_FILE, caseSensitive = false } = {}
++) {
++  const lines = String(content ?? "").replace(/\r\n?/g, "\n").split("\n");
++  const results = [];
++  for (let i = 0; i < lines.length && results.length < maxMatches; i += 1) {
++    const raw = lines[i];
++    const ranges = matchesInLine(raw, query, { caseSensitive });
++    if (!ranges.length) continue;
++    const { text, ranges: displayRanges } = trimLineForDisplay(raw, ranges);
++    results.push({
++      line: i + 1, // 1-based, matching CodeEditor/CodeMirror's own line numbering
++      column: ranges[0][0] + 1, // 1-based column of the first match, for jump-to-result
++      text,
++      ranges: displayRanges,
++      matchCount: ranges.length,
++    });
++  }
++  return results;
++}
++
++/**
++ * Every file's matches, across a whole project. `fileTexts` is
++ * `{[path]: content}` — already-fetched text, one entry per file
++ * useProjectSearch.js decided was worth scanning (an open buffer's
++ * live `edited` text, or a provider.read() result for a closed one);
++ * this function does no fetching and no filtering of WHICH paths to
++ * search, only what each one's text contains.
++ *
++ * Files are walked in sorted path order so the result list is stable
++ * and deterministic regardless of `fileTexts`' own key order (a plain
++ * object has none worth relying on). Stops early once
++ * `maxTotalMatches` match-lines have been collected across every file
++ * — `truncated: true` on the return value says the count undersells
++ * what's actually there, same "say so rather than silently drop rows"
++ * convention as fileTree.js's own truncation points.
++ *
++ * `matchCount` (here and on `maxTotalMatches`/`maxMatchesPerFile`)
++ * counts result ROWS — matching LINES, the unit the panel actually
++ * renders and a person actually clicks to jump to — not raw substring
++ * occurrences. A line with five hits on it is one row with
++ * `matchCount: 5` in searchFileContent()'s own sense of the word, but
++ * contributes exactly 1 toward these budgets, same as a line with one
++ * hit; a file with a single very-matchy line can't back into a huge
++ * row count in one shot the way an over-matchy LINE already can't
++ * (that's searchFileContent's own per-line ranges list, unbounded on
++ * purpose — see trimLineForDisplay for how a line's DISPLAY stays
++ * bounded regardless).
++ *
++ * @param {Record<string, string>} fileTexts
++ * @param {string} query
++ * @param {{caseSensitive?: boolean, maxMatchesPerFile?: number, maxTotalMatches?: number}} [opts]
++ * @returns {{results: {path: string, matches: object[], truncated: boolean}[], truncated: boolean, matchCount: number}}
++ */
++export function searchProject(fileTexts, query, opts = {}) {
++  const q = String(query || "").trim();
++  const maxMatchesPerFile = opts.maxMatchesPerFile ?? DEFAULT_MAX_MATCHES_PER_FILE;
++  const maxTotalMatches = opts.maxTotalMatches ?? DEFAULT_MAX_TOTAL_MATCHES;
++
++  if (!q) return { results: [], truncated: false, matchCount: 0 };
++
++  const paths = Object.keys(fileTexts || {}).sort();
++  const results = [];
++  let matchCount = 0;
++  let truncated = false;
++
++  for (const path of paths) {
++    if (matchCount >= maxTotalMatches) {
++      truncated = true;
++      break;
++    }
++    const remaining = maxTotalMatches - matchCount;
++    const matches = searchFileContent(fileTexts[path], q, {
++      maxMatches: Math.min(maxMatchesPerFile, remaining),
++      caseSensitive: !!opts.caseSensitive,
++    });
++    if (!matches.length) continue;
++    // This file itself was cut short either by its own per-file cap or
++    // by running into what's left of the project-wide budget.
++    const fileTruncated = matches.length >= maxMatchesPerFile || matches.length >= remaining;
++    if (fileTruncated) truncated = true;
++    results.push({ path, matches, truncated: fileTruncated });
++    matchCount += matches.length;
++  }
++
++  return { results, truncated, matchCount };
++}
+diff --git a/frontend/app/lib/workbench/quickOpen.js b/frontend/app/lib/workbench/quickOpen.js
+new file mode 100644
+index 0000000..c760572
+--- /dev/null
++++ b/frontend/app/lib/workbench/quickOpen.js
+@@ -0,0 +1,147 @@
++// frontend/app/lib/workbench/quickOpen.js — W2.6 (Build Workbench
++// plan). Pure ranking behind the Quick Open modal
++// (components/workbench/QuickOpen.jsx): given the project's file paths
++// and whatever's typed so far, which files match and in what order.
++//
++// No imports on purpose — same reasoning as fileTree.js/tabUtils.js's
++// own headers: __tests__/quickOpen.test.mjs loads this file's real
++// source with plain `node`, no imports map, so an added `import` fails
++// it on purpose.
++//
++// The scoring is a small, deliberately simple SUBSEQUENCE match (every
++// character typed must appear, in order, somewhere in the path) — not
++// a fuzzy-search library. It rewards, in rough order of weight: a
++// match that lands in the file's own NAME rather than a parent folder,
++// a match right at a path-segment/word boundary ("cs" hitting the C
++// and S of "components/Sidebar.jsx"), and a run of consecutive
++// characters over the same count scattered across the string. That's
++// enough to make "eew" find "EditorWorkbench.jsx" ahead of some
++// unrelated file that merely contains the same three letters, without
++// pulling in a scoring library for a palette of a few hundred paths.
++
++const PATH_SEP = "/";
++
++function isBoundary(ch) {
++  return ch === undefined || ch === PATH_SEP || ch === "-" || ch === "_" || ch === "." || ch === " ";
++}
++
++/**
++ * @param {string} query - already trimmed and non-empty; the caller
++ *   (rankQuickOpen) is what handles an empty query
++ * @param {string} path
++ * @returns {{score: number, indices: number[]}|null} null = no match —
++ *   some character in `query`, in order, isn't in `path` at all
++ */
++export function scorePath(query, path) {
++  const q = query.toLowerCase();
++  const p = path.toLowerCase();
++  const lastSlash = path.lastIndexOf(PATH_SEP);
++  const indices = [];
++  let score = 0;
++  let searchFrom = 0;
++  let lastMatch = -1;
++  let consecutive = 0;
++
++  for (let qi = 0; qi < q.length; qi += 1) {
++    const found = p.indexOf(q[qi], searchFrom);
++    if (found === -1) return null;
++    indices.push(found);
++
++    if (found === lastMatch + 1) {
++      consecutive += 1;
++      score += 3 + consecutive; // a longer unbroken run scores progressively better
++    } else {
++      consecutive = 0;
++      score += 1;
++    }
++    if (isBoundary(p[found - 1])) score += 5;
++    if (found > lastSlash) score += 2; // in the basename, not a folder segment
++
++    lastMatch = found;
++    searchFrom = found + 1;
++  }
++
++  // Tie-breakers once every match above scores identically: a shorter
++  // path and an earlier first match both read as "closer" to what was
++  // typed ("app.js" over "application/legacy/app.js" for the same
++  // query "app").
++  score += Math.max(0, 20 - path.length) * 0.05;
++  score -= indices[0] * 0.1;
++
++  return { score, indices };
++}
++
++/**
++ * Ranks every path that matches `query`, best first. A "/" typed into
++ * the query ("lib/work" narrowing to workbench files) is matched as an
++ * ordinary character by scorePath() above — which already does the
++ * right thing, since it can only line up with a real "/" in a
++ * matching path.
++ *
++ * @param {string[]} paths
++ * @param {string} query
++ * @param {{limit?: number}} [opts]
++ * @returns {{path: string, score: number, indices: number[]}[]}
++ */
++export function rankQuickOpen(paths, query, { limit = 50 } = {}) {
++  const q = String(query || "").trim();
++  if (!q) return [];
++  const ranked = [];
++  for (const path of paths || []) {
++    const m = scorePath(q, path);
++    if (m) ranked.push({ path, score: m.score, indices: m.indices });
++  }
++  ranked.sort((a, b) => b.score - a.score || a.path.length - b.path.length || a.path.localeCompare(b.path));
++  return ranked.slice(0, limit);
++}
++
++/**
++ * What Quick Open shows before anything is typed: `recentPaths` (most-
++ * recently-opened first — see QuickOpen.jsx's own header for where
++ * that list comes from) filtered down to files that still exist, then
++ * every other file so the palette is never empty on a fresh project.
++ * Paths not in `recentPaths` keep the project's own order (already
++ * alphabetical — see fileTree.js's buildFileTree()) rather than being
++ * re-sorted, so that part of the list reads like a normal file listing.
++ * Returned in the same `{path, score, indices}` shape as
++ * rankQuickOpen() (score 0, no indices — nothing typed yet to
++ * highlight) so the caller can render either list identically.
++ *
++ * @param {string[]} paths - every real file path in the project
++ * @param {string[]} recentPaths - most-recently-opened first
++ * @param {{limit?: number}} [opts]
++ */
++export function defaultQuickOpenList(paths, recentPaths, { limit = 50 } = {}) {
++  const known = new Set(paths || []);
++  const seen = new Set();
++  const ordered = [];
++  for (const path of recentPaths || []) {
++    if (known.has(path) && !seen.has(path)) {
++      seen.add(path);
++      ordered.push(path);
++    }
++  }
++  for (const path of paths || []) {
++    if (!seen.has(path)) {
++      seen.add(path);
++      ordered.push(path);
++    }
++  }
++  return ordered.slice(0, limit).map((path) => ({ path, score: 0, indices: [] }));
++}
++
++/**
++ * `indices` (absolute positions in the full path, as scorePath()
++ * returns them) that fall inside `path`'s own basename, remapped to
++ * be relative to the basename's own start — what QuickOpen.jsx needs
++ * to highlight matched characters in the bold filename it shows
++ * separately from the dim folder path underneath it.
++ *
++ * @param {string} path
++ * @param {number[]} indices
++ * @returns {number[]}
++ */
++export function basenameMatchIndices(path, indices) {
++  const nameStart = path.lastIndexOf(PATH_SEP) + 1;
++  return (indices || []).filter((i) => i >= nameStart).map((i) => i - nameStart);
++}
