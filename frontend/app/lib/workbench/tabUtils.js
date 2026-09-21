@@ -125,6 +125,48 @@ export function planBufferSync({ tabs, buffers, meta, dismissed = {}, busy = [] 
 }
 
 /**
+ * W2.5: which open buffers should have an autosave pending, and for
+ * what text. Pure — EditorWorkbench.jsx runs it after every render and
+ * keeps one debounce timer per returned path, restarting a path's timer
+ * only when its `edited` text changed (so an unrelated re-render never
+ * postpones somebody else's save).
+ *
+ * A buffer qualifies when it has unsaved edits and NONE of these hold:
+ *  - it's `stale` (the server moved on underneath it — the banner asks
+ *    the person first; saving now would just produce a conflict);
+ *  - a save for it is already in flight (`busy`) — when that finishes
+ *    the workbench re-plans, so edits typed during the round trip are
+ *    picked up then rather than dropped;
+ *  - it has an unresolved save conflict (`conflicts`) — Reload theirs /
+ *    Keep mine is a decision only the person can make;
+ *  - its last attempt FAILED for exactly this text (`failed[path]` is
+ *    that text). Without this an offline person would retry every
+ *    debounce period forever; with it, the next keystroke (different
+ *    text) is what earns the next retry.
+ *
+ * @param {object} args
+ * @param {string[]} args.tabs
+ * @param {{[path: string]: {dirty?: boolean, stale?: boolean, edited?: string}}} args.buffers
+ * @param {Iterable<string>} [args.busy]
+ * @param {{[path: string]: unknown}} [args.conflicts]
+ * @param {{[path: string]: string}} [args.failed]
+ * @returns {{path: string, edited: string}[]}
+ */
+export function planAutosave({ tabs, buffers, busy = [], conflicts = {}, failed = {} }) {
+  const busySet = new Set(busy);
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const out = [];
+  for (const path of tabs) {
+    const buffer = buffers[path];
+    if (!buffer || !buffer.dirty || buffer.stale) continue;
+    if (busySet.has(path) || has(conflicts, path)) continue;
+    if (has(failed, path) && failed[path] === buffer.edited) continue;
+    out.push({ path, edited: buffer.edited });
+  }
+  return out;
+}
+
+/**
  * Collapses the per-tab flags the strip and explorer care about —
  * dirty (unsaved edits), stale (changed on the server underneath
  * them), loading (a tab whose file hasn't arrived yet) — into ONE

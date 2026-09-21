@@ -22,8 +22,13 @@
 // app's floating "open chat" bubble sits fixed at the bottom-right of
 // the screen whenever the chat dock is closed — right on top of them.
 // The top-right corner is never under it.
+//
+// W2.5: the chevron beside Save opens the two save-flow toggles
+// (Autosave, Format on save). Their state and the persistence live one
+// level up (savePrefs.js / EditorWorkbench.jsx); this only draws the
+// menu and reports the click.
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, FileCode, Files, Loader2, PanelBottom, PanelRight, Save, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, FileCode, Files, Loader2, PanelBottom, PanelRight, Save, X } from "lucide-react";
 import ContextMenu from "./ContextMenu";
 import { decodeTabFlags, tabLabels } from "../../lib/workbench/tabUtils";
 
@@ -61,9 +66,13 @@ function EditorTabs({
   onToggleBottom,
   previewOpen = false,
   onTogglePreview, // omitted on the single-pane layout: no room for a third pane
+  savePrefs, // {autosave, formatOnSave} (savePrefs.js) — the Save options menu is hidden without it
+  onToggleAutosave,
+  onToggleFormatOnSave,
 }) {
   const stripRef = useRef(null);
   const [menu, setMenu] = useState(null); // {x, y, path} | null
+  const [optionsMenu, setOptionsMenu] = useState(null); // {x, y} | null — the Save options menu (W2.5)
   const flags = useMemo(() => decodeTabFlags(flagsKey), [flagsKey]);
   const labels = useMemo(() => tabLabels(tabs), [tabs]);
 
@@ -194,7 +203,7 @@ function EditorTabs({
         // The old Code view's Save button, kept as a visible control:
         // Cmd/Ctrl-S exists (CodeEditor's onSave) but a phone has no
         // such key, and "where do I save?" shouldn't need a shortcut.
-        <div className="shrink-0 flex items-center px-2 border-l border-[var(--neutral-800)]">
+        <div className="shrink-0 flex items-center gap-1 px-2 border-l border-[var(--neutral-800)]">
           <button
             type="button"
             onClick={onSave}
@@ -204,6 +213,44 @@ function EditorTabs({
             {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
             {saving ? "Saving…" : "Save"}
           </button>
+          {savePrefs && (
+            <button
+              type="button"
+              // While the menu is open, its own outside-pointerdown
+              // dismissal would close it and then this click would
+              // immediately reopen it. Keeping that pointerdown from
+              // reaching the document lets the click below be a plain
+              // toggle instead.
+              onPointerDown={(e) => {
+                if (optionsMenu) e.stopPropagation();
+              }}
+              onClick={(e) => {
+                if (optionsMenu) {
+                  setOptionsMenu(null);
+                  return;
+                }
+                const rect = e.currentTarget.getBoundingClientRect();
+                setOptionsMenu({ x: rect.left, y: rect.bottom + 4 });
+              }}
+              aria-haspopup="menu"
+              aria-expanded={!!optionsMenu}
+              aria-label="Save options"
+              title={
+                savePrefs.autosave || savePrefs.formatOnSave
+                  ? `Save options (${[savePrefs.autosave && "autosave", savePrefs.formatOnSave && "format on save"]
+                      .filter(Boolean)
+                      .join(", ")} on)`
+                  : "Save options"
+              }
+              className={`touch-target flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--neutral-800)] ${
+                savePrefs.autosave || savePrefs.formatOnSave
+                  ? "text-[var(--accent)]"
+                  : "text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
+              }`}
+            >
+              <ChevronDown size={14} />
+            </button>
+          )}
         </div>
       )}
 
@@ -241,6 +288,30 @@ function EditorTabs({
               key: "copy",
               label: "Copy path",
               onSelect: () => navigator.clipboard?.writeText(menu.path).catch(() => {}),
+            },
+          ]}
+        />
+      )}
+
+      {optionsMenu && savePrefs && (
+        <ContextMenu
+          x={optionsMenu.x}
+          y={optionsMenu.y}
+          onClose={() => setOptionsMenu(null)}
+          items={[
+            {
+              key: "autosave",
+              label: "Autosave",
+              checked: savePrefs.autosave,
+              title: "Save automatically shortly after you stop typing",
+              onSelect: onToggleAutosave,
+            },
+            {
+              key: "format",
+              label: "Format on save",
+              checked: savePrefs.formatOnSave,
+              title: "Run Prettier (JS, TS, JSON, CSS, HTML, Markdown) when you press Save or Ctrl/Cmd+S. Autosave never reformats.",
+              onSelect: onToggleFormatOnSave,
             },
           ]}
         />

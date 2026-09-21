@@ -49,7 +49,7 @@ function PendingChanges({ count, onClick }) {
 /**
  * @param {object} props
  * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
- * @param {"saved"|"dirty"|"saving"|"error"|null} props.saveState - null when no file is active
+ * @param {"saved"|"dirty"|"saving"|"error"|"conflict"|null} props.saveState - null when no file is active; "conflict" (W2.5) = the server rejected the save because the file changed underneath it and the person hasn't chosen Reload theirs / Keep mine yet
  * @param {string} [props.saveError] - shown as the tooltip on "Save failed"
  * @param {number} [props.version] - the active buffer's server version
  * @param {string|null} [props.language]
@@ -91,6 +91,11 @@ function StatusBar({
           {saveState === "error" && (
             <span className="text-red-400" title={saveError || undefined}>
               Save failed
+            </span>
+          )}
+          {saveState === "conflict" && (
+            <span className="text-amber-300" title="The server has a newer version of this file">
+              Save conflict
             </span>
           )}
           {saveState === "dirty" && <span className="text-amber-300">Unsaved changes</span>}
