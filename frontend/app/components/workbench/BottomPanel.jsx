@@ -15,6 +15,14 @@
 // a useSplitter) and hands it in. That is also why the resize handle is
 // a plain `onResizeStart` prop — this file doesn't know about splitters,
 // only where the handle goes (its top edge).
+//
+// W2.6: `panels[tabId]` — when the caller has real content for a tab
+// (ProjectSearchPanel for "search", HistoryPanel for "history"), it's
+// rendered in place of that tab's EMPTY_STATES entry. Problems/Console/
+// Terminal have no entry yet and keep showing their placeholder until
+// their own later step fills them in the same way. EditorWorkbench
+// memoizes each node itself (its own header explains why) so passing
+// this object doesn't defeat the memo() below.
 import { memo, useId } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { BOTTOM_TABS } from "../../lib/workbench/layoutPrefs";
@@ -50,11 +58,23 @@ const EMPTY_STATES = {
  * @param {boolean} [props.reserveRight] - keep the strip's right end clear for the app's floating "open chat" bubble (matters on narrow screens, where the tabs reach that far)
  * @param {boolean} [props.resizable=true] - false on the single-pane (phone) layout, where the handle is mouse-only
  * @param {(e: import("react").MouseEvent) => void} [props.onResizeStart] - useSplitter's onHandleMouseDown
+ * @param {Record<string, import("react").ReactNode>} [props.panels] - real tab content, keyed by tab id (W2.6)
  */
-function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, reserveRight = false, resizable = true, onResizeStart }) {
+function BottomPanel({
+  open,
+  activeTab,
+  onSelectTab,
+  onToggle,
+  height,
+  reserveRight = false,
+  resizable = true,
+  onResizeStart,
+  panels,
+}) {
   const uid = useId();
   const bodyId = `${uid}-body`;
   const empty = EMPTY_STATES[activeTab] || EMPTY_STATES.problems;
+  const customPanel = panels?.[activeTab];
 
   return (
     <div
@@ -128,12 +148,14 @@ function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, reserveRi
           id={bodyId}
           role="tabpanel"
           aria-labelledby={`${uid}-tab-${activeTab}`}
-          className="flex-1 min-h-0 overflow-auto px-4 py-3"
+          className={`flex-1 min-h-0 overflow-auto ${customPanel ? "px-2 py-2" : "px-4 py-3"}`}
         >
-          <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
-            <p className="text-xs text-[var(--neutral-400)]">{empty.title}</p>
-            <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">{empty.body}</p>
-          </div>
+          {customPanel || (
+            <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
+              <p className="text-xs text-[var(--neutral-400)]">{empty.title}</p>
+              <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">{empty.body}</p>
+            </div>
+          )}
         </div>
       )}
     </div>

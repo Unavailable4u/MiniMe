@@ -1,0 +1,1059 @@
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 6791389..e2eb79c 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -60,10 +60,11 @@
+ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { X } from "lucide-react";
+ import { authHeaders } from "../../context/SessionContext";
++import { useDaemonStatus } from "../../hooks/useDaemonStatus";
+ import { useExplorerOps } from "../../hooks/useExplorerOps";
+ import { useSplitter } from "../../hooks/useSplitter";
+ import { useViewport } from "../../hooks/useViewport";
+-import { createCloudFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
++import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
+ import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
+ import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
+ import { deleteSummary } from "../../lib/workbench/explorerOps";
+@@ -86,6 +87,8 @@ import {
+ import { loadSavePrefs, saveSavePrefs } from "../../lib/workbench/savePrefs";
+ import { encodeTabFlags, planAutosave, planBufferSync } from "../../lib/workbench/tabUtils";
+ import ConfirmDialog from "../ConfirmDialog";
++import PendingActionBar from "../PendingActionBar";
++import TerminalPanel from "../TerminalPanel";
+ import BottomPanel from "./BottomPanel";
+ import CodeEditor from "./CodeEditor";
+ import ConflictCompareView from "./ConflictCompareView";
+@@ -134,7 +137,17 @@ const EXPLORER_MAX_WIDTH = 480;
+  * search result click, say) instead of the parent needing to know when
+  * CodeEditor's own internal CM6 setup finishes.
+  */
+-const EditorPane = memo(function EditorPane({ path, active, visible, value, onEdit, onSave, onCursor, registerPane }) {
++const EditorPane = memo(function EditorPane({
++  path,
++  active,
++  visible,
++  value,
++  readOnly,
++  onEdit,
++  onSave,
++  onCursor,
++  registerPane,
++}) {
+   const editorRef = useRef(null);
+   const shown = active && visible;
+ 
+@@ -153,6 +166,7 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
+         ref={editorRef}
+         filePath={path}
+         value={value}
++        readOnly={readOnly}
+         onChange={(text) => onEdit(path, text)}
+         onSave={() => onSave(path)}
+         onCursorChange={(pos) => onCursor(path, pos)}
+@@ -162,12 +176,6 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
+ });
+ 
+ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+-  // One provider per (workspace, api) pair — memoized so re-renders
+-  // don't create a new one (which would re-subscribe to Pusher).
+-  const provider = useMemo(
+-    () => createCloudFileProvider({ workspaceId, apiUrl }),
+-    [workspaceId, apiUrl]
+-  );
+   const {
+     state,
+     setActivePath,
+@@ -179,9 +187,26 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     clearStale,
+     closeTabs,
+     setLayout,
++    switchSource,
+     renamePaths,
+   } = useEditorStore();
+ 
++  // W3.1: which provider backs the workbench right now — read from
++  // `layout.source` (see layoutPrefs.js's own header on why it lives
++  // there) rather than component state, so it persists the same way
++  // bottomOpen/previewOpen already do. One provider per (source,
++  // workspace, api) triple — memoized so re-renders don't create a new
++  // one (which would re-subscribe to Pusher for Cloud, or just be
++  // wasteful for Local).
++  const source = state.layout.source;
++  const provider = useMemo(
++    () =>
++      source === "local"
++        ? createLocalFileProvider({ workspaceId, apiUrl })
++        : createCloudFileProvider({ workspaceId, apiUrl }),
++    [source, workspaceId, apiUrl]
++  );
++
+   const [viewport] = useViewport();
+   const isMobile = viewport === "mobile";
+ 
+@@ -295,10 +320,29 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   // specific open pane's live CodeMirror view without CodeEditor itself
+   // needing to know Project Search exists.
+   const paneRefsRef = useRef(new Map());
++  // W3.1: mirrors useDaemonStatus's `live`, read by loadFileList()
++  // above. A ref rather than a dependency so loadFileList's identity
++  // (and the mount effect that calls it) doesn't churn every 5s poll
++  // tick — only a real live/not-live transition should trigger a fetch,
++  // and that's handled separately, by useDaemonStatus's own onLiveChange.
++  const daemonLiveRef = useRef(false);
+ 
+   // ---- file list ----------------------------------------------------
+ 
+   const loadFileList = useCallback(async () => {
++    // W3.1: Local with no live daemon isn't an ERROR to surface (see
++    // Explorer.jsx's own `daemonOffline` branch) — it's an expected,
++    // common state, so this skips the request entirely rather than
++    // letting provider.list() throw a 409 that would otherwise show up
++    // as a scary red banner where a calm "no daemon connected" already
++    // does the job.
++    if (provider.id === "local" && !daemonLiveRef.current) {
++      filesMetaRef.current = null;
++      setFilesMeta(null);
++      setListError(null);
++      setListLoading(false);
++      return null;
++    }
+     const seq = ++listSeqRef.current;
+     setListLoading(true);
+     setListError(null);
+@@ -850,6 +894,66 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     [fileLoaded]
+   );
+ 
++  // ---- local source / daemon / terminal (W3.1) ---------------------------
++
++  // Fires only on a not-live -> live transition (see useDaemonStatus's
++  // own header) — the moment a daemon connects, go fetch the tree, the
++  // same "don't make the person hit refresh themselves" behavior
++  // LocalWorkspaceTab.jsx's own status effect already had.
++  const handleDaemonLive = useCallback(() => {
++    refreshRef.current();
++  }, []);
++  const { live: daemonLive, checked: daemonChecked } = useDaemonStatus(
++    source === "local" ? workspaceId : null,
++    handleDaemonLive
++  );
++  daemonLiveRef.current = daemonLive;
++
++  // Switching source (the Explorer header's Project files / Local
++  // folder toggle): a path under one source means nothing under the
++  // other, so this is a hard reset of tabs/buffers (SWITCH_SOURCE
++  // itself does that part — see editorStore.js). The only thing this
++  // wrapper adds is asking first when there's something to lose,
++  // exactly like requestClose() already does for a single dirty tab.
++  const [pendingSourceChange, setPendingSourceChange] = useState(null);
++  const requestChangeSource = useCallback(
++    (next) => {
++      if (next === stateRef.current.layout.source) return;
++      const dirty = Object.values(stateRef.current.buffers).some((b) => b.dirty);
++      if (dirty) setPendingSourceChange(next);
++      else switchSource(next);
++    },
++    [switchSource]
++  );
++
++  // Any pending local action (a terminal command, and in part 2 a
++  // proposed write) landing is also the moment the tree might be stale
++  // — a command can create/delete/modify files just as easily as a
++  // save can. Mirrors LocalWorkspaceTab.jsx's own
++  // onConfirmed={() => live && loadRoot(...)}.
++  const handleActionConfirmed = useCallback(() => {
++    if (stateRef.current.layout.source === "local") refreshRef.current();
++  }, []);
++
++  // The Terminal tab's real content once Local is active — reusing
++  // components/TerminalPanel.jsx as-is (it already owns its own
++  // propose/confirm/deny round trip for execute_command; nothing here
++  // duplicates that). Cloud keeps BottomPanel's own EMPTY_STATES.terminal
++  // copy, which already explains terminals are a local-folder thing.
++  const terminalPanelNode = useMemo(() => {
++    if (provider.id !== "local") return null;
++    if (daemonChecked && !daemonLive) {
++      return (
++        <div className="h-full flex flex-col items-center justify-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3">
++          <span>
++            No daemon connected — see <code className="text-[10px]">daemon/README.md</code>.
++          </span>
++        </div>
++      );
++    }
++    return <TerminalPanel workspaceId={workspaceId} live={daemonLive} />;
++  }, [provider.id, workspaceId, daemonLive, daemonChecked]);
++
+   // ---- panel layout (W2.3b) --------------------------------------------
+ 
+   const { layout } = state;
+@@ -979,8 +1083,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   );
+ 
+   const bottomPanels = useMemo(
+-    () => ({ search: searchPanelNode, history: historyPanelNode }),
+-    [searchPanelNode, historyPanelNode]
++    () => ({
++      search: searchPanelNode,
++      history: historyPanelNode,
++      ...(terminalPanelNode ? { terminal: terminalPanelNode } : {}),
++    }),
++    [searchPanelNode, historyPanelNode, terminalPanelNode]
+   );
+ 
+   // ---- autosave + unsaved-edits guards (W2.5) --------------------------
+@@ -1109,6 +1217,13 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+       onKeyDown={handleWorkbenchKeyDown}
+       className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
+     >
++      {/* W3.1: a proposed local action (a terminal command today; a
++          proposed write in part 2) awaiting Confirm/Deny. Above the
++          whole main row, not just the terminal tab, the same placement
++          LocalWorkspaceTab.jsx already used — a person mid-edit in the
++          explorer/editor column should still see it land. */}
++      {provider.id === "local" && <PendingActionBar workspaceId={workspaceId} onConfirmed={handleActionConfirmed} />}
++
+       {/* Main row: explorer | splitter | editor column | splitter |
+           preview column. The bottom panel and the status bar sit below
+           it. The row keeps a minimum height so a tall bottom panel
+@@ -1127,7 +1242,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+             flagsKey={flagsKey}
+             onOpenFile={openFile}
+             onRefresh={handleRefresh}
+-            onDownloadZip={downloadZip}
++            onDownloadZip={provider.id === "local" ? undefined : downloadZip}
+             downloading={downloading}
+             downloadError={downloadError}
+             canModify={provider.capabilities.write}
+@@ -1138,6 +1253,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+             onRequestDelete={requestDelete}
+             onDuplicate={explorerOps.duplicate}
+             onMove={explorerOps.move}
++            source={source}
++            onChangeSource={requestChangeSource}
++            daemonLive={daemonLive}
++            daemonChecked={daemonChecked}
+           />
+         </div>
+ 
+@@ -1275,6 +1394,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+                   active={path === activePath}
+                   visible={!editorColumnHidden}
+                   value={buffer.edited}
++                  readOnly={!provider.capabilities.write || !!buffer.truncated}
+                   onEdit={handleEdit}
+                   onSave={saveFile}
+                   onCursor={handleCursor}
+@@ -1361,6 +1481,21 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+         onCancel={() => setPendingDelete(null)}
+       />
+ 
++      {/* W3.1: switching source is a hard reset of open tabs (see
++          editorStore.js's SWITCH_SOURCE) — same discard-and-confirm
++          shape as closing a dirty tab, just for everything open at once. */}
++      <ConfirmDialog
++        open={!!pendingSourceChange}
++        title={pendingSourceChange === "local" ? "Switch to your local folder?" : "Switch to project files?"}
++        message="Every open tab here has unsaved changes that don't exist under the other source. Switching will close them and discard those changes."
++        confirmLabel="Switch"
++        onConfirm={() => {
++          if (pendingSourceChange) switchSource(pendingSourceChange);
++          setPendingSourceChange(null);
++        }}
++        onCancel={() => setPendingSourceChange(null)}
++      />
++
+       {/* W2.5: "Compare" on the conflict bar. The right-hand side is the
+           buffer as it is NOW (what "Keep mine" would keep), falling back
+           to what the failed save sent. Both decisions are echoed here so
+diff --git a/frontend/app/components/workbench/Explorer.jsx b/frontend/app/components/workbench/Explorer.jsx
+index 58d5ecf..8cafdb7 100644
+--- a/frontend/app/components/workbench/Explorer.jsx
++++ b/frontend/app/components/workbench/Explorer.jsx
+@@ -30,17 +30,20 @@
+ // this whole tree on every keystroke.
+ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import {
++  Cloud,
+   Copy,
+   CopyPlus,
+   Download,
+   FilePlus,
+   FolderPlus,
++  HardDrive,
+   Loader2,
+   MessageSquarePlus,
+   Pencil,
+   RefreshCw,
+   Search,
+   Trash2,
++  WifiOff,
+   X,
+ } from "lucide-react";
+ import {
+@@ -117,6 +120,14 @@ function Explorer({
+   onRequestDelete,
+   onDuplicate,
+   onMove,
++  // W3.1: all four omitted (the default, from EditorWorkbench not
++  // passing them) means "no switcher" — the header row below simply
++  // doesn't render, so this stays a no-op change for any caller that
++  // predates the source switcher.
++  source, // "cloud" | "local" | undefined
++  onChangeSource, // (next: "cloud"|"local") => void
++  daemonLive = false,
++  daemonChecked = false,
+ }) {
+   const [expanded, setExpanded] = useState(() => new Set());
+   const [selection, setSelection] = useState(() => new Set()); // paths, files and folders
+@@ -165,6 +176,10 @@ function Explorer({
+ 
+   const typeOf = (path) => (fileSetRef.current.has(path) ? "file" : "dir");
+   const editable = canModify && !busy;
++  // W3.1: Local selected, the status poll has resolved at least once,
++  // and it said not live. Distinct from `error` (a real, unexpected
++  // failure) on purpose — see this component's own render branch below.
++  const daemonOffline = source === "local" && daemonChecked && !daemonLive;
+ 
+   // ---- effects -----------------------------------------------------------
+ 
+@@ -755,17 +770,23 @@ function Explorer({
+           )}
+           {/* Moved here from the old CodeView's own header (patch 11's
+               ZIP download) — the plan puts it in the explorer header.
+-              Disabled until there's at least one saved file. */}
+-          <button
+-            type="button"
+-            onClick={onDownloadZip}
+-            disabled={downloading || fileCount === 0}
+-            aria-label="Download all files as ZIP"
+-            title="Download as ZIP"
+-            className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+-          >
+-            {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+-          </button>
++              Disabled until there's at least one saved file. W3.1:
++              omitted entirely (not just disabled) when the caller
++              doesn't pass a handler — Local has no equivalent
++              whole-folder export route, and a visibly-enabled button
++              that silently does nothing is worse than no button. */}
++          {onDownloadZip && (
++            <button
++              type="button"
++              onClick={onDownloadZip}
++              disabled={downloading || fileCount === 0}
++              aria-label="Download all files as ZIP"
++              title="Download as ZIP"
++              className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
++            >
++              {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
++            </button>
++          )}
+           <button
+             type="button"
+             onClick={onRefresh}
+@@ -779,6 +800,48 @@ function Explorer({
+         </div>
+       </div>
+ 
++      {/* W3.1: only rendered when a caller actually wires source
++          switching in (see this component's own header comment on the
++          four new props) — omitting them keeps every OTHER mounting of
++          Explorer (there isn't one today, but nothing stops a future
++          one) exactly as it was. */}
++      {onChangeSource && (
++        <div className="shrink-0 flex items-center gap-1 px-2 py-1.5 border-b border-[var(--neutral-800)]">
++          <button
++            type="button"
++            onClick={() => onChangeSource("cloud")}
++            aria-pressed={source === "cloud"}
++            className={`flex-1 flex items-center justify-center gap-1 rounded-md py-1 text-[10px] font-medium min-h-[var(--viewport-touch-target)] ${
++              source === "cloud"
++                ? "bg-[var(--neutral-800)] text-[var(--neutral-100)]"
++                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
++            }`}
++          >
++            <Cloud size={11} /> Project files
++          </button>
++          <button
++            type="button"
++            onClick={() => onChangeSource("local")}
++            aria-pressed={source === "local"}
++            title={source === "local" ? (daemonLive ? "Daemon connected" : "No daemon connected") : undefined}
++            className={`flex-1 flex items-center justify-center gap-1 rounded-md py-1 text-[10px] font-medium min-h-[var(--viewport-touch-target)] ${
++              source === "local"
++                ? "bg-[var(--neutral-800)] text-[var(--neutral-100)]"
++                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
++            }`}
++          >
++            <HardDrive size={11} />
++            Local folder
++            {source === "local" && (
++              <span
++                aria-hidden="true"
++                className={`w-1.5 h-1.5 rounded-full ${daemonLive ? "bg-emerald-500" : "bg-[var(--neutral-700)]"}`}
++              />
++            )}
++          </button>
++        </div>
++      )}
++
+       {fileCount > 0 && (
+         <div className="shrink-0 px-2 py-1.5 border-b border-[var(--neutral-800)]">
+           <div className="flex items-center gap-1.5 rounded border border-[var(--neutral-800)] bg-[var(--neutral-950)] px-1.5 focus-within:border-[var(--neutral-600)]">
+@@ -831,7 +894,15 @@ function Explorer({
+         }`}
+       >
+         {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
+-        {loading && !filesMeta ? (
++        {daemonOffline ? (
++          <div className="flex flex-col items-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3 py-8">
++            <WifiOff size={18} className="text-[var(--neutral-700)]" />
++            <span>
++              No daemon connected — see <code className="text-[10px]">daemon/README.md</code>. Pair a local folder
++              and this fills in automatically once it connects.
++            </span>
++          </div>
++        ) : loading && !filesMeta ? (
+           <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
+             <Loader2 size={12} className="animate-spin" /> Loading…
+           </div>
+diff --git a/frontend/app/components/workbench/HistoryPanel.jsx b/frontend/app/components/workbench/HistoryPanel.jsx
+index 66c461b..18c44d4 100644
+--- a/frontend/app/components/workbench/HistoryPanel.jsx
++++ b/frontend/app/components/workbench/HistoryPanel.jsx
+@@ -63,7 +63,11 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+     setError(null);
+     setCompareVersion(null);
+     setRestoreError(null);
+-    if (!path || !provider) return;
++    // W3.1: Local has no version table (capabilities.history: false) —
++    // don't call provider.history() at all rather than letting it throw
++    // (LocalFileProvider doesn't even implement it) and surface that as
++    // a generic error banner.
++    if (!path || !provider || !provider.capabilities?.history) return;
+     const seq = ++seqRef.current;
+     setLoading(true);
+     provider
+@@ -112,6 +116,18 @@ export default function HistoryPanel({ path, provider, currentContent, currentVe
+     );
+   }
+ 
++  if (!provider?.capabilities?.history) {
++    return (
++      <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
++        <p className="text-xs text-[var(--neutral-400)]">No history for local files</p>
++        <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">
++          Version history is only kept for project files stored in the cloud. Local files are whatever is on disk
++          right now.
++        </p>
++      </div>
++    );
++  }
++
+   return (
+     <div className="h-full flex flex-col">
+       <div className="shrink-0 flex items-center justify-between px-1 pb-2 text-[11px]">
+diff --git a/frontend/app/hooks/useDaemonStatus.js b/frontend/app/hooks/useDaemonStatus.js
+new file mode 100644
+index 0000000..dc69c9b
+--- /dev/null
++++ b/frontend/app/hooks/useDaemonStatus.js
+@@ -0,0 +1,68 @@
++"use client";
++// frontend/app/hooks/useDaemonStatus.js — W3.1 (Build Workbench plan).
++// Ported from components/tabs/LocalWorkspaceTab.jsx's own inline
++// STATUS_POLL_MS/fetchStatus (see that file's header) so
++// EditorWorkbench.jsx's Local source can poll the same way without
++// duplicating the fetch — a short interval here is fine because
++// api/routes/local_workspace.py's local_status() docstring calls it
++// out explicitly: "a registry lookup, not a daemon round-trip".
++import { useEffect, useRef, useState } from "react";
++import { authHeaders } from "../context/SessionContext";
++
++const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
++const STATUS_POLL_MS = 5000;
++
++async function fetchStatus(wsId) {
++  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/local/status`, {
++    headers: await authHeaders(),
++  });
++  if (!res.ok) return { live: false };
++  return res.json();
++}
++
++/**
++ * @param {string|null} workspaceId - pass null to stop polling (e.g.
++ *   Cloud is the active source right now — there's nothing to check)
++ * @param {(nowLive: boolean) => void} [onLiveChange] - fires only on a
++ *   false -> true transition, the "the daemon just came up, go fetch
++ *   the tree" moment LocalWorkspaceTab.jsx's own status effect used
++ *   inline. Never fires on a live -> false transition — there's nothing
++ *   useful to *do* the instant a daemon drops, only something to *show*
++ *   (the `live` flag this hook already returns).
++ * @returns {{live: boolean, checked: boolean}} `checked` is false until
++ *   the first poll resolves, so callers can avoid a "not connected"
++ *   flash before they actually know one way or the other.
++ */
++export function useDaemonStatus(workspaceId, onLiveChange) {
++  const [live, setLive] = useState(false);
++  const [checked, setChecked] = useState(false);
++  const onLiveChangeRef = useRef(onLiveChange);
++  onLiveChangeRef.current = onLiveChange;
++
++  useEffect(() => {
++    setLive(false);
++    setChecked(false);
++    if (!workspaceId) return undefined;
++    let cancelled = false;
++
++    const check = async () => {
++      const status = await fetchStatus(workspaceId);
++      if (cancelled) return;
++      setChecked(true);
++      setLive((prevLive) => {
++        const nowLive = !!status.live;
++        if (!prevLive && nowLive) onLiveChangeRef.current?.(nowLive);
++        return nowLive;
++      });
++    };
++
++    check();
++    const interval = setInterval(check, STATUS_POLL_MS);
++    return () => {
++      cancelled = true;
++      clearInterval(interval);
++    };
++  }, [workspaceId]);
++
++  return { live, checked };
++}
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+index 47bf790..499206b 100644
+--- a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -323,14 +323,14 @@ assertEqual(ren.tabs, ["b.js"], "two tabs that end up on one path collapse to a
+ 
+ // --- SET_LAYOUT (W2.3b) ----------------------------------------------
+ 
+-const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false };
++const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false, source: "cloud" };
+ const withLayout = { ...initialState, layout: { ...defaultLayout } };
+ 
+ let laid = editorReducer(withLayout, { type: "SET_LAYOUT", layout: { bottomOpen: true } });
+-assertEqual(laid.layout, { bottomOpen: true, bottomTab: "problems", previewOpen: false }, "SET_LAYOUT merges a partial over the current layout");
++assertEqual(laid.layout, { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" }, "SET_LAYOUT merges a partial over the current layout");
+ 
+ laid = editorReducer(laid, { type: "SET_LAYOUT", layout: { bottomTab: "history", previewOpen: true } });
+-assertEqual(laid.layout, { bottomOpen: true, bottomTab: "history", previewOpen: true }, "SET_LAYOUT can change several fields at once, leaving the rest alone");
++assertEqual(laid.layout, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" }, "SET_LAYOUT can change several fields at once, leaving the rest alone");
+ 
+ const before = laid;
+ assertEqual(
+@@ -346,12 +346,12 @@ assertEqual(laid === before, true, "...and an update made only of invalid fields
+ laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", bottomOpen: false } });
+ assertEqual(
+   laid.layout,
+-  { bottomOpen: false, bottomTab: "history", previewOpen: true },
++  { bottomOpen: false, bottomTab: "history", previewOpen: true, source: "cloud" },
+   "...while the valid fields in the same update still apply"
+ );
+ 
+ laid = editorReducer(before, { type: "SET_LAYOUT", layout: { somethingElse: 1 } });
+-assertEqual(Object.keys(laid.layout).sort(), ["bottomOpen", "bottomTab", "previewOpen"], "SET_LAYOUT drops keys that aren't layout fields");
++assertEqual(Object.keys(laid.layout).sort(), ["bottomOpen", "bottomTab", "previewOpen", "source"], "SET_LAYOUT drops keys that aren't layout fields");
+ 
+ laid = editorReducer(initialState, { type: "SET_LAYOUT", layout: { previewOpen: true } });
+ assertEqual(laid.layout.previewOpen, true, "SET_LAYOUT works from an empty `layout: {}` (fields default, not undefined)");
+@@ -360,6 +360,46 @@ assertEqual(laid.layout.bottomTab, "problems", "...and the missing fields are fi
+ const opened = editorReducer(withLayout, { type: "SET_ACTIVE_PATH", path: "a.js" });
+ assertEqual(opened.layout, withLayout.layout, "unrelated actions leave layout untouched");
+ 
++// --- W3.1: SWITCH_SOURCE ------------------------------------------------
++
++const cloudSession = editorReducer(
++  { ...initialState, layout: { ...defaultLayout, bottomOpen: true, bottomTab: "history" } },
++  { type: "SET_ACTIVE_PATH", path: "a.js" }
++);
++const toLocal = editorReducer(cloudSession, { type: "SWITCH_SOURCE", source: "local" });
++assertEqual(toLocal.layout.source, "local", "SWITCH_SOURCE flips layout.source");
++assertEqual(toLocal.layout.bottomOpen, true, "...while leaving other layout fields (bottomOpen) alone");
++assertEqual(toLocal.layout.bottomTab, "history", "...and (bottomTab) alone");
++assertEqual(toLocal.tabs, [], "SWITCH_SOURCE clears open tabs — a cloud path means nothing under local");
++assertEqual(toLocal.activePath, null, "...and the active path");
++assertEqual(Object.keys(toLocal.buffers).length, 0, "...and every buffer");
++
++const same = editorReducer(toLocal, { type: "SWITCH_SOURCE", source: "local" });
++assertEqual(same === toLocal, true, "SWITCH_SOURCE to the already-active source is a no-op (same state object)");
++
++// --- W3.1: FILE_LOADED / SAVE_SUCCESS carry `truncated` -----------------
++
++const truncatedLoad = editorReducer(initialState, {
++  type: "FILE_LOADED",
++  path: "big.log",
++  file: { content: "partial...", truncated: true },
++});
++assertEqual(truncatedLoad.buffers["big.log"].truncated, true, "FILE_LOADED carries a truncated read onto the buffer");
++
++const untruncatedLoad = editorReducer(initialState, {
++  type: "FILE_LOADED",
++  path: "a.py",
++  file: { content: "print(1)" },
++});
++assertEqual(untruncatedLoad.buffers["a.py"].truncated, false, "FILE_LOADED without `truncated` defaults to false");
++
++const savedOverTruncated = editorReducer(truncatedLoad, {
++  type: "SAVE_SUCCESS",
++  path: "big.log",
++  file: { content: "the whole file now", version: 1 },
++});
++assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCESS always clears truncated — a save writes the whole buffer");
++
+ // --- W2.5: resolving a save conflict (409) ---------------------------------
+ //
+ // EditorWorkbench.jsx adds NO reducer action for these: "Reload theirs" is
+diff --git a/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs b/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs
+index 5d22a5f..02e45ba 100644
+--- a/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/layoutPrefs.test.mjs
+@@ -61,7 +61,7 @@ assertEqual(
+   ["problems", "console", "terminal", "history"],
+   "the bottom panel has the four planned tabs, in order"
+ );
+-assertEqual(DEFAULT_LAYOUT, { bottomOpen: false, bottomTab: "problems", previewOpen: false }, "defaults: panel and preview closed, Problems selected");
++assertEqual(DEFAULT_LAYOUT, { bottomOpen: false, bottomTab: "problems", previewOpen: false, source: "cloud" }, "defaults: panel and preview closed, Problems selected, cloud source");
+ 
+ // --- normalizeLayout --------------------------------------------------
+ 
+@@ -72,33 +72,33 @@ assertEqual(normalizeLayout([true, "history"]), DEFAULT_LAYOUT, "an array normal
+ assertEqual(normalizeLayout({}), DEFAULT_LAYOUT, "an empty object normalizes to the defaults");
+ 
+ assertEqual(
+-  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true }),
+-  { bottomOpen: true, bottomTab: "console", previewOpen: true },
++  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true, source: "local" }),
++  { bottomOpen: true, bottomTab: "console", previewOpen: true, source: "local" },
+   "a valid layout passes through unchanged"
+ );
+ assertEqual(
+-  normalizeLayout({ bottomOpen: "true", bottomTab: "search", previewOpen: 1 }),
++  normalizeLayout({ bottomOpen: "true", bottomTab: "search", previewOpen: 1, source: "nope" }),
+   DEFAULT_LAYOUT,
+-  "wrong types and an unknown tab id each fall back to their default"
++  "wrong types, an unknown tab id and an unknown source each fall back to their default"
+ );
+ assertEqual(
+   normalizeLayout({ bottomOpen: true, bottomTab: "nope", previewOpen: true }),
+-  { bottomOpen: true, bottomTab: "problems", previewOpen: true },
++  { bottomOpen: true, bottomTab: "problems", previewOpen: true, source: "cloud" },
+   "one bad field doesn't discard the good ones"
+ );
+ assertEqual(
+   Object.keys(normalizeLayout({ bottomOpen: true, extra: 1, __proto__: { x: 1 } })).sort(),
+-  ["bottomOpen", "bottomTab", "previewOpen"],
++  ["bottomOpen", "bottomTab", "previewOpen", "source"],
+   "unknown keys are dropped"
+ );
+ assertEqual(
+-  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true }),
+-  { bottomOpen: true, bottomTab: "history", previewOpen: true },
++  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
++  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" },
+   "with a fallback, invalid/missing fields take the fallback's values instead of the defaults"
+ );
+ assertEqual(
+-  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true }),
+-  { bottomOpen: false, bottomTab: "history", previewOpen: true },
++  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
++  { bottomOpen: false, bottomTab: "history", previewOpen: true, source: "local" },
+   "...and valid fields still win over the fallback"
+ );
+ assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(null)), true, "DEFAULT_LAYOUT is frozen, but normalizeLayout returns a fresh object callers may own");
+@@ -106,6 +106,7 @@ assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(
+ assertEqual(sameLayout(normalizeLayout(null), DEFAULT_LAYOUT), true, "sameLayout: equal layouts");
+ assertEqual(sameLayout({ ...DEFAULT_LAYOUT, bottomTab: "history" }, DEFAULT_LAYOUT), false, "sameLayout: a different tab");
+ assertEqual(sameLayout({ ...DEFAULT_LAYOUT, previewOpen: true }, DEFAULT_LAYOUT), false, "sameLayout: a different flag");
++assertEqual(sameLayout({ ...DEFAULT_LAYOUT, source: "local" }, DEFAULT_LAYOUT), false, "sameLayout: a different source");
+ 
+ // --- storage ----------------------------------------------------------
+ 
+@@ -113,10 +114,10 @@ assertEqual(layoutStorageKey("ws-1"), "minime_build_editor_layout:ws-1", "the st
+ assertEqual(layoutStorageKey("ws-1") === layoutStorageKey("ws-2"), false, "two workspaces don't share a layout");
+ 
+ let store = fakeStorage();
+-saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true });
++saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" });
+ assertEqual(
+   loadLayout(store, "ws-1"),
+-  { bottomOpen: true, bottomTab: "history", previewOpen: true },
++  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" },
+   "a saved layout loads back identically"
+ );
+ assertEqual(loadLayout(store, "ws-2"), DEFAULT_LAYOUT, "another workspace still gets the defaults");
+@@ -128,7 +129,7 @@ store = fakeStorage();
+ saveLayout(store, "ws-1", { bottomOpen: true, junk: "x" });
+ assertEqual(
+   JSON.parse(store.data[layoutStorageKey("ws-1")]),
+-  { bottomOpen: true, bottomTab: "problems", previewOpen: false },
++  { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" },
+   "what's written is the normalized layout, never the caller's raw object"
+ );
+ 
+@@ -137,7 +138,7 @@ assertEqual(loadLayout(store, "ws-1"), DEFAULT_LAYOUT, "an unparseable saved val
+ store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ bottomOpen: true, bottomTab: "gone" }) });
+ assertEqual(
+   loadLayout(store, "ws-1"),
+-  { bottomOpen: true, bottomTab: "problems", previewOpen: false },
++  { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" },
+   "a saved value naming a tab that no longer exists keeps the rest and defaults the tab"
+ );
+ store = fakeStorage({ [layoutStorageKey("ws-1")]: "null" });
+@@ -165,6 +166,13 @@ assertEqual(true, true, "storage that throws on write/remove: save is swallowed"
+ 
+ assertEqual(browserStorage(), null, "browserStorage() is null outside a browser (no `window` under node)");
+ 
++// --- W3.1: source ------------------------------------------------------
++
++assertEqual(normalizeLayout({ source: "local" }).source, "local", "a valid source passes through");
++assertEqual(normalizeLayout({ source: "dropbox" }).source, "cloud", "an unknown source falls back to cloud");
++assertEqual(normalizeLayout({ source: "local" }, { ...DEFAULT_LAYOUT, source: "cloud" }).source, "local", "a valid source still wins over the fallback");
++assertEqual(normalizeLayout({}, { ...DEFAULT_LAYOUT, source: "local" }).source, "local", "a missing source takes the fallback's value");
++
+ // --- size bounds ------------------------------------------------------
+ 
+ // A comfortable 800px-tall workbench: 70% (560) vs. room (800 - 24 - 160 = 616) → 560.
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+index b1d92b1..8cd5941 100644
+--- a/frontend/app/lib/workbench/editorStore.js
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -102,6 +102,11 @@ export function editorReducer(state, action) {
+     // A provider.read(path) resolved. `file` is the FileProvider's
+     // file shape (content/language/version/updated_at). `saved` and
+     // `edited` start equal — nothing to save until the user types.
++    // `truncated` (W3.1): only Local's read() ever sets this (a file
++    // over the daemon's read limit) — the workbench treats a truncated
++    // buffer as read-only regardless of the provider's own
++    // capabilities.write, since saving a partial file would silently
++    // chop off the rest of it.
+     case "FILE_LOADED": {
+       const { path, file } = action;
+       return {
+@@ -116,6 +121,7 @@ export function editorReducer(state, action) {
+             stale: false,
+             language: file.language || null,
+             updatedAt: file.updated_at || null,
++            truncated: !!file.truncated,
+           },
+         },
+       };
+@@ -170,6 +176,7 @@ export function editorReducer(state, action) {
+             stale: false,
+             language: file.language ?? buffer?.language ?? null,
+             updatedAt: file.updated_at || null,
++            truncated: false, // a save always writes the whole buffer, never a partial read
+           },
+         },
+       };
+@@ -294,6 +301,24 @@ export function editorReducer(state, action) {
+       };
+     }
+ 
++    // W3.1: switching the Explorer's source (Project files / Local
++    // folder). A path under one source means nothing under the other,
++    // so this resets tabs/buffers/activePath back to empty at the same
++    // time it flips `layout.source` — a caller (EditorWorkbench) is
++    // expected to have already confirmed discarding any unsaved edits
++    // BEFORE dispatching this, the same way closing a dirty tab already
++    // asks first (see EditorWorkbench.jsx's requestClose()); this
++    // action itself doesn't know or care whether anything was dirty.
++    // A no-op (same state returned) when the source isn't actually
++    // changing, so clicking the already-active source doesn't wipe the
++    // open tabs.
++    case "SWITCH_SOURCE": {
++      const { source } = action;
++      const current = normalizeLayout(state.layout);
++      if (current.source === source) return state;
++      return { ...initialState, layout: normalizeLayout({ ...current, source }, current) };
++    }
++
+     default:
+       return state;
+   }
+@@ -332,6 +357,7 @@ export function EditorStoreProvider({ children, initialLayout }) {
+       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
+       closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
+       setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
++      switchSource: (source) => dispatch({ type: "SWITCH_SOURCE", source }),
+       renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
+     }),
+     [dispatch]
+diff --git a/frontend/app/lib/workbench/fileProviders.js b/frontend/app/lib/workbench/fileProviders.js
+index ca73965..c850179 100644
+--- a/frontend/app/lib/workbench/fileProviders.js
++++ b/frontend/app/lib/workbench/fileProviders.js
+@@ -1,11 +1,11 @@
+ // frontend/app/lib/workbench/fileProviders.js — W2.2 (Build Workbench
+-// plan, decision D6). `FileProvider` interface with one implementation
+-// today (Cloud); `LocalFileProvider` follows in W3.1 once the daemon
+-// side of things exists, behind this exact same shape. Explorer/tabs/
+-// search/chips (W2.3+) talk to whichever provider is active through
+-// this contract only, never to a route path directly — that's what
+-// makes "merge Local Files into Build, daemon later" a real,
+-// incremental change instead of a rewrite (plan §1.3/§2 D6).
++// plan, decision D6). `FileProvider` interface with two implementations:
++// Cloud (workspace_code_files) and, as of W3.1, Local (a paired daemon
++// folder) — both behind this exact same shape. Explorer/tabs/search/
++// chips (W2.3+) talk to whichever provider is active through this
++// contract only, never to a route path directly — that's what makes
++// "merge Local Files into Build, daemon later" a real, incremental
++// change instead of a rewrite (plan §1.3/§2 D6).
+ //
+ // Contract (plan §5, step W2.2):
+ //   id                          — "cloud" | "local"; for display/logging,
+@@ -39,6 +39,26 @@
+ // git history for the pre-W2.2 shape) — folded in here so every
+ // consumer of this provider gets live refresh for free instead of each
+ // reinventing the channel-name/bind_global/unbind_global dance.
++//
++// LocalFileProvider (W3.1) wraps api/routes/local_workspace.py's
++// list_dir/read_file/status routes instead, over a PAIRED local folder
++// via the daemon. Three real differences from Cloud, all load-bearing:
++//   - list() has no flat listing on the server to ask for (the daemon's
++//     list_dir only returns one directory's own children) — see this
++//     provider's own comment for the bounded, ignore-listed walk that
++//     turns repeated list_dir calls into the same flat {path: meta}
++//     shape buildFileTree() already expects, unchanged, from Cloud.
++//   - capabilities.writeNeedsConfirm is true: a person's write needs a
++//     human OK on the other end before it touches their disk. write()
++//     itself is deliberately NOT wired to that flow here — a generic
++//     caller that didn't check writeNeedsConfirm first should get a
++//     loud error, not a silent no-op or a surprise unconfirmed write.
++//     EditorWorkbench's save flow calls propose()/confirm() directly
++//     instead (W3.1 part 2).
++//   - capabilities.history/watch are both false: there's no version
++//     table for local files (only workspace_code_files has one) and no
++//     push channel that knows when something outside this tab changed
++//     a file on disk.
+ "use client";
+ import { authHeaders } from "../../context/SessionContext";
+ import { getPusherClient } from "../pusherClient";
+@@ -196,3 +216,169 @@ export function createCloudFileProvider({ workspaceId, apiUrl }) {
+     },
+   };
+ }
++
++// ---------------------------------------------------------------------
++// W3.1 — LocalFileProvider
++// ---------------------------------------------------------------------
++
++// Skipped outright while walking a paired folder — the same defaults
++// most local dev tools already ignore by convention. A paired folder is
++// expected to be a real project (see daemon/README.md), not an
++// arbitrary drive, but these are exactly the directories that turn a
++// "list everything" walk into thousands of pointless round trips over
++// the daemon's websocket if someone pairs a repo root that still has
++// them checked out.
++const LOCAL_IGNORE_DIR_NAMES = new Set([
++  "node_modules", ".git", ".next", ".venv", "venv", "__pycache__",
++  "dist", "build", ".turbo", ".cache", "target", ".idea", ".vscode",
++]);
++
++// Safety valve, not a expected ceiling: a normal paired project won't
++// come close. Bounds the damage from a folder paired one level too high
++// (a whole drive, a monorepo with no ignore-listed vendor dir) to "the
++// explorer shows a truncated listing", not "hundreds of list_dir round
++// trips before the tab is usable".
++const LOCAL_LIST_MAX_ENTRIES = 5000;
++
++/**
++ * @param {{workspaceId: string, apiUrl: string}} config
++ * @returns a FileProvider backed by a paired local folder, over the
++ *   daemon (eo/local_workspace_tools.py via api/routes/local_workspace.py)
++ */
++export function createLocalFileProvider({ workspaceId, apiUrl }) {
++  const base = `${apiUrl}/api/workspaces/${workspaceId}/local`;
++
++  async function apiPost(path, body) {
++    const res = await fetch(`${base}${path}`, {
++      method: "POST",
++      headers: await authHeaders({ json: true }),
++      body: JSON.stringify(body),
++    });
++    if (!res.ok) throw new Error(await parseErrorDetail(res));
++    return res.json();
++  }
++
++  return {
++    id: "local",
++    capabilities: {
++      // W3.1 part 1 (this patch) is read-only: browsing and opening
++      // work, but nothing calls write()/remove()/move()/mkdir() yet, so
++      // there's nothing to gate behind a confirmation dialog in the UI
++      // itself. `write` flips to true, and the explorer's file
++      // operations along with it (Explorer.jsx already keys its New/
++      // Rename/Delete/Duplicate affordances off capabilities.write —
++      // see canModify there), once part 2 wires Save through
++      // propose()/confirm() below.
++      write: false,
++      writeNeedsConfirm: true,
++      history: false, // no version table for local files — HistoryPanel shows a fitting empty state instead of calling this
++      search: false, // unused: Project Search (W2.6) works over any provider's read(), regardless of this flag — see projectSearch.js's own header
++      terminal: true,
++      watch: false, // no push channel for changes made outside this tab
++    },
++
++    /** Cheap poll target — see api/routes/local_workspace.py's own docstring. Not part of the base FileProvider contract; hooks/useDaemonStatus.js is the intended caller. */
++    async status() {
++      const res = await fetch(`${base}/status`, { headers: await authHeaders() });
++      if (!res.ok) return { live: false };
++      return res.json();
++    },
++
++    /**
++     * The daemon has no flat "list everything" call, only list_dir for
++     * one directory at a time — so this walks the tree breadth-first,
++     * skipping LOCAL_IGNORE_DIR_NAMES and stopping at
++     * LOCAL_LIST_MAX_ENTRIES, and hands back the same flat
++     * `{path: {file_path, size}}` shape Cloud's list() does. That's a
++     * real trade-off (this fetches the whole tree up front rather than
++     * lazily per folder, unlike the daemon's own list_dir), made on
++     * purpose so Explorer.jsx/fileTree.js — buildFileTree(), the
++     * expand/collapse tree, the filter box — need ZERO changes to work
++     * with Local: they only ever see a flat filesMeta, exactly like
++     * they already do for Cloud. An unreadable subdirectory (permission
++     * error, deleted mid-walk) is skipped rather than failing the whole
++     * listing; an unreadable ROOT is not — that's "no daemon" or a bad
++     * pairing, and callers (EditorWorkbench) are expected to check
++     * status() before ever calling this rather than routing that
++     * failure through here as a normal empty listing.
++     */
++    async list() {
++      const root = await apiPost("/list_dir", { path: "." });
++      const filesMeta = {};
++      const queue = (root.entries || []).map((entry) => ({ dir: ".", entry }));
++      let count = 0;
++
++      while (queue.length > 0 && count < LOCAL_LIST_MAX_ENTRIES) {
++        const { dir, entry } = queue.shift();
++        if (LOCAL_IGNORE_DIR_NAMES.has(entry.name)) continue;
++        const path = dir === "." ? entry.name : `${dir}/${entry.name}`;
++        if (entry.type === "dir") {
++          try {
++            const data = await apiPost("/list_dir", { path });
++            for (const child of data.entries || []) queue.push({ dir: path, entry: child });
++          } catch {
++            // Skipped, not fatal — see this method's own header.
++          }
++        } else {
++          // No `version` field: every local file compares equal to
++          // itself on a manual refresh (see planBufferSync()'s callers)
++          // rather than ever looking "changed on the server" — a real
++          // consequence of `watch: false`, not an oversight. No
++          // `language` either: CodeEditor's own loadLanguageExtension()
++          // already infers syntax highlighting from the path/extension,
++          // not from this field — it only ever fed the status bar's
++          // label, which falls back to "plain text" gracefully.
++          filesMeta[path] = { file_path: path, size: entry.size ?? null, version: 0 };
++          count += 1;
++        }
++      }
++      return filesMeta;
++    },
++
++    async read(path) {
++      const data = await apiPost("/read_file", { path });
++      return { file_path: data.path, content: data.content, truncated: !!data.truncated };
++    },
++
++    async write() {
++      // See capabilities.writeNeedsConfirm's own comment above — a
++      // generic caller that writes without checking it first should
++      // fail loudly, not silently propose nothing and return as if it
++      // worked.
++      throw new Error("Local files need confirmation before writing — this provider isn't wired to Save yet");
++    },
++
++    async remove() {
++      throw new Error("Deleting local files isn't wired into the explorer yet");
++    },
++
++    async move() {
++      throw new Error("Moving local files isn't wired into the explorer yet");
++    },
++
++    async mkdir() {
++      throw new Error("Creating local folders isn't wired into the explorer yet");
++    },
++
++    /**
++     * Not part of the base FileProvider contract — TerminalPanel.jsx
++     * and (in part 2) EditorWorkbench's own save flow call these
++     * directly, the same propose -> human clicks Confirm/Deny on
++     * PendingActionBar -> daemon runs it round trip
++     * components/TerminalPanel.jsx already uses for execute_command.
++     */
++    async propose(tool, params) {
++      return apiPost("/propose", { tool, params });
++    },
++    async confirm(actionId) {
++      return apiPost("/confirm", { action_id: actionId });
++    },
++    async deny(actionId) {
++      return apiPost("/deny", { action_id: actionId });
++    },
++
++    subscribe() {
++      return () => {}; // watch: false — see this provider's own header
++    },
++  };
++}
+diff --git a/frontend/app/lib/workbench/layoutPrefs.js b/frontend/app/lib/workbench/layoutPrefs.js
+index 8dab232..d54597e 100644
+--- a/frontend/app/lib/workbench/layoutPrefs.js
++++ b/frontend/app/lib/workbench/layoutPrefs.js
+@@ -37,10 +37,24 @@ const BOTTOM_TAB_IDS = new Set(BOTTOM_TABS.map((t) => t.id));
+ // W6.2 Console, W3.1 Terminal) an open-by-default empty panel would
+ // only take height away from the editor. The tab strip is still
+ // visible when closed, so it stays discoverable.
++//
++// `source` (W3.1): which FileProvider the Explorer/tabs/search/history
++// are all currently pointed at — "cloud" (workspace_code_files) or
++// "local" (a paired daemon folder). Persisted here rather than as its
++// own storage key for the same reason the panel flags are: it's a
++// sticky per-workspace UI preference, not buffer state, so it belongs
++// wherever bottomOpen/previewOpen already live rather than a second
++// read/write path doing the same job. Switching it is NOT a plain
++// SET_LAYOUT, though — see editorStore.js's SWITCH_SOURCE, which resets
++// tabs/buffers at the same time (a path under one source means nothing
++// under the other).
++export const LOCAL_SOURCE_IDS = new Set(["cloud", "local"]);
++
+ export const DEFAULT_LAYOUT = Object.freeze({
+   bottomOpen: false,
+   bottomTab: "problems",
+   previewOpen: false,
++  source: "cloud",
+ });
+ 
+ // Sizes (px). Defaults/minimums for the splitters; the maximums depend
+@@ -78,12 +92,18 @@ export function normalizeLayout(raw, fallback) {
+     bottomOpen: typeof src.bottomOpen === "boolean" ? src.bottomOpen : base.bottomOpen,
+     bottomTab: BOTTOM_TAB_IDS.has(src.bottomTab) ? src.bottomTab : base.bottomTab,
+     previewOpen: typeof src.previewOpen === "boolean" ? src.previewOpen : base.previewOpen,
++    source: LOCAL_SOURCE_IDS.has(src.source) ? src.source : base.source,
+   };
+ }
+ 
+ /** Field-by-field equality of two normalized layouts. */
+ export function sameLayout(a, b) {
+-  return a.bottomOpen === b.bottomOpen && a.bottomTab === b.bottomTab && a.previewOpen === b.previewOpen;
++  return (
++    a.bottomOpen === b.bottomOpen &&
++    a.bottomTab === b.bottomTab &&
++    a.previewOpen === b.previewOpen &&
++    a.source === b.source
++  );
+ }
+ 
+ /** Per-workspace key, same `minime_build_editor_*:${id}` family as the splitters'. */

@@ -1,11 +1,11 @@
 // frontend/app/lib/workbench/fileProviders.js — W2.2 (Build Workbench
-// plan, decision D6). `FileProvider` interface with one implementation
-// today (Cloud); `LocalFileProvider` follows in W3.1 once the daemon
-// side of things exists, behind this exact same shape. Explorer/tabs/
-// search/chips (W2.3+) talk to whichever provider is active through
-// this contract only, never to a route path directly — that's what
-// makes "merge Local Files into Build, daemon later" a real,
-// incremental change instead of a rewrite (plan §1.3/§2 D6).
+// plan, decision D6). `FileProvider` interface with two implementations:
+// Cloud (workspace_code_files) and, as of W3.1, Local (a paired daemon
+// folder) — both behind this exact same shape. Explorer/tabs/search/
+// chips (W2.3+) talk to whichever provider is active through this
+// contract only, never to a route path directly — that's what makes
+// "merge Local Files into Build, daemon later" a real, incremental
+// change instead of a rewrite (plan §1.3/§2 D6).
 //
 // Contract (plan §5, step W2.2):
 //   id                          — "cloud" | "local"; for display/logging,
@@ -39,6 +39,26 @@
 // git history for the pre-W2.2 shape) — folded in here so every
 // consumer of this provider gets live refresh for free instead of each
 // reinventing the channel-name/bind_global/unbind_global dance.
+//
+// LocalFileProvider (W3.1) wraps api/routes/local_workspace.py's
+// list_dir/read_file/status routes instead, over a PAIRED local folder
+// via the daemon. Three real differences from Cloud, all load-bearing:
+//   - list() has no flat listing on the server to ask for (the daemon's
+//     list_dir only returns one directory's own children) — see this
+//     provider's own comment for the bounded, ignore-listed walk that
+//     turns repeated list_dir calls into the same flat {path: meta}
+//     shape buildFileTree() already expects, unchanged, from Cloud.
+//   - capabilities.writeNeedsConfirm is true: a person's write needs a
+//     human OK on the other end before it touches their disk. write()
+//     itself is deliberately NOT wired to that flow here — a generic
+//     caller that didn't check writeNeedsConfirm first should get a
+//     loud error, not a silent no-op or a surprise unconfirmed write.
+//     EditorWorkbench's save flow calls propose()/confirm() directly
+//     instead (W3.1 part 2).
+//   - capabilities.history/watch are both false: there's no version
+//     table for local files (only workspace_code_files has one) and no
+//     push channel that knows when something outside this tab changed
+//     a file on disk.
 "use client";
 import { authHeaders } from "../../context/SessionContext";
 import { getPusherClient } from "../pusherClient";
@@ -193,6 +213,172 @@ export function createCloudFileProvider({ workspaceId, apiUrl }) {
         channel.unbind_global(handler);
         pusher.unsubscribe(channelName);
       };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// W3.1 — LocalFileProvider
+// ---------------------------------------------------------------------
+
+// Skipped outright while walking a paired folder — the same defaults
+// most local dev tools already ignore by convention. A paired folder is
+// expected to be a real project (see daemon/README.md), not an
+// arbitrary drive, but these are exactly the directories that turn a
+// "list everything" walk into thousands of pointless round trips over
+// the daemon's websocket if someone pairs a repo root that still has
+// them checked out.
+const LOCAL_IGNORE_DIR_NAMES = new Set([
+  "node_modules", ".git", ".next", ".venv", "venv", "__pycache__",
+  "dist", "build", ".turbo", ".cache", "target", ".idea", ".vscode",
+]);
+
+// Safety valve, not a expected ceiling: a normal paired project won't
+// come close. Bounds the damage from a folder paired one level too high
+// (a whole drive, a monorepo with no ignore-listed vendor dir) to "the
+// explorer shows a truncated listing", not "hundreds of list_dir round
+// trips before the tab is usable".
+const LOCAL_LIST_MAX_ENTRIES = 5000;
+
+/**
+ * @param {{workspaceId: string, apiUrl: string}} config
+ * @returns a FileProvider backed by a paired local folder, over the
+ *   daemon (eo/local_workspace_tools.py via api/routes/local_workspace.py)
+ */
+export function createLocalFileProvider({ workspaceId, apiUrl }) {
+  const base = `${apiUrl}/api/workspaces/${workspaceId}/local`;
+
+  async function apiPost(path, body) {
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: await authHeaders({ json: true }),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await parseErrorDetail(res));
+    return res.json();
+  }
+
+  return {
+    id: "local",
+    capabilities: {
+      // W3.1 part 1 (this patch) is read-only: browsing and opening
+      // work, but nothing calls write()/remove()/move()/mkdir() yet, so
+      // there's nothing to gate behind a confirmation dialog in the UI
+      // itself. `write` flips to true, and the explorer's file
+      // operations along with it (Explorer.jsx already keys its New/
+      // Rename/Delete/Duplicate affordances off capabilities.write —
+      // see canModify there), once part 2 wires Save through
+      // propose()/confirm() below.
+      write: false,
+      writeNeedsConfirm: true,
+      history: false, // no version table for local files — HistoryPanel shows a fitting empty state instead of calling this
+      search: false, // unused: Project Search (W2.6) works over any provider's read(), regardless of this flag — see projectSearch.js's own header
+      terminal: true,
+      watch: false, // no push channel for changes made outside this tab
+    },
+
+    /** Cheap poll target — see api/routes/local_workspace.py's own docstring. Not part of the base FileProvider contract; hooks/useDaemonStatus.js is the intended caller. */
+    async status() {
+      const res = await fetch(`${base}/status`, { headers: await authHeaders() });
+      if (!res.ok) return { live: false };
+      return res.json();
+    },
+
+    /**
+     * The daemon has no flat "list everything" call, only list_dir for
+     * one directory at a time — so this walks the tree breadth-first,
+     * skipping LOCAL_IGNORE_DIR_NAMES and stopping at
+     * LOCAL_LIST_MAX_ENTRIES, and hands back the same flat
+     * `{path: {file_path, size}}` shape Cloud's list() does. That's a
+     * real trade-off (this fetches the whole tree up front rather than
+     * lazily per folder, unlike the daemon's own list_dir), made on
+     * purpose so Explorer.jsx/fileTree.js — buildFileTree(), the
+     * expand/collapse tree, the filter box — need ZERO changes to work
+     * with Local: they only ever see a flat filesMeta, exactly like
+     * they already do for Cloud. An unreadable subdirectory (permission
+     * error, deleted mid-walk) is skipped rather than failing the whole
+     * listing; an unreadable ROOT is not — that's "no daemon" or a bad
+     * pairing, and callers (EditorWorkbench) are expected to check
+     * status() before ever calling this rather than routing that
+     * failure through here as a normal empty listing.
+     */
+    async list() {
+      const root = await apiPost("/list_dir", { path: "." });
+      const filesMeta = {};
+      const queue = (root.entries || []).map((entry) => ({ dir: ".", entry }));
+      let count = 0;
+
+      while (queue.length > 0 && count < LOCAL_LIST_MAX_ENTRIES) {
+        const { dir, entry } = queue.shift();
+        if (LOCAL_IGNORE_DIR_NAMES.has(entry.name)) continue;
+        const path = dir === "." ? entry.name : `${dir}/${entry.name}`;
+        if (entry.type === "dir") {
+          try {
+            const data = await apiPost("/list_dir", { path });
+            for (const child of data.entries || []) queue.push({ dir: path, entry: child });
+          } catch {
+            // Skipped, not fatal — see this method's own header.
+          }
+        } else {
+          // No `version` field: every local file compares equal to
+          // itself on a manual refresh (see planBufferSync()'s callers)
+          // rather than ever looking "changed on the server" — a real
+          // consequence of `watch: false`, not an oversight. No
+          // `language` either: CodeEditor's own loadLanguageExtension()
+          // already infers syntax highlighting from the path/extension,
+          // not from this field — it only ever fed the status bar's
+          // label, which falls back to "plain text" gracefully.
+          filesMeta[path] = { file_path: path, size: entry.size ?? null, version: 0 };
+          count += 1;
+        }
+      }
+      return filesMeta;
+    },
+
+    async read(path) {
+      const data = await apiPost("/read_file", { path });
+      return { file_path: data.path, content: data.content, truncated: !!data.truncated };
+    },
+
+    async write() {
+      // See capabilities.writeNeedsConfirm's own comment above — a
+      // generic caller that writes without checking it first should
+      // fail loudly, not silently propose nothing and return as if it
+      // worked.
+      throw new Error("Local files need confirmation before writing — this provider isn't wired to Save yet");
+    },
+
+    async remove() {
+      throw new Error("Deleting local files isn't wired into the explorer yet");
+    },
+
+    async move() {
+      throw new Error("Moving local files isn't wired into the explorer yet");
+    },
+
+    async mkdir() {
+      throw new Error("Creating local folders isn't wired into the explorer yet");
+    },
+
+    /**
+     * Not part of the base FileProvider contract — TerminalPanel.jsx
+     * and (in part 2) EditorWorkbench's own save flow call these
+     * directly, the same propose -> human clicks Confirm/Deny on
+     * PendingActionBar -> daemon runs it round trip
+     * components/TerminalPanel.jsx already uses for execute_command.
+     */
+    async propose(tool, params) {
+      return apiPost("/propose", { tool, params });
+    },
+    async confirm(actionId) {
+      return apiPost("/confirm", { action_id: actionId });
+    },
+    async deny(actionId) {
+      return apiPost("/deny", { action_id: actionId });
+    },
+
+    subscribe() {
+      return () => {}; // watch: false — see this provider's own header
     },
   };
 }

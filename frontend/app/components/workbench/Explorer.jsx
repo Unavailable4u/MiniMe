@@ -30,17 +30,20 @@
 // this whole tree on every keystroke.
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Cloud,
   Copy,
   CopyPlus,
   Download,
   FilePlus,
   FolderPlus,
+  HardDrive,
   Loader2,
   MessageSquarePlus,
   Pencil,
   RefreshCw,
   Search,
   Trash2,
+  WifiOff,
   X,
 } from "lucide-react";
 import {
@@ -117,6 +120,14 @@ function Explorer({
   onRequestDelete,
   onDuplicate,
   onMove,
+  // W3.1: all four omitted (the default, from EditorWorkbench not
+  // passing them) means "no switcher" — the header row below simply
+  // doesn't render, so this stays a no-op change for any caller that
+  // predates the source switcher.
+  source, // "cloud" | "local" | undefined
+  onChangeSource, // (next: "cloud"|"local") => void
+  daemonLive = false,
+  daemonChecked = false,
 }) {
   const [expanded, setExpanded] = useState(() => new Set());
   const [selection, setSelection] = useState(() => new Set()); // paths, files and folders
@@ -165,6 +176,10 @@ function Explorer({
 
   const typeOf = (path) => (fileSetRef.current.has(path) ? "file" : "dir");
   const editable = canModify && !busy;
+  // W3.1: Local selected, the status poll has resolved at least once,
+  // and it said not live. Distinct from `error` (a real, unexpected
+  // failure) on purpose — see this component's own render branch below.
+  const daemonOffline = source === "local" && daemonChecked && !daemonLive;
 
   // ---- effects -----------------------------------------------------------
 
@@ -755,17 +770,23 @@ function Explorer({
           )}
           {/* Moved here from the old CodeView's own header (patch 11's
               ZIP download) — the plan puts it in the explorer header.
-              Disabled until there's at least one saved file. */}
-          <button
-            type="button"
-            onClick={onDownloadZip}
-            disabled={downloading || fileCount === 0}
-            aria-label="Download all files as ZIP"
-            title="Download as ZIP"
-            className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
-          >
-            {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-          </button>
+              Disabled until there's at least one saved file. W3.1:
+              omitted entirely (not just disabled) when the caller
+              doesn't pass a handler — Local has no equivalent
+              whole-folder export route, and a visibly-enabled button
+              that silently does nothing is worse than no button. */}
+          {onDownloadZip && (
+            <button
+              type="button"
+              onClick={onDownloadZip}
+              disabled={downloading || fileCount === 0}
+              aria-label="Download all files as ZIP"
+              title="Download as ZIP"
+              className="touch-target text-[var(--neutral-500)] hover:text-[var(--neutral-200)] disabled:opacity-50"
+            >
+              {downloading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            </button>
+          )}
           <button
             type="button"
             onClick={onRefresh}
@@ -778,6 +799,48 @@ function Explorer({
           </button>
         </div>
       </div>
+
+      {/* W3.1: only rendered when a caller actually wires source
+          switching in (see this component's own header comment on the
+          four new props) — omitting them keeps every OTHER mounting of
+          Explorer (there isn't one today, but nothing stops a future
+          one) exactly as it was. */}
+      {onChangeSource && (
+        <div className="shrink-0 flex items-center gap-1 px-2 py-1.5 border-b border-[var(--neutral-800)]">
+          <button
+            type="button"
+            onClick={() => onChangeSource("cloud")}
+            aria-pressed={source === "cloud"}
+            className={`flex-1 flex items-center justify-center gap-1 rounded-md py-1 text-[10px] font-medium min-h-[var(--viewport-touch-target)] ${
+              source === "cloud"
+                ? "bg-[var(--neutral-800)] text-[var(--neutral-100)]"
+                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            }`}
+          >
+            <Cloud size={11} /> Project files
+          </button>
+          <button
+            type="button"
+            onClick={() => onChangeSource("local")}
+            aria-pressed={source === "local"}
+            title={source === "local" ? (daemonLive ? "Daemon connected" : "No daemon connected") : undefined}
+            className={`flex-1 flex items-center justify-center gap-1 rounded-md py-1 text-[10px] font-medium min-h-[var(--viewport-touch-target)] ${
+              source === "local"
+                ? "bg-[var(--neutral-800)] text-[var(--neutral-100)]"
+                : "text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+            }`}
+          >
+            <HardDrive size={11} />
+            Local folder
+            {source === "local" && (
+              <span
+                aria-hidden="true"
+                className={`w-1.5 h-1.5 rounded-full ${daemonLive ? "bg-emerald-500" : "bg-[var(--neutral-700)]"}`}
+              />
+            )}
+          </button>
+        </div>
+      )}
 
       {fileCount > 0 && (
         <div className="shrink-0 px-2 py-1.5 border-b border-[var(--neutral-800)]">
@@ -831,7 +894,15 @@ function Explorer({
         }`}
       >
         {downloadError && <p className="text-[10px] text-red-400 px-1 pb-1">{downloadError}</p>}
-        {loading && !filesMeta ? (
+        {daemonOffline ? (
+          <div className="flex flex-col items-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3 py-8">
+            <WifiOff size={18} className="text-[var(--neutral-700)]" />
+            <span>
+              No daemon connected — see <code className="text-[10px]">daemon/README.md</code>. Pair a local folder
+              and this fills in automatically once it connects.
+            </span>
+          </div>
+        ) : loading && !filesMeta ? (
           <div className="text-xs text-[var(--neutral-600)] flex items-center gap-1.5 px-1 py-1">
             <Loader2 size={12} className="animate-spin" /> Loading…
           </div>

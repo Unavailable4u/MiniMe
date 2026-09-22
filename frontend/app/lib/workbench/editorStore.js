@@ -102,6 +102,11 @@ export function editorReducer(state, action) {
     // A provider.read(path) resolved. `file` is the FileProvider's
     // file shape (content/language/version/updated_at). `saved` and
     // `edited` start equal — nothing to save until the user types.
+    // `truncated` (W3.1): only Local's read() ever sets this (a file
+    // over the daemon's read limit) — the workbench treats a truncated
+    // buffer as read-only regardless of the provider's own
+    // capabilities.write, since saving a partial file would silently
+    // chop off the rest of it.
     case "FILE_LOADED": {
       const { path, file } = action;
       return {
@@ -116,6 +121,7 @@ export function editorReducer(state, action) {
             stale: false,
             language: file.language || null,
             updatedAt: file.updated_at || null,
+            truncated: !!file.truncated,
           },
         },
       };
@@ -170,6 +176,7 @@ export function editorReducer(state, action) {
             stale: false,
             language: file.language ?? buffer?.language ?? null,
             updatedAt: file.updated_at || null,
+            truncated: false, // a save always writes the whole buffer, never a partial read
           },
         },
       };
@@ -294,6 +301,24 @@ export function editorReducer(state, action) {
       };
     }
 
+    // W3.1: switching the Explorer's source (Project files / Local
+    // folder). A path under one source means nothing under the other,
+    // so this resets tabs/buffers/activePath back to empty at the same
+    // time it flips `layout.source` — a caller (EditorWorkbench) is
+    // expected to have already confirmed discarding any unsaved edits
+    // BEFORE dispatching this, the same way closing a dirty tab already
+    // asks first (see EditorWorkbench.jsx's requestClose()); this
+    // action itself doesn't know or care whether anything was dirty.
+    // A no-op (same state returned) when the source isn't actually
+    // changing, so clicking the already-active source doesn't wipe the
+    // open tabs.
+    case "SWITCH_SOURCE": {
+      const { source } = action;
+      const current = normalizeLayout(state.layout);
+      if (current.source === source) return state;
+      return { ...initialState, layout: normalizeLayout({ ...current, source }, current) };
+    }
+
     default:
       return state;
   }
@@ -332,6 +357,7 @@ export function EditorStoreProvider({ children, initialLayout }) {
       closeTab: (path) => dispatch({ type: "CLOSE_TAB", path }),
       closeTabs: (paths) => dispatch({ type: "CLOSE_TABS", paths }),
       setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
+      switchSource: (source) => dispatch({ type: "SWITCH_SOURCE", source }),
       renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
     }),
     [dispatch]

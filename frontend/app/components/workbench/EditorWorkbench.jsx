@@ -60,14 +60,17 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { authHeaders } from "../../context/SessionContext";
+import { useDaemonStatus } from "../../hooks/useDaemonStatus";
 import { useExplorerOps } from "../../hooks/useExplorerOps";
 import { useSplitter } from "../../hooks/useSplitter";
 import { useViewport } from "../../hooks/useViewport";
-import { createCloudFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
+import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
-import { basename, isSameOrDescendant, remapPath } from "../../lib/workbench/fileTree";
+import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
 import { deleteSummary } from "../../lib/workbench/explorerOps";
 import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
+import { jumpToPosition } from "../../lib/workbench/gotoPosition";
+import { useProjectSearch } from "../../hooks/useProjectSearch";
 import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
   BOTTOM_PANEL_MIN_HEIGHT,
@@ -84,12 +87,17 @@ import {
 import { loadSavePrefs, saveSavePrefs } from "../../lib/workbench/savePrefs";
 import { encodeTabFlags, planAutosave, planBufferSync } from "../../lib/workbench/tabUtils";
 import ConfirmDialog from "../ConfirmDialog";
+import PendingActionBar from "../PendingActionBar";
+import TerminalPanel from "../TerminalPanel";
 import BottomPanel from "./BottomPanel";
 import CodeEditor from "./CodeEditor";
 import ConflictCompareView from "./ConflictCompareView";
 import EditorTabs from "./EditorTabs";
 import Explorer from "./Explorer";
+import HistoryPanel from "./HistoryPanel";
 import PreviewColumn from "./PreviewColumn";
+import ProjectSearchPanel from "./ProjectSearchPanel";
+import QuickOpen from "./QuickOpen";
 import StatusBar from "./StatusBar";
 
 // W2.5: how long a dirty file has to sit untouched before autosave (when
@@ -121,8 +129,25 @@ const EXPLORER_MAX_WIDTH = 480;
  * memo()'d: every keystroke replaces the store's `buffers` object, but
  * only the edited file's `value` prop changes, so with stable callbacks
  * from the parent the other open editors skip re-rendering.
+ *
+ * `registerPane` (W2.6) hands the parent the *ref object* itself, once,
+ * rather than the view — the ref object is stable for this pane's whole
+ * lifetime (a plain useRef(null)), so the parent can always read
+ * `.current?.getView()` at the moment it actually needs the view (a
+ * search result click, say) instead of the parent needing to know when
+ * CodeEditor's own internal CM6 setup finishes.
  */
-const EditorPane = memo(function EditorPane({ path, active, visible, value, onEdit, onSave, onCursor }) {
+const EditorPane = memo(function EditorPane({
+  path,
+  active,
+  visible,
+  value,
+  readOnly,
+  onEdit,
+  onSave,
+  onCursor,
+  registerPane,
+}) {
   const editorRef = useRef(null);
   const shown = active && visible;
 
@@ -130,12 +155,18 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
     if (shown) editorRef.current?.getView()?.requestMeasure();
   }, [shown]);
 
+  useEffect(() => {
+    registerPane?.(path, editorRef);
+    return () => registerPane?.(path, null);
+  }, [path, registerPane]);
+
   return (
     <div className={active ? "absolute inset-0" : "hidden"}>
       <CodeEditor
         ref={editorRef}
         filePath={path}
         value={value}
+        readOnly={readOnly}
         onChange={(text) => onEdit(path, text)}
         onSave={() => onSave(path)}
         onCursorChange={(pos) => onCursor(path, pos)}
@@ -145,12 +176,6 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
 });
 
 function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
-  // One provider per (workspace, api) pair — memoized so re-renders
-  // don't create a new one (which would re-subscribe to Pusher).
-  const provider = useMemo(
-    () => createCloudFileProvider({ workspaceId, apiUrl }),
-    [workspaceId, apiUrl]
-  );
   const {
     state,
     setActivePath,
@@ -162,8 +187,25 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     clearStale,
     closeTabs,
     setLayout,
+    switchSource,
     renamePaths,
   } = useEditorStore();
+
+  // W3.1: which provider backs the workbench right now — read from
+  // `layout.source` (see layoutPrefs.js's own header on why it lives
+  // there) rather than component state, so it persists the same way
+  // bottomOpen/previewOpen already do. One provider per (source,
+  // workspace, api) triple — memoized so re-renders don't create a new
+  // one (which would re-subscribe to Pusher for Cloud, or just be
+  // wasteful for Local).
+  const source = state.layout.source;
+  const provider = useMemo(
+    () =>
+      source === "local"
+        ? createLocalFileProvider({ workspaceId, apiUrl })
+        : createCloudFileProvider({ workspaceId, apiUrl }),
+    [source, workspaceId, apiUrl]
+  );
 
   const [viewport] = useViewport();
   const isMobile = viewport === "mobile";
@@ -193,6 +235,13 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
   // savePrefs.js's own header), so unlike `layout` there's no
   // workspaceId-keyed re-read to do on a project switch.
   const [savePrefs, setSavePrefs] = useState(() => loadSavePrefs(browserStorage()));
+  // W2.6: Quick Open (Cmd/Ctrl-P) and Project Search's own "give the
+  // query box focus" signal — a counter rather than a boolean so
+  // pressing Cmd/Ctrl-Shift-F again while the panel is ALREADY open and
+  // focused still does something (re-selects the text) instead of being
+  // a no-op change to a flag that's already true.
+  const [quickOpenOpen, setQuickOpenOpen] = useState(false);
+  const [searchFocusSeq, setSearchFocusSeq] = useState(0);
 
   const explorerSplitter = useSplitter({
     axis: "width",
@@ -260,10 +309,40 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
   savePrefsRef.current = savePrefs;
   const failedSavesRef = useRef({}); // {path: the exact text whose last save FAILED} — autosave won't retry that same text (planAutosave)
   const autosaveTimersRef = useRef(new Map()); // path -> {edited, timer}
+  // W2.6: most-recently-active path first, capped — Quick Open's list
+  // before anything is typed (defaultQuickOpenList's own `recentPaths`).
+  // A ref, not state: it only needs to be read at the moment the palette
+  // opens, not on every change, so there's nothing to gain from a
+  // re-render every time a tab switch happens.
+  const recentOpenRef = useRef([]);
+  // W2.6: path -> the EditorPane's own ref OBJECT (not the view — see
+  // EditorPane's header on why). Lets jumpToSearchResult() below reach a
+  // specific open pane's live CodeMirror view without CodeEditor itself
+  // needing to know Project Search exists.
+  const paneRefsRef = useRef(new Map());
+  // W3.1: mirrors useDaemonStatus's `live`, read by loadFileList()
+  // above. A ref rather than a dependency so loadFileList's identity
+  // (and the mount effect that calls it) doesn't churn every 5s poll
+  // tick — only a real live/not-live transition should trigger a fetch,
+  // and that's handled separately, by useDaemonStatus's own onLiveChange.
+  const daemonLiveRef = useRef(false);
 
   // ---- file list ----------------------------------------------------
 
   const loadFileList = useCallback(async () => {
+    // W3.1: Local with no live daemon isn't an ERROR to surface (see
+    // Explorer.jsx's own `daemonOffline` branch) — it's an expected,
+    // common state, so this skips the request entirely rather than
+    // letting provider.list() throw a 409 that would otherwise show up
+    // as a scary red banner where a calm "no daemon connected" already
+    // does the job.
+    if (provider.id === "local" && !daemonLiveRef.current) {
+      filesMetaRef.current = null;
+      setFilesMeta(null);
+      setListError(null);
+      setListLoading(false);
+      return null;
+    }
     const seq = ++listSeqRef.current;
     setListLoading(true);
     setListError(null);
@@ -719,6 +798,162 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
 
   const handleRefresh = useCallback(() => refreshRef.current(), []);
 
+  // ---- quick open / project search / history (W2.6) ---------------------
+
+  // Every real file path in the project — Quick Open's full candidate
+  // list. The filtering itself (subsequence ranking) happens client-side
+  // in quickOpen.js over this same array, so it only needs to change
+  // when the file list actually does, not on every keystroke typed into
+  // the palette.
+  const allFilePaths = useMemo(() => realFilePaths(filesMeta), [filesMeta]);
+
+  // Most-recently-active path first — Quick Open's own list before
+  // anything is typed (defaultQuickOpenList's `recentPaths`).
+  useEffect(() => {
+    if (!state.activePath) return;
+    recentOpenRef.current = [state.activePath, ...recentOpenRef.current.filter((p) => p !== state.activePath)].slice(
+      0,
+      50
+    );
+  }, [state.activePath]);
+
+  const registerPane = useCallback((path, ref) => {
+    if (ref) paneRefsRef.current.set(path, ref);
+    else paneRefsRef.current.delete(path);
+  }, []);
+
+  // Retries across a few animation frames: a search-result click can
+  // call openFile() for a file that isn't open yet, and the new pane's
+  // ref won't be registered until AFTER the state update that adds its
+  // tab has rendered — the same "wait for the DOM to catch up" shape as
+  // CodeEditor's own requestMeasure(), bounded so a path that never
+  // mounts (closed again before its read landed) doesn't retry forever.
+  const jumpToPositionInPane = useCallback((path, pos, attempt = 0) => {
+    const view = paneRefsRef.current.get(path)?.current?.getView();
+    if (view) {
+      jumpToPosition(view, pos);
+      return;
+    }
+    if (attempt < 8) requestAnimationFrame(() => jumpToPositionInPane(path, pos, attempt + 1));
+  }, []);
+
+  // Project Search's own text source: an open tab's LIVE buffer (unsaved
+  // edits included — the point is searching what's actually in front of
+  // you), undefined for anything closed so useProjectSearch.js knows to
+  // fall back to provider.read().
+  const getOpenText = useCallback((path) => {
+    const b = stateRef.current.buffers[path];
+    return b ? b.edited : undefined;
+  }, []);
+
+  const search = useProjectSearch({ filesMeta, provider, getOpenText });
+
+  const jumpToSearchResult = useCallback(
+    (path, line, column, endColumn) => {
+      openFile(path); // the already-open case is handled inside openFile() itself
+      jumpToPositionInPane(path, { line, column, endColumn });
+    },
+    [openFile, jumpToPositionInPane]
+  );
+
+  // History's "Restore": lands the server's response the same way a
+  // normal save does — FILE_LOADED for the buffer, plus the file list's
+  // own entry patched in place rather than a full refetch (saveFile()
+  // above does the identical bookkeeping for a save; kept separate here
+  // since Restore's caller, HistoryPanel, isn't the save flow).
+  const handleRestored = useCallback(
+    (path, file) => {
+      fileLoaded(path, file);
+      delete dismissedRef.current[path];
+      delete failedSavesRef.current[path];
+      setSaveErrors((prev) => {
+        if (!(path in prev)) return prev;
+        const { [path]: _cleared, ...rest } = prev;
+        return rest;
+      });
+      setConflicts((prev) => {
+        if (!(path in prev)) return prev;
+        const { [path]: _cleared, ...rest } = prev;
+        return rest;
+      });
+      const nextMeta = {
+        ...(filesMetaRef.current || {}),
+        [path]: {
+          workspace_id: file.workspace_id,
+          file_path: file.file_path,
+          language: file.language,
+          size: file.content ? file.content.length : 0,
+          version: file.version,
+          updated_at: file.updated_at,
+          updated_by: file.updated_by,
+        },
+      };
+      filesMetaRef.current = nextMeta;
+      setFilesMeta(nextMeta);
+    },
+    [fileLoaded]
+  );
+
+  // ---- local source / daemon / terminal (W3.1) ---------------------------
+
+  // Fires only on a not-live -> live transition (see useDaemonStatus's
+  // own header) — the moment a daemon connects, go fetch the tree, the
+  // same "don't make the person hit refresh themselves" behavior
+  // LocalWorkspaceTab.jsx's own status effect already had.
+  const handleDaemonLive = useCallback(() => {
+    refreshRef.current();
+  }, []);
+  const { live: daemonLive, checked: daemonChecked } = useDaemonStatus(
+    source === "local" ? workspaceId : null,
+    handleDaemonLive
+  );
+  daemonLiveRef.current = daemonLive;
+
+  // Switching source (the Explorer header's Project files / Local
+  // folder toggle): a path under one source means nothing under the
+  // other, so this is a hard reset of tabs/buffers (SWITCH_SOURCE
+  // itself does that part — see editorStore.js). The only thing this
+  // wrapper adds is asking first when there's something to lose,
+  // exactly like requestClose() already does for a single dirty tab.
+  const [pendingSourceChange, setPendingSourceChange] = useState(null);
+  const requestChangeSource = useCallback(
+    (next) => {
+      if (next === stateRef.current.layout.source) return;
+      const dirty = Object.values(stateRef.current.buffers).some((b) => b.dirty);
+      if (dirty) setPendingSourceChange(next);
+      else switchSource(next);
+    },
+    [switchSource]
+  );
+
+  // Any pending local action (a terminal command, and in part 2 a
+  // proposed write) landing is also the moment the tree might be stale
+  // — a command can create/delete/modify files just as easily as a
+  // save can. Mirrors LocalWorkspaceTab.jsx's own
+  // onConfirmed={() => live && loadRoot(...)}.
+  const handleActionConfirmed = useCallback(() => {
+    if (stateRef.current.layout.source === "local") refreshRef.current();
+  }, []);
+
+  // The Terminal tab's real content once Local is active — reusing
+  // components/TerminalPanel.jsx as-is (it already owns its own
+  // propose/confirm/deny round trip for execute_command; nothing here
+  // duplicates that). Cloud keeps BottomPanel's own EMPTY_STATES.terminal
+  // copy, which already explains terminals are a local-folder thing.
+  const terminalPanelNode = useMemo(() => {
+    if (provider.id !== "local") return null;
+    if (daemonChecked && !daemonLive) {
+      return (
+        <div className="h-full flex flex-col items-center justify-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3">
+          <span>
+            No daemon connected — see <code className="text-[10px]">daemon/README.md</code>.
+          </span>
+        </div>
+      );
+    }
+    return <TerminalPanel workspaceId={workspaceId} live={daemonLive} />;
+  }, [provider.id, workspaceId, daemonLive, daemonChecked]);
+
   // ---- panel layout (W2.3b) --------------------------------------------
 
   const { layout } = state;
@@ -790,6 +1025,71 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     : "saved";
   const conflict = activePath ? conflicts[activePath] : null;
   const compare = compareConflict ? conflicts[compareConflict] : null;
+
+  // ---- bottom panel content (W2.6) --------------------------------------
+  // Each node is memoized on its OWN inputs so handing them down as a
+  // `panels` object doesn't defeat BottomPanel's memo() (see that file's
+  // own header) — without this, a fresh JSX element on every render
+  // (which WorkbenchBody does on every keystroke, via `buffers`) would
+  // give BottomPanel a "new" prop every time regardless of whether
+  // anything it actually renders changed.
+  const searchPanelNode = useMemo(
+    () => (
+      <ProjectSearchPanel
+        query={search.query}
+        onQueryChange={search.setQuery}
+        caseSensitive={search.caseSensitive}
+        onCaseSensitiveChange={search.setCaseSensitive}
+        results={search.results}
+        matchCount={search.matchCount}
+        truncated={search.truncated}
+        loading={search.loading}
+        error={search.error}
+        filesScanned={search.filesScanned}
+        totalFiles={search.totalFiles}
+        onJumpToResult={jumpToSearchResult}
+        focusSeq={searchFocusSeq}
+      />
+    ),
+    [
+      search.query,
+      search.setQuery,
+      search.caseSensitive,
+      search.setCaseSensitive,
+      search.results,
+      search.matchCount,
+      search.truncated,
+      search.loading,
+      search.error,
+      search.filesScanned,
+      search.totalFiles,
+      jumpToSearchResult,
+      searchFocusSeq,
+    ]
+  );
+
+  const historyPanelNode = useMemo(
+    () => (
+      <HistoryPanel
+        path={activePath}
+        provider={provider}
+        currentContent={activeBuffer?.saved}
+        currentVersion={activeBuffer?.version}
+        dirty={!!activeBuffer?.dirty}
+        onRestored={handleRestored}
+      />
+    ),
+    [activePath, provider, activeBuffer?.saved, activeBuffer?.version, activeBuffer?.dirty, handleRestored]
+  );
+
+  const bottomPanels = useMemo(
+    () => ({
+      search: searchPanelNode,
+      history: historyPanelNode,
+      ...(terminalPanelNode ? { terminal: terminalPanelNode } : {}),
+    }),
+    [searchPanelNode, historyPanelNode, terminalPanelNode]
+  );
 
   // ---- autosave + unsaved-edits guards (W2.5) --------------------------
 
@@ -886,11 +1186,44 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
           .join(", ")}). Closing them will discard those changes.`
     : "";
 
+  // Cmd/Ctrl-P and Cmd/Ctrl-Shift-F (W2.6). A plain onKeyDown on the
+  // workbench's own root div rather than a document-level listener:
+  // neither combo is in CodeMirror's own keymaps (see CodeEditor.jsx's
+  // own imports — defaultKeymap, searchKeymap, etc.), so the native
+  // keydown bubbles up from inside an editor the same as it would from
+  // anywhere else in this tree, and scoping the listener to the
+  // container means a shortcut typed while focus is elsewhere on the
+  // page (the chat dock, say) doesn't fire this handler at all.
+  const handleWorkbenchKeyDown = useCallback(
+    (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "p" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        setQuickOpenOpen(true);
+      } else if (key === "f" && e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        selectBottomTab("search");
+        setSearchFocusSeq((n) => n + 1);
+      }
+    },
+    [selectBottomTab]
+  );
+
   return (
     <div
       ref={containerRef}
+      onKeyDown={handleWorkbenchKeyDown}
       className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
     >
+      {/* W3.1: a proposed local action (a terminal command today; a
+          proposed write in part 2) awaiting Confirm/Deny. Above the
+          whole main row, not just the terminal tab, the same placement
+          LocalWorkspaceTab.jsx already used — a person mid-edit in the
+          explorer/editor column should still see it land. */}
+      {provider.id === "local" && <PendingActionBar workspaceId={workspaceId} onConfirmed={handleActionConfirmed} />}
+
       {/* Main row: explorer | splitter | editor column | splitter |
           preview column. The bottom panel and the status bar sit below
           it. The row keeps a minimum height so a tall bottom panel
@@ -909,7 +1242,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
             flagsKey={flagsKey}
             onOpenFile={openFile}
             onRefresh={handleRefresh}
-            onDownloadZip={downloadZip}
+            onDownloadZip={provider.id === "local" ? undefined : downloadZip}
             downloading={downloading}
             downloadError={downloadError}
             canModify={provider.capabilities.write}
@@ -920,6 +1253,10 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
             onRequestDelete={requestDelete}
             onDuplicate={explorerOps.duplicate}
             onMove={explorerOps.move}
+            source={source}
+            onChangeSource={requestChangeSource}
+            daemonLive={daemonLive}
+            daemonChecked={daemonChecked}
           />
         </div>
 
@@ -1057,9 +1394,11 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
                   active={path === activePath}
                   visible={!editorColumnHidden}
                   value={buffer.edited}
+                  readOnly={!provider.capabilities.write || !!buffer.truncated}
                   onEdit={handleEdit}
                   onSave={saveFile}
                   onCursor={handleCursor}
+                  registerPane={registerPane}
                 />
               );
             })}
@@ -1103,6 +1442,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
         reserveRight={reserveCorner}
         resizable={!isMobile}
         onResizeStart={bottomSplitter.onHandleMouseDown}
+        panels={bottomPanels}
       />
 
       <StatusBar
@@ -1141,6 +1481,21 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
         onCancel={() => setPendingDelete(null)}
       />
 
+      {/* W3.1: switching source is a hard reset of open tabs (see
+          editorStore.js's SWITCH_SOURCE) — same discard-and-confirm
+          shape as closing a dirty tab, just for everything open at once. */}
+      <ConfirmDialog
+        open={!!pendingSourceChange}
+        title={pendingSourceChange === "local" ? "Switch to your local folder?" : "Switch to project files?"}
+        message="Every open tab here has unsaved changes that don't exist under the other source. Switching will close them and discard those changes."
+        confirmLabel="Switch"
+        onConfirm={() => {
+          if (pendingSourceChange) switchSource(pendingSourceChange);
+          setPendingSourceChange(null);
+        }}
+        onCancel={() => setPendingSourceChange(null)}
+      />
+
       {/* W2.5: "Compare" on the conflict bar. The right-hand side is the
           buffer as it is NOW (what "Keep mine" would keep), falling back
           to what the failed save sent. Both decisions are echoed here so
@@ -1154,6 +1509,15 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
         onClose={() => setCompareConflict(null)}
         onReloadTheirs={() => reloadConflictTheirs(compareConflict)}
         onKeepMine={() => keepMineOnConflict(compareConflict)}
+      />
+
+      {/* W2.6: Cmd/Ctrl-P. */}
+      <QuickOpen
+        open={quickOpenOpen}
+        onClose={() => setQuickOpenOpen(false)}
+        paths={allFilePaths}
+        recentPaths={recentOpenRef.current}
+        onOpenFile={openFile}
       />
     </div>
   );
