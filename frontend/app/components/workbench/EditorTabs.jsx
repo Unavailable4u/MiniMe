@@ -61,6 +61,8 @@ function EditorTabs({
   onSave,
   canSave,
   saving,
+  saveLabel = "Save", // W3.1 part 2: "Propose write" for a writeNeedsConfirm provider (Local)
+  saveLabelBusy = "Saving…", // "Proposing…" alongside it
   onToggleExplorer, // only passed on the single-pane (mobile) layout
   bottomOpen = false,
   onToggleBottom,
@@ -211,7 +213,7 @@ function EditorTabs({
             className="flex items-center gap-1.5 rounded-lg border border-[var(--neutral-700)] px-2 py-1 text-xs font-medium text-[var(--neutral-200)] disabled:opacity-50"
           >
             {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-            {saving ? "Saving…" : "Save"}
+            {saving ? saveLabelBusy : saveLabel}
           </button>
           {savePrefs && (
             <button

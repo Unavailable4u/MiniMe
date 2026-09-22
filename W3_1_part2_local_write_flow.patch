@@ -1,0 +1,454 @@
+diff --git a/frontend/app/components/workbench/EditorTabs.jsx b/frontend/app/components/workbench/EditorTabs.jsx
+index 0aec1f4..2f3c9bb 100644
+--- a/frontend/app/components/workbench/EditorTabs.jsx
++++ b/frontend/app/components/workbench/EditorTabs.jsx
+@@ -61,6 +61,8 @@ function EditorTabs({
+   onSave,
+   canSave,
+   saving,
++  saveLabel = "Save", // W3.1 part 2: "Propose write" for a writeNeedsConfirm provider (Local)
++  saveLabelBusy = "Saving…", // "Proposing…" alongside it
+   onToggleExplorer, // only passed on the single-pane (mobile) layout
+   bottomOpen = false,
+   onToggleBottom,
+@@ -211,7 +213,7 @@ function EditorTabs({
+             className="flex items-center gap-1.5 rounded-lg border border-[var(--neutral-700)] px-2 py-1 text-xs font-medium text-[var(--neutral-200)] disabled:opacity-50"
+           >
+             {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+-            {saving ? "Saving…" : "Save"}
++            {saving ? saveLabelBusy : saveLabel}
+           </button>
+           {savePrefs && (
+             <button
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index e2eb79c..154c57c 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -57,6 +57,19 @@
+ // rather than a `ref` handle on purpose: BuildTab mounts this through
+ // next/dynamic, and next@14's dynamic() wrapper is a plain function
+ // component that never forwards `ref` to what it loads.
++//
++// W3.1 part 2: closes out Local's write path (part 1 shipped browsing/
++// opening only — see fileProviders.js's own header). saveFile() below
++// now branches on `provider.capabilities.writeNeedsConfirm`: Cloud (and
++// any future provider with plain `write`) keeps the W2.5 path above
++// unchanged; Local instead calls provider.propose("write_file", ...)
++// and waits for a human to hit Confirm on the PendingActionBar already
++// rendered above the main row (W3.1 part 1) — handleActionConfirmed()
++// is what turns that confirm into a store update. Autosave is skipped
++// entirely for a writeNeedsConfirm provider (see the autosave effect's
++// own comment on why re-arming it would spam proposals), and the Save
++// button/status bar read differently too (EditorTabs' saveLabel prop,
++// StatusBar's "awaiting-confirmation" state).
+ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { X } from "lucide-react";
+ import { authHeaders } from "../../context/SessionContext";
+@@ -231,6 +244,15 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   // `saving`/`saveErrors` already live at.
+   const [conflicts, setConflicts] = useState({});
+   const [compareConflict, setCompareConflict] = useState(null); // path shown in ConflictCompareView, or null
++  // W3.1 part 2: {path: contentThatWasProposed} — a write_file proposal
++  // is outstanding for this path and nothing has been typed since. Kept
++  // as content rather than a plain boolean/Set so a further keystroke
++  // (buffer.edited no longer equal to the stored text) naturally falls
++  // back out of "awaiting confirmation" into ordinary "dirty" without a
++  // separate effect to notice the edit — see saveState's derivation and
++  // handleActionConfirmed() below, the only two readers/writers besides
++  // saveFile() itself.
++  const [awaitingConfirmation, setAwaitingConfirmation] = useState({});
+   // W2.5: read once per mount — workbench-wide, not per-workspace (see
+   // savePrefs.js's own header), so unlike `layout` there's no
+   // workspaceId-keyed re-read to do on a project switch.
+@@ -326,6 +348,17 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   // tick — only a real live/not-live transition should trigger a fetch,
+   // and that's handled separately, by useDaemonStatus's own onLiveChange.
+   const daemonLiveRef = useRef(false);
++  // W3.1 part 2: action_id -> {path, content} for a write_file THIS
++  // saveFile() proposed. PendingActionBar's own onConfirmed only hands
++  // back {action_id, tool, params} (params for write_file is just
++  // {path} — see PendingActionBar.jsx's Pusher handler, the content
++  // never round-trips over the wire), so this is where the content we
++  // actually sent lives until confirm/deny resolves it. Same "a Map the
++  // component owns, not the store" shape as TerminalPanel.jsx's own
++  // runsRef for the identical reason: correlating OUR proposals among
++  // possibly several pending ones on this workspace (an agent, another
++  // tab) is UI bookkeeping, not editor state.
++  const pendingLocalWritesRef = useRef(new Map());
+ 
+   // ---- file list ----------------------------------------------------
+ 
+@@ -663,35 +696,52 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+             console.warn(`[EditorWorkbench] format-on-save skipped for ${path}`, err);
+           }
+         }
+-        // W1.1/W2.5: base_version turns this into an optimistic-
+-        // concurrency write — a 409 (FileConflictError) means someone
+-        // else's save landed first; see the catch below instead of the
+-        // old blind overwrite.
+-        const saved = await provider.write(path, sent, { baseVersion });
+-        delete failedSavesRef.current[path];
+-        const latest = stateRef.current.buffers[path];
+-        // Typing during the round trip is normal (and constant once
+-        // autosave is on): if the buffer no longer matches what was
+-        // sent, record the save but keep what's in the editor, instead
+-        // of swapping the server's copy in over the newer keystrokes.
+-        if (latest) saveSuccess(path, saved, { keepEdited: latest.edited !== sent });
+-        // Swap just this file's tree entry in place rather than
+-        // refetching the list. `version` is part of it now: the sync
+-        // check compares it against the open buffer's.
+-        const nextMeta = {
+-          ...(filesMetaRef.current || {}),
+-          [path]: {
+-            workspace_id: saved.workspace_id,
+-            file_path: saved.file_path,
+-            language: saved.language,
+-            size: saved.content ? saved.content.length : 0,
+-            version: saved.version,
+-            updated_at: saved.updated_at,
+-            updated_by: saved.updated_by,
+-          },
+-        };
+-        filesMetaRef.current = nextMeta;
+-        setFilesMeta(nextMeta);
++        if (provider.capabilities.writeNeedsConfirm) {
++          // W3.1 part 2: Local doesn't write — it proposes, and a
++          // human confirms on PendingActionBar (rendered above the main
++          // row whenever provider.id === "local") before anything
++          // touches disk. Nothing here marks the buffer saved: `dirty`
++          // stays true (it genuinely is — the content only exists in
++          // the buffer and the pending proposal, not on disk yet) and
++          // `awaitingConfirmation` is what lets the status bar/Save
++          // button show that distinctly from an ordinary unsaved edit.
++          // handleActionConfirmed() finishes the job once the person
++          // actually clicks Confirm.
++          const action = await provider.propose("write_file", { path, content: sent });
++          pendingLocalWritesRef.current.set(action.action_id, { path, content: sent });
++          delete failedSavesRef.current[path];
++          setAwaitingConfirmation((prev) => ({ ...prev, [path]: sent }));
++        } else {
++          // W1.1/W2.5: base_version turns this into an optimistic-
++          // concurrency write — a 409 (FileConflictError) means someone
++          // else's save landed first; see the catch below instead of
++          // the old blind overwrite.
++          const saved = await provider.write(path, sent, { baseVersion });
++          delete failedSavesRef.current[path];
++          const latest = stateRef.current.buffers[path];
++          // Typing during the round trip is normal (and constant once
++          // autosave is on): if the buffer no longer matches what was
++          // sent, record the save but keep what's in the editor, instead
++          // of swapping the server's copy in over the newer keystrokes.
++          if (latest) saveSuccess(path, saved, { keepEdited: latest.edited !== sent });
++          // Swap just this file's tree entry in place rather than
++          // refetching the list. `version` is part of it now: the sync
++          // check compares it against the open buffer's.
++          const nextMeta = {
++            ...(filesMetaRef.current || {}),
++            [path]: {
++              workspace_id: saved.workspace_id,
++              file_path: saved.file_path,
++              language: saved.language,
++              size: saved.content ? saved.content.length : 0,
++              version: saved.version,
++              updated_at: saved.updated_at,
++              updated_by: saved.updated_by,
++            },
++          };
++          filesMetaRef.current = nextMeta;
++          setFilesMeta(nextMeta);
++        }
+       } catch (err) {
+         if (err instanceof FileConflictError && err.current) {
+           setConflicts((prev) => ({ ...prev, [path]: { current: err.current, mine: sent } }));
+@@ -926,14 +976,44 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     [switchSource]
+   );
+ 
+-  // Any pending local action (a terminal command, and in part 2 a
+-  // proposed write) landing is also the moment the tree might be stale
+-  // — a command can create/delete/modify files just as easily as a
+-  // save can. Mirrors LocalWorkspaceTab.jsx's own
+-  // onConfirmed={() => live && loadRoot(...)}.
+-  const handleActionConfirmed = useCallback(() => {
+-    if (stateRef.current.layout.source === "local") refreshRef.current();
+-  }, []);
++  // Any pending local action (a terminal command, or a proposed write)
++  // landing is also the moment the tree might be stale — a command can
++  // create/delete/modify files just as easily as a save can. Mirrors
++  // LocalWorkspaceTab.jsx's own onConfirmed={() => live && loadRoot(...)}.
++  //
++  // W3.1 part 2: PendingActionBar calls this for EVERY confirmed action
++  // on the workspace, not only ones this tab proposed (an agent, or
++  // another browser tab, can confirm one too) — pendingLocalWritesRef is
++  // what tells "a write_file THIS saveFile() proposed" apart from any
++  // other confirmed action, the same way TerminalPanel.jsx's own runsRef
++  // filters the same channel's events down to commands IT started.
++  // Someone else's write to a path this tab happens to have open isn't
++  // handled here: Local's capabilities.watch is false on purpose (see
++  // fileProviders.js) — there's no live-change story for Local yet,
++  // only for the specific case of a proposal this saveFile() itself made.
++  const handleActionConfirmed = useCallback(
++    (action) => {
++      if (stateRef.current.layout.source === "local") refreshRef.current();
++      const pending = action?.action_id ? pendingLocalWritesRef.current.get(action.action_id) : null;
++      if (!pending || action.tool !== "write_file") return;
++      pendingLocalWritesRef.current.delete(action.action_id);
++      const { path, content } = pending;
++      setAwaitingConfirmation((prev) => {
++        if (!(path in prev)) return prev;
++        const { [path]: _done, ...rest } = prev;
++        return rest;
++      });
++      // Local files carry no version (LocalFileProvider.read()'s own
++      // comment) — `{content, version: 0}` is the whole "saved" shape
++      // SAVE_SUCCESS needs; `keepEdited` mirrors the Cloud save path
++      // above: if the person kept typing while the confirm was pending,
++      // the newer text stays in the editor rather than being clobbered
++      // by the (now-confirmed, but by then stale) proposed text.
++      const latest = stateRef.current.buffers[path];
++      if (latest) saveSuccess(path, { content, version: 0 }, { keepEdited: latest.edited !== content });
++    },
++    [saveSuccess]
++  );
+ 
+   // The Terminal tab's real content once Local is active — reusing
+   // components/TerminalPanel.jsx as-is (it already owns its own
+@@ -1012,10 +1092,19 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   const { tabs, buffers, activePath } = state;
+   const activeBuffer = activePath ? buffers[activePath] : null;
+   const flagsKey = useMemo(() => encodeTabFlags(tabs, buffers), [tabs, buffers]);
++  // W3.1 part 2: a proposed write is outstanding for the active path
++  // and nothing has been typed since (awaitingConfirmation[path] still
++  // equals the live buffer text) — checked ahead of "dirty" since a
++  // proposal-in-waiting IS dirty (nothing's on disk yet) but reads as
++  // something more specific than an ordinary unsaved edit.
++  const isAwaitingConfirmation =
++    !!activePath && provider.capabilities.writeNeedsConfirm && awaitingConfirmation[activePath] === activeBuffer?.edited;
+   const saveState = !activeBuffer
+     ? null
+     : saving[activePath]
+     ? "saving"
++    : isAwaitingConfirmation
++    ? "awaiting-confirmation"
+     : conflicts[activePath]
+     ? "conflict"
+     : saveErrors[activePath]
+@@ -1105,7 +1194,15 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   saveFileRef.current = saveFile;
+   useEffect(() => {
+     const timers = autosaveTimersRef.current;
+-    const due = savePrefs.autosave
++    // W3.1 part 2: never for a writeNeedsConfirm provider. A proposed
++    // write deliberately leaves the buffer `dirty` (see saveFile()'s own
++    // comment — nothing is actually saved until a human confirms), so
++    // without this guard the very next debounce tick would find the
++    // same file "due" again and propose it a second time, then a third,
++    // for as long as it sits unconfirmed — flooding PendingActionBar
++    // with duplicates of the same edit instead of the occasional retry
++    // planAutosave is meant for.
++    const due = savePrefs.autosave && !provider.capabilities.writeNeedsConfirm
+       ? planAutosave({ tabs, buffers, busy: Object.keys(saving), conflicts, failed: failedSavesRef.current })
+       : [];
+     const dueText = new Map(due.map((d) => [d.path, d.edited]));
+@@ -1123,7 +1220,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+       }, AUTOSAVE_DELAY_MS);
+       timers.set(path, { edited, timer });
+     }
+-  }, [savePrefs.autosave, tabs, buffers, saving, conflicts]);
++  }, [savePrefs.autosave, tabs, buffers, saving, conflicts, provider]);
+ 
+   useEffect(() => {
+     const timers = autosaveTimersRef.current;
+@@ -1217,11 +1314,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+       onKeyDown={handleWorkbenchKeyDown}
+       className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
+     >
+-      {/* W3.1: a proposed local action (a terminal command today; a
+-          proposed write in part 2) awaiting Confirm/Deny. Above the
+-          whole main row, not just the terminal tab, the same placement
+-          LocalWorkspaceTab.jsx already used — a person mid-edit in the
+-          explorer/editor column should still see it land. */}
++      {/* W3.1: a proposed local action (a terminal command, or — as of
++          part 2 — a proposed write from Save) awaiting Confirm/Deny.
++          Above the whole main row, not just the terminal tab, the same
++          placement LocalWorkspaceTab.jsx already used — a person
++          mid-edit in the explorer/editor column should still see it
++          land. */}
+       {provider.id === "local" && <PendingActionBar workspaceId={workspaceId} onConfirmed={handleActionConfirmed} />}
+ 
+       {/* Main row: explorer | splitter | editor column | splitter |
+@@ -1245,6 +1343,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+             onDownloadZip={provider.id === "local" ? undefined : downloadZip}
+             downloading={downloading}
+             downloadError={downloadError}
++            // "Can the tree itself change" (new file/folder, rename,
++            // delete, duplicate, drag-move) — deliberately NOT the same
++            // question as whether a buffer can be typed into (see
++            // EditorPane's readOnly below and fileProviders.js's own
++            // comment on the split). Local's capabilities.write is
++            // false, so these stay hidden there; Save works anyway.
+             canModify={provider.capabilities.write}
+             busy={explorerOps.busy}
+             onCreateFile={explorerOps.createFile}
+@@ -1287,14 +1391,30 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+             onCloseOthers={closeOthers}
+             onCloseAll={closeAll}
+             onSave={saveActive}
+-            canSave={!!activeBuffer?.dirty}
++            // W3.1 part 2: while a proposal is outstanding for the
++            // active path and nothing has changed since (see
++            // isAwaitingConfirmation above), Save is disabled rather
++            // than left clickable — re-proposing identical content
++            // would just pile a second, redundant pending action onto
++            // PendingActionBar next to the one already waiting there.
++            // Editing further makes it dirty again in the ordinary
++            // sense (isAwaitingConfirmation stops matching) and Save
++            // re-enables on its own, no extra bookkeeping needed.
++            canSave={!!activeBuffer?.dirty && !isAwaitingConfirmation}
+             saving={!!(activePath && saving[activePath])}
++            saveLabel={provider.capabilities.writeNeedsConfirm ? "Propose write" : "Save"}
++            saveLabelBusy={provider.capabilities.writeNeedsConfirm ? "Proposing…" : "Saving…"}
+             onToggleExplorer={isMobile ? toggleExplorer : undefined}
+             bottomOpen={layout.bottomOpen}
+             onToggleBottom={toggleBottom}
+             previewOpen={showPreview}
+             onTogglePreview={isMobile ? undefined : togglePreview}
+-            savePrefs={savePrefs}
++            // Autosave doesn't apply to a confirm-gated write (see the
++            // autosave effect's own comment) and format-on-save isn't
++            // worth splitting the menu out for on its own — the whole
++            // Save-options control is hidden for Local rather than
++            // offering a toggle that does nothing.
++            savePrefs={provider.capabilities.writeNeedsConfirm ? undefined : savePrefs}
+             onToggleAutosave={toggleAutosave}
+             onToggleFormatOnSave={toggleFormatOnSave}
+           />
+@@ -1394,7 +1514,16 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+                   active={path === activePath}
+                   visible={!editorColumnHidden}
+                   value={buffer.edited}
+-                  readOnly={!provider.capabilities.write || !!buffer.truncated}
++                  // W3.1 part 2: a buffer is editable when the provider
++                  // can EITHER write directly (Cloud) OR propose a write
++                  // (Local) — capabilities.write alone would leave Local
++                  // permanently read-only, which was only ever true for
++                  // part 1 before Save had anywhere to send a local
++                  // edit. `truncated` overrides either way: Local's
++                  // read() sets it for a file over the daemon's read
++                  // limit, and saving a partial file would silently
++                  // chop off the rest of it.
++                  readOnly={!(provider.capabilities.write || provider.capabilities.writeNeedsConfirm) || !!buffer.truncated}
+                   onEdit={handleEdit}
+                   onSave={saveFile}
+                   onCursor={handleCursor}
+diff --git a/frontend/app/components/workbench/StatusBar.jsx b/frontend/app/components/workbench/StatusBar.jsx
+index e789325..81f95c2 100644
+--- a/frontend/app/components/workbench/StatusBar.jsx
++++ b/frontend/app/components/workbench/StatusBar.jsx
+@@ -5,10 +5,11 @@
+ // state, its language and caret position, and the "Pending changes (N)"
+ // chip (W5.4 feeds it).
+ //
+-// Presentational only. Everything comes in as props so it stays
+-// correct over Cloud files now and Local files after W3.1 — the local
+-// provider will just pass a different `providerId` and a save state
+-// that reads "Waiting for confirmation" once that exists.
++// Presentational only. Everything comes in as props, which is what
++// keeps this correct over both Cloud and Local files: the local
++// provider just passes a different `providerId` ("Local folder" vs
++// "Project files") and, as of W3.1 part 2, its own "awaiting-
++// confirmation" save state alongside the ones Cloud already used.
+ import { memo } from "react";
+ import { Loader2 } from "lucide-react";
+ 
+@@ -49,7 +50,7 @@ function PendingChanges({ count, onClick }) {
+ /**
+  * @param {object} props
+  * @param {string} props.providerId - FileProvider.id ("cloud" | "local")
+- * @param {"saved"|"dirty"|"saving"|"error"|"conflict"|null} props.saveState - null when no file is active; "conflict" (W2.5) = the server rejected the save because the file changed underneath it and the person hasn't chosen Reload theirs / Keep mine yet
++ * @param {"saved"|"dirty"|"saving"|"awaiting-confirmation"|"error"|"conflict"|null} props.saveState - null when no file is active; "conflict" (W2.5) = the server rejected the save because the file changed underneath it and the person hasn't chosen Reload theirs / Keep mine yet; "awaiting-confirmation" (W3.1 part 2, Local only) = proposed but not yet confirmed on PendingActionBar
+  * @param {string} [props.saveError] - shown as the tooltip on "Save failed"
+  * @param {number} [props.version] - the active buffer's server version
+  * @param {string|null} [props.language]
+@@ -98,6 +99,11 @@ function StatusBar({
+               Save conflict
+             </span>
+           )}
++          {saveState === "awaiting-confirmation" && (
++            <span className="text-amber-300" title="Confirm or deny it above to finish saving">
++              Waiting for confirmation
++            </span>
++          )}
+           {saveState === "dirty" && <span className="text-amber-300">Unsaved changes</span>}
+           {saveState === "saved" && <span>{version ? `Saved · v${version}` : "Saved"}</span>}
+         </span>
+diff --git a/frontend/app/lib/workbench/fileProviders.js b/frontend/app/lib/workbench/fileProviders.js
+index c850179..8b230ba 100644
+--- a/frontend/app/lib/workbench/fileProviders.js
++++ b/frontend/app/lib/workbench/fileProviders.js
+@@ -54,7 +54,8 @@
+ //     caller that didn't check writeNeedsConfirm first should get a
+ //     loud error, not a silent no-op or a surprise unconfirmed write.
+ //     EditorWorkbench's save flow calls propose()/confirm() directly
+-//     instead (W3.1 part 2).
++//     instead — see saveFile() there and this provider's own
++//     propose()/confirm()/deny() below.
+ //   - capabilities.history/watch are both false: there's no version
+ //     table for local files (only workspace_code_files has one) and no
+ //     push channel that knows when something outside this tab changed
+@@ -261,15 +262,31 @@ export function createLocalFileProvider({ workspaceId, apiUrl }) {
+   return {
+     id: "local",
+     capabilities: {
+-      // W3.1 part 1 (this patch) is read-only: browsing and opening
+-      // work, but nothing calls write()/remove()/move()/mkdir() yet, so
+-      // there's nothing to gate behind a confirmation dialog in the UI
+-      // itself. `write` flips to true, and the explorer's file
+-      // operations along with it (Explorer.jsx already keys its New/
+-      // Rename/Delete/Duplicate affordances off capabilities.write —
+-      // see canModify there), once part 2 wires Save through
+-      // propose()/confirm() below.
++      // `write` stays false — permanently, not just until some later
++      // patch. It is deliberately NOT flipped now that Save itself is
++      // wired (EditorWorkbench.jsx's saveFile()): Explorer.jsx keys its
++      // New/Rename/Delete/Duplicate affordances off capabilities.write
++      // (see canModify there), and remove()/move()/mkdir() below still
++      // throw — those file-tree operations were never in this plan's
++      // scope for Local (only Cloud's workspace_code_files got them, in
++      // W1.2), so lighting up buttons that always fail would be worse
++      // than leaving them hidden. Editing a file's CONTENT is a
++      // different question from changing the tree, and that one IS
++      // wired — through writeNeedsConfirm below, not this flag.
++      // EditorWorkbench reads `write || writeNeedsConfirm` wherever the
++      // question is "can this buffer be typed into" (its readOnly prop)
++      // and reads `write` alone wherever the question is "can the tree
++      // itself change" (Explorer's canModify) — see that component's
++      // own comment on the split.
+       write: false,
++      // Save becomes "Propose write": EditorWorkbench's saveFile() calls
++      // propose("write_file", {path, content}) below instead of write()
++      // (which keeps throwing — see its own comment), and a human
++      // confirms on PendingActionBar before anything touches disk. No
++      // optimistic-concurrency story here the way Cloud's base_version
++      // gives one: the daemon keeps no version table for local files,
++      // so a confirmed write simply overwrites whatever is on disk at
++      // that moment, the same as any other local edit would.
+       writeNeedsConfirm: true,
+       history: false, // no version table for local files — HistoryPanel shows a fitting empty state instead of calling this
+       search: false, // unused: Project Search (W2.6) works over any provider's read(), regardless of this flag — see projectSearch.js's own header
+@@ -362,10 +379,11 @@ export function createLocalFileProvider({ workspaceId, apiUrl }) {
+ 
+     /**
+      * Not part of the base FileProvider contract — TerminalPanel.jsx
+-     * and (in part 2) EditorWorkbench's own save flow call these
+-     * directly, the same propose -> human clicks Confirm/Deny on
+-     * PendingActionBar -> daemon runs it round trip
+-     * components/TerminalPanel.jsx already uses for execute_command.
++     * and EditorWorkbench.jsx's own save flow (saveFile(), for a
++     * writeNeedsConfirm provider) both call these directly, the same
++     * propose -> human clicks Confirm/Deny on PendingActionBar ->
++     * daemon runs it round trip components/TerminalPanel.jsx already
++     * uses for execute_command.
+      */
+     async propose(tool, params) {
+       return apiPost("/propose", { tool, params });
