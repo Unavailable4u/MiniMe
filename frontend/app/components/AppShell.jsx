@@ -60,7 +60,6 @@ const PlanTab = dynamic(() => import("./tabs/PlanTab"), { loading: TabLoadingFal
 const BuildTab = dynamic(() => import("./tabs/BuildTab"), { loading: TabLoadingFallback });           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
 const TestTab = dynamic(() => import("./tabs/TestTab"), { loading: TabLoadingFallback });             // NEW — Test tab design spec §1: simulate & test
 const GrowthTab = dynamic(() => import("./tabs/GrowthTab"), { loading: TabLoadingFallback });           // NEW — Growth tab design spec §2: growth & marketing
-const LocalWorkspaceTab = dynamic(() => import("./tabs/LocalWorkspaceTab"), { loading: TabLoadingFallback });   // NEW — F2 Part 6: read-only local-daemon file tree
 import WorkspaceDataBubble from "./WorkspaceDataBubble";   // NEW — items #5/#13: relocated from floating-over-tab-content into the top nav
 
 const TABS = [
@@ -71,7 +70,6 @@ const TABS = [
   { id: "build", label: "Build", render: BuildTab },               // NEW — Part 7 §7.2; label renamed Tasks→Build, id/component/localStorage keys left as "tasks" intentionally
   { id: "test", label: "Test", render: TestTab },                   // NEW — Test tab design spec §1
   { id: "growth", label: "Growth", render: GrowthTab },               // NEW — Growth tab design spec §2
-  { id: "local", label: "Local Files", render: LocalWorkspaceTab },     // NEW — F2 Part 6: read-only, no terminal/write yet (Part 7)
   { id: "roles", label: "Role Library", render: RoleLibraryTab },
   { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
   { id: "usage", label: "Token Usage", render: TokenUsageTab },
@@ -83,11 +81,15 @@ const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refres
 const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — Item 2 remaining piece, live-run-state slice, step 1: same key SessionContext.jsx/WorkspaceDockContext.jsx already read/write, needed here to decide which chat AppShellBody's bootstrap effect restores
 
 // NEW — item #13: the tabs that resolve a workspaceId and therefore
-// have a Data bubble to show in the nav (7 original + Part 6's "local"
-// tab). Role Library, Workflow Templates, Token Usage, and Settings
-// never have project data, so the nav slot stays empty (not just
-// hidden) on those tabs.
-const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth", "local"]);
+// have a Data bubble to show in the nav. Role Library, Workflow
+// Templates, Token Usage, and Settings never have project data, so the
+// nav slot stays empty (not just hidden) on those tabs.
+// CHANGED — W3.2: "local" (Part 6's standalone tab) removed from this
+// set along with the tab itself — Local folder browsing now lives
+// inside Build's Editor sub-view (W3.1's Explorer source switch), so it
+// reports its workspace through Build's own "build" entry instead of a
+// second one.
+const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth"]);
 
 // NEW — §8: which tab owns each workspace stage.
 // FIX — plan/build were missing here even though Plan/Tasks tabs exist
@@ -199,6 +201,7 @@ function AppShellBody() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [pendingTemplateRoles, setPendingTemplateRoles] = useState(null); // NEW — Role Library's sticky multi-select bar hands a role list here, WorkflowTemplatesTab consumes it once
   const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState(null); // NEW — §8: { tabId, wsId } handed off by a promote action, consumed once by the destination tab
+  const [pendingLocalTabRedirect, setPendingLocalTabRedirect] = useState(false); // NEW — W3.2: true for one render when a saved "local" tab id got remapped to "build" below; consumed once by BuildTab to open straight into Editor/Local
 
   // NEW — items #5/#13: { [tabId]: { id, name } | null } — each workspace-
   // bearing tab reports its own currently-selected workspace here via
@@ -236,7 +239,18 @@ function AppShellBody() {
     // NEW — §4 fix: restore last active tab so a refresh doesn't always
     // land back on Chat.
     const savedTab = localStorage.getItem(ACTIVE_TAB_KEY);
-    if (savedTab && TABS.some((t) => t.id === savedTab)) {
+    // CHANGED — W3.2: "local" no longer exists in TABS, so the check
+    // below would just silently miss and leave activeTab on its "chat"
+    // default — a real dead end for anyone who had Local Files open
+    // last. Map it to "build" (where that functionality now lives,
+    // W3.1) and flag the redirect so BuildTab can also land on its
+    // Editor sub-view with the Local source selected, once.
+    if (savedTab === "local") {
+      setActiveTabState("build");
+      setVisitedTabs((prev) => new Set(prev).add("build"));
+      localStorage.setItem(ACTIVE_TAB_KEY, "build");
+      setPendingLocalTabRedirect(true);
+    } else if (savedTab && TABS.some((t) => t.id === savedTab)) {
       setActiveTabState(savedTab);
       setVisitedTabs((prev) => new Set(prev).add(savedTab));
     }
@@ -567,6 +581,8 @@ function AppShellBody() {
                   onConsumeInitialTemplateRoles={() => setPendingTemplateRoles(null)}
                   initialWorkspaceId={pendingWorkspaceSelection?.tabId === t.id ? pendingWorkspaceSelection.wsId : null}
                   onConsumeInitialWorkspaceId={() => setPendingWorkspaceSelection(null)}
+                  initialLocalTabRedirect={t.id === "build" ? pendingLocalTabRedirect : false}
+                  onConsumeInitialLocalTabRedirect={() => setPendingLocalTabRedirect(false)}
                   onPromoted={handlePromoted}
                   onActiveWorkspaceChange={
                     WORKSPACE_TAB_IDS.has(t.id)

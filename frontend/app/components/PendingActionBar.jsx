@@ -20,9 +20,11 @@ import { Check, X, FileEdit, Trash2, Terminal as TerminalIcon, AlertTriangle } f
  * this confirms/denies one local-workspace tool call. Deliberately its
  * own small component rather than folding into AgentStepList: a
  * pending local action isn't a graph step and has no role, and this
- * needs to render inside LocalWorkspaceTab (no dock/steps context)
- * as well as, potentially, inline in chat later -- keeping it
- * self-contained (it only needs workspaceId) keeps both possible.
+ * needs to render inside EditorWorkbench (no dock/steps context --
+ * W3.2: formerly LocalWorkspaceTab, retired in favor of Build's own
+ * Editor sub-view) as well as, potentially, inline in chat later --
+ * keeping it self-contained (it only needs workspaceId) keeps both
+ * possible.
  *
  * Subscribes directly to the workspace's Pusher channel
  * (`workspace-${workspaceId}`) for local_tool_proposed/confirmed/
@@ -68,9 +70,9 @@ async function apiPost(path, body) {
 
 /**
  * `onConfirmed(action, result)` — called after a successful confirm,
- * so a parent (e.g. LocalWorkspaceTab's Terminal view) can react, such
- * as switching to the Terminal sub-view the moment an execute_command
- * gets confirmed, or refreshing the file tree after a write/delete.
+ * so a parent (e.g. EditorWorkbench's Terminal panel) can react, such
+ * as switching to the Terminal tab the moment an execute_command gets
+ * confirmed, or refreshing the file tree after a write/delete.
  */
 function PendingActionBar({ workspaceId, onConfirmed }) {
   const [actions, setActions] = useState([]); // [{action_id, tool, params, expires_in_seconds}]
