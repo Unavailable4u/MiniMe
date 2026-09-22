@@ -88,6 +88,7 @@ import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
   BOTTOM_PANEL_MIN_HEIGHT,
   EDITOR_MIN_WIDTH,
+  LOCAL_SOURCE_IDS,
   MAIN_ROW_MIN_HEIGHT,
   PREVIEW_DEFAULT_WIDTH,
   PREVIEW_MIN_WIDTH,
@@ -1659,7 +1660,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
  * @param {boolean} [props.reserveCorner]
  * @param {(dirty: boolean) => void} [props.onDirtyChange] - W2.5: true while any open file has unsaved edits, false again when saved or unmounted; BuildTab guards project / sub-tab switches with it
  */
-export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = false, onDirtyChange }) {
+export default function EditorWorkbench({
+  workspaceId,
+  apiUrl,
+  reserveCorner = false,
+  onDirtyChange,
+  initialSourceOverride, // NEW — W3.2: BuildTab's one-time "the old Local Files tab redirected here" signal
+  onConsumeInitialSourceOverride, // NEW — W3.2: called once this mount has applied (or ignored) the override above, same consumed-once shape as AppShell's own initialWorkspaceId
+}) {
   // The saved panel layout, read once when the workbench mounts — the
   // store's initializer ignores later changes to it. That's fine for the
   // same reason the tabs are: BuildTab remounts this component per
@@ -1667,7 +1675,35 @@ export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = f
   // be swapped for another's in place. (`workspaceId` is a dependency
   // only so the read is correct if that ever stops being true for the
   // first render.)
-  const initialLayout = useMemo(() => loadLayout(browserStorage(), workspaceId), [workspaceId]);
+  //
+  // W3.2: initialSourceOverride, when it validates against
+  // LOCAL_SOURCE_IDS, wins over whatever this workspace's own persisted
+  // layout says — it's how the retired "local" tab's redirect lands
+  // someone on Local instead of whatever they last had open here. Not
+  // written back through saveLayout: it's a one-time nudge for this
+  // mount, not a new preference: the switch (or lack of one) after this
+  // is the user's own choice again.
+  const initialLayout = useMemo(() => {
+    const loaded = loadLayout(browserStorage(), workspaceId);
+    if (initialSourceOverride && LOCAL_SOURCE_IDS.has(initialSourceOverride)) {
+      return { ...loaded, source: initialSourceOverride };
+    }
+    return loaded;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  // Consume the override exactly once per mount, whether or not it
+  // validated — an invalid value shouldn't leave BuildTab re-arming it
+  // forever either. `initialSourceOverride` itself is intentionally not
+  // a dep: this component is remounted (key={selected.id}) for every
+  // project switch, so "once per mount" already means "once", the same
+  // guarantee LocalWorkspaceTab.jsx's own initialWorkspaceId consumer
+  // used to rely on.
+  useEffect(() => {
+    if (initialSourceOverride) onConsumeInitialSourceOverride?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <EditorStoreProvider initialLayout={initialLayout}>
       <WorkbenchBody

@@ -1,0 +1,868 @@
+diff --git a/MOBILE_PLAN.md b/MOBILE_PLAN.md
+index b54ad8b..3b75713 100644
+--- a/MOBILE_PLAN.md
++++ b/MOBILE_PLAN.md
+@@ -47,6 +47,15 @@ ones don't) and confirmed it scales down, not just up:
+   stay inline, revisit if it grows" call already made for
+   `WorkspaceChatPanel.jsx`'s composer in Phase 2. No controller-hook
+   split — at one branch there's nothing shared to extract yet.
++  **Retired — W3.2.** The file (and its standalone "Local Files" tab)
++  is gone; the same master/detail idea carried over into
++  `components/workbench/EditorWorkbench.jsx`'s own `isMobile` branch
++  (`mobileExplorerOpen` toggling explorer-full-width vs.
++  editor-full-width) when Local browsing merged into Build's Editor
++  sub-view. That branch is cosmetic-scale for now the same way this
++  one was — a real single-pane pass for the whole workbench (bottom
++  tabs, touch-sized merge controls) is still W8.7, tracked below under
++  Build.
+ 
+ Net: the rule holds at small scale without forcing every tab into
+ `components/mobile/` just because the folder exists. Same three
+@@ -474,8 +483,15 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
+     end to end. Same "confirm on real hardware" caveat as every other
+     entry; the two worth a tap-through are Brand Voice's custom-fact cards
+     and the Calendar date pickers (iOS renders `datetime-local` its own way).
+-- Build: **mobile fork not started** (see the row-actions pass above for
+-  what did ship for it).
++- Build: **mobile fork not started** for the kanban board / project list
++  (see the row-actions pass above for what did ship for it). Its Editor
++  sub-view is a partial exception — `EditorWorkbench.jsx` already has its
++  own inline `isMobile` single-pane branch (explorer-or-editor,
++  full-bleed layout from W0.2, Local source from W3.1/W3.2's retired
++  Local Files tab) — but that's the same cosmetic-scale, no-fork stopgap
++  `LocalWorkspaceTab.jsx` used above, not the real structural pass. A
++  proper mobile workbench (bottom tabs, touch-sized merge controls) is
++  W8.7 in the Build Workbench plan, same as the rest of Build.
+ 
+ ## Phase 6 — Graphs/canvases
+ **Ahead of schedule for the two tabs converted so far.**
+diff --git a/frontend/app/components/AppShell.jsx b/frontend/app/components/AppShell.jsx
+index 6c9e69f..1f99673 100644
+--- a/frontend/app/components/AppShell.jsx
++++ b/frontend/app/components/AppShell.jsx
+@@ -60,7 +60,6 @@ const PlanTab = dynamic(() => import("./tabs/PlanTab"), { loading: TabLoadingFal
+ const BuildTab = dynamic(() => import("./tabs/BuildTab"), { loading: TabLoadingFallback });           // NEW — Part 7 §7.2: kanban board over feature_status/current_plan
+ const TestTab = dynamic(() => import("./tabs/TestTab"), { loading: TabLoadingFallback });             // NEW — Test tab design spec §1: simulate & test
+ const GrowthTab = dynamic(() => import("./tabs/GrowthTab"), { loading: TabLoadingFallback });           // NEW — Growth tab design spec §2: growth & marketing
+-const LocalWorkspaceTab = dynamic(() => import("./tabs/LocalWorkspaceTab"), { loading: TabLoadingFallback });   // NEW — F2 Part 6: read-only local-daemon file tree
+ import WorkspaceDataBubble from "./WorkspaceDataBubble";   // NEW — items #5/#13: relocated from floating-over-tab-content into the top nav
+ 
+ const TABS = [
+@@ -71,7 +70,6 @@ const TABS = [
+   { id: "build", label: "Build", render: BuildTab },               // NEW — Part 7 §7.2; label renamed Tasks→Build, id/component/localStorage keys left as "tasks" intentionally
+   { id: "test", label: "Test", render: TestTab },                   // NEW — Test tab design spec §1
+   { id: "growth", label: "Growth", render: GrowthTab },               // NEW — Growth tab design spec §2
+-  { id: "local", label: "Local Files", render: LocalWorkspaceTab },     // NEW — F2 Part 6: read-only, no terminal/write yet (Part 7)
+   { id: "roles", label: "Role Library", render: RoleLibraryTab },
+   { id: "templates", label: "Workflow Templates", render: WorkflowTemplatesTab },
+   { id: "usage", label: "Token Usage", render: TokenUsageTab },
+@@ -83,11 +81,15 @@ const ACTIVE_TAB_KEY = "minime_active_tab";   // NEW — §4 fix: survive refres
+ const ACTIVE_CHAT_KEY = "minime_active_chat_id";   // NEW — Item 2 remaining piece, live-run-state slice, step 1: same key SessionContext.jsx/WorkspaceDockContext.jsx already read/write, needed here to decide which chat AppShellBody's bootstrap effect restores
+ 
+ // NEW — item #13: the tabs that resolve a workspaceId and therefore
+-// have a Data bubble to show in the nav (7 original + Part 6's "local"
+-// tab). Role Library, Workflow Templates, Token Usage, and Settings
+-// never have project data, so the nav slot stays empty (not just
+-// hidden) on those tabs.
+-const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth", "local"]);
++// have a Data bubble to show in the nav. Role Library, Workflow
++// Templates, Token Usage, and Settings never have project data, so the
++// nav slot stays empty (not just hidden) on those tabs.
++// CHANGED — W3.2: "local" (Part 6's standalone tab) removed from this
++// set along with the tab itself — Local folder browsing now lives
++// inside Build's Editor sub-view (W3.1's Explorer source switch), so it
++// reports its workspace through Build's own "build" entry instead of a
++// second one.
++const WORKSPACE_TAB_IDS = new Set(["chat", "notebooks", "research", "plan", "build", "test", "growth"]);
+ 
+ // NEW — §8: which tab owns each workspace stage.
+ // FIX — plan/build were missing here even though Plan/Tasks tabs exist
+@@ -199,6 +201,7 @@ function AppShellBody() {
+   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+   const [pendingTemplateRoles, setPendingTemplateRoles] = useState(null); // NEW — Role Library's sticky multi-select bar hands a role list here, WorkflowTemplatesTab consumes it once
+   const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState(null); // NEW — §8: { tabId, wsId } handed off by a promote action, consumed once by the destination tab
++  const [pendingLocalTabRedirect, setPendingLocalTabRedirect] = useState(false); // NEW — W3.2: true for one render when a saved "local" tab id got remapped to "build" below; consumed once by BuildTab to open straight into Editor/Local
+ 
+   // NEW — items #5/#13: { [tabId]: { id, name } | null } — each workspace-
+   // bearing tab reports its own currently-selected workspace here via
+@@ -236,7 +239,18 @@ function AppShellBody() {
+     // NEW — §4 fix: restore last active tab so a refresh doesn't always
+     // land back on Chat.
+     const savedTab = localStorage.getItem(ACTIVE_TAB_KEY);
+-    if (savedTab && TABS.some((t) => t.id === savedTab)) {
++    // CHANGED — W3.2: "local" no longer exists in TABS, so the check
++    // below would just silently miss and leave activeTab on its "chat"
++    // default — a real dead end for anyone who had Local Files open
++    // last. Map it to "build" (where that functionality now lives,
++    // W3.1) and flag the redirect so BuildTab can also land on its
++    // Editor sub-view with the Local source selected, once.
++    if (savedTab === "local") {
++      setActiveTabState("build");
++      setVisitedTabs((prev) => new Set(prev).add("build"));
++      localStorage.setItem(ACTIVE_TAB_KEY, "build");
++      setPendingLocalTabRedirect(true);
++    } else if (savedTab && TABS.some((t) => t.id === savedTab)) {
+       setActiveTabState(savedTab);
+       setVisitedTabs((prev) => new Set(prev).add(savedTab));
+     }
+@@ -567,6 +581,8 @@ function AppShellBody() {
+                   onConsumeInitialTemplateRoles={() => setPendingTemplateRoles(null)}
+                   initialWorkspaceId={pendingWorkspaceSelection?.tabId === t.id ? pendingWorkspaceSelection.wsId : null}
+                   onConsumeInitialWorkspaceId={() => setPendingWorkspaceSelection(null)}
++                  initialLocalTabRedirect={t.id === "build" ? pendingLocalTabRedirect : false}
++                  onConsumeInitialLocalTabRedirect={() => setPendingLocalTabRedirect(false)}
+                   onPromoted={handlePromoted}
+                   onActiveWorkspaceChange={
+                     WORKSPACE_TAB_IDS.has(t.id)
+diff --git a/frontend/app/components/PendingActionBar.jsx b/frontend/app/components/PendingActionBar.jsx
+index a7fc7a6..fb64937 100644
+--- a/frontend/app/components/PendingActionBar.jsx
++++ b/frontend/app/components/PendingActionBar.jsx
+@@ -20,9 +20,11 @@ import { Check, X, FileEdit, Trash2, Terminal as TerminalIcon, AlertTriangle } f
+  * this confirms/denies one local-workspace tool call. Deliberately its
+  * own small component rather than folding into AgentStepList: a
+  * pending local action isn't a graph step and has no role, and this
+- * needs to render inside LocalWorkspaceTab (no dock/steps context)
+- * as well as, potentially, inline in chat later -- keeping it
+- * self-contained (it only needs workspaceId) keeps both possible.
++ * needs to render inside EditorWorkbench (no dock/steps context --
++ * W3.2: formerly LocalWorkspaceTab, retired in favor of Build's own
++ * Editor sub-view) as well as, potentially, inline in chat later --
++ * keeping it self-contained (it only needs workspaceId) keeps both
++ * possible.
+  *
+  * Subscribes directly to the workspace's Pusher channel
+  * (`workspace-${workspaceId}`) for local_tool_proposed/confirmed/
+@@ -68,9 +70,9 @@ async function apiPost(path, body) {
+ 
+ /**
+  * `onConfirmed(action, result)` — called after a successful confirm,
+- * so a parent (e.g. LocalWorkspaceTab's Terminal view) can react, such
+- * as switching to the Terminal sub-view the moment an execute_command
+- * gets confirmed, or refreshing the file tree after a write/delete.
++ * so a parent (e.g. EditorWorkbench's Terminal panel) can react, such
++ * as switching to the Terminal tab the moment an execute_command gets
++ * confirmed, or refreshing the file tree after a write/delete.
+  */
+ function PendingActionBar({ workspaceId, onConfirmed }) {
+   const [actions, setActions] = useState([]); // [{action_id, tool, params, expires_in_seconds}]
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 7eb8a9f..c01dafd 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -728,7 +728,7 @@ function PartsPanel({ wsId, apiUrl }) {
+   );
+ }
+ 
+-function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
++function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect, onConsumeInitialLocalTabRedirect }) {
+   // §7 fix: workspaces + promoteWorkspace come from the same
+   // SessionContext NotebooksTab/ResearchTab already use — no new context
+   // plumbing needed, Tasks just reads the shared list and filters it.
+@@ -762,6 +762,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+   // NEW — patch 7: which of BUILD_VIEWS is showing for the selected
+   // project. Same pattern as PlanTab's BlueprintView `view` state.
+   const [buildView, setBuildView] = useState("tasks");
++  // NEW — W3.2: set once by the redirect effect below, read once by the
++  // EditorWorkbench prop just past the render return, then cleared by
++  // EditorWorkbench itself (onConsumeInitialSourceOverride) once it's
++  // applied it to that mount's initial layout — never re-armed after
++  // that, so switching projects or leaving/re-entering Editor manually
++  // doesn't keep forcing Local.
++  const [forceLocalSourceOnce, setForceLocalSourceOnce] = useState(false);
+   // NEW — W2.5: unsaved-edits guard. EditorWorkbench reports whether any
+   // open file has unsaved edits through `onDirtyChange`. It lands in a
+   // ref, not state: it's only ever read inside event handlers, and
+@@ -948,6 +955,20 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+     setRestoredSelection(true);
+   }, []);
+ 
++  // NEW — W3.2: AppShell remapped a stale "local" tab id here and is
++  // telling us so, once. There's no wsId to restore (the old Local
++  // Files tab picked from every workspace, not just build-stage ones —
++  // D7's accepted trade-off), so this only opens the Editor sub-view
++  // and arms forceLocalSourceOnce for whichever build project ends up
++  // selected above; requestBuildView's guardUnsaved isn't needed since
++  // nothing can be dirty yet this early.
++  useEffect(() => {
++    if (!initialLocalTabRedirect) return;
++    setBuildView("code");
++    setForceLocalSourceOnce(true);
++    onConsumeInitialLocalTabRedirect?.();
++  }, [initialLocalTabRedirect, onConsumeInitialLocalTabRedirect]);
++
+   useEffect(() => {
+     if (!restoredSelection || !selectedWsId) return;
+     localStorage.setItem(SELECTED_BUILD_WS_KEY, selectedWsId);
+@@ -1346,6 +1367,8 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+                 apiUrl={API_URL}
+                 reserveCorner={chatDockCollapsed}
+                 onDirtyChange={handleEditorDirty}
++                initialSourceOverride={forceLocalSourceOnce ? "local" : undefined}
++                onConsumeInitialSourceOverride={() => setForceLocalSourceOnce(false)}
+               />
+             </div>
+           </>
+diff --git a/frontend/app/components/tabs/LocalWorkspaceTab.jsx b/frontend/app/components/tabs/LocalWorkspaceTab.jsx
+deleted file mode 100644
+index ba2cd40..0000000
+--- a/frontend/app/components/tabs/LocalWorkspaceTab.jsx
++++ /dev/null
+@@ -1,592 +0,0 @@
+-"use client";
+-import { useState, useEffect, useCallback, useRef, memo } from "react";
+-import { authHeaders } from "../../context/SessionContext";
+-import { useWorkspaces } from "../../context/WorkspacesContext";   // same list-of-workspaces store every other project picker in this app reads from
+-import { useViewport } from "../../hooks/useViewport";   // NEW — Phase 3 (mobile cheap wins), see the mobile master/detail branch below
+-import PendingActionBar from "../PendingActionBar";   // NEW — Part 7
+-import TerminalPanel from "../TerminalPanel";           // NEW — Part 7
+-import {
+-  Folder, FolderOpen, File, Loader2, RefreshCw, WifiOff, ChevronRight,
+-  HardDrive, AlertTriangle, FileText, TerminalSquare, Copy, Check, ArrowLeft,
+-} from "lucide-react";
+-
+-/**
+- * F2 Part 6 — new tab shell + read-only file tree.
+- *
+- * Wired into AppShell.jsx's existing TABS/WORKSPACE_TAB_IDS pattern the
+- * same way every other workspace-scoped tab is (see that file's own
+- * comment on the standard prop set every tab receives). Deliberately
+- * does NOT reuse BuildTab.jsx/TestTab.jsx's stage-filtered project-card
+- * picker -- this tab has no pipeline stage of its own (it's not part of
+- * the note->research->plan->build->test->growth flow those two filter
+- * by), so a plain dropdown over every workspace the person has, same
+- * shape AuditLogTab.jsx already uses for its own "which workspace" picker
+- * one level up in Settings, is the right amount of picker for what this
+- * tab actually needs.
+- *
+- * Talks to Part 3's always-runs-free read routes (POST .../local/
+- * list_dir, POST .../local/read_file), Part 2's GET .../local/status
+- * poll, and, as of Part 7, Part 4's propose/confirm/deny surface for
+- * write_file/delete/execute_command -- surfaced here as a Files/
+- * Terminal sub-view toggle: Files is this same read-only tree (still
+- * read-only; write_file has no UI trigger from the tree yet, only from
+- * an agent's own tool calls landing on PendingActionBar), Terminal is
+- * Part 7's real xterm.js panel (see TerminalPanel.jsx) for proposing
+- * and watching execute_command run. PendingActionBar renders above
+- * both sub-views (not per-sub-view) since a pending write_file/delete/
+- * execute_command can be proposed by an agent regardless of which
+- * sub-view is currently open, and confirming/denying it isn't specific
+- * to either one.
+- *
+- * Place this file at: frontend/app/components/tabs/LocalWorkspaceTab.jsx
+- */
+-
+-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+-
+-// How often to poll .../local/status while this tab is open. Cheap on
+-// purpose (api/routes/local_workspace.py's local_status() docstring:
+-// "a registry lookup, not a daemon round-trip"), so a short interval
+-// here doesn't mean driving load through the actual websocket the way
+-// polling list_dir/read_file on the same interval would.
+-const STATUS_POLL_MS = 5000;
+-
+-function formatBytes(size) {
+-  if (typeof size !== "number") return "";
+-  if (size < 1024) return `${size} B`;
+-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+-}
+-
+-async function apiPost(path, body) {
+-  const res = await fetch(`${API_URL}${path}`, {
+-    method: "POST",
+-    headers: await authHeaders({ json: true }),
+-    body: JSON.stringify(body),
+-  });
+-  if (!res.ok) {
+-    // 409 here means "well-formed request, no live daemon (or the
+-    // daemon rejected it)" -- api/routes/local_workspace.py's own
+-    // convention (see local_list_dir/local_read_file docstrings).
+-    // Surfacing `detail` either way means this tab shows the daemon's
+-    // own error text (e.g. "not a UTF-8 text file") instead of a bare
+-    // status code.
+-    const err = await res.json().catch(() => ({}));
+-    throw new Error(err.detail || `Request failed (${res.status})`);
+-  }
+-  return res.json();
+-}
+-
+-async function fetchStatus(wsId) {
+-  const res = await fetch(`${API_URL}/api/workspaces/${wsId}/local/status`, {
+-    headers: await authHeaders(),
+-  });
+-  if (!res.ok) return { live: false };
+-  return res.json();
+-}
+-
+-function fetchListDir(wsId, path) {
+-  return apiPost(`/api/workspaces/${wsId}/local/list_dir`, { path });
+-}
+-
+-function fetchReadFile(wsId, path) {
+-  return apiPost(`/api/workspaces/${wsId}/local/read_file`, { path });
+-}
+-
+-// One row of the tree. Lazily fetches its own children on first
+-// expand (and caches them for the life of this node) rather than the
+-// tab loading the whole tree upfront -- same "don't fetch data nobody's
+-// asked to see yet" reasoning AppShell.jsx's own dynamic-tab-loading
+-// comment gives for deferring whole tab bodies.
+-function FileTreeNode({ wsId, entry, path, depth, onSelectFile, selectedPath }) {
+-  const [expanded, setExpanded] = useState(false);
+-  const [children, setChildren] = useState(null);
+-  const [loading, setLoading] = useState(false);
+-  const [error, setError] = useState(null);
+-
+-  const isDir = entry.type === "dir";
+-  const isSelected = !isDir && selectedPath === path;
+-
+-  const handleClick = useCallback(async () => {
+-    if (!isDir) {
+-      onSelectFile(path);
+-      return;
+-    }
+-    if (expanded) {
+-      setExpanded(false);
+-      return;
+-    }
+-    setExpanded(true);
+-    if (children !== null) return; // already loaded once -- don't re-fetch on every collapse/expand
+-    setLoading(true);
+-    setError(null);
+-    try {
+-      const data = await fetchListDir(wsId, path);
+-      setChildren(data.entries || []);
+-    } catch (e) {
+-      setError(e.message);
+-    } finally {
+-      setLoading(false);
+-    }
+-  }, [isDir, expanded, children, wsId, path, onSelectFile]);
+-
+-  const childIndent = { paddingLeft: `${(depth + 1) * 14 + 6}px` };
+-
+-  return (
+-    <div>
+-      <button
+-        type="button"
+-        onClick={handleClick}
+-        title={path}
+-        className={`w-full flex items-center gap-1.5 text-xs px-1.5 py-1 rounded text-left hover:bg-[var(--neutral-900)] ${
+-          isSelected ? "bg-[var(--neutral-900)] text-[var(--neutral-100)]" : "text-[var(--neutral-400)]"
+-        }`}
+-        style={{ paddingLeft: `${depth * 14 + 6}px` }}
+-      >
+-        {isDir ? (
+-          <ChevronRight size={11} className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`} />
+-        ) : (
+-          <span className="w-[11px] shrink-0" />
+-        )}
+-        {isDir ? (
+-          expanded
+-            ? <FolderOpen size={12} className="shrink-0 text-[var(--accent)]" />
+-            : <Folder size={12} className="shrink-0 text-[var(--neutral-500)]" />
+-        ) : (
+-          <File size={12} className="shrink-0 text-[var(--neutral-600)]" />
+-        )}
+-        <span className="truncate">{entry.name}</span>
+-        {!isDir && typeof entry.size === "number" && (
+-          <span className="ml-auto pl-2 text-[10px] text-[var(--neutral-700)] shrink-0">{formatBytes(entry.size)}</span>
+-        )}
+-      </button>
+-
+-      {isDir && expanded && (
+-        <div>
+-          {loading && (
+-            <div className="flex items-center gap-1.5 text-[10px] text-[var(--neutral-600)] py-1" style={childIndent}>
+-              <Loader2 size={10} className="animate-spin" /> Loading…
+-            </div>
+-          )}
+-          {!loading && error && (
+-            <div className="flex items-center gap-1.5 text-[10px] text-amber-500 py-1" style={childIndent}>
+-              <AlertTriangle size={10} className="shrink-0" /> {error}
+-            </div>
+-          )}
+-          {!loading && !error && children && children.length === 0 && (
+-            <div className="text-[10px] text-[var(--neutral-700)] py-1" style={childIndent}>Empty</div>
+-          )}
+-          {!loading && !error && children?.map((child) => (
+-            <FileTreeNode
+-              key={child.name}
+-              wsId={wsId}
+-              entry={child}
+-              path={path === "." ? child.name : `${path}/${child.name}`}
+-              depth={depth + 1}
+-              onSelectFile={onSelectFile}
+-              selectedPath={selectedPath}
+-            />
+-          ))}
+-        </div>
+-      )}
+-    </div>
+-  );
+-}
+-
+-// Right-hand preview pane for whichever file is currently selected.
+-// Read-only text dump -- no editing affordance exists yet (that's Part
+-// 7's job, alongside write_file's already-live propose/confirm surface
+-// from Part 4), so this deliberately renders as plain, non-editable
+-// text even though it's sitting right next to a real file on disk.
+-function FilePreview({ file }) {
+-  // Visual refinement: brief "Copied" confirmation on the copy-path
+-  // button, reset whenever the selection itself changes so a stale
+-  // checkmark from a previously-copied file can't linger onto the next.
+-  const [copied, setCopied] = useState(false);
+-  useEffect(() => {
+-    setCopied(false);
+-  }, [file?.path]);
+-
+-  const handleCopyPath = useCallback(() => {
+-    if (!file || !navigator.clipboard) return;
+-    navigator.clipboard.writeText(file.path).then(() => {
+-      setCopied(true);
+-      setTimeout(() => setCopied(false), 1500);
+-    }).catch(() => {});
+-  }, [file]);
+-
+-  if (!file) {
+-    return (
+-      <div className="h-full flex items-center justify-center text-xs text-[var(--neutral-600)]">
+-        Select a file to preview it
+-      </div>
+-    );
+-  }
+-
+-  // Visual refinement: line/char count footer, same idea as most code
+-  // editors' status bars -- gives a cheap sense of file size beyond the
+-  // byte count already shown in the tree row, without adding another
+-  // network round trip (the content's already sitting in state).
+-  const showMeta = !file.loading && !file.error;
+-  const lineCount = showMeta ? file.content.split("\n").length : null;
+-
+-  return (
+-    <div className="h-full flex flex-col min-h-0">
+-      <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--neutral-800)]">
+-        <span className="flex-1 min-w-0 text-xs text-[var(--neutral-300)] font-mono truncate" title={file.path}>
+-          {file.path}
+-        </span>
+-        <button
+-          type="button"
+-          onClick={handleCopyPath}
+-          title="Copy path"
+-          className="shrink-0 flex items-center gap-1 text-[10px] text-[var(--neutral-500)] hover:text-[var(--neutral-300)]"
+-        >
+-          {copied ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+-          {copied ? "Copied" : "Copy path"}
+-        </button>
+-      </div>
+-      <div className="flex-1 min-h-0 overflow-auto">
+-        {file.loading && (
+-          <div className="flex items-center gap-2 text-xs text-[var(--neutral-600)] py-6 justify-center">
+-            <Loader2 size={14} className="animate-spin" /> Loading…
+-          </div>
+-        )}
+-        {!file.loading && file.error && (
+-          <div className="flex items-start gap-2 text-xs text-amber-500 p-3">
+-            <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+-            <span>{file.error}</span>
+-          </div>
+-        )}
+-        {!file.loading && !file.error && (
+-          <>
+-            {file.truncated && (
+-              <div className="px-3 pt-2 text-[10px] text-amber-500">
+-                File is larger than the daemon&apos;s read limit -- showing the first part only.
+-              </div>
+-            )}
+-            <pre className="text-[11px] text-[var(--neutral-300)] p-3 whitespace-pre-wrap break-all font-mono">
+-              {file.content}
+-            </pre>
+-          </>
+-        )}
+-      </div>
+-      {showMeta && (
+-        <div className="shrink-0 px-3 py-1 border-t border-[var(--neutral-800)] text-[10px] text-[var(--neutral-700)]">
+-          {lineCount.toLocaleString()} {lineCount === 1 ? "line" : "lines"} · {file.content.length.toLocaleString()} chars
+-        </div>
+-      )}
+-    </div>
+-  );
+-}
+-
+-function LocalWorkspaceTab({ initialWorkspaceId, onConsumeInitialWorkspaceId, onActiveWorkspaceChange }) {
+-  const { workspaces } = useWorkspaces();
+-
+-  // NEW — Phase 3 (mobile cheap wins). Per useViewport.js's own file-header
+-  // rule and components/mobile/README.md's cosmetic-vs-structural split:
+-  // the tree/preview side-by-side split a few screens down IS a genuinely
+-  // different navigation model on a phone width (a fixed 256px tree plus
+-  // a squeezed preview pane doesn't fit next to it the way it does on
+-  // desktop/tablet — this isn't just "hide a column"), so it calls the
+-  // hook and branches in JS rather than leaning on CSS alone. Unlike
+-  // NotebooksTab.jsx (Phase 5, ~10 branches, justified a dedicated
+-  // components/mobile/NotebooksTab.jsx + controller-hook split), this is
+-  // exactly one branch in a 550-line file — same "small enough to stay
+-  // inline, revisit if it grows" call MOBILE_PLAN.md's Phase 2 entry
+-  // already made for WorkspaceChatPanel.jsx's composer. No fork file.
+-  const [viewport] = useViewport();
+-  const isMobile = viewport === "mobile";
+-
+-  const [selectedId, setSelectedId] = useState(null);
+-  const [live, setLive] = useState(false);
+-  const [statusChecked, setStatusChecked] = useState(false); // avoids a "not connected" flash before the first poll resolves
+-  const [rootEntries, setRootEntries] = useState(null);
+-  const [rootLoading, setRootLoading] = useState(false);
+-  const [rootError, setRootError] = useState(null);
+-  const [selectedFile, setSelectedFile] = useState(null);
+-  const [subView, setSubView] = useState("files"); // "files" | "terminal" — NEW, Part 7
+-
+-  // Monotonically increasing token guarding onSelectFile against
+-  // out-of-order network responses -- see that callback's own comment.
+-  const selectRequestRef = useRef(0);
+-
+-  // Consumed once, same "promote/handoff sets it, destination tab reads
+-  // it once and clears it" contract AppShell.jsx's pendingWorkspaceSelection
+-  // documents for every other workspace-scoped tab.
+-  useEffect(() => {
+-    if (initialWorkspaceId) {
+-      setSelectedId(initialWorkspaceId);
+-      onConsumeInitialWorkspaceId?.();
+-    }
+-    // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [initialWorkspaceId]);
+-
+-  useEffect(() => {
+-    // BUGFIX (same class as AuditLogTab.jsx's own workspace picker): this
+-    // used to only fire `!selectedId` — a one-time default pick, never
+-    // revisited. If the workspace behind `selectedId` is deleted (or the
+-    // user loses access) while this tab isn't the active one, selectedId
+-    // keeps pointing at an id no longer in `workspaces`: the <select>
+-    // above renders a `value` with no matching <option>, and every
+-    // status/list_dir/read_file call below keeps hitting a workspace_id
+-    // that 404s, even though the user may have several other workspaces
+-    // they could perfectly well browse. Re-check membership on every
+-    // `workspaces` change, not just when selectedId is empty, and fall
+-    // back the same way the initial-pick branch already does.
+-    if (workspaces.length === 0) return;
+-    const stillExists = selectedId && workspaces.some((ws) => ws.id === selectedId);
+-    if (!stillExists) setSelectedId(workspaces[0].id);
+-  }, [workspaces, selectedId]);
+-
+-  useEffect(() => {
+-    const selected = workspaces.find((w) => w.id === selectedId);
+-    onActiveWorkspaceChange?.(selected?.id || null, selected?.name);
+-  }, [selectedId, workspaces, onActiveWorkspaceChange]);
+-
+-  const loadRoot = useCallback(async (wsId) => {
+-    setRootLoading(true);
+-    setRootError(null);
+-    try {
+-      const data = await fetchListDir(wsId, ".");
+-      setRootEntries(data.entries || []);
+-    } catch (e) {
+-      setRootEntries(null);
+-      setRootError(e.message);
+-    } finally {
+-      setRootLoading(false);
+-    }
+-  }, []);
+-
+-  // Reset everything when the selected workspace changes -- a file
+-  // tree/preview from a different workspace's paired folder has no
+-  // business staying on screen while the daemon-status poll below
+-  // catches up to the new selection.
+-  useEffect(() => {
+-    setRootEntries(null);
+-    setRootError(null);
+-    setSelectedFile(null);
+-    setLive(false);
+-    setStatusChecked(false);
+-    // Also invalidate any read_file request still in flight for the
+-    // previous workspace, so a slow response landing after the switch
+-    // can't repopulate the preview pane with another workspace's file
+-    // (see selectRequestRef's own comment on onSelectFile).
+-    selectRequestRef.current += 1;
+-  }, [selectedId]);
+-
+-  useEffect(() => {
+-    if (!selectedId) return undefined;
+-    let cancelled = false;
+-
+-    const check = async () => {
+-      const status = await fetchStatus(selectedId);
+-      if (cancelled) return;
+-      setStatusChecked(true);
+-      setLive((prevLive) => {
+-        // Refetch the tree the moment a daemon goes from not-live to
+-        // live, so pairing the folder locally is enough to populate
+-        // this tab without a manual refresh click.
+-        if (!prevLive && status.live) loadRoot(selectedId);
+-        return status.live;
+-      });
+-    };
+-
+-    check();
+-    const interval = setInterval(check, STATUS_POLL_MS);
+-    return () => {
+-      cancelled = true;
+-      clearInterval(interval);
+-    };
+-  }, [selectedId, loadRoot]);
+-
+-  const onSelectFile = useCallback(async (path) => {
+-    // BUGFIX: out-of-order responses. Clicking file A then quickly
+-    // clicking file B fires two overlapping read_file requests; network
+-    // timing gives no guarantee A's promise resolves before B's, so the
+-    // naive version could let A's now-stale response land last and
+-    // silently overwrite B's freshly-selected content -- the tree still
+-    // highlights B, but the preview pane shows A. Stamping each call with
+-    // a token and checking it's still the latest before touching state
+-    // (after every await, so both the success and error paths are
+-    // covered) drops any response that's been superseded by a newer
+-    // selection -- same technique the reset effect above uses to
+-    // invalidate in-flight requests across a workspace switch.
+-    const requestId = ++selectRequestRef.current;
+-    setSelectedFile({ path, content: "", loading: true, error: null, truncated: false });
+-    try {
+-      const data = await fetchReadFile(selectedId, path);
+-      if (requestId !== selectRequestRef.current) return;
+-      setSelectedFile({ path, content: data.content, loading: false, error: null, truncated: Boolean(data.truncated) });
+-    } catch (e) {
+-      if (requestId !== selectRequestRef.current) return;
+-      setSelectedFile({ path, content: "", loading: false, error: e.message, truncated: false });
+-    }
+-  }, [selectedId]);
+-
+-  const handleRefresh = useCallback(() => {
+-    if (selectedId && live) loadRoot(selectedId);
+-  }, [selectedId, live, loadRoot]);
+-
+-  return (
+-    <div className="h-full flex flex-col min-h-0 text-sm">
+-      {/* CHANGED — Phase 3: px-3 py-2 -> the shared content-padding token
+-          (vertically only; py-2/0.5rem is already tighter than any
+-          --viewport-touch-target value, so it stays fixed — this bar's
+-          tap-friendliness comes from the buttons below, not the bar's own
+-          padding), same cosmetic rationale as Settings/AuditLog. */}
+-      <div className="shrink-0 flex items-center gap-2 px-[var(--viewport-content-padding)] py-2 border-b border-[var(--neutral-800)]">
+-        <HardDrive size={13} className="text-[var(--neutral-500)] shrink-0" />
+-        {workspaces.length > 0 ? (
+-          <select
+-            id="local-workspace-picker"
+-            name="localWorkspacePicker"
+-            value={selectedId || ""}
+-            onChange={(e) => setSelectedId(e.target.value)}
+-            className="text-xs bg-transparent border border-[var(--neutral-800)] rounded-lg px-2 min-h-[var(--viewport-touch-target)] text-[var(--neutral-300)]"
+-          >
+-            {workspaces.map((ws) => (
+-              <option key={ws.id} value={ws.id}>{ws.name}</option>
+-            ))}
+-          </select>
+-        ) : (
+-          <span className="text-xs text-[var(--neutral-600)]">No workspaces yet</span>
+-        )}
+-
+-        <span className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border ${
+-          live
+-            ? "border-emerald-900/50 text-emerald-500"
+-            : "border-[var(--neutral-800)] text-[var(--neutral-600)]"
+-        }`}>
+-          <span className={`w-1.5 h-1.5 rounded-full ${live ? "bg-emerald-500" : "bg-[var(--neutral-700)]"}`} />
+-          {live ? "Daemon connected" : "No daemon connected"}
+-        </span>
+-
+-        {selectedId && (
+-          <div className="flex items-center gap-0.5 rounded-lg border border-[var(--neutral-800)] p-0.5">
+-            <button
+-              type="button"
+-              onClick={() => setSubView("files")}
+-              className={`flex items-center gap-1 text-[11px] px-2 min-h-[var(--viewport-touch-target)] rounded-md ${
+-                subView === "files" ? "bg-[var(--neutral-800)] text-[var(--neutral-200)]" : "text-[var(--neutral-500)]"
+-              }`}
+-            >
+-              <FileText size={11} /> Files
+-            </button>
+-            <button
+-              type="button"
+-              onClick={() => setSubView("terminal")}
+-              className={`flex items-center gap-1 text-[11px] px-2 min-h-[var(--viewport-touch-target)] rounded-md ${
+-                subView === "terminal" ? "bg-[var(--neutral-800)] text-[var(--neutral-200)]" : "text-[var(--neutral-500)]"
+-              }`}
+-            >
+-              <TerminalSquare size={11} /> Terminal
+-            </button>
+-          </div>
+-        )}
+-
+-        <button
+-          type="button"
+-          onClick={handleRefresh}
+-          disabled={!live || rootLoading || subView !== "files"}
+-          title="Refresh"
+-          className={`flex items-center justify-center min-h-[var(--viewport-touch-target)] min-w-[var(--viewport-touch-target)] text-[var(--neutral-500)] hover:text-[var(--neutral-300)] disabled:opacity-40 disabled:cursor-not-allowed ${subView === "files" ? "ml-auto" : ""}`}
+-        >
+-          <RefreshCw size={13} className={rootLoading ? "animate-spin" : ""} />
+-        </button>
+-      </div>
+-
+-      {/* NEW — Part 7: pending write_file/delete/execute_command actions,
+-          from ANY proposer (an agent's tool call, another tab), shown
+-          above both sub-views since confirming/denying one isn't tied
+-          to whichever sub-view happens to be open right now. */}
+-      {selectedId && <PendingActionBar workspaceId={selectedId} onConfirmed={() => { if (live) loadRoot(selectedId); }} />}
+-
+-      {subView === "terminal" ? (
+-        <div className="flex-1 min-h-0">
+-          {selectedId ? (
+-            <TerminalPanel workspaceId={selectedId} live={live} />
+-          ) : (
+-            <p className="text-xs text-[var(--neutral-600)] px-3 py-2">Pick a workspace to get started.</p>
+-          )}
+-        </div>
+-      ) : (
+-        <div className="flex-1 min-h-0 flex">
+-          {/* CHANGED — Phase 3: on mobile this pane and the preview pane
+-              below are mutually exclusive (master/detail, tap a file to
+-              drill in, Back to return) instead of side-by-side — see the
+-              isMobile comment up by useViewport(). `hidden` rather than
+-              unmounting: keeps FileTreeNode's per-node `expanded`/
+-              `children` cache alive across a drill-in/Back round trip, so
+-              flipping to a file and back doesn't silently re-collapse and
+-              re-fetch a tree the user already opened. */}
+-          <div className={`${isMobile ? (selectedFile ? "hidden" : "w-full") : "w-64 shrink-0 border-r border-[var(--neutral-800)]"} overflow-auto py-1.5`}>
+-            {!selectedId && (
+-              <p className="text-xs text-[var(--neutral-600)] px-3 py-2">Pick a workspace to get started.</p>
+-            )}
+-
+-            {selectedId && statusChecked && !live && (
+-              <div className="flex flex-col items-center gap-2 text-center text-xs text-[var(--neutral-600)] px-3 py-8">
+-                <WifiOff size={18} className="text-[var(--neutral-700)]" />
+-                <span>
+-                  No local daemon is paired with this workspace right now.
+-                  Run the daemon locally (see <code className="text-[10px]">daemon/README.md</code>)
+-                  and this tree fills in automatically once it connects.
+-                </span>
+-              </div>
+-            )}
+-
+-            {selectedId && live && rootLoading && rootEntries === null && (
+-              <div className="flex items-center gap-2 text-xs text-[var(--neutral-600)] py-6 justify-center">
+-                <Loader2 size={14} className="animate-spin" /> Loading…
+-              </div>
+-            )}
+-
+-            {selectedId && live && rootError && (
+-              <div className="flex items-start gap-2 text-xs text-amber-500 px-3 py-2">
+-                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+-                <span>{rootError}</span>
+-              </div>
+-            )}
+-
+-            {selectedId && live && !rootError && rootEntries && rootEntries.length === 0 && (
+-              <p className="text-xs text-[var(--neutral-600)] px-3 py-2">This folder is empty.</p>
+-            )}
+-
+-            {selectedId && live && !rootError && rootEntries && rootEntries.map((entry) => (
+-              <FileTreeNode
+-                key={entry.name}
+-                wsId={selectedId}
+-                entry={entry}
+-                path={entry.name}
+-                depth={0}
+-                onSelectFile={onSelectFile}
+-                selectedPath={selectedFile?.path}
+-              />
+-            ))}
+-          </div>
+-
+-          <div className={`${isMobile ? (selectedFile ? "w-full flex flex-col min-h-0" : "hidden") : "flex-1 min-w-0"}`}>
+-            {isMobile && selectedFile && (
+-              <button
+-                type="button"
+-                onClick={() => setSelectedFile(null)}
+-                className="shrink-0 flex items-center gap-1.5 text-xs text-[var(--neutral-400)] hover:text-[var(--neutral-200)] px-[var(--viewport-content-padding)] min-h-[var(--viewport-touch-target)] border-b border-[var(--neutral-800)]"
+-              >
+-                <ArrowLeft size={13} /> Back to files
+-              </button>
+-            )}
+-            <div className={isMobile ? "flex-1 min-h-0" : "h-full"}>
+-              <FilePreview file={selectedFile} />
+-            </div>
+-          </div>
+-        </div>
+-      )}
+-    </div>
+-  );
+-}
+-
+-// Same memo() rationale every other tab body in this file/directory
+-// uses (see AuditLogTab.jsx/SettingsTab.jsx's own comments): AppShell's
+-// tab-switch re-render shouldn't force this tab to re-render/re-poll
+-// when it isn't the active one.
+-export default memo(LocalWorkspaceTab);
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 154c57c..49d3169 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -88,6 +88,7 @@ import {
+   BOTTOM_PANEL_DEFAULT_HEIGHT,
+   BOTTOM_PANEL_MIN_HEIGHT,
+   EDITOR_MIN_WIDTH,
++  LOCAL_SOURCE_IDS,
+   MAIN_ROW_MIN_HEIGHT,
+   PREVIEW_DEFAULT_WIDTH,
+   PREVIEW_MIN_WIDTH,
+@@ -1659,7 +1660,14 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+  * @param {boolean} [props.reserveCorner]
+  * @param {(dirty: boolean) => void} [props.onDirtyChange] - W2.5: true while any open file has unsaved edits, false again when saved or unmounted; BuildTab guards project / sub-tab switches with it
+  */
+-export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = false, onDirtyChange }) {
++export default function EditorWorkbench({
++  workspaceId,
++  apiUrl,
++  reserveCorner = false,
++  onDirtyChange,
++  initialSourceOverride, // NEW — W3.2: BuildTab's one-time "the old Local Files tab redirected here" signal
++  onConsumeInitialSourceOverride, // NEW — W3.2: called once this mount has applied (or ignored) the override above, same consumed-once shape as AppShell's own initialWorkspaceId
++}) {
+   // The saved panel layout, read once when the workbench mounts — the
+   // store's initializer ignores later changes to it. That's fine for the
+   // same reason the tabs are: BuildTab remounts this component per
+@@ -1667,7 +1675,35 @@ export default function EditorWorkbench({ workspaceId, apiUrl, reserveCorner = f
+   // be swapped for another's in place. (`workspaceId` is a dependency
+   // only so the read is correct if that ever stops being true for the
+   // first render.)
+-  const initialLayout = useMemo(() => loadLayout(browserStorage(), workspaceId), [workspaceId]);
++  //
++  // W3.2: initialSourceOverride, when it validates against
++  // LOCAL_SOURCE_IDS, wins over whatever this workspace's own persisted
++  // layout says — it's how the retired "local" tab's redirect lands
++  // someone on Local instead of whatever they last had open here. Not
++  // written back through saveLayout: it's a one-time nudge for this
++  // mount, not a new preference: the switch (or lack of one) after this
++  // is the user's own choice again.
++  const initialLayout = useMemo(() => {
++    const loaded = loadLayout(browserStorage(), workspaceId);
++    if (initialSourceOverride && LOCAL_SOURCE_IDS.has(initialSourceOverride)) {
++      return { ...loaded, source: initialSourceOverride };
++    }
++    return loaded;
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [workspaceId]);
++
++  // Consume the override exactly once per mount, whether or not it
++  // validated — an invalid value shouldn't leave BuildTab re-arming it
++  // forever either. `initialSourceOverride` itself is intentionally not
++  // a dep: this component is remounted (key={selected.id}) for every
++  // project switch, so "once per mount" already means "once", the same
++  // guarantee LocalWorkspaceTab.jsx's own initialWorkspaceId consumer
++  // used to rely on.
++  useEffect(() => {
++    if (initialSourceOverride) onConsumeInitialSourceOverride?.();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
+   return (
+     <EditorStoreProvider initialLayout={initialLayout}>
+       <WorkbenchBody

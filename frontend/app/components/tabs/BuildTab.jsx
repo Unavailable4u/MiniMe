@@ -728,7 +728,7 @@ function PartsPanel({ wsId, apiUrl }) {
   );
 }
 
-function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
+function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect, onConsumeInitialLocalTabRedirect }) {
   // §7 fix: workspaces + promoteWorkspace come from the same
   // SessionContext NotebooksTab/ResearchTab already use — no new context
   // plumbing needed, Tasks just reads the shared list and filters it.
@@ -762,6 +762,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
   // NEW — patch 7: which of BUILD_VIEWS is showing for the selected
   // project. Same pattern as PlanTab's BlueprintView `view` state.
   const [buildView, setBuildView] = useState("tasks");
+  // NEW — W3.2: set once by the redirect effect below, read once by the
+  // EditorWorkbench prop just past the render return, then cleared by
+  // EditorWorkbench itself (onConsumeInitialSourceOverride) once it's
+  // applied it to that mount's initial layout — never re-armed after
+  // that, so switching projects or leaving/re-entering Editor manually
+  // doesn't keep forcing Local.
+  const [forceLocalSourceOnce, setForceLocalSourceOnce] = useState(false);
   // NEW — W2.5: unsaved-edits guard. EditorWorkbench reports whether any
   // open file has unsaved edits through `onDirtyChange`. It lands in a
   // ref, not state: it's only ever read inside event handlers, and
@@ -947,6 +954,20 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
     if (savedId) setSelectedWsId(savedId);
     setRestoredSelection(true);
   }, []);
+
+  // NEW — W3.2: AppShell remapped a stale "local" tab id here and is
+  // telling us so, once. There's no wsId to restore (the old Local
+  // Files tab picked from every workspace, not just build-stage ones —
+  // D7's accepted trade-off), so this only opens the Editor sub-view
+  // and arms forceLocalSourceOnce for whichever build project ends up
+  // selected above; requestBuildView's guardUnsaved isn't needed since
+  // nothing can be dirty yet this early.
+  useEffect(() => {
+    if (!initialLocalTabRedirect) return;
+    setBuildView("code");
+    setForceLocalSourceOnce(true);
+    onConsumeInitialLocalTabRedirect?.();
+  }, [initialLocalTabRedirect, onConsumeInitialLocalTabRedirect]);
 
   useEffect(() => {
     if (!restoredSelection || !selectedWsId) return;
@@ -1346,6 +1367,8 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange }) {
                 apiUrl={API_URL}
                 reserveCorner={chatDockCollapsed}
                 onDirtyChange={handleEditorDirty}
+                initialSourceOverride={forceLocalSourceOnce ? "local" : undefined}
+                onConsumeInitialSourceOverride={() => setForceLocalSourceOnce(false)}
               />
             </div>
           </>

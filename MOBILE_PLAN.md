@@ -47,6 +47,15 @@ ones don't) and confirmed it scales down, not just up:
   stay inline, revisit if it grows" call already made for
   `WorkspaceChatPanel.jsx`'s composer in Phase 2. No controller-hook
   split — at one branch there's nothing shared to extract yet.
+  **Retired — W3.2.** The file (and its standalone "Local Files" tab)
+  is gone; the same master/detail idea carried over into
+  `components/workbench/EditorWorkbench.jsx`'s own `isMobile` branch
+  (`mobileExplorerOpen` toggling explorer-full-width vs.
+  editor-full-width) when Local browsing merged into Build's Editor
+  sub-view. That branch is cosmetic-scale for now the same way this
+  one was — a real single-pane pass for the whole workbench (bottom
+  tabs, touch-sized merge controls) is still W8.7, tracked below under
+  Build.
 
 Net: the rule holds at small scale without forcing every tab into
 `components/mobile/` just because the folder exists. Same three
@@ -474,8 +483,15 @@ Planned order: Research → Plan → Test → Growth → Build → Notebooks.
     end to end. Same "confirm on real hardware" caveat as every other
     entry; the two worth a tap-through are Brand Voice's custom-fact cards
     and the Calendar date pickers (iOS renders `datetime-local` its own way).
-- Build: **mobile fork not started** (see the row-actions pass above for
-  what did ship for it).
+- Build: **mobile fork not started** for the kanban board / project list
+  (see the row-actions pass above for what did ship for it). Its Editor
+  sub-view is a partial exception — `EditorWorkbench.jsx` already has its
+  own inline `isMobile` single-pane branch (explorer-or-editor,
+  full-bleed layout from W0.2, Local source from W3.1/W3.2's retired
+  Local Files tab) — but that's the same cosmetic-scale, no-fork stopgap
+  `LocalWorkspaceTab.jsx` used above, not the real structural pass. A
+  proper mobile workbench (bottom tabs, touch-sized merge controls) is
+  W8.7 in the Build Workbench plan, same as the rest of Build.
 
 ## Phase 6 — Graphs/canvases
 **Ahead of schedule for the two tabs converted so far.**
