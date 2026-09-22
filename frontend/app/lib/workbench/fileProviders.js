@@ -54,7 +54,8 @@
 //     caller that didn't check writeNeedsConfirm first should get a
 //     loud error, not a silent no-op or a surprise unconfirmed write.
 //     EditorWorkbench's save flow calls propose()/confirm() directly
-//     instead (W3.1 part 2).
+//     instead — see saveFile() there and this provider's own
+//     propose()/confirm()/deny() below.
 //   - capabilities.history/watch are both false: there's no version
 //     table for local files (only workspace_code_files has one) and no
 //     push channel that knows when something outside this tab changed
@@ -261,15 +262,31 @@ export function createLocalFileProvider({ workspaceId, apiUrl }) {
   return {
     id: "local",
     capabilities: {
-      // W3.1 part 1 (this patch) is read-only: browsing and opening
-      // work, but nothing calls write()/remove()/move()/mkdir() yet, so
-      // there's nothing to gate behind a confirmation dialog in the UI
-      // itself. `write` flips to true, and the explorer's file
-      // operations along with it (Explorer.jsx already keys its New/
-      // Rename/Delete/Duplicate affordances off capabilities.write —
-      // see canModify there), once part 2 wires Save through
-      // propose()/confirm() below.
+      // `write` stays false — permanently, not just until some later
+      // patch. It is deliberately NOT flipped now that Save itself is
+      // wired (EditorWorkbench.jsx's saveFile()): Explorer.jsx keys its
+      // New/Rename/Delete/Duplicate affordances off capabilities.write
+      // (see canModify there), and remove()/move()/mkdir() below still
+      // throw — those file-tree operations were never in this plan's
+      // scope for Local (only Cloud's workspace_code_files got them, in
+      // W1.2), so lighting up buttons that always fail would be worse
+      // than leaving them hidden. Editing a file's CONTENT is a
+      // different question from changing the tree, and that one IS
+      // wired — through writeNeedsConfirm below, not this flag.
+      // EditorWorkbench reads `write || writeNeedsConfirm` wherever the
+      // question is "can this buffer be typed into" (its readOnly prop)
+      // and reads `write` alone wherever the question is "can the tree
+      // itself change" (Explorer's canModify) — see that component's
+      // own comment on the split.
       write: false,
+      // Save becomes "Propose write": EditorWorkbench's saveFile() calls
+      // propose("write_file", {path, content}) below instead of write()
+      // (which keeps throwing — see its own comment), and a human
+      // confirms on PendingActionBar before anything touches disk. No
+      // optimistic-concurrency story here the way Cloud's base_version
+      // gives one: the daemon keeps no version table for local files,
+      // so a confirmed write simply overwrites whatever is on disk at
+      // that moment, the same as any other local edit would.
       writeNeedsConfirm: true,
       history: false, // no version table for local files — HistoryPanel shows a fitting empty state instead of calling this
       search: false, // unused: Project Search (W2.6) works over any provider's read(), regardless of this flag — see projectSearch.js's own header
@@ -362,10 +379,11 @@ export function createLocalFileProvider({ workspaceId, apiUrl }) {
 
     /**
      * Not part of the base FileProvider contract — TerminalPanel.jsx
-     * and (in part 2) EditorWorkbench's own save flow call these
-     * directly, the same propose -> human clicks Confirm/Deny on
-     * PendingActionBar -> daemon runs it round trip
-     * components/TerminalPanel.jsx already uses for execute_command.
+     * and EditorWorkbench.jsx's own save flow (saveFile(), for a
+     * writeNeedsConfirm provider) both call these directly, the same
+     * propose -> human clicks Confirm/Deny on PendingActionBar ->
+     * daemon runs it round trip components/TerminalPanel.jsx already
+     * uses for execute_command.
      */
     async propose(tool, params) {
       return apiPost("/propose", { tool, params });
