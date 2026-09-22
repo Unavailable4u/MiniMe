@@ -35,7 +35,11 @@ import { fileIconKey } from "../../lib/workbench/fileIcons";
 // fileIconKey() result -> [icon, color]. Muted on purpose: the colors
 // only say "what kind of file", they shouldn't compete with the active
 // row or the unsaved-changes dot.
-const FILE_ICONS = {
+//
+// Exported (W2.6) so QuickOpen.jsx's result list can show the same
+// per-type icon a file already has in the explorer, instead of a
+// second copy of this table drifting out of sync with this one.
+export const FILE_ICONS = {
   code: [FileCode, "text-sky-400"],
   markup: [Globe, "text-orange-400"],
   style: [Palette, "text-violet-400"],

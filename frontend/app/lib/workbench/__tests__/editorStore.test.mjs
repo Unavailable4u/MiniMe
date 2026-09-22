@@ -323,14 +323,14 @@ assertEqual(ren.tabs, ["b.js"], "two tabs that end up on one path collapse to a 
 
 // --- SET_LAYOUT (W2.3b) ----------------------------------------------
 
-const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false };
+const defaultLayout = { bottomOpen: false, bottomTab: "problems", previewOpen: false, source: "cloud" };
 const withLayout = { ...initialState, layout: { ...defaultLayout } };
 
 let laid = editorReducer(withLayout, { type: "SET_LAYOUT", layout: { bottomOpen: true } });
-assertEqual(laid.layout, { bottomOpen: true, bottomTab: "problems", previewOpen: false }, "SET_LAYOUT merges a partial over the current layout");
+assertEqual(laid.layout, { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" }, "SET_LAYOUT merges a partial over the current layout");
 
 laid = editorReducer(laid, { type: "SET_LAYOUT", layout: { bottomTab: "history", previewOpen: true } });
-assertEqual(laid.layout, { bottomOpen: true, bottomTab: "history", previewOpen: true }, "SET_LAYOUT can change several fields at once, leaving the rest alone");
+assertEqual(laid.layout, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "cloud" }, "SET_LAYOUT can change several fields at once, leaving the rest alone");
 
 const before = laid;
 assertEqual(
@@ -346,12 +346,12 @@ assertEqual(laid === before, true, "...and an update made only of invalid fields
 laid = editorReducer(before, { type: "SET_LAYOUT", layout: { bottomTab: "nope", bottomOpen: false } });
 assertEqual(
   laid.layout,
-  { bottomOpen: false, bottomTab: "history", previewOpen: true },
+  { bottomOpen: false, bottomTab: "history", previewOpen: true, source: "cloud" },
   "...while the valid fields in the same update still apply"
 );
 
 laid = editorReducer(before, { type: "SET_LAYOUT", layout: { somethingElse: 1 } });
-assertEqual(Object.keys(laid.layout).sort(), ["bottomOpen", "bottomTab", "previewOpen"], "SET_LAYOUT drops keys that aren't layout fields");
+assertEqual(Object.keys(laid.layout).sort(), ["bottomOpen", "bottomTab", "previewOpen", "source"], "SET_LAYOUT drops keys that aren't layout fields");
 
 laid = editorReducer(initialState, { type: "SET_LAYOUT", layout: { previewOpen: true } });
 assertEqual(laid.layout.previewOpen, true, "SET_LAYOUT works from an empty `layout: {}` (fields default, not undefined)");
@@ -359,6 +359,46 @@ assertEqual(laid.layout.bottomTab, "problems", "...and the missing fields are fi
 
 const opened = editorReducer(withLayout, { type: "SET_ACTIVE_PATH", path: "a.js" });
 assertEqual(opened.layout, withLayout.layout, "unrelated actions leave layout untouched");
+
+// --- W3.1: SWITCH_SOURCE ------------------------------------------------
+
+const cloudSession = editorReducer(
+  { ...initialState, layout: { ...defaultLayout, bottomOpen: true, bottomTab: "history" } },
+  { type: "SET_ACTIVE_PATH", path: "a.js" }
+);
+const toLocal = editorReducer(cloudSession, { type: "SWITCH_SOURCE", source: "local" });
+assertEqual(toLocal.layout.source, "local", "SWITCH_SOURCE flips layout.source");
+assertEqual(toLocal.layout.bottomOpen, true, "...while leaving other layout fields (bottomOpen) alone");
+assertEqual(toLocal.layout.bottomTab, "history", "...and (bottomTab) alone");
+assertEqual(toLocal.tabs, [], "SWITCH_SOURCE clears open tabs — a cloud path means nothing under local");
+assertEqual(toLocal.activePath, null, "...and the active path");
+assertEqual(Object.keys(toLocal.buffers).length, 0, "...and every buffer");
+
+const same = editorReducer(toLocal, { type: "SWITCH_SOURCE", source: "local" });
+assertEqual(same === toLocal, true, "SWITCH_SOURCE to the already-active source is a no-op (same state object)");
+
+// --- W3.1: FILE_LOADED / SAVE_SUCCESS carry `truncated` -----------------
+
+const truncatedLoad = editorReducer(initialState, {
+  type: "FILE_LOADED",
+  path: "big.log",
+  file: { content: "partial...", truncated: true },
+});
+assertEqual(truncatedLoad.buffers["big.log"].truncated, true, "FILE_LOADED carries a truncated read onto the buffer");
+
+const untruncatedLoad = editorReducer(initialState, {
+  type: "FILE_LOADED",
+  path: "a.py",
+  file: { content: "print(1)" },
+});
+assertEqual(untruncatedLoad.buffers["a.py"].truncated, false, "FILE_LOADED without `truncated` defaults to false");
+
+const savedOverTruncated = editorReducer(truncatedLoad, {
+  type: "SAVE_SUCCESS",
+  path: "big.log",
+  file: { content: "the whole file now", version: 1 },
+});
+assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCESS always clears truncated — a save writes the whole buffer");
 
 // --- W2.5: resolving a save conflict (409) ---------------------------------
 //

@@ -1,0 +1,1296 @@
+diff --git a/frontend/app/components/workbench/BottomPanel.jsx b/frontend/app/components/workbench/BottomPanel.jsx
+index a1aa2ce..47fb2d2 100644
+--- a/frontend/app/components/workbench/BottomPanel.jsx
++++ b/frontend/app/components/workbench/BottomPanel.jsx
+@@ -15,6 +15,14 @@
+ // a useSplitter) and hands it in. That is also why the resize handle is
+ // a plain `onResizeStart` prop — this file doesn't know about splitters,
+ // only where the handle goes (its top edge).
++//
++// W2.6: `panels[tabId]` — when the caller has real content for a tab
++// (ProjectSearchPanel for "search", HistoryPanel for "history"), it's
++// rendered in place of that tab's EMPTY_STATES entry. Problems/Console/
++// Terminal have no entry yet and keep showing their placeholder until
++// their own later step fills them in the same way. EditorWorkbench
++// memoizes each node itself (its own header explains why) so passing
++// this object doesn't defeat the memo() below.
+ import { memo, useId } from "react";
+ import { ChevronDown, ChevronUp } from "lucide-react";
+ import { BOTTOM_TABS } from "../../lib/workbench/layoutPrefs";
+@@ -50,11 +58,23 @@ const EMPTY_STATES = {
+  * @param {boolean} [props.reserveRight] - keep the strip's right end clear for the app's floating "open chat" bubble (matters on narrow screens, where the tabs reach that far)
+  * @param {boolean} [props.resizable=true] - false on the single-pane (phone) layout, where the handle is mouse-only
+  * @param {(e: import("react").MouseEvent) => void} [props.onResizeStart] - useSplitter's onHandleMouseDown
++ * @param {Record<string, import("react").ReactNode>} [props.panels] - real tab content, keyed by tab id (W2.6)
+  */
+-function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, reserveRight = false, resizable = true, onResizeStart }) {
++function BottomPanel({
++  open,
++  activeTab,
++  onSelectTab,
++  onToggle,
++  height,
++  reserveRight = false,
++  resizable = true,
++  onResizeStart,
++  panels,
++}) {
+   const uid = useId();
+   const bodyId = `${uid}-body`;
+   const empty = EMPTY_STATES[activeTab] || EMPTY_STATES.problems;
++  const customPanel = panels?.[activeTab];
+ 
+   return (
+     <div
+@@ -128,12 +148,14 @@ function BottomPanel({ open, activeTab, onSelectTab, onToggle, height, reserveRi
+           id={bodyId}
+           role="tabpanel"
+           aria-labelledby={`${uid}-tab-${activeTab}`}
+-          className="flex-1 min-h-0 overflow-auto px-4 py-3"
++          className={`flex-1 min-h-0 overflow-auto ${customPanel ? "px-2 py-2" : "px-4 py-3"}`}
+         >
+-          <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
+-            <p className="text-xs text-[var(--neutral-400)]">{empty.title}</p>
+-            <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">{empty.body}</p>
+-          </div>
++          {customPanel || (
++            <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
++              <p className="text-xs text-[var(--neutral-400)]">{empty.title}</p>
++              <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">{empty.body}</p>
++            </div>
++          )}
+         </div>
+       )}
+     </div>
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 3d278f5..6791389 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -65,9 +65,11 @@ import { useSplitter } from "../../hooks/useSplitter";
+ import { useViewport } from "../../hooks/useViewport";
+ import { createCloudFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
+ import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
+-import { basename, isSameOrDescendant, remapPath } from "../../lib/workbench/fileTree";
++import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
+ import { deleteSummary } from "../../lib/workbench/explorerOps";
+ import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
++import { jumpToPosition } from "../../lib/workbench/gotoPosition";
++import { useProjectSearch } from "../../hooks/useProjectSearch";
+ import {
+   BOTTOM_PANEL_DEFAULT_HEIGHT,
+   BOTTOM_PANEL_MIN_HEIGHT,
+@@ -89,7 +91,10 @@ import CodeEditor from "./CodeEditor";
+ import ConflictCompareView from "./ConflictCompareView";
+ import EditorTabs from "./EditorTabs";
+ import Explorer from "./Explorer";
++import HistoryPanel from "./HistoryPanel";
+ import PreviewColumn from "./PreviewColumn";
++import ProjectSearchPanel from "./ProjectSearchPanel";
++import QuickOpen from "./QuickOpen";
+ import StatusBar from "./StatusBar";
+ 
+ // W2.5: how long a dirty file has to sit untouched before autosave (when
+@@ -121,8 +126,15 @@ const EXPLORER_MAX_WIDTH = 480;
+  * memo()'d: every keystroke replaces the store's `buffers` object, but
+  * only the edited file's `value` prop changes, so with stable callbacks
+  * from the parent the other open editors skip re-rendering.
++ *
++ * `registerPane` (W2.6) hands the parent the *ref object* itself, once,
++ * rather than the view — the ref object is stable for this pane's whole
++ * lifetime (a plain useRef(null)), so the parent can always read
++ * `.current?.getView()` at the moment it actually needs the view (a
++ * search result click, say) instead of the parent needing to know when
++ * CodeEditor's own internal CM6 setup finishes.
+  */
+-const EditorPane = memo(function EditorPane({ path, active, visible, value, onEdit, onSave, onCursor }) {
++const EditorPane = memo(function EditorPane({ path, active, visible, value, onEdit, onSave, onCursor, registerPane }) {
+   const editorRef = useRef(null);
+   const shown = active && visible;
+ 
+@@ -130,6 +142,11 @@ const EditorPane = memo(function EditorPane({ path, active, visible, value, onEd
+     if (shown) editorRef.current?.getView()?.requestMeasure();
+   }, [shown]);
+ 
++  useEffect(() => {
++    registerPane?.(path, editorRef);
++    return () => registerPane?.(path, null);
++  }, [path, registerPane]);
++
+   return (
+     <div className={active ? "absolute inset-0" : "hidden"}>
+       <CodeEditor
+@@ -193,6 +210,13 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   // savePrefs.js's own header), so unlike `layout` there's no
+   // workspaceId-keyed re-read to do on a project switch.
+   const [savePrefs, setSavePrefs] = useState(() => loadSavePrefs(browserStorage()));
++  // W2.6: Quick Open (Cmd/Ctrl-P) and Project Search's own "give the
++  // query box focus" signal — a counter rather than a boolean so
++  // pressing Cmd/Ctrl-Shift-F again while the panel is ALREADY open and
++  // focused still does something (re-selects the text) instead of being
++  // a no-op change to a flag that's already true.
++  const [quickOpenOpen, setQuickOpenOpen] = useState(false);
++  const [searchFocusSeq, setSearchFocusSeq] = useState(0);
+ 
+   const explorerSplitter = useSplitter({
+     axis: "width",
+@@ -260,6 +284,17 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   savePrefsRef.current = savePrefs;
+   const failedSavesRef = useRef({}); // {path: the exact text whose last save FAILED} — autosave won't retry that same text (planAutosave)
+   const autosaveTimersRef = useRef(new Map()); // path -> {edited, timer}
++  // W2.6: most-recently-active path first, capped — Quick Open's list
++  // before anything is typed (defaultQuickOpenList's own `recentPaths`).
++  // A ref, not state: it only needs to be read at the moment the palette
++  // opens, not on every change, so there's nothing to gain from a
++  // re-render every time a tab switch happens.
++  const recentOpenRef = useRef([]);
++  // W2.6: path -> the EditorPane's own ref OBJECT (not the view — see
++  // EditorPane's header on why). Lets jumpToSearchResult() below reach a
++  // specific open pane's live CodeMirror view without CodeEditor itself
++  // needing to know Project Search exists.
++  const paneRefsRef = useRef(new Map());
+ 
+   // ---- file list ----------------------------------------------------
+ 
+@@ -719,6 +754,102 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+ 
+   const handleRefresh = useCallback(() => refreshRef.current(), []);
+ 
++  // ---- quick open / project search / history (W2.6) ---------------------
++
++  // Every real file path in the project — Quick Open's full candidate
++  // list. The filtering itself (subsequence ranking) happens client-side
++  // in quickOpen.js over this same array, so it only needs to change
++  // when the file list actually does, not on every keystroke typed into
++  // the palette.
++  const allFilePaths = useMemo(() => realFilePaths(filesMeta), [filesMeta]);
++
++  // Most-recently-active path first — Quick Open's own list before
++  // anything is typed (defaultQuickOpenList's `recentPaths`).
++  useEffect(() => {
++    if (!state.activePath) return;
++    recentOpenRef.current = [state.activePath, ...recentOpenRef.current.filter((p) => p !== state.activePath)].slice(
++      0,
++      50
++    );
++  }, [state.activePath]);
++
++  const registerPane = useCallback((path, ref) => {
++    if (ref) paneRefsRef.current.set(path, ref);
++    else paneRefsRef.current.delete(path);
++  }, []);
++
++  // Retries across a few animation frames: a search-result click can
++  // call openFile() for a file that isn't open yet, and the new pane's
++  // ref won't be registered until AFTER the state update that adds its
++  // tab has rendered — the same "wait for the DOM to catch up" shape as
++  // CodeEditor's own requestMeasure(), bounded so a path that never
++  // mounts (closed again before its read landed) doesn't retry forever.
++  const jumpToPositionInPane = useCallback((path, pos, attempt = 0) => {
++    const view = paneRefsRef.current.get(path)?.current?.getView();
++    if (view) {
++      jumpToPosition(view, pos);
++      return;
++    }
++    if (attempt < 8) requestAnimationFrame(() => jumpToPositionInPane(path, pos, attempt + 1));
++  }, []);
++
++  // Project Search's own text source: an open tab's LIVE buffer (unsaved
++  // edits included — the point is searching what's actually in front of
++  // you), undefined for anything closed so useProjectSearch.js knows to
++  // fall back to provider.read().
++  const getOpenText = useCallback((path) => {
++    const b = stateRef.current.buffers[path];
++    return b ? b.edited : undefined;
++  }, []);
++
++  const search = useProjectSearch({ filesMeta, provider, getOpenText });
++
++  const jumpToSearchResult = useCallback(
++    (path, line, column, endColumn) => {
++      openFile(path); // the already-open case is handled inside openFile() itself
++      jumpToPositionInPane(path, { line, column, endColumn });
++    },
++    [openFile, jumpToPositionInPane]
++  );
++
++  // History's "Restore": lands the server's response the same way a
++  // normal save does — FILE_LOADED for the buffer, plus the file list's
++  // own entry patched in place rather than a full refetch (saveFile()
++  // above does the identical bookkeeping for a save; kept separate here
++  // since Restore's caller, HistoryPanel, isn't the save flow).
++  const handleRestored = useCallback(
++    (path, file) => {
++      fileLoaded(path, file);
++      delete dismissedRef.current[path];
++      delete failedSavesRef.current[path];
++      setSaveErrors((prev) => {
++        if (!(path in prev)) return prev;
++        const { [path]: _cleared, ...rest } = prev;
++        return rest;
++      });
++      setConflicts((prev) => {
++        if (!(path in prev)) return prev;
++        const { [path]: _cleared, ...rest } = prev;
++        return rest;
++      });
++      const nextMeta = {
++        ...(filesMetaRef.current || {}),
++        [path]: {
++          workspace_id: file.workspace_id,
++          file_path: file.file_path,
++          language: file.language,
++          size: file.content ? file.content.length : 0,
++          version: file.version,
++          updated_at: file.updated_at,
++          updated_by: file.updated_by,
++        },
++      };
++      filesMetaRef.current = nextMeta;
++      setFilesMeta(nextMeta);
++    },
++    [fileLoaded]
++  );
++
+   // ---- panel layout (W2.3b) --------------------------------------------
+ 
+   const { layout } = state;
+@@ -791,6 +922,67 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+   const conflict = activePath ? conflicts[activePath] : null;
+   const compare = compareConflict ? conflicts[compareConflict] : null;
+ 
++  // ---- bottom panel content (W2.6) --------------------------------------
++  // Each node is memoized on its OWN inputs so handing them down as a
++  // `panels` object doesn't defeat BottomPanel's memo() (see that file's
++  // own header) — without this, a fresh JSX element on every render
++  // (which WorkbenchBody does on every keystroke, via `buffers`) would
++  // give BottomPanel a "new" prop every time regardless of whether
++  // anything it actually renders changed.
++  const searchPanelNode = useMemo(
++    () => (
++      <ProjectSearchPanel
++        query={search.query}
++        onQueryChange={search.setQuery}
++        caseSensitive={search.caseSensitive}
++        onCaseSensitiveChange={search.setCaseSensitive}
++        results={search.results}
++        matchCount={search.matchCount}
++        truncated={search.truncated}
++        loading={search.loading}
++        error={search.error}
++        filesScanned={search.filesScanned}
++        totalFiles={search.totalFiles}
++        onJumpToResult={jumpToSearchResult}
++        focusSeq={searchFocusSeq}
++      />
++    ),
++    [
++      search.query,
++      search.setQuery,
++      search.caseSensitive,
++      search.setCaseSensitive,
++      search.results,
++      search.matchCount,
++      search.truncated,
++      search.loading,
++      search.error,
++      search.filesScanned,
++      search.totalFiles,
++      jumpToSearchResult,
++      searchFocusSeq,
++    ]
++  );
++
++  const historyPanelNode = useMemo(
++    () => (
++      <HistoryPanel
++        path={activePath}
++        provider={provider}
++        currentContent={activeBuffer?.saved}
++        currentVersion={activeBuffer?.version}
++        dirty={!!activeBuffer?.dirty}
++        onRestored={handleRestored}
++      />
++    ),
++    [activePath, provider, activeBuffer?.saved, activeBuffer?.version, activeBuffer?.dirty, handleRestored]
++  );
++
++  const bottomPanels = useMemo(
++    () => ({ search: searchPanelNode, history: historyPanelNode }),
++    [searchPanelNode, historyPanelNode]
++  );
++
+   // ---- autosave + unsaved-edits guards (W2.5) --------------------------
+ 
+   // Autosave: one debounce timer per file that planAutosave() says is due.
+@@ -886,9 +1078,35 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+           .join(", ")}). Closing them will discard those changes.`
+     : "";
+ 
++  // Cmd/Ctrl-P and Cmd/Ctrl-Shift-F (W2.6). A plain onKeyDown on the
++  // workbench's own root div rather than a document-level listener:
++  // neither combo is in CodeMirror's own keymaps (see CodeEditor.jsx's
++  // own imports — defaultKeymap, searchKeymap, etc.), so the native
++  // keydown bubbles up from inside an editor the same as it would from
++  // anywhere else in this tree, and scoping the listener to the
++  // container means a shortcut typed while focus is elsewhere on the
++  // page (the chat dock, say) doesn't fire this handler at all.
++  const handleWorkbenchKeyDown = useCallback(
++    (e) => {
++      const mod = e.metaKey || e.ctrlKey;
++      if (!mod) return;
++      const key = e.key.toLowerCase();
++      if (key === "p" && !e.shiftKey && !e.altKey) {
++        e.preventDefault();
++        setQuickOpenOpen(true);
++      } else if (key === "f" && e.shiftKey && !e.altKey) {
++        e.preventDefault();
++        selectBottomTab("search");
++        setSearchFocusSeq((n) => n + 1);
++      }
++    },
++    [selectBottomTab]
++  );
++
+   return (
+     <div
+       ref={containerRef}
++      onKeyDown={handleWorkbenchKeyDown}
+       className="flex-1 min-h-0 flex flex-col border border-[var(--neutral-800)] rounded-lg overflow-hidden"
+     >
+       {/* Main row: explorer | splitter | editor column | splitter |
+@@ -1060,6 +1278,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+                   onEdit={handleEdit}
+                   onSave={saveFile}
+                   onCursor={handleCursor}
++                  registerPane={registerPane}
+                 />
+               );
+             })}
+@@ -1103,6 +1322,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+         reserveRight={reserveCorner}
+         resizable={!isMobile}
+         onResizeStart={bottomSplitter.onHandleMouseDown}
++        panels={bottomPanels}
+       />
+ 
+       <StatusBar
+@@ -1155,6 +1375,15 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+         onReloadTheirs={() => reloadConflictTheirs(compareConflict)}
+         onKeepMine={() => keepMineOnConflict(compareConflict)}
+       />
++
++      {/* W2.6: Cmd/Ctrl-P. */}
++      <QuickOpen
++        open={quickOpenOpen}
++        onClose={() => setQuickOpenOpen(false)}
++        paths={allFilePaths}
++        recentPaths={recentOpenRef.current}
++        onOpenFile={openFile}
++      />
+     </div>
+   );
+ }
+diff --git a/frontend/app/components/workbench/ExplorerRow.jsx b/frontend/app/components/workbench/ExplorerRow.jsx
+index 98ba35f..68bf40a 100644
+--- a/frontend/app/components/workbench/ExplorerRow.jsx
++++ b/frontend/app/components/workbench/ExplorerRow.jsx
+@@ -35,7 +35,11 @@ import { fileIconKey } from "../../lib/workbench/fileIcons";
+ // fileIconKey() result -> [icon, color]. Muted on purpose: the colors
+ // only say "what kind of file", they shouldn't compete with the active
+ // row or the unsaved-changes dot.
+-const FILE_ICONS = {
++//
++// Exported (W2.6) so QuickOpen.jsx's result list can show the same
++// per-type icon a file already has in the explorer, instead of a
++// second copy of this table drifting out of sync with this one.
++export const FILE_ICONS = {
+   code: [FileCode, "text-sky-400"],
+   markup: [Globe, "text-orange-400"],
+   style: [Palette, "text-violet-400"],
+diff --git a/frontend/app/components/workbench/HistoryCompareView.jsx b/frontend/app/components/workbench/HistoryCompareView.jsx
+new file mode 100644
+index 0000000..0f3c9a5
+--- /dev/null
++++ b/frontend/app/components/workbench/HistoryCompareView.jsx
+@@ -0,0 +1,133 @@
++"use client";
++// frontend/app/components/workbench/HistoryCompareView.jsx — W2.6
++// (Build Workbench plan). HistoryPanel's "click a version -> read-only
++// diff vs current" (the plan's own wording for this step). Same
++// @codemirror/merge MergeView-of-two-finished-documents shape as
++// ConflictCompareView.jsx (see that file's own header for why a FRESH
++// instance per open, rather than one kept alive and updated between
++// opens) — split into its own component rather than reused directly
++// because the two are about different DECISIONS at the bottom (Reload
++// theirs / Keep mine vs a single Restore) even though the diff
++// plumbing underneath is identical.
++import { useEffect, useRef } from "react";
++import { EditorState } from "@codemirror/state";
++import { EditorView, lineNumbers } from "@codemirror/view";
++import { MergeView } from "@codemirror/merge";
++import { buildEditorTheme } from "../../lib/workbench/cmTheme";
++import { basename } from "../../lib/workbench/fileTree";
++import { loadLanguageExtension } from "./CodeEditor";
++import ResponsiveSheet from "../mobile/ResponsiveSheet";
++
++function readOnlySide(doc, languageExtension) {
++  return {
++    doc,
++    extensions: [
++      lineNumbers(),
++      buildEditorTheme(),
++      languageExtension,
++      EditorState.readOnly.of(true),
++      EditorView.editable.of(false),
++    ],
++  };
++}
++
++/**
++ * @param {object} props
++ * @param {boolean} props.open
++ * @param {string} [props.path] - picks the syntax mode and the header/filename only
++ * @param {string} props.older - the historical version's content (MergeView side "a")
++ * @param {number} [props.olderVersion]
++ * @param {string} [props.olderUpdatedBy]
++ * @param {string} props.current - the file's current SAVED content (side "b")
++ * @param {number} [props.currentVersion]
++ * @param {() => void} props.onClose
++ * @param {() => void} props.onRestore - opens the Restore confirmation for `older`
++ */
++export default function HistoryCompareView({
++  open,
++  path,
++  older,
++  olderVersion,
++  olderUpdatedBy,
++  current,
++  currentVersion,
++  onClose,
++  onRestore,
++}) {
++  const containerRef = useRef(null);
++
++  useEffect(() => {
++    if (!open || !containerRef.current) return;
++    let disposed = false;
++    let view = null;
++
++    (async () => {
++      // Both sides are the same file, so one lazy-loaded language
++      // extension covers both — same per-file, not per-editor, cost
++      // CodeEditor.jsx's own loadLanguageExtension() already has.
++      const languageExtension = await loadLanguageExtension(path);
++      if (disposed || !containerRef.current) return;
++      view = new MergeView({
++        parent: containerRef.current,
++        a: readOnlySide(older ?? "", languageExtension),
++        b: readOnlySide(current ?? "", languageExtension),
++        highlightChanges: true,
++        gutter: true,
++        collapseUnchanged: { margin: 3 },
++      });
++      view.dom.style.height = "100%";
++      view.dom.style.overflow = "auto";
++    })();
++
++    return () => {
++      disposed = true;
++      view?.destroy();
++    };
++    // `older`/`current` intentionally excluded — a fresh compare is a
++    // fresh open (see ConflictCompareView.jsx's own header for why).
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [open, path]);
++
++  return (
++    <ResponsiveSheet
++      open={open}
++      onClose={onClose}
++      maxWidth="max-w-5xl"
++      className="bg-[var(--neutral-950)] border border-[var(--neutral-700)] text-[var(--neutral-200)] flex flex-col"
++    >
++      <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-[var(--neutral-800)]">
++        <h3 className="text-sm font-medium truncate">History — {path ? basename(path) : ""}</h3>
++        <button
++          type="button"
++          onClick={onClose}
++          className="text-xs text-[var(--neutral-500)] hover:text-[var(--neutral-200)]"
++        >
++          Close
++        </button>
++      </div>
++
++      <div className="shrink-0 grid grid-cols-2 text-[11px] text-[var(--neutral-500)] border-b border-[var(--neutral-800)]">
++        <div className="px-3 py-1.5 border-r border-[var(--neutral-800)] truncate">
++          {olderVersion != null ? `v${olderVersion}` : "Older version"}
++          {olderUpdatedBy ? ` · ${olderUpdatedBy}` : ""}
++        </div>
++        <div className="px-3 py-1.5 truncate">Current{currentVersion != null ? ` · v${currentVersion}` : ""}</div>
++      </div>
++
++      <div ref={containerRef} className="h-[55vh]" />
++
++      <div className="shrink-0 flex items-center justify-end gap-3 px-4 py-3 border-t border-[var(--neutral-800)] text-xs">
++        <button type="button" onClick={onClose} className="text-[var(--neutral-500)] hover:text-[var(--neutral-300)]">
++          Close
++        </button>
++        <button
++          type="button"
++          onClick={onRestore}
++          className="rounded-lg bg-[var(--accent)] text-[var(--accent-text)] px-3 py-1.5 font-medium"
++        >
++          Restore this version
++        </button>
++      </div>
++    </ResponsiveSheet>
++  );
++}
+diff --git a/frontend/app/components/workbench/HistoryPanel.jsx b/frontend/app/components/workbench/HistoryPanel.jsx
+new file mode 100644
+index 0000000..66c461b
+--- /dev/null
++++ b/frontend/app/components/workbench/HistoryPanel.jsx
+@@ -0,0 +1,201 @@
++"use client";
++// frontend/app/components/workbench/HistoryPanel.jsx — W2.6 (Build
++// Workbench plan). The bottom panel's History tab: past versions of the
++// ACTIVE file (workspace_code_file_versions, reached through
++// fileProviders.js's history()/restore() — both straight wrappers
++// around the W1.1 routes already shipped; see that file's own header).
++//
++// Only ever shows the active tab's history — a "no file open" empty
++// state otherwise, same convention StatusBar already uses for its own
++// per-buffer fields going blank when nothing is active. The live,
++// current version is pinned at the top so there's always something to
++// read "compared against", even though it isn't itself clickable —
++// there's nothing to compare it to or restore it FROM.
++//
++// Restore always asks first (ConfirmDialog, same component the
++// explorer's own Delete uses): unlike a save conflict's "Keep mine",
++// which is choosing between two things already open in front of you,
++// picking an old version here replaces the buffer's content outright,
++// including any unsaved edits sitting in it right now.
++import { useEffect, useRef, useState } from "react";
++import { Loader2, RotateCcw } from "lucide-react";
++import { basename } from "../../lib/workbench/fileTree";
++import HistoryCompareView from "./HistoryCompareView";
++import ConfirmDialog from "../ConfirmDialog";
++
++const SOURCE_LABEL = {
++  user: "You",
++  pipeline: "AI pipeline",
++  proposal: "AI edit",
++  restore: "Restored",
++};
++
++function formatWhen(iso) {
++  if (!iso) return "";
++  try {
++    return new Date(iso).toLocaleString();
++  } catch {
++    return iso;
++  }
++}
++
++/**
++ * @param {object} props
++ * @param {string|null} props.path - the active tab's path, or null
++ * @param {object|null} props.provider - needs .history(path)/.restore(path, version)
++ * @param {string} props.currentContent - the buffer's SAVED content (not `edited` — see header)
++ * @param {number} [props.currentVersion]
++ * @param {boolean} [props.dirty] - the open buffer has unsaved edits, named in the restore confirmation
++ * @param {(path: string, file: object) => void} props.onRestored - called with the provider's restore() response (the new current file) once a restore lands
++ */
++export default function HistoryPanel({ path, provider, currentContent, currentVersion, dirty, onRestored }) {
++  const [versions, setVersions] = useState(null); // null = not loaded yet for this path
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState(null);
++  const [compareVersion, setCompareVersion] = useState(null); // one entry from `versions`, or null
++  const [pendingRestore, setPendingRestore] = useState(null); // an entry awaiting confirmation
++  const [restoring, setRestoring] = useState(false);
++  const [restoreError, setRestoreError] = useState(null);
++  const seqRef = useRef(0);
++
++  useEffect(() => {
++    setVersions(null);
++    setError(null);
++    setCompareVersion(null);
++    setRestoreError(null);
++    if (!path || !provider) return;
++    const seq = ++seqRef.current;
++    setLoading(true);
++    provider
++      .history(path)
++      .then((list) => {
++        if (seq === seqRef.current) setVersions(list);
++      })
++      .catch((err) => {
++        if (seq === seqRef.current) setError(err.message || "Couldn't load history.");
++      })
++      .finally(() => {
++        if (seq === seqRef.current) setLoading(false);
++      });
++  }, [path, provider]);
++
++  async function doRestore(entry) {
++    if (!path || !provider) return;
++    setRestoring(true);
++    setRestoreError(null);
++    try {
++      const file = await provider.restore(path, entry.version);
++      onRestored(path, file);
++      setPendingRestore(null);
++      setCompareVersion(null);
++      // The restore itself becomes a new version (see restore_version()'s
++      // own docstring: it's an append, not a rewrite) — refresh the list
++      // so it shows up rather than looking like nothing happened.
++      const seq = ++seqRef.current;
++      const list = await provider.history(path);
++      if (seq === seqRef.current) setVersions(list);
++    } catch (err) {
++      setRestoreError(err.message || "Restore failed.");
++    } finally {
++      setRestoring(false);
++    }
++  }
++
++  if (!path) {
++    return (
++      <div className="h-full flex flex-col items-center justify-center gap-1 text-center">
++        <p className="text-xs text-[var(--neutral-400)]">No file open</p>
++        <p className="max-w-sm text-[11px] leading-relaxed text-[var(--neutral-600)]">
++          Open a file to see its saved history here.
++        </p>
++      </div>
++    );
++  }
++
++  return (
++    <div className="h-full flex flex-col">
++      <div className="shrink-0 flex items-center justify-between px-1 pb-2 text-[11px]">
++        <span className="truncate text-[var(--neutral-300)]">{basename(path)}</span>
++        {loading && <Loader2 size={11} className="animate-spin text-[var(--neutral-600)]" />}
++      </div>
++
++      {error && <p className="px-1 pb-2 text-[11px] text-red-400">{error}</p>}
++      {restoreError && <p className="px-1 pb-2 text-[11px] text-red-400">{restoreError}</p>}
++
++      <div className="flex-1 min-h-0 overflow-auto">
++        <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-[var(--neutral-400)]">
++          <span className="w-8 shrink-0 text-right text-[var(--neutral-600)]">
++            {currentVersion != null ? `v${currentVersion}` : ""}
++          </span>
++          <span className="flex-1 truncate">Current</span>
++        </div>
++
++        {versions && versions.length === 0 && !loading && (
++          <p className="px-2 py-2 text-[11px] text-[var(--neutral-600)]">
++            No earlier versions yet — this file has only been saved once.
++          </p>
++        )}
++
++        {(versions || []).map((entry) => (
++          <div
++            key={entry.version}
++            className="group flex items-center gap-2 rounded px-2 py-1 text-[11px] hover:bg-[var(--neutral-900)]"
++          >
++            <span className="w-8 shrink-0 text-right text-[var(--neutral-600)]">v{entry.version}</span>
++            <button
++              type="button"
++              onClick={() => setCompareVersion(entry)}
++              title="Compare with the current version"
++              className="min-w-0 flex-1 truncate text-left text-[var(--neutral-300)] hover:text-[var(--neutral-100)]"
++            >
++              {formatWhen(entry.updated_at)}
++              <span className="text-[var(--neutral-600)]">
++                {" · "}
++                {SOURCE_LABEL[entry.source] || entry.source || "unknown"}
++                {entry.updated_by ? ` · ${entry.updated_by}` : ""}
++              </span>
++            </button>
++            <button
++              type="button"
++              onClick={() => setPendingRestore(entry)}
++              title="Restore this version"
++              className="touch-target shrink-0 text-[var(--neutral-500)] opacity-0 hover:text-[var(--neutral-100)] focus:opacity-100 group-hover:opacity-100"
++            >
++              <RotateCcw size={12} />
++            </button>
++          </div>
++        ))}
++      </div>
++
++      <HistoryCompareView
++        open={!!compareVersion}
++        path={path}
++        older={compareVersion?.content}
++        olderVersion={compareVersion?.version}
++        olderUpdatedBy={compareVersion?.updated_by}
++        current={currentContent}
++        currentVersion={currentVersion}
++        onClose={() => setCompareVersion(null)}
++        onRestore={() => compareVersion && setPendingRestore(compareVersion)}
++      />
++
++      <ConfirmDialog
++        open={!!pendingRestore}
++        title="Restore this version?"
++        tone="info"
++        message={
++          pendingRestore
++            ? `Bring back v${pendingRestore.version} of ${basename(path)} (${formatWhen(
++                pendingRestore.updated_at
++              )}) as a new version. Nothing is deleted — the current version stays in history too.${
++                dirty ? " This also discards your unsaved edits in the editor." : ""
++              }`
++            : ""
++        }
++        confirmLabel={restoring ? "Restoring…" : "Restore"}
++        onConfirm={() => pendingRestore && doRestore(pendingRestore)}
++        onCancel={() => setPendingRestore(null)}
++      />
++    </div>
++  );
++}
+diff --git a/frontend/app/components/workbench/ProjectSearchPanel.jsx b/frontend/app/components/workbench/ProjectSearchPanel.jsx
+new file mode 100644
+index 0000000..8dd7b47
+--- /dev/null
++++ b/frontend/app/components/workbench/ProjectSearchPanel.jsx
+@@ -0,0 +1,148 @@
++"use client";
++// frontend/app/components/workbench/ProjectSearchPanel.jsx — W2.6
++// (Build Workbench plan). The bottom panel's Search tab: a query box
++// (+ case-sensitive toggle) over hooks/useProjectSearch.js, rendering
++// lib/workbench/projectSearch.js's own {path, matches[]} shape file by
++// file, line by line. Clicking a result reports it through
++// `onJumpToResult` — opening the file first if it isn't already, and
++// moving the caret there, are both the workbench's job (EditorWorkbench
++// owns the open tabs and the CodeMirror views), not this panel's.
++//
++// Presentational, like Explorer/EditorTabs/StatusBar: every value here
++// is a prop from useProjectSearch(), called once in EditorWorkbench and
++// passed down, so a project switch (which remounts the whole workbench,
++// key={selected.id}) naturally gets a fresh search instead of this
++// panel needing to know that happened.
++import { useEffect, useRef } from "react";
++import { CaseSensitive, Loader2, Search } from "lucide-react";
++import { basename, dirname } from "../../lib/workbench/fileTree";
++
++// Renders one already-matched line, coloring the ranges
++// searchFileContent() found (already remapped to `text`'s own
++// coordinates by trimLineForDisplay(), so no further adjustment is
++// needed here).
++function HighlightedLine({ text, ranges }) {
++  if (!ranges || ranges.length === 0) return <>{text}</>;
++  const parts = [];
++  let cursor = 0;
++  ranges.forEach(([start, end], i) => {
++    if (start > cursor) parts.push(<span key={`t${i}`}>{text.slice(cursor, start)}</span>);
++    parts.push(
++      <span key={`m${i}`} className="rounded-sm bg-[var(--accent)]/30 text-[var(--neutral-100)]">
++        {text.slice(start, end)}
++      </span>
++    );
++    cursor = end;
++  });
++  if (cursor < text.length) parts.push(<span key="tail">{text.slice(cursor)}</span>);
++  return <>{parts}</>;
++}
++
++function summaryLine({ error, query, loading, matchCount, results, truncated, filesScanned, totalFiles }) {
++  if (error) return error;
++  if (!query.trim()) return `Searches ${totalFiles} file${totalFiles === 1 ? "" : "s"} — open and closed.`;
++  if (loading) return "Searching…";
++  if (matchCount === 0) return "No matches.";
++  const files = `${results.length} file${results.length === 1 ? "" : "s"}`;
++  const matches = `${matchCount} match${matchCount === 1 ? "" : "es"}`;
++  return `${matches} in ${files}${truncated ? " (showing the first results)" : ""} · scanned ${filesScanned}/${totalFiles}`;
++}
++
++/**
++ * @param {object} props
++ * @param {string} props.query
++ * @param {(q: string) => void} props.onQueryChange
++ * @param {boolean} props.caseSensitive
++ * @param {(v: boolean) => void} props.onCaseSensitiveChange
++ * @param {{path: string, matches: object[], truncated: boolean}[]} props.results
++ * @param {number} props.matchCount
++ * @param {boolean} props.truncated
++ * @param {boolean} props.loading
++ * @param {string|null} props.error
++ * @param {number} props.filesScanned
++ * @param {number} props.totalFiles
++ * @param {(path: string, line: number, column: number, endColumn: number) => void} props.onJumpToResult
++ * @param {number} [props.focusSeq] - bumped by the workbench (Cmd/Ctrl-Shift-F) to refocus and re-select the query box
++ */
++export default function ProjectSearchPanel({
++  query,
++  onQueryChange,
++  caseSensitive,
++  onCaseSensitiveChange,
++  results,
++  matchCount,
++  truncated,
++  loading,
++  error,
++  filesScanned,
++  totalFiles,
++  onJumpToResult,
++  focusSeq,
++}) {
++  const inputRef = useRef(null);
++
++  useEffect(() => {
++    if (focusSeq) inputRef.current?.select();
++  }, [focusSeq]);
++
++  return (
++    <div className="h-full flex flex-col gap-2">
++      <div className="shrink-0 flex items-center gap-1.5 rounded border border-[var(--neutral-800)] bg-[var(--neutral-950)] px-1.5 focus-within:border-[var(--neutral-600)]">
++        <Search size={11} className="shrink-0 text-[var(--neutral-600)]" />
++        <input
++          ref={inputRef}
++          value={query}
++          onChange={(e) => onQueryChange(e.target.value)}
++          placeholder="Search across project files"
++          aria-label="Search across project files"
++          spellCheck={false}
++          autoComplete="off"
++          className="touch-input min-w-0 flex-1 bg-transparent py-1 text-xs text-[var(--neutral-200)] placeholder:text-[var(--neutral-600)] outline-none"
++        />
++        <button
++          type="button"
++          onClick={() => onCaseSensitiveChange(!caseSensitive)}
++          aria-pressed={caseSensitive}
++          title="Match case"
++          className={`touch-target shrink-0 rounded px-1 py-0.5 ${
++            caseSensitive ? "text-[var(--accent)]" : "text-[var(--neutral-600)] hover:text-[var(--neutral-300)]"
++          }`}
++        >
++          <CaseSensitive size={13} />
++        </button>
++        {loading && <Loader2 size={11} className="shrink-0 animate-spin text-[var(--neutral-600)]" />}
++      </div>
++
++      <p className="shrink-0 text-[11px] text-[var(--neutral-600)]">
++        {summaryLine({ error, query, loading, matchCount, results, truncated, filesScanned, totalFiles })}
++      </p>
++
++      <div className="flex-1 min-h-0 overflow-auto">
++        {results.map((fileResult) => (
++          <div key={fileResult.path} className="mb-2">
++            <div className="sticky top-0 z-10 flex items-baseline gap-1.5 bg-[var(--neutral-950)] px-1 py-0.5 text-[11px]">
++              <span className="truncate text-[var(--neutral-200)]">{basename(fileResult.path)}</span>
++              <span className="truncate text-[var(--neutral-600)]">{dirname(fileResult.path)}</span>
++              <span className="ml-auto shrink-0 text-[var(--neutral-600)]">
++                {fileResult.matches.length}
++                {fileResult.truncated ? "+" : ""}
++              </span>
++            </div>
++            {fileResult.matches.map((m) => (
++              <button
++                key={`${fileResult.path}:${m.line}:${m.column}`}
++                type="button"
++                onClick={() => onJumpToResult(fileResult.path, m.line, m.column, m.column + query.trim().length)}
++                title={`Line ${m.line}`}
++                className="block w-full truncate rounded px-2 py-0.5 text-left font-mono text-[11px] text-[var(--neutral-400)] hover:bg-[var(--neutral-900)] hover:text-[var(--neutral-100)]"
++              >
++                <span className="mr-2 select-none text-[var(--neutral-600)]">{m.line}</span>
++                <HighlightedLine text={m.text} ranges={m.ranges} />
++              </button>
++            ))}
++          </div>
++        ))}
++      </div>
++    </div>
++  );
++}
+diff --git a/frontend/app/components/workbench/QuickOpen.jsx b/frontend/app/components/workbench/QuickOpen.jsx
+new file mode 100644
+index 0000000..8000141
+--- /dev/null
++++ b/frontend/app/components/workbench/QuickOpen.jsx
+@@ -0,0 +1,169 @@
++"use client";
++// frontend/app/components/workbench/QuickOpen.jsx — W2.6 (Build
++// Workbench plan). Cmd/Ctrl-P's file palette: a text box over
++// lib/workbench/quickOpen.js's subsequence ranking. Opened, closed and
++// key-bound by EditorWorkbench.jsx (the workbench owns the keydown
++// handler and the open/closed state, same "pane reports intent, the
++// workbench decides what happens" split as Explorer's own file
++// operations) — this component only renders the list and reports which
++// path was chosen, through `onOpenFile`.
++//
++// ResponsiveSheet, not a hand-rolled overlay: same modal primitive
++// every other dialog in this app uses since the Phase-4 mobile pass
++// (ConfirmDialog, ConflictCompareView), which is what gives this
++// Escape-to-close, backdrop-click-to-close and a scroll lock for free,
++// and a full-screen sheet on a touch device with no physical keyboard
++// to press Cmd/Ctrl-P on in the first place (the trigger is still
++// keyboard-only for now — see EditorWorkbench.jsx's own keydown
++// handler — this is just "don't render badly if it somehow opens").
++import { useEffect, useMemo, useRef, useState } from "react";
++import { basenameMatchIndices, defaultQuickOpenList, rankQuickOpen } from "../../lib/workbench/quickOpen";
++import { basename, dirname } from "../../lib/workbench/fileTree";
++import { fileIconKey } from "../../lib/workbench/fileIcons";
++import { FILE_ICONS } from "./ExplorerRow";
++import ResponsiveSheet from "../mobile/ResponsiveSheet";
++
++function EntryIcon({ path }) {
++  const [Icon, tone] = FILE_ICONS[fileIconKey(basename(path))] || FILE_ICONS.file;
++  return <Icon size={12} className={`shrink-0 ${tone}`} />;
++}
++
++// `indices` are positions within `text` (already basename-relative, via
++// basenameMatchIndices) to render in the accent color — the same
++// "which characters actually matched" highlight a command palette is
++// expected to show.
++function Highlighted({ text, indices }) {
++  if (!indices || indices.length === 0) return <>{text}</>;
++  const marked = new Set(indices);
++  return (
++    <>
++      {[...text].map((ch, i) =>
++        marked.has(i) ? (
++          <span key={i} className="text-[var(--accent)]">
++            {ch}
++          </span>
++        ) : (
++          <span key={i}>{ch}</span>
++        )
++      )}
++    </>
++  );
++}
++
++const RESULT_LIMIT = 50;
++
++/**
++ * @param {object} props
++ * @param {boolean} props.open
++ * @param {() => void} props.onClose
++ * @param {string[]} props.paths - every real file path in the project
++ * @param {string[]} props.recentPaths - most-recently-opened first
++ * @param {(path: string) => void} props.onOpenFile
++ */
++export default function QuickOpen({ open, onClose, paths, recentPaths, onOpenFile }) {
++  const [query, setQuery] = useState("");
++  const [selected, setSelected] = useState(0);
++  const inputRef = useRef(null);
++  const listRef = useRef(null);
++
++  // Fresh every time it opens — a palette that remembered last time's
++  // typed text would show stale results for a beat before the person
++  // even starts typing.
++  useEffect(() => {
++    if (!open) return undefined;
++    setQuery("");
++    setSelected(0);
++    const id = requestAnimationFrame(() => inputRef.current?.focus());
++    return () => cancelAnimationFrame(id);
++  }, [open]);
++
++  const results = useMemo(() => {
++    const q = query.trim();
++    return q
++      ? rankQuickOpen(paths, q, { limit: RESULT_LIMIT })
++      : defaultQuickOpenList(paths, recentPaths, { limit: RESULT_LIMIT });
++  }, [paths, recentPaths, query]);
++
++  // Typing can shrink the list out from under whichever row was
++  // highlighted; clamp rather than let `selected` point past the end.
++  useEffect(() => {
++    setSelected((s) => Math.min(s, Math.max(0, results.length - 1)));
++  }, [results.length]);
++
++  useEffect(() => {
++    listRef.current?.children[selected]?.scrollIntoView({ block: "nearest" });
++  }, [selected]);
++
++  function choose(path) {
++    if (!path) return;
++    onOpenFile(path);
++    onClose();
++  }
++
++  function onKeyDown(e) {
++    if (e.key === "ArrowDown") {
++      e.preventDefault();
++      setSelected((s) => Math.min(results.length - 1, s + 1));
++    } else if (e.key === "ArrowUp") {
++      e.preventDefault();
++      setSelected((s) => Math.max(0, s - 1));
++    } else if (e.key === "Enter") {
++      e.preventDefault();
++      choose(results[selected]?.path);
++    }
++    // Escape isn't handled here — ResponsiveSheet already closes on it.
++  }
++
++  return (
++    <ResponsiveSheet
++      open={open}
++      onClose={onClose}
++      maxWidth="max-w-lg"
++      className="bg-[var(--neutral-950)] border border-[var(--neutral-700)] shadow-2xl"
++    >
++      <div role="dialog" aria-modal="true" aria-label="Quick open" onKeyDown={onKeyDown}>
++        <input
++          ref={inputRef}
++          value={query}
++          onChange={(e) => setQuery(e.target.value)}
++          placeholder="Go to file…"
++          aria-label="Go to file"
++          spellCheck={false}
++          autoComplete="off"
++          className="w-full bg-transparent px-3 py-2.5 text-sm text-[var(--neutral-100)] placeholder:text-[var(--neutral-600)] outline-none border-b border-[var(--neutral-800)]"
++        />
++        <div ref={listRef} role="listbox" aria-label="Files" className="max-h-[50vh] overflow-auto py-1">
++          {results.length === 0 && (
++            <p className="px-3 py-4 text-center text-xs text-[var(--neutral-600)]">
++              {paths.length === 0 ? "No files in this project." : "No files match."}
++            </p>
++          )}
++          {results.map((r, i) => {
++            const name = basename(r.path);
++            const dir = dirname(r.path);
++            const nameIndices = basenameMatchIndices(r.path, r.indices);
++            return (
++              <button
++                key={r.path}
++                type="button"
++                role="option"
++                aria-selected={i === selected}
++                onMouseEnter={() => setSelected(i)}
++                onClick={() => choose(r.path)}
++                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs ${
++                  i === selected ? "bg-[var(--neutral-800)]" : "hover:bg-[var(--neutral-900)]"
++                }`}
++              >
++                <EntryIcon path={r.path} />
++                <span className="min-w-0 flex-1 truncate text-[var(--neutral-100)]">
++                  <Highlighted text={name} indices={nameIndices} />
++                </span>
++                {dir && <span className="shrink-0 max-w-[45%] truncate text-[var(--neutral-600)]">{dir}</span>}
++              </button>
++            );
++          })}
++        </div>
++      </div>
++    </ResponsiveSheet>
++  );
++}
+diff --git a/frontend/app/hooks/useProjectSearch.js b/frontend/app/hooks/useProjectSearch.js
+new file mode 100644
+index 0000000..ec42581
+--- /dev/null
++++ b/frontend/app/hooks/useProjectSearch.js
+@@ -0,0 +1,153 @@
++"use client";
++// frontend/app/hooks/useProjectSearch.js — W2.6 (Build Workbench plan).
++// The async half of Project Search (Cmd/Ctrl-Shift-F): gathers the text
++// lib/workbench/projectSearch.js's pure searchProject() needs — an open
++// tab's live buffer, or a provider.read() for anything closed — and
++// hands the actual scanning to that module untouched. See
++// projectSearch.js's own header for why there is no backend search
++// route to call instead: this is a deliberate CLIENT-SIDE content
++// search, the same posture fileProviders.js's `capabilities.search:
++// false` already commits to.
++//
++// Debounced (~300ms after the last keystroke) so scanning a whole
++// project doesn't re-read every closed file on every character typed.
++// Closed-file reads are cached by the file's own `version`
++// (filesMeta[path].version) — a save or an external update only
++// invalidates THAT file's cache entry, not the whole thing, so typing
++// "abc" one letter at a time re-fetches nothing after the first
++// keystroke. A stale response can never land after a newer one: every
++// run gets a sequence number, matching EditorWorkbench's own
++// loadFileList()/refreshFromServer() convention, and only the latest
++// one is allowed to touch state.
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
++import { searchProject, searchableFilePaths } from "../lib/workbench/projectSearch";
++
++const DEBOUNCE_MS = 300;
++const READ_CONCURRENCY = 6; // provider.read() calls in flight at once, across the whole project
++
++/**
++ * Runs `fn` over `items` with at most `limit` calls in flight at once.
++ * No external dependency for something this small — same "obviously
++ * correct beats a library" call the pure lib files already make.
++ */
++async function mapWithConcurrency(items, limit, fn) {
++  let next = 0;
++  async function worker() {
++    while (next < items.length) {
++      const i = next++;
++      await fn(items[i], i);
++    }
++  }
++  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
++}
++
++/**
++ * @param {object} deps
++ * @param {Record<string, object>|null} deps.filesMeta - provider.list()'s latest result
++ * @param {object} deps.provider - the active FileProvider (needs .read)
++ * @param {(path: string) => string|undefined} deps.getOpenText - the
++ *   live buffer text for an open path (edited, unsaved edits included),
++ *   or undefined if that path isn't open right now
++ */
++export function useProjectSearch({ filesMeta, provider, getOpenText }) {
++  const [query, setQuery] = useState("");
++  const [caseSensitive, setCaseSensitive] = useState(false);
++  const [results, setResults] = useState([]);
++  const [matchCount, setMatchCount] = useState(0);
++  const [truncated, setTruncated] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState(null);
++  const [filesScanned, setFilesScanned] = useState(0);
++
++  const cacheRef = useRef(new Map()); // path -> {version, content}
++  const seqRef = useRef(0);
++  const timerRef = useRef(null);
++
++  const searchablePaths = useMemo(() => searchableFilePaths(filesMeta), [filesMeta]);
++
++  const resetToIdle = useCallback(() => {
++    setResults([]);
++    setMatchCount(0);
++    setTruncated(false);
++    setLoading(false);
++    setError(null);
++    setFilesScanned(0);
++  }, []);
++
++  const runSearch = useCallback(
++    async (q, opts) => {
++      const seq = ++seqRef.current;
++      setLoading(true);
++      setError(null);
++      try {
++        const fileTexts = {};
++        let scanned = 0;
++        await mapWithConcurrency(searchablePaths, READ_CONCURRENCY, async (path) => {
++          const open = getOpenText(path);
++          if (open !== undefined) {
++            fileTexts[path] = open;
++            scanned += 1;
++            return;
++          }
++          const meta = filesMeta?.[path];
++          const cached = cacheRef.current.get(path);
++          if (cached && meta && cached.version === meta.version) {
++            fileTexts[path] = cached.content;
++            scanned += 1;
++            return;
++          }
++          try {
++            const file = await provider.read(path);
++            if (seq !== seqRef.current) return; // superseded — don't bother caching a stale run's reads
++            cacheRef.current.set(path, { version: file.version ?? meta?.version ?? 0, content: file.content || "" });
++            fileTexts[path] = file.content || "";
++            scanned += 1;
++          } catch {
++            // One unreadable file (deleted mid-scan, a transient network
++            // blip) doesn't fail the whole search — it's just missing
++            // from this run's results.
++          }
++        });
++        if (seq !== seqRef.current) return;
++        const outcome = searchProject(fileTexts, q, { caseSensitive: !!opts.caseSensitive });
++        setResults(outcome.results);
++        setMatchCount(outcome.matchCount);
++        setTruncated(outcome.truncated);
++        setFilesScanned(scanned);
++      } catch (err) {
++        if (seq === seqRef.current) setError(err.message || "Search failed.");
++      } finally {
++        if (seq === seqRef.current) setLoading(false);
++      }
++    },
++    [searchablePaths, filesMeta, provider, getOpenText]
++  );
++
++  useEffect(() => {
++    if (timerRef.current) clearTimeout(timerRef.current);
++    if (!query.trim()) {
++      seqRef.current += 1; // invalidate any run still in flight
++      resetToIdle();
++      return undefined;
++    }
++    const q = query.trim();
++    timerRef.current = setTimeout(() => runSearch(q, { caseSensitive }), DEBOUNCE_MS);
++    return () => clearTimeout(timerRef.current);
++  }, [query, caseSensitive, runSearch, resetToIdle]);
++
++  useEffect(() => () => clearTimeout(timerRef.current), []);
++
++  return {
++    query,
++    setQuery,
++    caseSensitive,
++    setCaseSensitive,
++    results,
++    matchCount,
++    truncated,
++    loading,
++    error,
++    filesScanned,
++    totalFiles: searchablePaths.length,
++  };
++}
+diff --git a/frontend/app/lib/workbench/gotoPosition.js b/frontend/app/lib/workbench/gotoPosition.js
+new file mode 100644
+index 0000000..63df01a
+--- /dev/null
++++ b/frontend/app/lib/workbench/gotoPosition.js
+@@ -0,0 +1,47 @@
++// frontend/app/lib/workbench/gotoPosition.js — W2.6 (Build Workbench
++// plan). Turns a 1-based (line, column) — what
++// projectSearch.js's searchFileContent() reports and what a person
++// reads off the status bar's own Ln/Col — into a CM6 doc position and
++// puts the caret (or a selection) there, scrolled into view.
++//
++// Not part of the "no imports" pure-function family (fileTree.js,
++// tabUtils.js, quickOpen.js, projectSearch.js): this one's whole job is
++// dispatching a transaction against a LIVE EditorView, so unlike those
++// it needs @codemirror/state and can't be exercised by a plain-`node`
++// test. Kept out of CodeEditor.jsx itself because nothing about it is
++// CodeEditor's own concern — it's a caller-side helper ("the workbench
++// asked this view to jump somewhere"), same relationship
++// fileProviders.js has to the routes it wraps.
++import { EditorSelection } from "@codemirror/state";
++
++/**
++ * @param {import("@codemirror/view").EditorView|null|undefined} view -
++ *   a no-op if the view isn't mounted yet (or has already been torn
++ *   down) — callers that might race a pane's mount (Project Search's
++ *   jump, which can fire before a just-opened file's editor exists)
++ *   are expected to retry rather than this function queuing anything.
++ * @param {{line: number, column?: number, endColumn?: number}} pos -
++ *   `line` and `column` are 1-based, matching both
++ *   searchFileContent()'s own numbering and CodeMirror's line/column
++ *   gutter; `column` defaults to the line's start. `endColumn`
++ *   (1-based, exclusive) selects through there instead of only placing
++ *   the caret — a caller with a match's [start,end) range (0-based)
++ *   passes `column: start + 1, endColumn: end + 1`. Both are clamped
++ *   to the line's own length rather than throwing on a stale position
++ *   (the line the search matched may have been edited since).
++ */
++export function jumpToPosition(view, { line, column = 1, endColumn } = {}) {
++  if (!view) return;
++  const doc = view.state.doc;
++  const clampedLine = Math.min(Math.max(1, Math.floor(line) || 1), doc.lines);
++  const lineInfo = doc.line(clampedLine);
++  const from = Math.min(lineInfo.to, lineInfo.from + Math.max(0, (column || 1) - 1));
++  const to =
++    endColumn != null ? Math.min(lineInfo.to, Math.max(from, lineInfo.from + endColumn - 1)) : from;
++
++  view.dispatch({
++    selection: EditorSelection.single(from, to),
++    scrollIntoView: true,
++  });
++  view.focus();
++}

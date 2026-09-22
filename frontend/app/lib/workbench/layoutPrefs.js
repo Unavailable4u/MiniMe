@@ -37,10 +37,24 @@ const BOTTOM_TAB_IDS = new Set(BOTTOM_TABS.map((t) => t.id));
 // W6.2 Console, W3.1 Terminal) an open-by-default empty panel would
 // only take height away from the editor. The tab strip is still
 // visible when closed, so it stays discoverable.
+//
+// `source` (W3.1): which FileProvider the Explorer/tabs/search/history
+// are all currently pointed at — "cloud" (workspace_code_files) or
+// "local" (a paired daemon folder). Persisted here rather than as its
+// own storage key for the same reason the panel flags are: it's a
+// sticky per-workspace UI preference, not buffer state, so it belongs
+// wherever bottomOpen/previewOpen already live rather than a second
+// read/write path doing the same job. Switching it is NOT a plain
+// SET_LAYOUT, though — see editorStore.js's SWITCH_SOURCE, which resets
+// tabs/buffers at the same time (a path under one source means nothing
+// under the other).
+export const LOCAL_SOURCE_IDS = new Set(["cloud", "local"]);
+
 export const DEFAULT_LAYOUT = Object.freeze({
   bottomOpen: false,
   bottomTab: "problems",
   previewOpen: false,
+  source: "cloud",
 });
 
 // Sizes (px). Defaults/minimums for the splitters; the maximums depend
@@ -78,12 +92,18 @@ export function normalizeLayout(raw, fallback) {
     bottomOpen: typeof src.bottomOpen === "boolean" ? src.bottomOpen : base.bottomOpen,
     bottomTab: BOTTOM_TAB_IDS.has(src.bottomTab) ? src.bottomTab : base.bottomTab,
     previewOpen: typeof src.previewOpen === "boolean" ? src.previewOpen : base.previewOpen,
+    source: LOCAL_SOURCE_IDS.has(src.source) ? src.source : base.source,
   };
 }
 
 /** Field-by-field equality of two normalized layouts. */
 export function sameLayout(a, b) {
-  return a.bottomOpen === b.bottomOpen && a.bottomTab === b.bottomTab && a.previewOpen === b.previewOpen;
+  return (
+    a.bottomOpen === b.bottomOpen &&
+    a.bottomTab === b.bottomTab &&
+    a.previewOpen === b.previewOpen &&
+    a.source === b.source
+  );
 }
 
 /** Per-workspace key, same `minime_build_editor_*:${id}` family as the splitters'. */

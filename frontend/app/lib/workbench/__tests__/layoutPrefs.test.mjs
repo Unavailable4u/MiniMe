@@ -61,7 +61,7 @@ assertEqual(
   ["problems", "console", "terminal", "history"],
   "the bottom panel has the four planned tabs, in order"
 );
-assertEqual(DEFAULT_LAYOUT, { bottomOpen: false, bottomTab: "problems", previewOpen: false }, "defaults: panel and preview closed, Problems selected");
+assertEqual(DEFAULT_LAYOUT, { bottomOpen: false, bottomTab: "problems", previewOpen: false, source: "cloud" }, "defaults: panel and preview closed, Problems selected, cloud source");
 
 // --- normalizeLayout --------------------------------------------------
 
@@ -72,33 +72,33 @@ assertEqual(normalizeLayout([true, "history"]), DEFAULT_LAYOUT, "an array normal
 assertEqual(normalizeLayout({}), DEFAULT_LAYOUT, "an empty object normalizes to the defaults");
 
 assertEqual(
-  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true }),
-  { bottomOpen: true, bottomTab: "console", previewOpen: true },
+  normalizeLayout({ bottomOpen: true, bottomTab: "console", previewOpen: true, source: "local" }),
+  { bottomOpen: true, bottomTab: "console", previewOpen: true, source: "local" },
   "a valid layout passes through unchanged"
 );
 assertEqual(
-  normalizeLayout({ bottomOpen: "true", bottomTab: "search", previewOpen: 1 }),
+  normalizeLayout({ bottomOpen: "true", bottomTab: "search", previewOpen: 1, source: "nope" }),
   DEFAULT_LAYOUT,
-  "wrong types and an unknown tab id each fall back to their default"
+  "wrong types, an unknown tab id and an unknown source each fall back to their default"
 );
 assertEqual(
   normalizeLayout({ bottomOpen: true, bottomTab: "nope", previewOpen: true }),
-  { bottomOpen: true, bottomTab: "problems", previewOpen: true },
+  { bottomOpen: true, bottomTab: "problems", previewOpen: true, source: "cloud" },
   "one bad field doesn't discard the good ones"
 );
 assertEqual(
   Object.keys(normalizeLayout({ bottomOpen: true, extra: 1, __proto__: { x: 1 } })).sort(),
-  ["bottomOpen", "bottomTab", "previewOpen"],
+  ["bottomOpen", "bottomTab", "previewOpen", "source"],
   "unknown keys are dropped"
 );
 assertEqual(
-  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true }),
-  { bottomOpen: true, bottomTab: "history", previewOpen: true },
+  normalizeLayout({ bottomTab: "nope" }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
+  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" },
   "with a fallback, invalid/missing fields take the fallback's values instead of the defaults"
 );
 assertEqual(
-  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true }),
-  { bottomOpen: false, bottomTab: "history", previewOpen: true },
+  normalizeLayout({ bottomOpen: false }, { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" }),
+  { bottomOpen: false, bottomTab: "history", previewOpen: true, source: "local" },
   "...and valid fields still win over the fallback"
 );
 assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(null)), true, "DEFAULT_LAYOUT is frozen, but normalizeLayout returns a fresh object callers may own");
@@ -106,6 +106,7 @@ assertEqual(Object.isFrozen(DEFAULT_LAYOUT) && !Object.isFrozen(normalizeLayout(
 assertEqual(sameLayout(normalizeLayout(null), DEFAULT_LAYOUT), true, "sameLayout: equal layouts");
 assertEqual(sameLayout({ ...DEFAULT_LAYOUT, bottomTab: "history" }, DEFAULT_LAYOUT), false, "sameLayout: a different tab");
 assertEqual(sameLayout({ ...DEFAULT_LAYOUT, previewOpen: true }, DEFAULT_LAYOUT), false, "sameLayout: a different flag");
+assertEqual(sameLayout({ ...DEFAULT_LAYOUT, source: "local" }, DEFAULT_LAYOUT), false, "sameLayout: a different source");
 
 // --- storage ----------------------------------------------------------
 
@@ -113,10 +114,10 @@ assertEqual(layoutStorageKey("ws-1"), "minime_build_editor_layout:ws-1", "the st
 assertEqual(layoutStorageKey("ws-1") === layoutStorageKey("ws-2"), false, "two workspaces don't share a layout");
 
 let store = fakeStorage();
-saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true });
+saveLayout(store, "ws-1", { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" });
 assertEqual(
   loadLayout(store, "ws-1"),
-  { bottomOpen: true, bottomTab: "history", previewOpen: true },
+  { bottomOpen: true, bottomTab: "history", previewOpen: true, source: "local" },
   "a saved layout loads back identically"
 );
 assertEqual(loadLayout(store, "ws-2"), DEFAULT_LAYOUT, "another workspace still gets the defaults");
@@ -128,7 +129,7 @@ store = fakeStorage();
 saveLayout(store, "ws-1", { bottomOpen: true, junk: "x" });
 assertEqual(
   JSON.parse(store.data[layoutStorageKey("ws-1")]),
-  { bottomOpen: true, bottomTab: "problems", previewOpen: false },
+  { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" },
   "what's written is the normalized layout, never the caller's raw object"
 );
 
@@ -137,7 +138,7 @@ assertEqual(loadLayout(store, "ws-1"), DEFAULT_LAYOUT, "an unparseable saved val
 store = fakeStorage({ [layoutStorageKey("ws-1")]: JSON.stringify({ bottomOpen: true, bottomTab: "gone" }) });
 assertEqual(
   loadLayout(store, "ws-1"),
-  { bottomOpen: true, bottomTab: "problems", previewOpen: false },
+  { bottomOpen: true, bottomTab: "problems", previewOpen: false, source: "cloud" },
   "a saved value naming a tab that no longer exists keeps the rest and defaults the tab"
 );
 store = fakeStorage({ [layoutStorageKey("ws-1")]: "null" });
@@ -164,6 +165,13 @@ saveLayout(throwing, "ws-1", DEFAULT_LAYOUT); // must not throw
 assertEqual(true, true, "storage that throws on write/remove: save is swallowed");
 
 assertEqual(browserStorage(), null, "browserStorage() is null outside a browser (no `window` under node)");
+
+// --- W3.1: source ------------------------------------------------------
+
+assertEqual(normalizeLayout({ source: "local" }).source, "local", "a valid source passes through");
+assertEqual(normalizeLayout({ source: "dropbox" }).source, "cloud", "an unknown source falls back to cloud");
+assertEqual(normalizeLayout({ source: "local" }, { ...DEFAULT_LAYOUT, source: "cloud" }).source, "local", "a valid source still wins over the fallback");
+assertEqual(normalizeLayout({}, { ...DEFAULT_LAYOUT, source: "local" }).source, "local", "a missing source takes the fallback's value");
 
 // --- size bounds ------------------------------------------------------
 
