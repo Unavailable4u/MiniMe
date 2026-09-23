@@ -267,7 +267,20 @@ function ThinkingElapsed() {
 // default: a standalone Chat tab, or a Notebooks session where nothing's
 // been clicked yet, simply has no default to fall back to, same as
 // today (see tryHandleClassifiedToolCall's scope resolution below).
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false }) {
+// NEW — W4.2 (Build Workbench plan). `codeRefs`/`codeChips`/
+// `onClearCodeRefs` are the code-context equivalent of `activeContext`
+// just above: plain data + a ready-made element, not a dependency on
+// lib/workbench/codeContext.js or components/workbench/ContextChips.jsx
+// — this file stays usable by every non-Build tab exactly as before.
+// `codeRefs === null` (the default, every existing call site) means
+// "this panel isn't code-context-aware" and the Ask|Edit strip below
+// the message list doesn't render at all. BuildTab.jsx's own
+// CodeAwareChatPanel wrapper is what supplies real values: `codeRefs`
+// from useCodeContext().refs, `codeChips` as a `<ContextChips/>`
+// element (rendered here, but built there — see that wrapper's own
+// comment for why it can't be built in this file), and
+// `onClearCodeRefs` as that same store's clearRefs().
+export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false, codeRefs = null, codeChips = null, onClearCodeRefs = null }) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -394,8 +407,15 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // Fix (render-loop, take 2): same class of bug as setActiveMessageIndex
   // above — must depend on dock.sendTask (stable) specifically, never on
   // `dock` itself (a fresh object every render).
+  // CHANGED — W4.2: takes an optional second `extra` object, merged
+  // into the options dock.sendTask already forwards to the store's own
+  // sendTask() (mode/reviewBeforeDispatch unchanged for every existing
+  // caller, which all still call `sendTask(text)` with nothing in the
+  // second slot). sendCodeChatMessage below is the one caller that
+  // passes `{ codeRefs, displayText }` — see WorkspaceDockContext.jsx's
+  // own sendTask() for what those two do to the persisted message.
   const sendTask = useCallback(
-    (taskText) => dock.sendTask(taskText, { mode, reviewBeforeDispatch }),
+    (taskText, extra) => dock.sendTask(taskText, { mode, reviewBeforeDispatch, ...extra }),
     [dock.sendTask, mode, reviewBeforeDispatch]
   );
 
@@ -448,6 +468,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
 
   const [viewport] = useViewport();   // NEW — Phase 1 (mobile shell)
   const [modeOpen, setModeOpen] = useState(false);
+  // NEW — W4.2: "Ask | Edit", the code-context mode toggle -- unrelated
+  // to `mode`/`MODES`/`modeOpen` above (that trio is the tier picker,
+  // Auto/Simple/Fast/Expert/Beast). Only ever shown when `codeRefs`
+  // isn't null (see the composer JSX below); "Edit" has nothing to call
+  // yet (W5.1) so it renders disabled and this never actually leaves
+  // "ask" in this patch.
+  const [codeChatMode, setCodeChatMode] = useState("ask");
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
 
@@ -1125,8 +1152,55 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // unstable rowProps object was part of the same chain that caused the
   // "Maximum update depth exceeded" crash. See handleRowsRendered's comment
   // for the full chain.
+  // NEW — W4.2 (Build Workbench plan), Ask mode. D2: a chip-bearing
+  // chat message stays on the SAME /api/task path every other chat
+  // message already goes through — a real code EDIT gets its own
+  // dedicated endpoint (W5.1), this doesn't. The model sees each ref's
+  // full snippet, prepended as fenced blocks ahead of what the person
+  // typed; the chat log and the persisted message do NOT — they keep
+  // only `{path, fromLine, toLine}` per ref (see
+  // WorkspaceDockContext.jsx's sendTask, `displayText`/`codeRefs`), so
+  // a long chat history never balloons with code that's still sitting
+  // right there in the file, and MessageBubble.jsx renders that
+  // trimmed list back out as small read-only chips on the sent
+  // message. A folder ref carries no snippet yet (W5.5 is what expands
+  // one server-side) — noted by name only, not faked with an empty
+  // fenced block.
+  const sendCodeChatMessage = useCallback(
+    (text) => {
+      const fenced = codeRefs
+        .map((ref) =>
+          ref.kind === "folder"
+            ? `(folder attached: ${ref.path}/)`
+            : "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
+        )
+        .join("\n\n");
+      const augmented = fenced ? `${fenced}\n\n${text}` : text;
+      const trimmedRefs = codeRefs.map((ref) => ({ path: ref.path, fromLine: ref.fromLine, toLine: ref.toLine }));
+      sendTask(augmented, { displayText: text, codeRefs: trimmedRefs });
+      onClearCodeRefs?.();
+    },
+    [codeRefs, sendTask, onClearCodeRefs]
+  );
+
   const dispatchText = useCallback(
     (text) => {
+      // W4.2 / plan §7 gotcha 10: a chip-bearing send must bypass
+      // tryHandleGenerateIntent/tryHandleClassifiedToolCall entirely.
+      // Both exist to guess "generate notebooks vs plain chat" FROM
+      // THE TEXT ALONE — an instruction sent alongside an attached
+      // code selection has already been sorted into "do something with
+      // this code" by the person picking it, and running it through
+      // that same guesser risks a misread ("add a loading state to
+      // src/App.jsx L10-20" landing on "generate notebooks about
+      // App.jsx"). Edit mode isn't wired yet (W5.1), so this is the
+      // only path a chip-bearing send takes today, same as the "Ask
+      // mode works end-to-end, Edit is a stub" scope this step is
+      // meant to land.
+      if (codeRefs && codeRefs.length > 0) {
+        sendCodeChatMessage(text);
+        return;
+      }
       tryHandleGenerateIntent(text).then((handled) => {
         if (handled) return;
         if (CHAT_TOOL_CALLING_ENABLED) {
@@ -1139,8 +1213,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         }
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask` is what actually matters for rowProps below.
-    [sendTask]
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask`/`codeRefs`/`sendCodeChatMessage` is what actually matters for rowProps below.
+    [sendTask, codeRefs, sendCodeChatMessage]
   );
 
   function handleSubmit(e) {
@@ -1629,6 +1703,40 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
           </div>
         ) : (
         <>
+        {/* NEW — W4.2: the code-context chip tray + Ask|Edit mode toggle,
+            "chips render above the composer" (plan §5 W4.2). `codeRefs`
+            null (every non-Build call site) renders nothing here at
+            all — see this component's own prop-block comment above.
+            `codeChips` is a ready-made element the caller built
+            (BuildTab.jsx's CodeAwareChatPanel passes a live
+            <ContextChips/>), not something this file constructs
+            itself, so it stays free of any lib/workbench import. */}
+        {codeRefs !== null && (
+          <div className="border-t border-[var(--neutral-800)] px-4 pt-3 flex flex-col gap-2">
+            <div className="flex items-center gap-0.5 self-start rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] p-0.5">
+              <button
+                type="button"
+                onClick={() => setCodeChatMode("ask")}
+                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  codeChatMode === "ask"
+                    ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                    : "text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
+                }`}
+              >
+                Ask
+              </button>
+              <button
+                type="button"
+                disabled
+                title="Coming in W5 — reviewed AI edits with Keep/Undo"
+                className="rounded px-2 py-0.5 text-[11px] font-medium text-[var(--neutral-600)] cursor-default"
+              >
+                Edit
+              </button>
+            </div>
+            {codeChips}
+          </div>
+        )}
         {/* NEW — Data Layer §4b: compact status pills for in-flight/just-
             finished attachments, distinct from IngestionDropzone.jsx's
             fuller progress list (this composer has no room for that, and

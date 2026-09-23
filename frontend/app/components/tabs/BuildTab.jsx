@@ -23,8 +23,24 @@ import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggabl
 // sidebar's own subtree so switching projects in that list doesn't
 // remount it; see this provider's own `key` below for why it DOES
 // remount the workbench+chat section.
-import { CodeContextProvider } from "../../lib/workbench/codeContext";
+import { CodeContextProvider, useCodeContext } from "../../lib/workbench/codeContext";
 import ContextChips from "../workbench/ContextChips";
+
+// NEW — W4.2 (Build Workbench plan). BuildTab itself can't call
+// useCodeContext() — it's the component CREATING CodeContextProvider
+// as a child element below, not a descendant of it — so this tiny
+// wrapper, rendered INSIDE that provider (both <WorkspaceChatPanel>
+// call sites below are), does the read and hands WorkspaceChatPanel
+// only the plain data/element props it actually takes (`codeRefs`,
+// `codeChips`, `onClearCodeRefs`), same "no lib/workbench dependency"
+// shape as that file's existing `activeContext` prop. Module-scope,
+// not nested inside BuildTab: an inline function component would get a
+// fresh identity — and remount its whole subtree, draft included — on
+// every BuildTab render.
+function CodeAwareChatPanel(props) {
+  const { refs, clearRefs } = useCodeContext();
+  return <WorkspaceChatPanel {...props} codeRefs={refs} codeChips={<ContextChips />} onClearCodeRefs={clearRefs} />;
+}
 // Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -1524,12 +1540,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
             title="Drag to resize"
             className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-[var(--accent)]/40"
           />
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
         </div>
       )}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
         </div>
       )}
       {chatDockCollapsed && (
