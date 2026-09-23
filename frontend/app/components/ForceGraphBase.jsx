@@ -67,6 +67,16 @@ export default function ForceGraphBase({
   nodePointerAreaPaint,
   onNodeClick,
   onNodeHover,
+  // Forwarded straight to react-force-graph-2d's own onRenderFramePre:
+  // (canvasContext, globalScale) => void, called every animation frame
+  // BEFORE links/nodes are painted, with the canvas already translated/
+  // scaled into graph space -- so a caller can draw node.x/node.y
+  // straight into it, same as nodeCanvasObject does. Generic on purpose
+  // (per this component's docstring: domain-specific drawing is a prop,
+  // not baked in here) -- KnowledgeGraphView.jsx uses this to paint
+  // low-opacity cluster halos behind the graph; ForceGraphBase itself
+  // has no idea that's what's happening.
+  onRenderFramePre,
   cooldownTicks = 60,
   legend = null,
 }) {
@@ -152,6 +162,7 @@ export default function ForceGraphBase({
           linkLabel={linkLabel}
           linkCanvasObject={linkCanvasObject}
           linkCanvasObjectMode={linkCanvasObjectMode}
+          onRenderFramePre={onRenderFramePre}
           cooldownTicks={cooldownTicks}
           onEngineStop={() => {
             // Debounced re-frame: only nudge the view outward as new nodes

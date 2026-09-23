@@ -15,6 +15,16 @@ import { Loader2, ArrowUpRight, ChevronRight, ChevronLeft, MessageSquare, Plus, 
 import WorkspaceStageIcons, { STAGE_THEME } from "../WorkspaceStageIcons"; // NEW — item #2: colored per-stage icon + per-project stage badges
 import InstructionChecklist from "../InstructionChecklist"; // NEW — patch 7 (T2/T3 Plan/Build split): relocated from PlanTab.jsx's Blueprint sub-tab. Same component, same backend read/write path (workspace_facts.custom["instructions"], GET .../device-spec, PATCH .../instructions/steps/{step_id}) -- only the tab it renders in changed.
 import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggable chat-dock width, replacing the old fixed width: 560
+// NEW — W4.1: the shared code-context store. Mounted here, wrapping
+// the workbench + chat-dock section below, as a sibling ancestor of
+// both EditorWorkbench and WorkspaceChatPanel (see codeContext.js's
+// own header) — either side can add/read/remove chips without
+// prop-drilling through the other. Kept out of the project-picker
+// sidebar's own subtree so switching projects in that list doesn't
+// remount it; see this provider's own `key` below for why it DOES
+// remount the workbench+chat section.
+import { CodeContextProvider } from "../../lib/workbench/codeContext";
+import ContextChips from "../workbench/ContextChips";
 // Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
 // authHeaders(), matching require_auth()'s Authorization: Bearer check.
@@ -1299,6 +1309,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
       </div>
       )}
 
+      {/* NEW — W4.1: everything below (the workbench + the chat dock in
+          all its shapes) shares one code-context store, reset per
+          project via `key` — see this provider's own import comment
+          above. The project-picker sidebar just above is deliberately
+          OUTSIDE it: switching projects in that list must not remount
+          it. */}
+      <CodeContextProvider key={selected?.id}>
       {/* Selected project's board */}
       {/* CHANGED — W0.2: Editor mode (buildView === "code") swaps this
           from a scrolling max-w-4xl column to a flex column filling the
@@ -1352,6 +1369,13 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
             </div>
             {promoteError && <p className="text-xs text-red-400 px-4 pt-2">{promoteError}</p>}
             <div className="flex-1 min-h-0 flex flex-col px-4 pb-4 pt-3">
+              {/* NEW — W4.1: the chip tray for whatever's been added to
+                  chat via Explorer's "Add to chat" or the editor's own
+                  floating toolbar / Mod-L / gutter selection. Renders
+                  nothing when empty (see ContextChips.jsx). Keyed
+                  implicitly by CodeContextProvider's own key above, so
+                  it's already empty again on a fresh project. */}
+              <ContextChips className="shrink-0 mb-2" />
               {/* CHANGED — W2.3a: was patch 10's CodeView (file tree +
                   <textarea>). The workbench owns its own tabs/buffers, so
                   key={selected.id} remounts it per project -- otherwise
@@ -1517,6 +1541,7 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
           <MessageSquare size={18} />
         </button>
       )}
+      </CodeContextProvider>
 
       {/* NEW — project management modal; see managingWorkspace above.
           Deleting the selected project here is safe: the auto-select

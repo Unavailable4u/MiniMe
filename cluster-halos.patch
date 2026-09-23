@@ -1,0 +1,158 @@
+diff --git a/frontend/app/components/ForceGraphBase.jsx b/frontend/app/components/ForceGraphBase.jsx
+index cfa19c4..dc90901 100644
+--- a/frontend/app/components/ForceGraphBase.jsx
++++ b/frontend/app/components/ForceGraphBase.jsx
+@@ -67,6 +67,16 @@ export default function ForceGraphBase({
+   nodePointerAreaPaint,
+   onNodeClick,
+   onNodeHover,
++  // Forwarded straight to react-force-graph-2d's own onRenderFramePre:
++  // (canvasContext, globalScale) => void, called every animation frame
++  // BEFORE links/nodes are painted, with the canvas already translated/
++  // scaled into graph space -- so a caller can draw node.x/node.y
++  // straight into it, same as nodeCanvasObject does. Generic on purpose
++  // (per this component's docstring: domain-specific drawing is a prop,
++  // not baked in here) -- KnowledgeGraphView.jsx uses this to paint
++  // low-opacity cluster halos behind the graph; ForceGraphBase itself
++  // has no idea that's what's happening.
++  onRenderFramePre,
+   cooldownTicks = 60,
+   legend = null,
+ }) {
+@@ -152,6 +162,7 @@ export default function ForceGraphBase({
+           linkLabel={linkLabel}
+           linkCanvasObject={linkCanvasObject}
+           linkCanvasObjectMode={linkCanvasObjectMode}
++          onRenderFramePre={onRenderFramePre}
+           cooldownTicks={cooldownTicks}
+           onEngineStop={() => {
+             // Debounced re-frame: only nudge the view outward as new nodes
+diff --git a/frontend/app/components/KnowledgeGraphView.jsx b/frontend/app/components/KnowledgeGraphView.jsx
+index c9b80f0..8e48b59 100644
+--- a/frontend/app/components/KnowledgeGraphView.jsx
++++ b/frontend/app/components/KnowledgeGraphView.jsx
+@@ -1,5 +1,5 @@
+ "use client";
+-import { useMemo, useRef, useState } from "react";
++import { useCallback, useMemo, useRef, useState } from "react";
+ import ForceGraphBase from "./ForceGraphBase";
+ import { X } from "lucide-react";
+ 
+@@ -56,6 +56,70 @@ const STRUCTURAL_RELATIONS = new Set(["same_source", "clustered_with", "referenc
+ // clutter it's meant to sit alongside rather than blend into.
+ const CONCEPT_EDGE_COLOR = "#22d3ee";
+ 
++// NEW — cluster halos: low-opacity circles painted behind the graph,
++// one per "related group" of nodes, so relatedness reads as a shaded
++// territory in addition to the existing edge lines. Deliberately
++// derived from the SAME edges the force layout itself uses (closed
++// neighborhoods -- a node plus its direct neighbors), not a separate
++// embedding-based clustering like note_clusterer.py's KMeans pass:
++// KMeans hands every node to exactly one cluster, so its circles could
++// never overlap and could also disagree with where the physics has
++// actually settled the nodes. Edge-neighborhoods overlap naturally
++// (a node bridging two neighborhoods sits inside both circles), which
++// is what gives the set/subset look, and they stay visually honest
++// with the node-link layout since both are reading the same edges.
++const MAX_CLUSTER_CIRCLES = 8; // cap so a dense graph doesn't become a wall of color
++const CLUSTER_PADDING = 26; // px beyond the outermost member, clears node radius + label
++const CLUSTER_ALPHA = 0.13;
++const CLUSTER_PALETTE = [
++  "#f97316", "#06b6d4", "#eab308", "#ec4899",
++  "#8b5cf6", "#10b981", "#ef4444", "#3b82f6",
++];
++
++// Every node with >=2 neighbors becomes a candidate group (itself + its
++// direct neighbors). A group fully contained in a bigger one is dropped
++// (a hub's own neighborhood already covers each neighbor's smaller one),
++// and duplicate membership sets collapse to one. What's left is sorted
++// biggest-first and capped at MAX_CLUSTER_CIRCLES.
++function buildClusterGroups(graphNodes, neighbors) {
++  let candidates = [];
++  for (const node of graphNodes) {
++    const nbrs = neighbors.get(node.id) || [];
++    if (nbrs.length < 2) continue; // need self + >=2 neighbors for a meaningful circle
++    const members = new Map([[node.id, node]]);
++    for (const { node: n } of nbrs) members.set(n.id, n);
++    candidates.push(members);
++  }
++
++  candidates = candidates.filter(
++    (c, i) => !candidates.some((other, j) => i !== j && other.size > c.size && [...c.keys()].every((id) => other.has(id)))
++  );
++
++  const seenKeys = new Set();
++  candidates = candidates.filter((c) => {
++    const key = [...c.keys()].sort().join("|");
++    if (seenKeys.has(key)) return false;
++    seenKeys.add(key);
++    return true;
++  });
++
++  candidates.sort((a, b) => b.size - a.size);
++  return candidates.slice(0, MAX_CLUSTER_CIRCLES).map((c) => [...c.values()]);
++}
++
++// Smallest circle that just encloses this group's CURRENT live x/y
++// (centroid + furthest-member distance, not a true minimum-enclosing
++// circle -- good enough for a soft halo and cheap to recompute every
++// animation frame while the simulation is still moving nodes).
++function enclosingCircle(members) {
++  const pts = members.filter((n) => typeof n.x === "number" && typeof n.y === "number");
++  if (pts.length < 2) return null;
++  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
++  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
++  const radius = Math.max(...pts.map((p) => Math.hypot(p.x - cx, p.y - cy)));
++  return { cx, cy, radius };
++}
++
+ function truncate(text, n = 220) {
+   if (!text) return "";
+   return text.length > n ? text.slice(0, n) + "…" : text;
+@@ -261,6 +325,38 @@ export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSum
+     return { nodes: graphNodes, links, neighbors };
+   }, [nodes, edges]);
+ 
++  // NEW — cluster halos: recomputed only when the graph's actual nodes/
++  // edges change (via graphData), not on every animation frame -- group
++  // MEMBERSHIP is static between data updates, only the member x/y
++  // positions used to draw each circle move every frame.
++  const clusterGroups = useMemo(
++    () => buildClusterGroups(graphData.nodes, graphData.neighbors),
++    [graphData]
++  );
++
++  // Painted via ForceGraphBase's onRenderFramePre, i.e. BEFORE links/
++  // nodes are drawn each frame, so the halos sit behind the graph
++  // instead of covering it. Reads member.x/member.y live off the same
++  // persistent node objects the simulation is moving (see
++  // nodeObjectsRef above), so the circles track nodes as they settle
++  // rather than being computed once and going stale.
++  const drawClusterCircles = useCallback(
++    (ctx) => {
++      clusterGroups.forEach((members, i) => {
++        const circle = enclosingCircle(members);
++        if (!circle) return;
++        ctx.save();
++        ctx.beginPath();
++        ctx.arc(circle.cx, circle.cy, circle.radius + CLUSTER_PADDING, 0, 2 * Math.PI);
++        ctx.globalAlpha = CLUSTER_ALPHA;
++        ctx.fillStyle = CLUSTER_PALETTE[i % CLUSTER_PALETTE.length];
++        ctx.fill();
++        ctx.restore();
++      });
++    },
++    [clusterGroups]
++  );
++
+   const legend = useMemo(() => {
+     const seenSections = new Set((nodes || []).map((n) => n.section).filter(Boolean));
+     const items = Array.from(seenSections).map((section) => (
+@@ -325,6 +421,7 @@ export default function KnowledgeGraphView({ nodes, edges, onSelectNode, nodeSum
+         }
+         linkWidth={(link) => (STRUCTURAL_RELATIONS.has(link.relation) ? 1 : 2)}
+         linkLabel={(link) => link.relation}
++        onRenderFramePre={drawClusterCircles}
+         onNodeHover={setHoveredNode}
+         onNodeClick={(node) => {
+           // NEW — Phase 3: in concept-graph mode, a click opens the

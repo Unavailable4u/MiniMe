@@ -77,6 +77,12 @@ import { useDaemonStatus } from "../../hooks/useDaemonStatus";
 import { useExplorerOps } from "../../hooks/useExplorerOps";
 import { useSplitter } from "../../hooks/useSplitter";
 import { useViewport } from "../../hooks/useViewport";
+// W4.1: the shared code-context store — mounted by BuildTab.jsx ABOVE
+// this component (a sibling ancestor of EditorWorkbench and
+// WorkspaceChatPanel, see codeContext.js's own header), so this is
+// just an ordinary descendant read, the same relationship
+// useEditorStore() below has to EditorStoreProvider.
+import { useCodeContext } from "../../lib/workbench/codeContext";
 import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
@@ -161,6 +167,13 @@ const EditorPane = memo(function EditorPane({
   onSave,
   onCursor,
   registerPane,
+  // W4.1: same "(path, ...)" shape as onEdit/onSave/onCursor above —
+  // CodeEditor itself doesn't know its own path (see that file's own
+  // onRangeChange doc comment), so this pane is what closes over it
+  // before handing WorkbenchBody's codeContext handlers a path-aware
+  // callback.
+  onAddToChat,
+  onRangeChange,
 }) {
   const editorRef = useRef(null);
   const shown = active && visible;
@@ -184,6 +197,8 @@ const EditorPane = memo(function EditorPane({
         onChange={(text) => onEdit(path, text)}
         onSave={() => onSave(path)}
         onCursorChange={(pos) => onCursor(path, pos)}
+        onAddToChat={onAddToChat ? (sel) => onAddToChat(path, sel) : undefined}
+        onRangeChange={onRangeChange ? (mapRange) => onRangeChange(path, mapRange) : undefined}
       />
     </div>
   );
@@ -204,6 +219,11 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     switchSource,
     renamePaths,
   } = useEditorStore();
+
+  // W4.1: see this component's own import comment on why this is
+  // available here even though CodeContextProvider is mounted in
+  // BuildTab.jsx, above this whole component.
+  const { addRef, remapRefs, pendingJump, clearJump } = useCodeContext();
 
   // W3.1: which provider backs the workbench right now — read from
   // `layout.source` (see layoutPrefs.js's own header on why it lives
@@ -907,6 +927,82 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     [openFile, jumpToPositionInPane]
   );
 
+  // ---- code context (W4.1) --------------------------------------------
+  // "Add to chat" from CodeEditor's floating toolbar / Mod-L / gutter
+  // selection. EditorPane (above) has already closed over `path` before
+  // this is called, so `sel` is exactly CodeEditor's own onAddToChat
+  // shape: {from, to, fromLine, toLine, snippet}.
+  const handleAddRange = useCallback(
+    (path, sel) => {
+      addRef({
+        kind: "range",
+        path,
+        provider: provider.id,
+        from: sel.from,
+        to: sel.to,
+        fromLine: sel.fromLine,
+        toLine: sel.toLine,
+        snippet: sel.snippet,
+      });
+    },
+    [addRef, provider.id]
+  );
+
+  // CodeEditor's onRangeChange fires on every doc change with a plain
+  // ChangeSet.mapPos-based mapper (see that file's own buildMapRange());
+  // this just forwards it to the reducer's REMAP_REFS, which is a no-op
+  // for any path with no "range" chips outstanding.
+  const handleRangeChange = useCallback(
+    (path, mapRange) => remapRefs(path, mapRange),
+    [remapRefs]
+  );
+
+  // Explorer's "Add to chat" context-menu item — one or more selected
+  // rows, each already classified "file"|"folder" by Explorer's own
+  // typeOf(). A folder ref carries no snippet (W5.5 expands it
+  // server-side later); a file ref prefers the LIVE buffer (unsaved
+  // edits included, same reasoning as Project Search's getOpenText
+  // above) and only falls back to a fresh provider.read() for a file
+  // that isn't open.
+  const handleAddToChat = useCallback(
+    async (items) => {
+      for (const { path, kind } of items) {
+        if (kind === "folder") {
+          addRef({ kind: "folder", path, provider: provider.id, snippet: "" });
+          continue;
+        }
+        const openBuffer = stateRef.current.buffers[path];
+        let snippet = openBuffer ? openBuffer.edited : null;
+        if (snippet == null) {
+          try {
+            const file = await provider.read(path);
+            snippet = file.content ?? "";
+          } catch {
+            snippet = "";
+          }
+        }
+        addRef({ kind: "file", path, provider: provider.id, snippet });
+      }
+    },
+    [addRef, provider]
+  );
+
+  // A chip's click-to-jump (ContextChips.jsx's requestJump →
+  // codeContext.js's SET_PENDING_JUMP). Opens the file if it isn't
+  // already, same as jumpToSearchResult above, then jumps to the
+  // chip's own fromLine..toLine (a "file" ref has neither, so this
+  // lands on line 1 — gotoPosition.js's own clamping handles that
+  // default). Cleared right away so a second click on the SAME chip
+  // still fires (pendingJump going from a ref back to that identical
+  // ref wouldn't otherwise be a state change).
+  useEffect(() => {
+    if (!pendingJump) return;
+    const ref = pendingJump;
+    clearJump();
+    openFile(ref.path);
+    jumpToPositionInPane(ref.path, { line: ref.fromLine ?? 1, endLine: ref.toLine ?? undefined });
+  }, [pendingJump, clearJump, openFile, jumpToPositionInPane]);
+
   // History's "Restore": lands the server's response the same way a
   // normal save does — FILE_LOADED for the buffer, plus the file list's
   // own entry patched in place rather than a full refetch (saveFile()
@@ -1358,6 +1454,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
             onRequestDelete={requestDelete}
             onDuplicate={explorerOps.duplicate}
             onMove={explorerOps.move}
+            onAddToChat={handleAddToChat}
             source={source}
             onChangeSource={requestChangeSource}
             daemonLive={daemonLive}
@@ -1529,6 +1626,8 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
                   onSave={saveFile}
                   onCursor={handleCursor}
                   registerPane={registerPane}
+                  onAddToChat={handleAddRange}
+                  onRangeChange={handleRangeChange}
                 />
               );
             })}
