@@ -129,6 +129,7 @@ AGENT_PRODUCT_TIER_MAP: dict[str, dict[str, dict | None]] = {
         "backlink_detector",
         "brainstormer",
         "citation_graph_builder",
+        "code_editor",
         "content_adapter_pool",
         "content_writer",
         "contradiction_prefilter",

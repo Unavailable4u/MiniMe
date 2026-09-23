@@ -307,6 +307,12 @@ STRICT_FORMAT_ROLES = frozenset({
     "podcast_scriptwriter",
     "rehearsal_scriptwriter",
     "wireframe_sketcher",
+    # W5.2: code_editor's brief demands one exact JSON object that
+    # eo/code_edit_apply.py's apply_edits() consumes byte-for-byte. Its
+    # task_text is also the user's source code, which must never be
+    # embedded for skill retrieval or trigger ensure_skill_for_task()'s
+    # web-research pass.
+    "code_editor",
 })
 
 # Bug fix (audit follow-up): the two roles above whose output feeds

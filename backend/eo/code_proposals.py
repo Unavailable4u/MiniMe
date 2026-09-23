@@ -13,23 +13,22 @@ proposal's stored `proposed` text into a real
 workspace_code_files.write_file()/delete_file() call. Nothing else
 here writes a single byte of real file content.
 
-W5.2 seam (read before touching the `generate_edit` parameter below):
-agents/code_editor.py + eo/code_edit_apply.py — the real "LLM proposes
-a SEARCH/REPLACE edit, apply_edits() turns it into original/proposed
-text" pipeline the plan's D2/D3 describe — are a LATER step, not this
-one. create_proposal() below is deliberately written so THAT step only
-ever has to change ONE line (this module's `generate_edit` default
-argument) once it exists; everything about how a generated edit turns
-into a stored proposal row, gets listed, gets fetched, and gets
-resolved is already fully real in this patch. See
-_stub_generate_edit()'s own docstring for exactly what today's default
-does instead, and why that's an honest (not a fake/mocked) stand-in.
+W5.2 seam: agents/code_editor.py + eo/code_edit_apply.py — the real
+"LLM proposes a SEARCH/REPLACE edit, apply_edits() turns it into
+original/proposed text" pipeline the plan's D2/D3 describe — is now
+create_proposal()'s DEFAULT `generate_edit` (see
+_default_generate_edit() below). Everything about how a generated edit
+turns into a stored proposal row, gets listed, gets fetched, and gets
+resolved is unchanged from W5.1. _stub_generate_edit() stays in this
+module as the canned, no-LLM generator tests can pass explicitly; it
+is no longer the default.
 
 Same FakeCursor-isolatable, `eo.db`-only-touches-Postgres shape every
 other Postgres-backed store module in this package already takes (see
 eo/workspace_code_files.py, eo/chat_store.py) — nothing here imports
 psycopg directly.
 """
+import functools
 import hashlib
 import uuid
 from datetime import UTC, datetime
@@ -220,10 +219,11 @@ _LINE_COMMENT_BY_EXT = {
 def _stub_generate_edit(ws_id: str, instruction: str, refs: list[dict],
                          current_files: dict) -> dict:
     """W5.1's honest stand-in for agents/code_editor.py + eo/
-    code_edit_apply.py's apply_edits() (W5.2, not built yet) — see this
-    module's own docstring for the "only one line changes when W5.2
-    lands" contract. This is create_proposal()'s DEFAULT `generate_edit`
-    callable; any real or test replacement must return the same shape:
+    code_edit_apply.py's apply_edits() (W5.2). No longer the default
+    since W5.2 — create_proposal() uses agents/code_editor.py's
+    generate_edit unless a caller passes `generate_edit` explicitly
+    (this stub, or a test double). Every generator must return the
+    same shape:
 
         {"summary": str, "files": [{"path", "op", "content"}, ...],
          "model_meta": dict (optional)}
@@ -309,14 +309,28 @@ def _build_files_payload(edit_files: list[dict], current_files: dict) -> list[di
     return out
 
 
+def _default_generate_edit(session_id: str | None):
+    """W5.2: the real generator — agents/code_editor.py's generate_edit(),
+    with `session_id` bound so the model call is attributed to the chat
+    session in Token Usage without widening the four-argument
+    `generate_edit(ws_id, instruction, refs, current_files)` contract
+    every replacement (tests, stubs) implements. Imported lazily:
+    agents/code_editor.py pulls in eo.registry, and this module is
+    imported by api/routes/code_edit.py at app start-up, so a top-level
+    import would put the whole agent/registry graph on that path.
+    """
+    from agents.code_editor import generate_edit as real_generate_edit
+    return functools.partial(real_generate_edit, session_id=session_id)
+
+
 def create_proposal(ws_id: str, instruction: str, refs: list[dict],
                      session_id: str | None, user_id: str,
                      generate_edit=None) -> dict:
     """POST .../code/proposals — see this module's own docstring for
     the full lifecycle. Reads every referenced file's CURRENT content
     via workspace_code_files.get_file() up front, calls `generate_edit`
-    (default: _stub_generate_edit — see its own docstring for the W5.2
-    swap-in seam) SYNCHRONOUSLY, and stores whatever comes back as a
+    (default: agents/code_editor.py's generate_edit — see
+    _default_generate_edit()) SYNCHRONOUSLY, and stores whatever comes back as a
     new row. Nothing here writes to workspace_code_files, no matter
     what generate_edit returns — see resolve_proposal() for the only
     path that does.
@@ -341,7 +355,8 @@ def create_proposal(ws_id: str, instruction: str, refs: list[dict],
 
     current_files = {path: workspace_code_files.get_file(ws_id, path) for path in paths}
 
-    generate_edit = generate_edit or _stub_generate_edit
+    if generate_edit is None:
+        generate_edit = _default_generate_edit(session_id)
     try:
         result = generate_edit(ws_id, instruction, refs, current_files)
         files = _build_files_payload(result.get("files", []), current_files)
