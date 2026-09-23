@@ -76,13 +76,11 @@ class CodeProposalResolveRequest(BaseModel):
 def create_code_proposal(
     ws_id: str, req: CodeProposalCreateRequest, owner_id: str = Depends(require_auth)
 ):
-    """Calls the (today: stub — see eo/code_proposals.py's
-    _stub_generate_edit() docstring, and W5.2 for its real
-    replacement) edit generator SYNCHRONOUSLY and returns the stored
-    proposal — no separate poll needed for this step's own "Done when"
-    (create -> get -> resolve via curl), though W5.4's Pusher-driven
-    proposal card is still the intended long-term UX once a real
-    (slower) agent call sits behind this in W5.2.
+    """Calls the edit generator (W5.2: agents/code_editor.py — one to two
+    LLM calls) SYNCHRONOUSLY and returns the stored proposal — no
+    separate poll needed for the create -> get -> resolve flow, though
+    W5.4's Pusher-driven proposal card is still the intended long-term
+    UX now that a real (slower) agent call sits behind this.
 
     A bad request shape (empty instruction, no refs, an unsupported or
     folder ref kind) is a 400. A generation FAILURE is not — see
