@@ -120,6 +120,14 @@ function Explorer({
   onRequestDelete,
   onDuplicate,
   onMove,
+  // W4.1: wires up the context-menu "Add to chat" item below. Called
+  // with `[{path, kind: "file"|"folder"}, ...]` — every selected path,
+  // classified by this component's own typeOf() since the workbench
+  // has no cheaper way to tell a folder from a file than the same
+  // fileSet this pane already built. Omitted (the default, before
+  // W4.1's caller wired it in) keeps the item disabled, same "Coming
+  // soon" state it always had.
+  onAddToChat,
   // W3.1: all four omitted (the default, from EditorWorkbench not
   // passing them) means "no switcher" — the header row below simply
   // doesn't render, so this stays a no-op change for any caller that
@@ -678,8 +686,21 @@ function Explorer({
     items.push(
       { key: "sep-copy", separator: true },
       { key: "copy-path", label: many ? "Copy paths" : "Copy path", icon: Copy, onSelect: () => copyText(paths.join("\n")) },
-      // Wired up in W4.1, when code chips exist for it to add to.
-      { key: "add-to-chat", label: "Add to chat", icon: MessageSquarePlus, disabled: true, title: "Coming soon" }
+      // W4.1: each selected path becomes a ref — a "file" or "folder"
+      // ref per codeContext.js's model, classified here (typeOf) rather
+      // than by the caller, since this pane already knows which rows
+      // are which. `onAddToChat` is undefined until EditorWorkbench.jsx
+      // wires a real codeContext store in, so this stays the same
+      // disabled "Coming soon" stub it was pre-W4.1 for any caller that
+      // hasn't done that yet.
+      {
+        key: "add-to-chat",
+        label: many ? `Add ${paths.length} to chat` : "Add to chat",
+        icon: MessageSquarePlus,
+        disabled: !onAddToChat,
+        title: onAddToChat ? undefined : "Coming soon",
+        onSelect: () => onAddToChat?.(paths.map((p) => ({ path: p, kind: typeOf(p) === "dir" ? "folder" : "file" }))),
+      }
     );
     if (canModify) {
       items.push(

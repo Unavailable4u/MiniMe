@@ -20,7 +20,7 @@ import { EditorSelection } from "@codemirror/state";
  *   down) — callers that might race a pane's mount (Project Search's
  *   jump, which can fire before a just-opened file's editor exists)
  *   are expected to retry rather than this function queuing anything.
- * @param {{line: number, column?: number, endColumn?: number}} pos -
+ * @param {{line: number, column?: number, endLine?: number, endColumn?: number}} pos -
  *   `line` and `column` are 1-based, matching both
  *   searchFileContent()'s own numbering and CodeMirror's line/column
  *   gutter; `column` defaults to the line's start. `endColumn`
@@ -29,15 +29,28 @@ import { EditorSelection } from "@codemirror/state";
  *   passes `column: start + 1, endColumn: end + 1`. Both are clamped
  *   to the line's own length rather than throwing on a stale position
  *   (the line the search matched may have been edited since).
+ * @param {number} [pos.endLine] - W4.1: a code-context chip's
+ *   click-to-jump covers `fromLine`..`toLine`, not one line — passing
+ *   `endLine` selects through the end of THAT line (or `endColumn`
+ *   within it) instead of `endColumn` being read against `line`
+ *   itself. Omit it and this behaves exactly as it always did (a
+ *   same-line selection, or just a caret).
  */
-export function jumpToPosition(view, { line, column = 1, endColumn } = {}) {
+export function jumpToPosition(view, { line, column = 1, endLine, endColumn } = {}) {
   if (!view) return;
   const doc = view.state.doc;
   const clampedLine = Math.min(Math.max(1, Math.floor(line) || 1), doc.lines);
   const lineInfo = doc.line(clampedLine);
   const from = Math.min(lineInfo.to, lineInfo.from + Math.max(0, (column || 1) - 1));
-  const to =
-    endColumn != null ? Math.min(lineInfo.to, Math.max(from, lineInfo.from + endColumn - 1)) : from;
+
+  let to = from;
+  if (endLine != null) {
+    const clampedEndLine = Math.min(Math.max(clampedLine, Math.floor(endLine) || clampedLine), doc.lines);
+    const endLineInfo = doc.line(clampedEndLine);
+    to = endColumn != null ? Math.min(endLineInfo.to, endLineInfo.from + endColumn - 1) : endLineInfo.to;
+  } else if (endColumn != null) {
+    to = Math.min(lineInfo.to, Math.max(from, lineInfo.from + endColumn - 1));
+  }
 
   view.dispatch({
     selection: EditorSelection.single(from, to),
