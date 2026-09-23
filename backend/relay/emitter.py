@@ -170,6 +170,45 @@ class EventType(str, Enum):
     # react to it).
     CODE_FILE_UPDATED = "code_file_updated"
 
+    # W5.1 (Build Workbench plan, step 197): the proposal lifecycle
+    # behind Chat's Edit mode (W4.2) and the review UI (W5.3/W5.4).
+    # Both fired from eo/code_proposals.py, on the WORKSPACE channel —
+    # same "every dock/tab/chat with this workspace open, not just the
+    # session whose chat turn triggered it" reasoning PANEL_CONTENT_
+    # UPDATED/CODE_FILE_UPDATED already give for themselves. Payload
+    # shape for BOTH: {workspace_id, proposal_id, status} — ids/status
+    # only, never file content (same 10,240-byte Pusher cap class as
+    # CODE_FILE_UPDATED's own payload discipline; a proposal's files[]
+    # can carry full original/proposed text for several files, which
+    # would blow the cap instantly). A client that wants the actual
+    # diff fetches it via GET .../code/proposals/{proposal_id} once
+    # this event tells it something changed.
+    #   - CODE_PROPOSAL_READY: create_proposal() just stored a new row
+    #     (status is 'pending' for a normal generation, or 'failed' if
+    #     the — today: stub, W5.2: real — generator raised; see that
+    #     function's own docstring for why a failed generation still
+    #     gets a real row and fires this event rather than a bare
+    #     500). Frontend handler: W5.4's proposal card / pending tray,
+    #     once built — nothing subscribes to this yet.
+    #   - CODE_PROPOSAL_RESOLVED: resolve_proposal() just transitioned
+    #     a proposal OUT of 'pending' — status is one of 'accepted' /
+    #     'rejected' / 'partial' / 'stale' (a 'stale' resolution also
+    #     fires this, not just a terminal one — the pending tray needs
+    #     to know to show the "changed since proposed" banner just as
+    #     much as it needs to know about a real resolution). Plan §3's
+    #     own edit-flow line ("resolve -> write_file() + history
+    #     snapshot + code_file_updated -> every open editor/preview
+    #     refreshes") is why resolve_proposal() ALSO fires the existing
+    #     CODE_FILE_UPDATED (not a new type) for whichever paths it
+    #     actually wrote, right alongside this one -- write_file() itself
+    #     still doesn't emit that on its own today (only the pipeline's
+    #     batch write_files() path did, before this patch), so
+    #     resolve_proposal() closes that gap for the proposal-write path
+    #     specifically, same as task_runner.py's _write_code_files()
+    #     already does for its own batch path.
+    CODE_PROPOSAL_READY = "code_proposal_ready"
+    CODE_PROPOSAL_RESOLVED = "code_proposal_resolved"
+
     # PATCH-A additions: real call sites (agents/*.py) that were firing
     # these literals all along but had no matching entry, so every one
     # of them raised ValueError the first time that code path executed

@@ -77,6 +77,7 @@ from eo.agent_task_pool import AgentPoolSaturated, AgentTaskTimeout  # NEW — p
 from utils.llm_client import request_shutdown  # NEW — Patch 6.2
 from api.routes.chats import router as chats_router
 from api.routes.code import router as code_router
+from api.routes.code_edit import router as code_edit_router  # NEW — W5.1: proposal routes
 from api.routes.deploy import router as deploy_router
 from api.routes.graph_and_notes import router as graph_and_notes_router
 
@@ -338,6 +339,7 @@ app.include_router(graph_and_notes_router)
 app.include_router(notebooks_router)
 app.include_router(deploy_router)
 app.include_router(code_router)
+app.include_router(code_edit_router)  # W5.1: /api/workspaces/{ws_id}/code/proposals/*
 app.include_router(local_workspace_router)  # F2 Part 2: /ws/daemon/{workspace_id}
 app.include_router(local_workspace_data_router)  # F2 Part 3: /api/workspaces/{ws_id}/local/*
 app.include_router(mcp_router)  # Patch A8: /api/mcp/servers, /api/mcp/servers/{name}/status
