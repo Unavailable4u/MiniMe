@@ -1,0 +1,1086 @@
+diff --git a/backend/api/routes/code_edit.py b/backend/api/routes/code_edit.py
+new file mode 100644
+index 0000000..cdaeb8b
+--- /dev/null
++++ b/backend/api/routes/code_edit.py
+@@ -0,0 +1,160 @@
++"""
++api/routes/code_edit.py — W5.1 (Build Workbench plan, step 197): the
++proposal endpoints behind Chat's Edit mode (W4.2) and the review UI
++(W5.3/W5.4). New file rather than folding into api/routes/code.py, per
++the plan's own step text ("api/routes/code.py (or new code_edit.py
++router + include_router in api/server.py)") — code.py's own docstring
++already scopes itself to workspace_code_files' plain file/folder CRUD;
++a proposal is a distinct resource with its own lifecycle (pending ->
++accepted/rejected/partial/stale/failed) that only ever TOUCHES
++workspace_code_files indirectly, via eo/code_proposals.py's
++resolve_proposal() — see that module's own docstring.
++
++Same ownership-gate-then-delegate shape every workspace-scoped router
++in this codebase already uses (api/routes/code.py, api/routes/
++local_workspace.py, api/routes/mcp.py) — confirm the caller can see
++this workspace via chat_workspace.get_workspace() before touching
++eo/code_proposals.py at all, so a stranger's ws_id guess 404s before
++it ever reaches a proposal's content. `_require_workspace` is
++duplicated here rather than imported from api/routes/code.py, same
++convention every one of those sibling router files already follows
++for this exact helper (each keeps its own copy — see any of their own
++docstrings for why: no shared api/routes/_common.py exists for this
++yet, and a two-line ownership check isn't worth inventing one for).
++"""
++from fastapi import APIRouter, Depends, HTTPException
++from pydantic import BaseModel, Field
++
++from api.deps import require_auth
++from eo import chat_workspace, code_proposals
++from eo.code_proposals import ProposalStaleError
++
++router = APIRouter()
++
++
++def _require_workspace(ws_id: str, owner_id: str):
++    try:
++        chat_workspace.get_workspace(ws_id, owner_id)
++    except FileNotFoundError:
++        raise HTTPException(status_code=404, detail="Unknown workspace_id")
++
++
++# refs is passed through to eo/code_proposals.py as plain dicts, not a
++# typed model — deliberately. The ref shape this carries is
++# frontend/app/lib/workbench/codeContext.js's own `{id, kind, path,
++# fromLine, toLine, snippet, hash, provider, ...}`, which is still
++# growing (W6.x's `element`/`error` kinds add fields to the SAME
++# shape) and is only PARTIALLY interpreted server-side even once fully
++# grown — eo/code_proposals.py's _paths_from_refs() only ever reads
++# `kind`/`path` out of it today (see that function's own docstring).
++# Pinning a strict pydantic model here would mean this route needs a
++# matching edit every time the frontend's ref model gains a field for
++# a LATER step, for validation this layer doesn't actually need to do.
++class CodeProposalCreateRequest(BaseModel):
++    instruction: str
++    refs: list[dict] = Field(default_factory=list)
++    session_id: str | None = None
++
++
++class ProposalFileDecision(BaseModel):
++    path: str
++    # Validated against eo/code_proposals.py's own _VALID_DECISIONS
++    # inside resolve_proposal(), not here — same "the eo layer owns
++    # the ValueError for its own closed sets" pattern every other
++    # route in this codebase already follows (see e.g.
++    # api/routes/code.py's RestoreVersionRequest, which doesn't
++    # pre-validate `version` either).
++    decision: str
++    final_content: str | None = None
++
++
++class CodeProposalResolveRequest(BaseModel):
++    files: list[ProposalFileDecision]
++
++
++@router.post("/api/workspaces/{ws_id}/code/proposals", dependencies=[Depends(require_auth)])
++def create_code_proposal(
++    ws_id: str, req: CodeProposalCreateRequest, owner_id: str = Depends(require_auth)
++):
++    """Calls the (today: stub — see eo/code_proposals.py's
++    _stub_generate_edit() docstring, and W5.2 for its real
++    replacement) edit generator SYNCHRONOUSLY and returns the stored
++    proposal — no separate poll needed for this step's own "Done when"
++    (create -> get -> resolve via curl), though W5.4's Pusher-driven
++    proposal card is still the intended long-term UX once a real
++    (slower) agent call sits behind this in W5.2.
++
++    A bad request shape (empty instruction, no refs, an unsupported or
++    folder ref kind) is a 400. A generation FAILURE is not — see
++    create_proposal()'s own docstring for why that still returns 200
++    with a status='failed' proposal body instead."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return code_proposals.create_proposal(
++            ws_id, req.instruction, req.refs, req.session_id, owner_id,
++        )
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
++@router.get("/api/workspaces/{ws_id}/code/proposals", dependencies=[Depends(require_auth)])
++def list_code_proposals(
++    ws_id: str, status: str | None = None, owner_id: str = Depends(require_auth)
++):
++    """`?status=pending` is W5.4's pending tray's own call shape
++    ("the tray is the source of truth... populated from GET
++    .../code/proposals?status=pending on mount"); omitting `status`
++    lists every proposal regardless of status, most recent first."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return code_proposals.list_proposals(ws_id, status=status)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++
++@router.get(
++    "/api/workspaces/{ws_id}/code/proposals/{proposal_id}",
++    dependencies=[Depends(require_auth)],
++)
++def get_code_proposal(ws_id: str, proposal_id: str, owner_id: str = Depends(require_auth)):
++    """Full shape, files[] (original + proposed per file) included —
++    what W5.4's "reopen the tab -> Review restores the diff" needs.
++    404 when the proposal doesn't exist in THIS workspace, same
++    "stranger's guess never even confirms the id is real elsewhere"
++    posture every other 404 in this file already gives."""
++    _require_workspace(ws_id, owner_id)
++    try:
++        return code_proposals.get_proposal(ws_id, proposal_id)
++    except FileNotFoundError:
++        raise HTTPException(status_code=404, detail="Unknown proposal_id")
++
++
++@router.post(
++    "/api/workspaces/{ws_id}/code/proposals/{proposal_id}/resolve",
++    dependencies=[Depends(require_auth)],
++)
++def resolve_code_proposal(
++    ws_id: str, proposal_id: str, req: CodeProposalResolveRequest,
++    owner_id: str = Depends(require_auth),
++):
++    """The only route in this codebase that turns a proposal's stored
++    `proposed` text into a real file write — see
++    code_proposals.resolve_proposal()'s own docstring for the full
++    two-phase base_version re-check this delegates to. 409 (not 400)
++    on a ProposalStaleError, body = {"stale_files": [...]} — same
++    "everything the client needs to offer Reload/Keep-mine/Compare per
++    file, without a second round trip" shape W1.1's plain-Save 409
++    already gives for a single file, just carrying a list here instead
++    of one file. A ValueError (already-resolved proposal, or a bad
++    `decision` value) is a plain 400: the proposal and the route both
++    exist, it's the request against them that's invalid."""
++    _require_workspace(ws_id, owner_id)
++    decisions = [d.model_dump() for d in req.files]
++    try:
++        return code_proposals.resolve_proposal(ws_id, proposal_id, decisions, owner_id)
++    except FileNotFoundError:
++        raise HTTPException(status_code=404, detail="Unknown proposal_id")
++    except ProposalStaleError as e:
++        raise HTTPException(status_code=409, detail={"stale_files": e.stale_files})
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
+diff --git a/backend/api/server.py b/backend/api/server.py
+index fbfdc8d..fd6e22e 100644
+--- a/backend/api/server.py
++++ b/backend/api/server.py
+@@ -77,6 +77,7 @@ from eo.agent_task_pool import AgentPoolSaturated, AgentTaskTimeout  # NEW — p
+ from utils.llm_client import request_shutdown  # NEW — Patch 6.2
+ from api.routes.chats import router as chats_router
+ from api.routes.code import router as code_router
++from api.routes.code_edit import router as code_edit_router  # NEW — W5.1: proposal routes
+ from api.routes.deploy import router as deploy_router
+ from api.routes.graph_and_notes import router as graph_and_notes_router
+ 
+@@ -338,6 +339,7 @@ app.include_router(graph_and_notes_router)
+ app.include_router(notebooks_router)
+ app.include_router(deploy_router)
+ app.include_router(code_router)
++app.include_router(code_edit_router)  # W5.1: /api/workspaces/{ws_id}/code/proposals/*
+ app.include_router(local_workspace_router)  # F2 Part 2: /ws/daemon/{workspace_id}
+ app.include_router(local_workspace_data_router)  # F2 Part 3: /api/workspaces/{ws_id}/local/*
+ app.include_router(mcp_router)  # Patch A8: /api/mcp/servers, /api/mcp/servers/{name}/status
+diff --git a/backend/eo/code_proposals.py b/backend/eo/code_proposals.py
+new file mode 100644
+index 0000000..724f4a7
+--- /dev/null
++++ b/backend/eo/code_proposals.py
+@@ -0,0 +1,657 @@
++"""
++eo/code_proposals.py — W5.1 (Build Workbench plan, step 197): the
++pending-review store behind the Build workbench's "select code / Add
++to chat / Edit mode" flow (W4.1/W4.2) turning into a Copilot-style
++Keep/Undo diff (W5.3/W5.4). See migrations/0010_code_proposals.sql's
++own header for the full column-by-column schema rationale.
++
++Lifecycle, in one line: create_proposal() computes an edit and stores
++it at status='pending' WITHOUT touching workspace_code_files at all;
++resolve_proposal() is the only function in this module (or, as far as
++this module is concerned, in this codebase) that ever turns a
++proposal's stored `proposed` text into a real
++workspace_code_files.write_file()/delete_file() call. Nothing else
++here writes a single byte of real file content.
++
++W5.2 seam (read before touching the `generate_edit` parameter below):
++agents/code_editor.py + eo/code_edit_apply.py — the real "LLM proposes
++a SEARCH/REPLACE edit, apply_edits() turns it into original/proposed
++text" pipeline the plan's D2/D3 describe — are a LATER step, not this
++one. create_proposal() below is deliberately written so THAT step only
++ever has to change ONE line (this module's `generate_edit` default
++argument) once it exists; everything about how a generated edit turns
++into a stored proposal row, gets listed, gets fetched, and gets
++resolved is already fully real in this patch. See
++_stub_generate_edit()'s own docstring for exactly what today's default
++does instead, and why that's an honest (not a fake/mocked) stand-in.
++
++Same FakeCursor-isolatable, `eo.db`-only-touches-Postgres shape every
++other Postgres-backed store module in this package already takes (see
++eo/workspace_code_files.py, eo/chat_store.py) — nothing here imports
++psycopg directly.
++"""
++import hashlib
++import uuid
++from datetime import UTC, datetime
++
++from eo import db, workspace_code_files
++from eo.audit_log import write_audit
++from eo.workspace_code_files import VersionConflictError
++from relay.emitter import EventType, emit_workspace_event
++
++# Kept in lockstep BY HAND with migrations/0010_code_proposals.sql's
++# CHECK constraint — same small/stable/"not worth a DB-side derivation"
++# call workspace_code_files._VALID_VERSION_SOURCES already makes for
++# itself, for the identical reason (nothing outside this module ever
++# needs to enumerate these).
++_VALID_STATUSES = {"pending", "accepted", "rejected", "partial", "stale", "failed"}
++
++# The three ops a proposal's `files` entries — and, once W5.2 lands,
++# generate_edit()'s own {"path","op","content"} entries — may use.
++# Matches the plan's D3 edit-op vocabulary (`replace`/`create`/
++# `delete`) minus D3's own `search`/`replace` SEARCH/REPLACE fields,
++# which belong to eo/code_edit_apply.py's apply_edits() (W5.2) — by
++# the time a `files` entry lands in THIS module, an edit has already
++# been reduced to "here is the whole proposed text for this path",
++# whether that reduction happened via a real apply_edits() call or
++# (today) _stub_generate_edit()'s much simpler direct construction.
++_VALID_OPS = {"replace", "create", "delete"}
++
++# resolve_proposal()'s per-file decision vocabulary. "keep" writes the
++# file for real (via workspace_code_files); "undo" — and, per this
++# module's own "unlisted path defaults to undo" rule below, silence —
++# discards it. No "partial-within-a-file" value here on purpose: a
++# reviewer who kept SOME hunks and undid others inside W5.3's merge
++# view expresses that by sending "keep" + a `final_content` that
++# already reflects the per-hunk choices, not by inventing a third
++# decision value at this layer.
++_VALID_DECISIONS = {"keep", "undo"}
++
++# The ref `kind`s this step knows how to turn into "one file to read
++# and propose an edit for". "folder" is deliberately NOT here — see
++# _paths_from_refs()'s own docstring for why a folder ref reaching this
++# module today is a caller bug, not a case to quietly degrade.
++_SUPPORTED_REF_KINDS = {"range", "file", "element", "error"}
++
++
++class ProposalStaleError(Exception):
++    """Raised by resolve_proposal() when one or more files the
++    reviewer asked to KEEP have moved (a different `version` in
++    workspace_code_files today than the `base_version` this proposal
++    captured at propose time) — same role
++    workspace_code_files.VersionConflictError plays for a plain Save,
++    just evaluated across a whole proposal's file set instead of one
++    PUT. api/routes/code_edit.py's resolve route catches this
++    specifically and turns it into a 409.
++
++    Carries `stale_files`: [{path, expected_version, current}] — one
++    entry per file that failed the check, `current` being the full
++    live-file shape (workspace_code_files._row_to_file()'s own shape)
++    so the client can offer the same Reload/Keep-mine/Compare choices
++    W1.1's plain-Save 409 already gives, per file, without a second
++    round trip.
++    """
++
++    def __init__(self, stale_files: list[dict]):
++        self.stale_files = stale_files
++        super().__init__(
++            f"{len(stale_files)} file(s) changed since this proposal was created: "
++            f"{[f['path'] for f in stale_files]}"
++        )
++
++
++def _now():
++    return datetime.now(UTC)
++
++
++def _iso(value):
++    return value.isoformat() if value is not None else None
++
++
++def _hash_content(content: str) -> str:
++    """A short, stable fingerprint of a file's content at the moment a
++    proposal snapshot it — stored as `base_hash` on each `files` entry
++    for W5.4's staleness banner ("File changed since this edit was
++    proposed") to compare against, display-only, alongside
++    base_version (which is what resolve_proposal() below actually
++    enforces). Deliberately NOT the same algorithm as
++    frontend/app/lib/workbench/codeContext.js's hashString() (djb2) —
++    that function fingerprints a REF's snippet, client-side, for a
++    completely different comparison (has the chip's own tracked range
++    drifted); this one fingerprints a whole file's content, server-
++    side, from data the client never has read access to compute
++    against ahead of time. The two never need to agree with each
++    other. sha256 truncated to 16 hex chars is plenty of collision
++    resistance for a "did this obviously change" display hint, not a
++    security boundary.
++    """
++    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
++
++
++def _row_to_proposal(row: dict) -> dict:
++    """Full shape returned by every function below — files/refs/
++    model_meta are already Python list/dict objects by the time
++    psycopg hands back a jsonb column (see eo/db.py's pool-wide
++    dict_row + psycopg's own jsonb adapter), so no json.loads() is
++    needed here, same as eo/chat_store.py's own `payload` column
++    reads."""
++    return {
++        "id": row["id"],
++        "workspace_id": row["workspace_id"],
++        "session_id": row.get("session_id"),
++        "created_by": row.get("created_by"),
++        "instruction": row["instruction"],
++        "status": row["status"],
++        "files": row.get("files") or [],
++        "summary": row.get("summary"),
++        "refs": row.get("refs") or [],
++        "model_meta": row.get("model_meta") or {},
++        "created_at": _iso(row["created_at"]),
++        "resolved_at": _iso(row.get("resolved_at")),
++    }
++
++
++_PROPOSAL_COLUMNS = (
++    "id, workspace_id, session_id, created_by, instruction, status, "
++    "files, summary, refs, model_meta, created_at, resolved_at"
++)
++
++
++def _paths_from_refs(refs: list[dict]) -> list[str]:
++    """De-dupes refs (W4.1's model: `{id, kind, path, fromLine,
++    toLine, snippet, hash, provider, ...}`, stored/passed through
++    opaquely — see migrations/0010_code_proposals.sql's own comment on
++    the `refs` column) down to the distinct file paths
++    create_proposal() needs to read via workspace_code_files.get_file()
++    before it can hand anything to generate_edit(). Order-preserving
++    (first occurrence wins) purely so a stub/real generator's output
++    ordering is deterministic given the same input, not because
++    anything downstream depends on ref order specifically.
++
++    A `kind: "folder"` ref is refused outright (ValueError, which the
++    route turns into a 400) rather than silently treated as if its
++    `path` were one file's path: W5.5 ("Folder / multi-file scope") is
++    the step that expands a folder chip server-side into a size-
++    budgeted set of real file paths ("included 14 of 40 files" on the
++    chip, binaries/lockfiles/node_modules skipped); that expansion
++    logic doesn't exist yet, and pretending a folder path IS a file
++    path here would silently propose an edit "to" a folder that
++    workspace_code_files.get_file() would just read back as an always-
++    empty file, then silently write nothing useful on resolve. Failing
++    loud here is the same "fail loud on a bad path" posture
++    workspace_code_files._validate_file_path() already takes for a
++    malformed path.
++    """
++    if not refs:
++        raise ValueError("at least one ref is required")
++    paths: list[str] = []
++    seen: set[str] = set()
++    for ref in refs:
++        kind = ref.get("kind")
++        path = ref.get("path")
++        if kind == "folder":
++            raise ValueError(
++                f"folder refs are not supported by this endpoint yet (path={path!r}) "
++                "-- server-side folder expansion is step W5.5, not W5.1"
++            )
++        if kind not in _SUPPORTED_REF_KINDS:
++            raise ValueError(f"unsupported ref kind {kind!r}")
++        if not path:
++            raise ValueError(f"ref of kind {kind!r} is missing 'path'")
++        if path not in seen:
++            seen.add(path)
++            paths.append(path)
++    return paths
++
++
++# Small, deliberately non-exhaustive comment-marker table — just enough
++# for _stub_generate_edit() below to drop an honest, visibly-a-comment
++# line into whatever language the referenced file already is. Extend
++# only if a real file type shows up in testing that this maps wrong;
++# this is throwaway once W5.2's real agent replaces the stub entirely,
++# so it's not worth chasing full language coverage here.
++_LINE_COMMENT_BY_EXT = {
++    ".py": "#", ".sh": "#", ".yml": "#", ".yaml": "#",
++    ".js": "//", ".jsx": "//", ".ts": "//", ".tsx": "//",
++    ".css": "//", ".java": "//", ".go": "//",
++}
++
++
++def _stub_generate_edit(ws_id: str, instruction: str, refs: list[dict],
++                         current_files: dict) -> dict:
++    """W5.1's honest stand-in for agents/code_editor.py + eo/
++    code_edit_apply.py's apply_edits() (W5.2, not built yet) — see this
++    module's own docstring for the "only one line changes when W5.2
++    lands" contract. This is create_proposal()'s DEFAULT `generate_edit`
++    callable; any real or test replacement must return the same shape:
++
++        {"summary": str, "files": [{"path", "op", "content"}, ...],
++         "model_meta": dict (optional)}
++
++    `current_files`: {path: workspace_code_files.get_file()'s own
++    shape}, one entry per distinct path _paths_from_refs() pulled out
++    of `refs`, already read by create_proposal() BEFORE this is called
++    — this function never touches the database itself, real or stub,
++    so it's trivially swappable/testable without any DB isolation
++    machinery of its own.
++
++    What it actually does, per referenced path: appends one clearly-
++    labeled comment line recording `instruction`, using
++    _LINE_COMMENT_BY_EXT to pick a marker for the file's own extension
++    (falling back to `//`). A path workspace_code_files has nothing
++    saved at yet (version 0 — see get_file()'s own `_empty_file()`
++    shape) gets op="create" with just that comment line as its whole
++    content; an existing file gets op="replace" with the comment
++    appended to its current content. This is REAL content that lands
++    in a REAL review flow (W5.3's merge view, W5.4's proposal card) and
++    a REAL file write on resolve — same "the confirmation gate is
++    real, the destination integration isn't yet" honesty
++    agents/deploy_agent.py's trigger_live_deploy() already documents
++    for itself — it is simply not a real code edit, because the thing
++    that would produce one doesn't exist in this codebase yet.
++    """
++    files = []
++    for path, current in current_files.items():
++        marker = "//"
++        for ext, m in _LINE_COMMENT_BY_EXT.items():
++            if path.endswith(ext):
++                marker = m
++                break
++        comment_line = f"{marker} TODO(code_editor, W5.2): {instruction}"
++        if current["version"] == 0:
++            files.append({"path": path, "op": "create", "content": comment_line + "\n"})
++        else:
++            original = current["content"] or ""
++            sep = "\n" if original and not original.endswith("\n") else ""
++            files.append({"path": path, "op": "replace", "content": original + sep + comment_line + "\n"})
++    return {
++        "summary": f"[stub] {instruction}",
++        "files": files,
++        "model_meta": {"generator": "_stub_generate_edit", "note": "W5.2 not yet wired"},
++    }
++
++
++def _build_files_payload(edit_files: list[dict], current_files: dict) -> list[dict]:
++    """Turns generate_edit()'s `{path, op, content}` entries into the
++    shape actually stored in workspace_code_proposals.files: `{path,
++    op, base_version, base_hash, original, proposed}`.
++    base_version/base_hash/original all come from `current_files` —
++    the SNAPSHOT create_proposal() read from workspace_code_files
++    BEFORE calling generate_edit(), not a fresh read taken here — so
++    what's stored describes "what this file looked like when the
++    proposal was made", exactly what resolve_proposal() later needs to
++    detect drift against, deliberately decoupled from how long
++    generate_edit() itself took to run.
++    """
++    out = []
++    seen: set[str] = set()
++    for edit in edit_files:
++        path = edit.get("path")
++        if not path:
++            raise ValueError("generated edit is missing 'path' on one of its files")
++        if path in seen:
++            raise ValueError(f"generated edit lists {path!r} more than once")
++        seen.add(path)
++        op = edit.get("op", "replace")
++        if op not in _VALID_OPS:
++            raise ValueError(f"unknown op {op!r} for {path!r}")
++        current = current_files.get(path)
++        base_version = current["version"] if current is not None else 0
++        original = current["content"] if current is not None else ""
++        out.append({
++            "path": path,
++            "op": op,
++            "base_version": base_version,
++            "base_hash": _hash_content(original),
++            "original": original,
++            "proposed": edit.get("content", ""),
++        })
++    return out
++
++
++def create_proposal(ws_id: str, instruction: str, refs: list[dict],
++                     session_id: str | None, user_id: str,
++                     generate_edit=None) -> dict:
++    """POST .../code/proposals — see this module's own docstring for
++    the full lifecycle. Reads every referenced file's CURRENT content
++    via workspace_code_files.get_file() up front, calls `generate_edit`
++    (default: _stub_generate_edit — see its own docstring for the W5.2
++    swap-in seam) SYNCHRONOUSLY, and stores whatever comes back as a
++    new row. Nothing here writes to workspace_code_files, no matter
++    what generate_edit returns — see resolve_proposal() for the only
++    path that does.
++
++    A `generate_edit` failure does NOT raise out of this function: it
++    is caught, and a status='failed' row is stored and returned
++    instead (files=[], model_meta={"error": str(exc)}) — same
++    "the pending tray / chat card gets something to show, not a bare
++    500" reasoning W5.4's own "live status badge synced by the Pusher
++    event" design implies a failed generation needs a REAL row to
++    attach that badge to. A bad INPUT (empty instruction, no refs, an
++    unsupported ref kind, a folder ref) is a different class of
++    problem — that's still a plain ValueError raised straight through,
++    same as every other route in this codebase turns a bad-request
++    shape into a 400, because there's no proposal worth creating at
++    all in that case.
++    """
++    if not instruction or not instruction.strip():
++        raise ValueError("instruction cannot be empty")
++    refs = refs or []
++    paths = _paths_from_refs(refs)
++
++    current_files = {path: workspace_code_files.get_file(ws_id, path) for path in paths}
++
++    generate_edit = generate_edit or _stub_generate_edit
++    try:
++        result = generate_edit(ws_id, instruction, refs, current_files)
++        files = _build_files_payload(result.get("files", []), current_files)
++        summary = result.get("summary") or instruction
++        model_meta = result.get("model_meta") or {}
++        status = "pending"
++    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
++        files = []
++        summary = f"Edit generation failed: {exc}"
++        model_meta = {"error": str(exc)}
++        status = "failed"
++
++    proposal_id = f"prop_{uuid.uuid4().hex[:12]}"
++    now = _now()
++    with db.cursor(user_id=user_id) as cur:
++        cur.execute(
++            f"""
++            insert into workspace_code_proposals
++                (id, workspace_id, session_id, created_by, instruction, status,
++                 files, summary, refs, model_meta, created_at)
++            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
++            returning {_PROPOSAL_COLUMNS}
++            """,
++            (proposal_id, ws_id, session_id, user_id, instruction, status,
++             db.Json(files), summary, db.Json(refs), db.Json(model_meta), now),
++        )
++        row = cur.fetchone()
++
++    write_audit(user_id, "code_proposal.create", "workspace", ws_id,
++                {"proposal_id": proposal_id, "status": status, "file_count": len(files)})
++
++    # Gotcha (plan §1.5 / §7.2): payload is ids/status only, never file
++    # content — same 10,240-byte Pusher cap CODE_FILE_UPDATED's own
++    # payload respects. A CODE_PROPOSAL_READY fires even for a
++    # status='failed' row, same reasoning as this function's own
++    # docstring on why a failed generation still gets a real row: the
++    # pending tray / chat card's badge needs to move off "generating"
++    # either way.
++    emit_workspace_event(
++        EventType.CODE_PROPOSAL_READY,
++        workspace_id=ws_id,
++        agent="code_editor",
++        payload={"workspace_id": ws_id, "proposal_id": proposal_id, "status": status},
++    )
++    return _row_to_proposal(row)
++
++
++def list_proposals(ws_id: str, status: str | None = None) -> list[dict]:
++    """GET .../code/proposals[?status=pending] — most recent first.
++    W5.4's pending tray ("the tray is the source of truth... populated
++    from GET .../code/proposals?status=pending on mount") is the
++    intended caller for the filtered form; an unfiltered call (e.g. a
++    future History-style "all proposals" view) is supported by the
++    same function rather than a second one.
++
++    trusted=True — same reasoning workspace_code_files.list_files()/
++    get_file_history() give for themselves: this reads by workspace_id
++    only, no per-call acting user, and the route layer
++    (api/routes/code_edit.py) already gates on the caller being a
++    member/owner of ws_id via _require_workspace() before this is ever
++    reached."""
++    if status is not None and status not in _VALID_STATUSES:
++        raise ValueError(f"status must be one of {sorted(_VALID_STATUSES)}, got {status!r}")
++    with db.cursor(trusted=True) as cur:
++        if status is not None:
++            cur.execute(
++                f"select {_PROPOSAL_COLUMNS} from workspace_code_proposals "
++                "where workspace_id = %s and status = %s order by created_at desc",
++                (ws_id, status),
++            )
++        else:
++            cur.execute(
++                f"select {_PROPOSAL_COLUMNS} from workspace_code_proposals "
++                "where workspace_id = %s order by created_at desc",
++                (ws_id,),
++            )
++        rows = cur.fetchall()
++    return [_row_to_proposal(r) for r in rows]
++
++
++def get_proposal(ws_id: str, proposal_id: str) -> dict:
++    """GET .../code/proposals/{id} — W5.4's "close the browser mid-
++    review, reopen -> tray still shows it and Review restores the
++    diff" needs this to return the FULL stored files[] (original +
++    proposed per file), not list_proposals()'s own metadata-adjacent
++    row shape — unlike workspace_code_files' list/get split, there's
++    no separate "heavy" column to omit here (a proposal's files jsonb
++    is already the point of fetching it), so this and list_proposals()
++    share one row shape.
++
++    Raises FileNotFoundError (same convention
++    eo/chat_workspace.get_workspace() and eo/correction_candidates.py
++    already use for "no row here") when nothing matches BOTH
++    workspace_id and id — filtering on workspace_id here too, not just
++    id, is defense in depth per eo/db.py's own "every store module
++    still does its own scoping in the query itself" note, even though
++    `id` alone is already globally unique."""
++    with db.cursor(trusted=True) as cur:
++        cur.execute(
++            f"select {_PROPOSAL_COLUMNS} from workspace_code_proposals "
++            "where workspace_id = %s and id = %s",
++            (ws_id, proposal_id),
++        )
++        row = cur.fetchone()
++    if row is None:
++        raise FileNotFoundError(f"no proposal {proposal_id!r} in workspace {ws_id!r}")
++    return _row_to_proposal(row)
++
++
++def _mark_status(ws_id: str, proposal_id: str, status: str, user_id: str,
++                  resolved: bool = False) -> dict:
++    """Shared by resolve_proposal()'s two exit points (stale-abort and
++    a real accepted/rejected/partial resolution) — the only two places
++    this module ever changes a proposal's status after creation.
++    `resolved=True` also stamps resolved_at; the stale-abort path
++    passes resolved=False on purpose — a 'stale' proposal isn't
++    resolved, it's still sitting there pending the SAME review, just
++    now flagged so the client can offer "Regenerate / Review anyway"
++    (W5.4) instead of blindly retrying the same stale write."""
++    now = _now()
++    with db.cursor(user_id=user_id) as cur:
++        if resolved:
++            cur.execute(
++                f"""
++                update workspace_code_proposals set status = %s, resolved_at = %s
++                where workspace_id = %s and id = %s
++                returning {_PROPOSAL_COLUMNS}
++                """,
++                (status, now, ws_id, proposal_id),
++            )
++        else:
++            cur.execute(
++                f"""
++                update workspace_code_proposals set status = %s
++                where workspace_id = %s and id = %s
++                returning {_PROPOSAL_COLUMNS}
++                """,
++                (status, ws_id, proposal_id),
++            )
++        row = cur.fetchone()
++    if row is None:
++        raise FileNotFoundError(f"no proposal {proposal_id!r} in workspace {ws_id!r}")
++    return _row_to_proposal(row)
++
++
++def resolve_proposal(ws_id: str, proposal_id: str, decisions: list[dict],
++                      user_id: str) -> dict:
++    """POST .../code/proposals/{id}/resolve — the ONLY function in
++    this codebase that ever turns a proposal's stored `proposed` text
++    into a real workspace_code_files write. See this module's own
++    docstring for the lifecycle this sits at the end of.
++
++    `decisions`: [{"path", "decision": "keep"|"undo", "final_content"?
++    }], one entry per file the reviewer has an opinion on. A path
++    listed in the proposal's own `files` but ABSENT from `decisions`
++    defaults to "undo" — a reviewer who only sends decisions for files
++    they actually looked at doesn't accidentally write the rest; there
++    is no implicit "keep everything not mentioned" behavior anywhere
++    in this function. `final_content`, when given, is the file's
++    ACTUAL final text after W5.3's per-hunk Keep/Undo inside the merge
++    view — some hunks kept, others undone, still one "keep" decision
++    for the whole file at this layer. Omitted, a "keep" writes the
++    proposal's own stored `proposed` text verbatim (the whole-file
++    case).
++
++    Two-phase, not one, and NOT wrapped in a single Postgres
++    transaction spanning every file (workspace_code_files.write_file()/
++    delete_file() each open and commit their OWN transaction, same as
++    every other caller of those two functions):
++
++      Phase 1 — read the LIVE workspace_code_files row for every file
++      being kept and compare its `version` against the `base_version`
++      this proposal captured at propose time. Any mismatch means the
++      file moved since this proposal was created (a hand edit, a
++      pipeline regen, or another proposal's own resolve landing first)
++      — the WHOLE resolve is aborted before a single byte is written,
++      the proposal is marked 'stale', and ProposalStaleError is raised
++      (-> 409) naming every file that conflicted. This is the case the
++      plan's own "re-checks base_version -> 409 stale" line describes,
++      and it's what makes "the file changes only after resolve" (this
++      step's own Done-when) actually true for the overwhelmingly
++      common case of no concurrent edit landing mid-review.
++
++      Phase 2 — only reached if Phase 1 found nothing stale: write
++      every kept file for real, one workspace_code_files.write_file()/
++      delete_file() call per file. Each write_file() call ALSO passes
++      base_version (the same value Phase 1 just confirmed matches) so
++      it gets its own independent, atomic, row-locked conflict check
++      (see that function's own docstring) — Phase 1's check is an
++      up-front, best-effort pass across the WHOLE set; write_file()'s
++      own per-call check is what's actually race-free for any ONE
++      file. A VersionConflictError surfacing here anyway (a write
++      landing in the narrow window between Phase 1's read and this
++      specific file's write — genuinely rare, and only possible when
++      two people are resolving overlapping proposals at the same
++      instant) is caught, added to the same stale-files shape
++      ProposalStaleError carries, and does NOT roll back any kept
++      files already written earlier in this same loop — same "largely
++      succeeds or largely doesn't, not glued into one all-or-nothing
++      transaction" trade-off eo/workspace_code_files.write_files()
++      already documents for its own batch path, just surfacing here
++      instead of there. delete_file() has no base_version parameter of
++      its own at all (a pre-existing gap — W1.2 never added conflict
++      detection to delete), so for a kept op="delete" file, Phase 1's
++      read is the ONLY staleness protection this function can offer;
++      fixing that is out of this step's scope.
++
++    Overall `status` after a successful (non-stale) resolve: 'accepted'
++    if every proposal file was kept, 'rejected' if every one was
++    undone, 'partial' otherwise. write_audit()'s `action` follows the
++    same three-way split (code_proposal.accept / .reject / .partial).
++
++    Raises FileNotFoundError if the proposal doesn't exist, ValueError
++    if it's already resolved (status != 'pending') or a decision uses
++    an unrecognized `decision` value, ProposalStaleError per Phase 1/2
++    above."""
++    proposal = get_proposal(ws_id, proposal_id)
++    if proposal["status"] != "pending":
++        raise ValueError(
++            f"proposal {proposal_id!r} is already resolved (status={proposal['status']!r})"
++        )
++
++    for d in decisions:
++        if d.get("decision") not in _VALID_DECISIONS:
++            raise ValueError(
++                f"decision must be one of {sorted(_VALID_DECISIONS)}, got {d.get('decision')!r}"
++            )
++    decisions_by_path = {d["path"]: d for d in decisions}
++
++    # Phase 1 — see docstring.
++    stale = []
++    for f in proposal["files"]:
++        decision = decisions_by_path.get(f["path"], {}).get("decision", "undo")
++        if decision != "keep":
++            continue
++        live = workspace_code_files.get_file(ws_id, f["path"])
++        if live["version"] != f["base_version"]:
++            stale.append({"path": f["path"], "expected_version": f["base_version"], "current": live})
++    if stale:
++        _mark_status(ws_id, proposal_id, "stale", user_id, resolved=False)
++        raise ProposalStaleError(stale)
++
++    # Phase 2 — see docstring, including the mid-loop-conflict trade-off.
++    kept_paths, undone_paths = [], []
++    for f in proposal["files"]:
++        path = f["path"]
++        entry = decisions_by_path.get(path, {})
++        decision = entry.get("decision", "undo")
++        if decision != "keep":
++            undone_paths.append(path)
++            continue
++        final_content = entry.get("final_content")
++        content = final_content if final_content is not None else f["proposed"]
++        try:
++            if f["op"] == "delete":
++                workspace_code_files.delete_file(ws_id, path, user_id)
++            else:
++                workspace_code_files.write_file(
++                    ws_id, path, content, user_id,
++                    base_version=f["base_version"], source="proposal",
++                )
++            kept_paths.append(path)
++        except VersionConflictError as exc:
++            stale.append({"path": path, "expected_version": f["base_version"], "current": exc.current})
++    if stale:
++        _mark_status(ws_id, proposal_id, "stale", user_id, resolved=False)
++        raise ProposalStaleError(stale)
++
++    if kept_paths and undone_paths:
++        final_status = "partial"
++    elif kept_paths:
++        final_status = "accepted"
++    else:
++        final_status = "rejected"
++
++    row = _mark_status(ws_id, proposal_id, final_status, user_id, resolved=True)
++
++    action = {"accepted": "code_proposal.accept", "rejected": "code_proposal.reject",
++              "partial": "code_proposal.partial"}[final_status]
++    write_audit(user_id, action, "workspace", ws_id,
++                {"proposal_id": proposal_id, "kept": kept_paths, "undone": undone_paths})
++
++    # Plan §3's own edit-flow line: "... Done -> resolve -> write_file()
++    # + history snapshot + code_file_updated -> every open editor/
++    # preview refreshes." write_file()/delete_file() above don't emit
++    # this on their own (only api/task_runner.py's pipeline batch path
++    # does, unchanged by this patch — see relay/emitter.py's
++    # CODE_PROPOSAL_RESOLVED comment for the full "why here, not
++    # there" note) — resolve_proposal() is what closes that gap for
++    # the proposal-write path specifically. Skipped entirely when
++    # nothing was actually written (kept_paths is empty, i.e. a plain
++    # 'rejected' resolution) — same "no-op instead of an empty event"
++    # discipline emit_workspace_event()'s own workspace_id=None no-op
++    # path already takes, just decided by this caller instead.
++    if kept_paths:
++        emit_workspace_event(
++            EventType.CODE_FILE_UPDATED,
++            workspace_id=ws_id,
++            agent="code_editor",
++            payload={
++                "file_path": kept_paths[-1],
++                "file_paths": kept_paths,
++                "workspace_id": ws_id,
++            },
++        )
++
++    emit_workspace_event(
++        EventType.CODE_PROPOSAL_RESOLVED,
++        workspace_id=ws_id,
++        agent="code_editor",
++        payload={"workspace_id": ws_id, "proposal_id": proposal_id, "status": final_status},
++    )
++    return row
+diff --git a/backend/migrations/0010_code_proposals.sql b/backend/migrations/0010_code_proposals.sql
+new file mode 100644
+index 0000000..a8878be
+--- /dev/null
++++ b/backend/migrations/0010_code_proposals.sql
+@@ -0,0 +1,181 @@
++-- 0010_code_proposals.sql
++--
++-- W5.1 (Build Workbench plan, step 197): the pending-review store
++-- behind "select code / Add to chat / Edit mode" (W4.1/W4.2) turning
++-- into a Copilot-style Keep/Undo diff (W5.3/W5.4). A proposal is
++-- created by POST .../code/proposals (eo/code_proposals.py's
++-- create_proposal()), sits at status='pending' with its edited
++-- content computed but NOT yet written to workspace_code_files, and
++-- only becomes a real file write when POST .../code/proposals/{id}/
++-- resolve (resolve_proposal()) is called -- see that function's own
++-- docstring for the two-phase "check every kept file's base_version
++-- before writing any of them" contract. This table is the ONLY place
++-- a proposed edit lives between those two moments; workspace_code_files
++-- itself is untouched until resolve.
++--
++-- Same "one row per key, per workspace" shape as workspace_code_files
++-- (migration 0006) and workspace_code_file_versions (migration 0009),
++-- except keyed by a generated `id` rather than (workspace_id, some
++-- natural key) -- a workspace can have several proposals pending at
++-- once (one per file being edited, per W5.4's "one active proposal per
++-- file" rule enforced at the eo/route layer, not by this schema), so
++-- there's no natural composite key the way a single file's own path
++-- is one for workspace_code_files.
++--
++-- Columns, matching the plan's own §5 W5.1 schema line exactly:
++--   id            -- generated, see id shape below.
++--   workspace_id  -- same FK-with-cascade as every other workspace-
++--                    scoped table in this schema.
++--   session_id    -- the chat session that produced this proposal, so
++--                    a proposal card (W5.4) can be traced back to the
++--                    chat turn that made it. Nullable -- same "a
++--                    handful of callers don't have one" reasoning
++--                    migration 0008's llm_call_log.session_id already
++--                    documents; a curl-level create-then-resolve test
++--                    (this migration's own "Done when") has no real
++--                    chat session behind it.
++--   created_by    -- the acting user_id at propose time (always
++--                    present -- api/routes/code_edit.py's require_auth
++--                    dependency guarantees this, unlike session_id).
++--   instruction   -- the person's own edit request, verbatim, exactly
++--                    as typed into Edit mode (W4.2) -- what
++--                    generate_edit() (eo/code_proposals.py) was asked
++--                    to do, kept alongside the result so a later
++--                    reviewer (or W5.4's proposal card) can see the
++--                    request next to what it produced.
++--   status        -- see the CHECK constraint below for the closed set
++--                    and _VALID_STATUSES in eo/code_proposals.py for
++--                    the single source of truth it's kept in lockstep
++--                    with by hand -- same small/stable/"not worth a
++--                    DB-side derivation" reasoning
++--                    workspace_code_file_versions.source (migration
++--                    0009) already documents for itself.
++--   files         -- jsonb array, one entry per file this proposal
++--                    touches: {path, op, base_version, base_hash,
++--                    original, proposed}. base_version/base_hash/
++--                    original are a SNAPSHOT of workspace_code_files
++--                    taken at propose time (see
++--                    eo/code_proposals.py:_build_files_payload()'s own
++--                    docstring) -- resolve_proposal() re-reads the
++--                    LIVE row from workspace_code_files at resolve
++--                    time and compares against base_version, it never
++--                    trusts this column's own copy as still-current.
++--   summary       -- one-line, model-authored (or, until W5.2 lands,
++--                    stub-authored) description of what the edit did,
++--                    for W5.4's proposal card and the pending tray.
++--   refs          -- jsonb array, the caller's OWN ref shape
++--                    (frontend/app/lib/workbench/codeContext.js's
++--                    `{id, kind, path, fromLine, toLine, snippet,
++--                    hash, provider, ...}`) verbatim, unvalidated
++--                    beyond what eo/code_proposals.py itself checks
++--                    (kind/path). Stored opaquely on purpose -- W5.1
++--                    only needs `kind`/`path` out of a ref to decide
++--                    which files to read; nothing here needs to keep
++--                    this column's shape in lockstep with the
++--                    frontend's own ref model as it grows in later
++--                    steps (W6.x's `element`/`error` kinds add more
++--                    fields to the SAME ref shape without this table
++--                    ever needing a migration for it).
++--   model_meta    -- jsonb, free-form (token counts, model id, retry
++--                    count once W5.2's real agent lands; {"error":...}
++--                    for a status='failed' row today). No CHECK/shape
++--                    constraint on purpose -- same "whatever the
++--                    generator wants to record" latitude
++--                    llm_call_log's own free-standing columns don't
++--                    need here since this is a single opaque jsonb
++--                    blob, not queried columns.
++--   created_at    -- set once, by create_proposal(), never updated.
++--   resolved_at   -- null until resolve_proposal() transitions this
++--                    row out of 'pending'; set exactly once, at the
++--                    same moment `status` stops being 'pending'.
++--
++-- id shape: `prop_<12 hex chars>` (eo/code_proposals.py-generated,
++-- like correction_candidates.py's own `corr_<10 hex chars>` candidate
++-- ids), NOT a DB-generated uuid -- create_proposal() needs the id
++-- available before its own INSERT (to pass to generate_edit() as part
++-- of a future audit/tracing hook, and to build the CODE_PROPOSAL_READY
++-- event payload from the same value the INSERT used) rather than
++-- reading a `returning id` back first. Stored as `text`, not `uuid`,
++-- for exactly that reason -- there is no gen_random_uuid() default to
++-- rely on here the way chat_messages/llm_call_log's own uuid `id`
++-- columns do.
++--
++-- RLS: straight copy of workspace_code_files_scope (migration 0006)
++-- with the table name swapped -- list_proposals()/get_proposal() run
++-- with trusted=True (no per-call user_id, same reasoning
++-- get_file_history() gives for itself: the route layer already gates
++-- membership of ws_id via _require_workspace() before either function
++-- is ever reached), so the trusted branch is what lets normal reads
++-- through; the membership/ownership branches cover create_proposal()/
++-- resolve_proposal(), which do have a real user_id (created_by /
++-- the resolving reviewer, respectively).
++--
++-- Gotcha (0006 -> 0007's own bug, not repeating it here): RLS policy
++-- and GRANT both live in THIS file.
++--
++-- HOW TO APPLY: run as the `postgres` role (same as every migration
++-- before this one) -- `psql "$DATABASE_URL" -f
++-- migrations/0010_code_proposals.sql`. Uses IF NOT EXISTS / CREATE
++-- TABLE IF NOT EXISTS throughout, so it's safe to run more than once.
++-- No app restart needed -- same per-query privilege/RLS check note
++-- migration 0007/0009 already make.
++
++create table if not exists workspace_code_proposals (
++    id            text primary key,
++    workspace_id  text not null references workspaces(id) on delete cascade,
++    session_id    text,
++    created_by    text not null,
++    instruction   text not null,
++    status        text not null default 'pending'
++                  check (status in ('pending', 'accepted', 'rejected', 'partial', 'stale', 'failed')),
++    files         jsonb not null default '[]'::jsonb,
++    summary       text,
++    refs          jsonb not null default '[]'::jsonb,
++    model_meta    jsonb not null default '{}'::jsonb,
++    created_at    timestamptz not null default now(),
++    resolved_at   timestamptz
++);
++
++comment on table workspace_code_proposals is
++    'W5.1: pending/resolved LLM-proposed code edits for the Build '
++    'workbench''s review flow -- see eo/code_proposals.py for read/'
++    'write access. A row here never implies workspace_code_files was '
++    'written; only resolve_proposal() (status leaving ''pending'') '
++    'ever writes real file content, via workspace_code_files.'
++    'write_file(source=''proposal'').';
++
++alter table workspace_code_proposals enable row level security;
++alter table workspace_code_proposals force row level security;
++
++drop policy if exists workspace_code_proposals_scope on workspace_code_proposals;
++create policy workspace_code_proposals_scope on workspace_code_proposals
++    for all
++    using (
++        workspace_id in (
++            select workspace_id from workspace_members
++            where user_id::text = current_setting('app.current_user_id', true)
++        )
++        or workspace_id in (
++            select id from workspaces
++            where owner_id::text = current_setting('app.current_user_id', true)
++        )
++        or current_setting('app.trusted_internal', true) = 'true'
++    );
++
++-- Serves both list_proposals() shapes (GET .../code/proposals and GET
++-- .../code/proposals?status=pending) -- a leading workspace_id column
++-- covers the unfiltered "every proposal in this workspace" query too,
++-- just without status narrowing the scan; created_at desc trailing
++-- matches list_proposals()'s own "most recent first" ORDER BY so
++-- neither query needs a separate sort step.
++create index if not exists workspace_code_proposals_workspace_status_idx
++    on workspace_code_proposals (workspace_id, status, created_at desc);
++
++-- Same "exactly the DML it needs" posture as every GRANT in this
++-- schema -- no delete. A proposal is a permanent, status-transitioned
++-- record (pending -> accepted/rejected/partial/stale/failed); nothing
++-- in eo/code_proposals.py ever removes one, same append-only-in-
++-- practice posture audit_log/llm_call_log take for themselves,
++-- expressed here as simply never granting delete in the first place
++-- rather than granting-then-revoking it.
++grant select, insert, update on workspace_code_proposals to minime_app;
+diff --git a/backend/relay/emitter.py b/backend/relay/emitter.py
+index 2e6301e..8e6226f 100644
+--- a/backend/relay/emitter.py
++++ b/backend/relay/emitter.py
+@@ -170,6 +170,45 @@ class EventType(str, Enum):
+     # react to it).
+     CODE_FILE_UPDATED = "code_file_updated"
+ 
++    # W5.1 (Build Workbench plan, step 197): the proposal lifecycle
++    # behind Chat's Edit mode (W4.2) and the review UI (W5.3/W5.4).
++    # Both fired from eo/code_proposals.py, on the WORKSPACE channel —
++    # same "every dock/tab/chat with this workspace open, not just the
++    # session whose chat turn triggered it" reasoning PANEL_CONTENT_
++    # UPDATED/CODE_FILE_UPDATED already give for themselves. Payload
++    # shape for BOTH: {workspace_id, proposal_id, status} — ids/status
++    # only, never file content (same 10,240-byte Pusher cap class as
++    # CODE_FILE_UPDATED's own payload discipline; a proposal's files[]
++    # can carry full original/proposed text for several files, which
++    # would blow the cap instantly). A client that wants the actual
++    # diff fetches it via GET .../code/proposals/{proposal_id} once
++    # this event tells it something changed.
++    #   - CODE_PROPOSAL_READY: create_proposal() just stored a new row
++    #     (status is 'pending' for a normal generation, or 'failed' if
++    #     the — today: stub, W5.2: real — generator raised; see that
++    #     function's own docstring for why a failed generation still
++    #     gets a real row and fires this event rather than a bare
++    #     500). Frontend handler: W5.4's proposal card / pending tray,
++    #     once built — nothing subscribes to this yet.
++    #   - CODE_PROPOSAL_RESOLVED: resolve_proposal() just transitioned
++    #     a proposal OUT of 'pending' — status is one of 'accepted' /
++    #     'rejected' / 'partial' / 'stale' (a 'stale' resolution also
++    #     fires this, not just a terminal one — the pending tray needs
++    #     to know to show the "changed since proposed" banner just as
++    #     much as it needs to know about a real resolution). Plan §3's
++    #     own edit-flow line ("resolve -> write_file() + history
++    #     snapshot + code_file_updated -> every open editor/preview
++    #     refreshes") is why resolve_proposal() ALSO fires the existing
++    #     CODE_FILE_UPDATED (not a new type) for whichever paths it
++    #     actually wrote, right alongside this one -- write_file() itself
++    #     still doesn't emit that on its own today (only the pipeline's
++    #     batch write_files() path did, before this patch), so
++    #     resolve_proposal() closes that gap for the proposal-write path
++    #     specifically, same as task_runner.py's _write_code_files()
++    #     already does for its own batch path.
++    CODE_PROPOSAL_READY = "code_proposal_ready"
++    CODE_PROPOSAL_RESOLVED = "code_proposal_resolved"
++
+     # PATCH-A additions: real call sites (agents/*.py) that were firing
+     # these literals all along but had no matching entry, so every one
+     # of them raised ValueError the first time that code path executed
