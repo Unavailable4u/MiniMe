@@ -1,0 +1,374 @@
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index bb531a9..2d792a1 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -23,6 +23,7 @@ import HireReviewScreen from "./HireReviewScreen";
+ // trio of per-half collapse buttons.
+ import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below
+ import { ingestFileByExtension } from "../lib/ingestDispatch";
++import { createProposal as createCodeProposal, subscribeToProposalEvents } from "../lib/workbench/codeProposals";   // NEW — W5.1b
+ import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
+ import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
+ 
+@@ -282,7 +283,7 @@ function ThinkingElapsed() {
+ // `onClearCodeRefs` as that same store's clearRefs().
+ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false, codeRefs = null, codeChips = null, onClearCodeRefs = null }) {
+   const legacy = useSession();
+-  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
++  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
+   const dock = useWorkspaceDock(workspaceId, chatId);
+   const usingDock = dock.key != null;
+   const { createWorkspaceChat, loadOlderMessages } = useWorkspaceDockActions();
+@@ -471,10 +472,22 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+   // NEW — W4.2: "Ask | Edit", the code-context mode toggle -- unrelated
+   // to `mode`/`MODES`/`modeOpen` above (that trio is the tier picker,
+   // Auto/Simple/Fast/Expert/Beast). Only ever shown when `codeRefs`
+-  // isn't null (see the composer JSX below); "Edit" has nothing to call
+-  // yet (W5.1) so it renders disabled and this never actually leaves
+-  // "ask" in this patch.
++  // isn't null (see the composer JSX below).
++  // CHANGED — W5.1b: "Edit" is no longer a disabled stub — see
++  // sendCodeEditProposal below and the toggle's own JSX further down
++  // for what flipping this to "edit" actually does now.
+   const [codeChatMode, setCodeChatMode] = useState("ask");
++  // NEW — W5.1b: proposals created by THIS panel instance this
++  // session, newest first — a deliberately plain, read-only stand-in
++  // for W5.3's real Keep/Undo merge view and W5.4's real
++  // cross-session pending tray. Local component state, not dock
++  // state or anything persisted: reloading the tab loses this list on
++  // purpose (there's no Keep/Undo to resume here yet, so there's
++  // nothing worth restoring — GET .../code/proposals?status=pending
++  // is what W5.4's real tray will read from instead of this).
++  const [codeProposals, setCodeProposals] = useState([]);
++  const [codeProposalPending, setCodeProposalPending] = useState(false);
++  const [codeProposalError, setCodeProposalError] = useState(null);
+   const [draft, setDraft] = useState("");
+   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+ 
+@@ -1183,6 +1196,75 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+     [codeRefs, sendTask, onClearCodeRefs]
+   );
+ 
++  // NEW — W5.1b (Build Workbench plan, step 197). D2/D3's real code
++  // EDIT path, as opposed to sendCodeChatMessage's Ask-mode chat
++  // message: calls eo/code_proposals.py's create_proposal() via
++  // POST .../code/proposals (see api/routes/code_edit.py) instead of
++  // sendTask()'s /api/task path — a proposal is its own resource with
++  // its own lifecycle, not a chat turn, so it never touches the
++  // dock's chat/message state at all. The instruction's own text is
++  // NOT prefixed with fenced snippets the way sendCodeChatMessage's
++  // `augmented` text is — the backend already re-reads each ref's
++  // CURRENT file content itself (create_proposal()'s own
++  // workspace_code_files.get_file() call, ahead of generate_edit()),
++  // so sending the snippet twice would just be redundant bytes on the
++  // wire, not anything the server needs.
++  //
++  // The returned proposal is appended to codeProposals for this
++  // panel's own plain read-only list (see that state's own comment
++  // above) — there is deliberately no Keep/Undo action wired to it
++  // yet (W5.3), so a 'pending' proposal here just sits there showing
++  // what the (today: stub, W5.2: real) generator produced until a
++  // later step's merge view can act on it.
++  const sendCodeEditProposal = useCallback(
++    (text) => {
++      if (!workspaceId) return; // Edit mode is only ever shown inside a workspace's Build tab
++      setCodeProposalPending(true);
++      setCodeProposalError(null);
++      createCodeProposal(API_URL, workspaceId, {
++        instruction: text,
++        refs: codeRefs,
++        sessionId: dock.state.sessionId ?? null,
++      })
++        .then((proposal) => {
++          setCodeProposals((prev) => [proposal, ...prev]);
++          onClearCodeRefs?.();
++        })
++        .catch((err) => {
++          // A 400 (bad request shape — see create_proposal()'s own
++          // ValueError cases) lands here; a GENERATION failure does
++          // NOT (create_proposal() still returns 200 with
++          // status: "failed" — see its own docstring) — that case
++          // still hits the .then() above and renders as a failed
++          // entry in the list, not this error banner.
++          setCodeProposalError(err.message || "Couldn't create the proposal — try again.");
++        })
++        .finally(() => setCodeProposalPending(false));
++    },
++    [workspaceId, API_URL, codeRefs, dock.state.sessionId, onClearCodeRefs]
++  );
++
++  // NEW — W5.1b: live status updates for proposals THIS panel created
++  // — see codeProposals.js's subscribeToProposalEvents() own
++  // docstring for why this is the one case (another tab/session
++  // resolving the SAME proposal) this subscription actually changes
++  // anything for today; this tab's own create already has the row
++  // via sendCodeEditProposal's .then() above. Only subscribed while
++  // this is a code-context-aware panel with a real workspace behind
++  // it (codeRefs !== null, same gate the Ask|Edit strip itself uses)
++  // — every other WorkspaceChatPanel instance (Chat tab, Research,
++  // etc.) never had an Edit mode to react to in the first place.
++  useEffect(() => {
++    if (codeRefs === null || !workspaceId) return;
++    return subscribeToProposalEvents(workspaceId, {
++      onResolved: ({ proposal_id, status }) => {
++        setCodeProposals((prev) =>
++          prev.map((p) => (p.id === proposal_id ? { ...p, status } : p))
++        );
++      },
++    });
++  }, [codeRefs, workspaceId]);
++
+   const dispatchText = useCallback(
+     (text) => {
+       // W4.2 / plan §7 gotcha 10: a chip-bearing send must bypass
+@@ -1193,12 +1275,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+       // this code" by the person picking it, and running it through
+       // that same guesser risks a misread ("add a loading state to
+       // src/App.jsx L10-20" landing on "generate notebooks about
+-      // App.jsx"). Edit mode isn't wired yet (W5.1), so this is the
+-      // only path a chip-bearing send takes today, same as the "Ask
+-      // mode works end-to-end, Edit is a stub" scope this step is
+-      // meant to land.
++      // App.jsx"). CHANGED — W5.1b: Edit mode is wired now, so a
++      // chip-bearing send branches on codeChatMode instead of always
++      // taking the Ask path — "Ask mode works end-to-end, Edit is a
++      // stub" (W4.2's own scope line) is what this step replaces.
+       if (codeRefs && codeRefs.length > 0) {
+-        sendCodeChatMessage(text);
++        if (codeChatMode === "edit") {
++          sendCodeEditProposal(text);
++        } else {
++          sendCodeChatMessage(text);
++        }
+         return;
+       }
+       tryHandleGenerateIntent(text).then((handled) => {
+@@ -1213,8 +1299,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+         }
+       });
+     },
+-    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask`/`codeRefs`/`sendCodeChatMessage` is what actually matters for rowProps below.
+-    [sendTask, codeRefs, sendCodeChatMessage]
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask`/`codeRefs`/`sendCodeChatMessage`/`codeChatMode`/`sendCodeEditProposal` is what actually matters for rowProps below.
++    [sendTask, codeRefs, sendCodeChatMessage, codeChatMode, sendCodeEditProposal]
+   );
+ 
+   function handleSubmit(e) {
+diff --git a/frontend/app/lib/workbench/codeProposals.js b/frontend/app/lib/workbench/codeProposals.js
+new file mode 100644
+index 0000000..649466f
+--- /dev/null
++++ b/frontend/app/lib/workbench/codeProposals.js
+@@ -0,0 +1,212 @@
++// frontend/app/lib/workbench/codeProposals.js — W5.1b (Build Workbench
++// plan, step 197): the frontend half of W5.1's proposal endpoints —
++// see backend/eo/code_proposals.py's own module docstring for the
++// full lifecycle this wraps (create -> pending -> resolve ->
++// accepted/rejected/partial/stale/failed).
++//
++// Plain exported async functions, not a stateful provider — unlike
++// fileProviders.js's createCloudFileProvider() (constructed once per
++// workbench mount, bound to one workspace's {workspaceId, apiUrl} for
++// the whole Explorer/tabs/search/chips surface), a proposal is
++// something ONE chat send kicks off at a time from
++// WorkspaceChatPanel.jsx's Edit-mode composer — there's no shared
++// per-workspace state here worth wrapping in a factory closure, so
++// every function below just takes `apiUrl`/`workspaceId` as plain
++// arguments, same shape as SessionContext.jsx's/
++// WorkspaceDockContext.jsx's own `${API_URL}/api/...` call sites.
++//
++// What this step wires up, concretely: WorkspaceChatPanel.jsx's
++// Ask|Edit toggle (W4.2) can now actually select "Edit" (previously
++// disabled, "Coming in W5"), and a chip-bearing Edit-mode send calls
++// createProposal() below instead of the Ask-mode chat path. The
++// result renders as a plain, read-only list in that panel — no
++// Keep/Undo (W5.3), no cross-session pending tray (W5.4). That's a
++// deliberate scope line, not an oversight: this step's job is making
++// the real round trip (create -> live status update via Pusher)
++// reachable from the UI at all, not building the merge view on top of
++// it.
++"use client";
++import { authHeaders } from "../../context/SessionContext";
++import { getPusherClient } from "../pusherClient";
++
++/**
++ * Thrown by resolveProposal() on a 409 — same role FileConflictError
++ * plays in fileProviders.js, just carrying a LIST of conflicting files
++ * (eo/code_proposals.py's ProposalStaleError.stale_files, one entry
++ * per file that moved since this proposal was created) instead of
++ * one, since a proposal can touch several files at once. Nothing in
++ * this step's UI catches this yet (there's no resolve() call site
++ * until W5.3's Keep/Undo view exists to send decisions) — exported
++ * now so that step doesn't have to invent it later.
++ */
++export class ProposalStaleError extends Error {
++  constructor(staleFiles) {
++    super("One or more files changed on the server since this proposal was created");
++    this.name = "ProposalStaleError";
++    this.staleFiles = staleFiles || [];
++  }
++}
++
++async function parseErrorDetail(res) {
++  const body = await res.json().catch(() => null);
++  return body?.detail || `${res.status} ${res.statusText}`;
++}
++
++// The plan's own ref shape (migrations/0010_code_proposals.sql's own
++// comment on the `refs` column: `{id, kind, path, fromLine, toLine,
++// snippet, hash, provider, ...}`) — trimmed down from
++// codeContext.js's full in-memory ref (which also carries `from`/`to`
++// character offsets and a client-only `truncated` flag CM6 needs for
++// live position-tracking) to exactly the fields a proposal on the
++// server ever reads or displays. Mirrors sendCodeChatMessage's own
++// `trimmedRefs` in WorkspaceChatPanel.jsx, which does the same
++// trim for the Ask-mode persisted-message path, just keeping
++// `snippet`/`hash` here too since eo/code_proposals.py's
++// _paths_from_refs() only READS kind/path but the row still stores
++// the whole ref for W5.4's proposal card to show what was selected.
++function toProposalRef(ref) {
++  return {
++    id: ref.id,
++    kind: ref.kind,
++    path: ref.path,
++    fromLine: ref.fromLine ?? null,
++    toLine: ref.toLine ?? null,
++    snippet: ref.snippet ?? null,
++    hash: ref.hash ?? null,
++    provider: ref.provider ?? null,
++  };
++}
++
++/**
++ * POST .../code/proposals — see api/routes/code_edit.py's
++ * create_code_proposal() docstring: this call is synchronous end to
++ * end (today's stub generator runs inline, W5.2's real agent call
++ * will too) and returns the FULLY STORED proposal, status included —
++ * no polling needed for this step's own round trip.
++ *
++ * `refs`: codeContext.js's full ref objects — trimmed to
++ * toProposalRef()'s shape before the request body is built, so this
++ * function's caller never has to remember to do that trim itself.
++ * Throws (via parseErrorDetail) on a 400 (empty instruction, no refs,
++ * a folder ref, an unsupported ref kind) — see create_proposal()'s
++ * own docstring for that closed set; a generation FAILURE is NOT an
++ * error here, it's a normal 200 with `status: "failed"` on the
++ * returned proposal (same reasoning that function's docstring gives),
++ * so callers should check `.status`, not just catch.
++ */
++export async function createProposal(apiUrl, workspaceId, { instruction, refs, sessionId }) {
++  const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/proposals`, {
++    method: "POST",
++    headers: await authHeaders({ json: true }),
++    body: JSON.stringify({
++      instruction,
++      refs: (refs || []).map(toProposalRef),
++      session_id: sessionId ?? null,
++    }),
++  });
++  if (!res.ok) throw new Error(await parseErrorDetail(res));
++  return res.json();
++}
++
++/**
++ * GET .../code/proposals[?status=pending] — most recent first. Not
++ * called anywhere yet in this step (there's no pending tray until
++ * W5.4), but a from-scratch fetch is exactly what that tray's own
++ * mount-time load will need, same "the plumbing exists before the
++ * component that uses it" shape createProposal()'s Pusher-ready
++ * subscribeToProposalEvents() below already takes.
++ */
++export async function listProposals(apiUrl, workspaceId, { status } = {}) {
++  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
++  const res = await fetch(`${apiUrl}/api/workspaces/${workspaceId}/code/proposals${qs}`, {
++    headers: await authHeaders(),
++  });
++  if (!res.ok) throw new Error(await parseErrorDetail(res));
++  return res.json();
++}
++
++/**
++ * GET .../code/proposals/{id} — full shape, files[] (original +
++ * proposed per file) included. What W5.3's merge view will fetch once
++ * a proposal card is actually clicked; not called anywhere yet.
++ */
++export async function getProposal(apiUrl, workspaceId, proposalId) {
++  const res = await fetch(
++    `${apiUrl}/api/workspaces/${workspaceId}/code/proposals/${proposalId}`,
++    { headers: await authHeaders() }
++  );
++  if (!res.ok) throw new Error(await parseErrorDetail(res));
++  return res.json();
++}
++
++/**
++ * POST .../code/proposals/{id}/resolve — `decisions`:
++ * [{path, decision: "keep"|"undo", finalContent?}], mirroring
++ * eo/code_proposals.py's resolve_proposal() own `decisions` shape
++ * (camelCase here, converted to the wire's `final_content` below —
++ * every other field name already matches). Not called anywhere yet;
++ * W5.3's Keep/Undo view is the intended caller. Throws
++ * ProposalStaleError on a 409, same shape/reasoning as
++ * fileProviders.js's write() throwing FileConflictError on its own
++ * 409.
++ */
++export async function resolveProposal(apiUrl, workspaceId, proposalId, decisions) {
++  const res = await fetch(
++    `${apiUrl}/api/workspaces/${workspaceId}/code/proposals/${proposalId}/resolve`,
++    {
++      method: "POST",
++      headers: await authHeaders({ json: true }),
++      body: JSON.stringify({
++        files: (decisions || []).map((d) => ({
++          path: d.path,
++          decision: d.decision,
++          final_content: d.finalContent ?? null,
++        })),
++      }),
++    }
++  );
++  if (res.status === 409) {
++    const body = await res.json().catch(() => null);
++    throw new ProposalStaleError(body?.detail?.stale_files || []);
++  }
++  if (!res.ok) throw new Error(await parseErrorDetail(res));
++  return res.json();
++}
++
++/**
++ * relay/emitter.py's CODE_PROPOSAL_READY / CODE_PROPOSAL_RESOLVED, on
++ * the same `workspace-${id}` channel fileProviders.js's
++ * CloudFileProvider.subscribe() already binds to for
++ * `code_file_updated` — same sanitization, same bind_global +
++ * eventType filter shape, so a second subscriber on this channel
++ * (this one) behaves identically to the first. Returns an unsubscribe
++ * function, same contract as that provider's subscribe().
++ *
++ * Both payloads are `{workspace_id, proposal_id, status}` only (see
++ * that module's own comment on why — never file content), which is
++ * already everything `onReady`/`onResolved` need: WorkspaceChatPanel.jsx's
++ * own read-only proposal list (this step) matches on `proposal_id`
++ * against what createProposal() already returned it synchronously, so
++ * a resolution from ANOTHER tab/session (the only case this
++ * subscription actually adds anything for, today — this tab's own
++ * create already has the row) still flips that entry's status live.
++ * `onReady` is included for symmetry / for W5.4's pending tray to use
++ * later; nothing in this step passes one.
++ */
++export function subscribeToProposalEvents(workspaceId, { onReady, onResolved } = {}) {
++  const pusher = getPusherClient();
++  if (!pusher) return () => {}; // Pusher env vars not set — live updates disabled
++
++  const channelName = `workspace-${workspaceId.replace(/[^A-Za-z0-9_=@,.;-]/g, "-")}`;
++  const channel = pusher.subscribe(channelName);
++  const handler = (eventType, data) => {
++    if (eventType === "code_proposal_ready") onReady?.(data);
++    else if (eventType === "code_proposal_resolved") onResolved?.(data);
++  };
++  channel.bind_global(handler);
++
++  return () => {
++    channel.unbind_global(handler);
++    pusher.unsubscribe(channelName);
++  };
++}

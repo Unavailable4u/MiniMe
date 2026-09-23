@@ -23,6 +23,7 @@ import HireReviewScreen from "./HireReviewScreen";
 // trio of per-half collapse buttons.
 import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below
 import { ingestFileByExtension } from "../lib/ingestDispatch";
+import { createProposal as createCodeProposal, subscribeToProposalEvents } from "../lib/workbench/codeProposals";   // NEW — W5.1b
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
 
@@ -282,7 +283,7 @@ function ThinkingElapsed() {
 // `onClearCodeRefs` as that same store's clearRefs().
 export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false, codeRefs = null, codeChips = null, onClearCodeRefs = null }) {
   const legacy = useSession();
-  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
+  const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
   const dock = useWorkspaceDock(workspaceId, chatId);
   const usingDock = dock.key != null;
   const { createWorkspaceChat, loadOlderMessages } = useWorkspaceDockActions();
@@ -471,10 +472,22 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // NEW — W4.2: "Ask | Edit", the code-context mode toggle -- unrelated
   // to `mode`/`MODES`/`modeOpen` above (that trio is the tier picker,
   // Auto/Simple/Fast/Expert/Beast). Only ever shown when `codeRefs`
-  // isn't null (see the composer JSX below); "Edit" has nothing to call
-  // yet (W5.1) so it renders disabled and this never actually leaves
-  // "ask" in this patch.
+  // isn't null (see the composer JSX below).
+  // CHANGED — W5.1b: "Edit" is no longer a disabled stub — see
+  // sendCodeEditProposal below and the toggle's own JSX further down
+  // for what flipping this to "edit" actually does now.
   const [codeChatMode, setCodeChatMode] = useState("ask");
+  // NEW — W5.1b: proposals created by THIS panel instance this
+  // session, newest first — a deliberately plain, read-only stand-in
+  // for W5.3's real Keep/Undo merge view and W5.4's real
+  // cross-session pending tray. Local component state, not dock
+  // state or anything persisted: reloading the tab loses this list on
+  // purpose (there's no Keep/Undo to resume here yet, so there's
+  // nothing worth restoring — GET .../code/proposals?status=pending
+  // is what W5.4's real tray will read from instead of this).
+  const [codeProposals, setCodeProposals] = useState([]);
+  const [codeProposalPending, setCodeProposalPending] = useState(false);
+  const [codeProposalError, setCodeProposalError] = useState(null);
   const [draft, setDraft] = useState("");
   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
 
@@ -1183,6 +1196,75 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
     [codeRefs, sendTask, onClearCodeRefs]
   );
 
+  // NEW — W5.1b (Build Workbench plan, step 197). D2/D3's real code
+  // EDIT path, as opposed to sendCodeChatMessage's Ask-mode chat
+  // message: calls eo/code_proposals.py's create_proposal() via
+  // POST .../code/proposals (see api/routes/code_edit.py) instead of
+  // sendTask()'s /api/task path — a proposal is its own resource with
+  // its own lifecycle, not a chat turn, so it never touches the
+  // dock's chat/message state at all. The instruction's own text is
+  // NOT prefixed with fenced snippets the way sendCodeChatMessage's
+  // `augmented` text is — the backend already re-reads each ref's
+  // CURRENT file content itself (create_proposal()'s own
+  // workspace_code_files.get_file() call, ahead of generate_edit()),
+  // so sending the snippet twice would just be redundant bytes on the
+  // wire, not anything the server needs.
+  //
+  // The returned proposal is appended to codeProposals for this
+  // panel's own plain read-only list (see that state's own comment
+  // above) — there is deliberately no Keep/Undo action wired to it
+  // yet (W5.3), so a 'pending' proposal here just sits there showing
+  // what the (today: stub, W5.2: real) generator produced until a
+  // later step's merge view can act on it.
+  const sendCodeEditProposal = useCallback(
+    (text) => {
+      if (!workspaceId) return; // Edit mode is only ever shown inside a workspace's Build tab
+      setCodeProposalPending(true);
+      setCodeProposalError(null);
+      createCodeProposal(API_URL, workspaceId, {
+        instruction: text,
+        refs: codeRefs,
+        sessionId: dock.state.sessionId ?? null,
+      })
+        .then((proposal) => {
+          setCodeProposals((prev) => [proposal, ...prev]);
+          onClearCodeRefs?.();
+        })
+        .catch((err) => {
+          // A 400 (bad request shape — see create_proposal()'s own
+          // ValueError cases) lands here; a GENERATION failure does
+          // NOT (create_proposal() still returns 200 with
+          // status: "failed" — see its own docstring) — that case
+          // still hits the .then() above and renders as a failed
+          // entry in the list, not this error banner.
+          setCodeProposalError(err.message || "Couldn't create the proposal — try again.");
+        })
+        .finally(() => setCodeProposalPending(false));
+    },
+    [workspaceId, API_URL, codeRefs, dock.state.sessionId, onClearCodeRefs]
+  );
+
+  // NEW — W5.1b: live status updates for proposals THIS panel created
+  // — see codeProposals.js's subscribeToProposalEvents() own
+  // docstring for why this is the one case (another tab/session
+  // resolving the SAME proposal) this subscription actually changes
+  // anything for today; this tab's own create already has the row
+  // via sendCodeEditProposal's .then() above. Only subscribed while
+  // this is a code-context-aware panel with a real workspace behind
+  // it (codeRefs !== null, same gate the Ask|Edit strip itself uses)
+  // — every other WorkspaceChatPanel instance (Chat tab, Research,
+  // etc.) never had an Edit mode to react to in the first place.
+  useEffect(() => {
+    if (codeRefs === null || !workspaceId) return;
+    return subscribeToProposalEvents(workspaceId, {
+      onResolved: ({ proposal_id, status }) => {
+        setCodeProposals((prev) =>
+          prev.map((p) => (p.id === proposal_id ? { ...p, status } : p))
+        );
+      },
+    });
+  }, [codeRefs, workspaceId]);
+
   const dispatchText = useCallback(
     (text) => {
       // W4.2 / plan §7 gotcha 10: a chip-bearing send must bypass
@@ -1193,12 +1275,16 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
       // this code" by the person picking it, and running it through
       // that same guesser risks a misread ("add a loading state to
       // src/App.jsx L10-20" landing on "generate notebooks about
-      // App.jsx"). Edit mode isn't wired yet (W5.1), so this is the
-      // only path a chip-bearing send takes today, same as the "Ask
-      // mode works end-to-end, Edit is a stub" scope this step is
-      // meant to land.
+      // App.jsx"). CHANGED — W5.1b: Edit mode is wired now, so a
+      // chip-bearing send branches on codeChatMode instead of always
+      // taking the Ask path — "Ask mode works end-to-end, Edit is a
+      // stub" (W4.2's own scope line) is what this step replaces.
       if (codeRefs && codeRefs.length > 0) {
-        sendCodeChatMessage(text);
+        if (codeChatMode === "edit") {
+          sendCodeEditProposal(text);
+        } else {
+          sendCodeChatMessage(text);
+        }
         return;
       }
       tryHandleGenerateIntent(text).then((handled) => {
@@ -1213,8 +1299,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
         }
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask`/`codeRefs`/`sendCodeChatMessage` is what actually matters for rowProps below.
-    [sendTask, codeRefs, sendCodeChatMessage]
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask`/`codeRefs`/`sendCodeChatMessage`/`codeChatMode`/`sendCodeEditProposal` is what actually matters for rowProps below.
+    [sendTask, codeRefs, sendCodeChatMessage, codeChatMode, sendCodeEditProposal]
   );
 
   function handleSubmit(e) {
