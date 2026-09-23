@@ -1,0 +1,295 @@
+diff --git a/frontend/app/components/MessageBubble.jsx b/frontend/app/components/MessageBubble.jsx
+index b054641..ab0af17 100644
+--- a/frontend/app/components/MessageBubble.jsx
++++ b/frontend/app/components/MessageBubble.jsx
+@@ -3,7 +3,7 @@ import { useState, useEffect, memo } from "react";
+ import Markdown from "./Markdown";
+ import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
+ import { supabase } from "../lib/supabaseClient";   // NEW — CO5 step 4: useStreamingAnswer needs a fresh access_token for the EventSource ?token= param
+-import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4
++import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil, FileCode2 } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4; FileCode2 NEW — W4.2
+ import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
+ import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
+ import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
+@@ -200,11 +200,37 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isA
+   if (message.role === "user") {
+     return (
+       <div className="flex justify-end">
+-        {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
+-            pasted code) actually keeps its line breaks and indentation
+-            instead of collapsing to one line. */}
+-        <div className="bg-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-[80%] whitespace-pre-wrap leading-[var(--density-line-height)]">
+-          {message.text}
++        <div className="max-w-[80%] flex flex-col items-end gap-1">
++          {/* NEW — W4.2: the code refs this message was sent WITH, if
++              any (WorkspaceDockContext.jsx's sendTask only ever puts
++              {path, fromLine, toLine} here — no snippet body, see that
++              file's own comment). Read-only: no × / no jump, unlike
++              ContextChips.jsx's live tray above the composer — this is
++              a record of what was attached when the message was sent,
++              not something still editable. */}
++          {message.codeRefs?.length > 0 && (
++            <div className="flex flex-wrap justify-end gap-1">
++              {message.codeRefs.map((ref, i) => (
++                <span
++                  key={`${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}:${i}`}
++                  className="inline-flex items-center gap-1 rounded-full border border-[var(--neutral-700)] bg-[var(--neutral-900)] px-2 py-0.5 text-[10px] text-[var(--neutral-400)]"
++                >
++                  <FileCode2 size={10} className="shrink-0" />
++                  <span className="truncate max-w-[10rem]">
++                    {ref.path.split("/").pop()}
++                    {ref.fromLine != null &&
++                      (ref.fromLine === ref.toLine ? ` L${ref.fromLine}` : ` L${ref.fromLine}-${ref.toLine}`)}
++                  </span>
++                </span>
++              ))}
++            </div>
++          )}
++          {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
++              pasted code) actually keeps its line breaks and indentation
++              instead of collapsing to one line. */}
++          <div className="bg-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-full whitespace-pre-wrap leading-[var(--density-line-height)]">
++            {message.text}
++          </div>
+         </div>
+       </div>
+     );
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index a99534b..bb531a9 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -267,7 +267,20 @@ function ThinkingElapsed() {
+ // default: a standalone Chat tab, or a Notebooks session where nothing's
+ // been clicked yet, simply has no default to fall back to, same as
+ // today (see tryHandleClassifiedToolCall's scope resolution below).
+-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false }) {
++// NEW — W4.2 (Build Workbench plan). `codeRefs`/`codeChips`/
++// `onClearCodeRefs` are the code-context equivalent of `activeContext`
++// just above: plain data + a ready-made element, not a dependency on
++// lib/workbench/codeContext.js or components/workbench/ContextChips.jsx
++// — this file stays usable by every non-Build tab exactly as before.
++// `codeRefs === null` (the default, every existing call site) means
++// "this panel isn't code-context-aware" and the Ask|Edit strip below
++// the message list doesn't render at all. BuildTab.jsx's own
++// CodeAwareChatPanel wrapper is what supplies real values: `codeRefs`
++// from useCodeContext().refs, `codeChips` as a `<ContextChips/>`
++// element (rendered here, but built there — see that wrapper's own
++// comment for why it can't be built in this file), and
++// `onClearCodeRefs` as that same store's clearRefs().
++export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false, codeRefs = null, codeChips = null, onClearCodeRefs = null }) {
+   const legacy = useSession();
+   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8
+   const dock = useWorkspaceDock(workspaceId, chatId);
+@@ -394,8 +407,15 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+   // Fix (render-loop, take 2): same class of bug as setActiveMessageIndex
+   // above — must depend on dock.sendTask (stable) specifically, never on
+   // `dock` itself (a fresh object every render).
++  // CHANGED — W4.2: takes an optional second `extra` object, merged
++  // into the options dock.sendTask already forwards to the store's own
++  // sendTask() (mode/reviewBeforeDispatch unchanged for every existing
++  // caller, which all still call `sendTask(text)` with nothing in the
++  // second slot). sendCodeChatMessage below is the one caller that
++  // passes `{ codeRefs, displayText }` — see WorkspaceDockContext.jsx's
++  // own sendTask() for what those two do to the persisted message.
+   const sendTask = useCallback(
+-    (taskText) => dock.sendTask(taskText, { mode, reviewBeforeDispatch }),
++    (taskText, extra) => dock.sendTask(taskText, { mode, reviewBeforeDispatch, ...extra }),
+     [dock.sendTask, mode, reviewBeforeDispatch]
+   );
+ 
+@@ -448,6 +468,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+ 
+   const [viewport] = useViewport();   // NEW — Phase 1 (mobile shell)
+   const [modeOpen, setModeOpen] = useState(false);
++  // NEW — W4.2: "Ask | Edit", the code-context mode toggle -- unrelated
++  // to `mode`/`MODES`/`modeOpen` above (that trio is the tier picker,
++  // Auto/Simple/Fast/Expert/Beast). Only ever shown when `codeRefs`
++  // isn't null (see the composer JSX below); "Edit" has nothing to call
++  // yet (W5.1) so it renders disabled and this never actually leaves
++  // "ask" in this patch.
++  const [codeChatMode, setCodeChatMode] = useState("ask");
+   const [draft, setDraft] = useState("");
+   const [workingPanelCollapsed, setWorkingPanelCollapsed] = useState(false);
+ 
+@@ -1125,8 +1152,55 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+   // unstable rowProps object was part of the same chain that caused the
+   // "Maximum update depth exceeded" crash. See handleRowsRendered's comment
+   // for the full chain.
++  // NEW — W4.2 (Build Workbench plan), Ask mode. D2: a chip-bearing
++  // chat message stays on the SAME /api/task path every other chat
++  // message already goes through — a real code EDIT gets its own
++  // dedicated endpoint (W5.1), this doesn't. The model sees each ref's
++  // full snippet, prepended as fenced blocks ahead of what the person
++  // typed; the chat log and the persisted message do NOT — they keep
++  // only `{path, fromLine, toLine}` per ref (see
++  // WorkspaceDockContext.jsx's sendTask, `displayText`/`codeRefs`), so
++  // a long chat history never balloons with code that's still sitting
++  // right there in the file, and MessageBubble.jsx renders that
++  // trimmed list back out as small read-only chips on the sent
++  // message. A folder ref carries no snippet yet (W5.5 is what expands
++  // one server-side) — noted by name only, not faked with an empty
++  // fenced block.
++  const sendCodeChatMessage = useCallback(
++    (text) => {
++      const fenced = codeRefs
++        .map((ref) =>
++          ref.kind === "folder"
++            ? `(folder attached: ${ref.path}/)`
++            : "```" + (ref.fromLine != null ? `${ref.path}#L${ref.fromLine}-L${ref.toLine}` : ref.path) + "\n" + (ref.snippet || "") + "\n```"
++        )
++        .join("\n\n");
++      const augmented = fenced ? `${fenced}\n\n${text}` : text;
++      const trimmedRefs = codeRefs.map((ref) => ({ path: ref.path, fromLine: ref.fromLine, toLine: ref.toLine }));
++      sendTask(augmented, { displayText: text, codeRefs: trimmedRefs });
++      onClearCodeRefs?.();
++    },
++    [codeRefs, sendTask, onClearCodeRefs]
++  );
++
+   const dispatchText = useCallback(
+     (text) => {
++      // W4.2 / plan §7 gotcha 10: a chip-bearing send must bypass
++      // tryHandleGenerateIntent/tryHandleClassifiedToolCall entirely.
++      // Both exist to guess "generate notebooks vs plain chat" FROM
++      // THE TEXT ALONE — an instruction sent alongside an attached
++      // code selection has already been sorted into "do something with
++      // this code" by the person picking it, and running it through
++      // that same guesser risks a misread ("add a loading state to
++      // src/App.jsx L10-20" landing on "generate notebooks about
++      // App.jsx"). Edit mode isn't wired yet (W5.1), so this is the
++      // only path a chip-bearing send takes today, same as the "Ask
++      // mode works end-to-end, Edit is a stub" scope this step is
++      // meant to land.
++      if (codeRefs && codeRefs.length > 0) {
++        sendCodeChatMessage(text);
++        return;
++      }
+       tryHandleGenerateIntent(text).then((handled) => {
+         if (handled) return;
+         if (CHAT_TOOL_CALLING_ENABLED) {
+@@ -1139,8 +1213,8 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+         }
+       });
+     },
+-    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask` is what actually matters for rowProps below.
+-    [sendTask]
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- tryHandleGenerateIntent/tryHandleClassifiedToolCall/logClassifiedIntent are recreated every render themselves (not yet stabilized); depending on the now-stable `sendTask`/`codeRefs`/`sendCodeChatMessage` is what actually matters for rowProps below.
++    [sendTask, codeRefs, sendCodeChatMessage]
+   );
+ 
+   function handleSubmit(e) {
+@@ -1629,6 +1703,40 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+           </div>
+         ) : (
+         <>
++        {/* NEW — W4.2: the code-context chip tray + Ask|Edit mode toggle,
++            "chips render above the composer" (plan §5 W4.2). `codeRefs`
++            null (every non-Build call site) renders nothing here at
++            all — see this component's own prop-block comment above.
++            `codeChips` is a ready-made element the caller built
++            (BuildTab.jsx's CodeAwareChatPanel passes a live
++            <ContextChips/>), not something this file constructs
++            itself, so it stays free of any lib/workbench import. */}
++        {codeRefs !== null && (
++          <div className="border-t border-[var(--neutral-800)] px-4 pt-3 flex flex-col gap-2">
++            <div className="flex items-center gap-0.5 self-start rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] p-0.5">
++              <button
++                type="button"
++                onClick={() => setCodeChatMode("ask")}
++                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
++                  codeChatMode === "ask"
++                    ? "bg-[var(--accent)] text-[var(--accent-text)]"
++                    : "text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
++                }`}
++              >
++                Ask
++              </button>
++              <button
++                type="button"
++                disabled
++                title="Coming in W5 — reviewed AI edits with Keep/Undo"
++                className="rounded px-2 py-0.5 text-[11px] font-medium text-[var(--neutral-600)] cursor-default"
++              >
++                Edit
++              </button>
++            </div>
++            {codeChips}
++          </div>
++        )}
+         {/* NEW — Data Layer §4b: compact status pills for in-flight/just-
+             finished attachments, distinct from IngestionDropzone.jsx's
+             fuller progress list (this composer has no room for that, and
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index 5a175a3..a0c3ffa 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -23,8 +23,24 @@ import { useSplitter } from "../../hooks/useSplitter"; // NEW — W0.2: draggabl
+ // sidebar's own subtree so switching projects in that list doesn't
+ // remount it; see this provider's own `key` below for why it DOES
+ // remount the workbench+chat section.
+-import { CodeContextProvider } from "../../lib/workbench/codeContext";
++import { CodeContextProvider, useCodeContext } from "../../lib/workbench/codeContext";
+ import ContextChips from "../workbench/ContextChips";
++
++// NEW — W4.2 (Build Workbench plan). BuildTab itself can't call
++// useCodeContext() — it's the component CREATING CodeContextProvider
++// as a child element below, not a descendant of it — so this tiny
++// wrapper, rendered INSIDE that provider (both <WorkspaceChatPanel>
++// call sites below are), does the read and hands WorkspaceChatPanel
++// only the plain data/element props it actually takes (`codeRefs`,
++// `codeChips`, `onClearCodeRefs`), same "no lib/workbench dependency"
++// shape as that file's existing `activeContext` prop. Module-scope,
++// not nested inside BuildTab: an inline function component would get a
++// fresh identity — and remount its whole subtree, draft included — on
++// every BuildTab render.
++function CodeAwareChatPanel(props) {
++  const { refs, clearRefs } = useCodeContext();
++  return <WorkspaceChatPanel {...props} codeRefs={refs} codeChips={<ContextChips />} onClearCodeRefs={clearRefs} />;
++}
+ // Part 8.9: replaces the old static shared-secret x-api-key header
+ // -- every fetch() below now sends the real per-user Supabase JWT via
+ // authHeaders(), matching require_auth()'s Authorization: Bearer check.
+@@ -1524,12 +1540,12 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
+             title="Drag to resize"
+             className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-[var(--accent)]/40"
+           />
+-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
++          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+         </div>
+       )}
+       {!chatDockCollapsed && (
+         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+-          <WorkspaceChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
++          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+         </div>
+       )}
+       {chatDockCollapsed && (
+diff --git a/frontend/app/context/WorkspaceDockContext.jsx b/frontend/app/context/WorkspaceDockContext.jsx
+index 4bdbaf7..2fe037d 100644
+--- a/frontend/app/context/WorkspaceDockContext.jsx
++++ b/frontend/app/context/WorkspaceDockContext.jsx
+@@ -910,10 +910,22 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
+     // matched -- nodes got written for real, just into a bucket nothing
+     // ever reads from. Passing the real id through as app_slug (a field
+     // TaskRequest already accepts) unifies the write and read side.
+-    const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false, topicId = null, scope = null } = {}) => {
++    // NEW — W4.2: `displayText`/`codeRefs`, both optional and additive.
++    // WorkspaceChatPanel.jsx's sendCodeChatMessage is the one caller
++    // that passes them: `taskText` there is the fenced-snippets-plus-
++    // instruction string the model actually needs to see (still what
++    // goes to /api/task below, unchanged), while `displayText` is the
++    // person's own typed instruction with none of that fencing — what
++    // the bubble shows and what gets persisted. `codeRefs` is the
++    // trimmed `{path, fromLine, toLine}` list (no snippet bodies) that
++    // rides along on the same message purely for MessageBubble.jsx's
++    // read-only chip row. Every existing caller passes neither, so
++    // `userMessage` is byte-for-byte the same for them (`text: taskText`,
++    // no `codeRefs` key at all).
++    const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false, topicId = null, scope = null, displayText = null, codeRefs = null } = {}) => {
+       const dockWorkspaceId = key && key.startsWith("ws:") ? key.slice(3) : null;
+       const dockSessionId = states.get(key)?.sessionId;
+-      const userMessage = { role: "user", text: taskText };
++      const userMessage = { role: "user", text: displayText ?? taskText, ...(codeRefs ? { codeRefs } : {}) };
+       setState(key, (prev) => ({ messages: [...prev.messages, userMessage] }));
+       persistMessageToSession(dockSessionId, userMessage);
+       setState(key, { loading: true });

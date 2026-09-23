@@ -3,7 +3,7 @@ import { useState, useEffect, memo } from "react";
 import Markdown from "./Markdown";
 import { useSession } from "../context/SessionContext";   // NEW — Data Layer §9d: generateNotebooks
 import { supabase } from "../lib/supabaseClient";   // NEW — CO5 step 4: useStreamingAnswer needs a fresh access_token for the EventSource ?token= param
-import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4
+import { Sparkles, X, Loader2, CheckCircle2, Check, Pencil, FileCode2 } from "lucide-react";   // NEW — Data Layer §9d; Check/Pencil NEW — CO3 patch 4; FileCode2 NEW — W4.2
 import BranchRow from "./notebooks/BranchRow";   // NEW — Phase 2 step 2.10
 import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step 3.2
 import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
@@ -200,11 +200,37 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isA
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
-        {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
-            pasted code) actually keeps its line breaks and indentation
-            instead of collapsing to one line. */}
-        <div className="bg-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-[80%] whitespace-pre-wrap leading-[var(--density-line-height)]">
-          {message.text}
+        <div className="max-w-[80%] flex flex-col items-end gap-1">
+          {/* NEW — W4.2: the code refs this message was sent WITH, if
+              any (WorkspaceDockContext.jsx's sendTask only ever puts
+              {path, fromLine, toLine} here — no snippet body, see that
+              file's own comment). Read-only: no × / no jump, unlike
+              ContextChips.jsx's live tray above the composer — this is
+              a record of what was attached when the message was sent,
+              not something still editable. */}
+          {message.codeRefs?.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-1">
+              {message.codeRefs.map((ref, i) => (
+                <span
+                  key={`${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}:${i}`}
+                  className="inline-flex items-center gap-1 rounded-full border border-[var(--neutral-700)] bg-[var(--neutral-900)] px-2 py-0.5 text-[10px] text-[var(--neutral-400)]"
+                >
+                  <FileCode2 size={10} className="shrink-0" />
+                  <span className="truncate max-w-[10rem]">
+                    {ref.path.split("/").pop()}
+                    {ref.fromLine != null &&
+                      (ref.fromLine === ref.toLine ? ` L${ref.fromLine}` : ` L${ref.fromLine}-${ref.toLine}`)}
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+          {/* whitespace-pre-wrap so a multiline/indented user message (e.g.
+              pasted code) actually keeps its line breaks and indentation
+              instead of collapsing to one line. */}
+          <div className="bg-[var(--neutral-800)] rounded-lg px-[var(--density-bubble-padding-x)] py-[var(--density-bubble-padding-y)] text-sm max-w-full whitespace-pre-wrap leading-[var(--density-line-height)]">
+            {message.text}
+          </div>
         </div>
       </div>
     );

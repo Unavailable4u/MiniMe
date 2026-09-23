@@ -910,10 +910,22 @@ export function WorkspaceDockProvider({ children, refreshChatList, getWorkspaceI
     // matched -- nodes got written for real, just into a bucket nothing
     // ever reads from. Passing the real id through as app_slug (a field
     // TaskRequest already accepts) unifies the write and read side.
-    const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false, topicId = null, scope = null } = {}) => {
+    // NEW — W4.2: `displayText`/`codeRefs`, both optional and additive.
+    // WorkspaceChatPanel.jsx's sendCodeChatMessage is the one caller
+    // that passes them: `taskText` there is the fenced-snippets-plus-
+    // instruction string the model actually needs to see (still what
+    // goes to /api/task below, unchanged), while `displayText` is the
+    // person's own typed instruction with none of that fencing — what
+    // the bubble shows and what gets persisted. `codeRefs` is the
+    // trimmed `{path, fromLine, toLine}` list (no snippet bodies) that
+    // rides along on the same message purely for MessageBubble.jsx's
+    // read-only chip row. Every existing caller passes neither, so
+    // `userMessage` is byte-for-byte the same for them (`text: taskText`,
+    // no `codeRefs` key at all).
+    const sendTask = async (key, taskText, { mode = "auto", reviewBeforeDispatch = false, topicId = null, scope = null, displayText = null, codeRefs = null } = {}) => {
       const dockWorkspaceId = key && key.startsWith("ws:") ? key.slice(3) : null;
       const dockSessionId = states.get(key)?.sessionId;
-      const userMessage = { role: "user", text: taskText };
+      const userMessage = { role: "user", text: displayText ?? taskText, ...(codeRefs ? { codeRefs } : {}) };
       setState(key, (prev) => ({ messages: [...prev.messages, userMessage] }));
       persistMessageToSession(dockSessionId, userMessage);
       setState(key, { loading: true });
