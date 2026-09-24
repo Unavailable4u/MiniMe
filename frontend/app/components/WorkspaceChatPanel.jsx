@@ -281,7 +281,28 @@ function ThinkingElapsed() {
 // element (rendered here, but built there — see that wrapper's own
 // comment for why it can't be built in this file), and
 // `onClearCodeRefs` as that same store's clearRefs().
-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false, codeRefs = null, codeChips = null, onClearCodeRefs = null }) {
+// NEW — W5.3: `onReviewProposal(proposal)` — the proposals list's own
+// "Review" button, one per pending entry in `codeProposals` (below).
+// Same "plain callback, not a codeContext.js import" shape as
+// `onClearCodeRefs` — CodeAwareChatPanel is what turns a click into
+// codeContext.js's requestReview(proposal.id) plus switching the Build
+// tab to its Editor sub-tab (and, on the mobile overlay instance,
+// closing the chat dock), neither of which this file knows how to do.
+export default function WorkspaceChatPanel({
+  collapsed = false,
+  onToggleCollapse = null,
+  workspaceId = null,
+  chatId = null,
+  onNavigateSubTab = null,
+  stacked = false,
+  hideAttach = false,
+  activeContext = null,
+  standalone = false,
+  codeRefs = null,
+  codeChips = null,
+  onClearCodeRefs = null,
+  onReviewProposal = null,
+}) {
   const legacy = useSession();
   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
   const dock = useWorkspaceDock(workspaceId, chatId);
@@ -478,13 +499,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
   // for what flipping this to "edit" actually does now.
   const [codeChatMode, setCodeChatMode] = useState("ask");
   // NEW — W5.1b: proposals created by THIS panel instance this
-  // session, newest first — a deliberately plain, read-only stand-in
-  // for W5.3's real Keep/Undo merge view and W5.4's real
-  // cross-session pending tray. Local component state, not dock
-  // state or anything persisted: reloading the tab loses this list on
-  // purpose (there's no Keep/Undo to resume here yet, so there's
-  // nothing worth restoring — GET .../code/proposals?status=pending
-  // is what W5.4's real tray will read from instead of this).
+  // session, newest first. CHANGED — W5.3: each "pending" entry now has
+  // a real Review button into ReviewPanel.jsx's Keep/Undo merge view
+  // (see the list's own JSX further down) — this used to be a plain
+  // read-only stand-in for that. Still local component state, not dock
+  // state or anything persisted: reloading the tab loses this list —
+  // W5.4's real cross-session pending tray is what GET
+  // .../code/proposals?status=pending will read from instead.
   const [codeProposals, setCodeProposals] = useState([]);
   const [codeProposalPending, setCodeProposalPending] = useState(false);
   const [codeProposalError, setCodeProposalError] = useState(null);
@@ -1813,14 +1834,49 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
               </button>
               <button
                 type="button"
-                disabled
-                title="Coming in W5 — reviewed AI edits with Keep/Undo"
-                className="rounded px-2 py-0.5 text-[11px] font-medium text-[var(--neutral-600)] cursor-default"
+                onClick={() => setCodeChatMode("edit")}
+                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  codeChatMode === "edit"
+                    ? "bg-[var(--accent)] text-[var(--accent-text)]"
+                    : "text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
+                }`}
               >
                 Edit
               </button>
             </div>
             {codeChips}
+            {/* NEW — W5.3: every proposal THIS panel has created or heard
+                resolved (subscribeToProposalEvents' onResolved, above) —
+                a "pending" one gets a Review button into
+                ReviewPanel.jsx's Keep/Undo UI; anything else just shows
+                how it was left (matches reviewMode.js's own status
+                vocabulary, so a proposal resolved elsewhere while this
+                panel was closed reads the same way here as there). */}
+            {codeProposals.length > 0 && (
+              <ul className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+                {codeProposals.map((p) => (
+                  <li
+                    key={p.id}
+                    className="flex items-center justify-between gap-2 rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] px-2 py-1.5 text-[11px]"
+                  >
+                    <span className="min-w-0 truncate text-[var(--neutral-300)]" title={p.instruction || undefined}>
+                      {p.summary || p.instruction || "AI edit"}
+                    </span>
+                    {p.status === "pending" ? (
+                      <button
+                        type="button"
+                        onClick={() => onReviewProposal?.(p)}
+                        className="shrink-0 rounded bg-[var(--accent)] text-[var(--accent-text)] px-2 py-0.5 font-medium hover:opacity-90"
+                      >
+                        Review
+                      </button>
+                    ) : (
+                      <span className="shrink-0 capitalize text-[var(--neutral-500)]">{p.status}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
         {/* NEW — Data Layer §4b: compact status pills for in-flight/just-

@@ -90,13 +90,25 @@ import { languages } from "@codemirror/language-data";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
-import { buildEditorTheme } from "../../lib/workbench/cmTheme";
+import {
+  Chunk,
+  acceptChunk,
+  getChunks,
+  getOriginalDoc,
+  goToNextChunk,
+  goToPreviousChunk,
+  rejectChunk,
+  unifiedMergeView,
+  updateOriginalDoc,
+} from "@codemirror/merge";
+import { buildEditorTheme, buildReviewTheme } from "../../lib/workbench/cmTheme";
 import {
   detectIndentUnit,
   indentGuideOffsets,
   minimalChange,
   normalizeLineBreaks,
 } from "../../lib/workbench/editorUtils";
+import { chunkLineStats } from "../../lib/workbench/reviewMode";
 
 // Tags a transaction as coming from THIS component's own `value`-prop
 // effect (an external update), not from the person typing — read back
@@ -347,6 +359,45 @@ function buildMapRange(update) {
   };
 }
 
+// W5.3: the "Keep"/"Undo" buttons @codemirror/merge's unifiedMergeView
+// paints inline on every changed chunk, in place of the package's own
+// default green/red "accept"/"reject" pair — same wording as
+// ReviewPanel.jsx's toolbar so a hunk's own buttons and the file-wide
+// "Keep all"/"Undo all" ones read as the same action at two scales.
+// `action` is @codemirror/merge's own click handler (calls
+// acceptChunk()/rejectChunk() on this chunk, under the hood identical
+// to what keepAll()/undoAll() below do for every chunk); this only
+// supplies the element and stops a click from also moving focus/
+// selection into the editor first, which mousedown would otherwise do.
+function renderMergeControl(type, action) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `cm-mm-merge-btn cm-mm-merge-btn-${type === "accept" ? "accept" : "reject"}`;
+  button.textContent = type === "accept" ? "Keep" : "Undo";
+  button.setAttribute("aria-label", type === "accept" ? "Keep this change" : "Undo this change");
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", action);
+  return button;
+}
+
+// W5.3: the `{current, remaining, added, removed}` shape ReviewPanel.jsx
+// passes straight to editorStore.js's REVIEW_FILE_UPDATE — read fresh
+// from CM6's own merge state rather than kept as separate React state,
+// so it can never drift from what's actually on screen. `getChunks`
+// only returns null before the merge view's ChunkField has run at all
+// (see that function's own doc comment); `Chunk.build` recomputes the
+// same thing directly for that one edge case, from `getOriginalDoc` —
+// the ORIGINAL text, which itself moves as chunks are accepted (see
+// acceptChunk's own doc comment: "no longer highlighted", not "gone
+// from the document") — against the live document.
+function reviewSnapshot(state) {
+  const info = getChunks(state);
+  const original = getOriginalDoc(state);
+  const chunks = info ? info.chunks : Chunk.build(original, state.doc);
+  const { added, removed } = chunkLineStats(chunks, original, state.doc);
+  return { current: state.doc.toString(), remaining: chunks.length, added, removed };
+}
+
 // Exported (W2.5) so ConflictCompareView's two read-only MergeView sides
 // highlight with the same lazy per-file loader instead of a second copy.
 export async function loadLanguageExtension(filePath) {
@@ -395,6 +446,8 @@ function useCodeMirror({
   onAddToChat,
   onSelectionToolbar,
   onRangeChange,
+  review,
+  onReviewChange,
 }) {
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
@@ -405,6 +458,11 @@ function useCodeMirror({
   const onAddToChatRef = useRef(onAddToChat);
   const onSelectionToolbarRef = useRef(onSelectionToolbar);
   const onRangeChangeRef = useRef(onRangeChange);
+  // W5.3: same shape again — ReviewPanel.jsx's ReviewEditor rebuilds its
+  // `onReviewChange` closure on every render (it closes over `path`), so
+  // this can't be read directly in the mount effect the way `review`
+  // itself (below, never a fresh object after the initial render) can.
+  const onReviewChangeRef = useRef(onReviewChange);
   const gutterAnchorRef = useRef(null); // W4.1: last gutter-clicked line, for Shift-click ranges
   const languageCompartmentRef = useRef(null);
   const readOnlyCompartmentRef = useRef(null);
@@ -417,6 +475,7 @@ function useCodeMirror({
   onAddToChatRef.current = onAddToChat;
   onSelectionToolbarRef.current = onSelectionToolbar;
   onRangeChangeRef.current = onRangeChange;
+  onReviewChangeRef.current = onReviewChange;
 
   // Mount once. `value`/`filePath`/`readOnly` at THIS instant seed the
   // initial state; every later change to any of them is handled by the
@@ -433,11 +492,20 @@ function useCodeMirror({
     readOnlyCompartmentRef.current = readOnlyCompartment;
     indentCompartmentRef.current = indentCompartment;
 
+    // W5.3: `review` is set once by the caller (ReviewPanel.jsx's own
+    // ReviewEditor memoizes it on `original`, which never changes for a
+    // review's lifetime — the same "read directly, not via a ref"
+    // treatment already given `value`/`filePath`/`readOnly` above,
+    // since a review editor is never handed a NEW review to switch to;
+    // closing one unmounts it (see ReviewPanel.jsx's own header).
+    const isReview = !!review;
+
     const state = EditorState.create({
       doc: value ?? "",
       extensions: [
         baseExtensions(onSaveRef, onAddToChatRef, gutterAnchorRef),
         buildEditorTheme(),
+        isReview ? buildReviewTheme() : [],
         indentCompartment.of(indentUnit.of(detectIndentUnit(value ?? ""))),
         languageCompartment.of([]),
         readOnlyCompartment.of([
@@ -474,7 +542,34 @@ function useCodeMirror({
             // shows above a non-empty selection, hides otherwise.
             onSelectionToolbarRef.current?.(computeToolbarPos(update.view));
           }
+          // W5.3: report the file's current text and remaining-hunk
+          // count after anything that could have changed either —
+          // typing, Keep/Undo on one hunk, or keepAll()/undoAll() below
+          // (each of those is its own dispatch, so each is its own
+          // update here). `docChanged` alone would miss Keep: acceptChunk
+          // moves the ORIGINAL doc via the updateOriginalDoc effect and
+          // touches no text, since the accepted text was already on
+          // screen (see reviewSnapshot()'s own comment).
+          if (
+            isReview &&
+            (update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(updateOriginalDoc))))
+          ) {
+            onReviewChangeRef.current?.(reviewSnapshot(update.state));
+          }
         }),
+        // W5.3: the merge view itself, comparing this editor's document
+        // (the proposed text `value` seeded above) against `review.original`
+        // — see ConflictCompareView.jsx's header for why review mode
+        // uses unifiedMergeView (one document, per-hunk controls
+        // threaded through it) rather than that component's two-pane
+        // MergeView (two read-only finished snapshots side by side).
+        isReview
+          ? unifiedMergeView({
+              original: normalizeLineBreaks(review.original ?? ""),
+              mergeControls: renderMergeControl,
+              collapseUnchanged: { margin: 3 },
+            })
+          : [],
       ],
     });
 
@@ -484,6 +579,12 @@ function useCodeMirror({
     // Report where the caret starts (line 1, col 1) so a status bar has
     // something to show before the first click or keystroke.
     onCursorChangeRef.current?.(cursorPosition(view.state));
+    // W5.3: and the initial hunk count, so reviewMode.js's
+    // reviewProgress() can tell "still loading" (editorStore.js's
+    // REVIEW_OPEN seeds `remaining: null`) from "loaded, nothing left to
+    // decide" (a proposal that turned out to be a no-op diff) without
+    // waiting for the person to touch anything.
+    if (isReview) onReviewChangeRef.current?.(reviewSnapshot(view.state));
 
     return () => {
       view.destroy();
@@ -593,6 +694,19 @@ function useCodeMirror({
  *   path) — EditorWorkbench.jsx's EditorPane closes over it; see that
  *   file. Fires on every doc change (typed or external) with a plain
  *   ChangeSet.mapPos-based mapper, for codeContext.js's REMAP_REFS.
+ * @param {{original: string}} [props.review] - W5.3: turns this editor
+ *   into a Copilot-style review of one file — `value` is the proposed
+ *   text (still editable unless `readOnly`), diffed inline against
+ *   `review.original` via @codemirror/merge's unifiedMergeView, with
+ *   per-hunk Keep/Undo buttons. Set once; see useCodeMirror()'s own
+ *   comment on why this doesn't react to later prop changes the way
+ *   `value`/`filePath`/`readOnly` do. ReviewPanel.jsx is the only
+ *   caller.
+ * @param {(snap: {current: string, remaining: number, added: number, removed: number}) => void} [props.onReviewChange] -
+ *   W5.3: fires once on mount and after every hunk decision (typing,
+ *   a hunk's own Keep/Undo, or keepAll()/undoAll() below) — the shape
+ *   ReviewPanel.jsx forwards straight into editorStore.js's
+ *   REVIEW_FILE_UPDATE. Ignored when `review` isn't set.
  */
 function CodeEditor(
   {
@@ -606,6 +720,8 @@ function CodeEditor(
     className,
     onAddToChat,
     onRangeChange,
+    review,
+    onReviewChange,
   },
   ref
 ) {
@@ -625,6 +741,8 @@ function CodeEditor(
     onAddToChat,
     onSelectionToolbar: onAddToChat ? setToolbar : undefined,
     onRangeChange,
+    review,
+    onReviewChange,
   });
 
   useImperativeHandle(
@@ -644,6 +762,41 @@ function CodeEditor(
         const { from, to } = view.state.selection.main;
         const doc = view.state.doc;
         return { from, to, fromLine: doc.lineAt(from).number, toLine: doc.lineAt(to).number };
+      },
+      // W5.3 — review mode only (ReviewPanel.jsx's Keep all/Undo all and
+      // Prev/Next). Harmless no-ops on a plain editor: getChunks() finds
+      // no merge extension installed and returns null, and the
+      // goToNext/PreviousChunk commands simply have nothing to move to.
+      keepAll: () => {
+        const view = viewRef.current;
+        if (!view) return;
+        // Each accept/reject is its own dispatch and can shift or
+        // remove OTHER chunks (rejecting one changes document length;
+        // accepting one moves the diff baseline — see reviewSnapshot()'s
+        // comment), so this re-reads the chunk list after every one
+        // rather than iterating a snapshot taken before any of them.
+        for (;;) {
+          const info = getChunks(view.state);
+          if (!info || info.chunks.length === 0) break;
+          if (!acceptChunk(view, info.chunks[0].fromB)) break;
+        }
+      },
+      undoAll: () => {
+        const view = viewRef.current;
+        if (!view) return;
+        for (;;) {
+          const info = getChunks(view.state);
+          if (!info || info.chunks.length === 0) break;
+          if (!rejectChunk(view, info.chunks[0].fromB)) break;
+        }
+      },
+      nextChange: () => {
+        const view = viewRef.current;
+        if (view) goToNextChunk(view);
+      },
+      prevChange: () => {
+        const view = viewRef.current;
+        if (view) goToPreviousChunk(view);
       },
     }),
     [viewRef]

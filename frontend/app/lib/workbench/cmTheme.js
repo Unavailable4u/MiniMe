@@ -208,3 +208,67 @@ export function buildEditorTheme() {
 
   return [theme, syntaxHighlighting(highlightStyle)];
 }
+
+/**
+ * W5.3 (Build Workbench plan): the review-mode extension
+ * components/workbench/CodeEditor.jsx layers on top of buildEditorTheme()
+ * when it mounts @codemirror/merge's unifiedMergeView (ReviewPanel.jsx's
+ * per-file Copilot-style diff). Restates that package's own baseTheme
+ * selectors — `.cm-changedLine`, `.cm-deletedChunk`, the `.cm-merge-b`
+ * class unifiedMergeView tags its editor with (see
+ * ConflictCompareView.jsx's header for why THAT component's read-only
+ * two-pane diff uses the separate MergeView class instead, with its own
+ * `.cm-merge-a`/`.cm-merge-b` pair) — in this app's own tokens, same
+ * "reskin everywhere from one place" reasoning as buildEditorTheme()
+ * above. `.cm-mm-merge-btn*` styles the Keep/Undo buttons
+ * CodeEditor.jsx's renderMergeControl() builds, in place of the
+ * package's own default green/red "accept"/"reject" pair.
+ */
+export function buildReviewTheme() {
+  const colors = {
+    panel: cssVar("--neutral-900"),
+    border: cssVar("--neutral-800"),
+    dim: cssVar("--neutral-500"),
+    lime: cssVar("--cyber-lime"),
+  };
+  // No token in globals.css is a distinct "removed-line red" either —
+  // see buildEditorTheme()'s own comment on why `t.invalid` above is
+  // also a literal, for the same reason.
+  const removed = "#ef4444";
+
+  return EditorView.theme(
+    {
+      "&.cm-merge-b .cm-changedLine": { backgroundColor: withAlpha(colors.lime, 0.1) },
+      ".cm-deletedChunk": {
+        backgroundColor: withAlpha(removed, 0.1),
+        borderRadius: "4px",
+      },
+      "&dark.cm-merge-b .cm-changedText": {
+        background: `linear-gradient(${withAlpha(colors.lime, 0.6)}, ${withAlpha(colors.lime, 0.6)}) bottom/100% 2px no-repeat`,
+      },
+      "&dark .cm-deletedChunk .cm-deletedText": {
+        background: `linear-gradient(${withAlpha(removed, 0.6)}, ${withAlpha(removed, 0.6)}) bottom/100% 2px no-repeat`,
+      },
+      ".cm-collapsedLines": {
+        color: colors.dim,
+        background: colors.panel,
+        border: `1px dashed ${colors.border}`,
+        borderRadius: "4px",
+        margin: "2px 0",
+      },
+      ".cm-mm-merge-btn": {
+        border: "none",
+        cursor: "pointer",
+        borderRadius: "3px",
+        fontFamily: "inherit",
+        fontSize: "10px",
+        fontWeight: "600",
+        padding: "1px 6px",
+        margin: "0 0 0 4px",
+      },
+      ".cm-mm-merge-btn-accept": { background: colors.lime, color: "#052e16" },
+      ".cm-mm-merge-btn-reject": { background: removed, color: "#450a0a" },
+    },
+    { dark: true }
+  );
+}

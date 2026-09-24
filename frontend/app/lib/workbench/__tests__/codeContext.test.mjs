@@ -43,7 +43,7 @@ function assert(cond, msg) {
   }
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null };
 
 // --- ADD_REF -----------------------------------------------------------
 
@@ -171,6 +171,25 @@ const afterClearJump = codeContextReducer(withJump, { type: "CLEAR_PENDING_JUMP"
 assertEqual(afterClearJump.pendingJump, null, "CLEAR_PENDING_JUMP resets it");
 const noopClear = codeContextReducer(afterClearJump, { type: "CLEAR_PENDING_JUMP" });
 assert(noopClear === afterClearJump, "CLEAR_PENDING_JUMP with nothing pending returns the SAME state object");
+
+// --- pending review (W5.3) ----------------------------------------------
+
+const withReview = codeContextReducer(initialState, { type: "SET_PENDING_REVIEW", proposalId: "prop_1" });
+assertEqual(withReview.pendingReview, "prop_1", "SET_PENDING_REVIEW records the proposal id");
+assertEqual(withReview.pendingJump, null, "...without touching pendingJump");
+const afterClearReview = codeContextReducer(withReview, { type: "CLEAR_PENDING_REVIEW" });
+assertEqual(afterClearReview.pendingReview, null, "CLEAR_PENDING_REVIEW resets it");
+const noopClearReview = codeContextReducer(afterClearReview, { type: "CLEAR_PENDING_REVIEW" });
+assert(noopClearReview === afterClearReview, "CLEAR_PENDING_REVIEW with nothing pending returns the SAME state object");
+
+// Clicking Review a second time before the first lands (same proposal,
+// still just re-set) must still register as a change to consumers — a
+// same-value SET_PENDING_REVIEW is NOT collapsed to a no-op the way
+// CLEAR_PENDING_REVIEW is, since EditorWorkbench.jsx's effect keys off
+// this changing at all, not off the id being new.
+const setAgain = codeContextReducer(withReview, { type: "SET_PENDING_REVIEW", proposalId: "prop_1" });
+assertEqual(setAgain.pendingReview, "prop_1", "SET_PENDING_REVIEW with the same id still produces a fresh state object");
+assert(setAgain !== withReview, "...i.e. it is NOT short-circuited to the same object");
 
 // --- contextBudget -----------------------------------------------------------
 
