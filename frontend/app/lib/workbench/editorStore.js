@@ -35,6 +35,25 @@
 // with AI") without prop-drilling. Panel SIZES are not part of it; they
 // stay with useSplitter (layoutPrefs.js's header has the split).
 //
+// W5.3 addition: `review` — null, or the ONE AI-proposed edit currently
+// open in ReviewPanel.jsx's Copilot-style Keep/Undo UI. Deliberately a
+// single slot, not keyed by proposal id: only one review is ever open
+// at a time (it replaces the tabs+editor area — see ReviewPanel.jsx's
+// own header), and EditorWorkbench.jsx's openFile() guard refuses to
+// open anything else while it's set. Left `proposals` (still an empty
+// placeholder) alone — that one's W5.4's cross-session pending tray,
+// a list of every open proposal regardless of whether it's being
+// reviewed right now; this is "the one being reviewed right now, and
+// how far through it we are". Its shape — `{proposalId, instruction,
+// summary, order, files, activePath, submitting, error, stale}` — is
+// built by reviewMode.js's reviewFilesFromProposal() (order/files) on
+// REVIEW_OPEN; `files[path]` is `{op, baseVersion, original, proposed,
+// current, remaining, added, removed}`, where `current`/`remaining`/
+// `added`/`removed` start as reviewMode.js seeds them (proposed text,
+// `remaining: null` — "hasn't reported yet") and are kept live by each
+// file's own CodeEditor review instance reporting through
+// REVIEW_FILE_UPDATE (see CodeEditor.jsx's reviewSnapshot()).
+//
 // No JSX here on purpose — every other file directly under `lib/`
 // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
 // so the provider component below is written with `createElement`
@@ -45,6 +64,7 @@ import { createContext, createElement, useContext, useMemo, useReducer } from "r
 import { isSameOrDescendant, remapPath } from "./fileTree";
 import { nextActiveAfterClose } from "./tabUtils";
 import { normalizeLayout, sameLayout } from "./layoutPrefs";
+import { reviewFilesFromProposal } from "./reviewMode";
 
 const EditorStoreContext = createContext(null);
 
@@ -54,6 +74,7 @@ const initialState = {
   buffers: {},
   layout: normalizeLayout(null), // W2.3b: the defaults; EditorStoreProvider's `initialLayout` overrides
   proposals: [],
+  review: null, // W5.3: see this file's header comment
 };
 
 /**
@@ -301,6 +322,87 @@ export function editorReducer(state, action) {
       };
     }
 
+    // W5.3: a proposal was fetched and is ready to review — EditorWorkbench.jsx's
+    // pendingReview effect dispatches this with GET .../code/proposals/{id}'s
+    // response, already checked against reviewMode.js's unreviewableReason()
+    // (a non-"pending" or file-less proposal never reaches here). Building
+    // `order`/`files` is reviewFilesFromProposal()'s job — see that
+    // function's own doc comment for why `remaining` starts null.
+    case "REVIEW_OPEN": {
+      const { proposal } = action;
+      const { order, files } = reviewFilesFromProposal(proposal);
+      return {
+        ...state,
+        review: {
+          proposalId: proposal.id,
+          instruction: proposal.instruction || "",
+          summary: proposal.summary || "",
+          order,
+          files,
+          activePath: order[0] ?? null,
+          submitting: false,
+          error: null,
+          stale: false,
+        },
+      };
+    }
+
+    // A file chip's click in ReviewPanel.jsx's toolbar, or
+    // EditorWorkbench.jsx's openFile() guard redirecting a click on a
+    // file that's already part of the open review.
+    case "REVIEW_SET_ACTIVE": {
+      if (!state.review) return state;
+      const { path } = action;
+      if (!state.review.order.includes(path) || state.review.activePath === path) return state;
+      return { ...state, review: { ...state.review, activePath: path } };
+    }
+    // One file's review editor reported a fresh snapshot (mount, a
+    // keystroke, a hunk's own Keep/Undo, or Keep all/Undo all) — see
+    // CodeEditor.jsx's reviewSnapshot(). No-ops for a file that isn't
+    // (or is no longer) part of the open review, so a stray report from
+    // an editor that's mid-unmount can't resurrect stale state.
+    case "REVIEW_FILE_UPDATE": {
+      if (!state.review) return state;
+      const { path, snap } = action;
+      const f = state.review.files[path];
+      if (!f) return state;
+      return {
+        ...state,
+        review: {
+          ...state.review,
+          files: {
+            ...state.review.files,
+            [path]: { ...f, current: snap.current, remaining: snap.remaining, added: snap.added, removed: snap.removed },
+          },
+        },
+      };
+    }
+
+    // The Done round trip's in-flight flag — ReviewPanel.jsx's own
+    // "Applying…" spinner and disabled toolbar.
+    case "REVIEW_SUBMITTING": {
+      if (!state.review) return state;
+      return { ...state, review: { ...state.review, submitting: !!action.submitting } };
+    }
+
+    // Done failed. `stale` (a 409 — one of the review's files changed on
+    // the server since the proposal was made) disables Done outright,
+    // matching resolveProposal()'s own ProposalStaleError; any other
+    // failure just shows the message and leaves Done available to retry.
+    case "REVIEW_ERROR": {
+      if (!state.review) return state;
+      return { ...state, review: { ...state.review, error: action.error ?? null, stale: !!action.stale } };
+    }
+
+    // Cancel, or Done succeeded. The proposal itself is untouched on
+    // the server either way (Cancel leaves it "pending"; Done's own
+    // resolveProposal() call is what changes its status) — this only
+    // closes the local UI.
+    case "REVIEW_CLOSE": {
+      if (!state.review) return state;
+      return { ...state, review: null };
+    }
+
     // W3.1: switching the Explorer's source (Project files / Local
     // folder). A path under one source means nothing under the other,
     // so this resets tabs/buffers/activePath back to empty at the same
@@ -359,6 +461,13 @@ export function EditorStoreProvider({ children, initialLayout }) {
       setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
       switchSource: (source) => dispatch({ type: "SWITCH_SOURCE", source }),
       renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
+      // W5.3
+      reviewOpen: (proposal) => dispatch({ type: "REVIEW_OPEN", proposal }),
+      reviewSetActive: (path) => dispatch({ type: "REVIEW_SET_ACTIVE", path }),
+      reviewFileUpdate: (path, snap) => dispatch({ type: "REVIEW_FILE_UPDATE", path, snap }),
+      reviewSubmitting: (submitting) => dispatch({ type: "REVIEW_SUBMITTING", submitting }),
+      reviewError: (error, stale) => dispatch({ type: "REVIEW_ERROR", error, stale }),
+      reviewClose: () => dispatch({ type: "REVIEW_CLOSE" }),
     }),
     [dispatch]
   );

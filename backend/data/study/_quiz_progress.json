@@ -153,6 +153,83 @@
           "explanation": "The source defines a full\u2011pitch coil as having a 180\u00b0 electrical span, with sides under opposite poles, yielding maximum EMF."
         }
       ]
+    },
+    {
+      "attempt_id": "attempt_c65a0cf4fe",
+      "workspace_id": "ws_bcc70c4e37",
+      "quiz_node_id": "panel:ws_bcc70c4e37:study_quiz",
+      "created_by": "user",
+      "created_at": "2026-09-24T10:35:39.067376+00:00",
+      "score": 3,
+      "total": 5,
+      "percent": 60.0,
+      "results": [
+        {
+          "question": "",
+          "options": [
+            "Electromagnetic conduction",
+            "Electromagnetic induction",
+            "Thermal conduction",
+            "Electromagnetic induction is the correct answer as alternators operate on the principles of electromagnetic induction, similar to DC generators."
+          ],
+          "correct_index": 3,
+          "given_index": 1,
+          "is_correct": false,
+          "explanation": ""
+        },
+        {
+          "question": "Q2: What type of armature winding is used in alternators?",
+          "options": [
+            "Concentrated winding coils only",
+            "Distributed winding coils only",
+            "A.C. armature windings are generally distributed windings, which are symmetrically distributed in slots around the complete circumference of the armature.",
+            "Both concentrated and distributed winding coils"
+          ],
+          "correct_index": 2,
+          "given_index": 2,
+          "is_correct": true,
+          "explanation": ""
+        },
+        {
+          "question": "Q3: What is the purpose of damper windings in alternators?",
+          "options": [
+            "To generate high voltage",
+            "To reduce eddy current losses",
+            "To prevent hunting, provide starting torque in synchronous motors, and help maintain voltage balance during unbalanced loads.",
+            "To increase the speed of the alternator"
+          ],
+          "correct_index": 2,
+          "given_index": 1,
+          "is_correct": false,
+          "explanation": ""
+        },
+        {
+          "question": "Q4: What is the difference between salient pole type and smooth cylindrical type rotors?",
+          "options": [
+            "Salient pole type is used in high-speed turbo-generators",
+            "Smooth cylindrical type is used in low to medium-speed alternators",
+            "Salient pole type is used in low to medium-speed alternators, while smooth cylindrical type is used in high-speed turbo-generators.",
+            "Both types are used in the same applications"
+          ],
+          "correct_index": 2,
+          "given_index": 2,
+          "is_correct": true,
+          "explanation": ""
+        },
+        {
+          "question": "Q5: What determines the frequency of the electromotive force (e.m.f.) in an alternator?",
+          "options": [
+            "The number of poles and the stator speed",
+            "The number of poles and the rotor speed",
+            "The frequency of the e.m.f. depends on the number of poles and the rotor speed.",
+            "The type of armature winding used"
+          ],
+          "correct_index": 2,
+          "given_index": 2,
+          "is_correct": true,
+          "explanation": ""
+        }
+      ]
     }
   ]
 }

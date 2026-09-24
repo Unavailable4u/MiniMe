@@ -37,9 +37,34 @@ import ContextChips from "../workbench/ContextChips";
 // not nested inside BuildTab: an inline function component would get a
 // fresh identity — and remount its whole subtree, draft included — on
 // every BuildTab render.
-function CodeAwareChatPanel(props) {
-  const { refs, clearRefs } = useCodeContext();
-  return <WorkspaceChatPanel {...props} codeRefs={refs} codeChips={<ContextChips />} onClearCodeRefs={clearRefs} />;
+// CHANGED — W5.3: same reasoning for `onReviewProposal` — this is the
+// one place inside the provider that can turn a "Review" click (the
+// proposals list's own button, in WorkspaceChatPanel.jsx) into
+// codeContext.js's requestReview(proposal.id), which EditorWorkbench.jsx
+// (a DIFFERENT descendant of the same provider) is what actually
+// listens for. `onEnterReviewMode` is BuildTab's own plain callback —
+// switching the Build tab to its Editor sub-tab, and (only on the
+// mobile overlay instance below) closing the chat dock — passed in
+// rather than read from context, since neither of those is
+// code-context state.
+function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
+  const { refs, clearRefs, requestReview } = useCodeContext();
+  const onReviewProposal = useCallback(
+    (proposal) => {
+      onEnterReviewMode?.();
+      requestReview(proposal.id);
+    },
+    [onEnterReviewMode, requestReview]
+  );
+  return (
+    <WorkspaceChatPanel
+      {...props}
+      codeRefs={refs}
+      codeChips={<ContextChips />}
+      onClearCodeRefs={clearRefs}
+      onReviewProposal={onReviewProposal}
+    />
+  );
 }
 // Part 8.9: replaces the old static shared-secret x-api-key header
 // -- every fetch() below now sends the real per-user Supabase JWT via
@@ -1540,12 +1565,35 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
             title="Drag to resize"
             className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-[var(--accent)]/40"
           />
-          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+          <CodeAwareChatPanel
+            collapsed={false}
+            onToggleCollapse={toggleChatDock}
+            workspaceId={selected?.id}
+            stacked
+            onEnterReviewMode={() => requestBuildView("code")}
+          />
         </div>
       )}
       {!chatDockCollapsed && (
         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
-          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
+          {/* W5.3: this instance IS the mobile chat overlay (see the
+              wrapping div's own `lg:hidden fixed inset-0` above) — Review
+              both switches to the Editor sub-tab AND gets out of the way
+              of it, same as tapping a search result already does
+              elsewhere in this tab. `toggleChatDock` is a plain toggle;
+              this only runs while the dock is open (chatDockCollapsed
+              is false — see the `!chatDockCollapsed` guard around this
+              whole block), so calling it here always closes it. */}
+          <CodeAwareChatPanel
+            collapsed={false}
+            onToggleCollapse={toggleChatDock}
+            workspaceId={selected?.id}
+            stacked
+            onEnterReviewMode={() => {
+              requestBuildView("code");
+              toggleChatDock();
+            }}
+          />
         </div>
       )}
       {chatDockCollapsed && (

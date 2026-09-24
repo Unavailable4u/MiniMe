@@ -83,12 +83,16 @@ import { useViewport } from "../../hooks/useViewport";
 // just an ordinary descendant read, the same relationship
 // useEditorStore() below has to EditorStoreProvider.
 import { useCodeContext } from "../../lib/workbench/codeContext";
+// W5.3: the review round trip — getProposal() to fetch what
+// pendingReview only carries the id of, resolveProposal() for Done.
+import { ProposalStaleError, getProposal, resolveProposal } from "../../lib/workbench/codeProposals";
 import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
 import { deleteSummary } from "../../lib/workbench/explorerOps";
 import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
 import { jumpToPosition } from "../../lib/workbench/gotoPosition";
+import { buildDecisions, dirtyOverlap, unreviewableReason } from "../../lib/workbench/reviewMode";
 import { useProjectSearch } from "../../hooks/useProjectSearch";
 import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
@@ -118,6 +122,7 @@ import HistoryPanel from "./HistoryPanel";
 import PreviewColumn from "./PreviewColumn";
 import ProjectSearchPanel from "./ProjectSearchPanel";
 import QuickOpen from "./QuickOpen";
+import ReviewPanel from "./ReviewPanel";
 import StatusBar from "./StatusBar";
 
 // W2.5: how long a dirty file has to sit untouched before autosave (when
@@ -218,12 +223,18 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     setLayout,
     switchSource,
     renamePaths,
+    reviewOpen,
+    reviewSetActive,
+    reviewFileUpdate,
+    reviewSubmitting,
+    reviewError,
+    reviewClose,
   } = useEditorStore();
 
   // W4.1: see this component's own import comment on why this is
   // available here even though CodeContextProvider is mounted in
   // BuildTab.jsx, above this whole component.
-  const { addRef, remapRefs, pendingJump, clearJump } = useCodeContext();
+  const { addRef, remapRefs, pendingJump, clearJump, pendingReview, clearReview } = useCodeContext();
 
   // W3.1: which provider backs the workbench right now — read from
   // `layout.source` (see layoutPrefs.js's own header on why it lives
@@ -538,6 +549,22 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
       setNotice(null);
       if (isMobileRef.current) setMobileExplorerOpen(false); // single-pane: jump to the editor
       const s = stateRef.current;
+      // W5.3: a review replaces the tabs+editor area outright (see
+      // ReviewPanel.jsx's own header) — a normal open would be either
+      // invisible (ReviewPanel is what's actually showing) or would
+      // abandon in-progress Keep/Undo decisions if it swapped
+      // underneath. A file that's PART of the open review switches the
+      // review to it, same as clicking its chip in ReviewPanel.jsx's
+      // own toolbar; anything else asks for the review to be finished
+      // or cancelled first rather than silently doing nothing.
+      if (s.review) {
+        if (s.review.files[path]) {
+          reviewSetActive(path);
+        } else {
+          setNotice("Finish or cancel the current AI edit review before opening another file.");
+        }
+        return;
+      }
       if (s.buffers[path] || openingRef.current.has(path)) {
         activateTab(path);
         return;
@@ -562,7 +589,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
         cancelledOpensRef.current.delete(path);
       }
     },
-    [provider, activateTab, setActivePath, fileLoaded, dropTabs]
+    [provider, activateTab, setActivePath, fileLoaded, dropTabs, reviewSetActive]
   );
 
   // Every close path goes through here so unsaved edits are never
@@ -1003,6 +1030,77 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     jumpToPositionInPane(ref.path, { line: ref.fromLine ?? 1, endLine: ref.toLine ?? undefined });
   }, [pendingJump, clearJump, openFile, jumpToPositionInPane]);
 
+  // W5.3: fetches the proposal `pendingReview` only names by id — see
+  // codeContext.js's SET_PENDING_REVIEW comment on why this doesn't
+  // trust whatever shape the caller (WorkspaceChatPanel.jsx's "Review"
+  // button, by way of BuildTab.jsx's CodeAwareChatPanel) already had.
+  // A proposal reviewMode.js's unreviewableReason() rejects (already
+  // resolved, gone stale, or a no-op edit with no files) surfaces as
+  // the SAME dismissible notice a failed file open uses, rather than
+  // opening a review with nothing to show.
+  const openProposalForReview = useCallback(
+    async (proposalId) => {
+      setNotice(null);
+      try {
+        const proposal = await getProposal(apiUrl, workspaceId, proposalId);
+        const reason = unreviewableReason(proposal);
+        if (reason) {
+          setNotice(reason);
+          return;
+        }
+        reviewOpen(proposal);
+      } catch (err) {
+        setNotice(`Couldn't open this edit for review: ${err.message}`);
+      }
+    },
+    [apiUrl, workspaceId, reviewOpen]
+  );
+
+  // Cleared right away, same as pendingJump above — clicking Review
+  // again on the very same proposal (closed without deciding, then
+  // reopened) must still fire.
+  useEffect(() => {
+    if (!pendingReview) return;
+    const proposalId = pendingReview;
+    clearReview();
+    openProposalForReview(proposalId);
+  }, [pendingReview, clearReview, openProposalForReview]);
+
+  // ReviewPanel.jsx's "Done" — reviewMode.js's buildDecisions() turns
+  // the review's current per-file state into exactly the `decisions`
+  // POST .../code/proposals/{id}/resolve wants. A stale 409 (one of the
+  // review's files changed on the server since the proposal was made)
+  // disables Done rather than leaving it retryable — there is nothing
+  // a retry of the SAME decisions would do differently. No success
+  // notice on the happy path: `notice` (below) is styled as an error
+  // banner everywhere else it's used, and resolveProposal()'s own
+  // write already lands through the ordinary code_file_updated ->
+  // syncOpenBuffers() channel (this component's `provider.subscribe`
+  // effect, unchanged by W5.3) — reviewMode.js's resolvedMessage() is
+  // exported for a caller that DOES want the wording (W5.4's tray is
+  // the likely one) rather than unused.
+  const handleReviewDone = useCallback(async () => {
+    const current = stateRef.current.review;
+    if (!current) return;
+    reviewSubmitting(true);
+    try {
+      const decisions = buildDecisions(current);
+      await resolveProposal(apiUrl, workspaceId, current.proposalId, decisions);
+      reviewClose();
+    } catch (err) {
+      if (err instanceof ProposalStaleError) {
+        reviewError(
+          "This edit can no longer be applied — one of its files changed on the server since it was proposed. Close this review and ask again.",
+          true
+        );
+      } else {
+        reviewError(err.message || "Couldn't apply this edit.", false);
+      }
+    } finally {
+      reviewSubmitting(false);
+    }
+  }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
+
   // History's "Restore": lands the server's response the same way a
   // normal save does — FILE_LOADED for the buffer, plus the file list's
   // own entry patched in place rather than a full refetch (saveFile()
@@ -1186,8 +1284,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
 
   // ---- derived ---------------------------------------------------------
 
-  const { tabs, buffers, activePath } = state;
+  const { tabs, buffers, activePath, review } = state;
   const activeBuffer = activePath ? buffers[activePath] : null;
+  // W5.3: files in the open review whose NORMAL tab also has unsaved
+  // edits — ReviewPanel.jsx's own amber banner (the proposal was made
+  // against the saved version, not the buffer).
+  const reviewDirtyPaths = useMemo(() => dirtyOverlap(review, buffers), [review, buffers]);
   const flagsKey = useMemo(() => encodeTabFlags(tabs, buffers), [tabs, buffers]);
   // W3.1 part 2: a proposed write is outstanding for the active path
   // and nothing has been typed since (awaitingConfirmation[path] still
@@ -1480,7 +1582,25 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
           className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}
           style={isMobile ? undefined : { minWidth: EDITOR_MIN_WIDTH }}
         >
-          <EditorTabs
+          {review ? (
+            <ReviewPanel
+              review={review}
+              dirtyPaths={reviewDirtyPaths}
+              visible={!editorColumnHidden}
+              onSelectFile={reviewSetActive}
+              onFileChange={reviewFileUpdate}
+              onDone={handleReviewDone}
+              onClose={reviewClose}
+            />
+          ) : null}
+          {/* W5.3: the normal tab strip + editors, kept mounted (not
+              unmounted) under `review` so closing a review puts every tab
+              back exactly as it was — undo history, cursor, scroll — see
+              ReviewPanel.jsx's own header. `display:contents` when shown
+              so this wrapper doesn't itself take part in the flex column
+              above (its children lay out as if it weren't there). */}
+          <div className={review ? "hidden" : "contents"}>
+            <EditorTabs
             tabs={tabs}
             activePath={activePath}
             flagsKey={flagsKey}
@@ -1640,6 +1760,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
                 Loading…
               </div>
             ) : null}
+          </div>
           </div>
         </div>
 

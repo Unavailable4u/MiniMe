@@ -1,0 +1,573 @@
+diff --git a/frontend/app/lib/preview/__tests__/instrument.test.mjs b/frontend/app/lib/preview/__tests__/instrument.test.mjs
+new file mode 100644
+index 0000000..f366056
+--- /dev/null
++++ b/frontend/app/lib/preview/__tests__/instrument.test.mjs
+@@ -0,0 +1,232 @@
++// W6.3 (Build Workbench plan) — golden-file tests for lib/preview/instrument.js.
++//
++// Loads the REAL instrument.js through loadSource.mjs (no pasted copy —
++// see that helper's own header for why). Reused from lib/workbench/'s
++// __tests__ directory rather than duplicated here: it's a generic
++// source-transform utility with nothing workbench-specific in it.
++//
++// instrument.js's only STATIC import is `parse5` (`import * as parse5
++// from "parse5"`), so that's the only thing this file needs to supply
++// through loadSource's `imports` map — it's a real, actually-installed
++// package, not a stub, loaded here the normal ESM way since this test
++// file runs as real ESM (.mjs) regardless of instrument.js's own module
++// system quirks. @babel/parser is pulled in by instrument.js via a
++// dynamic `await import("@babel/parser")` inside instrumentJsx, which
++// loadSource's import-stripping regex only matches static
++// `import ... from "spec";` lines and so never touches — it resolves at
++// real call time instead, exactly as it would when webpack (or plain
++// node, as proven by this file passing) actually runs it. That resolves
++// relative to node_modules from this file's own location upward, so it
++// needs `npm install` run in frontend/ first (parse5 + @babel/parser are
++// this patch's two new dependencies — see package.json).
++//
++// Run: node frontend/app/lib/preview/__tests__/instrument.test.mjs
++import * as parse5 from "parse5";
++import { loadSource } from "../../workbench/__tests__/loadSource.mjs";
++
++// NOTE: loadSource() resolves its relPath argument relative to
++// loadSource.mjs's OWN location (lib/workbench/__tests__/), not to this
++// file — hence "../../preview/instrument.js" rather than "../instrument.js".
++const { instrumentHtml, instrumentJsx, instrumentSource } = loadSource("../../preview/instrument.js", {
++  imports: { parse5 },
++});
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++function assert(cond, msg) {
++  if (!cond) {
++    failures++;
++    console.error(`FAIL: ${msg}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// Pulls every data-mm value out of a string, in document order, without
++// caring about instrumentHtml vs instrumentJsx's very different output
++// shapes (serialized parse5 tree vs. spliced original source) — both
++// just need to contain the literal attribute somewhere.
++function mmValues(code) {
++  return [...code.matchAll(/data-mm="([^"]+)"/g)].map((m) => m[1]);
++}
++
++// --- instrumentHtml ----------------------------------------------------
++
++{
++  const html =
++    "<!DOCTYPE html>\n" +
++    "<html><head><title>x</title><meta charset=\"utf-8\"><style>.a{color:red}</style></head>\n" +
++    "<body>\n" +
++    '  <div class="a">\n' +
++    "    <p>hi</p>\n" +
++    '    <img src="x.png">\n' +
++    "  </div>\n" +
++    "  <script>console.log(1)</script>\n" +
++    "</body></html>";
++
++  const result = instrumentHtml(html, "index.html");
++  assert(result.instrumented, "instrumentHtml: a plain document reports instrumented:true");
++
++  const values = mmValues(result.code);
++  assert(values.some((v) => v.startsWith("index.html:4:")), "instrumentHtml: the div gets a data-mm starting at its real line (4)");
++  assert(values.some((v) => v.startsWith("index.html:5:")), "instrumentHtml: the p gets a data-mm starting at its real line (5)");
++  assert(values.some((v) => v.startsWith("index.html:6:")), "instrumentHtml: the (unclosed, void) img still gets one");
++
++  for (const skipped of ["html", "head", "title", "meta", "style", "script"]) {
++    assert(
++      !result.code.includes(`<${skipped} data-mm=`),
++      `instrumentHtml: <${skipped}> is on the skip list and never gets data-mm`
++    );
++  }
++
++  // Contract check: parse5 reports 1-based columns; instrumentHtml must
++  // convert to the 0-based contract. "  <div..." — the div's `<` is the
++  // 3rd character on its line, i.e. 0-based column 2.
++  const divValue = values.find((v) => v.startsWith("index.html:4:"));
++  assertEqual(divValue, "index.html:4:2:7:8", "instrumentHtml: div's data-mm is exactly path:line:col:line:col, 0-based columns");
++}
++
++{
++  // Re-running on already-instrumented output must not double up.
++  const once = instrumentHtml("<body><p>hi</p></body>", "a.html");
++  const twice = instrumentHtml(once.code, "a.html");
++  assertEqual(mmValues(twice.code).length, mmValues(once.code).length, "instrumentHtml: re-instrumenting already-tagged output adds nothing new");
++  assertEqual(twice.instrumented, false, "instrumentHtml: a no-op second pass reports instrumented:false");
++}
++
++// --- instrumentJsx: host elements, components, self-closing -----------
++
++{
++  const src = [
++    "function Card({title}) {",
++    '  return <div className="card"><span>{title}</span><Icon name="x" /></div>;',
++    "}",
++  ].join("\n");
++
++  const result = await instrumentJsx(src, "src/Card.jsx");
++  assert(result.instrumented, "instrumentJsx: reports instrumented:true when host elements are found");
++  assert(result.code.includes('<div data-mm="src/Card.jsx:2:9:2:74" className="card">'), "instrumentJsx: div gets the exact contract value, spliced right after the tag name");
++  assert(result.code.includes("<span data-mm="), "instrumentJsx: span (nested host element) is instrumented too");
++  assert(!result.code.includes("<Icon data-mm="), "instrumentJsx: capitalized component tag gets nothing (v1 scope, see module header)");
++
++  // Splice correctness: the result must still be valid, re-parseable JSX.
++  let reparsed = null;
++  try {
++    const babelParser = await import("@babel/parser");
++    reparsed = babelParser.parse(result.code, { sourceType: "module", plugins: ["jsx", "typescript"] });
++  } catch {
++    reparsed = null;
++  }
++  assert(reparsed !== null, "instrumentJsx: spliced output re-parses as valid JSX");
++}
++
++{
++  // Self-closing host element — no separate closing tag, but still one
++  // whole-element range ending at the `/>`.
++  const src = 'const el = <img src="x.png" />;';
++  const result = await instrumentJsx(src, "a.jsx");
++  assert(result.code.includes('<img data-mm="a.jsx:1:11:1:30" src="x.png" />'), "instrumentJsx: self-closing element's range ends at its own `/>`, not some other element's");
++}
++
++// --- Fragments -----------------------------------------------------------
++
++{
++  const src = [
++    "function List() {",
++    "  return (",
++    "    <>",
++    "      <div>a</div>",
++    "      <div>b</div>",
++    "    </>",
++    "  );",
++    "}",
++  ].join("\n");
++  const result = await instrumentJsx(src, "a.jsx");
++  assertEqual(mmValues(result.code).length, 2, "instrumentJsx: a fragment wrapper gets nothing, but both children inside it do");
++}
++
++// --- Nested .map() -------------------------------------------------------
++
++{
++  const src = [
++    "function Items({items}) {",
++    "  return (",
++    "    <ul>",
++    "      {items.map((item) => (",
++    "        <li key={item.id}>{item.name}</li>",
++    "      ))}",
++    "    </ul>",
++    "  );",
++    "}",
++  ].join("\n");
++  const result = await instrumentJsx(src, "a.jsx");
++  assert(result.code.includes("<ul data-mm="), "instrumentJsx: the outer <ul> is instrumented");
++  assert(result.code.includes("<li data-mm="), "instrumentJsx: an element returned from inside a .map() callback is still found and instrumented");
++}
++
++// --- Template literals in an attribute value ------------------------------
++
++{
++  // eslint-disable-next-line no-template-curly-in-string
++  const src = "const el = <div title={`count: ${n}`}>{n}</div>;";
++  const result = await instrumentJsx(src, "a.jsx");
++  assert(result.instrumented, "instrumentJsx: a template literal inside a JSX attribute doesn't break parsing");
++  assert(result.code.includes("<div data-mm="), "instrumentJsx: the element carrying the template-literal attribute is still instrumented");
++  assert(result.code.includes("title={`count: ${n}`}"), "instrumentJsx: the template literal itself is untouched in the output");
++}
++
++// --- TSX (typescript plugin engaged) --------------------------------------
++
++{
++  const src = [
++    "function Badge({count}: {count: number}) {",
++    "  const label = count > 9 ? \"9+\" : String(count);",
++    '  return <span className="badge">{label}</span>;',
++    "}",
++  ].join("\n");
++  const result = await instrumentJsx(src, "src/Badge.tsx");
++  assert(result.instrumented, "instrumentJsx: TSX with real type annotations parses fine (typescript plugin is always on)");
++  assert(result.code.includes("<span data-mm=\"src/Badge.tsx:3:"), "instrumentJsx: the host element in a .tsx file is instrumented with the .tsx path");
++}
++
++// --- Syntax-error file: never break the preview ---------------------------
++
++{
++  const broken = "function f() { return <div><span></div>; }"; // mismatched closing tag
++  const result = await instrumentJsx(broken, "broken.jsx");
++  assertEqual(result.code, broken, "instrumentJsx: on a syntax error, the ORIGINAL code comes back untouched");
++  assertEqual(result.instrumented, false, "instrumentJsx: on a syntax error, instrumented is false");
++  assertEqual(result.note, "preview inspector unavailable for this file", "instrumentJsx: on a syntax error, the note explains why (never a thrown error)");
++}
++
++// --- instrumentSource dispatcher -----------------------------------------
++
++{
++  const htmlResult = await instrumentSource("<body><p>hi</p></body>", "index.html");
++  assert(htmlResult.instrumented, "instrumentSource: routes .html to instrumentHtml");
++
++  const jsxResult = await instrumentSource('const el = <div className="x">y</div>;', "src/App.jsx");
++  assert(jsxResult.instrumented, "instrumentSource: routes .jsx to instrumentJsx");
++
++  const tsxResult = await instrumentSource('const el = <div className="x">y</div>;', "src/App.tsx");
++  assert(tsxResult.instrumented, "instrumentSource: routes .tsx to instrumentJsx too");
++
++  const cssResult = await instrumentSource(".x { color: red; }", "src/styles.css");
++  assertEqual(cssResult, { code: ".x { color: red; }", instrumented: false, note: null }, "instrumentSource: an extension it doesn't know is a no-op, not a failure (no note)");
++}
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/preview/instrument.js b/frontend/app/lib/preview/instrument.js
+new file mode 100644
+index 0000000..c91fb2f
+--- /dev/null
++++ b/frontend/app/lib/preview/instrument.js
+@@ -0,0 +1,238 @@
++// frontend/app/lib/preview/instrument.js — W6.3 (Build Workbench plan).
++//
++// Source instrumenter for the preview inspector (W6.4/W6.5): stamps every
++// element in a file with a `data-mm` attribute so a click inside the
++// rendered preview can be traced back to an exact range in the file that
++// produced it.
++//
++// THE CONTRACT — everything downstream (W6.4's inspector runtime, W6.5's
++// click-to-code, W7.1's element-scoped edits) depends on this exact shape,
++// so it's written down once here rather than re-derived at each call site:
++//
++//     data-mm="<path>:<startLine>:<startCol>:<endLine>:<endCol>"
++//
++//   - lines are 1-based, columns are 0-based, end is EXCLUSIVE.
++//   - the range covers the WHOLE element: opening tag through closing tag
++//     (or through the self-closing `/>` for a void/self-closing element —
++//     there is no separate "just the opening tag" range).
++//   - `path` is whatever the caller passes as `filePath` — this module
++//     doesn't resolve or validate it, callers pass the same workspace-
++//     relative path the file tree already uses.
++//
++// Two independent implementations behind one dispatcher (instrumentSource,
++// at the bottom), because HTML and JSX need fundamentally different
++// strategies:
++//
++//   - HTML (instrumentHtml): parse5 gives back a fully mutable tree with
++//     exact source locations AND a spec-correct serializer, so this adds
++//     the attribute directly to each element's attrs array and lets
++//     parse5.serialize() regenerate the markup. This is what a real
++//     browser's HTML5 parsing algorithm would produce for the same input
++//     (implied tags, void-element normalization, etc. included) — safe
++//     for a preview iframe, which is about to re-parse the HTML itself
++//     anyway, but NOT a byte-for-byte round-trip of the original source.
++//
++//   - JSX/TSX (instrumentJsx): there is no equivalent safe round-trip
++//     serializer for a Babel AST that preserves the developer's original
++//     formatting (re-printing loses comments, quote style, blank lines).
++//     So this walks the AST for source *offsets* only and splices
++//     ` data-mm="..."` directly into the ORIGINAL source string, back to
++//     front (highest offset first) so already-computed offsets for
++//     earlier elements stay valid as later ones shift the string.
++//
++// Rules that apply to both (see each function's own doc comment for how):
++//   - operates on copies only — takes a code string, returns a new code
++//     string; never touches disk, an editor buffer, or any shared state.
++//   - skips an element that already carries a data-mm attribute, so
++//     re-running this on already-instrumented output is a safe no-op for
++//     that element rather than a duplicate/conflicting attribute.
++//   - if parsing fails outright, returns the ORIGINAL code untouched plus
++//     a `note` — this must never be the thing that breaks the preview.
++//
++// Lazy-loading: @babel/parser is a full JS/TS parser and not small (see
++// this module's own entry in the build plan's library table) — it's only
++// pulled in via a dynamic import() inside instrumentJsx, so a pure-HTML
++// preview never loads it. parse5 is comparatively small and needed by
++// nearly every preview kind (even a React/Sandpack project typically still
++// has an index.html shell), so it's a plain static import here.
++
++import * as parse5 from "parse5";
++
++// Elements no click should ever land on / that don't render visible
++// content of their own — instrumenting them would either be inert (head,
++// meta, link, title never appear in the rendered box model) or actively
++// wrong (script/style content isn't "an element you clicked", and adding
++// a data-mm attribute to a <script> tag doesn't do anything harmful, it's
++// just noise that will never be hit by the click handler in W6.4).
++const HTML_SKIP_TAGS = new Set(["html", "head", "script", "style", "meta", "link", "title"]);
++
++function hasDataMm(attrs) {
++  return (attrs || []).some((a) => a.name === "data-mm");
++}
++
++function mmValue(filePath, startLine, startCol, endLine, endCol) {
++  return `${filePath}:${startLine}:${startCol}:${endLine}:${endCol}`;
++}
++
++/**
++ * Instruments an HTML document with data-mm attributes.
++ *
++ * Walks parse5's parsed tree (not the raw text) so HTML5's own error-
++ * recovery/implied-tag rules are handled correctly for free — hand-rolled
++ * string splicing on HTML specifically would have to reimplement a chunk
++ * of the HTML5 parsing algorithm to get void elements, implied </li>,
++ * unquoted attributes, etc. right. parse5 essentially never throws (the
++ * HTML5 spec defines error recovery for almost any byte sequence), but
++ * this still guards the call in case of a genuinely non-string input or
++ * an internal parse5 error — same "never break the preview" contract
++ * instrumentJsx's real try/catch enforces for real syntax errors.
++ *
++ * @param {string} code
++ * @param {string} filePath
++ * @returns {{code: string, instrumented: boolean, note: string|null}}
++ */
++export function instrumentHtml(code, filePath) {
++  let document;
++  try {
++    document = parse5.parse(code, { sourceCodeLocationInfo: true });
++  } catch {
++    return { code, instrumented: false, note: "preview inspector unavailable for this file" };
++  }
++
++  let changed = false;
++
++  function walk(node) {
++    if (node.tagName && node.sourceCodeLocation && !HTML_SKIP_TAGS.has(node.tagName)) {
++      if (!hasDataMm(node.attrs)) {
++        const loc = node.sourceCodeLocation;
++        // parse5's startCol/endCol are 1-based; the data-mm contract is
++        // 0-based columns (see this module's header) — the -1 below is
++        // the only unit conversion this function needs to do.
++        node.attrs.push({
++          name: "data-mm",
++          value: mmValue(filePath, loc.startLine, loc.startCol - 1, loc.endLine, loc.endCol - 1),
++        });
++        changed = true;
++      }
++    }
++    for (const child of node.childNodes || []) walk(child);
++  }
++  walk(document);
++
++  if (!changed) return { code, instrumented: false, note: null };
++  return { code: parse5.serialize(document), instrumented: true, note: null };
++}
++
++// Generic, dependency-free AST walker — deliberately NOT @babel/traverse
++// (an extra dependency this module doesn't otherwise need). Visits every
++// node reachable through any own enumerable property, which is enough to
++// reach JSXElements nested anywhere — inside a .map() callback, inside a
++// ternary, inside a template-literal expression — without knowing every
++// specific Babel node shape ahead of time. Metadata-only keys are skipped
++// both because they're not source nodes and, for `loc`/`extra`, because
++// walking into them is pure wasted work on every node in the tree.
++const WALK_SKIP_KEYS = new Set(["loc", "start", "end", "range", "leadingComments", "trailingComments", "innerComments", "extra"]);
++
++function walkAst(node, visit) {
++  if (!node || typeof node !== "object") return;
++  if (Array.isArray(node)) {
++    for (const item of node) walkAst(item, visit);
++    return;
++  }
++  if (typeof node.type === "string") visit(node);
++  for (const key of Object.keys(node)) {
++    if (WALK_SKIP_KEYS.has(key)) continue;
++    const value = node[key];
++    if (value && typeof value === "object") walkAst(value, visit);
++  }
++}
++
++function isHostElement(name) {
++  // Only a plain lowercase JSXIdentifier is a host/intrinsic element in
++  // JSX's own convention (the thing that becomes a DOM tag). A capitalized
++  // JSXIdentifier (<Button>), a JSXMemberExpression (<Foo.Bar>), or a
++  // JSXNamespacedName (<svg:use>) are all component/reference tags with
++  // no DOM element of their own to attach an attribute to — v1 gives
++  // these nothing, per this module's header; W7.1 is where "select the
++  // usage site" for a component click gets solved instead.
++  return name.type === "JSXIdentifier" && /^[a-z]/.test(name.name);
++}
++
++/**
++ * Instruments a JSX/TSX source file with data-mm attributes.
++ *
++ * @param {string} code
++ * @param {string} filePath
++ * @returns {Promise<{code: string, instrumented: boolean, note: string|null}>}
++ */
++export async function instrumentJsx(code, filePath) {
++  const parser = await import("@babel/parser");
++
++  let ast;
++  try {
++    // Both plugins are always on together (matches the build plan's own
++    // spec) rather than switched on the .jsx/.tsx extension — a stray
++    // `as` cast or `<T>` type param in a .jsx file some projects still
++    // ship is far cheaper to tolerate than to special-case here, and
++    // enabling the typescript plugin on plain JS/JSX is a no-op when
++    // there's no TS syntax to find.
++    ast = parser.parse(code, { sourceType: "module", plugins: ["jsx", "typescript"] });
++  } catch {
++    return { code, instrumented: false, note: "preview inspector unavailable for this file" };
++  }
++
++  // Collect every injection point first (as {offset, text}) instead of
++  // splicing as we go — walkAst doesn't guarantee traversal order lines
++  // up with source order once nested callbacks are involved, and even if
++  // it did, splicing earlier in the string would invalidate every offset
++  // already computed from the ORIGINAL ast for elements later in the
++  // file. Sorting once, descending, and applying back-to-front (below)
++  // sidesteps both problems: every splice happens at an offset that is
++  // still valid because nothing after it in the string has moved yet.
++  const injections = [];
++  walkAst(ast, (node) => {
++    // JSXFragment (<>...</>) has no tag name at all to attach an
++    // attribute to -- walkAst still reaches every JSXElement nested
++    // inside it via the normal recursive walk, so fragments need no
++    // special-casing here beyond simply not matching this check.
++    if (node.type !== "JSXElement") return;
++    const name = node.openingElement.name;
++    if (!isHostElement(name)) return;
++    if (node.openingElement.attributes.some((a) => a.type === "JSXAttribute" && a.name?.name === "data-mm")) return;
++
++    injections.push({
++      offset: name.end, // right after the tag name, before any attributes/`>`/`/>` -- see the module header for why here specifically
++      text: ` data-mm=${JSON.stringify(mmValue(filePath, node.loc.start.line, node.loc.start.column, node.loc.end.line, node.loc.end.column))}`,
++    });
++  });
++
++  if (!injections.length) return { code, instrumented: false, note: null };
++
++  injections.sort((a, b) => b.offset - a.offset);
++  let out = code;
++  for (const { offset, text } of injections) {
++    out = out.slice(0, offset) + text + out.slice(offset);
++  }
++  return { code: out, instrumented: true, note: null };
++}
++
++const JSX_EXTENSION_RE = /\.[jt]sx?$/i;
++const HTML_EXTENSION_RE = /\.html?$/i;
++
++/**
++ * Dispatches to instrumentHtml or instrumentJsx by `filePath`'s
++ * extension. Any other extension is not a failure — there's simply
++ * nothing this module knows how to instrument for it (a .css or .json
++ * file, say) — so it comes back unchanged with `instrumented: false` and
++ * no note; `note` is reserved for "this looked instrumentable and
++ * parsing it failed", not "this was never in scope".
++ *
++ * @param {string} code
++ * @param {string} filePath
++ * @returns {Promise<{code: string, instrumented: boolean, note: string|null}>}
++ */
++export async function instrumentSource(code, filePath) {
++  if (HTML_EXTENSION_RE.test(filePath)) return instrumentHtml(code, filePath);
++  if (JSX_EXTENSION_RE.test(filePath)) return instrumentJsx(code, filePath);
++  return { code, instrumented: false, note: null };
++}
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index 3d914d2..4b5dd12 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -9,6 +9,7 @@
+       "version": "0.1.0",
+       "hasInstallScript": true,
+       "dependencies": {
++        "@babel/parser": "^7.29.9",
+         "@codemirror/autocomplete": "^6.20.3",
+         "@codemirror/commands": "^6.11.1",
+         "@codemirror/language": "^6.12.4",
+@@ -31,6 +32,7 @@
+         "lucide-react": "^1.23.0",
+         "mermaid": "^11.16.0",
+         "next": "14.2.35",
++        "parse5": "^8.0.1",
+         "prettier": "^3.9.8",
+         "pusher-js": "^8.5.0",
+         "react": "18.3.1",
+@@ -286,9 +288,9 @@
+       }
+     },
+     "node_modules/@babel/parser": {
+-      "version": "7.29.8",
+-      "resolved": "https://registry.npmjs.org/@babel/parser/-/parser-7.29.8.tgz",
+-      "integrity": "sha512-E8lTAYNB1KW+FH+VGJuZM1ioAx2E6oVlvQFRrf5P8ZZmsiJXYAD9vTFV7yyEURNzgh1dFqMZuO6tUwcARbqFCA==",
++      "version": "7.29.9",
++      "resolved": "https://registry.npmjs.org/@babel/parser/-/parser-7.29.9.tgz",
++      "integrity": "sha512-CjXrNHTnvqBVqHgdBysY3vk2T8tpJHb5/RMeHJBTyVa9xgugCB0CJTx/3oO8RV2QRQP391RWpB7D6hLjm8V9uA==",
+       "license": "MIT",
+       "dependencies": {
+         "@babel/types": "^7.29.8"
+@@ -6358,6 +6360,18 @@
+         "node": ">=10.13.0"
+       }
+     },
++    "node_modules/entities": {
++      "version": "8.1.0",
++      "resolved": "https://registry.npmjs.org/entities/-/entities-8.1.0.tgz",
++      "integrity": "sha512-kxL7msIffSuh9aaFAMD7rxAIuTRMAHMeBtgHW2yUdWw732ZNh4MehkF2gdjvtdmikkaIP9bFDDJOPlsvm7avrA==",
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=20.19.0"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/entities?sponsor=1"
++      }
++    },
+     "node_modules/es-abstract": {
+       "version": "1.24.2",
+       "resolved": "https://registry.npmjs.org/es-abstract/-/es-abstract-1.24.2.tgz",
+@@ -10808,6 +10822,18 @@
+       "integrity": "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==",
+       "license": "MIT"
+     },
++    "node_modules/parse5": {
++      "version": "8.0.1",
++      "resolved": "https://registry.npmjs.org/parse5/-/parse5-8.0.1.tgz",
++      "integrity": "sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==",
++      "license": "MIT",
++      "dependencies": {
++        "entities": "^8.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/inikulin/parse5?sponsor=1"
++      }
++    },
+     "node_modules/patch-package": {
+       "version": "8.0.1",
+       "resolved": "https://registry.npmjs.org/patch-package/-/patch-package-8.0.1.tgz",
+diff --git a/frontend/package.json b/frontend/package.json
+index a874199..35fcfd2 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -10,6 +10,7 @@
+     "postinstall": "patch-package"
+   },
+   "dependencies": {
++    "@babel/parser": "^7.29.9",
+     "@codemirror/autocomplete": "^6.20.3",
+     "@codemirror/commands": "^6.11.1",
+     "@codemirror/language": "^6.12.4",
+@@ -32,6 +33,7 @@
+     "lucide-react": "^1.23.0",
+     "mermaid": "^11.16.0",
+     "next": "14.2.35",
++    "parse5": "^8.0.1",
+     "prettier": "^3.9.8",
+     "pusher-js": "^8.5.0",
+     "react": "18.3.1",

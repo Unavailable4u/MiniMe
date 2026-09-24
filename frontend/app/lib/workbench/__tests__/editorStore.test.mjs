@@ -1,16 +1,17 @@
 // W2.2 (Build Workbench plan) — reducer test for editorStore.js;
 // extended in W2.3a for the tab-strip actions, in W2.3b for SET_LAYOUT, in
-// W2.4 for RENAME_PATHS and in W2.5 for the save-conflict resolutions.
+// W2.4 for RENAME_PATHS, in W2.5 for the save-conflict resolutions, and in
+// W5.3 for the `review` slice (REVIEW_OPEN etc).
 //
 // Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
 // copy of editorReducer() (editorStore.js pulls in `react`, which plain
 // `node` couldn't resolve without node_modules) and said the copy had to be
 // kept in sync by hand — which is how a test ends up green against code
 // that has moved on. loadSource.mjs now reads editorStore.js itself and
-// satisfies its two imports from the map below: a stub for `react` (only
+// satisfies its imports from the map below: a stub for `react` (only
 // its top-level createContext() call runs at load time; the provider and
 // hook aren't exercised here) and the real tabUtils.js / layoutPrefs.js /
-// fileTree.js.
+// fileTree.js / reviewMode.js.
 //
 // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
 import { loadSource } from "./loadSource.mjs";
@@ -25,8 +26,15 @@ const reactStub = {
 const tabUtils = loadSource("../tabUtils.js");
 const layoutPrefs = loadSource("../layoutPrefs.js");
 const fileTree = loadSource("../fileTree.js");
+const reviewMode = loadSource("../reviewMode.js");
 const { editorReducer } = loadSource("../editorStore.js", {
-  imports: { react: reactStub, "./tabUtils": tabUtils, "./layoutPrefs": layoutPrefs, "./fileTree": fileTree },
+  imports: {
+    react: reactStub,
+    "./tabUtils": tabUtils,
+    "./layoutPrefs": layoutPrefs,
+    "./fileTree": fileTree,
+    "./reviewMode": reviewMode,
+  },
 });
 
 const initialState = {
@@ -35,6 +43,7 @@ const initialState = {
   buffers: {},
   layout: {},
   proposals: [],
+  review: null,
 };
 
 let failures = 0;
@@ -449,6 +458,102 @@ assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCES
 
   // Neither resolution touches the tab strip.
   assertEqual([kept.tabs, kept.activePath], [st.tabs, st.activePath], "resolving a conflict doesn't change tabs or the active file");
+}
+
+// --- W5.3: REVIEW_OPEN / REVIEW_SET_ACTIVE / REVIEW_FILE_UPDATE /
+// REVIEW_SUBMITTING / REVIEW_ERROR / REVIEW_CLOSE ------------------------
+{
+  const proposal = {
+    id: "prop_1",
+    instruction: "add a docstring",
+    summary: "Add a docstring to greet()",
+    status: "pending",
+    files: [
+      { path: "a.py", op: "replace", base_version: 3, original: "def greet():\n    pass\n", proposed: "def greet():\n    \"\"\"Says hi.\"\"\"\n    pass\n" },
+      { path: "new.py", op: "create", base_version: 0, original: "", proposed: "x = 1\n" },
+    ],
+  };
+
+  let st = editorReducer(initialState, { type: "REVIEW_OPEN", proposal });
+  assertEqual(st.review.proposalId, "prop_1", "REVIEW_OPEN stores the proposal id");
+  assertEqual(st.review.order, ["a.py", "new.py"], "REVIEW_OPEN's file order matches the proposal's files");
+  assertEqual(st.review.activePath, "a.py", "REVIEW_OPEN activates the first file");
+  assertEqual(st.review.files["a.py"].remaining, null, "a freshly opened file's remaining is null — its editor hasn't reported yet");
+  assertEqual(st.review.files["a.py"].current, proposal.files[0].proposed, "a freshly opened file's current text is the proposed text");
+  assertEqual(st.review.submitting, false, "REVIEW_OPEN starts not submitting");
+  assertEqual(st.review.stale, false, "REVIEW_OPEN starts not stale");
+  assertEqual(st.tabs, [], "opening a review doesn't touch the normal tab strip");
+
+  st = editorReducer(st, { type: "REVIEW_SET_ACTIVE", path: "new.py" });
+  assertEqual(st.review.activePath, "new.py", "REVIEW_SET_ACTIVE switches the active file");
+
+  const same = editorReducer(st, { type: "REVIEW_SET_ACTIVE", path: "new.py" });
+  assertEqual(same === st, true, "REVIEW_SET_ACTIVE to the already-active file is a no-op (same state object)");
+
+  assertEqual(
+    editorReducer(st, { type: "REVIEW_SET_ACTIVE", path: "not-in-review.py" }) === st,
+    true,
+    "REVIEW_SET_ACTIVE to a path outside the review is ignored"
+  );
+
+  st = editorReducer(st, {
+    type: "REVIEW_FILE_UPDATE",
+    path: "a.py",
+    snap: { current: "def greet():\n    pass\n", remaining: 0, added: 0, removed: 1 },
+  });
+  assertEqual(st.review.files["a.py"].remaining, 0, "REVIEW_FILE_UPDATE sets remaining");
+  assertEqual(st.review.files["a.py"].current, "def greet():\n    pass\n", "REVIEW_FILE_UPDATE sets current");
+  assertEqual(st.review.files["new.py"].remaining, null, "REVIEW_FILE_UPDATE on one file leaves another file's state alone");
+
+  assertEqual(
+    editorReducer(st, { type: "REVIEW_FILE_UPDATE", path: "ghost.py", snap: { current: "", remaining: 0, added: 0, removed: 0 } }) === st,
+    true,
+    "REVIEW_FILE_UPDATE for a path not in the review is a no-op"
+  );
+
+  st = editorReducer(st, { type: "REVIEW_SUBMITTING", submitting: true });
+  assertEqual(st.review.submitting, true, "REVIEW_SUBMITTING sets the in-flight flag");
+
+  st = editorReducer(st, { type: "REVIEW_ERROR", error: "This edit can no longer be applied.", stale: true });
+  assertEqual(st.review.error, "This edit can no longer be applied.", "REVIEW_ERROR sets the message");
+  assertEqual(st.review.stale, true, "REVIEW_ERROR can flag the review as stale (a 409)");
+
+  // Re-opening (a second proposal) over an ALREADY-open review replaces
+  // the slice wholesale rather than merging — a stale per-file
+  // `remaining`/`current`/`error`/`stale` from the previous proposal
+  // must not leak into the new one.
+  const reopened = editorReducer(st, {
+    type: "REVIEW_OPEN",
+    proposal: { id: "prop_2", status: "pending", files: [{ path: "b.py", op: "replace", original: "1", proposed: "2" }] },
+  });
+  assertEqual(reopened.review.proposalId, "prop_2", "REVIEW_OPEN over an open review opens the new one");
+  assertEqual(reopened.review.files["a.py"], undefined, "...with no trace of the previous review's files");
+  assertEqual(reopened.review.error, null, "...and no trace of the previous review's error");
+  assertEqual(reopened.review.stale, false, "...or its stale flag");
+
+  st = editorReducer(st, { type: "REVIEW_CLOSE" });
+  assertEqual(st.review, null, "REVIEW_CLOSE clears the review");
+
+  assertEqual(
+    editorReducer(initialState, { type: "REVIEW_CLOSE" }) === initialState,
+    true,
+    "REVIEW_CLOSE with no open review is a no-op"
+  );
+  assertEqual(
+    editorReducer(initialState, { type: "REVIEW_SET_ACTIVE", path: "a.py" }) === initialState,
+    true,
+    "REVIEW_SET_ACTIVE with no open review is a no-op"
+  );
+  assertEqual(
+    editorReducer(initialState, { type: "REVIEW_SUBMITTING", submitting: true }) === initialState,
+    true,
+    "REVIEW_SUBMITTING with no open review is a no-op"
+  );
+  assertEqual(
+    editorReducer(initialState, { type: "REVIEW_ERROR", error: "x" }) === initialState,
+    true,
+    "REVIEW_ERROR with no open review is a no-op"
+  );
 }
 
 if (failures > 0) {

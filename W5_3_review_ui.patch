@@ -1,0 +1,1897 @@
+diff --git a/frontend/app/components/WorkspaceChatPanel.jsx b/frontend/app/components/WorkspaceChatPanel.jsx
+index 2d792a1..7818367 100644
+--- a/frontend/app/components/WorkspaceChatPanel.jsx
++++ b/frontend/app/components/WorkspaceChatPanel.jsx
+@@ -281,7 +281,28 @@ function ThinkingElapsed() {
+ // element (rendered here, but built there — see that wrapper's own
+ // comment for why it can't be built in this file), and
+ // `onClearCodeRefs` as that same store's clearRefs().
+-export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse = null, workspaceId = null, chatId = null, onNavigateSubTab = null, stacked = false, hideAttach = false, activeContext = null, standalone = false, codeRefs = null, codeChips = null, onClearCodeRefs = null }) {
++// NEW — W5.3: `onReviewProposal(proposal)` — the proposals list's own
++// "Review" button, one per pending entry in `codeProposals` (below).
++// Same "plain callback, not a codeContext.js import" shape as
++// `onClearCodeRefs` — CodeAwareChatPanel is what turns a click into
++// codeContext.js's requestReview(proposal.id) plus switching the Build
++// tab to its Editor sub-tab (and, on the mobile overlay instance,
++// closing the chat dock), neither of which this file knows how to do.
++export default function WorkspaceChatPanel({
++  collapsed = false,
++  onToggleCollapse = null,
++  workspaceId = null,
++  chatId = null,
++  onNavigateSubTab = null,
++  stacked = false,
++  hideAttach = false,
++  activeContext = null,
++  standalone = false,
++  codeRefs = null,
++  codeChips = null,
++  onClearCodeRefs = null,
++  onReviewProposal = null,
++}) {
+   const legacy = useSession();
+   const { ingestFile, ingestPdfFile, ingestVoiceFile, generateNotebooks, classifyIntent, markTopicDone, API_URL } = legacy;   // NEW — Data Layer §4b; generateNotebooks NEW — chat audit bug #1; classifyIntent NEW — Phase 2 step 2.5; markTopicDone NEW — Phase 6 step 6.8; API_URL NEW — W5.1b, for codeProposals.js's plain fetch() calls
+   const dock = useWorkspaceDock(workspaceId, chatId);
+@@ -478,13 +499,13 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+   // for what flipping this to "edit" actually does now.
+   const [codeChatMode, setCodeChatMode] = useState("ask");
+   // NEW — W5.1b: proposals created by THIS panel instance this
+-  // session, newest first — a deliberately plain, read-only stand-in
+-  // for W5.3's real Keep/Undo merge view and W5.4's real
+-  // cross-session pending tray. Local component state, not dock
+-  // state or anything persisted: reloading the tab loses this list on
+-  // purpose (there's no Keep/Undo to resume here yet, so there's
+-  // nothing worth restoring — GET .../code/proposals?status=pending
+-  // is what W5.4's real tray will read from instead of this).
++  // session, newest first. CHANGED — W5.3: each "pending" entry now has
++  // a real Review button into ReviewPanel.jsx's Keep/Undo merge view
++  // (see the list's own JSX further down) — this used to be a plain
++  // read-only stand-in for that. Still local component state, not dock
++  // state or anything persisted: reloading the tab loses this list —
++  // W5.4's real cross-session pending tray is what GET
++  // .../code/proposals?status=pending will read from instead.
+   const [codeProposals, setCodeProposals] = useState([]);
+   const [codeProposalPending, setCodeProposalPending] = useState(false);
+   const [codeProposalError, setCodeProposalError] = useState(null);
+@@ -1813,14 +1834,49 @@ export default function WorkspaceChatPanel({ collapsed = false, onToggleCollapse
+               </button>
+               <button
+                 type="button"
+-                disabled
+-                title="Coming in W5 — reviewed AI edits with Keep/Undo"
+-                className="rounded px-2 py-0.5 text-[11px] font-medium text-[var(--neutral-600)] cursor-default"
++                onClick={() => setCodeChatMode("edit")}
++                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
++                  codeChatMode === "edit"
++                    ? "bg-[var(--accent)] text-[var(--accent-text)]"
++                    : "text-[var(--neutral-400)] hover:text-[var(--neutral-200)]"
++                }`}
+               >
+                 Edit
+               </button>
+             </div>
+             {codeChips}
++            {/* NEW — W5.3: every proposal THIS panel has created or heard
++                resolved (subscribeToProposalEvents' onResolved, above) —
++                a "pending" one gets a Review button into
++                ReviewPanel.jsx's Keep/Undo UI; anything else just shows
++                how it was left (matches reviewMode.js's own status
++                vocabulary, so a proposal resolved elsewhere while this
++                panel was closed reads the same way here as there). */}
++            {codeProposals.length > 0 && (
++              <ul className="flex flex-col gap-1 max-h-40 overflow-y-auto">
++                {codeProposals.map((p) => (
++                  <li
++                    key={p.id}
++                    className="flex items-center justify-between gap-2 rounded-md border border-[var(--neutral-800)] bg-[var(--neutral-900)] px-2 py-1.5 text-[11px]"
++                  >
++                    <span className="min-w-0 truncate text-[var(--neutral-300)]" title={p.instruction || undefined}>
++                      {p.summary || p.instruction || "AI edit"}
++                    </span>
++                    {p.status === "pending" ? (
++                      <button
++                        type="button"
++                        onClick={() => onReviewProposal?.(p)}
++                        className="shrink-0 rounded bg-[var(--accent)] text-[var(--accent-text)] px-2 py-0.5 font-medium hover:opacity-90"
++                      >
++                        Review
++                      </button>
++                    ) : (
++                      <span className="shrink-0 capitalize text-[var(--neutral-500)]">{p.status}</span>
++                    )}
++                  </li>
++                ))}
++              </ul>
++            )}
+           </div>
+         )}
+         {/* NEW — Data Layer §4b: compact status pills for in-flight/just-
+diff --git a/frontend/app/components/tabs/BuildTab.jsx b/frontend/app/components/tabs/BuildTab.jsx
+index a0c3ffa..490018b 100644
+--- a/frontend/app/components/tabs/BuildTab.jsx
++++ b/frontend/app/components/tabs/BuildTab.jsx
+@@ -37,9 +37,34 @@ import ContextChips from "../workbench/ContextChips";
+ // not nested inside BuildTab: an inline function component would get a
+ // fresh identity — and remount its whole subtree, draft included — on
+ // every BuildTab render.
+-function CodeAwareChatPanel(props) {
+-  const { refs, clearRefs } = useCodeContext();
+-  return <WorkspaceChatPanel {...props} codeRefs={refs} codeChips={<ContextChips />} onClearCodeRefs={clearRefs} />;
++// CHANGED — W5.3: same reasoning for `onReviewProposal` — this is the
++// one place inside the provider that can turn a "Review" click (the
++// proposals list's own button, in WorkspaceChatPanel.jsx) into
++// codeContext.js's requestReview(proposal.id), which EditorWorkbench.jsx
++// (a DIFFERENT descendant of the same provider) is what actually
++// listens for. `onEnterReviewMode` is BuildTab's own plain callback —
++// switching the Build tab to its Editor sub-tab, and (only on the
++// mobile overlay instance below) closing the chat dock — passed in
++// rather than read from context, since neither of those is
++// code-context state.
++function CodeAwareChatPanel({ onEnterReviewMode, ...props }) {
++  const { refs, clearRefs, requestReview } = useCodeContext();
++  const onReviewProposal = useCallback(
++    (proposal) => {
++      onEnterReviewMode?.();
++      requestReview(proposal.id);
++    },
++    [onEnterReviewMode, requestReview]
++  );
++  return (
++    <WorkspaceChatPanel
++      {...props}
++      codeRefs={refs}
++      codeChips={<ContextChips />}
++      onClearCodeRefs={clearRefs}
++      onReviewProposal={onReviewProposal}
++    />
++  );
+ }
+ // Part 8.9: replaces the old static shared-secret x-api-key header
+ // -- every fetch() below now sends the real per-user Supabase JWT via
+@@ -1540,12 +1565,35 @@ function BuildTab({ onPromoted, onActiveWorkspaceChange, initialLocalTabRedirect
+             title="Drag to resize"
+             className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-[var(--accent)]/40"
+           />
+-          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
++          <CodeAwareChatPanel
++            collapsed={false}
++            onToggleCollapse={toggleChatDock}
++            workspaceId={selected?.id}
++            stacked
++            onEnterReviewMode={() => requestBuildView("code")}
++          />
+         </div>
+       )}
+       {!chatDockCollapsed && (
+         <div className="lg:hidden fixed inset-0 z-40 bg-[var(--neutral-950)]">
+-          <CodeAwareChatPanel collapsed={false} onToggleCollapse={toggleChatDock} workspaceId={selected?.id} stacked />
++          {/* W5.3: this instance IS the mobile chat overlay (see the
++              wrapping div's own `lg:hidden fixed inset-0` above) — Review
++              both switches to the Editor sub-tab AND gets out of the way
++              of it, same as tapping a search result already does
++              elsewhere in this tab. `toggleChatDock` is a plain toggle;
++              this only runs while the dock is open (chatDockCollapsed
++              is false — see the `!chatDockCollapsed` guard around this
++              whole block), so calling it here always closes it. */}
++          <CodeAwareChatPanel
++            collapsed={false}
++            onToggleCollapse={toggleChatDock}
++            workspaceId={selected?.id}
++            stacked
++            onEnterReviewMode={() => {
++              requestBuildView("code");
++              toggleChatDock();
++            }}
++          />
+         </div>
+       )}
+       {chatDockCollapsed && (
+diff --git a/frontend/app/components/workbench/CodeEditor.jsx b/frontend/app/components/workbench/CodeEditor.jsx
+index d4fea19..55af0ed 100644
+--- a/frontend/app/components/workbench/CodeEditor.jsx
++++ b/frontend/app/components/workbench/CodeEditor.jsx
+@@ -90,13 +90,25 @@ import { languages } from "@codemirror/language-data";
+ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+ import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+ import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+-import { buildEditorTheme } from "../../lib/workbench/cmTheme";
++import {
++  Chunk,
++  acceptChunk,
++  getChunks,
++  getOriginalDoc,
++  goToNextChunk,
++  goToPreviousChunk,
++  rejectChunk,
++  unifiedMergeView,
++  updateOriginalDoc,
++} from "@codemirror/merge";
++import { buildEditorTheme, buildReviewTheme } from "../../lib/workbench/cmTheme";
+ import {
+   detectIndentUnit,
+   indentGuideOffsets,
+   minimalChange,
+   normalizeLineBreaks,
+ } from "../../lib/workbench/editorUtils";
++import { chunkLineStats } from "../../lib/workbench/reviewMode";
+ 
+ // Tags a transaction as coming from THIS component's own `value`-prop
+ // effect (an external update), not from the person typing — read back
+@@ -347,6 +359,45 @@ function buildMapRange(update) {
+   };
+ }
+ 
++// W5.3: the "Keep"/"Undo" buttons @codemirror/merge's unifiedMergeView
++// paints inline on every changed chunk, in place of the package's own
++// default green/red "accept"/"reject" pair — same wording as
++// ReviewPanel.jsx's toolbar so a hunk's own buttons and the file-wide
++// "Keep all"/"Undo all" ones read as the same action at two scales.
++// `action` is @codemirror/merge's own click handler (calls
++// acceptChunk()/rejectChunk() on this chunk, under the hood identical
++// to what keepAll()/undoAll() below do for every chunk); this only
++// supplies the element and stops a click from also moving focus/
++// selection into the editor first, which mousedown would otherwise do.
++function renderMergeControl(type, action) {
++  const button = document.createElement("button");
++  button.type = "button";
++  button.className = `cm-mm-merge-btn cm-mm-merge-btn-${type === "accept" ? "accept" : "reject"}`;
++  button.textContent = type === "accept" ? "Keep" : "Undo";
++  button.setAttribute("aria-label", type === "accept" ? "Keep this change" : "Undo this change");
++  button.addEventListener("mousedown", (event) => event.preventDefault());
++  button.addEventListener("click", action);
++  return button;
++}
++
++// W5.3: the `{current, remaining, added, removed}` shape ReviewPanel.jsx
++// passes straight to editorStore.js's REVIEW_FILE_UPDATE — read fresh
++// from CM6's own merge state rather than kept as separate React state,
++// so it can never drift from what's actually on screen. `getChunks`
++// only returns null before the merge view's ChunkField has run at all
++// (see that function's own doc comment); `Chunk.build` recomputes the
++// same thing directly for that one edge case, from `getOriginalDoc` —
++// the ORIGINAL text, which itself moves as chunks are accepted (see
++// acceptChunk's own doc comment: "no longer highlighted", not "gone
++// from the document") — against the live document.
++function reviewSnapshot(state) {
++  const info = getChunks(state);
++  const original = getOriginalDoc(state);
++  const chunks = info ? info.chunks : Chunk.build(original, state.doc);
++  const { added, removed } = chunkLineStats(chunks, original, state.doc);
++  return { current: state.doc.toString(), remaining: chunks.length, added, removed };
++}
++
+ // Exported (W2.5) so ConflictCompareView's two read-only MergeView sides
+ // highlight with the same lazy per-file loader instead of a second copy.
+ export async function loadLanguageExtension(filePath) {
+@@ -395,6 +446,8 @@ function useCodeMirror({
+   onAddToChat,
+   onSelectionToolbar,
+   onRangeChange,
++  review,
++  onReviewChange,
+ }) {
+   const viewRef = useRef(null);
+   const onChangeRef = useRef(onChange);
+@@ -405,6 +458,11 @@ function useCodeMirror({
+   const onAddToChatRef = useRef(onAddToChat);
+   const onSelectionToolbarRef = useRef(onSelectionToolbar);
+   const onRangeChangeRef = useRef(onRangeChange);
++  // W5.3: same shape again — ReviewPanel.jsx's ReviewEditor rebuilds its
++  // `onReviewChange` closure on every render (it closes over `path`), so
++  // this can't be read directly in the mount effect the way `review`
++  // itself (below, never a fresh object after the initial render) can.
++  const onReviewChangeRef = useRef(onReviewChange);
+   const gutterAnchorRef = useRef(null); // W4.1: last gutter-clicked line, for Shift-click ranges
+   const languageCompartmentRef = useRef(null);
+   const readOnlyCompartmentRef = useRef(null);
+@@ -417,6 +475,7 @@ function useCodeMirror({
+   onAddToChatRef.current = onAddToChat;
+   onSelectionToolbarRef.current = onSelectionToolbar;
+   onRangeChangeRef.current = onRangeChange;
++  onReviewChangeRef.current = onReviewChange;
+ 
+   // Mount once. `value`/`filePath`/`readOnly` at THIS instant seed the
+   // initial state; every later change to any of them is handled by the
+@@ -433,11 +492,20 @@ function useCodeMirror({
+     readOnlyCompartmentRef.current = readOnlyCompartment;
+     indentCompartmentRef.current = indentCompartment;
+ 
++    // W5.3: `review` is set once by the caller (ReviewPanel.jsx's own
++    // ReviewEditor memoizes it on `original`, which never changes for a
++    // review's lifetime — the same "read directly, not via a ref"
++    // treatment already given `value`/`filePath`/`readOnly` above,
++    // since a review editor is never handed a NEW review to switch to;
++    // closing one unmounts it (see ReviewPanel.jsx's own header).
++    const isReview = !!review;
++
+     const state = EditorState.create({
+       doc: value ?? "",
+       extensions: [
+         baseExtensions(onSaveRef, onAddToChatRef, gutterAnchorRef),
+         buildEditorTheme(),
++        isReview ? buildReviewTheme() : [],
+         indentCompartment.of(indentUnit.of(detectIndentUnit(value ?? ""))),
+         languageCompartment.of([]),
+         readOnlyCompartment.of([
+@@ -474,7 +542,34 @@ function useCodeMirror({
+             // shows above a non-empty selection, hides otherwise.
+             onSelectionToolbarRef.current?.(computeToolbarPos(update.view));
+           }
++          // W5.3: report the file's current text and remaining-hunk
++          // count after anything that could have changed either —
++          // typing, Keep/Undo on one hunk, or keepAll()/undoAll() below
++          // (each of those is its own dispatch, so each is its own
++          // update here). `docChanged` alone would miss Keep: acceptChunk
++          // moves the ORIGINAL doc via the updateOriginalDoc effect and
++          // touches no text, since the accepted text was already on
++          // screen (see reviewSnapshot()'s own comment).
++          if (
++            isReview &&
++            (update.docChanged || update.transactions.some((tr) => tr.effects.some((e) => e.is(updateOriginalDoc))))
++          ) {
++            onReviewChangeRef.current?.(reviewSnapshot(update.state));
++          }
+         }),
++        // W5.3: the merge view itself, comparing this editor's document
++        // (the proposed text `value` seeded above) against `review.original`
++        // — see ConflictCompareView.jsx's header for why review mode
++        // uses unifiedMergeView (one document, per-hunk controls
++        // threaded through it) rather than that component's two-pane
++        // MergeView (two read-only finished snapshots side by side).
++        isReview
++          ? unifiedMergeView({
++              original: normalizeLineBreaks(review.original ?? ""),
++              mergeControls: renderMergeControl,
++              collapseUnchanged: { margin: 3 },
++            })
++          : [],
+       ],
+     });
+ 
+@@ -484,6 +579,12 @@ function useCodeMirror({
+     // Report where the caret starts (line 1, col 1) so a status bar has
+     // something to show before the first click or keystroke.
+     onCursorChangeRef.current?.(cursorPosition(view.state));
++    // W5.3: and the initial hunk count, so reviewMode.js's
++    // reviewProgress() can tell "still loading" (editorStore.js's
++    // REVIEW_OPEN seeds `remaining: null`) from "loaded, nothing left to
++    // decide" (a proposal that turned out to be a no-op diff) without
++    // waiting for the person to touch anything.
++    if (isReview) onReviewChangeRef.current?.(reviewSnapshot(view.state));
+ 
+     return () => {
+       view.destroy();
+@@ -593,6 +694,19 @@ function useCodeMirror({
+  *   path) — EditorWorkbench.jsx's EditorPane closes over it; see that
+  *   file. Fires on every doc change (typed or external) with a plain
+  *   ChangeSet.mapPos-based mapper, for codeContext.js's REMAP_REFS.
++ * @param {{original: string}} [props.review] - W5.3: turns this editor
++ *   into a Copilot-style review of one file — `value` is the proposed
++ *   text (still editable unless `readOnly`), diffed inline against
++ *   `review.original` via @codemirror/merge's unifiedMergeView, with
++ *   per-hunk Keep/Undo buttons. Set once; see useCodeMirror()'s own
++ *   comment on why this doesn't react to later prop changes the way
++ *   `value`/`filePath`/`readOnly` do. ReviewPanel.jsx is the only
++ *   caller.
++ * @param {(snap: {current: string, remaining: number, added: number, removed: number}) => void} [props.onReviewChange] -
++ *   W5.3: fires once on mount and after every hunk decision (typing,
++ *   a hunk's own Keep/Undo, or keepAll()/undoAll() below) — the shape
++ *   ReviewPanel.jsx forwards straight into editorStore.js's
++ *   REVIEW_FILE_UPDATE. Ignored when `review` isn't set.
+  */
+ function CodeEditor(
+   {
+@@ -606,6 +720,8 @@ function CodeEditor(
+     className,
+     onAddToChat,
+     onRangeChange,
++    review,
++    onReviewChange,
+   },
+   ref
+ ) {
+@@ -625,6 +741,8 @@ function CodeEditor(
+     onAddToChat,
+     onSelectionToolbar: onAddToChat ? setToolbar : undefined,
+     onRangeChange,
++    review,
++    onReviewChange,
+   });
+ 
+   useImperativeHandle(
+@@ -645,6 +763,41 @@ function CodeEditor(
+         const doc = view.state.doc;
+         return { from, to, fromLine: doc.lineAt(from).number, toLine: doc.lineAt(to).number };
+       },
++      // W5.3 — review mode only (ReviewPanel.jsx's Keep all/Undo all and
++      // Prev/Next). Harmless no-ops on a plain editor: getChunks() finds
++      // no merge extension installed and returns null, and the
++      // goToNext/PreviousChunk commands simply have nothing to move to.
++      keepAll: () => {
++        const view = viewRef.current;
++        if (!view) return;
++        // Each accept/reject is its own dispatch and can shift or
++        // remove OTHER chunks (rejecting one changes document length;
++        // accepting one moves the diff baseline — see reviewSnapshot()'s
++        // comment), so this re-reads the chunk list after every one
++        // rather than iterating a snapshot taken before any of them.
++        for (;;) {
++          const info = getChunks(view.state);
++          if (!info || info.chunks.length === 0) break;
++          if (!acceptChunk(view, info.chunks[0].fromB)) break;
++        }
++      },
++      undoAll: () => {
++        const view = viewRef.current;
++        if (!view) return;
++        for (;;) {
++          const info = getChunks(view.state);
++          if (!info || info.chunks.length === 0) break;
++          if (!rejectChunk(view, info.chunks[0].fromB)) break;
++        }
++      },
++      nextChange: () => {
++        const view = viewRef.current;
++        if (view) goToNextChunk(view);
++      },
++      prevChange: () => {
++        const view = viewRef.current;
++        if (view) goToPreviousChunk(view);
++      },
+     }),
+     [viewRef]
+   );
+diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
+index 6574fe1..fde63d3 100644
+--- a/frontend/app/components/workbench/EditorWorkbench.jsx
++++ b/frontend/app/components/workbench/EditorWorkbench.jsx
+@@ -83,12 +83,16 @@ import { useViewport } from "../../hooks/useViewport";
+ // just an ordinary descendant read, the same relationship
+ // useEditorStore() below has to EditorStoreProvider.
+ import { useCodeContext } from "../../lib/workbench/codeContext";
++// W5.3: the review round trip — getProposal() to fetch what
++// pendingReview only carries the id of, resolveProposal() for Done.
++import { ProposalStaleError, getProposal, resolveProposal } from "../../lib/workbench/codeProposals";
+ import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
+ import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
+ import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
+ import { deleteSummary } from "../../lib/workbench/explorerOps";
+ import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
+ import { jumpToPosition } from "../../lib/workbench/gotoPosition";
++import { buildDecisions, dirtyOverlap, unreviewableReason } from "../../lib/workbench/reviewMode";
+ import { useProjectSearch } from "../../hooks/useProjectSearch";
+ import {
+   BOTTOM_PANEL_DEFAULT_HEIGHT,
+@@ -118,6 +122,7 @@ import HistoryPanel from "./HistoryPanel";
+ import PreviewColumn from "./PreviewColumn";
+ import ProjectSearchPanel from "./ProjectSearchPanel";
+ import QuickOpen from "./QuickOpen";
++import ReviewPanel from "./ReviewPanel";
+ import StatusBar from "./StatusBar";
+ 
+ // W2.5: how long a dirty file has to sit untouched before autosave (when
+@@ -218,12 +223,18 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     setLayout,
+     switchSource,
+     renamePaths,
++    reviewOpen,
++    reviewSetActive,
++    reviewFileUpdate,
++    reviewSubmitting,
++    reviewError,
++    reviewClose,
+   } = useEditorStore();
+ 
+   // W4.1: see this component's own import comment on why this is
+   // available here even though CodeContextProvider is mounted in
+   // BuildTab.jsx, above this whole component.
+-  const { addRef, remapRefs, pendingJump, clearJump } = useCodeContext();
++  const { addRef, remapRefs, pendingJump, clearJump, pendingReview, clearReview } = useCodeContext();
+ 
+   // W3.1: which provider backs the workbench right now — read from
+   // `layout.source` (see layoutPrefs.js's own header on why it lives
+@@ -538,6 +549,22 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+       setNotice(null);
+       if (isMobileRef.current) setMobileExplorerOpen(false); // single-pane: jump to the editor
+       const s = stateRef.current;
++      // W5.3: a review replaces the tabs+editor area outright (see
++      // ReviewPanel.jsx's own header) — a normal open would be either
++      // invisible (ReviewPanel is what's actually showing) or would
++      // abandon in-progress Keep/Undo decisions if it swapped
++      // underneath. A file that's PART of the open review switches the
++      // review to it, same as clicking its chip in ReviewPanel.jsx's
++      // own toolbar; anything else asks for the review to be finished
++      // or cancelled first rather than silently doing nothing.
++      if (s.review) {
++        if (s.review.files[path]) {
++          reviewSetActive(path);
++        } else {
++          setNotice("Finish or cancel the current AI edit review before opening another file.");
++        }
++        return;
++      }
+       if (s.buffers[path] || openingRef.current.has(path)) {
+         activateTab(path);
+         return;
+@@ -562,7 +589,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+         cancelledOpensRef.current.delete(path);
+       }
+     },
+-    [provider, activateTab, setActivePath, fileLoaded, dropTabs]
++    [provider, activateTab, setActivePath, fileLoaded, dropTabs, reviewSetActive]
+   );
+ 
+   // Every close path goes through here so unsaved edits are never
+@@ -1003,6 +1030,77 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+     jumpToPositionInPane(ref.path, { line: ref.fromLine ?? 1, endLine: ref.toLine ?? undefined });
+   }, [pendingJump, clearJump, openFile, jumpToPositionInPane]);
+ 
++  // W5.3: fetches the proposal `pendingReview` only names by id — see
++  // codeContext.js's SET_PENDING_REVIEW comment on why this doesn't
++  // trust whatever shape the caller (WorkspaceChatPanel.jsx's "Review"
++  // button, by way of BuildTab.jsx's CodeAwareChatPanel) already had.
++  // A proposal reviewMode.js's unreviewableReason() rejects (already
++  // resolved, gone stale, or a no-op edit with no files) surfaces as
++  // the SAME dismissible notice a failed file open uses, rather than
++  // opening a review with nothing to show.
++  const openProposalForReview = useCallback(
++    async (proposalId) => {
++      setNotice(null);
++      try {
++        const proposal = await getProposal(apiUrl, workspaceId, proposalId);
++        const reason = unreviewableReason(proposal);
++        if (reason) {
++          setNotice(reason);
++          return;
++        }
++        reviewOpen(proposal);
++      } catch (err) {
++        setNotice(`Couldn't open this edit for review: ${err.message}`);
++      }
++    },
++    [apiUrl, workspaceId, reviewOpen]
++  );
++
++  // Cleared right away, same as pendingJump above — clicking Review
++  // again on the very same proposal (closed without deciding, then
++  // reopened) must still fire.
++  useEffect(() => {
++    if (!pendingReview) return;
++    const proposalId = pendingReview;
++    clearReview();
++    openProposalForReview(proposalId);
++  }, [pendingReview, clearReview, openProposalForReview]);
++
++  // ReviewPanel.jsx's "Done" — reviewMode.js's buildDecisions() turns
++  // the review's current per-file state into exactly the `decisions`
++  // POST .../code/proposals/{id}/resolve wants. A stale 409 (one of the
++  // review's files changed on the server since the proposal was made)
++  // disables Done rather than leaving it retryable — there is nothing
++  // a retry of the SAME decisions would do differently. No success
++  // notice on the happy path: `notice` (below) is styled as an error
++  // banner everywhere else it's used, and resolveProposal()'s own
++  // write already lands through the ordinary code_file_updated ->
++  // syncOpenBuffers() channel (this component's `provider.subscribe`
++  // effect, unchanged by W5.3) — reviewMode.js's resolvedMessage() is
++  // exported for a caller that DOES want the wording (W5.4's tray is
++  // the likely one) rather than unused.
++  const handleReviewDone = useCallback(async () => {
++    const current = stateRef.current.review;
++    if (!current) return;
++    reviewSubmitting(true);
++    try {
++      const decisions = buildDecisions(current);
++      await resolveProposal(apiUrl, workspaceId, current.proposalId, decisions);
++      reviewClose();
++    } catch (err) {
++      if (err instanceof ProposalStaleError) {
++        reviewError(
++          "This edit can no longer be applied — one of its files changed on the server since it was proposed. Close this review and ask again.",
++          true
++        );
++      } else {
++        reviewError(err.message || "Couldn't apply this edit.", false);
++      }
++    } finally {
++      reviewSubmitting(false);
++    }
++  }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
++
+   // History's "Restore": lands the server's response the same way a
+   // normal save does — FILE_LOADED for the buffer, plus the file list's
+   // own entry patched in place rather than a full refetch (saveFile()
+@@ -1186,8 +1284,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+ 
+   // ---- derived ---------------------------------------------------------
+ 
+-  const { tabs, buffers, activePath } = state;
++  const { tabs, buffers, activePath, review } = state;
+   const activeBuffer = activePath ? buffers[activePath] : null;
++  // W5.3: files in the open review whose NORMAL tab also has unsaved
++  // edits — ReviewPanel.jsx's own amber banner (the proposal was made
++  // against the saved version, not the buffer).
++  const reviewDirtyPaths = useMemo(() => dirtyOverlap(review, buffers), [review, buffers]);
+   const flagsKey = useMemo(() => encodeTabFlags(tabs, buffers), [tabs, buffers]);
+   // W3.1 part 2: a proposed write is outstanding for the active path
+   // and nothing has been typed since (awaitingConfirmation[path] still
+@@ -1480,7 +1582,25 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+           className={editorColumnHidden ? "hidden" : "flex-1 min-w-0 flex flex-col"}
+           style={isMobile ? undefined : { minWidth: EDITOR_MIN_WIDTH }}
+         >
+-          <EditorTabs
++          {review ? (
++            <ReviewPanel
++              review={review}
++              dirtyPaths={reviewDirtyPaths}
++              visible={!editorColumnHidden}
++              onSelectFile={reviewSetActive}
++              onFileChange={reviewFileUpdate}
++              onDone={handleReviewDone}
++              onClose={reviewClose}
++            />
++          ) : null}
++          {/* W5.3: the normal tab strip + editors, kept mounted (not
++              unmounted) under `review` so closing a review puts every tab
++              back exactly as it was — undo history, cursor, scroll — see
++              ReviewPanel.jsx's own header. `display:contents` when shown
++              so this wrapper doesn't itself take part in the flex column
++              above (its children lay out as if it weren't there). */}
++          <div className={review ? "hidden" : "contents"}>
++            <EditorTabs
+             tabs={tabs}
+             activePath={activePath}
+             flagsKey={flagsKey}
+@@ -1641,6 +1761,7 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+               </div>
+             ) : null}
+           </div>
++          </div>
+         </div>
+ 
+         {/* Preview column (W2.3b): empty frame for now — W6.1 mounts the
+diff --git a/frontend/app/components/workbench/ReviewPanel.jsx b/frontend/app/components/workbench/ReviewPanel.jsx
+new file mode 100644
+index 0000000..7cd17e0
+--- /dev/null
++++ b/frontend/app/components/workbench/ReviewPanel.jsx
+@@ -0,0 +1,277 @@
++"use client";
++// frontend/app/components/workbench/ReviewPanel.jsx — W5.3 (Build
++// Workbench plan). The Copilot-style review of one AI-proposed edit:
++// a toolbar (progress, previous/next change, Keep all, Undo all,
++// Cancel, Done), a list of the files the edit touches with +/- badges,
++// and one merge-view editor per file (CodeEditor in review mode — see
++// that file's header for how a hunk's Keep / Undo works).
++//
++// It REPLACES the tabs + editor area while a review is open (EditorWorkbench
++// keeps the normal editors mounted but hidden underneath, so closing the
++// review puts every tab back exactly as it was — undo history, cursor,
++// scroll). The Explorer, bottom panel and status bar stay put.
++//
++// Presentational: the proposal, the per-file state (`current`,
++// `remaining`, `added`, `removed`) and the submit lifecycle all live in
++// the editor store's `review` slice, and the resolve() round trip is
++// EditorWorkbench's — this component only renders that state and turns
++// clicks into the callbacks below. The one thing it owns is a map of its
++// editors' imperative handles, which is how Keep all / Undo all and the
++// previous/next buttons reach the merge views without the store ever
++// holding a CodeMirror object.
++//
++// Every file's editor is mounted at once and the inactive ones hidden
++// (same as EditorPane): a merge view's decisions live in its editor
++// state, so unmounting one on a file switch would silently un-decide
++// every hunk in it. The store's copy (`current`) is what Done sends;
++// the mounted editors are what make switching files lossless.
++import { memo, useCallback, useEffect, useMemo, useRef } from "react";
++import { AlertTriangle, Check, ChevronDown, ChevronUp, Loader2, Sparkles } from "lucide-react";
++import { reviewProgress } from "../../lib/workbench/reviewMode";
++import { tabLabels } from "../../lib/workbench/tabUtils";
++import CodeEditor from "./CodeEditor";
++
++const OP_LABELS = { create: "new", delete: "deleted" };
++
++/**
++ * One reviewed file's merge editor. memo()'d on primitives only — `op`,
++ * `original` and `proposed` never change for a review's lifetime, so an
++ * update to a sibling file (or to this file's own `current`) doesn't
++ * re-render the others.
++ */
++const ReviewEditor = memo(function ReviewEditor({ path, op, original, proposed, active, visible, register, onChange }) {
++  const editorRef = useRef(null);
++  const shown = active && visible;
++  const review = useMemo(() => ({ original }), [original]);
++
++  // A display:none editor can't measure itself — see EditorPane's header.
++  useEffect(() => {
++    if (shown) editorRef.current?.getView()?.requestMeasure();
++  }, [shown]);
++
++  useEffect(() => {
++    register(path, editorRef);
++    return () => register(path, null);
++  }, [path, register]);
++
++  return (
++    <div className={active ? "absolute inset-0" : "hidden"}>
++      <CodeEditor
++        ref={editorRef}
++        filePath={path}
++        value={proposed}
++        review={review}
++        // A deletion has nothing to edit — the person's only choices are
++        // Keep (delete the file) and Undo (keep it).
++        readOnly={op === "delete"}
++        onReviewChange={(snap) => onChange(path, snap)}
++      />
++    </div>
++  );
++});
++
++function ToolbarButton({ onClick, disabled, title, children, primary = false }) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      disabled={disabled}
++      title={title}
++      className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
++        primary
++          ? "bg-[var(--accent)] text-[var(--accent-text)] hover:opacity-90"
++          : "border border-[var(--neutral-700)] text-[var(--neutral-200)] hover:bg-[var(--neutral-800)]"
++      }`}
++    >
++      {children}
++    </button>
++  );
++}
++
++/**
++ * @param {object} props
++ * @param {object} props.review - the editor store's `review` slice
++ * @param {string[]} props.dirtyPaths - reviewed files that also have unsaved edits open in a normal tab
++ * @param {boolean} props.visible - false while the whole editor column is hidden (phone layout showing the explorer)
++ * @param {(path: string) => void} props.onSelectFile
++ * @param {(path: string, snap: {current: string, remaining: number, added: number, removed: number}) => void} props.onFileChange
++ * @param {() => void} props.onDone - send every file's decision to resolve()
++ * @param {() => void} props.onClose - leave the review; the proposal stays pending on the server
++ */
++function ReviewPanel({ review, dirtyPaths, visible, onSelectFile, onFileChange, onDone, onClose }) {
++  const editorRefs = useRef(new Map());
++  const register = useCallback((path, ref) => {
++    if (ref) editorRefs.current.set(path, ref);
++    else editorRefs.current.delete(path);
++  }, []);
++
++  const progress = reviewProgress(review);
++  const busy = review.submitting;
++  const canDone = progress.allResolved && !busy && !review.stale;
++  const labels = useMemo(() => tabLabels(review.order), [review.order]);
++
++  const forEachEditor = (fn) => {
++    for (const ref of editorRefs.current.values()) if (ref.current) fn(ref.current);
++  };
++  const active = () => editorRefs.current.get(review.activePath)?.current;
++
++  const statusText = !progress.ready
++    ? "Loading changes…"
++    : progress.remaining === 0
++    ? "All changes reviewed"
++    : `${progress.remaining} change${progress.remaining === 1 ? "" : "s"} left in ${progress.filesLeft} file${
++        progress.filesLeft === 1 ? "" : "s"
++      }`;
++
++  const doneTitle = review.stale
++    ? "This edit can no longer be applied"
++    : !progress.ready
++    ? "Still loading"
++    : progress.remaining > 0
++    ? "Keep or undo every change first — Keep all / Undo all settle the rest at once"
++    : "Apply your decisions";
++
++  return (
++    <div className="flex-1 min-h-0 flex flex-col">
++      <div className="shrink-0 flex flex-col gap-2 border-b border-[var(--neutral-800)] bg-[var(--neutral-900)] px-3 py-2">
++        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
++          <div className="flex min-w-0 items-center gap-2">
++            <Sparkles size={13} className="shrink-0 text-[var(--accent)]" />
++            <span
++              className="min-w-0 truncate text-xs text-[var(--neutral-200)]"
++              title={review.instruction || review.summary || undefined}
++            >
++              {review.summary || review.instruction || "AI edit"}
++            </span>
++          </div>
++          <span role="status" aria-live="polite" className="shrink-0 text-[11px] text-[var(--neutral-500)]">
++            {statusText}
++          </span>
++        </div>
++
++        {review.order.length > 0 && (
++          <div role="tablist" aria-label="Files in this edit" className="flex gap-1 overflow-x-auto">
++            {labels.map(({ path, name, hint }) => {
++              const f = review.files[path];
++              const isActive = path === review.activePath;
++              const resolved = f.remaining === 0;
++              return (
++                <button
++                  key={path}
++                  type="button"
++                  role="tab"
++                  aria-selected={isActive}
++                  onClick={() => onSelectFile(path)}
++                  title={path}
++                  className={`shrink-0 flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors ${
++                    isActive
++                      ? "border-[var(--neutral-600)] bg-[var(--neutral-800)] text-[var(--neutral-100)]"
++                      : "border-[var(--neutral-800)] text-[var(--neutral-400)] hover:bg-[var(--neutral-800)]"
++                  }`}
++                >
++                  <span className="max-w-[12rem] truncate">
++                    {name}
++                    {hint ? <span className="text-[var(--neutral-600)]"> · {hint}</span> : null}
++                  </span>
++                  {OP_LABELS[f.op] && (
++                    <span className="rounded bg-[var(--neutral-700)] px-1 text-[10px] uppercase tracking-wide text-[var(--neutral-300)]">
++                      {OP_LABELS[f.op]}
++                    </span>
++                  )}
++                  {f.remaining == null ? null : resolved ? (
++                    <Check size={11} className="text-emerald-400" aria-label="All changes in this file reviewed" />
++                  ) : (
++                    <span className="flex gap-1 font-mono text-[10px]">
++                      <span className="text-emerald-400">+{f.added}</span>
++                      <span className="text-red-400">−{f.removed}</span>
++                    </span>
++                  )}
++                </button>
++              );
++            })}
++          </div>
++        )}
++
++        <div role="toolbar" aria-label="Review actions" className="flex flex-wrap items-center justify-between gap-2">
++          <div className="flex flex-wrap items-center gap-1.5">
++            <ToolbarButton onClick={() => active()?.prevChange()} disabled={busy} title="Previous change in this file">
++              <ChevronUp size={12} /> Prev
++            </ToolbarButton>
++            <ToolbarButton onClick={() => active()?.nextChange()} disabled={busy} title="Next change in this file">
++              <ChevronDown size={12} /> Next
++            </ToolbarButton>
++            <span className="mx-1 h-4 w-px bg-[var(--neutral-800)]" aria-hidden="true" />
++            <ToolbarButton
++              onClick={() => forEachEditor((ed) => ed.keepAll())}
++              disabled={busy || review.stale || progress.remaining === 0}
++              title="Keep every remaining change in every file"
++            >
++              Keep all
++            </ToolbarButton>
++            <ToolbarButton
++              onClick={() => forEachEditor((ed) => ed.undoAll())}
++              disabled={busy || review.stale || progress.remaining === 0}
++              title="Undo every remaining change in every file"
++            >
++              Undo all
++            </ToolbarButton>
++          </div>
++          <div className="flex items-center gap-1.5">
++            <ToolbarButton
++              onClick={onClose}
++              disabled={busy}
++              title="Close the review — the edit stays pending and you can reopen it"
++            >
++              {review.stale ? "Close" : "Cancel"}
++            </ToolbarButton>
++            <ToolbarButton onClick={onDone} disabled={!canDone} title={doneTitle} primary>
++              {busy ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
++              {busy ? "Applying…" : "Done"}
++            </ToolbarButton>
++          </div>
++        </div>
++      </div>
++
++      {dirtyPaths.length > 0 && (
++        <div className="shrink-0 flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-300">
++          <AlertTriangle size={12} className="mt-px shrink-0" />
++          <span>
++            You have unsaved edits in {dirtyPaths.join(", ")}. This edit was made against the saved version, so keeping
++            it will mark {dirtyPaths.length === 1 ? "that file" : "those files"} as changed on the server.
++          </span>
++        </div>
++      )}
++
++      {review.error && (
++        <div
++          role="alert"
++          className="shrink-0 flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-300"
++        >
++          <AlertTriangle size={12} className="mt-px shrink-0" />
++          <span>{review.error}</span>
++        </div>
++      )}
++
++      <div className="relative flex-1 min-h-0">
++        {review.order.map((path) => {
++          const f = review.files[path];
++          return (
++            <ReviewEditor
++              key={path}
++              path={path}
++              op={f.op}
++              original={f.original}
++              proposed={f.proposed}
++              active={path === review.activePath}
++              visible={visible}
++              register={register}
++              onChange={onFileChange}
++            />
++          );
++        })}
++      </div>
++    </div>
++  );
++}
++
++export default memo(ReviewPanel);
+diff --git a/frontend/app/lib/workbench/__tests__/codeContext.test.mjs b/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
+index f4671ac..926edb0 100644
+--- a/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/codeContext.test.mjs
+@@ -43,7 +43,7 @@ function assert(cond, msg) {
+   }
+ }
+ 
+-const initialState = { refs: [], nextId: 1, pendingJump: null };
++const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null };
+ 
+ // --- ADD_REF -----------------------------------------------------------
+ 
+@@ -172,6 +172,25 @@ assertEqual(afterClearJump.pendingJump, null, "CLEAR_PENDING_JUMP resets it");
+ const noopClear = codeContextReducer(afterClearJump, { type: "CLEAR_PENDING_JUMP" });
+ assert(noopClear === afterClearJump, "CLEAR_PENDING_JUMP with nothing pending returns the SAME state object");
+ 
++// --- pending review (W5.3) ----------------------------------------------
++
++const withReview = codeContextReducer(initialState, { type: "SET_PENDING_REVIEW", proposalId: "prop_1" });
++assertEqual(withReview.pendingReview, "prop_1", "SET_PENDING_REVIEW records the proposal id");
++assertEqual(withReview.pendingJump, null, "...without touching pendingJump");
++const afterClearReview = codeContextReducer(withReview, { type: "CLEAR_PENDING_REVIEW" });
++assertEqual(afterClearReview.pendingReview, null, "CLEAR_PENDING_REVIEW resets it");
++const noopClearReview = codeContextReducer(afterClearReview, { type: "CLEAR_PENDING_REVIEW" });
++assert(noopClearReview === afterClearReview, "CLEAR_PENDING_REVIEW with nothing pending returns the SAME state object");
++
++// Clicking Review a second time before the first lands (same proposal,
++// still just re-set) must still register as a change to consumers — a
++// same-value SET_PENDING_REVIEW is NOT collapsed to a no-op the way
++// CLEAR_PENDING_REVIEW is, since EditorWorkbench.jsx's effect keys off
++// this changing at all, not off the id being new.
++const setAgain = codeContextReducer(withReview, { type: "SET_PENDING_REVIEW", proposalId: "prop_1" });
++assertEqual(setAgain.pendingReview, "prop_1", "SET_PENDING_REVIEW with the same id still produces a fresh state object");
++assert(setAgain !== withReview, "...i.e. it is NOT short-circuited to the same object");
++
+ // --- contextBudget -----------------------------------------------------------
+ 
+ assertEqual(contextBudget([]).totalChars, 0, "contextBudget of no refs is 0");
+diff --git a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+index 499206b..fc416be 100644
+--- a/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
++++ b/frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+@@ -1,16 +1,17 @@
+ // W2.2 (Build Workbench plan) — reducer test for editorStore.js;
+ // extended in W2.3a for the tab-strip actions, in W2.3b for SET_LAYOUT, in
+-// W2.4 for RENAME_PATHS and in W2.5 for the save-conflict resolutions.
++// W2.4 for RENAME_PATHS, in W2.5 for the save-conflict resolutions, and in
++// W5.3 for the `review` slice (REVIEW_OPEN etc).
+ //
+ // Runs the REAL reducer. Until W2.3a this file kept a byte-for-byte pasted
+ // copy of editorReducer() (editorStore.js pulls in `react`, which plain
+ // `node` couldn't resolve without node_modules) and said the copy had to be
+ // kept in sync by hand — which is how a test ends up green against code
+ // that has moved on. loadSource.mjs now reads editorStore.js itself and
+-// satisfies its two imports from the map below: a stub for `react` (only
++// satisfies its imports from the map below: a stub for `react` (only
+ // its top-level createContext() call runs at load time; the provider and
+ // hook aren't exercised here) and the real tabUtils.js / layoutPrefs.js /
+-// fileTree.js.
++// fileTree.js / reviewMode.js.
+ //
+ // Run: node frontend/app/lib/workbench/__tests__/editorStore.test.mjs
+ import { loadSource } from "./loadSource.mjs";
+@@ -25,8 +26,15 @@ const reactStub = {
+ const tabUtils = loadSource("../tabUtils.js");
+ const layoutPrefs = loadSource("../layoutPrefs.js");
+ const fileTree = loadSource("../fileTree.js");
++const reviewMode = loadSource("../reviewMode.js");
+ const { editorReducer } = loadSource("../editorStore.js", {
+-  imports: { react: reactStub, "./tabUtils": tabUtils, "./layoutPrefs": layoutPrefs, "./fileTree": fileTree },
++  imports: {
++    react: reactStub,
++    "./tabUtils": tabUtils,
++    "./layoutPrefs": layoutPrefs,
++    "./fileTree": fileTree,
++    "./reviewMode": reviewMode,
++  },
+ });
+ 
+ const initialState = {
+@@ -35,6 +43,7 @@ const initialState = {
+   buffers: {},
+   layout: {},
+   proposals: [],
++  review: null,
+ };
+ 
+ let failures = 0;
+@@ -451,6 +460,102 @@ assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCES
+   assertEqual([kept.tabs, kept.activePath], [st.tabs, st.activePath], "resolving a conflict doesn't change tabs or the active file");
+ }
+ 
++// --- W5.3: REVIEW_OPEN / REVIEW_SET_ACTIVE / REVIEW_FILE_UPDATE /
++// REVIEW_SUBMITTING / REVIEW_ERROR / REVIEW_CLOSE ------------------------
++{
++  const proposal = {
++    id: "prop_1",
++    instruction: "add a docstring",
++    summary: "Add a docstring to greet()",
++    status: "pending",
++    files: [
++      { path: "a.py", op: "replace", base_version: 3, original: "def greet():\n    pass\n", proposed: "def greet():\n    \"\"\"Says hi.\"\"\"\n    pass\n" },
++      { path: "new.py", op: "create", base_version: 0, original: "", proposed: "x = 1\n" },
++    ],
++  };
++
++  let st = editorReducer(initialState, { type: "REVIEW_OPEN", proposal });
++  assertEqual(st.review.proposalId, "prop_1", "REVIEW_OPEN stores the proposal id");
++  assertEqual(st.review.order, ["a.py", "new.py"], "REVIEW_OPEN's file order matches the proposal's files");
++  assertEqual(st.review.activePath, "a.py", "REVIEW_OPEN activates the first file");
++  assertEqual(st.review.files["a.py"].remaining, null, "a freshly opened file's remaining is null — its editor hasn't reported yet");
++  assertEqual(st.review.files["a.py"].current, proposal.files[0].proposed, "a freshly opened file's current text is the proposed text");
++  assertEqual(st.review.submitting, false, "REVIEW_OPEN starts not submitting");
++  assertEqual(st.review.stale, false, "REVIEW_OPEN starts not stale");
++  assertEqual(st.tabs, [], "opening a review doesn't touch the normal tab strip");
++
++  st = editorReducer(st, { type: "REVIEW_SET_ACTIVE", path: "new.py" });
++  assertEqual(st.review.activePath, "new.py", "REVIEW_SET_ACTIVE switches the active file");
++
++  const same = editorReducer(st, { type: "REVIEW_SET_ACTIVE", path: "new.py" });
++  assertEqual(same === st, true, "REVIEW_SET_ACTIVE to the already-active file is a no-op (same state object)");
++
++  assertEqual(
++    editorReducer(st, { type: "REVIEW_SET_ACTIVE", path: "not-in-review.py" }) === st,
++    true,
++    "REVIEW_SET_ACTIVE to a path outside the review is ignored"
++  );
++
++  st = editorReducer(st, {
++    type: "REVIEW_FILE_UPDATE",
++    path: "a.py",
++    snap: { current: "def greet():\n    pass\n", remaining: 0, added: 0, removed: 1 },
++  });
++  assertEqual(st.review.files["a.py"].remaining, 0, "REVIEW_FILE_UPDATE sets remaining");
++  assertEqual(st.review.files["a.py"].current, "def greet():\n    pass\n", "REVIEW_FILE_UPDATE sets current");
++  assertEqual(st.review.files["new.py"].remaining, null, "REVIEW_FILE_UPDATE on one file leaves another file's state alone");
++
++  assertEqual(
++    editorReducer(st, { type: "REVIEW_FILE_UPDATE", path: "ghost.py", snap: { current: "", remaining: 0, added: 0, removed: 0 } }) === st,
++    true,
++    "REVIEW_FILE_UPDATE for a path not in the review is a no-op"
++  );
++
++  st = editorReducer(st, { type: "REVIEW_SUBMITTING", submitting: true });
++  assertEqual(st.review.submitting, true, "REVIEW_SUBMITTING sets the in-flight flag");
++
++  st = editorReducer(st, { type: "REVIEW_ERROR", error: "This edit can no longer be applied.", stale: true });
++  assertEqual(st.review.error, "This edit can no longer be applied.", "REVIEW_ERROR sets the message");
++  assertEqual(st.review.stale, true, "REVIEW_ERROR can flag the review as stale (a 409)");
++
++  // Re-opening (a second proposal) over an ALREADY-open review replaces
++  // the slice wholesale rather than merging — a stale per-file
++  // `remaining`/`current`/`error`/`stale` from the previous proposal
++  // must not leak into the new one.
++  const reopened = editorReducer(st, {
++    type: "REVIEW_OPEN",
++    proposal: { id: "prop_2", status: "pending", files: [{ path: "b.py", op: "replace", original: "1", proposed: "2" }] },
++  });
++  assertEqual(reopened.review.proposalId, "prop_2", "REVIEW_OPEN over an open review opens the new one");
++  assertEqual(reopened.review.files["a.py"], undefined, "...with no trace of the previous review's files");
++  assertEqual(reopened.review.error, null, "...and no trace of the previous review's error");
++  assertEqual(reopened.review.stale, false, "...or its stale flag");
++
++  st = editorReducer(st, { type: "REVIEW_CLOSE" });
++  assertEqual(st.review, null, "REVIEW_CLOSE clears the review");
++
++  assertEqual(
++    editorReducer(initialState, { type: "REVIEW_CLOSE" }) === initialState,
++    true,
++    "REVIEW_CLOSE with no open review is a no-op"
++  );
++  assertEqual(
++    editorReducer(initialState, { type: "REVIEW_SET_ACTIVE", path: "a.py" }) === initialState,
++    true,
++    "REVIEW_SET_ACTIVE with no open review is a no-op"
++  );
++  assertEqual(
++    editorReducer(initialState, { type: "REVIEW_SUBMITTING", submitting: true }) === initialState,
++    true,
++    "REVIEW_SUBMITTING with no open review is a no-op"
++  );
++  assertEqual(
++    editorReducer(initialState, { type: "REVIEW_ERROR", error: "x" }) === initialState,
++    true,
++    "REVIEW_ERROR with no open review is a no-op"
++  );
++}
++
+ if (failures > 0) {
+   console.error(`\n${failures} assertion(s) failed.`);
+   process.exit(1);
+diff --git a/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs b/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
+new file mode 100644
+index 0000000..70ae844
+--- /dev/null
++++ b/frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
+@@ -0,0 +1,269 @@
++// W5.3 (Build Workbench plan) — tests for reviewMode.js.
++//
++// Loads the REAL lib/workbench/reviewMode.js through loadSource.mjs (no
++// pasted copy). No `imports` are passed on purpose: reviewMode.js must
++// stay dependency-free (same rule as fileTree.js/tabUtils.js — see that
++// file's own header), and an added `import` line would make this load
++// fail loudly.
++//
++// Run: node frontend/app/lib/workbench/__tests__/reviewMode.test.mjs
++import { loadSource } from "./loadSource.mjs";
++
++const {
++  chunkLineStats,
++  reviewFilesFromProposal,
++  decisionForFile,
++  buildDecisions,
++  reviewProgress,
++  dirtyOverlap,
++  unreviewableReason,
++  resolvedMessage,
++} = loadSource("../reviewMode.js");
++
++let failures = 0;
++function assertEqual(actual, expected, msg) {
++  const a = JSON.stringify(actual);
++  const e = JSON.stringify(expected);
++  if (a !== e) {
++    failures++;
++    console.error(`FAIL: ${msg}\n  expected: ${e}\n  actual:   ${a}`);
++  } else {
++    console.log(`PASS: ${msg}`);
++  }
++}
++
++// A minimal stand-in for CM6's `Text` — exactly the subset chunkLineStats()
++// uses: `.lineAt(pos).number`, 1-based, computed from `\n` offsets.
++function fakeDoc(text) {
++  const starts = [0];
++  for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
++  return {
++    lineAt(pos) {
++      let number = 1;
++      for (let i = 1; i < starts.length; i++) {
++        if (starts[i] > pos) break;
++        number++;
++      }
++      return { number };
++    },
++  };
++}
++
++// --- chunkLineStats -----------------------------------------------------
++
++{
++  // "line1\nline2\nline3\n" -> "line1\nCHANGED\nline3\n": one line swapped
++  // for one line, at line 2 on both sides.
++  const original = fakeDoc("line1\nline2\nline3\n");
++  const doc = fakeDoc("line1\nCHANGED\nline3\n");
++  const chunks = [{ fromA: 6, toA: 12, endA: 11, fromB: 6, toB: 14, endB: 13 }];
++  assertEqual(chunkLineStats(chunks, original, doc), { added: 1, removed: 1 }, "a one-line swap is +1/-1");
++}
++{
++  // A pure insertion: nothing removed (fromA === toA).
++  const original = fakeDoc("a\nb\n");
++  const doc = fakeDoc("a\nNEW\nb\n");
++  const chunks = [{ fromA: 2, toA: 2, endA: 1, fromB: 2, toB: 6, endB: 5 }];
++  assertEqual(chunkLineStats(chunks, original, doc), { added: 1, removed: 0 }, "a pure insertion has removed: 0");
++}
++{
++  // A pure deletion: nothing added (fromB === toB).
++  const original = fakeDoc("a\nGONE\nb\n");
++  const doc = fakeDoc("a\nb\n");
++  const chunks = [{ fromA: 2, toA: 7, endA: 6, fromB: 2, toB: 2, endB: 1 }];
++  assertEqual(chunkLineStats(chunks, original, doc), { added: 0, removed: 1 }, "a pure deletion has added: 0");
++}
++assertEqual(chunkLineStats([], fakeDoc(""), fakeDoc("")), { added: 0, removed: 0 }, "no chunks -> no lines");
++assertEqual(chunkLineStats(undefined, fakeDoc(""), fakeDoc("")), { added: 0, removed: 0 }, "chunkLineStats(undefined) doesn't throw");
++{
++  // Two separate chunks in one file both count toward the total. Each
++  // chunk here covers exactly one line, so its own `endA`/`endB` is the
++  // same offset as its `fromA`/`fromB` — trivially "the same line" —
++  // rather than needing to land on some other in-line offset.
++  const original = fakeDoc("a\nb\nc\nd\n");
++  const doc = fakeDoc("A\nb\nC\nd\n");
++  const chunks = [
++    { fromA: 0, toA: 2, endA: 0, fromB: 0, toB: 2, endB: 0 },
++    { fromA: 4, toA: 6, endA: 4, fromB: 4, toB: 6, endB: 4 },
++  ];
++  assertEqual(chunkLineStats(chunks, original, doc), { added: 2, removed: 2 }, "two separate chunks both count toward the total");
++}
++
++// --- reviewFilesFromProposal ---------------------------------------------
++
++{
++  const built = reviewFilesFromProposal({
++    files: [
++      { path: "a.py", op: "replace", base_version: 3, original: "old\n", proposed: "new\n" },
++      { path: "new.py", op: "create", base_version: 0, original: "", proposed: "x = 1\n" },
++      { path: "gone.py", op: "delete", base_version: 2, original: "bye\n", proposed: "" },
++    ],
++  });
++  assertEqual(built.order, ["a.py", "new.py", "gone.py"], "order matches the proposal's files, in order");
++  assertEqual(built.files["a.py"], {
++    op: "replace",
++    baseVersion: 3,
++    original: "old\n",
++    proposed: "new\n",
++    current: "new\n",
++    remaining: null,
++    added: 0,
++    removed: 0,
++  }, "a file's initial state: current === proposed, remaining null until an editor reports");
++  assertEqual(built.files["new.py"].op, "create", "op is carried through");
++  assertEqual(built.files["gone.py"].op, "delete", "...for every op");
++}
++assertEqual(reviewFilesFromProposal({}), { order: [], files: {} }, "a proposal with no files array -> empty review");
++assertEqual(reviewFilesFromProposal(null), { order: [], files: {} }, "reviewFilesFromProposal(null) doesn't throw");
++{
++  const built = reviewFilesFromProposal({ files: [{ path: "a.py", proposed: "x" }, { path: "a.py", proposed: "y" }] });
++  assertEqual(built.order, ["a.py"], "a duplicate path in `files` isn't added to order twice");
++}
++{
++  const built = reviewFilesFromProposal({ files: [{ path: "a.py", original: "x\n", proposed: "y\n" }] });
++  assertEqual(built.files["a.py"].op, "replace", "a file with no `op` defaults to replace");
++  assertEqual(built.files["a.py"].baseVersion, 0, "a file with no base_version defaults to 0");
++}
++
++// --- decisionForFile ------------------------------------------------------
++
++assertEqual(
++  decisionForFile({ op: "replace", original: "old\n", proposed: "new\n", final: "old\n" }),
++  { decision: "undo", finalContent: null },
++  "final === original -> undo, nothing was kept"
++);
++assertEqual(
++  decisionForFile({ op: "replace", original: "old\n", proposed: "new\n", final: "new\n" }),
++  { decision: "keep", finalContent: null },
++  "final === proposed -> keep with NO finalContent (server writes its own stored copy byte for byte)"
++);
++assertEqual(
++  decisionForFile({ op: "replace", original: "a\nb\nc\n", proposed: "A\nb\nC\n", final: "A\nb\nc\n" }),
++  { decision: "keep", finalContent: "A\nb\nc\n" },
++  "a mix of kept and undone hunks -> keep WITH the merged text"
++);
++assertEqual(
++  decisionForFile({ op: "replace", original: "a\r\nb\r\n", proposed: "A\r\nb\r\n", final: "A\nb\n" }),
++  { decision: "keep", finalContent: null },
++  "CRLF original/proposed vs. CM6's always-LF final text still compares equal (eol() normalizes both sides)"
++);
++assertEqual(
++  decisionForFile({ op: "create", original: "", proposed: "x = 1\n", final: "x = 1\n" }),
++  { decision: "keep", finalContent: null },
++  "create, fully kept -> keep"
++);
++assertEqual(
++  decisionForFile({ op: "create", original: "", proposed: "x = 1\n", final: "" }),
++  { decision: "undo", finalContent: null },
++  "create, fully undone -> undo (don't create the file)"
++);
++assertEqual(
++  decisionForFile({ op: "delete", original: "bye\n", proposed: "", final: "" }),
++  { decision: "keep", finalContent: null },
++  "delete, nothing brought back -> keep (delete the file)"
++);
++assertEqual(
++  decisionForFile({ op: "delete", original: "bye\n", proposed: "", final: "bye\n" }),
++  { decision: "undo", finalContent: null },
++  "delete with everything undone (brought back) -> undo (keep the file)"
++);
++assertEqual(
++  decisionForFile({ op: "delete", original: "line1\nline2\n", proposed: "", final: "line1\n" }),
++  { decision: "undo", finalContent: null },
++  "delete with SOME lines brought back is still undo, never keep-with-finalContent — the server's delete ignores finalContent entirely"
++);
++
++// --- buildDecisions ---------------------------------------------------
++
++{
++  const review = {
++    order: ["a.py", "gone.py"],
++    files: {
++      "a.py": { op: "replace", original: "old\n", proposed: "new\n", current: "new\n" },
++      "gone.py": { op: "delete", original: "bye\n", proposed: "", current: "" },
++    },
++  };
++  assertEqual(
++    buildDecisions(review),
++    [
++      { path: "a.py", decision: "keep", finalContent: null },
++      { path: "gone.py", decision: "keep", finalContent: null },
++    ],
++    "buildDecisions maps every file in order through decisionForFile"
++  );
++}
++assertEqual(buildDecisions(null), [], "buildDecisions(null) doesn't throw");
++
++// --- reviewProgress -----------------------------------------------------
++
++assertEqual(reviewProgress(null), { ready: false, remaining: 0, filesLeft: 0, allResolved: false }, "no review -> not ready, nothing resolved");
++{
++  const loading = {
++    order: ["a.py", "b.py"],
++    files: { "a.py": { remaining: null }, "b.py": { remaining: null } },
++  };
++  assertEqual(reviewProgress(loading), { ready: false, remaining: 0, filesLeft: 0, allResolved: false }, "any file still null -> not ready");
++}
++{
++  const partial = {
++    order: ["a.py", "b.py"],
++    files: { "a.py": { remaining: 2 }, "b.py": { remaining: 0 } },
++  };
++  assertEqual(reviewProgress(partial), { ready: true, remaining: 2, filesLeft: 1, allResolved: false }, "ready, some hunks left in one file -> not allResolved");
++}
++{
++  const done = {
++    order: ["a.py", "b.py"],
++    files: { "a.py": { remaining: 0 }, "b.py": { remaining: 0 } },
++  };
++  assertEqual(reviewProgress(done), { ready: true, remaining: 0, filesLeft: 0, allResolved: true }, "every file at 0 remaining -> allResolved");
++}
++{
++  // A file's editor hasn't mounted at all yet (no entry in `files`) — same as remaining: null.
++  const missing = { order: ["a.py"], files: {} };
++  assertEqual(reviewProgress(missing), { ready: false, remaining: 0, filesLeft: 0, allResolved: false }, "a listed path missing from files[] -> not ready, doesn't throw");
++}
++
++// --- dirtyOverlap ---------------------------------------------------------
++
++assertEqual(dirtyOverlap(null, {}), [], "no review -> no overlap");
++assertEqual(
++  dirtyOverlap({ order: ["a.py", "b.py", "c.py"] }, { "a.py": { dirty: true }, "b.py": { dirty: false }, "c.py": {} }),
++  ["a.py"],
++  "dirtyOverlap returns only the review's files whose buffer is dirty"
++);
++assertEqual(dirtyOverlap({ order: ["a.py"] }, {}), [], "a file with no open buffer at all isn't dirty");
++
++// --- unreviewableReason ----------------------------------------------------
++
++assertEqual(unreviewableReason({ status: "pending", files: [{ path: "a.py" }] }), null, "a pending proposal with files can be reviewed");
++assertEqual(
++  unreviewableReason({ status: "pending", files: [] }),
++  "This edit doesn't change any files.",
++  "a pending proposal with no files can't be reviewed"
++);
++assertEqual(unreviewableReason({ status: "accepted" }), "This edit was already applied.", "accepted");
++assertEqual(unreviewableReason({ status: "rejected" }), "This edit was already discarded.", "rejected");
++assertEqual(unreviewableReason({ status: "partial" }), "This edit was already partly applied.", "partial");
++assertEqual(
++  unreviewableReason({ status: "stale" }),
++  "This edit is out of date — a file changed after it was proposed. Ask for it again.",
++  "stale"
++);
++assertEqual(unreviewableReason({ status: "failed" }), "That edit couldn't be generated. Try asking again.", "failed");
++assertEqual(unreviewableReason({ status: "something-new" }), "This edit can't be opened for review.", "an unrecognized status gets a generic reason, not a throw");
++assertEqual(unreviewableReason({}), "This edit can't be opened for review.", "no status at all -> generic reason");
++
++// --- resolvedMessage -----------------------------------------------------
++
++assertEqual(resolvedMessage("accepted"), "Applied the AI edit.", "accepted");
++assertEqual(resolvedMessage("partial"), "Applied part of the AI edit.", "partial");
++assertEqual(resolvedMessage("rejected"), "Discarded the AI edit — nothing was changed.", "rejected");
++assertEqual(resolvedMessage("something-else"), "Finished reviewing the AI edit.", "an unrecognized status still gets a sensible message");
++
++if (failures > 0) {
++  console.error(`\n${failures} assertion(s) failed.`);
++  process.exit(1);
++} else {
++  console.log("\nAll assertions passed.");
++}
+diff --git a/frontend/app/lib/workbench/cmTheme.js b/frontend/app/lib/workbench/cmTheme.js
+index f2ae6d0..3727671 100644
+--- a/frontend/app/lib/workbench/cmTheme.js
++++ b/frontend/app/lib/workbench/cmTheme.js
+@@ -208,3 +208,67 @@ export function buildEditorTheme() {
+ 
+   return [theme, syntaxHighlighting(highlightStyle)];
+ }
++
++/**
++ * W5.3 (Build Workbench plan): the review-mode extension
++ * components/workbench/CodeEditor.jsx layers on top of buildEditorTheme()
++ * when it mounts @codemirror/merge's unifiedMergeView (ReviewPanel.jsx's
++ * per-file Copilot-style diff). Restates that package's own baseTheme
++ * selectors — `.cm-changedLine`, `.cm-deletedChunk`, the `.cm-merge-b`
++ * class unifiedMergeView tags its editor with (see
++ * ConflictCompareView.jsx's header for why THAT component's read-only
++ * two-pane diff uses the separate MergeView class instead, with its own
++ * `.cm-merge-a`/`.cm-merge-b` pair) — in this app's own tokens, same
++ * "reskin everywhere from one place" reasoning as buildEditorTheme()
++ * above. `.cm-mm-merge-btn*` styles the Keep/Undo buttons
++ * CodeEditor.jsx's renderMergeControl() builds, in place of the
++ * package's own default green/red "accept"/"reject" pair.
++ */
++export function buildReviewTheme() {
++  const colors = {
++    panel: cssVar("--neutral-900"),
++    border: cssVar("--neutral-800"),
++    dim: cssVar("--neutral-500"),
++    lime: cssVar("--cyber-lime"),
++  };
++  // No token in globals.css is a distinct "removed-line red" either —
++  // see buildEditorTheme()'s own comment on why `t.invalid` above is
++  // also a literal, for the same reason.
++  const removed = "#ef4444";
++
++  return EditorView.theme(
++    {
++      "&.cm-merge-b .cm-changedLine": { backgroundColor: withAlpha(colors.lime, 0.1) },
++      ".cm-deletedChunk": {
++        backgroundColor: withAlpha(removed, 0.1),
++        borderRadius: "4px",
++      },
++      "&dark.cm-merge-b .cm-changedText": {
++        background: `linear-gradient(${withAlpha(colors.lime, 0.6)}, ${withAlpha(colors.lime, 0.6)}) bottom/100% 2px no-repeat`,
++      },
++      "&dark .cm-deletedChunk .cm-deletedText": {
++        background: `linear-gradient(${withAlpha(removed, 0.6)}, ${withAlpha(removed, 0.6)}) bottom/100% 2px no-repeat`,
++      },
++      ".cm-collapsedLines": {
++        color: colors.dim,
++        background: colors.panel,
++        border: `1px dashed ${colors.border}`,
++        borderRadius: "4px",
++        margin: "2px 0",
++      },
++      ".cm-mm-merge-btn": {
++        border: "none",
++        cursor: "pointer",
++        borderRadius: "3px",
++        fontFamily: "inherit",
++        fontSize: "10px",
++        fontWeight: "600",
++        padding: "1px 6px",
++        margin: "0 0 0 4px",
++      },
++      ".cm-mm-merge-btn-accept": { background: colors.lime, color: "#052e16" },
++      ".cm-mm-merge-btn-reject": { background: removed, color: "#450a0a" },
++    },
++    { dark: true }
++  );
++}
+diff --git a/frontend/app/lib/workbench/codeContext.js b/frontend/app/lib/workbench/codeContext.js
+index f59a4d2..c1f6f75 100644
+--- a/frontend/app/lib/workbench/codeContext.js
++++ b/frontend/app/lib/workbench/codeContext.js
+@@ -101,7 +101,7 @@ function refKey(ref) {
+   return `${ref.kind}:${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}`;
+ }
+ 
+-const initialState = { refs: [], nextId: 1, pendingJump: null };
++const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null };
+ 
+ /**
+  * Pure reducer — see editorStore.js's own header for why this shape
+@@ -185,6 +185,21 @@ export function codeContextReducer(state, action) {
+     case "CLEAR_PENDING_JUMP":
+       return state.pendingJump == null ? state : { ...state, pendingJump: null };
+ 
++    // W5.3: WorkspaceChatPanel.jsx's proposals list "Review" button, by
++    // way of BuildTab.jsx's CodeAwareChatPanel wrapper. One pending
++    // review request at a time, same reasoning as pendingJump above — a
++    // second click before the first lands just replaces it. Carries
++    // only the proposal's id: EditorWorkbench.jsx's own effect always
++    // re-fetches (GET .../code/proposals/{id}) rather than trusting
++    // whatever shape the caller happened to have, so a review opened
++    // from a stale list entry (W5.4's tray, a proposal another tab
++    // already resolved) still sees the CURRENT status.
++    case "SET_PENDING_REVIEW":
++      return { ...state, pendingReview: action.proposalId };
++
++    case "CLEAR_PENDING_REVIEW":
++      return state.pendingReview == null ? state : { ...state, pendingReview: null };
++
+     default:
+       return state;
+   }
+@@ -215,13 +230,15 @@ export function CodeContextProvider({ children }) {
+       remapRefs: (path, mapRange) => dispatch({ type: "REMAP_REFS", path, mapRange }),
+       requestJump: (ref) => dispatch({ type: "SET_PENDING_JUMP", ref }),
+       clearJump: () => dispatch({ type: "CLEAR_PENDING_JUMP" }),
++      requestReview: (proposalId) => dispatch({ type: "SET_PENDING_REVIEW", proposalId }),
++      clearReview: () => dispatch({ type: "CLEAR_PENDING_REVIEW" }),
+     }),
+     [dispatch]
+   );
+ 
+   const value = useMemo(
+-    () => ({ refs: state.refs, pendingJump: state.pendingJump, ...actions }),
+-    [state.refs, state.pendingJump, actions]
++    () => ({ refs: state.refs, pendingJump: state.pendingJump, pendingReview: state.pendingReview, ...actions }),
++    [state.refs, state.pendingJump, state.pendingReview, actions]
+   );
+ 
+   return createElement(CodeContextContext.Provider, { value }, children);
+diff --git a/frontend/app/lib/workbench/editorStore.js b/frontend/app/lib/workbench/editorStore.js
+index 8cd5941..e81a432 100644
+--- a/frontend/app/lib/workbench/editorStore.js
++++ b/frontend/app/lib/workbench/editorStore.js
+@@ -35,6 +35,25 @@
+ // with AI") without prop-drilling. Panel SIZES are not part of it; they
+ // stay with useSplitter (layoutPrefs.js's header has the split).
+ //
++// W5.3 addition: `review` — null, or the ONE AI-proposed edit currently
++// open in ReviewPanel.jsx's Copilot-style Keep/Undo UI. Deliberately a
++// single slot, not keyed by proposal id: only one review is ever open
++// at a time (it replaces the tabs+editor area — see ReviewPanel.jsx's
++// own header), and EditorWorkbench.jsx's openFile() guard refuses to
++// open anything else while it's set. Left `proposals` (still an empty
++// placeholder) alone — that one's W5.4's cross-session pending tray,
++// a list of every open proposal regardless of whether it's being
++// reviewed right now; this is "the one being reviewed right now, and
++// how far through it we are". Its shape — `{proposalId, instruction,
++// summary, order, files, activePath, submitting, error, stale}` — is
++// built by reviewMode.js's reviewFilesFromProposal() (order/files) on
++// REVIEW_OPEN; `files[path]` is `{op, baseVersion, original, proposed,
++// current, remaining, added, removed}`, where `current`/`remaining`/
++// `added`/`removed` start as reviewMode.js seeds them (proposed text,
++// `remaining: null` — "hasn't reported yet") and are kept live by each
++// file's own CodeEditor review instance reporting through
++// REVIEW_FILE_UPDATE (see CodeEditor.jsx's reviewSnapshot()).
++//
+ // No JSX here on purpose — every other file directly under `lib/`
+ // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
+ // so the provider component below is written with `createElement`
+@@ -45,6 +64,7 @@ import { createContext, createElement, useContext, useMemo, useReducer } from "r
+ import { isSameOrDescendant, remapPath } from "./fileTree";
+ import { nextActiveAfterClose } from "./tabUtils";
+ import { normalizeLayout, sameLayout } from "./layoutPrefs";
++import { reviewFilesFromProposal } from "./reviewMode";
+ 
+ const EditorStoreContext = createContext(null);
+ 
+@@ -54,6 +74,7 @@ const initialState = {
+   buffers: {},
+   layout: normalizeLayout(null), // W2.3b: the defaults; EditorStoreProvider's `initialLayout` overrides
+   proposals: [],
++  review: null, // W5.3: see this file's header comment
+ };
+ 
+ /**
+@@ -301,6 +322,87 @@ export function editorReducer(state, action) {
+       };
+     }
+ 
++    // W5.3: a proposal was fetched and is ready to review — EditorWorkbench.jsx's
++    // pendingReview effect dispatches this with GET .../code/proposals/{id}'s
++    // response, already checked against reviewMode.js's unreviewableReason()
++    // (a non-"pending" or file-less proposal never reaches here). Building
++    // `order`/`files` is reviewFilesFromProposal()'s job — see that
++    // function's own doc comment for why `remaining` starts null.
++    case "REVIEW_OPEN": {
++      const { proposal } = action;
++      const { order, files } = reviewFilesFromProposal(proposal);
++      return {
++        ...state,
++        review: {
++          proposalId: proposal.id,
++          instruction: proposal.instruction || "",
++          summary: proposal.summary || "",
++          order,
++          files,
++          activePath: order[0] ?? null,
++          submitting: false,
++          error: null,
++          stale: false,
++        },
++      };
++    }
++
++    // A file chip's click in ReviewPanel.jsx's toolbar, or
++    // EditorWorkbench.jsx's openFile() guard redirecting a click on a
++    // file that's already part of the open review.
++    case "REVIEW_SET_ACTIVE": {
++      if (!state.review) return state;
++      const { path } = action;
++      if (!state.review.order.includes(path) || state.review.activePath === path) return state;
++      return { ...state, review: { ...state.review, activePath: path } };
++    }
++    // One file's review editor reported a fresh snapshot (mount, a
++    // keystroke, a hunk's own Keep/Undo, or Keep all/Undo all) — see
++    // CodeEditor.jsx's reviewSnapshot(). No-ops for a file that isn't
++    // (or is no longer) part of the open review, so a stray report from
++    // an editor that's mid-unmount can't resurrect stale state.
++    case "REVIEW_FILE_UPDATE": {
++      if (!state.review) return state;
++      const { path, snap } = action;
++      const f = state.review.files[path];
++      if (!f) return state;
++      return {
++        ...state,
++        review: {
++          ...state.review,
++          files: {
++            ...state.review.files,
++            [path]: { ...f, current: snap.current, remaining: snap.remaining, added: snap.added, removed: snap.removed },
++          },
++        },
++      };
++    }
++
++    // The Done round trip's in-flight flag — ReviewPanel.jsx's own
++    // "Applying…" spinner and disabled toolbar.
++    case "REVIEW_SUBMITTING": {
++      if (!state.review) return state;
++      return { ...state, review: { ...state.review, submitting: !!action.submitting } };
++    }
++
++    // Done failed. `stale` (a 409 — one of the review's files changed on
++    // the server since the proposal was made) disables Done outright,
++    // matching resolveProposal()'s own ProposalStaleError; any other
++    // failure just shows the message and leaves Done available to retry.
++    case "REVIEW_ERROR": {
++      if (!state.review) return state;
++      return { ...state, review: { ...state.review, error: action.error ?? null, stale: !!action.stale } };
++    }
++
++    // Cancel, or Done succeeded. The proposal itself is untouched on
++    // the server either way (Cancel leaves it "pending"; Done's own
++    // resolveProposal() call is what changes its status) — this only
++    // closes the local UI.
++    case "REVIEW_CLOSE": {
++      if (!state.review) return state;
++      return { ...state, review: null };
++    }
++
+     // W3.1: switching the Explorer's source (Project files / Local
+     // folder). A path under one source means nothing under the other,
+     // so this resets tabs/buffers/activePath back to empty at the same
+@@ -359,6 +461,13 @@ export function EditorStoreProvider({ children, initialLayout }) {
+       setLayout: (layout) => dispatch({ type: "SET_LAYOUT", layout }),
+       switchSource: (source) => dispatch({ type: "SWITCH_SOURCE", source }),
+       renamePaths: (renames, versions) => dispatch({ type: "RENAME_PATHS", renames, versions }),
++      // W5.3
++      reviewOpen: (proposal) => dispatch({ type: "REVIEW_OPEN", proposal }),
++      reviewSetActive: (path) => dispatch({ type: "REVIEW_SET_ACTIVE", path }),
++      reviewFileUpdate: (path, snap) => dispatch({ type: "REVIEW_FILE_UPDATE", path, snap }),
++      reviewSubmitting: (submitting) => dispatch({ type: "REVIEW_SUBMITTING", submitting }),
++      reviewError: (error, stale) => dispatch({ type: "REVIEW_ERROR", error, stale }),
++      reviewClose: () => dispatch({ type: "REVIEW_CLOSE" }),
+     }),
+     [dispatch]
+   );
+diff --git a/frontend/app/lib/workbench/reviewMode.js b/frontend/app/lib/workbench/reviewMode.js
+new file mode 100644
+index 0000000..c9be20e
+--- /dev/null
++++ b/frontend/app/lib/workbench/reviewMode.js
+@@ -0,0 +1,217 @@
++// frontend/app/lib/workbench/reviewMode.js — W5.3 (Build Workbench plan).
++// The pure decision logic behind the Copilot-style review UI: given a
++// stored proposal and what the person did with each hunk, work out what
++// to send to POST .../code/proposals/{id}/resolve.
++//
++// Split out of the components for the same reason tabUtils.js is: the
++// interesting parts here are "given this state, what should happen"
++// rules — is this file kept or undone, is the review finished, which
++// open buffers would a Keep collide with — and a rule is far easier to
++// get right, and keep right, as a function with a test than tangled
++// into an effect. No imports — see fileTree.js's header; the test
++// loader in __tests__/reviewMode.test.mjs enforces it.
++//
++// The one CodeMirror-shaped thing in here, chunkLineStats(), takes the
++// two documents as plain objects with a `lineAt(pos).number` method —
++// which is exactly the subset of CM6's `Text` it uses — so it can be
++// tested against a small stand-in instead of needing CodeMirror
++// installed.
++
++// CM6 always splits on \r\n, \r and \n alike and reports "\n" back, so
++// whatever text comes out of a review editor is LF-only even for a
++// CRLF file. Comparing it with the server's text has to ignore that, or
++// an untouched CRLF file would look "changed" at every line end. Same
++// rule as editorUtils.normalizeLineBreaks (duplicated: this module
++// stays import-free).
++function eol(text) {
++  return (text ?? "").replace(/\r\n|\r/g, "\n");
++}
++
++/**
++ * Lines added / removed by a set of merge chunks — what the file
++ * list's `+12 −3` badge shows. `chunks` are @codemirror/merge `Chunk`s
++ * (fromA/toA/endA against the ORIGINAL text, fromB/toB/endB against the
++ * text being edited); a side with `from === to` covers no lines. Counts
++ * whole lines on each side, not characters: a one-word edit inside a
++ * line is one line added and one removed, the same as `git diff --stat`.
++ *
++ * @param {{fromA:number,toA:number,endA:number,fromB:number,toB:number,endB:number}[]} chunks
++ * @param {{lineAt:(pos:number)=>{number:number}}} originalDoc
++ * @param {{lineAt:(pos:number)=>{number:number}}} doc
++ * @returns {{added:number, removed:number}}
++ */
++export function chunkLineStats(chunks, originalDoc, doc) {
++  let added = 0;
++  let removed = 0;
++  for (const ch of chunks || []) {
++    if (ch.fromA < ch.toA) removed += originalDoc.lineAt(ch.endA).number - originalDoc.lineAt(ch.fromA).number + 1;
++    if (ch.fromB < ch.toB) added += doc.lineAt(ch.endB).number - doc.lineAt(ch.fromB).number + 1;
++  }
++  return { added, removed };
++}
++
++/**
++ * The review slice's `files` map + display order, built from a proposal
++ * as GET .../code/proposals/{id} returns it. `remaining` starts null
++ * — "the editor hasn't reported yet" — so a review can't look finished
++ * before its merge views have even mounted (see reviewProgress()).
++ * `current` starts as the proposed text, which is what an editor shows
++ * before any hunk is decided.
++ *
++ * @param {{files?: {path:string, op?:string, base_version?:number, original?:string, proposed?:string}[]}} proposal
++ * @returns {{order: string[], files: Record<string, object>}}
++ */
++export function reviewFilesFromProposal(proposal) {
++  const order = [];
++  const files = {};
++  for (const f of proposal?.files || []) {
++    if (!f || !f.path || f.path in files) continue;
++    order.push(f.path);
++    files[f.path] = {
++      op: f.op || "replace",
++      baseVersion: f.base_version ?? 0,
++      original: f.original ?? "",
++      proposed: f.proposed ?? "",
++      current: f.proposed ?? "",
++      remaining: null,
++      added: 0,
++      removed: 0,
++    };
++  }
++  return { order, files };
++}
++
++/**
++ * One file's resolve() decision, from what's in its review editor now.
++ *
++ * The server's vocabulary is only keep | undo (see
++ * eo/code_proposals.py's _VALID_DECISIONS) — a mix of kept and undone
++ * hunks inside one file is expressed as "keep" with the merged text as
++ * `finalContent`. So:
++ *
++ *   - Nothing of the proposal survived (the final text is the original
++ *     text again) → "undo": there is nothing to write.
++ *   - The whole proposal survived → "keep" with NO finalContent, so the
++ *     server writes the proposal's own stored text byte for byte (which
++ *     matters for a CRLF file: the editor's copy is LF-only).
++ *   - Anything in between → "keep" with the merged text.
++ *
++ * `delete` is special: the server's delete ignores finalContent
++ * entirely, so a delete where some lines were brought back by undoing
++ * hunks must NOT be sent as "keep" — that would delete the whole file
++ * regardless. It is kept only when nothing was brought back.
++ *
++ * @param {{op:string, original:string, proposed:string, final:string}} f
++ * @returns {{decision:"keep"|"undo", finalContent:string|null}}
++ */
++export function decisionForFile({ op, original, proposed, final }) {
++  const fin = eol(final);
++  const orig = eol(original);
++  const prop = eol(proposed);
++
++  if (op === "delete") {
++    return fin === prop ? { decision: "keep", finalContent: null } : { decision: "undo", finalContent: null };
++  }
++  if (fin === orig) return { decision: "undo", finalContent: null };
++  if (fin === prop) return { decision: "keep", finalContent: null };
++  return { decision: "keep", finalContent: final };
++}
++
++/**
++ * The `decisions` array resolveProposal() (codeProposals.js) takes,
++ * for every file in the review.
++ *
++ * @param {{order: string[], files: Record<string, object>}} review
++ * @returns {{path:string, decision:"keep"|"undo", finalContent:string|null}[]}
++ */
++export function buildDecisions(review) {
++  return (review?.order || []).map((path) => {
++    const f = review.files[path];
++    const { decision, finalContent } = decisionForFile({
++      op: f.op,
++      original: f.original,
++      proposed: f.proposed,
++      final: f.current,
++    });
++    return { path, decision, finalContent };
++  });
++}
++
++/**
++ * How far along a review is. `ready` is false until every file's editor
++ * has reported at least once (`remaining` is null before that);
++ * `allResolved` is the "Done" gate — every hunk in every file has been
++ * kept or undone. Unresolved hunks are deliberately NOT treated as
++ * kept: silently applying changes nobody looked at is the thing a
++ * review exists to prevent, so Done waits, and Keep all / Undo all are
++ * the one-click way to settle the rest.
++ *
++ * @param {{order: string[], files: Record<string, {remaining:number|null, added:number, removed:number}>}|null} review
++ * @returns {{ready:boolean, remaining:number, filesLeft:number, allResolved:boolean}}
++ */
++export function reviewProgress(review) {
++  if (!review) return { ready: false, remaining: 0, filesLeft: 0, allResolved: false };
++  let ready = true;
++  let remaining = 0;
++  let filesLeft = 0;
++  for (const path of review.order) {
++    const f = review.files[path];
++    if (!f || f.remaining == null) {
++      ready = false;
++      continue;
++    }
++    remaining += f.remaining;
++    if (f.remaining > 0) filesLeft += 1;
++  }
++  return { ready, remaining, filesLeft, allResolved: ready && remaining === 0 };
++}
++
++/**
++ * Files in the review whose open editor buffer has unsaved edits. The
++ * proposal was made against the SAVED text on the server, not the
++ * buffer, so keeping it moves the server version on and the buffer
++ * comes back flagged "changed on the server" — worth saying before it
++ * happens.
++ *
++ * @param {{order: string[]}|null} review
++ * @param {Record<string, {dirty?: boolean}>} buffers
++ * @returns {string[]}
++ */
++export function dirtyOverlap(review, buffers) {
++  if (!review) return [];
++  return review.order.filter((p) => !!buffers?.[p]?.dirty);
++}
++
++/**
++ * The one-line reason a proposal can't be opened for review, or null
++ * when it can. Everything except `pending` has already been decided
++ * (or never produced anything to decide on).
++ *
++ * @param {{status?: string, files?: unknown[]}} proposal
++ * @returns {string|null}
++ */
++export function unreviewableReason(proposal) {
++  const status = proposal?.status;
++  if (status === "pending") {
++    return (proposal.files || []).length === 0 ? "This edit doesn't change any files." : null;
++  }
++  if (status === "accepted") return "This edit was already applied.";
++  if (status === "rejected") return "This edit was already discarded.";
++  if (status === "partial") return "This edit was already partly applied.";
++  if (status === "stale") return "This edit is out of date — a file changed after it was proposed. Ask for it again.";
++  if (status === "failed") return "That edit couldn't be generated. Try asking again.";
++  return "This edit can't be opened for review.";
++}
++
++/**
++ * The confirmation shown after a successful resolve, by final status.
++ *
++ * @param {string} status - accepted | rejected | partial
++ * @returns {string}
++ */
++export function resolvedMessage(status) {
++  if (status === "accepted") return "Applied the AI edit.";
++  if (status === "partial") return "Applied part of the AI edit.";
++  if (status === "rejected") return "Discarded the AI edit — nothing was changed.";
++  return "Finished reviewing the AI edit.";
++}

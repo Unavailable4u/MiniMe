@@ -101,7 +101,7 @@ function refKey(ref) {
   return `${ref.kind}:${ref.path}:${ref.fromLine ?? ""}:${ref.toLine ?? ""}`;
 }
 
-const initialState = { refs: [], nextId: 1, pendingJump: null };
+const initialState = { refs: [], nextId: 1, pendingJump: null, pendingReview: null };
 
 /**
  * Pure reducer — see editorStore.js's own header for why this shape
@@ -185,6 +185,21 @@ export function codeContextReducer(state, action) {
     case "CLEAR_PENDING_JUMP":
       return state.pendingJump == null ? state : { ...state, pendingJump: null };
 
+    // W5.3: WorkspaceChatPanel.jsx's proposals list "Review" button, by
+    // way of BuildTab.jsx's CodeAwareChatPanel wrapper. One pending
+    // review request at a time, same reasoning as pendingJump above — a
+    // second click before the first lands just replaces it. Carries
+    // only the proposal's id: EditorWorkbench.jsx's own effect always
+    // re-fetches (GET .../code/proposals/{id}) rather than trusting
+    // whatever shape the caller happened to have, so a review opened
+    // from a stale list entry (W5.4's tray, a proposal another tab
+    // already resolved) still sees the CURRENT status.
+    case "SET_PENDING_REVIEW":
+      return { ...state, pendingReview: action.proposalId };
+
+    case "CLEAR_PENDING_REVIEW":
+      return state.pendingReview == null ? state : { ...state, pendingReview: null };
+
     default:
       return state;
   }
@@ -215,13 +230,15 @@ export function CodeContextProvider({ children }) {
       remapRefs: (path, mapRange) => dispatch({ type: "REMAP_REFS", path, mapRange }),
       requestJump: (ref) => dispatch({ type: "SET_PENDING_JUMP", ref }),
       clearJump: () => dispatch({ type: "CLEAR_PENDING_JUMP" }),
+      requestReview: (proposalId) => dispatch({ type: "SET_PENDING_REVIEW", proposalId }),
+      clearReview: () => dispatch({ type: "CLEAR_PENDING_REVIEW" }),
     }),
     [dispatch]
   );
 
   const value = useMemo(
-    () => ({ refs: state.refs, pendingJump: state.pendingJump, ...actions }),
-    [state.refs, state.pendingJump, actions]
+    () => ({ refs: state.refs, pendingJump: state.pendingJump, pendingReview: state.pendingReview, ...actions }),
+    [state.refs, state.pendingJump, state.pendingReview, actions]
   );
 
   return createElement(CodeContextContext.Provider, { value }, children);

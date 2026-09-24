@@ -10,6 +10,7 @@
     "postinstall": "patch-package"
   },
   "dependencies": {
+    "@babel/parser": "^7.29.9",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/language": "^6.12.4",
@@ -32,6 +33,7 @@
     "lucide-react": "^1.23.0",
     "mermaid": "^11.16.0",
     "next": "14.2.35",
+    "parse5": "^8.0.1",
     "prettier": "^3.9.8",
     "pusher-js": "^8.5.0",
     "react": "18.3.1",
