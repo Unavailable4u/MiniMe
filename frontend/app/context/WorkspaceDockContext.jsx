@@ -1451,7 +1451,34 @@ export function useWorkspaceDock(workspaceId, chatId = null) {
     [store, workspaceId]
   );
 
-  return { key, state, setDockState, sendTask, resumeRun, requestPause, confirmHireReview, cancelHireReview, openScopedSubChat };
+  // NEW — W5.4 (Build Workbench plan). The store-level persistMessage()
+  // (above sendTask, this file's own §3c comment) has always existed,
+  // but nothing calling THIS hook could reach it — every prior caller
+  // either goes through sendTask (a message + a run together) or
+  // persistMessageToSession directly (the run functions above, which
+  // already have a captured sessionId of their own). WorkspaceChatPanel.jsx's
+  // `code_proposal` card is the first caller that wants to persist a
+  // message with no run attached — a proposal is its own resource, not
+  // a chat turn (see sendCodeEditProposal's own header) — so this
+  // follows sendTask's exact wrapper shape: bound to whatever key this
+  // hook already resolved, a no-op when there's none yet.
+  const persistMessage = useCallback(
+    (message) => (key ? store.persistMessage(key, message) : Promise.resolve()),
+    [store, key]
+  );
+
+  return {
+    key,
+    state,
+    setDockState,
+    sendTask,
+    resumeRun,
+    requestPause,
+    confirmHireReview,
+    cancelHireReview,
+    openScopedSubChat,
+    persistMessage,
+  };
 }
 
 /**

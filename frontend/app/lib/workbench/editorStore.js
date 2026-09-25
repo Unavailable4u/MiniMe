@@ -40,11 +40,9 @@
 // single slot, not keyed by proposal id: only one review is ever open
 // at a time (it replaces the tabs+editor area — see ReviewPanel.jsx's
 // own header), and EditorWorkbench.jsx's openFile() guard refuses to
-// open anything else while it's set. Left `proposals` (still an empty
-// placeholder) alone — that one's W5.4's cross-session pending tray,
-// a list of every open proposal regardless of whether it's being
-// reviewed right now; this is "the one being reviewed right now, and
-// how far through it we are". Its shape — `{proposalId, instruction,
+// open anything else while it's set. Distinct from `proposals` (W5.4,
+// below) — this is "the one being reviewed right now, and how far
+// through it we are". Its shape — `{proposalId, instruction,
 // summary, order, files, activePath, submitting, error, stale}` — is
 // built by reviewMode.js's reviewFilesFromProposal() (order/files) on
 // REVIEW_OPEN; `files[path]` is `{op, baseVersion, original, proposed,
@@ -53,6 +51,19 @@
 // `remaining: null` — "hasn't reported yet") and are kept live by each
 // file's own CodeEditor review instance reporting through
 // REVIEW_FILE_UPDATE (see CodeEditor.jsx's reviewSnapshot()).
+//
+// W5.4 addition: `proposals` is now populated — the cross-session
+// pending tray (StatusBar.jsx's "Pending changes (N)" chip,
+// PendingTray.jsx). A plain array of proposal rows exactly as GET
+// .../code/proposals returns them, plus one client-only field per row
+// (`possiblyStale`) — see PROPOSALS_LOADED/PROPOSAL_UPSERT/
+// PROPOSAL_STATUS_UPDATE/PROPOSAL_FILES_CHANGED/
+// PROPOSAL_CLEAR_POSSIBLY_STALE below for how it's loaded and kept
+// live. Unlike `review` above (one slot, the proposal actually open
+// for a per-hunk diff), this can hold several proposals at once — one
+// per file being edited, at most, since W5.4 also enforces "one active
+// proposal per file" at creation time (WorkspaceChatPanel.jsx's
+// sendCodeEditProposal).
 //
 // No JSX here on purpose — every other file directly under `lib/`
 // (cmTheme.js, editorUtils.js) is plain functions/data, not components,
@@ -421,6 +432,96 @@ export function editorReducer(state, action) {
       return { ...initialState, layout: normalizeLayout({ ...current, source }, current) };
     }
 
+    // W5.4: the cross-session pending tray's own source of truth.
+    // `proposals` is populated once at mount from GET
+    // .../code/proposals?status=pending (EditorWorkbench.jsx's own
+    // effect) — "the tray is the source of truth... the proposal
+    // survives closing the tab" (plan §5 W5.4) — a full replace, not a
+    // merge: this is the one point where the tray's contents are
+    // trusted to be exactly what the server says is pending right now.
+    // `possiblyStale` (client-only — never a field the server sends)
+    // starts false for everything just loaded; see
+    // PROPOSAL_FILES_CHANGED below for what sets it.
+    case "PROPOSALS_LOADED": {
+      const proposals = (action.proposals || []).map((p) => ({ ...p, possiblyStale: false }));
+      return { ...state, proposals };
+    }
+
+    // A proposal was created (CODE_PROPOSAL_READY, from this tab's own
+    // sendCodeEditProposal or another tab/session entirely) or just
+    // resolved with the FULL updated row already in hand (a local Keep
+    // all / Reject / Regenerate — PendingTray.jsx's own buttons — whose
+    // resolveProposal()/createProposal() response is exactly this
+    // shape). Replaces the existing entry by id, or adds it at the
+    // front if this tab has never heard of it before. `possiblyStale`
+    // always resets to false on a full replace: a proposal that just
+    // (re)entered `pending` was, by definition, generated against
+    // whatever the file looks like right now.
+    case "PROPOSAL_UPSERT": {
+      const proposal = { ...action.proposal, possiblyStale: false };
+      const idx = state.proposals.findIndex((p) => p.id === proposal.id);
+      const proposals =
+        idx === -1
+          ? [proposal, ...state.proposals]
+          : state.proposals.map((p, i) => (i === idx ? proposal : p));
+      return { ...state, proposals };
+    }
+
+    // CODE_PROPOSAL_RESOLVED's own payload is ids/status only (plan
+    // §7.2's Pusher byte cap, same reasoning CODE_FILE_UPDATED's own
+    // payload follows) — cheaper to patch the one field a proposal
+    // resolved ELSEWHERE (ReviewPanel.jsx's Done, another tab's tray)
+    // needs updated here than to re-fetch a full row this tab may not
+    // even be showing. A status update for a proposal id this tab has
+    // never heard of is a no-op — there's nothing here worth inventing
+    // a placeholder row for.
+    case "PROPOSAL_STATUS_UPDATE": {
+      const { proposalId, status } = action;
+      const idx = state.proposals.findIndex((p) => p.id === proposalId);
+      if (idx === -1) return state;
+      const proposals = state.proposals.slice();
+      proposals[idx] = { ...proposals[idx], status };
+      return { ...state, proposals };
+    }
+
+    // W5.4's proactive staleness signal. eo/code_proposals.py's
+    // base_hash is display-only — the thing that actually blocks a
+    // stale write is base_version, checked only when someone ACTUALLY
+    // tries to resolve (resolve_proposal()'s own Phase 1) — so there is
+    // no "did this change" value to poll ahead of time, and nothing
+    // here tries to recompute one. What's already flowing into this
+    // component either way is exactly the event the plan names as the
+    // trigger: `code_file_updated` naming a path (EditorWorkbench.jsx's
+    // own `provider.subscribe` effect). Any PENDING proposal touching
+    // one of those paths gets flagged. A false positive (the file was
+    // saved back byte-identical) just shows a dismissible banner; a
+    // false negative isn't possible, since resolve() still catches a
+    // real version mismatch regardless of whether this was ever set.
+    case "PROPOSAL_FILES_CHANGED": {
+      const changed = new Set(action.filePaths || []);
+      if (changed.size === 0) return state;
+      let touched = false;
+      const proposals = state.proposals.map((p) => {
+        if (p.status !== "pending" || p.possiblyStale) return p;
+        if (!(p.files || []).some((f) => changed.has(f.path))) return p;
+        touched = true;
+        return { ...p, possiblyStale: true };
+      });
+      return touched ? { ...state, proposals } : state;
+    }
+
+    // "Review anyway" on the stale banner acknowledges it without
+    // necessarily having resolved anything (Regenerate doesn't need
+    // this — replacing the row via PROPOSAL_UPSERT already resets the
+    // flag on its own).
+    case "PROPOSAL_CLEAR_POSSIBLY_STALE": {
+      const idx = state.proposals.findIndex((p) => p.id === action.proposalId);
+      if (idx === -1 || !state.proposals[idx].possiblyStale) return state;
+      const proposals = state.proposals.slice();
+      proposals[idx] = { ...proposals[idx], possiblyStale: false };
+      return { ...state, proposals };
+    }
+
     default:
       return state;
   }
@@ -468,6 +569,12 @@ export function EditorStoreProvider({ children, initialLayout }) {
       reviewSubmitting: (submitting) => dispatch({ type: "REVIEW_SUBMITTING", submitting }),
       reviewError: (error, stale) => dispatch({ type: "REVIEW_ERROR", error, stale }),
       reviewClose: () => dispatch({ type: "REVIEW_CLOSE" }),
+      // W5.4
+      proposalsLoaded: (proposals) => dispatch({ type: "PROPOSALS_LOADED", proposals }),
+      proposalUpsert: (proposal) => dispatch({ type: "PROPOSAL_UPSERT", proposal }),
+      proposalStatusUpdate: (proposalId, status) => dispatch({ type: "PROPOSAL_STATUS_UPDATE", proposalId, status }),
+      proposalFilesChanged: (filePaths) => dispatch({ type: "PROPOSAL_FILES_CHANGED", filePaths }),
+      proposalClearPossiblyStale: (proposalId) => dispatch({ type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId }),
     }),
     [dispatch]
   );

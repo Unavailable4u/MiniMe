@@ -519,7 +519,7 @@ index 0000000..2ffe525
 +  );
 +}
 diff --git a/frontend/app/components/workbench/EditorWorkbench.jsx b/frontend/app/components/workbench/EditorWorkbench.jsx
-index fde63d3..33ce7dc 100644
+index aac69d0..07c4a4d 100644
 --- a/frontend/app/components/workbench/EditorWorkbench.jsx
 +++ b/frontend/app/components/workbench/EditorWorkbench.jsx
 @@ -85,14 +85,33 @@ import { useViewport } from "../../hooks/useViewport";
@@ -564,9 +564,9 @@ index fde63d3..33ce7dc 100644
  import HistoryPanel from "./HistoryPanel";
 +import PendingTray from "./PendingTray";
  import PreviewColumn from "./PreviewColumn";
+ import PreviewPane from "./PreviewPane"; // NEW — W6.1: mounted below, replacing the placeholder PreviewColumn shows when its children prop is omitted
  import ProjectSearchPanel from "./ProjectSearchPanel";
- import QuickOpen from "./QuickOpen";
-@@ -229,6 +249,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+@@ -230,6 +250,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
      reviewSubmitting,
      reviewError,
      reviewClose,
@@ -579,7 +579,7 @@ index fde63d3..33ce7dc 100644
    } = useEditorStore();
  
    // W4.1: see this component's own import comment on why this is
-@@ -525,9 +551,20 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+@@ -526,9 +552,20 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
  
    // Live refresh (W0.1 / W2.2): the provider owns the Pusher plumbing;
    // this is only "what to do when told something changed". The payload's
@@ -603,7 +603,7 @@ index fde63d3..33ce7dc 100644
  
    // W0.1: Pusher can drop a connection while a tab is backgrounded
    // (mobile Safari suspends sockets aggressively), so a regen that
-@@ -542,6 +579,49 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+@@ -543,6 +580,49 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
      return () => document.removeEventListener("visibilitychange", onVisibility);
    }, []);
  
@@ -653,7 +653,7 @@ index fde63d3..33ce7dc 100644
    // ---- open / close --------------------------------------------------
  
    const openFile = useCallback(
-@@ -1101,6 +1181,81 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+@@ -1102,6 +1182,81 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
      }
    }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
  
@@ -735,7 +735,7 @@ index fde63d3..33ce7dc 100644
    // History's "Restore": lands the server's response the same way a
    // normal save does — FILE_LOADED for the buffer, plus the file list's
    // own entry patched in place rather than a full refetch (saveFile()
-@@ -1273,14 +1428,17 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+@@ -1274,14 +1429,17 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
    );
    const closePreview = useCallback(() => setLayout({ previewOpen: false }), [setLayout]);
  
@@ -759,7 +759,7 @@ index fde63d3..33ce7dc 100644
  
    // ---- derived ---------------------------------------------------------
  
-@@ -1803,9 +1961,23 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
+@@ -1806,9 +1964,23 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
          language={activeBuffer?.language}
          cursor={cursor}
          pendingCount={pendingCount}
