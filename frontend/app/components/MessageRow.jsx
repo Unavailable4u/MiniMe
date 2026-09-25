@@ -17,6 +17,9 @@ export default function MessageRow({
   onSendCommand,
   onResume,       // NEW — CO3 patch 3
   isActivePause,  // NEW — CO3 patch 3
+  onReviewProposal,  // NEW — W5.4
+  onKeepProposal,    // NEW — W5.4
+  onRejectProposal,  // NEW — W5.4
 }) {
   return (
     <div onClick={() => onSelect(index)} className="pb-4">
@@ -26,6 +29,9 @@ export default function MessageRow({
         onSendCommand={onSendCommand}
         onResume={onResume}
         isActivePause={isActivePause}
+        onReviewProposal={onReviewProposal}
+        onKeepProposal={onKeepProposal}
+        onRejectProposal={onRejectProposal}
       />
     </div>
   );

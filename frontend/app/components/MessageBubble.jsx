@@ -9,6 +9,7 @@ import { TARGETS } from "../lib/notebookCapabilities";   // NEW — Phase 3 step
 import { useProactiveSuggestions } from "../hooks/useProactiveSuggestions";   // NEW — Phase 3 step 3.7
 import ArtifactRenderer from "./ArtifactRenderer";   // NEW — Phase CO, CO2
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark beside each assistant reply
+import CodeProposalCard from "./workbench/CodeProposalCard";   // NEW — W5.4
 
 const TARGETS_BY_KEY = Object.fromEntries(TARGETS.map((t) => [t.key, t]));   // NEW — Phase 3 step 3.2
 
@@ -137,7 +138,16 @@ function useStreamingAnswer(sessionId, enabled) {
 // is still set, so a stale paused bubble further up the thread (from a
 // run that has since been resumed) doesn't keep showing a live Resume
 // button.
-function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isActivePause }) {
+function MessageBubble({
+  message,
+  onNavigateSubTab,
+  onSendCommand,
+  onResume,
+  isActivePause,
+  onReviewProposal, // NEW — W5.4
+  onKeepProposal, // NEW — W5.4
+  onRejectProposal, // NEW — W5.4
+}) {
   // NEW — Phase 3 step 3.7. Called unconditionally, ahead of every
   // early-return branch below (role === "generation"/"suggestion"/
   // "user") — Rules of Hooks: a hook can't be called only on the path
@@ -170,6 +180,29 @@ function MessageBubble({ message, onNavigateSubTab, onSendCommand, onResume, isA
           ))}
         </div>
       </div>
+    );
+  }
+
+  // NEW — W5.4 (Build Workbench plan). The persisted record of an
+  // Edit-mode send (sendCodeEditProposal, WorkspaceChatPanel.jsx — see
+  // that function's own header for why a proposal earns a persisted
+  // card where the "generation" role just above doesn't persist at
+  // all). onReviewProposal/onKeepProposal/onRejectProposal are the
+  // same three-layer-threaded callbacks (rowProps -> VirtualMessageRow
+  // -> MessageRow -> here) onResume/onSendCommand above already use.
+  // `onReviewProposal` takes a proposal-shaped object elsewhere (the
+  // composer's own read-only list passes the real `codeProposals`
+  // entry) — this card only ever has the message's own `proposalId`,
+  // so it's adapted to `{id: message.proposalId}` right here rather
+  // than changing that callback's contract for every other caller.
+  if (message.role === "code_proposal") {
+    return (
+      <CodeProposalCard
+        message={message}
+        onReview={(m) => onReviewProposal?.({ id: m.proposalId })}
+        onKeepAll={onKeepProposal}
+        onReject={onRejectProposal}
+      />
     );
   }
 

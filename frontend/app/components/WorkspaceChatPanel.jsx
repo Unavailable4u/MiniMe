@@ -23,7 +23,22 @@ import HireReviewScreen from "./HireReviewScreen";
 // trio of per-half collapse buttons.
 import { Sparkles, Feather, Zap, Brain, Flame, ChevronDown, ChevronUp, ClipboardCheck, PanelRightOpen, PanelRightClose, X, MessageSquare, Paperclip, Loader2, CheckCircle2, XCircle, AlertTriangle, Send } from "lucide-react";   // CHANGED — Send added for the compact icon-only composer below
 import { ingestFileByExtension } from "../lib/ingestDispatch";
-import { createProposal as createCodeProposal, subscribeToProposalEvents } from "../lib/workbench/codeProposals";   // NEW — W5.1b
+// NEW — W5.1b: createProposal, subscribeToProposalEvents. NEW — W5.4:
+// resolveProposal/ProposalStaleError (the card's own Keep all/Reject —
+// the same POST .../code/proposals/{id}/resolve round trip
+// ReviewPanel.jsx's Done button makes) and listProposals (the "one
+// active proposal per file" pre-check below).
+import {
+  createProposal as createCodeProposal,
+  listProposals,
+  ProposalStaleError,
+  resolveProposal,
+  subscribeToProposalEvents,
+} from "../lib/workbench/codeProposals";
+// NEW — W5.4: keepAllDecisions()/rejectAllDecisions() stand in for a
+// per-hunk review nobody opened, the same shortcut PendingTray.jsx
+// (EditorWorkbench.jsx) uses for its own Keep all/Reject buttons.
+import { keepAllDecisions, rejectAllDecisions } from "../lib/workbench/reviewMode";
 import { parseFreeText, TARGETS } from "./notebooks/NotebooksGeneratePicker";
 import AssistantAvatar from "./AssistantAvatar";   // NEW — animated brand-mark for the "Working…" row below
 
@@ -185,7 +200,19 @@ const ATTACH_DONE_AUTOCLEAR_MS = 3000;
 // purpose anymore, so it — and the ref-setting div wrapper in
 // MessageRow.jsx — were dead weight kept alive only by being passed
 // through. Removed here, and MessageRow's ref prop dropped to match.
-function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab, onSendCommand, onResume, pausedActive }) {
+function VirtualMessageRow({
+  index,
+  style,
+  messages,
+  onSelect,
+  onNavigateSubTab,
+  onSendCommand,
+  onResume,
+  pausedActive,
+  onReviewProposal, // NEW — W5.4
+  onKeepProposal, // NEW — W5.4
+  onRejectProposal, // NEW — W5.4
+}) {
   // NEW — CO3 patch 3: only the single most-recent message can be the
   // "live" pause — everything earlier in the thread is history, even
   // if it also happens to carry status:"paused" from a prior run.
@@ -200,6 +227,9 @@ function VirtualMessageRow({ index, style, messages, onSelect, onNavigateSubTab,
         onSendCommand={onSendCommand}
         onResume={onResume}
         isActivePause={isActivePause}
+        onReviewProposal={onReviewProposal}
+        onKeepProposal={onKeepProposal}
+        onRejectProposal={onRejectProposal}
       />
     </div>
   );
@@ -1222,8 +1252,7 @@ export default function WorkspaceChatPanel({
   // message: calls eo/code_proposals.py's create_proposal() via
   // POST .../code/proposals (see api/routes/code_edit.py) instead of
   // sendTask()'s /api/task path — a proposal is its own resource with
-  // its own lifecycle, not a chat turn, so it never touches the
-  // dock's chat/message state at all. The instruction's own text is
+  // its own lifecycle, not a chat turn. The instruction's own text is
   // NOT prefixed with fenced snippets the way sendCodeChatMessage's
   // `augmented` text is — the backend already re-reads each ref's
   // CURRENT file content itself (create_proposal()'s own
@@ -1231,50 +1260,103 @@ export default function WorkspaceChatPanel({
   // so sending the snippet twice would just be redundant bytes on the
   // wire, not anything the server needs.
   //
-  // The returned proposal is appended to codeProposals for this
-  // panel's own plain read-only list (see that state's own comment
-  // above) — there is deliberately no Keep/Undo action wired to it
-  // yet (W5.3), so a 'pending' proposal here just sits there showing
-  // what the (today: stub, W5.2: real) generator produced until a
-  // later step's merge view can act on it.
+  // W5.4 CHANGED: the returned proposal is still appended to
+  // codeProposals for this panel's own composer-tray list (below the
+  // Ask|Edit toggle), same as W5.1b/W5.3 — but it is ALSO now persisted
+  // as a `code_proposal` chat message (dock.persistMessage), with
+  // Review/Keep all/Reject of its own. That's new: this step's own
+  // W5.1b comment used to say a proposal "never touches the dock's
+  // chat/message state at all" — true until a scrollback-visible
+  // record of it became part of the spec. The tray
+  // (GET .../code/proposals?status=pending, EditorWorkbench.jsx's
+  // PendingTray.jsx) stays the actual source of truth per the plan's
+  // own line ("the proposal survives closing the tab") — this card is
+  // a convenience, which is also why it carries a full snapshot
+  // (original/proposed per file, same shape the proposal row itself
+  // already stores) rather than a trimmed reference the way an
+  // ordinary chat message's `codeRefs` are: it needs to render its own
+  // +/- badges without a second fetch, and a page reload only shows
+  // whatever was persisted at send time regardless (there's no
+  // update-message endpoint to keep it current — the live badge below
+  // only updates while this tab stays open, over Pusher).
   const sendCodeEditProposal = useCallback(
-    (text) => {
+    async (text) => {
       if (!workspaceId) return; // Edit mode is only ever shown inside a workspace's Build tab
       setCodeProposalPending(true);
       setCodeProposalError(null);
-      createCodeProposal(API_URL, workspaceId, {
-        instruction: text,
-        refs: codeRefs,
-        sessionId: dock.state.sessionId ?? null,
-      })
-        .then((proposal) => {
-          setCodeProposals((prev) => [proposal, ...prev]);
-          onClearCodeRefs?.();
-        })
-        .catch((err) => {
-          // A 400 (bad request shape — see create_proposal()'s own
-          // ValueError cases) lands here; a GENERATION failure does
-          // NOT (create_proposal() still returns 200 with
-          // status: "failed" — see its own docstring) — that case
-          // still hits the .then() above and renders as a failed
-          // entry in the list, not this error banner.
-          setCodeProposalError(err.message || "Couldn't create the proposal — try again.");
-        })
-        .finally(() => setCodeProposalPending(false));
+      try {
+        // W5.4: "one active proposal per file" (plan §5 W5.4) — a
+        // pending proposal already covers one of these paths, so a
+        // second one here would leave two AI edits racing for the
+        // same file's base_version. Folder refs aren't expanded
+        // server-side yet (W5.5 — create_proposal() itself rejects
+        // them today), so only the paths actually being sent matter.
+        const targetPaths = codeRefs.filter((r) => r.kind !== "folder").map((r) => r.path);
+        if (targetPaths.length > 0) {
+          const targets = new Set(targetPaths);
+          const pending = await listProposals(API_URL, workspaceId, { status: "pending" });
+          const blockingFile = pending
+            .flatMap((p) => p.files || [])
+            .find((f) => targets.has(f.path));
+          if (blockingFile) {
+            throw new Error(`${blockingFile.path} already has a pending AI edit — review or resolve it first.`);
+          }
+        }
+
+        const proposal = await createCodeProposal(API_URL, workspaceId, {
+          instruction: text,
+          refs: codeRefs,
+          sessionId: dock.state.sessionId ?? null,
+        });
+        setCodeProposals((prev) => [proposal, ...prev]);
+        onClearCodeRefs?.();
+
+        if (usingDock) {
+          const cardMessage = {
+            role: "code_proposal",
+            proposalId: proposal.id,
+            instruction: proposal.instruction,
+            summary: proposal.summary,
+            status: proposal.status,
+            files: (proposal.files || []).map((f) => ({ path: f.path, op: f.op, original: f.original, proposed: f.proposed })),
+          };
+          dock.setDockState((prev) => ({ messages: [...prev.messages, cardMessage] }));
+          dock.persistMessage(cardMessage);
+        }
+      } catch (err) {
+        // A 400 (bad request shape — see create_proposal()'s own
+        // ValueError cases), the one-active-proposal-per-file check
+        // above, or a network failure all land here; a GENERATION
+        // failure does NOT (create_proposal() still returns 200 with
+        // status: "failed" — see its own docstring) — that case still
+        // reaches the try block's happy path and renders as a failed
+        // entry, not this error banner.
+        setCodeProposalError(err.message || "Couldn't create the proposal — try again.");
+      } finally {
+        setCodeProposalPending(false);
+      }
     },
-    [workspaceId, API_URL, codeRefs, dock.state.sessionId, onClearCodeRefs]
+    [workspaceId, API_URL, codeRefs, dock.state.sessionId, dock.setDockState, dock.persistMessage, onClearCodeRefs, usingDock]
   );
 
-  // NEW — W5.1b: live status updates for proposals THIS panel created
-  // — see codeProposals.js's subscribeToProposalEvents() own
-  // docstring for why this is the one case (another tab/session
-  // resolving the SAME proposal) this subscription actually changes
-  // anything for today; this tab's own create already has the row
-  // via sendCodeEditProposal's .then() above. Only subscribed while
-  // this is a code-context-aware panel with a real workspace behind
-  // it (codeRefs !== null, same gate the Ask|Edit strip itself uses)
-  // — every other WorkspaceChatPanel instance (Chat tab, Research,
-  // etc.) never had an Edit mode to react to in the first place.
+  // NEW — W5.1b: live status updates for proposals THIS panel created —
+  // see codeProposals.js's subscribeToProposalEvents() own docstring
+  // for why this is the one case (another tab/session resolving the
+  // SAME proposal) this subscription actually changes anything for
+  // today; this tab's own create already has the row via
+  // sendCodeEditProposal's .then() above. Only subscribed while this
+  // is a code-context-aware panel with a real workspace behind it
+  // (codeRefs !== null, same gate the Ask|Edit strip itself uses) —
+  // every other WorkspaceChatPanel instance (Chat tab, Research, etc.)
+  // never had an Edit mode to react to in the first place.
+  //
+  // W5.4 CHANGED: also patches any persisted `code_proposal` chat
+  // messages' own live status badge — a proposal resolved from
+  // ANYWHERE (ReviewPanel.jsx's Done, PendingTray.jsx's Keep all/
+  // Reject, or this card's own buttons below, which already update
+  // optimistically) fires the exact same CODE_PROPOSAL_RESOLVED event,
+  // so this one subscription keeps the card honest regardless of where
+  // the resolve actually happened.
   useEffect(() => {
     if (codeRefs === null || !workspaceId) return;
     return subscribeToProposalEvents(workspaceId, {
@@ -1282,9 +1364,55 @@ export default function WorkspaceChatPanel({
         setCodeProposals((prev) =>
           prev.map((p) => (p.id === proposal_id ? { ...p, status } : p))
         );
+        if (usingDock) {
+          dock.setDockState((prev) => ({
+            messages: prev.messages.map((m) =>
+              m.role === "code_proposal" && m.proposalId === proposal_id ? { ...m, status } : m
+            ),
+          }));
+        }
       },
     });
-  }, [codeRefs, workspaceId]);
+  }, [codeRefs, workspaceId, usingDock, dock.setDockState]);
+
+  // W5.4: the persisted `code_proposal` card's own Keep all / Reject —
+  // the same POST .../code/proposals/{id}/resolve round trip
+  // ReviewPanel.jsx's Done button makes (W5.3), just with
+  // reviewMode.js's keepAllDecisions()/rejectAllDecisions() standing in
+  // for a per-hunk review nobody opened. Works from the message itself
+  // rather than looking the proposal up in `codeProposals` — that
+  // local list only ever holds what THIS panel instance has created or
+  // heard resolved this session, while a persisted card can outlive it
+  // (a reload, a proposal made in another tab and only ever seen here
+  // as a resolved-status echo) — which is exactly why the card carries
+  // its own full files[] snapshot (see sendCodeEditProposal's header).
+  const handleResolveFromCard = useCallback(
+    async (message, mode) => {
+      const decisions = mode === "keep" ? keepAllDecisions(message) : rejectAllDecisions(message);
+      try {
+        const resolved = await resolveProposal(API_URL, workspaceId, message.proposalId, decisions);
+        setCodeProposals((prev) =>
+          prev.map((p) => (p.id === message.proposalId ? { ...p, status: resolved.status } : p))
+        );
+        if (usingDock) {
+          dock.setDockState((prev) => ({
+            messages: prev.messages.map((m) =>
+              m.role === "code_proposal" && m.proposalId === message.proposalId ? { ...m, status: resolved.status } : m
+            ),
+          }));
+        }
+      } catch (err) {
+        setCodeProposalError(
+          err instanceof ProposalStaleError
+            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
+            : err.message || "Couldn't apply this edit."
+        );
+      }
+    },
+    [API_URL, workspaceId, usingDock, dock.setDockState]
+  );
+  const handleKeepProposalCard = useCallback((message) => handleResolveFromCard(message, "keep"), [handleResolveFromCard]);
+  const handleRejectProposalCard = useCallback((message) => handleResolveFromCard(message, "reject"), [handleResolveFromCard]);
 
   const dispatchText = useCallback(
     (text) => {
@@ -1423,8 +1551,21 @@ export default function WorkspaceChatPanel({
       onSendCommand: dispatchText,
       onResume: dock.resumeRun,               // NEW — CO3 patch 3
       pausedActive: !!dock.state.pausedRun,    // NEW — CO3 patch 3
+      onReviewProposal,                        // NEW — W5.4
+      onKeepProposal: handleKeepProposalCard,  // NEW — W5.4
+      onRejectProposal: handleRejectProposalCard, // NEW — W5.4
     }),
-    [messages, setActiveMessageIndex, onNavigateSubTab, dispatchText, dock.resumeRun, dock.state.pausedRun]
+    [
+      messages,
+      setActiveMessageIndex,
+      onNavigateSubTab,
+      dispatchText,
+      dock.resumeRun,
+      dock.state.pausedRun,
+      onReviewProposal,
+      handleKeepProposalCard,
+      handleRejectProposalCard,
+    ]
   );
 
   // Perf audit #3 step 8 fix — Row now lives at module scope (see
@@ -1851,7 +1992,12 @@ export default function WorkspaceChatPanel({
                 ReviewPanel.jsx's Keep/Undo UI; anything else just shows
                 how it was left (matches reviewMode.js's own status
                 vocabulary, so a proposal resolved elsewhere while this
-                panel was closed reads the same way here as there). */}
+                panel was closed reads the same way here as there).
+                W5.4: this list is session-local (cleared on reload) —
+                the persisted `code_proposal` message below in the
+                thread itself, and EditorWorkbench.jsx's cross-session
+                PendingTray.jsx, are what survive a reload; this stays
+                as a quick glance right above the composer. */}
             {codeProposals.length > 0 && (
               <ul className="flex flex-col gap-1 max-h-40 overflow-y-auto">
                 {codeProposals.map((p) => (

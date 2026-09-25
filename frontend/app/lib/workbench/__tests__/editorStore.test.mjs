@@ -556,6 +556,84 @@ assertEqual(savedOverTruncated.buffers["big.log"].truncated, false, "SAVE_SUCCES
   );
 }
 
+// --- W5.4: PROPOSALS_LOADED / PROPOSAL_UPSERT / PROPOSAL_STATUS_UPDATE /
+// PROPOSAL_FILES_CHANGED / PROPOSAL_CLEAR_POSSIBLY_STALE ------------------
+{
+  const propA = { id: "prop_a", status: "pending", files: [{ path: "a.py" }] };
+  const propB = { id: "prop_b", status: "pending", files: [{ path: "b.py" }] };
+
+  let st = editorReducer(initialState, { type: "PROPOSALS_LOADED", proposals: [propA, propB] });
+  assertEqual(
+    st.proposals,
+    [{ ...propA, possiblyStale: false }, { ...propB, possiblyStale: false }],
+    "PROPOSALS_LOADED replaces `proposals` wholesale, tagging each with possiblyStale: false"
+  );
+
+  // PROPOSAL_UPSERT: a new id is added at the front...
+  const propC = { id: "prop_c", status: "pending", files: [{ path: "c.py" }] };
+  st = editorReducer(st, { type: "PROPOSAL_UPSERT", proposal: propC });
+  assertEqual(
+    st.proposals.map((p) => p.id),
+    ["prop_c", "prop_a", "prop_b"],
+    "PROPOSAL_UPSERT adds an unknown id at the front"
+  );
+
+  // ...an existing id is replaced in place, and possiblyStale resets.
+  st = editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["a.py"] });
+  assertEqual(st.proposals.find((p) => p.id === "prop_a").possiblyStale, true, "PROPOSAL_FILES_CHANGED flags a pending proposal touching the changed path");
+  const resolvedA = { id: "prop_a", status: "accepted", files: [{ path: "a.py" }] };
+  st = editorReducer(st, { type: "PROPOSAL_UPSERT", proposal: resolvedA });
+  assertEqual(
+    st.proposals.map((p) => p.id),
+    ["prop_c", "prop_a", "prop_b"],
+    "PROPOSAL_UPSERT replaces an existing id in place rather than reordering"
+  );
+  assertEqual(st.proposals.find((p) => p.id === "prop_a").status, "accepted", "...with the new status");
+  assertEqual(st.proposals.find((p) => p.id === "prop_a").possiblyStale, false, "...and possiblyStale reset, since a full replace means a fresh row");
+
+  // PROPOSAL_STATUS_UPDATE: a cheap in-place patch, no fetch involved.
+  st = editorReducer(st, { type: "PROPOSAL_STATUS_UPDATE", proposalId: "prop_b", status: "rejected" });
+  assertEqual(st.proposals.find((p) => p.id === "prop_b").status, "rejected", "PROPOSAL_STATUS_UPDATE patches just the status field");
+  assertEqual(
+    editorReducer(st, { type: "PROPOSAL_STATUS_UPDATE", proposalId: "prop_ghost", status: "accepted" }) === st,
+    true,
+    "PROPOSAL_STATUS_UPDATE for an unknown id is a no-op"
+  );
+
+  // PROPOSAL_FILES_CHANGED: only touches PENDING proposals whose files overlap.
+  assertEqual(
+    editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["a.py"] }) === st,
+    true,
+    "PROPOSAL_FILES_CHANGED doesn't re-flag an already-resolved proposal (prop_a is accepted, not pending)"
+  );
+  st = editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["c.py", "nothing.py"] });
+  assertEqual(st.proposals.find((p) => p.id === "prop_c").possiblyStale, true, "PROPOSAL_FILES_CHANGED flags prop_c via c.py");
+  assertEqual(
+    editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: [] }) === st,
+    true,
+    "PROPOSAL_FILES_CHANGED with no paths is a no-op"
+  );
+  assertEqual(
+    editorReducer(st, { type: "PROPOSAL_FILES_CHANGED", filePaths: ["c.py"] }) === st,
+    true,
+    "PROPOSAL_FILES_CHANGED is a no-op when the proposal is already flagged"
+  );
+
+  // PROPOSAL_CLEAR_POSSIBLY_STALE: "Review anyway".
+  st = editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_c" });
+  assertEqual(st.proposals.find((p) => p.id === "prop_c").possiblyStale, false, "PROPOSAL_CLEAR_POSSIBLY_STALE clears the flag");
+  assertEqual(
+    editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_c" }) === st,
+    true,
+    "PROPOSAL_CLEAR_POSSIBLY_STALE is a no-op when the flag is already clear"
+  );
+  assertEqual(
+    editorReducer(st, { type: "PROPOSAL_CLEAR_POSSIBLY_STALE", proposalId: "prop_ghost" }) === st,
+    true,
+    "PROPOSAL_CLEAR_POSSIBLY_STALE for an unknown id is a no-op"
+  );
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
   process.exit(1);

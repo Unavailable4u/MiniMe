@@ -14,6 +14,9 @@ const {
   reviewFilesFromProposal,
   decisionForFile,
   buildDecisions,
+  keepAllDecisions,
+  rejectAllDecisions,
+  fileDiffStats,
   reviewProgress,
   dirtyOverlap,
   unreviewableReason,
@@ -260,6 +263,59 @@ assertEqual(resolvedMessage("accepted"), "Applied the AI edit.", "accepted");
 assertEqual(resolvedMessage("partial"), "Applied part of the AI edit.", "partial");
 assertEqual(resolvedMessage("rejected"), "Discarded the AI edit — nothing was changed.", "rejected");
 assertEqual(resolvedMessage("something-else"), "Finished reviewing the AI edit.", "an unrecognized status still gets a sensible message");
+
+// --- keepAllDecisions / rejectAllDecisions (W5.4) -------------------------
+
+{
+  const proposal = {
+    files: [
+      { path: "a.py", op: "replace", original: "def greet():\n    pass\n", proposed: "def greet():\n    \"\"\"Says hi.\"\"\"\n    pass\n" },
+      { path: "new.py", op: "create", original: "", proposed: "x = 1\n" },
+      { path: "gone.py", op: "delete", original: "old\n", proposed: "" },
+    ],
+  };
+
+  assertEqual(
+    keepAllDecisions(proposal),
+    [
+      { path: "a.py", decision: "keep", finalContent: null },
+      { path: "new.py", decision: "keep", finalContent: null },
+      { path: "gone.py", decision: "keep", finalContent: null },
+    ],
+    "keepAllDecisions keeps every file exactly as proposed, with no finalContent"
+  );
+
+  assertEqual(
+    rejectAllDecisions(proposal),
+    [
+      { path: "a.py", decision: "undo", finalContent: null },
+      { path: "new.py", decision: "undo", finalContent: null },
+      { path: "gone.py", decision: "undo", finalContent: null },
+    ],
+    "rejectAllDecisions undoes every file, including a delete (nothing is removed)"
+  );
+}
+
+// --- fileDiffStats (W5.4) --------------------------------------------------
+
+assertEqual(fileDiffStats("a\nb\nc\n", "a\nb\nc\n"), { added: 0, removed: 0 }, "identical text -> no changes");
+assertEqual(fileDiffStats("", "x = 1\n"), { added: 1, removed: 0 }, "a brand-new file (empty original) is all additions");
+assertEqual(fileDiffStats("old\n", ""), { added: 0, removed: 1 }, "a deleted file (empty proposed) is all removals");
+assertEqual(
+  fileDiffStats("one\ntwo\nthree\nfour\n", "one\nTWO\nTHREE\nfour\n"),
+  { added: 2, removed: 2 },
+  "a changed middle block, same length -> one-for-one added/removed, common prefix/suffix excluded"
+);
+assertEqual(
+  fileDiffStats("one\ntwo\nthree\n", "one\ntwo\nextra\nthree\n"),
+  { added: 1, removed: 0 },
+  "a pure insertion in the middle counts only as added"
+);
+assertEqual(
+  fileDiffStats("one\r\ntwo\r\n", "one\r\ntwo\r\n"),
+  { added: 0, removed: 0 },
+  "CRLF line endings normalize the same way decisionForFile()'s eol() does"
+);
 
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);

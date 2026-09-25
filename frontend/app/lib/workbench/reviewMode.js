@@ -138,6 +138,83 @@ export function buildDecisions(review) {
 }
 
 /**
+ * Every file kept exactly as proposed — W5.4's "Keep all" quick action
+ * (PendingTray.jsx's tray row, CodeProposalCard.jsx's chat card) for a
+ * proposal nobody has opened a per-hunk review for. reviewFilesFromProposal()
+ * already seeds every file's `current` as its proposed text (see that
+ * function's own doc comment), which is exactly buildDecisions()'s
+ * "whole proposal survived → keep, no finalContent" case — this just
+ * names that shortcut so a caller with no open `review` slice can reach
+ * the identical decisions ReviewPanel.jsx's own Keep-all button would
+ * produce on an untouched review.
+ *
+ * @param {{files?: object[]}} proposal
+ * @returns {{path:string, decision:"keep"|"undo", finalContent:string|null}[]}
+ */
+export function keepAllDecisions(proposal) {
+  return buildDecisions(reviewFilesFromProposal(proposal));
+}
+
+/**
+ * The opposite quick action — every file undone, nothing written to
+ * disk. decisionForFile() only reaches "undo" when the final text
+ * equals the file's ORIGINAL text, so this overrides every file's
+ * `current` back to `original` before calling buildDecisions() (the
+ * default `current` reviewFilesFromProposal() seeds is the proposed
+ * text — Keep all's shape, not this one's). Safe to call on a proposal
+ * that's already gone stale: resolve_proposal() only checks
+ * base_version for a "keep" decision (see that function's own Phase 1),
+ * so an all-"undo" resolve never trips ProposalStaleError.
+ *
+ * @param {{files?: object[]}} proposal
+ * @returns {{path:string, decision:"keep"|"undo", finalContent:string|null}[]}
+ */
+export function rejectAllDecisions(proposal) {
+  const review = reviewFilesFromProposal(proposal);
+  for (const path of review.order) {
+    review.files[path] = { ...review.files[path], current: review.files[path].original };
+  }
+  return buildDecisions(review);
+}
+
+/**
+ * Lines added/removed between two whole-file texts — the file-list
+ * "+N −M" badge PendingTray.jsx and CodeProposalCard.jsx (W5.4) both
+ * need BEFORE any editor exists to ask chunkLineStats() (above) for
+ * real merge-view chunks; both only ever have the proposal's own
+ * stored `original`/`proposed` strings to work from.
+ *
+ * Not a general-purpose diff: trims the common prefix and common
+ * suffix lines, then counts everything left in the middle as one
+ * replaced block — `removed` lines from `original`, `added` lines from
+ * `proposed`, the same convention chunkLineStats() applies to a single
+ * merge-view chunk. Right whenever the edit is one contiguous changed
+ * region, which is the overwhelmingly common shape for a targeted AI
+ * edit; can over-count on a genuinely interleaved edit (lines
+ * reordered, several separate untouched stretches inside the changed
+ * region) — acceptable for a summary badge that a real per-hunk review
+ * (ReviewPanel.jsx, once the file is actually open) already supersedes.
+ *
+ * @param {string} original
+ * @param {string} proposed
+ * @returns {{added:number, removed:number}}
+ */
+export function fileDiffStats(original, proposed) {
+  const a = eol(original).split("\n");
+  const b = eol(proposed).split("\n");
+  let start = 0;
+  const maxStart = Math.min(a.length, b.length);
+  while (start < maxStart && a[start] === b[start]) start++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  return { added: endB - start, removed: endA - start };
+}
+
+/**
  * How far along a review is. `ready` is false until every file's editor
  * has reported at least once (`remaining` is null before that);
  * `allResolved` is the "Done" gate — every hunk in every file has been

@@ -85,14 +85,33 @@ import { useViewport } from "../../hooks/useViewport";
 import { useCodeContext } from "../../lib/workbench/codeContext";
 // W5.3: the review round trip — getProposal() to fetch what
 // pendingReview only carries the id of, resolveProposal() for Done.
-import { ProposalStaleError, getProposal, resolveProposal } from "../../lib/workbench/codeProposals";
+// W5.4: listProposals() (the tray's own GET .../code/proposals?status=
+// pending on mount), subscribeToProposalEvents() (CODE_PROPOSAL_READY/
+// CODE_PROPOSAL_RESOLVED keeping it live — the same subscription shape
+// WorkspaceChatPanel.jsx's own composer-tray list already uses), and
+// createProposal (aliased: PendingTray.jsx's "Regenerate" re-creates a
+// proposal the same way sendCodeEditProposal does, just from here).
+import {
+  ProposalStaleError,
+  createProposal as createCodeProposal,
+  getProposal,
+  listProposals,
+  resolveProposal,
+  subscribeToProposalEvents,
+} from "../../lib/workbench/codeProposals";
 import { createCloudFileProvider, createLocalFileProvider, FileConflictError } from "../../lib/workbench/fileProviders";
 import { EditorStoreProvider, useEditorStore } from "../../lib/workbench/editorStore";
 import { basename, isSameOrDescendant, realFilePaths, remapPath } from "../../lib/workbench/fileTree";
 import { deleteSummary } from "../../lib/workbench/explorerOps";
 import { formatContent, isFormattable } from "../../lib/workbench/formatOnSave";
 import { jumpToPosition } from "../../lib/workbench/gotoPosition";
-import { buildDecisions, dirtyOverlap, unreviewableReason } from "../../lib/workbench/reviewMode";
+import {
+  buildDecisions,
+  dirtyOverlap,
+  keepAllDecisions,
+  rejectAllDecisions,
+  unreviewableReason,
+} from "../../lib/workbench/reviewMode";
 import { useProjectSearch } from "../../hooks/useProjectSearch";
 import {
   BOTTOM_PANEL_DEFAULT_HEIGHT,
@@ -119,6 +138,7 @@ import ConflictCompareView from "./ConflictCompareView";
 import EditorTabs from "./EditorTabs";
 import Explorer from "./Explorer";
 import HistoryPanel from "./HistoryPanel";
+import PendingTray from "./PendingTray";
 import PreviewColumn from "./PreviewColumn";
 import PreviewPane from "./PreviewPane"; // NEW — W6.1: mounted below, replacing the placeholder PreviewColumn shows when its children prop is omitted
 import ProjectSearchPanel from "./ProjectSearchPanel";
@@ -230,6 +250,12 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     reviewSubmitting,
     reviewError,
     reviewClose,
+    // W5.4
+    proposalsLoaded,
+    proposalUpsert,
+    proposalStatusUpdate,
+    proposalFilesChanged,
+    proposalClearPossiblyStale,
   } = useEditorStore();
 
   // W4.1: see this component's own import comment on why this is
@@ -526,9 +552,20 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
 
   // Live refresh (W0.1 / W2.2): the provider owns the Pusher plumbing;
   // this is only "what to do when told something changed". The payload's
-  // file paths aren't even needed — a list refetch + version comparison
-  // finds what changed.
-  useEffect(() => provider.subscribe(() => refreshRef.current()), [provider]);
+  // file paths aren't needed for the refresh itself — a list refetch +
+  // version comparison finds what changed — but W5.4's pending-tray
+  // staleness banner DOES want them: any pending proposal touching one
+  // of these paths gets flagged (see editorStore.js's
+  // PROPOSAL_FILES_CHANGED for why this, and not a base_hash recompute,
+  // is what drives it).
+  useEffect(
+    () =>
+      provider.subscribe(({ filePaths }) => {
+        refreshRef.current();
+        if (filePaths?.length) proposalFilesChanged(filePaths);
+      }),
+    [provider, proposalFilesChanged]
+  );
 
   // W0.1: Pusher can drop a connection while a tab is backgrounded
   // (mobile Safari suspends sockets aggressively), so a regen that
@@ -542,6 +579,49 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, []);
+
+  // W5.4: the pending tray's own source of truth — "populated from GET
+  // …/code/proposals?status=pending on mount" (plan §5 W5.4), loaded
+  // once per mount the same way loadFileList() above is (this component
+  // remounts per project, key={selected.id} in BuildTab.jsx, so there's
+  // no workspace switch to react to in place). A failure here just
+  // leaves the tray empty rather than crashing the workbench — same
+  // "don't take down the editor over a list that failed to load"
+  // reasoning loadFileList() itself already follows.
+  useEffect(() => {
+    let cancelled = false;
+    listProposals(apiUrl, workspaceId, { status: "pending" })
+      .then((proposals) => {
+        if (!cancelled) proposalsLoaded(proposals);
+      })
+      .catch((err) => {
+        console.error("Couldn't load pending proposals:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiUrl, workspaceId, proposalsLoaded]);
+
+  // W5.4: keeps the tray live. CODE_PROPOSAL_READY fires for a NEW
+  // proposal — this tab's own sendCodeEditProposal (WorkspaceChatPanel.jsx)
+  // just as much as another tab or session — with ids/status only (plan
+  // §7.2's Pusher byte cap), so a real GET fills in the summary/files
+  // the tray actually renders. CODE_PROPOSAL_RESOLVED needs no such
+  // fetch: it's already just the id/status this tray wants (see
+  // PROPOSAL_STATUS_UPDATE's own comment). Same workspace channel
+  // WorkspaceChatPanel.jsx's own subscription and this component's
+  // `provider.subscribe` above already use — subscribeToProposalEvents()'s
+  // own header covers why a second (third) subscriber is fine.
+  useEffect(() => {
+    return subscribeToProposalEvents(workspaceId, {
+      onReady: ({ proposal_id }) => {
+        getProposal(apiUrl, workspaceId, proposal_id)
+          .then((proposal) => proposalUpsert(proposal))
+          .catch((err) => console.error("Couldn't load new proposal:", err));
+      },
+      onResolved: ({ proposal_id, status }) => proposalStatusUpdate(proposal_id, status),
+    });
+  }, [workspaceId, apiUrl, proposalUpsert, proposalStatusUpdate]);
 
   // ---- open / close --------------------------------------------------
 
@@ -1102,6 +1182,81 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
     }
   }, [apiUrl, workspaceId, reviewSubmitting, reviewClose, reviewError]);
 
+  // W5.4: PendingTray.jsx's own three quick actions, for a proposal
+  // nobody has opened ReviewPanel.jsx's per-hunk diff for. "Review"
+  // just reuses the exact same path a chip's Review button already
+  // takes (openProposalForReview, above) — dismissing the stale banner
+  // along the way, since opening the diff IS "acknowledging" it. Keep
+  // all / Reject skip straight to resolveProposal() with
+  // reviewMode.js's keepAllDecisions()/rejectAllDecisions() standing in
+  // for a review nobody opened — same round trip handleReviewDone makes,
+  // just without a `review` slice to read `current` from. Each success
+  // lands the FULL updated row via proposalUpsert() rather than waiting
+  // for this tab's own CODE_PROPOSAL_RESOLVED echo, so the tray updates
+  // immediately instead of after a Pusher round trip.
+  const handleTrayReview = useCallback(
+    (proposal) => {
+      proposalClearPossiblyStale(proposal.id);
+      openProposalForReview(proposal.id);
+    },
+    [openProposalForReview, proposalClearPossiblyStale]
+  );
+
+  const handleTrayKeepAll = useCallback(
+    async (proposal) => {
+      try {
+        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, keepAllDecisions(proposal));
+        proposalUpsert(resolved);
+      } catch (err) {
+        setNotice(
+          err instanceof ProposalStaleError
+            ? "This edit can no longer be applied — one of its files changed on the server since it was proposed."
+            : err.message || "Couldn't apply this edit."
+        );
+      }
+    },
+    [apiUrl, workspaceId, proposalUpsert]
+  );
+
+  const handleTrayReject = useCallback(
+    async (proposal) => {
+      try {
+        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, rejectAllDecisions(proposal));
+        proposalUpsert(resolved);
+      } catch (err) {
+        setNotice(err.message || "Couldn't discard this edit.");
+      }
+    },
+    [apiUrl, workspaceId, proposalUpsert]
+  );
+
+  // The stale banner's other action: reject the out-of-date proposal
+  // (always safe — rejectAllDecisions() never sends a "keep", and
+  // resolve_proposal() only checks base_version for those, so this
+  // never itself throws ProposalStaleError) and immediately ask for a
+  // fresh one against the SAME instruction/refs. `refs`/`session_id`
+  // are stored on the proposal row exactly as create_proposal()
+  // received them (eo/code_proposals.py's own _build_files_payload
+  // docstring), so this is the same request sendCodeEditProposal made
+  // the first time, just replayed from here instead of the composer.
+  const handleTrayRegenerate = useCallback(
+    async (proposal) => {
+      try {
+        const resolved = await resolveProposal(apiUrl, workspaceId, proposal.id, rejectAllDecisions(proposal));
+        proposalUpsert(resolved);
+        const fresh = await createCodeProposal(apiUrl, workspaceId, {
+          instruction: proposal.instruction,
+          refs: proposal.refs || [],
+          sessionId: proposal.session_id ?? null,
+        });
+        proposalUpsert(fresh);
+      } catch (err) {
+        setNotice(err.message || "Couldn't regenerate this edit.");
+      }
+    },
+    [apiUrl, workspaceId, proposalUpsert]
+  );
+
   // History's "Restore": lands the server's response the same way a
   // normal save does — FILE_LOADED for the buffer, plus the file list's
   // own entry patched in place rather than a full refetch (saveFile()
@@ -1274,14 +1429,17 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
   );
   const closePreview = useCallback(() => setLayout({ previewOpen: false }), [setLayout]);
 
-  // "Pending changes (N)": AI-proposed edits waiting for review. The
-  // store's `proposals` stays empty until W5.4 loads them, so this is 0
-  // for now; only `pending` ones count (resolved ones may live in the
-  // list too — plan §5 W5.1's status column).
-  const pendingCount = useMemo(
-    () => state.proposals.filter((p) => p?.status === "pending").length,
+  // "Pending changes (N)": AI-proposed edits waiting for review —
+  // StatusBar.jsx's own chip, and PendingTray.jsx's list when it's
+  // clicked open. Only `pending` ones count/show; resolved ones stay in
+  // `state.proposals` too (plan §5 W5.1's status column) but drop out of
+  // both once their status moves on.
+  const pendingProposals = useMemo(
+    () => state.proposals.filter((p) => p?.status === "pending"),
     [state.proposals]
   );
+  const pendingCount = pendingProposals.length;
+  const [pendingTrayOpen, setPendingTrayOpen] = useState(false);
 
   // ---- derived ---------------------------------------------------------
 
@@ -1806,7 +1964,21 @@ function WorkbenchBody({ workspaceId, apiUrl, reserveCorner, onDirtyChange }) {
         language={activeBuffer?.language}
         cursor={cursor}
         pendingCount={pendingCount}
+        onPendingClick={() => setPendingTrayOpen(true)}
         reserveRight={reserveCorner}
+      />
+
+      <PendingTray
+        open={pendingTrayOpen}
+        onClose={() => setPendingTrayOpen(false)}
+        proposals={pendingProposals}
+        onReview={(proposal) => {
+          setPendingTrayOpen(false);
+          handleTrayReview(proposal);
+        }}
+        onKeepAll={handleTrayKeepAll}
+        onReject={handleTrayReject}
+        onRegenerate={handleTrayRegenerate}
       />
 
       <ConfirmDialog
